@@ -59,7 +59,7 @@ impl Bodies {
         Layout {
             record: &self.record,
             pack_stem: &self.stem,
-            pack: &self.pack,
+            pack: Pack::Bytes(&self.pack),
             index: &self.index,
             packed_refs: &self.refs,
             config: &self.config,
@@ -107,7 +107,9 @@ fn private_write(path: &Path, bytes: &[u8]) {
     file.sync_all().unwrap();
 }
 fn recover(fixture: &Fixture, bodies: &Bodies, resume: bool) -> Result<Completed, Error> {
-    materialize(&fixture.target(), &bodies.layout(), resume, &mut || true)
+    materialize(&fixture.target(), &mut bodies.layout(), resume, &mut || {
+        true
+    })
 }
 
 #[test]
@@ -115,7 +117,7 @@ fn exact_bodies_publish_head_last_in_both_native_filename_domains() {
     for width in [40, 64] {
         let fixture = Fixture::new();
         let bodies = Bodies::new(width);
-        let result = materialize(&fixture.target(), &bodies.layout(), false, &mut || {
+        let result = materialize(&fixture.target(), &mut bodies.layout(), false, &mut || {
             if fixture.target().join("HEAD").exists() {
                 for (name, expected) in bodies.files() {
                     assert_eq!(fs::read(fixture.target().join(name)).unwrap(), expected);
@@ -148,7 +150,7 @@ fn every_cooperative_interruption_is_latched_and_identified_work_resumes() {
     let bodies = Bodies::new(40);
     let baseline = Fixture::new();
     let mut polls = 0;
-    materialize(&baseline.target(), &bodies.layout(), false, &mut || {
+    materialize(&baseline.target(), &mut bodies.layout(), false, &mut || {
         polls += 1;
         true
     })
@@ -163,7 +165,7 @@ fn every_cooperative_interruption_is_latched_and_identified_work_resumes() {
     for stop in 1..=polls {
         let fixture = Fixture::new();
         let mut seen = 0;
-        let error = materialize(&fixture.target(), &bodies.layout(), false, &mut || {
+        let error = materialize(&fixture.target(), &mut bodies.layout(), false, &mut || {
             seen += 1;
             seen != stop // Later polls would allow; the stopped call stays stopped.
         })
@@ -239,7 +241,7 @@ fn malformed_layout_refuses_before_directory_creation() {
     ] {
         let mut layout = bodies.layout();
         layout.pack_stem = stem;
-        let error = materialize(&fixture.target(), &layout, false, &mut || true).unwrap_err();
+        let error = materialize(&fixture.target(), &mut layout, false, &mut || true).unwrap_err();
         assert_eq!(error.code, Code::InvalidLayout);
         assert!(!fixture.target().exists());
     }
@@ -395,7 +397,8 @@ fn resume_refusals_before_target_inspection_preserve_publication_uncertainty() {
 
     fs::set_permissions(fixture.target(), fs::Permissions::from_mode(0o700)).unwrap();
     bodies.assert_complete(&fixture.target());
-    let error = materialize(&fixture.target(), &bodies.layout(), true, &mut || false).unwrap_err();
+    let error =
+        materialize(&fixture.target(), &mut bodies.layout(), true, &mut || false).unwrap_err();
     assert_eq!(error.code, Code::Stopped);
     assert_eq!(error.state, State::PublicationUncertain);
     bodies.assert_complete(&fixture.target());
@@ -431,7 +434,7 @@ fn directory_substitution_after_staging_is_detected_and_preserved() {
     let fixture = Fixture::new();
     let bodies = Bodies::new(40);
     let mut replaced = false;
-    let error = materialize(&fixture.target(), &bodies.layout(), false, &mut || {
+    let error = materialize(&fixture.target(), &mut bodies.layout(), false, &mut || {
         let directory = fixture.target().join("objects/pack");
         if !replaced
             && directory
@@ -472,6 +475,179 @@ fn permissive_modes_and_non_normal_destinations_refuse() {
     .unwrap();
     recover(&fixture, &bodies, true).unwrap();
     let ambiguous = fixture.0.join("new").join(".");
-    assert!(materialize(&ambiguous, &bodies.layout(), false, &mut || true).is_err());
+    assert!(materialize(&ambiguous, &mut bodies.layout(), false, &mut || true).is_err());
     assert!(!fixture.0.join("new").exists());
+}
+
+/// A source-protocol fixture, not a cryptographic verifier. The production
+/// SHA-256/file-identity adapter has separate exact-source tests.
+struct Replay {
+    bytes: Vec<u8>,
+    declared: u64,
+    position: usize,
+    maximum_read: usize,
+    rewinds: usize,
+    ends: usize,
+    reject_eof: bool,
+}
+impl Replay {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            declared: bytes.len() as u64,
+            position: 0,
+            maximum_read: 997,
+            rewinds: 0,
+            ends: 0,
+            reject_eof: false,
+        }
+    }
+}
+impl VerifiedPackSource for Replay {
+    fn len(&self) -> u64 {
+        self.declared
+    }
+    fn rewind(&mut self) -> std::io::Result<()> {
+        self.position = 0;
+        self.rewinds += 1;
+        Ok(())
+    }
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let count = (self.bytes.len() - self.position)
+            .min(self.maximum_read)
+            .min(output.len());
+        if count == 0 {
+            self.ends += 1;
+            if self.reject_eof {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "fixture source binding changed",
+                ));
+            }
+        }
+        output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
+    }
+}
+
+#[test]
+fn streamed_packs_publish_and_resume_exact_prefixes_after_complete_binding_checks() {
+    for width in [40, 64] {
+        let fixture = Fixture::new();
+        let bodies = Bodies::new(width);
+        let mut source = Replay::new(&bodies.pack);
+        let mut layout = bodies.layout();
+        layout.pack = Pack::Stream(&mut source);
+        let result = materialize(&fixture.target(), &mut layout, false, &mut || true).unwrap();
+        assert!(!result.already_published);
+        bodies.assert_complete(&fixture.target());
+        assert!(source.rewinds >= 3);
+        assert_eq!(source.ends, source.rewinds);
+
+        fs::remove_file(fixture.target().join("HEAD")).unwrap();
+        let name = format!("objects/pack/{}.pack", bodies.stem);
+        let stage = fixture.target().join(format!("{name}{PART}"));
+        fs::rename(fixture.target().join(&name), &stage).unwrap();
+        let prefix = CHUNK / 2 + 7;
+        OpenOptions::new()
+            .write(true)
+            .open(&stage)
+            .unwrap()
+            .set_len(prefix as u64)
+            .unwrap();
+        let mut source = Replay::new(&bodies.pack);
+        let mut layout = bodies.layout();
+        layout.pack = Pack::Stream(&mut source);
+        let result = materialize(&fixture.target(), &mut layout, true, &mut || true).unwrap();
+        assert!(!result.already_published);
+        bodies.assert_complete(&fixture.target());
+        assert!(source.rewinds >= 3);
+        assert_eq!(source.ends, source.rewinds);
+    }
+}
+
+#[test]
+fn a_source_binding_failure_at_eof_never_installs_the_pack_or_head() {
+    let fixture = Fixture::new();
+    let bodies = Bodies::new(64);
+    let mut source = Replay::new(&bodies.pack);
+    source.reject_eof = true;
+    let mut layout = bodies.layout();
+    layout.pack = Pack::Stream(&mut source);
+    let error = materialize(&fixture.target(), &mut layout, false, &mut || true).unwrap_err();
+    assert_eq!(error.code, Code::SourceChanged);
+    assert_eq!(error.state, State::Staged);
+    assert!(!fixture.target().join("HEAD").exists());
+    let name = format!("objects/pack/{}.pack", bodies.stem);
+    assert!(!fixture.target().join(&name).exists());
+    assert_eq!(
+        fs::read(fixture.target().join(format!("{name}{PART}"))).unwrap(),
+        bodies.pack
+    );
+    assert_eq!(source.ends, 1);
+
+    // The valid twin rechecks the exact retained stage and completes normally.
+    let mut source = Replay::new(&bodies.pack);
+    let mut layout = bodies.layout();
+    layout.pack = Pack::Stream(&mut source);
+    materialize(&fixture.target(), &mut layout, true, &mut || true).unwrap();
+    bodies.assert_complete(&fixture.target());
+}
+
+#[test]
+fn a_matching_short_stage_never_authorizes_append_from_an_unbound_source_tail() {
+    let fixture = Fixture::new();
+    let bodies = Bodies::new(40);
+    recover(&fixture, &bodies, false).unwrap();
+    fs::remove_file(fixture.target().join("HEAD")).unwrap();
+    let name = format!("objects/pack/{}.pack", bodies.stem);
+    fs::remove_file(fixture.target().join(&name)).unwrap();
+    let prefix = &bodies.pack[..31];
+    let path = fixture.target().join(format!("{name}{PART}"));
+    private_write(&path, prefix);
+    let mut source = Replay::new(&bodies.pack);
+    source.reject_eof = true;
+    let mut layout = bodies.layout();
+    layout.pack = Pack::Stream(&mut source);
+    let error = materialize(&fixture.target(), &mut layout, true, &mut || true).unwrap_err();
+    assert_eq!(error.code, Code::SourceChanged);
+    assert_eq!(source.position, bodies.pack.len());
+    assert_eq!(source.ends, 1);
+    assert_eq!(fs::read(&path).unwrap(), prefix);
+    assert!(!fixture.target().join("HEAD").exists());
+    recover(&fixture, &bodies, true).unwrap();
+    bodies.assert_complete(&fixture.target());
+}
+
+#[test]
+fn streamed_length_disagreement_refuses_and_resume_preserves_visible_head() {
+    for extra in [false, true] {
+        let fixture = Fixture::new();
+        let bodies = Bodies::new(40);
+        let mut source = Replay::new(&bodies.pack);
+        if extra {
+            source.bytes.push(42);
+        } else {
+            source.bytes.pop();
+        }
+        let mut layout = bodies.layout();
+        layout.pack = Pack::Stream(&mut source);
+        let error = materialize(&fixture.target(), &mut layout, false, &mut || true).unwrap_err();
+        assert_eq!(error.code, Code::SourceChanged);
+        assert!(!fixture.target().join("HEAD").exists());
+    }
+
+    let fixture = Fixture::new();
+    let bodies = Bodies::new(64);
+    recover(&fixture, &bodies, false).unwrap();
+    let mut source = Replay::new(&bodies.pack);
+    source.reject_eof = true;
+    let mut layout = bodies.layout();
+    layout.pack = Pack::Stream(&mut source);
+    let error = materialize(&fixture.target(), &mut layout, true, &mut || true).unwrap_err();
+    assert_eq!(error.code, Code::SourceChanged);
+    assert_eq!(error.state, State::PublicationUncertain);
+    bodies.assert_complete(&fixture.target());
+    recover(&fixture, &bodies, true).unwrap();
 }

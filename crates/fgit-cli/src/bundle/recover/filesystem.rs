@@ -9,18 +9,49 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 const RECORD: &str = ".frankengit-native-source-recovery";
 const PART: &str = ".fg-recovery-part";
 const CHUNK: usize = 64 * 1024;
 
-/// Borrowed fixed bodies, constructed from GitBundleRecovery by the caller.
+/// A replayable pack bound to an already verified native plan. Every complete
+/// replay must check that binding before returning EOF, including replays used
+/// to compare a shorter existing stage. The writer always reads through EOF.
+/// Git interpretation and the cryptographic binding belong to the native caller.
+pub(super) trait VerifiedPackSource {
+    fn len(&self) -> u64;
+    fn rewind(&mut self) -> std::io::Result<()>;
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize>;
+}
+
+pub(super) enum Pack<'a> {
+    Bytes(&'a [u8]),
+    Stream(&'a mut dyn VerifiedPackSource),
+}
+impl Pack<'_> {
+    fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Stream(source) => source.len(),
+        }
+    }
+    fn within_limit(&self) -> bool {
+        let maximum = match self {
+            Self::Bytes(_) => 128 * 1024 * 1024,
+            Self::Stream(_) => 16 * 1024 * 1024 * 1024,
+        };
+        self.len() > 0 && self.len() <= maximum
+    }
+}
+
+/// Borrowed metadata and a bounded replayable pack, constructed from the native
+/// recovery plan. Only the pack may be file backed; metadata remains bounded.
 pub(super) struct Layout<'a> {
     pub record: &'a [u8],
     pub pack_stem: &'a str,
-    pub pack: &'a [u8],
+    pub pack: Pack<'a>,
     pub index: &'a [u8],
     pub packed_refs: &'a [u8],
     pub config: &'a [u8],
@@ -59,6 +90,7 @@ pub(super) enum Code {
     InvalidFile,
     NamespaceChanged,
     BodyMismatch,
+    SourceChanged,
     Io,
 }
 impl Code {
@@ -74,6 +106,7 @@ impl Code {
             Self::InvalidFile => "non_private_regular_file",
             Self::NamespaceChanged => "namespace_changed",
             Self::BodyMismatch => "existing_body_mismatch",
+            Self::SourceChanged => "verified_source_changed",
             Self::Io => "filesystem_error",
         }
     }
@@ -106,7 +139,37 @@ pub(super) struct Completed {
 
 struct Body<'a> {
     name: String,
-    bytes: &'a [u8],
+    content: Content<'a>,
+}
+enum Content<'a> {
+    Bytes(Cursor<&'a [u8]>),
+    Stream(&'a mut dyn VerifiedPackSource),
+}
+impl<'a> Content<'a> {
+    fn bytes(bytes: &'a [u8]) -> Self {
+        Self::Bytes(Cursor::new(bytes))
+    }
+    fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(cursor) => cursor.get_ref().len() as u64,
+            Self::Stream(source) => source.len(),
+        }
+    }
+    fn rewind(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Bytes(cursor) => {
+                cursor.set_position(0);
+                Ok(())
+            }
+            Self::Stream(source) => source.rewind(),
+        }
+    }
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Bytes(cursor) => cursor.read(output),
+            Self::Stream(source) => source.read(output),
+        }
+    }
 }
 struct Directory {
     path: PathBuf,
@@ -128,6 +191,15 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
     }
     fn io(&self, action: &str, error: std::io::Error) -> Error {
         self.error(Code::Io, format!("{action}: {error}"))
+    }
+    fn source_error(&self, action: &str, error: std::io::Error) -> Error {
+        let code = match error.kind() {
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
+                Code::SourceChanged
+            }
+            _ => Code::Io,
+        };
+        self.error(code, format!("{action}: {error}"))
     }
     fn checkpoint(&mut self) -> Result<(), Error> {
         if !self.stopped && !(self.live)() {
@@ -180,7 +252,7 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
     fn inspect_file(
         &mut self,
         path: &Path,
-        expected: &[u8],
+        expected: &mut Content<'_>,
         prefix: bool,
     ) -> Result<Option<Metadata>, Error> {
         self.check_directories()?;
@@ -190,8 +262,8 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
             return Ok(None);
         };
         if !private_file(&named)
-            || named.len() > expected.len() as u64
-            || (!prefix && named.len() != expected.len() as u64)
+            || named.len() > expected.len()
+            || (!prefix && named.len() != expected.len())
         {
             return Err(self.error(
                 if !private_file(&named) {
@@ -209,26 +281,59 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
         if !same_file(&named, &before) {
             return Err(self.error(Code::NamespaceChanged, "body changed while opening"));
         }
+        expected
+            .rewind()
+            .map_err(|error| self.source_error("rewind verified body", error))?;
         let mut buffer = [0_u8; CHUNK];
-        let mut at = 0_usize;
+        let mut source = [0_u8; CHUNK];
+        let mut at = 0_u64;
         loop {
             self.checkpoint()?;
-            let count = match file.read(&mut buffer) {
+            let count = match expected.read(&mut source) {
                 Ok(count) => count,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(self.io("read existing body", error)),
+                Err(error) => return Err(self.source_error("read verified body", error)),
             };
             self.checkpoint()?;
             let end = at
-                .checked_add(count)
-                .filter(|end| *end <= expected.len())
-                .ok_or_else(|| self.error(Code::BodyMismatch, "existing body grew"))?;
-            if buffer[..count] != expected[at..end] {
+                .checked_add(count as u64)
+                .filter(|end| count <= CHUNK && *end <= expected.len())
+                .ok_or_else(|| self.error(Code::SourceChanged, "verified body grew"))?;
+            let compare = (named.len().saturating_sub(at)).min(count as u64) as usize;
+            let mut read = 0;
+            while read < compare {
+                self.checkpoint()?;
+                match file.read(&mut buffer[read..compare]) {
+                    Ok(0) => {
+                        return Err(self.error(Code::BodyMismatch, "existing body shortened"));
+                    }
+                    Ok(count) => read += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(self.io("read existing body", error)),
+                }
+            }
+            if buffer[..compare] != source[..compare] {
                 return Err(self.error(Code::BodyMismatch, path.display().to_string()));
             }
+            // Even a short stage prefix must be compared to a fully replayed,
+            // binding-checked source. An unchecked prefix never authorizes append.
             at = end;
             if count == 0 {
                 break;
+            }
+        }
+        if at != expected.len() {
+            return Err(self.error(Code::SourceChanged, "verified body shortened"));
+        }
+        self.checkpoint()?;
+        loop {
+            match file.read(&mut buffer[..1]) {
+                Ok(0) => break,
+                Ok(_) => return Err(self.error(Code::BodyMismatch, "existing body grew")),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    self.checkpoint()?;
+                }
+                Err(error) => return Err(self.io("check existing body EOF", error)),
             }
         }
         let after = file
@@ -236,24 +341,21 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
             .map_err(|error| self.io("inspect read body", error))?;
         let current =
             fs::symlink_metadata(path).map_err(|error| self.io("recheck read body", error))?;
-        if at as u64 != named.len() || !same_file(&before, &after) || !same_file(&after, &current) {
+        if !same_file(&before, &after) || !same_file(&after, &current) {
             return Err(self.error(Code::NamespaceChanged, "body changed while reading"));
-        }
-        if !prefix && at != expected.len() {
-            return Err(self.error(Code::BodyMismatch, "incomplete final body"));
         }
         self.check_directories()?;
         Ok(Some(current))
     }
-    fn inspect_body(&mut self, root: &Path, body: &Body<'_>) -> Result<bool, Error> {
+    fn inspect_body(&mut self, root: &Path, body: &mut Body<'_>) -> Result<bool, Error> {
         let final_path = root.join(&body.name);
         let part_path = root.join(format!("{}{PART}", body.name));
-        let final_file = self.inspect_file(&final_path, body.bytes, false)?;
-        let part_file = self.inspect_file(&part_path, body.bytes, true)?;
+        let final_file = self.inspect_file(&final_path, &mut body.content, false)?;
+        let part_file = self.inspect_file(&part_path, &mut body.content, true)?;
         match (&final_file, &part_file) {
             (Some(final_file), Some(part_file))
                 if !same_identity(final_file, part_file)
-                    || part_file.len() != body.bytes.len() as u64
+                    || part_file.len() != body.content.len()
                     || links(part_file) != 2 =>
             {
                 return Err(self.error(
@@ -271,7 +373,7 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
         }
         Ok(final_file.is_some())
     }
-    fn stage_body(&mut self, root: &Path, body: &Body<'_>) -> Result<bool, Error> {
+    fn stage_body(&mut self, root: &Path, body: &mut Body<'_>) -> Result<bool, Error> {
         if self.inspect_body(root, body)? {
             return Ok(true);
         }
@@ -305,24 +407,53 @@ impl<F: FnMut() -> bool> Writer<'_, F> {
         }
         // inspect_body verified the complete existing prefix before this append.
         // The trusted-local profile requires no concurrent writer to this path.
-        let at = usize::try_from(opened.len())
-            .map_err(|_| self.error(Code::BodyMismatch, "stage length overflow"))?;
-        if at > body.bytes.len() {
+        let prefix = opened.len();
+        if prefix > body.content.len() {
             return Err(self.error(Code::BodyMismatch, "stage is longer than expected"));
         }
-        for chunk in body.bytes[at..].chunks(CHUNK) {
+        body.content
+            .rewind()
+            .map_err(|error| self.source_error("rewind verified stage source", error))?;
+        let mut buffer = [0_u8; CHUNK];
+        let mut at = 0_u64;
+        loop {
             self.check_directories()?;
-            file.write_all(chunk)
-                .map_err(|error| self.io("append verified stage", error))?;
+            let count = match body.content.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(self.source_error("read verified stage source", error)),
+            };
             self.checkpoint()?;
+            let end = at
+                .checked_add(count as u64)
+                .filter(|end| count <= CHUNK && *end <= body.content.len())
+                .ok_or_else(|| self.error(Code::SourceChanged, "verified body grew"))?;
+            let skip = prefix.saturating_sub(at).min(count as u64) as usize;
+            if skip < count {
+                file.write_all(&buffer[skip..count])
+                    .map_err(|error| self.io("append verified stage", error))?;
+                self.checkpoint()?;
+            }
+            at = end;
+            if count == 0 {
+                break;
+            }
+        }
+        if at != body.content.len() {
+            return Err(self.error(Code::SourceChanged, "verified body shortened"));
         }
         file.sync_all()
             .map_err(|error| self.io("synchronize stage", error))?;
         drop(file);
-        self.inspect_file(&part_path, body.bytes, false)?;
+        self.inspect_file(&part_path, &mut body.content, false)?;
         Ok(false)
     }
-    fn install_body(&mut self, root: &Path, body: &Body<'_>, is_head: bool) -> Result<(), Error> {
+    fn install_body(
+        &mut self,
+        root: &Path,
+        body: &mut Body<'_>,
+        is_head: bool,
+    ) -> Result<(), Error> {
         let present = self.stage_body(root, body)?;
         let final_path = root.join(&body.name);
         let part_path = root.join(format!("{}{PART}", body.name));
@@ -528,7 +659,7 @@ fn inspect_namespace<F: FnMut() -> bool>(
 /// an unidentified directory which resume refuses; it is never guessed owned.
 pub(super) fn materialize(
     destination: &Path,
-    layout: &Layout<'_>,
+    layout: &mut Layout<'_>,
     resume: bool,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<Completed, Error> {
@@ -564,8 +695,7 @@ pub(super) fn materialize(
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || layout.record.is_empty()
         || layout.record.len() > 16 * 1024
-        || layout.pack.is_empty()
-        || layout.pack.len() > 128 * 1024 * 1024
+        || !layout.pack.within_limit()
         || layout.index.is_empty()
         || layout.index.len() > 16 * 1024 * 1024
         || layout.packed_refs.is_empty()
@@ -625,34 +755,38 @@ pub(super) fn materialize(
     } else {
         State::Staged
     };
-    let bodies = [
+    let pack = match &mut layout.pack {
+        Pack::Bytes(bytes) => Content::bytes(bytes),
+        Pack::Stream(source) => Content::Stream(&mut **source),
+    };
+    let mut bodies = [
         Body {
             name: RECORD.to_owned(),
-            bytes: layout.record,
+            content: Content::bytes(layout.record),
         },
         Body {
             name: format!("objects/pack/{}.pack", layout.pack_stem),
-            bytes: layout.pack,
+            content: pack,
         },
         Body {
             name: format!("objects/pack/{}.idx", layout.pack_stem),
-            bytes: layout.index,
+            content: Content::bytes(layout.index),
         },
         Body {
             name: "packed-refs".to_owned(),
-            bytes: layout.packed_refs,
+            content: Content::bytes(layout.packed_refs),
         },
         Body {
             name: "config".to_owned(),
-            bytes: layout.config,
+            content: Content::bytes(layout.config),
         },
         Body {
             name: "HEAD".to_owned(),
-            bytes: layout.head,
+            content: Content::bytes(layout.head),
         },
     ];
     inspect_namespace(&mut writer, &root, &bodies)?;
-    if resume && !writer.inspect_body(&root, &bodies[0])? {
+    if resume && !writer.inspect_body(&root, &mut bodies[0])? {
         return Err(writer.error(
             Code::MissingRecoveryRecord,
             "only a complete exact recovery record identifies an interrupted target",
@@ -673,7 +807,7 @@ pub(super) fn materialize(
     }
     // On resume, reject all corruption before creating/appending any body. A
     // visible HEAD may never be repaired around absent/incomplete dependencies.
-    for body in &bodies {
+    for body in &mut bodies {
         let present = writer.inspect_body(&root, body)?;
         if already_published && !present {
             return Err(writer.error(
@@ -685,7 +819,7 @@ pub(super) fn materialize(
     if already_published {
         writer.state = State::Published;
     }
-    writer.install_body(&root, &bodies[0], false)?;
+    writer.install_body(&root, &mut bodies[0], false)?;
     writer.sync_directory(&root)?;
     writer.sync_directory(&canonical_parent)?;
     for relative in ["objects", "objects/pack", "refs"] {
@@ -706,7 +840,7 @@ pub(super) fn materialize(
         }
         writer.remember_directory(path, true)?;
     }
-    for body in &bodies[1..5] {
+    for body in &mut bodies[1..5] {
         writer.install_body(&root, body, false)?;
     }
     for directory in ["objects/pack", "objects", "refs", ""] {
@@ -714,7 +848,7 @@ pub(super) fn materialize(
     }
     // All native dependencies are immutable and synchronized before HEAD.
     inspect_namespace(&mut writer, &root, &bodies)?;
-    for body in &bodies[..5] {
+    for body in &mut bodies[..5] {
         if !writer.inspect_body(&root, body)? {
             return Err(writer.error(
                 Code::BodyMismatch,
@@ -722,7 +856,7 @@ pub(super) fn materialize(
             ));
         }
     }
-    writer.install_body(&root, &bodies[5], true)?;
+    writer.install_body(&root, &mut bodies[5], true)?;
     writer.sync_directory(&root)?;
     writer.sync_directory(&canonical_parent)?;
     writer.state = State::Durable;

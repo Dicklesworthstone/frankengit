@@ -56,6 +56,15 @@ impl Fixture {
         fs::write(self.0.join("input.bundle"), &bytes).unwrap();
         bytes
     }
+    fn scratch(&self) {
+        fs::create_dir(self.0.join("scratch")).unwrap();
+        fs::set_permissions(self.0.join("scratch"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fn recover_file(&self, tail: &[&str]) -> Output {
+        let mut args = vec!["--file-backed", "--scratch-dir", "scratch"];
+        args.extend_from_slice(tail);
+        self.recover(&args)
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -257,4 +266,151 @@ fn global_deadline_also_bounds_offline_verification_before_destination_creation(
     );
     assert!(!fixture.0.join("restored.git").exists());
     success(fixture.recover(&[]));
+}
+
+#[test]
+fn binary_file_backed_recovery_preserves_original_packs_and_resumes_partial_packs() {
+    for (format, encoded, offset, checksum, index_hash) in [
+        (
+            "sha1",
+            include_str!("../../../tests/fixtures/native_bundle_recovery/sha1.bundle.hex"),
+            128,
+            "2c774238758f7919f693d532f8eeea2abed537dc",
+            "7e81389280215f9a9139920f12a94d807d55cb83accd723799bc70919b010ec7",
+        ),
+        (
+            "sha256",
+            include_str!("../../../tests/fixtures/native_bundle_recovery/sha256.bundle.hex"),
+            198,
+            "fa21f8dd38157fa90ab57fbe341e9404c1a9d25c3bd8709a7ca607647b14214d",
+            "ad9f3bf1c1c2dc4d5483a02bda8dbae512d5e369ba4fc481d4a45d8f5afc2579",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.scratch();
+        let bytes = fixture.write(encoded);
+        let digest = fgit_crypto::lowercase_hex(&fgit_crypto::sha256_digest(&bytes));
+        let report = success(fixture.recover_file(&[
+            "--max-input-mib",
+            "512",
+            "--max-expanded-mib",
+            "512",
+            "--expect-format",
+            format,
+            "--expect-sha256",
+            &digest,
+        ]));
+        assert!(
+            report.contains("\"storage_profile\":\"file-backed-native-bare-source-recovery-v1\"")
+        );
+        assert!(report.contains("\"scratch_removed\":true"));
+        assert!(report.contains(&format!(
+            "\"pack_sha256\":\"{}\"",
+            fgit_crypto::lowercase_hex(&fgit_crypto::sha256_digest(&bytes[offset..]))
+        )));
+        let target = fixture.0.join("restored.git");
+        let pack = target.join(format!("objects/pack/pack-{checksum}.pack"));
+        assert_eq!(fs::read(&pack).unwrap(), bytes[offset..]);
+        let index = fs::read(target.join(format!("objects/pack/pack-{checksum}.idx"))).unwrap();
+        assert_eq!(
+            fgit_crypto::lowercase_hex(&fgit_crypto::sha256_digest(&index)),
+            index_hash
+        );
+        assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 0);
+        let report = success(fixture.recover(&["--resume", "--expect-sha256", &digest]));
+        assert!(report.contains("\"already_published\":true"));
+        let part = pack.with_extension("pack.fg-recovery-part");
+        fs::remove_file(target.join("HEAD")).unwrap();
+        fs::rename(&pack, &part).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&part)
+            .unwrap()
+            .set_len(7)
+            .unwrap();
+        let report = success(fixture.recover_file(&["--resume", "--expect-sha256", &digest]));
+        assert!(report.contains("\"already_published\":false"));
+        assert!(!part.exists());
+        assert_eq!(fs::read(&pack).unwrap(), bytes[offset..]);
+        assert_eq!(
+            fs::read(target.join("HEAD")).unwrap(),
+            b"ref: refs/heads/main\n"
+        );
+        assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn file_backed_refusal_preserves_scratch_residue_and_rejects_scratch_in_a_live_destination() {
+    let fixture = Fixture::new();
+    fixture.scratch();
+    fixture.write(include_str!(
+        "../../../tests/fixtures/native_bundle_recovery/sha1.bundle.hex"
+    ));
+    let residue = fixture.0.join("scratch/previous.scratch");
+    fs::write(&residue, b"keep this unrelated file").unwrap();
+    refused(
+        fixture.recover_file(&["--expect-sha256", &"0".repeat(64)]),
+        "expected_bundle_artifact_mismatch",
+    );
+    assert!(!fixture.0.join("restored.git").exists());
+    assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 1);
+    success(fixture.recover_file(&[]));
+    let head = fs::read(fixture.0.join("restored.git/HEAD")).unwrap();
+    let record = fs::read(
+        fixture
+            .0
+            .join("restored.git/.frankengit-native-source-recovery"),
+    )
+    .unwrap();
+    let result = fixture.recover(&["--resume", "--file-backed", "--scratch-dir", "restored.git"]);
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("state=publication_uncertain"), "{error}");
+    assert!(
+        error.contains("no_destination_write_this_attempt=true"),
+        "{error}"
+    );
+    refused(result, "outside the recovery destination");
+    assert_eq!(fs::read(fixture.0.join("restored.git/HEAD")).unwrap(), head);
+    assert_eq!(
+        fs::read(
+            fixture
+                .0
+                .join("restored.git/.frankengit-native-source-recovery")
+        )
+        .unwrap(),
+        record
+    );
+    assert_eq!(fs::read(&residue).unwrap(), b"keep this unrelated file");
+}
+
+#[test]
+fn global_deadline_precedes_file_backed_scratch_creation_and_publication() {
+    let fixture = Fixture::new();
+    fixture.scratch();
+    fixture.write(include_str!(
+        "../../../tests/fixtures/native_bundle_recovery/sha1.bundle.hex"
+    ));
+    refused(
+        fixture.run(&[
+            "--timeout-secs",
+            "0.000000001",
+            "bundle",
+            "recover",
+            "input.bundle",
+            "restored.git",
+            "--trusted-local",
+            "--head-ref",
+            "refs/heads/main",
+            "--file-backed",
+            "--scratch-dir",
+            "scratch",
+            "--timeout-secs",
+            "3600",
+        ]),
+        "stopped",
+    );
+    assert!(!fixture.0.join("restored.git").exists());
+    assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 0);
+    success(fixture.recover_file(&[]));
 }

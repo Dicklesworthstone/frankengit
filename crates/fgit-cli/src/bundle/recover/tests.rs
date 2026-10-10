@@ -116,3 +116,66 @@ fn existing_verifier_pins_limits_and_duplicate_rules_remain_authoritative() {
         assert!(parse(&values).is_err(), "{values:?}");
     }
 }
+
+#[test]
+fn file_backed_recovery_forwards_explicit_profiles_with_order_independent_larger_limits() {
+    for tail in [
+        args(&[
+            "--file-backed",
+            "--scratch-dir",
+            "private",
+            "--max-input-mib",
+            "512",
+            "--max-expanded-mib",
+            "1024",
+        ]),
+        args(&[
+            "--max-expanded-mib",
+            "1024",
+            "--max-input-mib",
+            "512",
+            "--scratch-dir",
+            "private",
+            "--file-backed",
+        ]),
+    ] {
+        let mut values = base();
+        values.extend(tail);
+        let parsed = parse(&values).unwrap();
+        let limits = &parsed.verification.limits;
+        assert_eq!(
+            parsed.verification.scratch_directory,
+            Some(PathBuf::from("private"))
+        );
+        assert_eq!(limits.envelope.max_bundle_bytes, 512 * 1024 * 1024);
+        assert_eq!(limits.pack.max_input_bytes, 512 * 1024 * 1024);
+        assert_eq!(limits.pack.max_total_expanded_bytes, 1024 * 1024 * 1024);
+        assert_eq!(limits.graph.max_payload_bytes, 1024 * 1024 * 1024);
+        assert_eq!(limits.pack.max_object_bytes, 32 * 1024 * 1024);
+        assert_eq!(limits.graph.max_objects, 100_000);
+        assert_eq!(limits.graph.max_references, 4096);
+    }
+    for tail in [
+        args(&["--file-backed"]),
+        args(&["--scratch-dir", "private"]),
+        args(&["--file-backed", "--scratch-dir", "private", "--file-backed"]),
+        args(&[
+            "--file-backed",
+            "--scratch-dir",
+            "private",
+            "--max-input-mib",
+            "16385",
+        ]),
+        args(&[
+            "--file-backed",
+            "--scratch-dir",
+            "private",
+            "--max-expanded-mib",
+            "16385",
+        ]),
+    ] {
+        let mut values = base();
+        values.extend(tail);
+        assert!(parse(&values).is_err(), "{values:?}");
+    }
+}

@@ -36,8 +36,62 @@ An explicitly selected global `fg --timeout-secs` policy also applies; the
 shorter of that policy and the command's local limit bounds the whole operation,
 including resume. Without a global override, the local 1..3600-second selection
 applies directly (300 seconds by default).
-The native 128 MiB input and expanded-payload ceilings remain in force; this is
-not a streaming large-repository restore.
+The default profile keeps the existing 128 MiB input and expanded-payload
+ceilings. An explicit file-backed profile accepts larger independently selected
+limits while preserving the native verifier's other bounds.
+
+### File-backed recovery
+
+```sh
+mkdir -m 700 recovery-scratch
+fg bundle recover backup.bundle recovered.git \
+  --trusted-local --head-ref refs/heads/main \
+  --file-backed --scratch-dir recovery-scratch \
+  --max-input-mib 1024 --max-expanded-mib 2048 \
+  --expect-sha256 "$INDEPENDENT_BUNDLE_SHA256"
+```
+
+`--file-backed` and `--scratch-dir` must be selected together. Both byte limits
+still default to 128 MiB; either may be raised independently up to 16,384 MiB
+(16 GiB) in this profile. Selection is independent of argument order. The
+per-object limit stays at 32 MiB, with at most 100,000 objects and 4,096 refs by
+default. Existing envelope, index-entry, delta depth/fanout and aggregate work
+limits still apply. Increasing input or expanded capacity does not grant more
+delta work or admit an oversized individual object.
+
+The native reader keeps inflated entry data and resolved graph payloads in one
+new private scratch file. It does not collect the complete input pack or total
+expanded payload in memory; bounded per-object buffers and index/graph metadata
+remain in memory. Scratch can require up to twice the selected expanded limit.
+The caller supplies an existing private Unix directory (mode 0700 or tighter),
+outside the recovery destination. A read-only canonical path-separation check
+runs before verification, so selecting the destination itself, a descendant, or
+a destination-parent alias cannot create temporary entries there. Sibling and
+parent scratch directories are allowed. If scratch is the destination parent,
+the destination cannot use the reserved `.fg-bundle-*.scratch` filename pattern.
+This limited namespace preflight does not inspect destination body contents.
+
+Input and scratch paths cannot contain symlinks or parent traversal. The input
+is a nonempty regular file opened once and bound to its descriptor identity,
+size, timestamps, mode and named path. Independent artifact/reference pins are
+checked before pack inflation when available; matching pins still require full
+pack, object and graph verification. The scratch file is removed only while its
+exact identity and private ownership remain intact. Any error during this
+preparation phase, including cancellation or cleanup failure, leaves the
+destination untouched by this attempt.
+A cleanup refusal reports the retained private path and does not remove a
+replacement or unrelated file. A process crash may leave scratch residue, which
+a later invocation never automatically adopts or deletes.
+
+After preparation, the command closes and removes its scratch file before
+inspecting destination bodies or writing any destination entry. The publisher
+then streams the original verified pack range from the same input descriptor.
+Each complete replay checks the exact pack length, SHA-256 and source stability
+before returning verified EOF, including comparisons with an existing complete
+pack or a shorter staging prefix. A changed source refuses publication even
+when an earlier verification succeeded. The pack is never rewritten or held as
+a complete in-memory byte vector. The same create-only, synchronized, HEAD-last
+publication rules below apply to both storage profiles.
 
 ### Publication and resume
 
@@ -77,7 +131,9 @@ and `durable`. Resume starts with publication uncertainty until the destination
 can be inspected: input verification failures, an early cancellation, or a
 changed private-directory mode cannot rule out a previous publication. Input
 read and verification refusals also report that this attempt made no destination
-writes. The destination is still inspected only after verifying the input.
+writes. Destination bodies are inspected only after verifying the input;
+file-backed mode first performs the read-only scratch path-separation check
+described above.
 An existing HEAD is observed before inspecting resume records or unrelated
 entries: corruption cannot hide the fact that a publication root is already
 visible. A HEAD with missing dependencies refuses
@@ -102,6 +158,12 @@ selected HEAD, record hash, publication state and resume status. Forge state,
 authority, signatures, origin authentication, branch currentness and external
 gitlink targets remain explicit non-claims. This is a source materialization
 and does not complete the signed capsule/authority backup obligation in `.4.21`.
+File-backed success additionally reports
+`storage_profile: file-backed-native-bare-source-recovery-v1`, `pack_sha256`,
+`scratch_bytes` and `scratch_removed: true`. It does not serialize pack or index
+bodies into the report. The retained recovery record and generated Git files
+are identical across storage profiles, allowing a valid source within both
+profiles' limits to resume in either mode.
 
 ## Read-only native preparation
 
@@ -131,11 +193,13 @@ identified recovery directory, stage/sync/read back the index, pack and metadata
 then publish HEAD last. A content-verification report alone never authorizes
 writing over an existing repository or resolving a publication uncertainty.
 
-Input/expanded/object/reference limits and cancellation retain the existing
-native verifier boundaries. Index output also obeys the selected pack byte and
-index-entry ceilings. The CLI bounds the complete layout report to 16 MiB and
-checks cancellation while hex-encoding metadata. There is no streaming claim;
-input and index/metadata consume separately bounded memory.
+Input/expanded/object/reference limits and cancellation retain the selected
+native verifier profile. Read-only preparation accepts the same explicit
+`--file-backed --scratch-dir DIR` selection and larger byte ceilings described
+above. Index output also obeys the selected pack byte and index-entry ceilings.
+The CLI bounds the complete layout report to 16 MiB and checks cancellation
+while hex-encoding metadata. File-backed preparation retains the bounded index
+and metadata in memory while the input and expanded payloads remain file backed.
 
 ## Evidence boundary
 
@@ -151,10 +215,20 @@ Use the dated compiler pinned in `rust-toolchain.toml`. This compiles the actual
 writer, without a mock Git parser or alternative runtime. Its synthetic bodies
 test filesystem ownership, every cooperative interruption point, prefix resume,
 publication ordering, hard-link/namespace checks and preservation on refusal.
-These component tests do not establish native Git compatibility. The separate
+The actual native preparation and CLI operation also have runtime-free module
+tests: they exercise both storage profiles through the same parser, verifier,
+scratch owner and publisher, without a replacement Git parser or runtime. They
+cover independent SHA-1/SHA-256 index goldens, cross-profile retry, a real pack
+prefix resume, source substitution after preparation, cleanup failure before
+destination writes, cancellation and canonical scratch/destination separation.
+The production stream adapter and filesystem writer have a combined harness in
+`crates/fgit-cli/tests/bundle_file_recovery_components.rs`, including source hash
+and length changes during complete and partial replays. These component tests
+do not establish native Git compatibility. The separate
 `bundle_recovery` integration target runs the real `fg` binary with Git and
 JavaScript absent from PATH, verifies SHA-1/SHA-256 original packs and independent
-index goldens, and exercises fresh-process exact retry and interrupted resume.
+index goldens, and exercises fresh-process exact retry and interrupted resume
+for the in-memory and file-backed profiles.
 Those commands describe the available tests; their execution must be bound to
 the tested revision before making a verification claim.
 
