@@ -15,6 +15,7 @@ use crate::{
 };
 use fgit_types::RefName;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, BufRead};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FullBundleLimits {
@@ -60,6 +61,150 @@ impl From<PackWriteError> for FullBundleError {
     }
 }
 
+/// Exact bounded transport header, retained independently of the pack stream.
+/// Header acceptance admits no pack object or native checksum.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FullBundleHeader {
+    format: ObjectFormat,
+    references: Vec<BundleReference>,
+    head: Option<ObjectId>,
+    prerequisites: Vec<ObjectId>,
+    raw: Vec<u8>,
+}
+
+/// Source I/O errors remain distinct from native bundle-header refusals.
+#[derive(Debug)]
+pub enum StreamBundleHeaderError {
+    Io(io::Error),
+    Bundle(FullBundleError),
+}
+impl std::fmt::Display for StreamBundleHeaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "streamed bundle header input: {error}"),
+            Self::Bundle(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for StreamBundleHeaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Bundle(error) => Some(error),
+        }
+    }
+}
+impl From<io::Error> for StreamBundleHeaderError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+impl From<FullBundleError> for StreamBundleHeaderError {
+    fn from(value: FullBundleError) -> Self {
+        Self::Bundle(value)
+    }
+}
+impl From<PackError> for StreamBundleHeaderError {
+    fn from(value: PackError) -> Self {
+        Self::Bundle(FullBundleError::Pack(value))
+    }
+}
+
+impl FullBundleHeader {
+    /// Read a self-contained header and leave the reader immediately before
+    /// `PACK`. No pack byte is consumed or validated by this operation.
+    /// The caller must separately enforce the total bundle limit while reading
+    /// the pack and configure any blocking reader's I/O timeout.
+    pub fn read<R: BufRead + ?Sized>(
+        reader: &mut R,
+        limits: FullBundleLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, StreamBundleHeaderError> {
+        Self::read_profile(reader, limits, false, deadline)
+    }
+
+    /// The same bounded reader with the existing prerequisite profile enabled.
+    pub fn read_incremental<R: BufRead + ?Sized>(
+        reader: &mut R,
+        limits: FullBundleLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, StreamBundleHeaderError> {
+        Self::read_profile(reader, limits, true, deadline)
+    }
+
+    fn read_profile<R: BufRead + ?Sized>(
+        reader: &mut R,
+        limits: FullBundleLimits,
+        incremental: bool,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, StreamBundleHeaderError> {
+        let mut raw = Vec::new();
+        let mut line_bytes = 0_usize;
+        loop {
+            checkpoint(deadline)?;
+            if raw.len() >= limits.max_bundle_bytes {
+                return Err(FullBundleError::Limit("bundle bytes").into());
+            }
+            if raw.len() >= limits.max_header_bytes {
+                return Err(FullBundleError::Limit("header bytes").into());
+            }
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                return Err(FullBundleError::Invalid("header line without delimiter").into());
+            }
+            let maximum = available
+                .len()
+                .min(65_536)
+                .min(limits.max_header_bytes - raw.len())
+                .min(limits.max_bundle_bytes - raw.len());
+            let available = &available[..maximum];
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let count = newline.map_or(available.len(), |index| index + 1);
+            raw.try_reserve(count)
+                .map_err(|_| FullBundleError::Limit("header allocation"))?;
+            raw.extend_from_slice(&available[..count]);
+            reader.consume(count);
+            if let Some(length) = newline {
+                if line_bytes == 0 && length == 0 {
+                    break;
+                }
+                line_bytes = 0;
+            } else {
+                line_bytes += count;
+            }
+        }
+        checkpoint(deadline)?;
+        parse_header(&raw, limits, incremental, deadline).map_err(Into::into)
+    }
+
+    #[must_use]
+    pub const fn format(&self) -> ObjectFormat {
+        self.format
+    }
+    #[must_use]
+    pub fn references(&self) -> &[BundleReference] {
+        &self.references
+    }
+    #[must_use]
+    pub const fn head(&self) -> Option<ObjectId> {
+        self.head
+    }
+    #[must_use]
+    pub fn prerequisites(&self) -> &[ObjectId] {
+        &self.prerequisites
+    }
+    #[must_use]
+    pub fn header_bytes(&self) -> usize {
+        self.raw.len()
+    }
+    /// Original bytes, including signature, capabilities and the terminating
+    /// empty line. Preserve them when binding a whole-bundle transport digest.
+    #[must_use]
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
 /// Bounded header plus borrowed pack bytes. No object has been admitted.
 #[derive(Debug)]
 pub struct FullBundleInput<'a> {
@@ -101,120 +246,18 @@ impl<'a> FullBundleInput<'a> {
         if input.len() > limits.max_bundle_bytes {
             return Err(FullBundleError::Limit("bundle bytes"));
         }
-        let mut cursor = 0;
-        let version = match line(input, &mut cursor, limits.max_header_bytes)? {
-            b"# v2 git bundle" => 2,
-            b"# v3 git bundle" => 3,
-            _ => return Err(FullBundleError::Invalid("signature")),
-        };
-        let mut format = ObjectFormat::Sha1;
-        let mut capability_seen = false;
-        let mut refs = BTreeMap::new();
-        let mut head = None;
-        let mut records = 0usize;
-        let mut prerequisites = BTreeSet::new();
-        loop {
-            checkpoint(deadline)?;
-            let record = line(input, &mut cursor, limits.max_header_bytes)?;
-            if record.is_empty() {
-                break;
-            }
-            if record.starts_with(b"@") {
-                if version != 3 || records != 0 || !prerequisites.is_empty() || capability_seen {
-                    return Err(FullBundleError::Invalid(
-                        "duplicate or misplaced capability",
-                    ));
-                }
-                format = match record {
-                    b"@object-format=sha1" => ObjectFormat::Sha1,
-                    b"@object-format=sha256" => ObjectFormat::Sha256,
-                    _ => return Err(FullBundleError::Unsupported("bundle capability")),
-                };
-                capability_seen = true;
-                continue;
-            }
-            if let Some(record) = record.strip_prefix(b"-") {
-                if !incremental {
-                    return Err(FullBundleError::Unsupported(
-                        "incremental bundle prerequisite",
-                    ));
-                }
-                if records != 0 {
-                    return Err(FullBundleError::Invalid("prerequisite after reference"));
-                }
-                if prerequisites.len() == MAX_BUNDLE_PREREQUISITES {
-                    return Err(FullBundleError::Limit("prerequisites"));
-                }
-                let width = format.digest_len() * 2;
-                if record.get(width) != Some(&b' ') {
-                    return Err(FullBundleError::Invalid("prerequisite record"));
-                }
-                let text = std::str::from_utf8(&record[..width])
-                    .map_err(|_| FullBundleError::Invalid("prerequisite identity"))?;
-                let id = ObjectId::from_hex(format, &text.to_ascii_lowercase())
-                    .map_err(|_| FullBundleError::Invalid("prerequisite identity"))?;
-                if id.is_zero() || !prerequisites.insert(id) {
-                    return Err(FullBundleError::Invalid("zero or duplicate prerequisite"));
-                }
-                continue;
-            }
-            if records == limits.max_references {
-                return Err(FullBundleError::Limit("references"));
-            }
-            records += 1;
-            let width = format.digest_len() * 2;
-            if record.get(width) != Some(&b' ') {
-                return Err(FullBundleError::Invalid("reference record"));
-            }
-            let text = std::str::from_utf8(&record[..width])
-                .map_err(|_| FullBundleError::Invalid("object identity"))?;
-            let id = ObjectId::from_hex(format, &text.to_ascii_lowercase())
-                .map_err(|_| FullBundleError::Invalid("object identity"))?;
-            if id.is_zero() {
-                return Err(FullBundleError::Invalid("zero reference target"));
-            }
-            let name = &record[width + 1..];
-            if name == b"HEAD" {
-                if head.replace(id).is_some() {
-                    return Err(FullBundleError::Invalid("duplicate HEAD"));
-                }
-            } else {
-                let name = RefName::try_new(name)
-                    .map_err(|_| FullBundleError::Invalid("reference name"))?;
-                if !name.as_bytes().starts_with(b"refs/") {
-                    return Err(FullBundleError::Unsupported("non-refs advertisement"));
-                }
-                if refs.insert(name, id).is_some() {
-                    return Err(FullBundleError::Invalid("duplicate reference"));
-                }
-            }
-        }
-        if refs.is_empty() {
-            return Err(FullBundleError::Unsupported("bundle without direct refs"));
-        }
-        if head.is_some_and(|id| {
-            !refs
-                .iter()
-                .any(|(name, target)| name.as_bytes().starts_with(b"refs/heads/") && *target == id)
-        }) {
-            return Err(FullBundleError::Unsupported(
-                "detached or unadvertised HEAD",
-            ));
-        }
+        let header = parse_header(input, limits, incremental, deadline)?;
+        let cursor = header.raw.len();
         if !input[cursor..].starts_with(b"PACK") {
             return Err(FullBundleError::Invalid("missing pack"));
         }
-        let references = refs
-            .into_iter()
-            .map(|(name, id)| BundleReference::new(id, name))
-            .collect();
         Ok(Self {
-            format,
-            references,
-            head,
+            format: header.format,
+            references: header.references,
+            head: header.head,
             pack: &input[cursor..],
             header_bytes: cursor,
-            prerequisites: prerequisites.into_iter().collect(),
+            prerequisites: header.prerequisites,
         })
     }
     #[must_use]
@@ -256,6 +299,131 @@ impl<'a> FullBundleInput<'a> {
         checkpoint(deadline)?;
         Ok(())
     }
+}
+
+fn parse_header(
+    input: &[u8],
+    limits: FullBundleLimits,
+    incremental: bool,
+    deadline: &mut impl Deadline,
+) -> Result<FullBundleHeader, FullBundleError> {
+    let mut cursor = 0;
+    let version = match line(input, &mut cursor, limits.max_header_bytes)? {
+        b"# v2 git bundle" => 2,
+        b"# v3 git bundle" => 3,
+        _ => return Err(FullBundleError::Invalid("signature")),
+    };
+    let mut format = ObjectFormat::Sha1;
+    let mut capability_seen = false;
+    let mut refs = BTreeMap::new();
+    let mut head = None;
+    let mut records = 0usize;
+    let mut prerequisites = BTreeSet::new();
+    loop {
+        checkpoint(deadline)?;
+        let record = line(input, &mut cursor, limits.max_header_bytes)?;
+        if record.is_empty() {
+            break;
+        }
+        if record.starts_with(b"@") {
+            if version != 3 || records != 0 || !prerequisites.is_empty() || capability_seen {
+                return Err(FullBundleError::Invalid(
+                    "duplicate or misplaced capability",
+                ));
+            }
+            format = match record {
+                b"@object-format=sha1" => ObjectFormat::Sha1,
+                b"@object-format=sha256" => ObjectFormat::Sha256,
+                _ => return Err(FullBundleError::Unsupported("bundle capability")),
+            };
+            capability_seen = true;
+            continue;
+        }
+        if let Some(record) = record.strip_prefix(b"-") {
+            if !incremental {
+                return Err(FullBundleError::Unsupported(
+                    "incremental bundle prerequisite",
+                ));
+            }
+            if records != 0 {
+                return Err(FullBundleError::Invalid("prerequisite after reference"));
+            }
+            if prerequisites.len() == MAX_BUNDLE_PREREQUISITES {
+                return Err(FullBundleError::Limit("prerequisites"));
+            }
+            let width = format.digest_len() * 2;
+            if record.get(width) != Some(&b' ') {
+                return Err(FullBundleError::Invalid("prerequisite record"));
+            }
+            let text = std::str::from_utf8(&record[..width])
+                .map_err(|_| FullBundleError::Invalid("prerequisite identity"))?;
+            let id = ObjectId::from_hex(format, &text.to_ascii_lowercase())
+                .map_err(|_| FullBundleError::Invalid("prerequisite identity"))?;
+            if id.is_zero() || !prerequisites.insert(id) {
+                return Err(FullBundleError::Invalid("zero or duplicate prerequisite"));
+            }
+            continue;
+        }
+        if records == limits.max_references {
+            return Err(FullBundleError::Limit("references"));
+        }
+        records += 1;
+        let width = format.digest_len() * 2;
+        if record.get(width) != Some(&b' ') {
+            return Err(FullBundleError::Invalid("reference record"));
+        }
+        let text = std::str::from_utf8(&record[..width])
+            .map_err(|_| FullBundleError::Invalid("object identity"))?;
+        let id = ObjectId::from_hex(format, &text.to_ascii_lowercase())
+            .map_err(|_| FullBundleError::Invalid("object identity"))?;
+        if id.is_zero() {
+            return Err(FullBundleError::Invalid("zero reference target"));
+        }
+        let name = &record[width + 1..];
+        if name == b"HEAD" {
+            if head.replace(id).is_some() {
+                return Err(FullBundleError::Invalid("duplicate HEAD"));
+            }
+        } else {
+            let name =
+                RefName::try_new(name).map_err(|_| FullBundleError::Invalid("reference name"))?;
+            if !name.as_bytes().starts_with(b"refs/") {
+                return Err(FullBundleError::Unsupported("non-refs advertisement"));
+            }
+            if refs.insert(name, id).is_some() {
+                return Err(FullBundleError::Invalid("duplicate reference"));
+            }
+        }
+    }
+    if refs.is_empty() {
+        return Err(FullBundleError::Unsupported("bundle without direct refs"));
+    }
+    if head.is_some_and(|id| {
+        !refs
+            .iter()
+            .any(|(name, target)| name.as_bytes().starts_with(b"refs/heads/") && *target == id)
+    }) {
+        return Err(FullBundleError::Unsupported(
+            "detached or unadvertised HEAD",
+        ));
+    }
+    let references = refs
+        .into_iter()
+        .map(|(name, id)| BundleReference::new(id, name))
+        .collect();
+    Ok(FullBundleHeader {
+        format,
+        references,
+        head,
+        raw: {
+            let mut raw = Vec::new();
+            raw.try_reserve_exact(cursor)
+                .map_err(|_| FullBundleError::Limit("header allocation"))?;
+            raw.extend_from_slice(&input[..cursor]);
+            raw
+        },
+        prerequisites: prerequisites.into_iter().collect(),
+    })
 }
 
 fn line<'a>(

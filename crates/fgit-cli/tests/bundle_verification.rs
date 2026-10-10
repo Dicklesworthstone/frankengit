@@ -120,3 +120,173 @@ fn binary_help_and_literal_path_require_no_repository_configuration() {
     );
     assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
 }
+
+#[cfg(unix)]
+fn private_scratch(fixture: &Fixture) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = fixture.0.join("scratch");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    directory
+}
+
+#[cfg(unix)]
+#[test]
+fn binary_file_backed_verification_checks_both_formats_and_cleans_private_scratch() {
+    for (encoded, format) in [(SHA1, "sha1"), (SHA256, "sha256")] {
+        let fixture = Fixture::new();
+        let original = fixture.write(encoded);
+        let scratch = private_scratch(&fixture);
+        let digest = fgit_crypto::lowercase_hex(&fgit_crypto::sha256_digest(&original));
+        let result = fixture.run(&[
+            "bundle",
+            "verify",
+            "source.bundle",
+            "--max-input-mib",
+            "512",
+            "--max-expanded-mib",
+            "512",
+            "--scratch-dir",
+            "scratch",
+            "--file-backed",
+            "--expect-sha256",
+            &digest,
+        ]);
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report = String::from_utf8(result.stdout).unwrap();
+        assert_eq!(report.lines().count(), 1);
+        assert!(report.contains(&format!("\"object_format\":\"{format}\"")));
+        assert!(report.contains("\"storage_profile\":\"file-backed-native-full-bundle-v1\""));
+        assert!(report.contains("\"scratch_removed\":true"));
+        assert!(report.contains("\"caller_expectations_matched\":true"));
+        assert!(report.contains("\"object_graph_verified\":true"));
+        assert!(report.contains("\"repository_changed\":false"));
+        assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read(fixture.0.join("source.bundle")).unwrap(),
+            original
+        );
+        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 2);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn binary_file_backed_refusals_preserve_source_and_unrelated_scratch_files() {
+    let fixture = Fixture::new();
+    let original = fixture.write(SHA1);
+    let scratch = private_scratch(&fixture);
+    let retained = scratch.join("previous-attempt.scratch");
+    std::fs::write(&retained, b"operator's previous residue").unwrap();
+    let wrong = "0".repeat(64);
+    for args in [
+        vec![
+            "bundle",
+            "verify",
+            "source.bundle",
+            "--file-backed",
+            "--scratch-dir",
+            "scratch",
+            "--expect-sha256",
+            &wrong,
+        ],
+        vec![
+            "bundle",
+            "verify",
+            "source.bundle",
+            "--max-input-mib",
+            "129",
+        ],
+        vec!["bundle", "verify", "source.bundle", "--file-backed"],
+        vec![
+            "--timeout-secs",
+            "0.000000001",
+            "bundle",
+            "verify",
+            "source.bundle",
+            "--file-backed",
+            "--scratch-dir",
+            "scratch",
+        ],
+    ] {
+        let result = fixture.run(&args);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            std::fs::read(&retained).unwrap(),
+            b"operator's previous residue"
+        );
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(fixture.0.join("source.bundle")).unwrap(),
+            original
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn binary_file_backed_layout_exports_metadata_without_materializing_a_repository() {
+    let fixture = Fixture::new();
+    let bundle = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/native_bundle_recovery/sha256.bundle.hex"
+    ));
+    fixture.write(bundle.trim());
+    let scratch = private_scratch(&fixture);
+    let result = fixture.run(&[
+        "bundle",
+        "verify",
+        "source.bundle",
+        "--file-backed",
+        "--scratch-dir",
+        "scratch",
+        "--recovery-head-hex",
+        "726566732f68656164732f6d61696e",
+    ]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = String::from_utf8(result.stdout).unwrap();
+    let encoded = report
+        .split_once("\"index_hex\":\"")
+        .unwrap()
+        .1
+        .split('"')
+        .next()
+        .unwrap();
+    let index: Vec<_> = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    let expected = "ad9f3bf1c1c2dc4d5483a02bda8dbae512d5e369ba4fc481d4a45d8f5afc2579";
+    assert_eq!(
+        fgit_crypto::lowercase_hex(&fgit_crypto::sha256_digest(&index)),
+        expected
+    );
+    assert!(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/native_bundle_recovery/metadata.json"
+        ))
+        .contains(expected)
+    );
+    assert!(report.contains("\"repository_changed\":false"));
+    assert!(!report.contains("\"pack_hex\""));
+    assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 2);
+}
