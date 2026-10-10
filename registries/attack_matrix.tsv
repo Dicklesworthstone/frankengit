@@ -18,3 +18,4 @@ ATK-015	7.13	Peer equivocation, CRDT last-writer-wins on protected refs, and sch
 ATK-016	7.14	Operator break-glass override abuse, signing key compromise, and release asset tampering	crates/fgit-policy/tests/break_glass_evidence.rs	active
 ATK-017	7.5	SSH transport host key forgery, unauthorized deploy key injection, and unauthenticated channel command execution	scripts/e2e/ssh_transport_security.sh	active
 ATK-018	7.1	Resource ceiling violations on untrusted pack/frame input triggering unbounded memory or recursion	scripts/e2e/suites/security/resource_ceilings.sh	active
+ATK-019	7.5	Review-policy scope widening, remote ownership bootstrap, self-authorized administrator rotation, stale predecessor and revoked credential replay	crates/fgit-node/tests/protection_http.rs	active

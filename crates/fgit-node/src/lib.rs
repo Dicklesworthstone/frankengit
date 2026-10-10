@@ -6393,6 +6393,9 @@ pub struct NodeConfig {
     /// the listener's own origins. Runtime-only deployment policy
     /// (frankengit-root-doctrine-x2mv.4.31).
     http_trusted_origin: Option<HttpTrustedOrigin>,
+    /// Explicit runtime-only ceiling for the scoped HTTP review-protection API.
+    /// Disabled by default; token scopes and current administrators still apply.
+    http_protection_admin: bool,
     /// Which cell this process is, for answers it serves.
     ///
     /// `frankengit-1egm`. Unset by default and typed as such: a deployment that
@@ -6439,6 +6442,7 @@ impl NodeConfig {
             git_daemon_receive_limits: ReceiveLimits::default(),
             git_daemon_receive_principal: None,
             http_trusted_origin: None,
+            http_protection_admin: false,
         }
     }
 
@@ -6561,6 +6565,22 @@ impl NodeConfig {
     #[must_use]
     pub const fn http_trusted_origin(&self) -> Option<&HttpTrustedOrigin> {
         self.http_trusted_origin.as_ref()
+    }
+
+    /// Enables the independently scoped HTTP review-protection API.
+    ///
+    /// This runtime ceiling grants no principal or token permission and cannot
+    /// bootstrap a policy. First installation remains a trusted-local operation.
+    #[must_use]
+    pub const fn with_http_protection_admin(mut self) -> Self {
+        self.http_protection_admin = true;
+        self
+    }
+
+    /// Whether the HTTP review-protection API was explicitly enabled.
+    #[must_use]
+    pub const fn http_protection_admin_enabled(&self) -> bool {
+        self.http_protection_admin
     }
 
     /// Opens the git-daemon receive-pack lane, publishing as `principal`.

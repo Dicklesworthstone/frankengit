@@ -68,6 +68,14 @@ identical replacement, increments the repository policy epoch. Approvals from
 older epochs consequently cannot satisfy the new policy. There is no implicit
 refresh of PR coordinates, reviewer versions or candidate identities.
 
+The separate [MCP administration profile](MCP_REVIEW_PROTECTION.md) exposes this
+same local operator workflow with independent read, write and outcome grants.
+The opt-in [HTTP protection API](HTTP_PROTECTION_API.md) supports inspection and
+replacement of an already installed policy with dedicated credential scopes.
+HTTP cannot bootstrap ownership. Both adapters use existing native admission
+and recovery; transport permissions do not replace current policy administrator
+authorization.
+
 `show` returns the selected head, epoch, singleton version and complete policy.
 It distinguishes never-installed from explicitly disabled. `ref_hex` always
 preserves exact reference bytes; `ref` is null for a non-UTF-8 name. CLI input

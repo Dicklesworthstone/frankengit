@@ -56,6 +56,8 @@ pub(super) struct Grant {
     reviews_read: bool,
     reviews_write: bool,
     merges_write: bool,
+    protection_read: bool,
+    protection_write: bool,
 }
 impl Grant {
     pub const fn permits(self, service: Service) -> bool {
@@ -91,6 +93,14 @@ impl Grant {
     /// reviewers. Mandatory repository protection remains enforced at CAS.
     pub const fn permits_reviewed_merge(self) -> bool {
         self.merges_write
+    }
+    /// Policy inspection and administration require independent explicit grants.
+    pub const fn permits_protection(self, mutation: bool) -> bool {
+        if mutation {
+            self.protection_write
+        } else {
+            self.protection_read
+        }
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
@@ -156,6 +166,8 @@ impl CredentialSource {
                     reviews_read: false,
                     reviews_write: false,
                     merges_write: false,
+                    protection_read: false,
+                    protection_write: false,
                 })
             }
             Self::File { path, binding } => {
@@ -354,6 +366,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
         reviews_read: false,
         reviews_write: false,
         merges_write: false,
+        protection_read: false,
+        protection_write: false,
     };
     let mut previous = 0;
     for scope in scopes.split(',') {
@@ -370,6 +384,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
             "reviews-read" => (8, &mut grant.reviews_read),
             "reviews-write" => (9, &mut grant.reviews_write),
             "merges-write" => (10, &mut grant.merges_write),
+            "protection-read" => (11, &mut grant.protection_read),
+            "protection-write" => (12, &mut grant.protection_write),
             _ => return Err(CredentialFailure::InvalidFile),
         };
         if rank <= previous {
@@ -834,6 +850,48 @@ mod tests {
                 && !legacy.permits_reviews(true)
                 && !legacy.permits_reviewed_merge()
         );
+    }
+    #[test]
+    fn protection_grants_are_explicit_independent_and_do_not_grant_other_services() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let old = grant(
+            principal,
+            "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write",
+        )
+        .unwrap();
+        assert!(!old.permits_protection(false) && !old.permits_protection(true));
+        for (scope, mutation) in [("protection-read", false), ("protection-write", true)] {
+            let selected = grant(principal, scope).unwrap();
+            assert!(selected.permits_protection(mutation));
+            assert!(!selected.permits_protection(!mutation));
+            assert!(
+                !selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack)
+            );
+            assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
+            assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
+            assert!(!selected.permits_reviews(false) && !selected.permits_reviews(true));
+            assert!(!selected.permits_outcomes() && !selected.permits_reviewed_merge());
+        }
+        let both = grant(principal, "protection-read,protection-write").unwrap();
+        assert!(both.permits_protection(false) && both.permits_protection(true));
+        assert!(grant(principal, "merges-write,protection-read,protection-write").is_ok());
+        for scopes in [
+            "protection-write,protection-read",
+            "protection-read,protection-read",
+            "protection-write,protection-write",
+            "protection-read,read",
+            "protection",
+        ] {
+            assert!(grant(principal, scopes).is_err());
+        }
+        let token = "a".repeat(64);
+        let legacy = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        }
+        .authenticate(Some(&format!("Bearer {token}")))
+        .unwrap();
+        assert!(!legacy.permits_protection(false) && !legacy.permits_protection(true));
     }
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {

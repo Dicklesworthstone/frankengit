@@ -51,7 +51,9 @@ rejects empty sets, duplicate reviewers and submitter/opener self-approval.
 Mandatory protected-branch requirements cannot be removed by submitting a
 smaller list. Only explicitly required and mandatory reviewers are enforced;
 this is not an implicit veto by every principal who has ever reviewed a PR.
-There is no remote protection-administration endpoint in this change.
+Policy administration uses the separately enabled and independently scoped
+[HTTP protection API](HTTP_PROTECTION_API.md); review and merge grants do not
+authorize changing mandatory requirements.
 
 Credential files retain their existing exact tenant/repository/incarnation
 binding and per-authentication reload. Rotation preserves identity when the

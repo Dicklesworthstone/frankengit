@@ -21,6 +21,7 @@ use crate::service_stop as stop_file;
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
+  [--allow-protection]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
@@ -40,12 +41,12 @@ Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
     --trusted-local --print-credentials-header [--expected-incarnation <id>]
 
-Requires an existing repository. Git pushes, issue APIs, PR APIs, source APIs
-and outcome queries are disabled by default. --allow-receive enables Git pushes
-for receive-scoped tokens. --allow-issues, --allow-outcomes, --allow-pulls and
---allow-source require --credentials-file and the token's appropriate scopes.
-No switch enables another service. --allow-source exposes read-only source
-queries to read-scoped tokens; it does not grant any mutation permission.
+Requires an existing repository. Git pushes, issue APIs, PR APIs, source APIs,
+protection APIs and outcome queries are disabled by default. --allow-receive enables
+Git pushes for receive-scoped tokens. --allow-issues, --allow-outcomes, --allow-pulls,
+--allow-source and --allow-protection require --credentials-file and the token's
+appropriate scopes. No switch enables another service. --allow-source exposes
+read-only source queries to read-scoped tokens; it grants no mutation permission.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
@@ -53,7 +54,7 @@ for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -106,6 +107,17 @@ expected_commit can additionally compare the selected ref tip. Source reads neve
 stage objects or create transactions. Search match limits are explicitly partial,
 not complete no-match results. See docs/HTTP_SOURCE_API.md for limits and examples.
 
+The independently enabled protection API uses protection-read/protection-write:
+  GET /api/v1/protection
+  POST /api/v1/protection
+Replacement requires a complete URL-encoded form with positive expected_version,
+expected_epoch, repeated administrator=<principal-hex> fields and either repeated
+required_reviewer=<raw-reference-bytes-hex>:<principal-hex> fields or clear=true.
+Current canonical administrators authorize replacement; proposed administrators
+cannot authorize themselves. First installation remains local through fg protection
+set or the separate MCP protection-admin profile. Reuse the original Idempotency-Key
+only for the identical complete command. See docs/HTTP_PROTECTION_API.md.
+
 Outcome lookup uses a bodyless POST and the ORIGINAL Idempotency-Key:
   POST /api/v1/outcomes                 (metadata transaction or atomic push)
   POST /api/v1/outcomes/receive         (whole recorded non-atomic session)
@@ -144,6 +156,7 @@ struct Options {
     allow_outcomes: bool,
     allow_pulls: bool,
     allow_source: bool,
+    allow_protection: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
     stop_file: Option<PathBuf>,
@@ -207,6 +220,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--allow-outcomes"
                 | "--allow-pulls"
                 | "--allow-source"
+                | "--allow-protection"
                 | "--print-credentials-header"
                 | "--continuous"
         );
@@ -306,11 +320,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let allow_outcomes = flags.contains_key("--allow-outcomes");
     let allow_pulls = flags.contains_key("--allow-pulls");
     let allow_source = flags.contains_key("--allow-source");
-    if (allow_issues || allow_outcomes || allow_pulls || allow_source)
+    let allow_protection = flags.contains_key("--allow-protection");
+    if (allow_issues || allow_outcomes || allow_pulls || allow_source || allow_protection)
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
         return Err(
-            "issue/PR/source/outcome endpoints require explicit scopes in --credentials-file"
+            "issue/PR/source/protection/outcome endpoints require explicit scopes in --credentials-file"
                 .into(),
         );
     }
@@ -344,6 +359,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             Some(bytes("--receive-max-expanded-mib")?),
         )
         .with_selected_pack_byte_envelope(bytes("--pack-max-expanded-mib")?);
+    if allow_protection {
+        config = config.with_http_protection_admin();
+    }
     if let Some(origin) = flags.get("--trusted-origin") {
         config = config.with_http_trusted_origin(
             HttpTrustedOrigin::try_new(origin).map_err(|refusal| refusal.to_string())?,
@@ -366,6 +384,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         allow_outcomes,
         allow_pulls,
         allow_source,
+        allow_protection,
         limits,
         idle_timeout,
         stop_file,
@@ -481,9 +500,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         };
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            options.allow_source, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
+            options.allow_source, options.allow_protection, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
         if let Some(control) = control {
@@ -611,6 +630,8 @@ mod tests {
         assert!(!options.allow_outcomes);
         assert!(!options.allow_pulls);
         assert!(!options.allow_source);
+        assert!(!options.allow_protection);
+        assert!(!options.config.http_protection_admin_enabled());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
@@ -794,6 +815,36 @@ mod tests {
         assert!(parse(&args).is_err());
     }
     #[test]
+    fn protection_requires_scoped_credentials_and_never_enables_other_services() {
+        let mut static_args = arguments();
+        static_args.push("--allow-protection".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        let defaults = parse(&args).unwrap();
+        assert!(!defaults.allow_protection);
+        assert!(!defaults.config.http_protection_admin_enabled());
+        args.push("--allow-protection".into());
+        let options = parse(&args).unwrap();
+        assert!(options.allow_protection);
+        assert!(options.config.http_protection_admin_enabled());
+        assert!(
+            !options.allow_receive
+                && !options.allow_issues
+                && !options.allow_outcomes
+                && !options.allow_pulls
+                && !options.allow_source
+        );
+        args.push("--allow-protection".into());
+        assert!(parse(&args).is_err());
+        let mut provisioning = arguments()[..5].to_vec();
+        provisioning.extend([
+            "--print-credentials-header".into(),
+            "--allow-protection".into(),
+        ]);
+        assert!(parse(&provisioning).is_err());
+    }
+    #[test]
     fn header_provisioning_is_a_separate_read_only_operation() {
         let mut args = arguments()[..5].to_vec();
         args.push("--print-credentials-header".into());
@@ -864,13 +915,16 @@ mod tests {
                 && !options.allow_outcomes
                 && !options.allow_pulls
                 && !options.allow_source
+                && !options.allow_protection
         );
+        assert!(!options.config.http_protection_admin_enabled());
         for flag in [
             "--allow-receive",
             "--allow-issues",
             "--allow-outcomes",
             "--allow-pulls",
             "--allow-source",
+            "--allow-protection",
         ] {
             let mut selected = args.clone();
             selected.push(flag.into());
@@ -880,6 +934,11 @@ mod tests {
             assert_eq!(options.allow_outcomes, flag == "--allow-outcomes");
             assert_eq!(options.allow_pulls, flag == "--allow-pulls");
             assert_eq!(options.allow_source, flag == "--allow-source");
+            assert_eq!(options.allow_protection, flag == "--allow-protection");
+            assert_eq!(
+                options.config.http_protection_admin_enabled(),
+                flag == "--allow-protection"
+            );
         }
     }
 }
