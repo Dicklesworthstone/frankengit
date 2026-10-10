@@ -1,34 +1,45 @@
 //! Separate operator policy profile, not an additional grant on a code agent.
-//! The same MCP codec/transport and native authority reader remain the owners.
+//! Native admission owns authorization, retry identity and canonical publication.
+mod write;
+
 use std::collections::BTreeMap;
 
 use fgit_forge::event::protection::ReviewProtection;
-use fgit_types::{GitHashAlgorithm, RepositoryId, RepositoryIncarnationId, TenantId};
+use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{self, ReadTools, Tool, ToolError};
-use super::{NodeTools, Options, head, hex, mutations, require_fields};
+use super::{NodeTools, Options, head, hex, mutations, outcomes, require_fields};
 
 const SHOW: &str = "frankengit_protection_show";
 const USAGE: &str = "usage: fg-mcp --protection-admin <storage-root> <tenant-id> <repository-id>
-  --trusted-local --expected-incarnation <id> --allow-read
+  --trusted-local --expected-incarnation <id>
+  [--allow-read] [--allow-write] [--allow-outcomes] [--principal <id>]
   [--object-format sha1|sha256] [--max-messages <1..100000>]
 
-Read the exact authority-selected required-review policy of an existing node.
-This profile exposes no code, issue, PR, review, mutation or recovery tools.
-It is explicitly operator-authorized local access, not remote IAM. Never proxy
-this process to untrusted clients. Policy text cannot expand its launch grant.
+Read, replace or recover required-review protection with independent grants.
+At least one grant is required. Writes and recovery require --principal; reads
+are never implicitly granted. Set replaces the complete policy at the supplied
+version and epoch, using the original client key unchanged across retries.
+Existing canonical administrators authorize replacement, not the new list.
+An explicit operator write grant may install the first policy; its administrator
+set must include the launch principal. Empty branches disable requirements while
+retaining administrators. No code, issue, PR or review tools are exposed.
+This is operator-authorized local access, not remote IAM. Never proxy this
+process to untrusted clients. Policy text cannot expand its launch grant.
 MCP framing, serial execution, native request budgets and explicit node shutdown
 are identical to the existing fg-mcp profile. No separate listener or runtime.";
 
 #[derive(Clone, Debug)]
 struct Launch {
     options: Options,
+    read: bool,
+    write: bool,
 }
 
 fn parse(arguments: &[String]) -> Result<Launch, String> {
     if arguments.len() < 3
-        || arguments.len() > 12
+        || arguments.len() > 16
         || arguments[0].is_empty()
         || arguments.iter().any(|arg| arg.len() > 4096)
     {
@@ -40,8 +51,8 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
         let flag = arguments[cursor].as_str();
         cursor += 1;
         let value = match flag {
-            "--trusted-local" | "--allow-read" => "",
-            "--expected-incarnation" | "--object-format" | "--max-messages" => {
+            "--trusted-local" | "--allow-read" | "--allow-write" | "--allow-outcomes" => "",
+            "--expected-incarnation" | "--object-format" | "--max-messages" | "--principal" => {
                 let value = arguments
                     .get(cursor)
                     .ok_or("missing protection option value")?;
@@ -54,8 +65,21 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
             return Err("duplicate protection option".into());
         }
     }
-    if !flags.contains_key("--trusted-local") || !flags.contains_key("--allow-read") {
-        return Err("policy inspection requires --trusted-local and --allow-read".into());
+    if !flags.contains_key("--trusted-local") {
+        return Err("policy administration requires --trusted-local".into());
+    }
+    let read = flags.contains_key("--allow-read");
+    let write = flags.contains_key("--allow-write");
+    let recover = flags.contains_key("--allow-outcomes");
+    if !read && !write && !recover {
+        return Err("at least one explicit policy grant is required".into());
+    }
+    let principal = flags
+        .get("--principal")
+        .map(|value| canonical_principal(value).map_err(|_| "invalid principal ID".to_owned()))
+        .transpose()?;
+    if (write || recover) != principal.is_some() {
+        return Err("--principal is required exactly when writes or outcomes are granted".into());
     }
     let incarnation = flags
         .get("--expected-incarnation")
@@ -88,21 +112,39 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
             pulls: false,
             source: false,
             writes: Default::default(),
-            outcomes: false,
-            principal: None,
+            outcomes: recover,
+            principal,
         },
+        read,
+        write,
     })
+}
+
+fn canonical_principal(value: &str) -> Result<PrincipalId, ToolError> {
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ToolError::invalid("invalid_principal_id"));
+    }
+    PrincipalId::from_hex(value).map_err(|_| ToolError::invalid("invalid_principal_id"))
 }
 
 // No Deref, generic dispatch, or exposed NodeTools handle: the separate profile
 // never inherits the ordinary backend's tool catalogue or capability ceilings.
 struct ProtectionTools {
     backend: NodeTools,
+    read: bool,
+    write: bool,
 }
 impl ProtectionTools {
     fn open(launch: Launch) -> Result<Self, String> {
+        let allow_stopped_intake = launch.write || launch.options.outcomes;
         Ok(Self {
-            backend: NodeTools::open_authorized(launch.options, false)?,
+            backend: NodeTools::open_authorized(launch.options, allow_stopped_intake)?,
+            read: launch.read,
+            write: launch.write,
         })
     }
     fn close(self) -> Result<(), String> {
@@ -195,22 +237,60 @@ fn policy_value(policy: &ReviewProtection) -> Value {
 
 impl ReadTools for ProtectionTools {
     fn tools(&self) -> Vec<Tool> {
-        let mut properties = Object::new();
-        properties.insert("expected_head".into(), object([
-            ("type", text("string")), ("maxLength", json::number(140)),
-            ("description", text("Optional exact snapshot_token. A moved head refuses, never silently repins.")),
-        ]));
-        vec![Tool {
-            name: SHOW,
-            description: "Read complete required-review protection, administrators, version and policy epoch at one authenticated head. Absent policy differs from an installed policy with no protected branches. Read-only; does not grant administration or code access.",
-            schema: mutations::input_schema(properties, &[]),
-        }]
+        let mut tools = Vec::new();
+        if self.read {
+            tools.push(show_tool());
+        }
+        if self.write {
+            tools.push(write::tool());
+        }
+        if self.backend.options.outcomes {
+            tools.extend(outcomes::tools());
+        }
+        tools
+    }
+    fn is_mutation(&self, name: &str) -> bool {
+        self.write && name == write::NAME
+    }
+    fn result_is_error(&self, name: &str, value: &Value) -> bool {
+        self.is_mutation(name)
+            && value
+                .object()
+                .and_then(|fields| fields.get("outcome"))
+                .and_then(Value::text)
+                == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
-        if name != SHOW {
-            return Err(ToolError::invalid("tool_not_granted"));
+        if self.read && name == SHOW {
+            return self.show(args);
         }
-        self.show(args)
+        if self.write && name == write::NAME {
+            return write::call(&self.backend, args);
+        }
+        if self.backend.options.outcomes && name == outcomes::NAME {
+            return outcomes::call(&self.backend, args);
+        }
+        Err(ToolError::invalid("tool_not_granted"))
+    }
+}
+
+fn show_tool() -> Tool {
+    let mut properties = Object::new();
+    properties.insert(
+        "expected_head".into(),
+        object([
+            ("type", text("string")),
+            ("maxLength", json::number(140)),
+            (
+                "description",
+                text("Optional exact snapshot_token. A moved head refuses, never silently repins."),
+            ),
+        ]),
+    );
+    Tool {
+        name: SHOW,
+        description: "Read complete required-review protection, administrators, version and policy epoch at one authenticated head. Absent policy differs from an installed policy with no protected branches. Read-only; does not grant administration or code access.",
+        schema: mutations::input_schema(properties, &[]),
     }
 }
 
@@ -237,4 +317,8 @@ pub(in crate::mcp) fn run(arguments: &[String]) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod integration_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_tests;
