@@ -32,9 +32,16 @@ pub(super) struct Fixture {
     pub subject: ReviewSubject,
     pub base: GitOid,
     pub genesis: RepositoryAuthorityHeadId,
+    pub source_bundle: Vec<u8>,
 }
 impl Fixture {
     pub fn new(format: GitHashAlgorithm, conflict: bool) -> Self {
+        Self::history(format, conflict, false)
+    }
+    pub fn fast_forward(format: GitHashAlgorithm) -> Self {
+        Self::history(format, false, true)
+    }
+    fn history(format: GitHashAlgorithm, conflict: bool, fast_forward: bool) -> Self {
         let root = std::env::temp_dir().join(format!("fg-mcp-pr-candidate-{}-{}",
             std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         fs::create_dir(&root).unwrap();
@@ -66,7 +73,12 @@ impl Fixture {
         )).unwrap();
         assert!(matches!(created.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
         let mut tips = Vec::new();
+        let mut source_bundle = Vec::new();
         for (reference, name) in [(&target_ref, "main"), (&source_ref, "topic")] {
+            if fast_forward && reference == &target_ref {
+                tips.push(base);
+                continue;
+            }
             let patch = if conflict {
                 format!("diff --git a/README b/README\n--- a/README\n+++ b/README\n@@ -1 +1 @@\n-base\n+{name}\n")
             } else {
@@ -85,6 +97,24 @@ impl Fixture {
             )).unwrap();
             assert!(matches!(published.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
             tips.push(candidate.candidate_commit);
+            if reference == &source_ref {
+                source_bundle = candidate.bundle_bytes().to_vec();
+            }
+        }
+        if fast_forward {
+            let parent = tips[1];
+            let patch = b"diff --git a/second b/second\nnew file mode 100644\n--- /dev/null\n+++ b/second\n@@ -0,0 +1 @@\n+second source change\n";
+            let request = node.request_context();
+            let candidate = node.runtime().block_on(node.prepare_trusted_patch_in(
+                &request, &source_ref, parent, [0xc4; 16], patch, &metadata(), Default::default(),
+            )).unwrap();
+            let published = node.runtime().block_on(node.apply_workspace_bundle_durable_in(
+                &request, actor(1), b"publish-second-topic", &source_ref, parent,
+                candidate.candidate_commit, candidate.bundle_bytes(),
+            )).unwrap();
+            assert!(matches!(published.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+            tips[1] = candidate.candidate_commit;
+            source_bundle = candidate.bundle_bytes().to_vec();
         }
         let incarnation = node.repository_incarnation_id();
         node.shutdown().unwrap();
@@ -113,7 +143,7 @@ impl Fixture {
         options.writes = Default::default();
         options.principal = None;
         let backend = NodeTools::open(options).unwrap();
-        Self { root, backend: Some(backend), subject, base, genesis }
+        Self { root, backend: Some(backend), subject, base, genesis, source_bundle }
     }
     pub fn backend(&self) -> &NodeTools { self.backend.as_ref().unwrap() }
     pub fn backend_mut(&mut self) -> &mut NodeTools { self.backend.as_mut().unwrap() }

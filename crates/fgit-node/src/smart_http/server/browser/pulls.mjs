@@ -1,7 +1,7 @@
 // Native PR client. Views are immutable observations, never merge permission.
 import { Transport, integer, principal, snapshot, listReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
   hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record } from './pulls-core.mjs';
-import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, PREPARATION_LIMIT } from './pulls-candidate.mjs';
+import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, isFastForwardCandidate, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
 import { RECEIPT_LIMIT, requestBody, requestPath, requestKey, publication, recovery, base64, fromBase64, receiptScope } from './pulls-actions.mjs';
@@ -276,9 +276,21 @@ export class PullClient {
   async stageMerge(requiredReviewers) {
     if (!this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a merge.');
     const { number, fields, bundle } = this.#artifact;
+    if (isFastForwardCandidate(fields)) fail('An existing source-tip candidate requires explicit fast-forward publication.');
     // Caller-selected reviewers are explicit requirements, not inferred votes.
     // The node independently enforces opener/submitter and current-policy gates.
     return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers }, bundle);
+  }
+  async stageInspectedFastForward() {
+    if (!this.connected || !this.#artifact) fail('Inspect the exact source-tip candidate before preparing a fast-forward.');
+    const { number, fields } = this.#artifact;
+    if (!isFastForwardCandidate(fields)) fail('Fast-forward requires the inspected source tip and its exact target base.');
+    const { object_format, pull_request_version, source_ref, source_tip, target_ref, target_tip } = fields;
+    // This is the explicit native fast-forward schema. Current repository
+    // protection supplies its review requirements; no bundle or caller-selected
+    // reviewer assertion can change this publication method or retry identity.
+    return this.#stage(number, 'fast-forward',
+      { object_format, pull_request_version, source_ref, source_tip, target_ref, target_tip }, null);
   }
   async #stage(number, action, fields, bundle) {
     const scope = this.#selected(); requestPath(number, action);

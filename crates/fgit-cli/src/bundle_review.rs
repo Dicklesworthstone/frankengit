@@ -94,11 +94,14 @@ pub fn run(arguments: &[String], merging: bool) -> Result<(), String> {
         || vec![input.base],
         |merge| vec![input.base, merge.source_tip],
     );
+    let fast_forward = input.merge.as_ref().is_some_and(|merge| {
+        merge.merge_commit == merge.source_tip && merge.base_tip == merge.target_tip_before
+    });
     if result.review.comparison.mode != ComparisonMode::Direct
         || result.review.comparison.requested_before != input.base
         || result.review.comparison.compared_before != input.base
         || result.review.comparison.requested_after != input.candidate
-        || result.parents != expected_parents
+        || (!fast_forward && result.parents != expected_parents)
         || result.bundle_bytes != bytes.len()
         || result.merge_base != input.merge.as_ref().map(|merge| merge.base_tip)
     {

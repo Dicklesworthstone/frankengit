@@ -115,7 +115,8 @@ pub(super) fn call_in(
     let subject = &input.selection.subject;
     check_selection(&input.selection, &inspected.subject, inspected.review.source_head)?;
     if inspected.candidate != input.candidate
-        || inspected.parents != [subject.target_tip, subject.source_tip]
+        || (!input.candidate.is_fast_forward(subject)
+            && inspected.parents != [subject.target_tip, subject.source_tip])
         || inspected.bundle.sha256 != input.digest
         || inspected.bundle.bytes != input.bundle.len()
         || inspected.bundle.pack_bytes == 0
@@ -148,6 +149,11 @@ pub(super) fn call_in(
         input.options, &inspected.review,
     )?;
     let arguments = candidate_arguments(subject, input.candidate, &input.bundle)?;
+    let publication_tool = if input.candidate.is_fast_forward(subject) {
+        super::super::super::merge_writes::FAST_FORWARD_NAME
+    } else {
+        super::super::super::merge_writes::NAME
+    };
     let mut result = binding(backend);
     result.extend(subject_fields(subject));
     result.extend(commit_fields(&inspected.candidate_commit_body)?);
@@ -175,7 +181,7 @@ pub(super) fn call_in(
         ("merge_algorithm_verified".into(), Value::Bool(false)),
         ("candidate_arguments".into(), arguments),
         ("review_tool".into(), text(reviews::NAME)),
-        ("publication_tool".into(), text(super::super::super::merge_writes::NAME)),
+        ("publication_tool".into(), text(publication_tool)),
     ]);
     let result = Value::Object(result);
     result.encode(MAX_TOOL_RESULT).map_err(|_| ToolError::failed("candidate_response_limit"))?;

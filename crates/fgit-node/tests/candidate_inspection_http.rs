@@ -3,6 +3,8 @@
 //! review/merge remain separate transactions; no canned inspection engine.
 #[path = "candidate_inspection_http/support.rs"]
 mod support;
+#[path = "candidate_inspection_http/fast_forward.rs"]
+mod fast_forward;
 use support::*;
 
 use fgit_authority::{IdempotencyKey, key_recovery::RequestRecovery};

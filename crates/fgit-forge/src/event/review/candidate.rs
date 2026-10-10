@@ -19,13 +19,24 @@ impl CandidateBinding {
             || self.commit.is_zero()
             || self.merge_base.algorithm() != subject.source_tip.algorithm()
             || self.commit.algorithm() != subject.source_tip.algorithm()
-            || self.commit == subject.source_tip
+            || (self.commit == subject.source_tip && self.merge_base != subject.target_tip)
             || self.commit == subject.target_tip
             || subject.source_tip == subject.target_tip
         {
             return Err(invalid_native("review.candidate"));
         }
         Ok(())
+    }
+    /// An exact source-tip candidate names a fast-forward only when its base is
+    /// the observed target. This shape is not an ancestry or admission proof:
+    /// the node must verify the entire selected source history before a vote.
+    /// Source-only reviews still have no `CandidateBinding` and cannot satisfy
+    /// the exact-candidate merge gate.
+    #[must_use]
+    pub fn is_fast_forward(&self, subject: &ReviewSubject) -> bool {
+        self.commit == subject.source_tip
+            && self.merge_base == subject.target_tip
+            && subject.source_tip != subject.target_tip
     }
     #[must_use]
     pub fn merge(&self, subject: &ReviewSubject) -> super::super::NativeMerge {
@@ -182,5 +193,38 @@ mod tests {
                 .proposed_event(PrincipalId::from_bytes([1; 16]), GitHashAlgorithm::Sha1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn exact_fast_forward_candidates_bind_both_tips_and_preserve_source_only_separation() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let mut command = command(format);
+            let actor = PrincipalId::from_bytes([1; 16]);
+            command.candidate.commit = command.review.subject.source_tip;
+            assert!(!command.candidate.is_fast_forward(&command.review.subject));
+            assert!(command.proposed_event(actor, format).is_err());
+
+            command.candidate.merge_base = command.review.subject.target_tip;
+            assert!(command.candidate.is_fast_forward(&command.review.subject));
+            let exact = command.proposed_event(actor, format).unwrap();
+            let bytes = encode_body(&exact).unwrap();
+            assert_eq!(
+                decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap(),
+                exact
+            );
+            assert_eq!(
+                encode_body(&decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap())
+                    .unwrap(),
+                bytes
+            );
+            assert_ne!(
+                bytes,
+                encode_body(&command.review.proposed_event(actor, format).unwrap()).unwrap()
+            );
+
+            command.candidate.commit = command.review.subject.target_tip;
+            assert!(!command.candidate.is_fast_forward(&command.review.subject));
+            assert!(command.proposed_event(actor, format).is_err());
+        }
     }
 }

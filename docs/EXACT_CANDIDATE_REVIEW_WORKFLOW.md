@@ -55,6 +55,15 @@ candidate commit (therefore its metadata and tree), merge base, source/target
 refs and tips, PR number/version, policy epoch, reviewer, decision and reason.
 This verifies the bytes named by the vote, not whether a person understood them.
 
+For an explicit fast-forward, the exact candidate is the existing source tip
+and its merge base is the observed target tip. The inspector proves native
+ancestry and reports the source commit's actual parents, which can differ from
+the two-parent shape of a constructed merge. The same durable exact-candidate
+review can satisfy current mandatory protection on the fast-forward endpoint;
+source-only votes still cannot. See
+[`FAST_FORWARD_PR_MERGES.md`](FAST_FORWARD_PR_MERGES.md) for the publication
+method and its refusal/retry behavior.
+
 The old source-only review profile 1 retains its bytes. Additive profile 2
 (`exact-merge-candidate-v1`) appends candidate/base identities. Source-only votes
 are readable but cannot satisfy exact-candidate publication. Review decisions

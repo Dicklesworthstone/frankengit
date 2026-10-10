@@ -100,9 +100,12 @@
         <button id="review-stage" type="submit">Prepare review — do not send</button>
       </form>
       <form id="merge">
-        <h3>Reviewed merge</h3>
-        <label>Required reviewer IDs, one per line <textarea id="required-reviewers" rows="5" spellcheck="false" required></textarea></label>
-        <p>Enter 1–32 distinct 32-character lowercase hexadecimal principal IDs explicitly. Displayed reviews never fill this field automatically. The opener and submitter cannot provide independent approval.</p>
+        <h3 id="merge-heading">Reviewed merge</h3>
+        <p id="merge-method-guidance">The inspected candidate determines the explicit publication method. Current branch protection applies.</p>
+        <div id="merge-reviewer-fields">
+          <label>Required reviewer IDs, one per line <textarea id="required-reviewers" rows="5" spellcheck="false" required></textarea></label>
+          <p>Enter 1–32 distinct 32-character lowercase hexadecimal principal IDs explicitly. Displayed reviews never fill this field automatically. The opener and submitter cannot provide independent approval.</p>
+        </div>
         <button id="merge-stage" type="submit">Prepare merge — do not send</button>
       </form>
     </div>

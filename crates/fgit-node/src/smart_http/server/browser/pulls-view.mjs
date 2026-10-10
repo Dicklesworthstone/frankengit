@@ -4,6 +4,7 @@ import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
 import { decimal, oid, unhex, fail, showReply } from './pulls-core.mjs';
 import { RECEIPT_LIMIT, fastForwardCommand } from './pulls-actions.mjs';
+import { isFastForwardCandidate } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
 
@@ -32,7 +33,7 @@ export function renderInspection(doc, parent, report) {
   parent.replaceChildren();
   item(doc, parent, 'h3', `Inspected candidate ${report.candidate_commit}`);
   item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
-    `Base: ${report.merge_base}\nParents (target, source): ${report.parents.join(', ')}\n` +
+    `Base: ${report.merge_base}\nNative parents: ${report.parents.join(', ')}\n` +
     `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
   return renderComparison(doc, parent, report.comparison, 'inspection');
@@ -116,7 +117,7 @@ const IDS = ['connection', 'token', 'disconnect', 'status', 'refresh', 'pr-list'
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
   'prepare', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
   'candidate-import', 'candidate-import-file', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
-  'merge', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file'];
+  'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file'];
 
 export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImpl = globalThis.fetch,
   cryptoImpl = globalThis.crypto, downloadImpl = null } = {}) {
@@ -142,6 +143,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
+    const inspectedFastForward = isFastForwardCandidate(candidate?.fields);
+    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : 'Reviewed merge';
+    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : 'Prepare merge — do not send';
+    nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
+    nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
+    nodes['required-reviewers'].required = !inspectedFastForward;
+    nodes['merge-method-guidance'].textContent = inspectedFastForward
+      ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
+      : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
     for (const id of ['candidate-download', 'inspection-download']) nodes[id].disabled = !candidate || busy;
     nodes.send.disabled = !connected || busy || !pending || !nodes.confirm.checked;
     nodes.recover.disabled = !connected || busy || !pending;
@@ -390,9 +400,14 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status('Exact-candidate review prepared locally. The authenticated credential determines the reviewer, not this form.');
   }));
   on('merge', 'submit', () => run('stage', async guard => {
-    const reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
-    await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
-    status('Merge request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.');
+    if (isFastForwardCandidate(client.candidate?.fields)) {
+      await client.stageInspectedFastForward(); guard(); nodes.confirm.checked = false;
+      status('Fast-forward request prepared for the exact inspected source tip. Nothing sent. The node rechecks ancestry, both branch tips, the PR version and current branch protection before publication.');
+    } else {
+      const reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
+      await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
+      status('Merge request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.');
+    }
   }));
   nodes.confirm.addEventListener('change', controls);
   on('send', 'click', () => run('send', async guard => {

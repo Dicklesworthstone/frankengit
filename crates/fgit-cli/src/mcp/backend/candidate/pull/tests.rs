@@ -2,6 +2,7 @@ use super::*;
 mod support;
 mod inspection;
 mod resolution;
+mod fast_forward;
 use support::*;
 
 #[test]
