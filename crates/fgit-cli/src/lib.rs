@@ -108,7 +108,11 @@ pub fn command_timeout_duration() -> Duration {
 /// The global override only when the operator explicitly selected one.
 #[must_use]
 pub fn command_timeout_override_duration() -> Option<Duration> {
-    COMMAND_TIMEOUT.get().copied().flatten().map(GitDaemonSessionTimeout::duration)
+    COMMAND_TIMEOUT
+        .get()
+        .copied()
+        .flatten()
+        .map(GitDaemonSessionTimeout::duration)
 }
 
 static NEXT_EXPORT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
@@ -124,6 +128,8 @@ pub enum CliRefusal {
     /// quietly fall back to SHA-1: a repository's object format is permanent,
     /// and a silent default would mint the wrong one irreversibly.
     UnsupportedObjectFormat(String),
+    /// An initialization selected a root layout this command does not support.
+    UnsupportedRootLayout(String),
     /// The supplied tenant identity was not canonical lowercase hex.
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
@@ -274,11 +280,15 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
                 "unsupported object format `{token}`: expected `sha1` or `sha256`"
+            ),
+            Self::UnsupportedRootLayout(token) => write!(
+                formatter,
+                "unsupported root layout `{token}`: expected `legacy` or `ref-merkle-v1`"
             ),
             Self::SampleObjectFormat { repository, sample } => write!(
                 formatter,
@@ -409,6 +419,7 @@ impl Error for CliRefusal {
             Self::AtCleanup { inspection, .. } => Some(inspection.as_ref()),
             Self::Usage
             | Self::UnsupportedObjectFormat(_)
+            | Self::UnsupportedRootLayout(_)
             | Self::SampleObjectFormat { .. }
             | Self::ExportDestination
             | Self::ExportDestinationExists(_)
@@ -522,7 +533,8 @@ pub enum CliOutcome {
 
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
-    let (arguments, receive_principal) = extract_receive_principal(arguments)?;
+    let (arguments, init_layout) = extract_init_root_layout(arguments)?;
+    let (arguments, receive_principal) = extract_receive_principal(&arguments)?;
     let (arguments, serve_envelope) = extract_serve_envelope(&arguments)?;
     match &arguments[..] {
         [command, storage_root, tenant, repository] if command == "init" => run_init(
@@ -531,6 +543,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             repository,
             GitHashAlgorithm::Sha1,
             None,
+            init_layout,
         ),
         [command, storage_root, tenant, repository, format] if command == "init" => run_init(
             storage_root,
@@ -538,6 +551,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             repository,
             object_format(format)?,
             None,
+            init_layout,
         ),
         [command, storage_root, tenant, repository, flag, key]
             if command == "init" && flag == "--creation-idempotency-key" =>
@@ -548,6 +562,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 repository,
                 GitHashAlgorithm::Sha1,
                 Some(key.as_bytes()),
+                init_layout,
             )
         }
         [command, storage_root, tenant, repository, flag, key, format]
@@ -559,6 +574,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 repository,
                 object_format(format)?,
                 Some(key.as_bytes()),
+                init_layout,
             )
         }
         [
@@ -771,15 +787,53 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     }
 }
 
-/// Creates one repository in the explicitly selected object format.
+/// Select initialization layout explicitly. Existing repositories continue to
+/// resolve their authenticated configuration; this is never a migration flag.
+fn extract_init_root_layout(
+    arguments: &[String],
+) -> Result<(Vec<String>, fgit_types::RootLayoutVersion), CliRefusal> {
+    use fgit_types::RootLayoutVersion;
+    if arguments.first().map(String::as_str) != Some("init") {
+        return Ok((arguments.to_vec(), RootLayoutVersion::LegacyWholeBody));
+    }
+    let mut retained = Vec::with_capacity(arguments.len());
+    let mut layout = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        if cursor >= 4 && arguments[cursor] == "--creation-idempotency-key" {
+            retained.push(arguments[cursor].clone());
+            retained.push(arguments.get(cursor + 1).ok_or(CliRefusal::Usage)?.clone());
+            cursor += 2;
+        } else if arguments[cursor] == "--root-layout" {
+            if cursor < 4 || layout.is_some() {
+                return Err(CliRefusal::Usage);
+            }
+            let token = arguments.get(cursor + 1).ok_or(CliRefusal::Usage)?;
+            layout = Some(match token.as_str() {
+                "legacy" => RootLayoutVersion::LegacyWholeBody,
+                "ref-merkle-v1" => RootLayoutVersion::RefStateMerkleV1,
+                _ => return Err(CliRefusal::UnsupportedRootLayout(token.clone())),
+            });
+            cursor += 2;
+        } else {
+            retained.push(arguments[cursor].clone());
+            cursor += 1;
+        }
+    }
+    Ok((retained, layout.unwrap_or_default()))
+}
+
+/// Creates one repository in the explicitly selected object format and layout.
 fn run_init(
     storage_root: &str,
     tenant: &str,
     repository: &str,
     format: GitHashAlgorithm,
     creation_idempotency_key: Option<&[u8]>,
+    layout: fgit_types::RootLayoutVersion,
 ) -> Result<CliOutcome, CliRefusal> {
-    let configuration = node_config(storage_root, tenant, repository, Some(format), None)?;
+    let configuration =
+        node_config(storage_root, tenant, repository, Some(format), None)?.with_root_layout(layout);
     let configuration = match creation_idempotency_key {
         Some(key) => configuration.with_creation_idempotency_key(key.to_vec()),
         None => configuration,
@@ -1178,22 +1232,57 @@ fn run_export(
     }
 }
 
-/// Writes a completed pack through a same-directory staging file and publishes
+/// Writes completed export bytes through a same-directory staging file and publishes
 /// it only by linking to a previously absent destination.
 ///
 /// `hard_link` is deliberately used rather than `rename`: it fails if another
 /// writer made the destination visible first, so this command cannot silently
 /// replace an operator's prior export.  Both paths share a directory, making
 /// the publication one filesystem operation over the synced completed bytes.
-fn write_new_export(destination: &Path, bytes: &[u8]) -> Result<(), CliRefusal> {
+pub fn write_new_export(destination: &Path, bytes: &[u8]) -> Result<(), CliRefusal> {
+    write_new_export_while(destination, bytes, &|| true)
+}
+
+/// Publish already verified bytes with cancellation checkpoints while staging
+/// and immediately before the create-only link. A stopped operation removes
+/// only its private temporary file and never publishes a partial destination.
+pub fn write_new_export_while(
+    destination: &Path,
+    bytes: &[u8],
+    live: &dyn Fn() -> bool,
+) -> Result<(), CliRefusal> {
+    let cancelled = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "export deadline expired before publication",
+        )
+    };
+    if !live() {
+        return Err(CliRefusal::ExportFile {
+            operation: "check export deadline",
+            path: Box::new(destination.to_path_buf()),
+            source: Box::new(cancelled()),
+        });
+    }
     let (temporary, mut staged) = create_export_staging_file(destination)?;
-    if let Err(source) = staged.write_all(bytes) {
-        return abort_staged_export("write staged export", temporary, source);
+    for chunk in bytes.chunks(64 * 1024) {
+        if !live() {
+            drop(staged);
+            return abort_staged_export("check export deadline", temporary, cancelled());
+        }
+        if let Err(source) = staged.write_all(chunk) {
+            drop(staged);
+            return abort_staged_export("write staged export", temporary, source);
+        }
     }
     if let Err(source) = staged.sync_all() {
+        drop(staged);
         return abort_staged_export("sync staged export", temporary, source);
     }
     drop(staged);
+    if !live() {
+        return abort_staged_export("check export deadline", temporary, cancelled());
+    }
 
     if let Err(source) = fs::hard_link(&temporary, destination) {
         if source.kind() == io::ErrorKind::AlreadyExists {
@@ -2100,6 +2189,88 @@ mod tests {
                 matches!(run(&command), Ok(CliOutcome::Initialized(_))),
                 "fg init must accept the explicit `{format}` repository format"
             );
+        }
+    }
+
+    #[test]
+    fn init_root_layout_is_explicit_and_preserves_creation_key_bytes() {
+        use fgit_types::RootLayoutVersion;
+        let base = ["init", "storage", "tenant", "repository", "sha256"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(
+            extract_init_root_layout(&base).unwrap(),
+            (base.clone(), RootLayoutVersion::LegacyWholeBody)
+        );
+        let mut explicit = base.clone();
+        explicit.extend(["--root-layout".to_owned(), "ref-merkle-v1".to_owned()]);
+        assert_eq!(
+            extract_init_root_layout(&explicit).unwrap(),
+            (base, RootLayoutVersion::RefStateMerkleV1)
+        );
+        explicit.extend(["--root-layout".to_owned(), "legacy".to_owned()]);
+        assert!(extract_init_root_layout(&explicit).is_err());
+        let literal = [
+            "init",
+            "storage",
+            "tenant",
+            "repository",
+            "--creation-idempotency-key",
+            "--root-layout",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(
+            extract_init_root_layout(&literal).unwrap(),
+            (literal.clone(), RootLayoutVersion::LegacyWholeBody)
+        );
+        let mut invalid = literal[..4].to_vec();
+        invalid.extend(["--root-layout".to_owned(), "newer-layout".to_owned()]);
+        assert!(matches!(
+            extract_init_root_layout(&invalid),
+            Err(CliRefusal::UnsupportedRootLayout(_))
+        ));
+    }
+
+    #[test]
+    fn cli_initialization_persists_selected_ref_merkle_layout_for_reopening() {
+        for format in ["sha1", "sha256"] {
+            let scratch = ScratchDirectory::new();
+            let command = vec![
+                "init".to_owned(),
+                scratch.0.to_string_lossy().into_owned(),
+                "11111111111111111111111111111111".to_owned(),
+                "22222222222222222222222222222222".to_owned(),
+                "--creation-idempotency-key".to_owned(),
+                "proof-layout-initialization".to_owned(),
+                format.to_owned(),
+                "--root-layout".to_owned(),
+                "ref-merkle-v1".to_owned(),
+            ];
+            assert!(matches!(run(&command), Ok(CliOutcome::Initialized(_))));
+            assert!(matches!(
+                run(&command),
+                Ok(CliOutcome::Initialized(
+                    fgit_node::NodeInitialization::IdenticalRetry
+                ))
+            ));
+            let mut node = OneNode::open_existing(NodeConfig::new(
+                scratch.0.clone(),
+                TenantId::from_bytes([0x11; 16]),
+                RepositoryId::from_bytes([0x22; 16]),
+            ))
+            .unwrap();
+            node.bring_into_service(fgit_types::HeadGeneration::FIRST)
+                .unwrap();
+            let materialized = node
+                .runtime()
+                .block_on(node.materialize_admission_in(&node.request_context()))
+                .unwrap();
+            assert_eq!(
+                materialized.root_layout(),
+                fgit_types::RootLayoutVersion::RefStateMerkleV1
+            );
+            node.shutdown().unwrap();
         }
     }
 

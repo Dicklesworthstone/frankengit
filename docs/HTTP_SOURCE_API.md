@@ -10,6 +10,12 @@ seal transactions, move refs, change forge metadata or publish outbox work.
 The implementation uses the native TreeFS/object-fabric readers and source
 search engine, not a checkout, another Git engine, index or database.
 
+For complete blob bytes cryptographically bound to an independently supplied
+authority head, use the separate authenticated binary
+[`verified-blob` endpoint and `fg verify-read`](VERIFIED_BLOB_READS.md).
+That endpoint uses the same source-read grant and requires an explicit Merkle
+ref layout; range responses described here are not complete blob proofs.
+
 This describes implementation interfaces, not a passing Rust build, completed
 compatibility campaign or production release. The full fastapi_rust/OpenAPI,
 projection, search-index and browser integration remain separate boundaries.

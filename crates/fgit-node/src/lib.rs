@@ -154,7 +154,9 @@ pub use webhook::{DeadLetterQueue, WebhookDeliveryDestination};
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
 pub use quarantine_validator::ProductionQuarantineValidator;
 use quarantine_validator::ProductionReceiveQuarantineHandoff;
-pub use verified_reads::{ServedVerifiedRead, VerifiedReadQuery, VerifiedReadServingRefusal};
+pub use verified_reads::{
+    ServedVerifiedRead, VerifiedBlobReadRefusal, VerifiedReadQuery, VerifiedReadServingRefusal,
+};
 
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";

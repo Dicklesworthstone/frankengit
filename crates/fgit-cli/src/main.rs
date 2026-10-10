@@ -26,6 +26,7 @@ mod source_search;
 mod ssh_server;
 mod tags;
 mod transaction_outcome;
+mod verify_read;
 mod webhook_commands;
 mod workflow_command;
 #[cfg(target_os = "linux")]
@@ -46,6 +47,18 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "verify-read")
+    {
+        return match verify_read::run(&arguments[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}", verify_read::error_json(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "backup")

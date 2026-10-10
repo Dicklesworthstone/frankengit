@@ -107,6 +107,15 @@ expected_commit can additionally compare the selected ref tip. Source reads neve
 stage objects or create transactions. Search match limits are explicitly partial,
 not complete no-match results. See docs/HTTP_SOURCE_API.md for limits and examples.
 
+Complete independently pinned file proofs use the same read grant and --allow-source:
+  GET /api/v1/source/verified-blob?ref_hex=HEX&path_hex=HEX&expected_head=PIN
+This bodyless read returns a bounded binary canonical proof, requires an exact
+current-head pin, and rejects Idempotency-Key. Select --root-layout ref-merkle-v1
+when initializing a new repository; existing legacy roots are not migrated.
+Use fg verify-read with a separately trusted head to check the complete response.
+Original tree witnesses include sibling entries within the authorized ref.
+See docs/VERIFIED_BLOB_READS.md for byte limits and the complete client flow.
+
 The independently enabled protection API uses protection-read/protection-write:
   GET /api/v1/protection
   POST /api/v1/protection

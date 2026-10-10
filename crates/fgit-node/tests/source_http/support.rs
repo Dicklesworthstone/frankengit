@@ -101,7 +101,14 @@ fn loose(
     id
 }
 pub fn fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid) {
-    let (mut node, _) = OneNode::init(root.config(format)).unwrap();
+    fixture_with_config(root, format, root.config(format))
+}
+pub fn fixture_with_config(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    config: NodeConfig,
+) -> (OneNode, GitOid) {
+    let (mut node, _) = OneNode::init(config).unwrap();
     let selected = node
         .runtime()
         .block_on(node.authenticate_authority_head())
