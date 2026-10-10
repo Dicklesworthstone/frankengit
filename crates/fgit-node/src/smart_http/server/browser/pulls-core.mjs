@@ -247,6 +247,7 @@ export function apiError(status) {
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+    (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
@@ -315,6 +316,13 @@ export class Transport {
     if (/^pulls\/[1-9][0-9]*\/checks(?:\?|$)/.test(path) &&
         (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
          statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)) fail('PR checks are a closed read-only profile.');
+    if (/^pulls\/[1-9][0-9]*\/comments(?:\?|$)/.test(path)) {
+      const reading = method === 'GET';
+      if (binary || contentType !== 'application/x-www-form-urlencoded' ||
+          (reading ? (body !== undefined || key !== undefined || !read || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)
+            : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
+      integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
+    }
     const allowed = this.#rebase
       ? /^(?:source\/(?:tree|rebase\/(?:prepare|resolve|inspect|apply))|outcomes)$/.test(path)
       : this.#replay
@@ -331,7 +339,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|comments|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);

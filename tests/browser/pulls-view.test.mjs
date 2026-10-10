@@ -87,7 +87,8 @@ test('PR selection retains the list snapshot and renders hostile metadata as tex
   await h.connect(); await h.open();
   assert.equal(new URL(h.calls[1].url).searchParams.get('expected_head'), head);
   assert.match(h.nodes.selected.textContent, /<img src=x onerror=alert\(1\)>/);
-  assert.match(h.nodes.selected.textContent, /<script>credential\(\)<\/script>\\u202e/);
+  assert.match(h.nodes.selected.textContent, /<script>credential\(\)<\/script>\\u\{202e\}/);
+  assert.doesNotMatch(h.nodes.selected.textContent, /\u202e/);
   assert.equal(h.nodes.body.value, body); assert.equal(h.nodes['expected-version'].value, '1');
   assert.equal(h.calls.some(call => call.headers['Idempotency-Key']), false);
 });

@@ -113,6 +113,7 @@ async function fileText(input) {
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 const IDS = ['connection', 'token', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number',
+  'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
   'prepare', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
@@ -124,7 +125,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const nodes = Object.fromEntries(IDS.map(id => { const el = doc.getElementById(id); if (!el) fail(`Missing UI element: ${id}`); return [id, el]; }));
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
-  let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null;
+  let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
   const status = message => { nodes.status.textContent = displayText(message); };
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
@@ -136,6 +137,11 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open' || selected.row.data.source_ref === null || selected.row.data.target_ref === null;
     nodes['reviews-load'].disabled = !connected || busy || !selected;
+    nodes['comments-load'].disabled = !connected || busy || !selected;
+    nodes['comments-limit'].disabled = !connected || busy || !selected;
+    const canComment = connected && selected && conversation?.reply.found && conversation.reply.number === selected.row.number;
+    nodes['comment-stage'].disabled = !canComment || busy || Boolean(pending);
+    nodes['comment-body'].disabled = !canComment || busy;
     if (fastForward) fastForward.button.disabled = !connected || busy || Boolean(pending) ||
       !fastForward.available || selected?.row !== fastForward.row || Boolean(selected?.stale);
     const resolving = Boolean(client.conflict);
@@ -166,6 +172,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       'Only Send/Retry dispatches these exact bytes. Edits elsewhere do not change this request. An absent outcome is not proof of failure.') : 'No prepared mutation.';
   }
   function clearViews() {
+    clearComments();
     selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
@@ -218,7 +225,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const metadataIds = { expected_version: 'expected-version', object_format: 'object-format', source_ref: 'source-ref', target_ref: 'target-ref',
     source_tip: 'source-tip', target_tip: 'target-tip', title: 'title', body: 'body' };
   function clearProposal() {
+    clearComments();
     for (const id of ['pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
+  }
+  function clearComments(keepDraft = false) {
+    conversation = null; nodes.conversation.replaceChildren(); nodes['comment-paging'].replaceChildren();
+    nodes['comment-version'].value = '';
+    if (!keepDraft) nodes['comment-body'].value = '';
   }
   function renderSelected(result) {
     clearProposal(); fastForward = null;
@@ -317,7 +330,52 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     });
   }
   function downloadText(name, text) { download(name, text); }
+  function loadComments(after = 0, head = null, pageLimit = null) {
+    return run('read', async guard => {
+      if (!selected) fail('Select a PR first.');
+      const limit = pageLimit ?? decimal(nodes['comments-limit'].value, 'comments per page', 1);
+      if (![1, 5, 20].includes(limit)) fail('Choose 1, 5, or 20 comments per page.');
+      const number = selected.row.number, row = selected.row;
+      client.cancelReads(); clearComments(true);
+      item(doc, nodes.conversation, 'p', 'Loading conversation…');
+      try {
+        const result = await client.comments(number, { after, head, limit, render: true }); guard();
+        if (selected?.row !== row) fail('The selected PR changed.');
+        conversation = result; nodes.conversation.replaceChildren();
+        if (!result.reply.found) {
+          item(doc, nodes.conversation, 'p', 'Conversation unavailable: this PR is absent or not disclosed.');
+          status('No conversation result was inferred.'); return;
+        }
+        nodes['comment-version'].value = String(result.reply.discussion_version);
+        item(doc, nodes.conversation, 'p', `Conversation version ${result.reply.discussion_version} · snapshot ${result.head}`);
+        if (!result.reply.comments.length) item(doc, nodes.conversation, 'p', after === 0 ? 'No comments at this snapshot.' : 'No further comments at this snapshot.');
+        const renderGeneration = generation;
+        for (const comment of result.reply.comments) {
+          const section = element(doc, 'section'); nodes.conversation.append(section);
+          item(doc, section, 'h3', `Comment ${comment.version} · ${comment.actor}`);
+          section.append(markdownBody(doc, comment.body, comment.body_rendered, {
+            cryptoImpl, current: () => client.connected && generation === renderGeneration && conversation === result && selected?.row === row,
+          }).element);
+        }
+        if (result.reply.next_after !== null) button(nodes['comment-paging'], 'Next comments page', () => loadComments(result.reply.next_after, result.head, limit));
+        item(doc, nodes.conversation, 'p', result.reply.complete ? 'All comments after this cursor are shown.' : 'More comments remain at this snapshot.');
+        status('Conversation loaded. Preparing a comment uses its displayed discussion version and preserves PR metadata.');
+      } catch (error) {
+        guard(); clearComments(true);
+        item(doc, nodes.conversation, 'p', `Conversation unavailable: ${error.message || 'read failed'}. Reload explicitly before preparing a comment.`);
+        throw error;
+      }
+    });
+  }
   function renderTerminal(result) {
+    if (result.action === 'comment') {
+      nodes.confirm.checked = false;
+      if (result.terminal) {
+        clearComments(result.outcome !== 'committed');
+        status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. Load the latest conversation to observe the result. PR metadata and existing approvals are unchanged; external delivery is not established.`);
+      } else status(`Comment outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
+      return;
+    }
     nodes.confirm.checked = false; nodes.candidate.replaceChildren();
     if (result.terminal) {
       resolution.clear();
@@ -346,8 +404,16 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     const result = await client.show(requested, null, { render: true }); guard(); renderSelected(result); status('Selected an explicitly refreshed PR snapshot.');
   }));
   on('reviews-load', 'click', () => loadReviews());
+  on('comments-load', 'click', () => loadComments());
+  on('comment-form', 'submit', () => run('stage', async guard => {
+    if (!selected || !conversation?.reply.found || conversation.reply.number !== selected.row.number) fail('Load the selected PR conversation first.');
+    await client.stageComment(selected.row.number, conversation.reply.discussion_version, nodes['comment-body'].value); guard();
+    nodes.confirm.checked = false;
+    status('Comment prepared locally. Review its exact body and discussion version below, then send it explicitly.');
+  }));
   on('new-pr', 'click', () => {
     if (operation || !client.connected) return;
+    clearComments();
     invalidateCandidate(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
     nodes['expected-version'].value = '0'; nodes['object-format'].value = client.binding?.format ?? 'sha1'; nodes['metadata-action'].value = 'open';
@@ -429,6 +495,6 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   });
   doc.defaultView.addEventListener('pagehide', disconnect);
   status('Connect with a repository token. Credentials remain only in page memory.'); controls();
-  return { client, disconnect, loadPr, loadList, loadReviews };
+  return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
 }
 if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) mountPulls(document);

@@ -129,6 +129,31 @@ an instruction or HTML authority.
 }
 ```
 
+## Browser conversation
+
+Open the repository's `/ui/pulls/` page, connect an explicitly scoped token,
+and select a native PR. **Load latest conversation** reads a fresh conversation
+snapshot independently of the selected PR metadata and review snapshot. Each
+continuation keeps that conversation's exact head, discussion version, and page
+size. Choose 1, 5, or 20 comments per page; a smaller page lets long comments fit
+the HTTP response budget without silently truncating bodies.
+
+The page displays each comment's version, authenticated author, and literal
+body, with the existing source-bound safe Markdown presentation when available.
+Missing or undisclosed conversations cannot be mistaken for an available empty
+stream. A malformed or stale page clears the old conversation and writable
+version, while preserving the unsent draft for an explicit reload. Credential
+rejection or disconnect clears private views and drafts.
+
+**Prepare comment** saves the original body and the loaded conversation version
+locally. It does not publish. The existing explicit confirmation and send controls
+submit that saved request; later form edits cannot change it. An uncertain result
+retains the original request and key for retry, receipt export, and outcome
+recovery. Terminal comment outcomes preserve independently inspected candidates,
+PR metadata, and displayed review evidence. Reload the conversation explicitly to
+observe the result. Open, closed, and merged native PRs use the same discussion
+flow, subject to the server's independent read and write grants.
+
 ## Retry, history, and delivery
 
 Retry an uncertain append using the **identical principal, original key, PR
@@ -173,6 +198,11 @@ tests, HTTP parser/output and real TCP campaigns, and CLI/MCP input,
 independent-grant, exact-retry, and persisted-node tests. Each tests the
 actual owning layer; a parser or protocol fixture is not native execution
 evidence.
+
+The pinned reference library suite passed all 61 tests on the canonical-comment
+commit. The browser PR/transport suite passed all 309 tests, including the new
+conversation client and real-template view regressions. Those browser tests use
+controlled HTTP responses; they do not establish execution of the Rust server.
 
 Full node/CLI compilation and native campaigns remain unexecuted in this
 editing environment: unchanged Asupersync compilation exceeded the shared

@@ -20,6 +20,7 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
         b"/ui/pulls.mjs" => Some((script, include_str!("pulls.mjs"))),
         b"/ui/pulls-core.mjs" => Some((script, include_str!("pulls-core.mjs"))),
         b"/ui/pulls-checks.mjs" => Some((script, include_str!("pulls-checks.mjs"))),
+        b"/ui/pulls-comments.mjs" => Some((script, include_str!("pulls-comments.mjs"))),
         b"/ui/pulls-candidate.mjs" => Some((script, include_str!("pulls-candidate.mjs"))),
         b"/ui/pulls-resolution.mjs" => Some((script, include_str!("pulls-resolution.mjs"))),
         b"/ui/pulls-resolution-view.mjs" => {
@@ -123,6 +124,7 @@ mod tests {
             "/ui/markdown.mjs",
             "/ui/pulls-core.mjs",
             "/ui/pulls-checks.mjs",
+            "/ui/pulls-comments.mjs",
             "/ui/pulls-candidate.mjs",
             "/ui/pulls-actions.mjs",
             "/ui/pulls-resolution.mjs",

@@ -39,6 +39,20 @@
       <div id="reviews"></div><div id="review-paging"></div>
     </section>
   </div>
+  <section aria-labelledby="conversation-heading">
+    <h2 id="conversation-heading">Conversation</h2>
+    <p>Discuss an open, closed, or merged PR. Comments preserve the PR’s metadata and existing approvals.</p>
+    <label>Comments per page <select id="comments-limit"><option value="5">5</option><option value="1">1</option><option value="20">20</option></select></label>
+    <button id="comments-load" type="button">Load latest conversation</button>
+    <p>Choose a smaller page if long comments exceed the response limit.</p>
+    <div id="conversation"></div><div id="comment-paging"></div>
+    <form id="comment-form">
+      <label>Conversation version <input id="comment-version" readonly aria-readonly="true"></label>
+      <label>Your comment <textarea id="comment-body" rows="5" maxlength="65536" required></textarea></label>
+      <button id="comment-stage" type="submit">Prepare comment — do not send</button>
+    </form>
+    <p>Load the conversation first. Your token determines the author. Preparing a comment saves its exact body and conversation version for sending or recovery below.</p>
+  </section>
   <details>
     <summary>Open, update, close, or reopen a PR</summary>
     <p>This proposal does not change the observed PR above. Closing and reopening submit the complete explicit metadata and a positive expected version. Reopen a closed PR, not a merged one; the node enforces the lifecycle without moving refs. There is no implicit tip refresh.</p>

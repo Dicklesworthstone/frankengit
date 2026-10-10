@@ -4,6 +4,7 @@ import { Transport, integer, principal, snapshot, listReply, showReply, reviewsR
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, isFastForwardCandidate, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
+import { commentsReply } from './pulls-comments.mjs';
 import { RECEIPT_LIMIT, requestBody, requestPath, requestKey, publication, recovery, base64, fromBase64, receiptScope } from './pulls-actions.mjs';
 
 function candidateFields(fields) {
@@ -144,6 +145,19 @@ export class PullClient {
     this.#scope = checked.binding; return checked;
   }
 
+  // Conversation pages carry their own snapshot and stream version.
+  async comments(number, { after = 0, limit = 20, head = null, render = false } = {}) {
+    integer(number, 'PR number', 1); integer(after, 'comment cursor'); integer(limit, 'page size', 1, 100);
+    if (typeof render !== 'boolean') fail('Invalid Markdown presentation choice.');
+    if (head !== null) snapshot(head); if (after && head === null) fail('Comment continuation requires its original snapshot.');
+    const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+    if (head !== null) query.set('expected_head', head); if (render) query.set('render', 'html_safe');
+    const raw = await this.#transport.request(`pulls/${number}/comments?${query}`, { statuses: [200, 404] });
+    const checked = commentsReply(raw.value, number, { after, limit, head, scope: this.#scope });
+    if (checked.reply.found !== (raw.status === 200)) fail('Conversation presence and HTTP status disagree.');
+    this.#scope = checked.binding; return checked;
+  }
+
   // Bind every checks page to the complete selected PR observation, including
   // byte-only refs and both native tips. Paging never refreshes the subject.
   async checks(number, observed, { after = null, limit = 20 } = {}) {
@@ -268,6 +282,9 @@ export class PullClient {
     return this.inspect(number, fields, bytes);
   }
   async stageMetadata(number, action, fields) { return this.#stage(number, action, fields, null); }
+  async stageComment(number, version, body) {
+    return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body }, null);
+  }
   async stageReview(action, version, reason) {
     if (!['approve', 'request-changes', 'withdraw'].includes(action) || !this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a review.');
     const { number, fields, bundle } = this.#artifact;
@@ -360,7 +377,9 @@ export class PullClient {
         method: 'POST', body: new Blob([p.bytes]), contentType: p.contentType, key: p.key, read: false, statuses: [200, 409], maximum: 32 * 1024,
       });
       const result = publication(response.value, p, response.status);
-      this.#pending = null; this.invalidateCandidate(); return result;
+      this.#pending = null;
+      if (p.action !== 'comment') this.invalidateCandidate();
+      return p.action === 'comment' ? { ...result, action: 'comment' } : result;
     } catch (error) { error.outcomeUnknown = true; throw error; }
     finally { this.#busy = false; }
   }
@@ -370,9 +389,9 @@ export class PullClient {
     try {
       const response = await this.#transport.request('outcomes', { method: 'POST', key: p.key, read: false, maximum: 32 * 1024 });
       const result = recovery(response.value, p);
-      if (result.terminal) { this.#pending = null; this.invalidateCandidate(); }
+      if (result.terminal) { this.#pending = null; if (p.action !== 'comment') this.invalidateCandidate(); }
       else { p.observedTx = result.tx; p.observedPrincipal = result.principal; if (result.tx) p.sent = true; }
-      return result;
+      return p.action === 'comment' ? { ...result, action: 'comment' } : result;
     } finally { this.#busy = false; }
   }
 }
