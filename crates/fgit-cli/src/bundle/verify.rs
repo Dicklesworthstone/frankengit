@@ -54,12 +54,12 @@ The filesystem owner must stage and synchronize all bodies, then publish HEAD la
 Exit 0: fully verified; 2: invalid/incomplete/unsupported input or interrupted work.";
 
 #[derive(Debug)]
-struct Options {
-    path: PathBuf,
-    limits: BundleVerifyLimits,
-    timeout: Duration,
-    expectations: Option<BundleExpectations>,
-    recovery_head: Option<RefName>,
+pub(super) struct Options {
+    pub(super) path: PathBuf,
+    pub(super) limits: BundleVerifyLimits,
+    pub(super) timeout: Duration,
+    pub(super) expectations: Option<BundleExpectations>,
+    pub(super) recovery_head: Option<RefName>,
 }
 fn number(value: &str, maximum: usize) -> Result<usize, String> {
     if value.is_empty()
@@ -76,7 +76,7 @@ fn number(value: &str, maximum: usize) -> Result<usize, String> {
     }
     Ok(value)
 }
-fn parse(args: &[String]) -> Result<Options, String> {
+pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if args.is_empty()
         || args.len() > 2 * MAX_EXPECTED_REFS + 32
         || args.iter().try_fold(0_usize, |sum, arg| sum.checked_add(arg.len()))
@@ -213,7 +213,7 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
             && left.permissions().readonly() == right.permissions().readonly()
     }
 }
-fn read_input(
+pub(super) fn read_input(
     path: &Path,
     maximum: usize,
     live: &mut impl FnMut() -> bool,

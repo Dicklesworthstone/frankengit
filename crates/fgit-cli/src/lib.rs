@@ -99,6 +99,18 @@ pub fn command_request_context(node: &OneNode) -> NodeRequestContext {
     node.command_request_context(COMMAND_TIMEOUT.get().copied().flatten())
 }
 
+/// The same finite command policy for clients that do not open a local node.
+#[must_use]
+pub fn command_timeout_duration() -> Duration {
+    command_timeout_override_duration().unwrap_or(GitDaemonSessionTimeout::DEFAULT.duration())
+}
+
+/// The global override only when the operator explicitly selected one.
+#[must_use]
+pub fn command_timeout_override_duration() -> Option<Duration> {
+    COMMAND_TIMEOUT.get().copied().flatten().map(GitDaemonSessionTimeout::duration)
+}
+
 static NEXT_EXPORT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
 /// Typed refusal from the minimal `fg` command parser.
