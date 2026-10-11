@@ -189,9 +189,16 @@ test('actual fg exports, authenticates and restores a native authority archive',
   data.head_generation = String(exported.head_generation); const keys = pair(), approval = join(root, 'approval'), trustKey = join(root, 'public');
   const signed = await signRepositoryBackupFile(archive, keys.privatePem, data); await writeFile(approval, signed.envelope); await writeFile(trustKey, keys.publicPem);
   const policy = { ...data, minimum_head_generation: data.head_generation }; delete policy.head_generation;
-  const result = await runApprovedRepositoryBackup({ operation: 'restore', fg, input: archive, approval, trustKey, policy, trustedLocal: true,
-    verificationInstance: '900000001', destinationInstance: '900000002', destination: join(root, 'restored'), approvalRecord: join(root, 'record') });
+  const options = { operation: 'restore', fg, input: archive, approval, trustKey, policy, trustedLocal: true,
+    verificationInstance: '900000001', destinationInstance: '900000002', destination: join(root, 'restored'), approvalRecord: join(root, 'record') };
+  const result = await runApprovedRepositoryBackup(options);
   assert.equal(result.native.reopened_and_verified, true);
+  assert.equal(result.native.signature_verified, true);
+  assert.equal(result.approval_effect_time_enforced, true);
+  assert.equal(result.native.approval.minimum_head_generation, policy.minimum_head_generation);
+  const resumed = await runApprovedRepositoryBackup({ ...options, resume: true });
+  assert.equal(resumed.native.already_published, true);
+  assert.deepEqual(resumed.native.approval, result.native.approval);
   run(['doctor', join(root, 'restored'), tenant, repository]);
 });
 
@@ -205,4 +212,85 @@ test('lost CLI stdout after confirmed restore retains complete state and the ori
   const exit = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
   assert.equal(exit, 1); assert.equal(JSON.parse(diagnostic).state, 'complete');
   assert.ok(await exists(join(f.options.destination, 'authority-visible'))); assert.ok(await exists(f.options.approvalRecord));
+});
+
+// These are real operator/process tests against the explicitly fake native peer.
+// They assert submission, pinning and refusal boundaries, not Rust publication.
+test('resume pins the exact native signed intent, including envelope whitespace', async t => {
+  const f = await fixture(t), result = await f.run(), record = await readFile(f.options.approvalRecord);
+  const before = (await f.calls()).length, envelope = await readFile(f.options.approval);
+  const retained = JSON.parse(record);
+  assert.equal(retained.type, 'repository_backup_restore_approval_v2');
+  assert.equal(retained.native_signed_mode, true);
+  assert.equal(retained.approval_binding_sha256, result.native.approval.binding_sha256);
+  // Whitespace changes no DSSE signature or parsed statement, but does change
+  // the native immutable resume intent. Refuse before a native process starts.
+  await writeFile(f.options.approval, Buffer.concat([envelope, Buffer.from('\n')]));
+  await assert.rejects(f.run({ resume: true }), error => {
+    assert.equal(error.state, 'existing_unknown'); return error.code === 'backup_restore_approval_record_mismatch';
+  });
+  assert.equal((await f.calls()).length, before);
+  assert.deepEqual(await readFile(f.options.approvalRecord), record);
+  assert.ok(await exists(join(f.options.destination, 'authority-visible')));
+  await writeFile(f.options.approval, envelope);
+  const permitted = await f.run({ resume: true });
+  assert.equal(permitted.native.approval.binding_sha256, result.native.approval.binding_sha256);
+});
+
+test('legacy unsigned-mode records are retained and never upgraded during resume', async t => {
+  const f = await fixture(t); await f.run();
+  const current = await readFile(f.options.approvalRecord), parsed = JSON.parse(current);
+  const { native_signed_mode, approval_binding_sha256, ...old } = parsed;
+  old.type = 'repository_backup_restore_approval_v1';
+  const legacy = Buffer.from(JSON.stringify(old) + '\n');
+  await writeFile(f.options.approvalRecord, legacy);
+  const before = (await f.calls()).length;
+  await assert.rejects(f.run({ resume: true }), code('backup_restore_approval_record_mismatch'));
+  assert.equal((await f.calls()).length, before);
+  assert.deepEqual(await readFile(f.options.approvalRecord), legacy);
+  assert.ok(await exists(join(f.options.destination, 'authority-visible')));
+  await writeFile(f.options.approvalRecord, current);
+  assert.equal((await f.run({ resume: true })).state, 'complete');
+});
+
+for (const phase of ['authenticated', 'preflight_verified']) {
+  test(`replacement of original approval and key at ${phase} cannot change native inputs`, async t => {
+    const f = await fixture(t), original = await readFile(f.options.approval), other = pair();
+    const replacement = await signRepositoryBackupFile(f.options.input, other.privatePem, f.data);
+    const result = await f.run({ onProgress: async event => {
+      if (event.phase !== phase) return;
+      await writeFile(f.options.approval, replacement.envelope);
+      await writeFile(f.options.trustKey, other.publicPem);
+    } });
+    assert.equal(result.state, 'complete');
+    assert.notEqual(result.native.approval.trusted_key_id, replacement.trusted_key_id);
+    assert.deepEqual(result.native.approval.statement, JSON.parse(Buffer.from(JSON.parse(original).payload, 'base64')));
+    const calls = await f.calls();
+    assert.equal(calls[0].args[calls[0].args.indexOf('--approval') + 1], calls[1].args[calls[1].args.indexOf('--approval') + 1]);
+  });
+}
+
+for (const [approvalMismatch, wrong] of [['binding_sha256', '00'.repeat(32)], ['minimum_head_generation', '1'],
+  ['trusted_key_id', 'sha256:' + '00'.repeat(32)], ['signature_verified', false],
+  ['newest_checkpoint_verified', true], ['complete_capsule_verified', true], ['statement', {}]]) {
+  test(`mismatched native approval ${approvalMismatch} blocks restore with a permitted twin`, async t => {
+    const f = await fixture(t); await f.mode({ approvalMismatch, wrong });
+    await assert.rejects(f.run(), code('backup_native_approval_mismatch'));
+    assert.deepEqual((await f.calls()).map(call => call.args[1]), ['verify']);
+    assert.ok(!await exists(f.options.destination)); assert.ok(!await exists(f.options.approvalRecord));
+    await f.mode({ approvalMismatch: null });
+    assert.equal((await f.run()).state, 'complete');
+  });
+}
+
+test('tampered private approval after preflight never reaches native restore', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.run({ onProgress: async event => {
+    if (event.phase !== 'preflight_verified') return;
+    const [call] = await f.calls(), path = call.args[call.args.indexOf('--approval') + 1];
+    const original = await readFile(path); await writeFile(path, Buffer.alloc(original.length, 120));
+  } }), code('backup_native_approval_changed'));
+  const calls = await f.calls(); assert.deepEqual(calls.map(call => call.args[1]), ['verify']);
+  assert.ok(!await exists(f.options.destination)); assert.ok(await exists(f.options.approvalRecord));
+  assert.ok(!await exists(calls[0].args[calls[0].args.indexOf('--approval') + 1]));
 });

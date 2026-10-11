@@ -19,14 +19,19 @@ Authenticate the independent Ed25519 approval and actual archive bytes, then run
 native fg backup verify. Check every signed identity against the native receipt
 BEFORE starting fg backup restore. All phases share one bounded deadline.
 Restore retains a synchronized approval record outside the destination. Resume
-must reauthenticate and match that record, including its exact generation floor.
+must reauthenticate and match its version-2 record, including exact original
+approval bytes, native signed-mode binding, trusted key and generation floor.
+Legacy version-1 records are refused without automatic upgrade or unsigned retry.
 The destination and record parents must already be owner-private directories.
 Native restore alone owns quarantine, original commitments, graph checks,
 authority-last publication and exact --resume behavior. Never serve a partial
 root or replay external effects automatically. No shell, PATH lookup, Git helper,
 archive decoder or unsigned fallback. A failed/interrupted restore stays unknown,
 not rolled back. Failed native preflight scratch is retained for diagnosis.
-Approval expiry gates native submission; it is NOT an in-native revocation lease.
+Both native phases receive private copies of the authenticated approval and
+public key with all seven trust-policy flags. Native signed mode checks expiry
+again immediately before authority publication and binds resumable ownership.
+This is not an external key-revocation lease. Keep original approvals unchanged.
 This restores the native authority-and-selected-Git profile, not external artifacts,
 routing, or a complete Repository Capsule. The explicitly chosen fg must be trusted.
 `;
@@ -74,6 +79,8 @@ async function main() {
     process.stderr.write(JSON.stringify({ type: 'approved_repository_backup_error', code: error.code ?? 'backup_failed',
       state: result?.state ?? error.state ?? 'not_started', native_exit_code: error.native_exit_code ?? null,
       native_diagnostic: error.native_diagnostic ?? null,
+      approval_scratch: error.approval_scratch ?? null, cleanup_error: error.cleanup_error ?? null,
+      native_receipt: error.native_receipt ?? null,
       verification_scratch: error.verification_scratch ?? null, approval_record: result?.approval_record ?? error.approval_record ?? null,
       absence_proves_non_publication: false }) + '\n'); process.exitCode = 1;
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }

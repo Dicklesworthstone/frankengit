@@ -8,7 +8,7 @@ import { isAbsolute, resolve, dirname, basename, join, sep } from 'node:path';
 import { runImportProcess, importJson } from './native-import-process.mjs';
 import { BACKUP_LIMITS, backupError, backupPath, backupLifetime, exact, readBackupControl, publishBackupControl } from './repository-backup-io.mjs';
 import { backupDecimal, backupPolicy, authenticateRepositoryBackupFile } from './repository-backup-approval.mjs';
-import { stageNativeBackupApproval, assertNativeBackupApproval } from './repository-backup-native-approval.mjs';
+import { stageNativeBackupApproval, assertNativeBackupApproval, nativeBackupApprovalBinding } from './repository-backup-native-approval.mjs';
 
 const IDENTITY = ['tenant_id', 'repository_id', 'incarnation_id', 'object_format'];
 const COMMON = ['type', 'schema_version', 'sha256', ...IDENTITY, 'head_generation', 'objects', 'references', 'payload_bytes',
@@ -115,7 +115,11 @@ export async function runApprovedRepositoryBackup(raw) {
       options.destination = await privateCanonicalPath(options.destination);
       options.approvalRecord = await privateCanonicalPath(options.approvalRecord);
       if (options.approvalRecord === options.destination || options.approvalRecord.startsWith(options.destination + sep)) fail('backup_record_must_be_separate');
-      record = Buffer.from(JSON.stringify({ type: 'repository_backup_restore_approval_v1', destination: options.destination,
+      // Version 2 explicitly binds native signed mode and the exact original
+      // envelope/key/policy preimage. Never reinterpret a legacy unsigned run.
+      const pins = nativeBackupApprovalBinding(encoded, key, authentication.policy);
+      record = Buffer.from(JSON.stringify({ type: 'repository_backup_restore_approval_v2', destination: options.destination,
+        native_signed_mode: true, approval_binding_sha256: pins.binding_sha256,
         destination_instance: options.destinationInstance, trusted_key_id: authentication.trusted_key_id,
         policy: authentication.policy, statement }) + '\n');
       if (options.resume) await checkRecord(options.approvalRecord, record, live);
@@ -177,12 +181,20 @@ export async function runApprovedRepositoryBackup(raw) {
     if (nativeApproval) {
       // Failed containment does not establish that the child stopped using its
       // inputs. Retain them for diagnosis instead of claiming successful cleanup.
-      if (failure?.code === 'native_import_containment_failed') failure.approval_scratch = nativeApproval.directory;
+      if (failure?.code === 'native_import_containment_failed') {
+        failure.approval_scratch = nativeApproval.directory;
+        // Release our descriptors but retain the immutable child inputs.
+        try { await nativeApproval.retain(); } catch (error) { failure.cleanup_error = error.code; }
+      }
       else {
         try { await nativeApproval.close(); }
         catch (error) {
           if (failure) { failure.cleanup_error = error.code; failure.approval_scratch = nativeApproval.directory; }
-          else { error.state = state; error.native_receipt = nativeReceipt; throw error; }
+          else {
+            error.state = state; error.native_receipt = nativeReceipt;
+            error.approval_record = options.approvalRecord ?? null;
+            error.verification_scratch = scratch; throw error;
+          }
         }
       }
     }

@@ -62,18 +62,20 @@ export async function stageNativeBackupApproval(encoded, publicPem, authenticati
     if (!named.isDirectory() || !same(named, opened) || !same(opened, identity)
       || named.uid !== BigInt(process.getuid()) || (named.mode & 0o077n)) fail('backup_native_approval_changed');
   }
-  async function cleanup() {
+  async function cleanup(retain = false) {
     let problem;
     try {
-      if (directory) await checkDirectory();
-      for (const entry of files) {
-        const named = await lstat(entry.path, { bigint: true });
-        if (!named.isFile() || !same(named, entry.identity)) fail('backup_native_approval_changed');
-        await unlink(entry.path);
+      if (!retain) {
+        if (directory) await checkDirectory();
+        for (const entry of files) {
+          const named = await lstat(entry.path, { bigint: true });
+          if (!named.isFile() || !same(named, entry.identity)) fail('backup_native_approval_changed');
+          await unlink(entry.path);
+        }
+        if (directory) { await directory.sync(); await checkDirectory(); }
+        // Unknown children, including native diagnostic state, are not removed.
+        await rmdir(root);
       }
-      if (directory) { await directory.sync(); await checkDirectory(); }
-      // Unknown children, including native diagnostic state, are not removed.
-      await rmdir(root);
     } catch (error) { problem = error; }
     for (const handle of [...files.map(entry => entry.file), directory]) {
       try { await handle?.close(); } catch (error) { problem ??= error; }
@@ -84,6 +86,10 @@ export async function stageNativeBackupApproval(encoded, publicPem, authenticati
     }
   }
   const close = () => (closing ??= cleanup());
+  // A failed-containment caller cannot delete resources a child may still read.
+  // Finalization still closes our own file descriptors; it is idempotent and
+  // cannot be followed by a close() that silently removes retained evidence.
+  const retain = () => (closing ??= cleanup(true));
   try {
     directory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     identity = await directory.stat({ bigint: true }); await checkDirectory(); live.check();
@@ -111,7 +117,7 @@ export async function stageNativeBackupApproval(encoded, publicPem, authenticati
     const args = Object.freeze(['--approval', files[0].path, '--trust-key', files[1].path,
       '--tenant-id', policy.tenant_id, '--repository-id', policy.repository_id, '--incarnation-id', policy.incarnation_id,
       '--object-format', policy.object_format, '--minimum-head-generation', policy.minimum_head_generation]);
-    return Object.freeze({ args, expected, directory: root, check, close });
+    return Object.freeze({ args, expected, directory: root, check, close, retain });
   } catch (caught) {
     const error = caught instanceof Error ? caught : backupError('backup_native_approval_staging_failed');
     try { await close(); } catch (cleanup) { error.cleanup_error = cleanup.code; error.approval_scratch = root; }

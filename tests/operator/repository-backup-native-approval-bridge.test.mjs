@@ -1,7 +1,7 @@
 // Real filesystem and cryptographic inputs; no native Rust execution claim.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, lstat, readdir, rm, rename, symlink, chmod, unlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, lstat, readdir, rm, rename, symlink, chmod, unlink, readlink } from 'node:fs/promises';
 import { generateKeyPairSync } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ const policy = Object.freeze({ tenant_id: '11'.repeat(16), repository_id: '22'.r
   object_format: 'sha1', minimum_head_generation: '18446744073709551615' });
 const publicPem = Buffer.from('-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n');
 const code = value => error => error.code === value;
-async function fixture(t) {
+async function fixture(t, expectedCleanupFailure = false) {
   const root = await mkdtemp(join(tmpdir(), 'fg-approval-bridge-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const input = join(root, 'source'); await writeFile(input, 'opaque archive; no native graph claim');
@@ -23,7 +23,8 @@ async function fixture(t) {
     { ...identity, head_generation: minimum_head_generation });
   const { authentication } = await verifyRepositoryBackupApproval(envelope, key, policy);
   const session = await stageNativeBackupApproval(envelope, key, authentication, backupLifetime());
-  t.after(async () => { try { await session.close(); } finally { await rm(session.directory, { recursive: true, force: true }); } });
+  t.after(async () => { try { await session.close(); } catch (error) { if (!expectedCleanupFailure) throw error; }
+    finally { await rm(session.directory, { recursive: true, force: true }); } });
   return { root, envelope, key, authentication, session, path: session.args[1] };
 }
 
@@ -101,4 +102,34 @@ test('pre-cancellation and oversized inputs refuse without staging', async t => 
   await assert.rejects(stageNativeBackupApproval(Buffer.alloc(16385), f.key, f.authentication, backupLifetime()), code('backup_approval_byte_limit'));
   await assert.rejects(stageNativeBackupApproval(f.envelope, Buffer.alloc(8193), f.authentication, backupLifetime()), code('backup_approval_byte_limit'));
   await f.session.check();
+});
+
+
+test('failed-containment retirement retains inputs but releases every owned descriptor', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), expected = await readFile(f.path);
+  const descriptors = async () => {
+    const targets = await Promise.all((await readdir('/proc/self/fd')).map(async name => {
+      try { return await readlink('/proc/self/fd/' + name); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; return ''; }
+    }));
+    return targets.filter(target => target === f.session.directory || target.startsWith(f.session.directory + '/'));
+  };
+  assert.equal((await descriptors()).length, 3, 'one directory and two control descriptors owned');
+  await Promise.all([f.session.retain(), f.session.retain()]);
+  assert.equal((await descriptors()).length, 0);
+  assert.deepEqual(await readFile(f.path), expected);
+  await assert.rejects(f.session.check(), code('backup_native_approval_closed'));
+  await f.session.close();
+  assert.deepEqual(await readFile(f.path), expected, 'later close cannot delete retained inputs');
+});
+
+test('cleanup cannot recursively erase unexpected native evidence', async t => {
+  const f = await fixture(t, true), extra = join(f.session.directory, 'unowned-evidence');
+  await writeFile(extra, 'retain diagnostic state');
+  await assert.rejects(f.session.close(), error => {
+    assert.equal(error.approval_scratch, f.session.directory);
+    return error.code === 'backup_native_approval_cleanup_failed';
+  });
+  assert.equal(await readFile(extra, 'utf8'), 'retain diagnostic state');
+  await assert.rejects(lstat(f.path), code('ENOENT'), 'only owned controls removed');
 });
