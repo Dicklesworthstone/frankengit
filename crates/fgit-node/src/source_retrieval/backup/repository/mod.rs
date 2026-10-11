@@ -1,5 +1,6 @@
 //! Bounded source recovery: authority rows plus EVERY Git object selected by
 //! the same head. Payload bytes stream through a private, unpublished file.
+mod approval;
 mod archive;
 mod input;
 mod profile;
@@ -20,7 +21,8 @@ use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 use super::{emit, hex, publish_streamed, quote, regular, require_absent, with_store};
 use archive::stream::{Seal, StreamDecoder, StreamEncoder, StreamHeader, TransferLimits};
 use archive::{Identity, MAX_OBJECT_BYTES, MAX_OBJECTS};
-use profile::{Profile, ProfileFlags};
+use profile::{Deadline, Profile, ProfileFlags};
+use std::time::Duration;
 
 pub const USAGE: &str =
     "usage: fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
@@ -37,6 +39,7 @@ This is a bounded trusted-local SOURCE recovery transport, not a signed capsule
 or a full service backup. External artifacts, private keys, runner workspaces,
 search indexes and routing are excluded. Stable trusted parent paths required.
 Default archive budget: 1 GiB; default operation deadline: 300 seconds.
+An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 Independent bounds: 100000 objects, 32 MiB per object, 100000 refs and
 1000000 inspected edges. Authority metadata retains its separate 64 MiB bound.
 Codec/runtime limits may refuse earlier. The deadline covers all passes, is
@@ -148,14 +151,15 @@ fn with_node<T>(
         (Err(error), Err(cleanup)) => Err(format!("{error}; node shutdown also failed: {cleanup}")),
     }
 }
-fn export(options: &Options, file: &mut File) -> Result<String, String> {
-    let deadline = options.profile.start();
+fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<String, String> {
+    deadline.check()?;
     let metadata = std::fs::symlink_metadata(&options.root).map_err(|e| e.to_string())?;
     if !metadata.is_dir() {
         return Err("source root must be an existing directory, not a symlink".into());
     }
     let database = options.root.join("authority.fsqlite");
     regular(&database)?;
+    deadline.check()?;
     let authority = with_store(
         &database,
         StoreInstanceId::from_raw(0),
@@ -297,23 +301,38 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
     )
 }
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    run_with_timeout(args, output, None)
+}
+
+pub(super) fn run_with_timeout(
+    args: &[String],
+    output: &mut impl Write,
+    timeout: Option<Duration>,
+) -> Result<(), String> {
     if args == ["--help"] {
         emit(output, USAGE)?;
         emit(output, restore::USAGE)?;
         return emit(output, restore::verify::USAGE);
     }
     if args.first().is_some_and(|arg| arg == "verify") {
-        return restore::verify::run(args, output);
+        return restore::verify::run(args, output, timeout);
     }
     if args.first().is_some_and(|arg| arg == "restore") {
-        return restore::run(args, output);
+        return restore::run(args, output, timeout);
     }
     if args == ["export", "--help"] {
         return emit(output, USAGE);
     }
-    let options = parse(args)?;
+    let mut options = parse(args)?;
+    options.profile = options.profile.with_timeout_cap(timeout)?;
+    let deadline = options.profile.start();
+    deadline.check()?;
     require_absent(&options.destination)?;
-    let receipt = publish_streamed(&options.destination, |file| export(&options, file))?;
+    let receipt = publish_streamed(
+        &options.destination,
+        |file| export(&options, file, deadline),
+        || deadline.check(),
+    )?;
     emit(output, &receipt)
         .map_err(|error| format!("repository backup published; receipt output failed: {error}"))
 }

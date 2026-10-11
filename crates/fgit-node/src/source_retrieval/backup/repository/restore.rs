@@ -19,6 +19,7 @@ use fgit_treefs::integrity::{GraphReport, ObjectGraphAudit};
 use super::super::{
     emit, generation, hex, parent, quote, regular, require_absent, sync_directory, with_store,
 };
+use super::approval::{ApprovalFlags, ApprovalOptions, VerifiedApproval};
 use super::archive::{Record, stream::StreamHeader};
 use super::input::PinnedArchive;
 use super::profile::{Deadline, Profile, ProfileFlags};
@@ -28,6 +29,16 @@ pub(super) const USAGE: &str =
     "usage: fg backup restore <backup-file> <storage-root> --trusted-local
          --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer>
          [--resume] [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
+         [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
+          --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
+          --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
+
+The seven approval options are all-or-none. Signed mode verifies the separately
+trusted Ed25519 key, exact namespace, external generation floor, signed archive
+digest/size and lifetime before reserving a destination. --expected-sha256 stays
+independently required. Approval lifetime is checked again immediately before
+authority publication. Signed resume requires the exact original approval and
+trust policy; neither an unsigned resume nor changed policy may reinterpret it.
 
 By default reserve an EMPTY new root. --resume requires an existing restore intent
 for the SAME independently trusted checksum and destination instance. It accepts
@@ -40,6 +51,7 @@ Checksum and streamed identity checks precede directory creation. All later
 passes rehash the same open input against that pin; payload memory does not grow
 with archive size. Default archive budget: 1 GiB; authority metadata: 64 MiB.
 The 300 second default deadline is shared across ALL passes of one invocation.
+An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 An explicit resume gets a new bounded attempt, not an unbounded automatic retry.
 
 Metadata and objects are staged under .restore-quarantine. Graph/selection,
@@ -54,7 +66,7 @@ Do not serve or concurrently modify the root/quarantine. Trusted parent paths
 are required. Legacy interrupted roots without an intent cannot be resumed.
 Deadlines cannot interrupt blocking I/O. Failed state is retained, not deleted.
 
-This is SOURCE recovery, not a signed capsule, external-artifact backup, routing
+This is SOURCE recovery, not a complete signed capsule, external-artifact backup, routing
 activation or authorization to replay external effects. Review restored outbox
 state and external dependencies before serving. The checksum pins one chosen
 checkpoint; it does not prove this was the newest source checkpoint.
@@ -69,6 +81,7 @@ struct Options {
     instance: StoreInstanceId,
     profile: Profile,
     resume: bool,
+    approval: Option<ApprovalOptions>,
 }
 fn digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
@@ -86,7 +99,7 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
     Ok(result)
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=13).contains(&args.len())
+    if !(8..=27).contains(&args.len())
         || args[0] != "restore"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -97,6 +110,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let (mut trusted, mut expected, mut instance, mut resume) = (false, None, None, false);
     let mut profile = ProfileFlags::default();
+    let mut approval = ApprovalFlags::default();
     let mut cursor = 3;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -129,6 +143,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 instance = Some(StoreInstanceId::from_raw(number));
             }
             "--max-archive-bytes" | "--timeout-secs" => profile.set(flag, value)?,
+            _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
             _ => return Err(format!("unknown or duplicate restore option: {flag}")),
         }
     }
@@ -146,6 +161,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         instance: instance.ok_or("restore requires a --destination-instance")?,
         profile: profile.finish(),
         resume,
+        approval: approval.finish()?,
     })
 }
 fn create_private(path: &Path) -> Result<(), String> {
@@ -420,28 +436,39 @@ fn execute_with_checkpoints(
     mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
 ) -> Result<String, String> {
     let deadline = options.profile.start();
-    if !options.resume {
-        require_absent(&options.output)?;
-    }
-    let mut archive = PinnedArchive::open(
-        &options.input,
-        options.expected,
-        options.profile.transfer,
-        deadline,
-    )?;
-    if archive.header().authority.instance == options.instance.raw() {
-        return Err("destination instance must differ from source; no destination created".into());
-    }
-    deadline.check()?;
+    let (mut archive, approval) = (|| {
+        let approval = authenticate_approval(options, deadline)?;
+        if !options.resume {
+            require_absent(&options.output)?;
+        }
+        let archive = PinnedArchive::open(
+            &options.input,
+            options.expected,
+            options.profile.transfer,
+            deadline,
+        )?;
+        match_approval(approval.as_ref(), &archive, deadline)?;
+        if archive.header().authority.instance == options.instance.raw() {
+            return Err("destination instance must differ from source".into());
+        }
+        Ok((archive, approval))
+    })()
+    .map_err(|error| before_resume_inspection(options, error))?;
+    let binding = approval.as_ref().map(VerifiedApproval::binding_digest);
     let intent = if options.resume {
-        resume::Intent::open(&options.output, options.expected, options.instance)?
+        resume::Intent::open_bound(&options.output, options.expected, options.instance, binding)
     } else {
-        resume::Intent::reserve(&options.output, options.expected, options.instance)?
-    };
-    let already_published = intent.published()?;
+        resume::Intent::reserve_bound(&options.output, options.expected, options.instance, binding)
+    }
+    .map_err(|error| before_resume_inspection(options, error))?;
+    let already_published = intent
+        .published()
+        .map_err(|error| before_resume_inspection(options, error))?;
     let (expected, prior_graph) = if already_published {
         // Drop a crash-surviving quarantine alias before any engine reopen.
-        intent.settle_publication()?;
+        intent.settle_publication().map_err(|error| {
+            format!("destination authority is visible; resume alias settlement refused: {error}")
+        })?;
         let expected = authority_image(
             &options.output,
             &archive.header().authority,
@@ -496,13 +523,22 @@ fn execute_with_checkpoints(
                 return Err("restored graph changed across quarantine reopen".into());
             }
             checkpoint(Stage::QuarantineVerified)?;
-            deadline.check()?;
+            check_approval_current(approval.as_ref(), deadline)?;
             let publication = PreparedPublication::prepare(&quarantine, &options.output)?;
             checkpoint(Stage::DataPrepared)?;
             deadline.check()?;
             Ok((publication, expected, graph))
         })();
         let (publication, expected, graph) = prepared.map_err(|error: String| {
+            format!(
+                "{error}; destination authority not published; retained restore state at {}",
+                options.output.display()
+            )
+        })?;
+        // This is the final approval observation before the no-replace link.
+        // It also applies to resumed unpublished work. No later expiry may
+        // reinterpret an already successful publication as prevented.
+        check_approval_current(approval.as_ref(), deadline).map_err(|error| {
             format!(
                 "{error}; destination authority not published; retained restore state at {}",
                 options.output.display()
@@ -545,7 +581,7 @@ fn execute_with_checkpoints(
             "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
             "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
             "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
-            "\"external_artifacts_restored\":false,\"signature_verified\":false,",
+            "\"external_artifacts_restored\":false,\"signature_verified\":{}{},",
             "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}}}"
         ),
         quote(&hex(&options.expected)),
@@ -558,16 +594,78 @@ fn execute_with_checkpoints(
         graph.references,
         graph.payload_bytes,
         options.instance.raw(),
+        approval.is_some(),
+        approval_receipt_fields(approval.as_ref()),
         archive.seal().bytes,
         options.resume,
         already_published
     ))
 }
-pub(super) fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
+
+fn before_resume_inspection(options: &Options, error: String) -> String {
+    if options.resume {
+        format!(
+            "resume refused before destination publication state was established; a prior attempt may already have published authority; {error}"
+        )
+    } else {
+        error
+    }
+}
+
+fn authenticate_approval(
+    options: &Options,
+    deadline: Deadline,
+) -> Result<Option<VerifiedApproval>, String> {
+    options
+        .approval
+        .as_ref()
+        .map(|approval| {
+            approval.authenticate(
+                options.expected,
+                options.profile.transfer.max_archive_bytes,
+                deadline,
+            )
+        })
+        .transpose()
+}
+
+fn check_approval_current(
+    approval: Option<&VerifiedApproval>,
+    deadline: Deadline,
+) -> Result<(), String> {
+    deadline.check()?;
+    if let Some(approval) = approval {
+        approval.check_current()?;
+    }
+    Ok(())
+}
+
+fn match_approval(
+    approval: Option<&VerifiedApproval>,
+    archive: &PinnedArchive,
+    deadline: Deadline,
+) -> Result<(), String> {
+    if let Some(approval) = approval {
+        approval.match_archive(archive.header(), archive.seal())?;
+    }
+    check_approval_current(approval, deadline)
+}
+
+fn approval_receipt_fields(approval: Option<&VerifiedApproval>) -> String {
+    approval.map_or_else(String::new, |approval| {
+        format!(",\"approval\":{}", approval.receipt_json())
+    })
+}
+pub(super) fn run(
+    args: &[String],
+    output: &mut impl Write,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
     if args == ["restore", "--help"] {
         return emit(output, USAGE);
     }
-    let options = parse(args)?;
+    let mut options = parse(args)?;
+    options.profile = options.profile.with_timeout_cap(timeout)?;
     let receipt = execute(&options)?;
     emit(output, &receipt)
         .map_err(|error| format!("repository restore completed; receipt output failed: {error}"))

@@ -78,9 +78,9 @@ publication. Their opaque archive fixture is deliberately not valid native
 repository state. These are signing/I/O tests, not native recovery, Rust,
 full-workspace, power-loss, performance or bead-closure evidence.
 
-## Approved native verification and restore
+## JavaScript approval wrapper
 
-The native operator path now composes the detached approval with the existing
+The JavaScript operator wrapper composes the detached approval with the existing
 `fg backup verify` and `fg backup restore` commands. It does not change their
 archive format, authority implementation, quarantine, graph validation,
 original-payload commitments, or authority-last publication.
@@ -168,3 +168,152 @@ confirmed completion. They are not native archive, Rust, durable-backend or
 power-loss evidence. The separate actual-`fg` test exports an empty native node,
 signs its archive, restores it, and calls native doctor; it is explicitly skipped
 unless `FG_NATIVE_BIN` is supplied. No full service/capsule or bead closure claim.
+
+## Native approval enforcement in `fg backup`
+
+The native `fg backup verify` and `fg backup restore` commands also accept the
+existing detached approval directly. The command verifies DSSE and Ed25519 in
+Rust, using the existing crypto implementation. It does not launch the
+JavaScript issuer, a wrapper, Git, or another executable. The archive format and
+the native authority, object-graph and payload-commitment checks stay the same.
+
+```sh
+fg backup verify backup.fgit /private/new-verification-root --trusted-local \
+  --expected-sha256 "$INDEPENDENT_ARCHIVE_SHA256" --verification-instance 900000001 \
+  --approval backup.approval.json --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT_HEX" --repository-id "$REPOSITORY_HEX" \
+  --incarnation-id "$INCARNATION_HEX" --object-format sha256 \
+  --minimum-head-generation "$EXTERNALLY_RETAINED_FLOOR"
+
+fg backup restore backup.fgit /private/new-restored-node --trusted-local \
+  --expected-sha256 "$INDEPENDENT_ARCHIVE_SHA256" --destination-instance 900000002 \
+  --approval backup.approval.json --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT_HEX" --repository-id "$REPOSITORY_HEX" \
+  --incarnation-id "$INCARNATION_HEX" --object-format sha256 \
+  --minimum-head-generation "$EXTERNALLY_RETAINED_FLOOR"
+```
+
+All seven approval options are required together: `--approval`, `--trust-key`,
+`--tenant-id`, `--repository-id`, `--incarnation-id`, `--object-format` and
+`--minimum-head-generation`. The independently selected `--expected-sha256`
+remains required even in signed mode. Unknown or duplicate options and partial
+approval policy refuse. Omitting all seven preserves the existing unsigned,
+checksum-pinned command behavior and receipt fields.
+
+The native transfer defaults remain 1 GiB and 300 seconds. The existing
+`--max-archive-bytes` permits 1 through 1099511627776 bytes; the native leaf
+`--timeout-secs` permits 1 through 86400 seconds. These native limits are distinct
+from the JavaScript issuer/wrapper's 3600-second ceiling. Authority metadata
+retains its independent 64 MiB bound, and native object/graph limits remain in
+force. Control input is bounded separately to 16 KiB per approval envelope,
+4096 bytes per decoded signed payload and 8192 bytes per trusted public-key
+file. Reading and verification use one operation deadline; no subsequent
+approval check renews it.
+
+For all three repository backup operations, an explicit leading `fg
+--timeout-secs` narrows the native leaf timeout. For example, `fg --timeout-secs
+30 backup restore ... --timeout-secs 600` has a 30-second effective allowance;
+a larger global value cannot widen a smaller leaf value. Fractional global
+seconds retain their precision. With no explicit global override the existing
+leaf defaults apply. The shared library `run_with_timeout` entrypoint supplies
+the same cap without global mutable state; `run` and the compatibility executable
+keep their existing defaults. The separate authority-only backup executable is
+outside this `fg backup` dispatch.
+
+Before creating verification scratch or reserving a restore intent, the native
+command snapshots both control files, authenticates the exact original signed
+payload and separate trusted key, checks the external identity and generation
+floor, and verifies the approval lifetime. It then verifies the independently
+pinned archive through one open input and requires its actual tenant,
+repository, incarnation, hash format, head generation, whole-file digest and
+byte count to match the signed statement. This prevents an otherwise valid
+signature over false operator declarations from authorizing different native
+state. Later passes rehash that same pinned input while checking authority,
+the selected graph and original payload commitments.
+
+The control files and destination parent are operator-controlled local inputs.
+Use stable trusted paths and keep the source, destination and quarantine away
+from concurrent mutation or serving. File/path identity checks and the restore
+lock do not isolate the command from an adversary with the same filesystem
+authority. The public key is supplied independently; a key adjacent to an
+untrusted archive does not establish its trust.
+
+### Publication-time approval and exact signed resume
+
+After the quarantined node has verified and closed, approval freshness is
+checked again. The final freshness and operation-deadline check runs immediately
+before `PreparedPublication::publish`, whose create-only authority-file link is
+the visibility boundary. This also applies when an unpublished signed restore
+is resumed. Expiry at that point refuses publication and retains the exact
+quarantine/intent for diagnosis. This is a cooperative local prepublication
+check, not an atomic wall-clock lease, a revocation service, or canonical
+authorization. Blocking filesystem calls cannot be interrupted at an exact
+deadline instant.
+
+Signed attempts use an 80-byte `FGRES002` `.restore-intent`. In addition to the
+archive pin and destination instance, it commits to a domain-separated digest
+of the exact original envelope bytes, canonical trusted SPKI bytes and external
+namespace, hash format and generation-floor policy. Legacy unsigned attempts
+retain the exact 48-byte `FGRES001` encoding. Resume compares the full expected
+intent before any quarantine normalization, database open or surviving alias
+cleanup. Both signed-to-unsigned downgrade and unsigned-to-signed
+reinterpretation refuse. Changing even an independently accepted floor or
+reformatting the original envelope changes the signed binding.
+
+Add `--resume` only with the original checksum, destination instance, approval
+and trust policy. Each invocation reauthenticates the controls and rechecks
+their current lifetime; no cached intent stands in for a signature. A newly
+issued or renewed approval requires a new destination rather than changing the
+meaning of an existing signed intent. No external approval-record file is
+needed for this direct native mode; the binding is part of the native intent
+itself.
+
+An already-published resume verifies the exact imported snapshot and objects
+without advancing authority tokens. An early resume refusal, including a
+missing/changed approval, expired signature or invalid archive, reports that a
+prior attempt may already have published authority. After confirmed publication,
+later expiry, directory/alias cleanup failure, final verification failure or
+receipt-output failure cannot be reported as prevention or rollback. The command
+preserves destination state. It never overwrites, merges or rewinds newer work.
+
+### Native receipts and selected validation
+
+Signed successful receipts set outer `signature_verified` to true and add an
+`approval` object containing the trusted key ID, exact binding SHA-256, external
+minimum generation and full authenticated statement. Existing graph, payload,
+reopen/close, scratch-removal or resume fields retain their meanings. The
+approval object explicitly reports that newest-checkpoint and complete-capsule
+verification are false. Approval receipt formatting does not recheck expiry
+after a confirmed publication.
+
+The following commands select the added validation; this documentation does not
+assert that a particular checkout has passed them. Use the pinned toolchain and
+an isolated Cargo target directory. The native unit campaigns marked ignored
+require an explicitly selected Node.js executable solely to run the existing
+issuer as a test fixture generator. Their production verify/restore paths are
+Rust, and expiry is tested with a per-operation injected wall clock that has no
+production or environment-controlled counterpart.
+
+```sh
+export CARGO_TARGET_DIR=/data/frankengit-targets/signed-native-backup
+cargo test -p fgit-node --lib source_retrieval::backup::repository --locked -- --test-threads=1
+FG_BACKUP_APPROVAL_NODE="$(command -v node)" \
+  cargo test -p fgit-node --lib resume_engine_tests::signed_tests --locked \
+  -- --ignored --test-threads=1
+cargo build -p fgit-cli --bin fg --locked
+FG_NATIVE_BIN="$CARGO_TARGET_DIR/debug/fg" \
+  node --test tests/operator/repository-backup-native-approval.test.mjs
+```
+
+Ordinary tests cover complete-policy parsing, independent checksum requirements,
+exact versioned intent bytes, changed trust bindings, both directions of signed
+mode reinterpretation and truthful resume errors. The selected native campaigns
+exercise real JS-issued signatures over native archives in both hash domains,
+source-loss recovery, native preflight, exact resumed state, wrong signer,
+mutated payload, false signed header declarations, wrong floor and expiry at the
+publication boundary. A clock advance after publication checks that completion
+remains truthful. The separate real-`fg` process test imports a nonempty source,
+exports its archive, deletes the source, then verifies/restores and resumes with
+an empty executable search path for every `fg` invocation. It is skipped unless
+`FG_NATIVE_BIN` is supplied. These checks do not establish full service or signed
+capsule recovery, exhaustive power-loss behavior or the broader bead's closure.

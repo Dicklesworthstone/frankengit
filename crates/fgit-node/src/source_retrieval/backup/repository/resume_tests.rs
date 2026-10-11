@@ -54,6 +54,54 @@ fn immutable_binding_is_exact_versioned_and_specific_to_pin_and_instance() {
 }
 
 #[test]
+fn signed_intent_requires_the_same_exact_approval_and_cannot_downgrade() {
+    let scratch = Scratch::new();
+    let root = scratch.root();
+    let approved = [0x41; 32];
+    drop(Intent::reserve_bound(&root, PIN, instance(), Some(approved)).unwrap());
+    let original = fs::read(root.join(INTENT)).unwrap();
+    assert_eq!(original.len(), SIGNED_INTENT_BYTES);
+    assert_eq!(&original[..8], b"FGRES002");
+    assert_eq!(&original[8..40], &PIN);
+    assert_eq!(&original[40..48], &instance().raw().to_be_bytes());
+    assert_eq!(&original[48..], &approved);
+    let untouched = root.join("unrelated");
+    fs::write(&untouched, b"preserve").unwrap();
+    for binding in [None, Some([0x42; 32])] {
+        let error = Intent::open_bound(&root, PIN, instance(), binding).unwrap_err();
+        assert!(
+            error.contains("exact signed approval/trust policy"),
+            "{error}"
+        );
+        assert_eq!(fs::read(root.join(INTENT)).unwrap(), original);
+        assert_eq!(fs::read(&untouched).unwrap(), b"preserve");
+        assert!(!root.join(".restore-quarantine").exists());
+    }
+    assert!(Intent::open_bound(&root, PIN, instance(), Some(approved)).is_ok());
+}
+
+#[test]
+fn unsigned_intent_cannot_be_reinterpreted_as_signed_and_signed_length_is_exact() {
+    let scratch = Scratch::new();
+    let unsigned = scratch.0.join("unsigned");
+    drop(Intent::reserve(&unsigned, PIN, instance()).unwrap());
+    assert!(Intent::open_bound(&unsigned, PIN, instance(), Some([1; 32])).is_err());
+    assert!(Intent::open(&unsigned, PIN, instance()).is_ok());
+    let root = scratch.root();
+    drop(Intent::reserve_bound(&root, PIN, instance(), Some([2; 32])).unwrap());
+    let good = fs::read(root.join(INTENT)).unwrap();
+    for length in 0..good.len() {
+        fs::write(root.join(INTENT), &good[..length]).unwrap();
+        assert!(Intent::open_bound(&root, PIN, instance(), Some([2; 32])).is_err());
+    }
+    let mut extra = good;
+    extra.push(0);
+    fs::write(root.join(INTENT), extra).unwrap();
+    assert!(Intent::open_bound(&root, PIN, instance(), Some([2; 32])).is_err());
+    assert!(!root.join(".restore-quarantine").exists());
+}
+
+#[test]
 fn live_owner_excludes_a_second_handle_and_drop_releases_without_breaking_a_lock_file() {
     let scratch = Scratch::new();
     let root = scratch.root();

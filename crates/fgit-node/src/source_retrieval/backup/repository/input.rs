@@ -129,7 +129,7 @@ fn check_checksum(
         bytes,
     };
     if seal.digest != expected {
-        return Err("repository backup checksum mismatch; no destination created".into());
+        return Err("repository backup checksum mismatch".into());
     }
     Ok(seal)
 }

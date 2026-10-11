@@ -64,7 +64,11 @@ fn main() -> ExitCode {
         .is_some_and(|argument| argument == "backup")
     {
         use fgit_node::source_retrieval::backup;
-        return match backup::run(&arguments[1..], &mut std::io::stdout().lock()) {
+        return match backup::run_with_timeout(
+            &arguments[1..],
+            &mut std::io::stdout().lock(),
+            fgit_cli::command_timeout_override_duration(),
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{}", backup::error_json(&error));
