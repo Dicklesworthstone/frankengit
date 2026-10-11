@@ -2065,7 +2065,7 @@ fn emit_insert_run(bytes: &[u8], output: &mut Vec<u8>) -> Result<(), PackWriteEr
     Ok(())
 }
 
-fn pack_header(count: u32) -> [u8; PACK_HEADER_BYTES] {
+pub(super) fn pack_header(count: u32) -> [u8; PACK_HEADER_BYTES] {
     let mut header = [0_u8; PACK_HEADER_BYTES];
     header[..4].copy_from_slice(b"PACK");
     header[4..8].copy_from_slice(&2_u32.to_be_bytes());
@@ -2073,7 +2073,7 @@ fn pack_header(count: u32) -> [u8; PACK_HEADER_BYTES] {
     header
 }
 
-fn encode_entry_header(type_code: u8, size: usize) -> Result<Vec<u8>, PackWriteError> {
+pub(super) fn encode_entry_header(type_code: u8, size: usize) -> Result<Vec<u8>, PackWriteError> {
     if !(1..=7).contains(&type_code) || type_code == 5 {
         return Err(PackError::InvalidEntryType(type_code).into());
     }
