@@ -15,13 +15,15 @@ mod source_review;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
+use fgit_admission::merge::native::objects::{
+    MergeObjectLimits, validate_merge_objects, validate_squash_objects,
+};
 use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::{
-    CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation, MergeProfile,
-    MergeSourceError, PlannedMergeObject, PreparationError, PreparationLimits, PreparedMerge,
-    prepare_merge, prepare_merge_with_profile,
+    CommitInput, MergeCommitStyle, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation,
+    MergeProfile, MergeSourceError, PlannedMergeObject, PreparationError, PreparationLimits,
+    PreparedMerge, prepare_merge_with_options,
 };
 use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
@@ -101,6 +103,33 @@ impl OneNode {
         limits: PreparationLimits,
         profile: MergeProfile,
     ) -> Result<PreparedMergeBundle, NodeWorkspaceRefusal> {
+        self.prepare_merge_bundle_with_options_in(
+            request,
+            target,
+            incoming,
+            visibility,
+            metadata,
+            limits,
+            profile,
+            MergeCommitStyle::TwoParent,
+        )
+        .await
+    }
+
+    /// Prepare either a two-parent merge or a one-parent squash over the same
+    /// authenticated tips. Squash preserves the merge tree and verifies source
+    /// history independently; it never publishes or grants review approval.
+    pub async fn prepare_merge_bundle_with_options_in(
+        &self,
+        request: &NodeRequestContext,
+        target: &RefName,
+        incoming: &RefName,
+        visibility: &RefVisibility,
+        metadata: &MergeMetadata,
+        limits: PreparationLimits,
+        profile: MergeProfile,
+        style: MergeCommitStyle,
+    ) -> Result<PreparedMergeBundle, NodeWorkspaceRefusal> {
         limits
             .validate()
             .map_err(NodeWorkspaceRefusal::MergePreparation)?;
@@ -163,25 +192,16 @@ impl OneNode {
             read_bytes: Cell::new(0),
             budget_failed: Cell::new(false),
         };
-        let outcome = match profile {
-            MergeProfile::PathMergeV1 => prepare_merge(
-                &source,
-                self.object_format,
-                our_tip,
-                their_tip,
-                metadata,
-                limits,
-            ),
-            MergeProfile::ExactRenamesV1 => prepare_merge_with_profile(
-                &source,
-                self.object_format,
-                our_tip,
-                their_tip,
-                metadata,
-                limits,
-                profile,
-            ),
-        }
+        let outcome = prepare_merge_with_options(
+            &source,
+            self.object_format,
+            our_tip,
+            their_tip,
+            metadata,
+            limits,
+            profile,
+            style,
+        )
         .map_err(NodeWorkspaceRefusal::MergePreparation)?;
         let bundle = if let MergePreparation::Clean(plan) = &outcome {
             Some(bundle_for_plan(&source, target, incoming, plan, limits)?)
@@ -239,12 +259,20 @@ fn bundle_for_plan(
         merge_commit: plan.commit,
     };
     let mut live = || original.checkpoint().is_ok();
-    let verified = validate_merge_objects(
-        &candidate,
-        &coordinates,
-        MergeObjectLimits::default(),
-        &mut live,
-    );
+    let verified = match plan.style {
+        MergeCommitStyle::TwoParent => validate_merge_objects(
+            &candidate,
+            &coordinates,
+            MergeObjectLimits::default(),
+            &mut live,
+        ),
+        MergeCommitStyle::Squash => validate_squash_objects(
+            &candidate,
+            &coordinates,
+            MergeObjectLimits::default(),
+            &mut live,
+        ),
+    };
     // Preserve the source's actual cancellation/budget failure instead
     // of disguising it as a missing object in the pack-source adapter.
     original.checkpoint().map_err(source_error)?;
@@ -270,8 +298,8 @@ fn bundle_for_plan(
         GitHashAlgorithm::Sha1 => b"# v2 git bundle\n".to_vec(),
         GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
     };
-    // Two prerequisites account for every unchanged object reachable
-    // through either parent. Neither parent is silently omitted.
+    // Both original histories remain prerequisites. A squash may reuse source
+    // blobs even though source is not a parent of its one-parent candidate.
     bytes.extend_from_slice(
         format!(
             "-{} target\n-{} source\n{} ",

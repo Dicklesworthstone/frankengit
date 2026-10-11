@@ -228,6 +228,37 @@ where
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)
     }
+    async fn validate_squash_async<'a>(
+        &'a self,
+        store: &'a S,
+        cx: &'a S::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        // Only an inner projection that explicitly supports squash can admit
+        // this method. The same native candidate commitment fixes its parent
+        // shape, and every current named approval must bind that exact commit.
+        let closure = self
+            .inner
+            .validate_squash_async(store, cx, basis, authenticated, intent)
+            .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        verify_at(
+            store,
+            cx,
+            basis,
+            intent,
+            self.context.principal_id,
+            self.required,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(closure)
+    }
 }
 
 fn infrastructure(error: AdmissionError) -> ProjectionFailure {

@@ -1,7 +1,9 @@
 # Native merge preparation
 
-`fg merge prepare` constructs a native two-parent merge candidate from two
-branches selected at one authenticated repository head. `fg merge apply`
+`fg merge prepare` constructs a native two-parent merge candidate by default
+from two branches selected at one authenticated repository head. Select
+`--method squash` for a one-parent candidate; see
+[native squash merges](NATIVE_SQUASH_MERGES.md). `fg merge apply`
 remains the separate operation that publishes an independently reviewed
 candidate through the coupled Ref + Forge + Outbox transaction.
 
@@ -31,7 +33,8 @@ fg merge prepare ./fgit-data \
 
 The author, timestamp and message are explicit reproducibility inputs. The
 committer defaults to the supplied author; `--committer` selects a different
-explicit identity. Both timestamps use UTC. Neither local Git configuration
+explicit identity. `--object-format sha1|sha256` selects the repository's native
+hash format, defaulting to SHA-1. Both timestamps use UTC. Neither local Git configuration
 nor the current wall clock supplies hidden metadata.
 
 `--trusted-local` acknowledges the local operator's authority to read the
@@ -58,9 +61,10 @@ executable-bit changes evaluated independently. Directories use native Git
 entry ordering; unchanged subtrees and files are referenced by identity rather
 than materialized as new payloads.
 
-The resulting commit has target-before as its first parent and source as its
-second parent. A fast-forward-capable input still creates an explicit two-parent
-candidate. An already integrated source produces `already_up_to_date`, with no
+With the default `merge-commit` method, the resulting commit has target-before
+as its first parent and source as its second parent. A fast-forward-capable
+input still creates an explicit candidate. Squash keeps only target-before as
+its parent while using the same resulting tree. An already integrated source produces `already_up_to_date`, with no
 candidate, bundle or repository mutation.
 
 The profile is not Git `ort` equivalence. It does not infer renames, copy
@@ -86,7 +90,7 @@ A successful clean result writes one JSON object containing:
   `published_to_repository: false`.
 
 SHA-1 repositories produce a v2 Git bundle. SHA-256 repositories produce a v3
-bundle with `object-format=sha256`. Both parent tips are prerequisites, so a
+bundle with `object-format=sha256`. Both original branch tips are prerequisites, including for squash, so a
 review repository must already have their reachable history. The artifact
 contains the constructed objects, not a second copy of all unchanged history.
 

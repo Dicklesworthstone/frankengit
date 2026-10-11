@@ -7,7 +7,7 @@ use fgit_forge::event::review::{
     NativeReviewEvent, REVIEW_PROFILE, ReviewCommand, ReviewDecision, ReviewSubject,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
-use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
+use fgit_node::{LoopbackReceiveSession, NativeMergeMethod, NodeConfig, OneNode};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DecisionOutcome, DigestAlgorithmId, DigestBytes, GitHashAlgorithm,
     HeadGeneration, PolicyEpoch, PrincipalId, RefName, RepositoryAuthorityHeadId, RepositoryId,
@@ -32,7 +32,7 @@ usage: fg merge apply-reviewed <storage-root> <tenant-id> <repository-id> <pr-nu
   --principal <submitter-id> --idempotency-key <key> --expected-version <pr-version>
   --source-ref <branch> --target-ref <branch> --source-tip <oid> --target-tip <oid>
   --merge-base <oid> --candidate <oid> --policy-epoch <n> --bundle <path>
-  --require-reviewer <id> [--require-reviewer <id> ...]
+  --require-reviewer <id> [--require-reviewer <id> ...] [--method merge-commit|squash]
 
 Reviews bind the actual merge commit, not merely its source branch. Every named
 reviewer must approve that exact candidate and current PR/policy version. Opener
@@ -63,6 +63,7 @@ struct Mutation {
     command: CandidateReviewCommand,
     bundle: Option<PathBuf>,
     reviewers: Vec<PrincipalId>,
+    method: NativeMergeMethod,
 }
 #[derive(Debug)]
 struct ReadOptions {
@@ -118,7 +119,7 @@ pub fn run(args: &[String], mode: Mode) -> Result<u8, String> {
             let subject = &options.command.review.subject;
             node.runtime()
                 .block_on(
-                    node.apply_reviewed_merge_bundle_durable_in(
+                    node.apply_reviewed_merge_bundle_with_method_durable_in(
                         &request,
                         options.principal,
                         &options.key,
@@ -130,6 +131,7 @@ pub fn run(args: &[String], mode: Mode) -> Result<u8, String> {
                             .ok_or("reviewed merge requires bundle bytes")?,
                         subject.policy_epoch,
                         &options.reviewers,
+                        options.method,
                     ),
                 )
                 .map_err(|e| e.to_string())
@@ -215,7 +217,8 @@ fn flags(
                         | "--bundle"
                 ) || (mode == Mode::Review
                     && matches!(flag, "--review-version" | "--decision" | "--reason"))
-                    || (mode == Mode::Apply && flag == "--require-reviewer")
+                    || (mode == Mode::Apply
+                        && matches!(flag, "--require-reviewer" | "--method"))
             };
         if !allowed {
             return Err(format!("unknown or inapplicable option {flag:?}"));
@@ -360,6 +363,9 @@ fn parse_mutation(args: &[String], mode: Mode) -> Result<Mutation, String> {
         command,
         bundle,
         reviewers,
+        method: super::merge_apply::parse_method(
+            flags.get("--method").copied().unwrap_or("merge-commit"),
+        )?,
     })
 }
 fn parse_read(args: &[String]) -> Result<ReadOptions, String> {
@@ -569,7 +575,7 @@ fn render_terminal(
     };
     format!(
         concat!(
-            "{{\"schema_version\":1,\"type\":{},\"profile\":{}, {}, {},\"principal\":{},",
+            "{{\"schema_version\":1,\"type\":{},\"profile\":{},\"method\":{}, {}, {},\"principal\":{},",
             "\"decision\":{},\"expected_review_version\":{},\"required_reviewers\":[{}],",
             "\"outcome\":{},\"published_to_repository\":{},\"git_refs_changed\":{},",
             "\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
@@ -586,6 +592,11 @@ fn render_terminal(
         } else {
             "named-candidate-reviewers-v1"
         }),
+        if mode == Mode::Apply {
+            quote(super::merge_apply::method_name(options.method))
+        } else {
+            "null".into()
+        },
         scope_fields(&options.scope),
         subject_fields(
             &options.command.review.subject,
@@ -783,6 +794,30 @@ mod tests {
         }
     }
     #[test]
+    fn reviewed_publication_selects_method_but_reviews_bind_only_the_exact_candidate() {
+        for width in [40, 64] {
+            let defaults = parse_mutation(&args(width, Mode::Apply), Mode::Apply).unwrap();
+            assert_eq!(defaults.method, NativeMergeMethod::MergeCommit);
+            let mut squash = args(width, Mode::Apply);
+            squash.extend(["--method".into(), "squash".into()]);
+            let selected = parse_mutation(&squash, Mode::Apply).unwrap();
+            assert_eq!(selected.method, NativeMergeMethod::Squash);
+            assert_eq!(selected.command.candidate, defaults.command.candidate);
+            squash.extend(["--method".into(), "squash".into()]);
+            assert!(parse_mutation(&squash, Mode::Apply).is_err());
+
+            let mut review = args(width, Mode::Review);
+            review.extend(["--method".into(), "squash".into()]);
+            assert!(parse_mutation(&review, Mode::Review).is_err());
+            for method in ["auto", "rebase", "fast-forward-only", ""] {
+                let mut invalid = args(width, Mode::Apply);
+                invalid.extend(["--method".into(), method.into()]);
+                assert!(parse_mutation(&invalid, Mode::Apply).is_err(), "{method}");
+            }
+        }
+    }
+
+    #[test]
     fn withdrawal_and_named_reviewers_have_no_implicit_fallback() {
         let mut withdraw = args(40, Mode::Review);
         change(&mut withdraw, "--decision", "withdraw");
@@ -847,6 +882,7 @@ mod tests {
         let text = render_terminal(&options, Mode::Apply, tx, &terminal, Some("close\nfailed"));
         assert!(text.contains("\"outcome\":\"committed\""));
         assert!(text.contains("\"git_refs_changed\":true"));
+        assert!(text.contains("\"method\":\"merge-commit\""));
         assert!(text.contains("\"node_closed\":false"));
         assert!(text.contains("close\\u000afailed"));
         assert!(!text.contains("private-key"));

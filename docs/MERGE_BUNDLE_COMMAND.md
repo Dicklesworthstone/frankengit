@@ -15,7 +15,9 @@ Python helpers and transport fixtures, not a passing FrankenGit runtime gate.
 
 Supply coordinates independently of the bundle. In this example the source
 and target branches already exist in the node, their tips are the reviewed
-parents, and the reviewed candidate is a two-parent native Git commit.
+parents, and the reviewed candidate is a two-parent native Git commit. Add
+`--method squash` for an explicitly reviewed one-parent squash of an existing
+PR; see [native squash merges](NATIVE_SQUASH_MERGES.md).
 
 ```bash
 fg merge apply "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
@@ -37,12 +39,13 @@ All review fields are mandatory. Repeated or unknown options are errors.
 SHA-1 and SHA-256 are supported; all four supplied object IDs must be nonzero
 and belong to the repository's native domain. Source and target must be
 distinct fully qualified branch refs with distinct tips. The candidate must
-have exactly two parents in the order **target-before, source**, and the
-supplied base must be an ancestor of both parents. Native object bytes, not
+have exactly two parents in the order **target-before, source** for the default
+`merge-commit` method, or exactly one **target-before** parent for `squash`.
+The supplied base must be an ancestor of both original branch tips. Native object bytes, not
 caller-supplied edge metadata, establish these relationships.
 
 `--expected-version 0` explicitly selects a new aggregate stream containing a
-merge receipt. It does **not** fabricate an opened or approved pull request.
+two-parent merge receipt. Squash requires a positive exact existing-PR version. It does **not** fabricate an opened or approved pull request.
 A positive version requires that exact existing aggregate position; closed
 or already-merged aggregates cannot silently reopen. Merge-only streams do
 not become fictional opened-PR rows in historical projections. The actual
@@ -119,8 +122,8 @@ their presence does not prove publication.
 
 A terminal response is one JSON line with `type: "merge_publication"`, outcome,
 transaction ID, decision sequence, committed RCR or refusal identity, repository,
-PR/version, all reviewed commit coordinates, and hexadecimal source/target ref
-bytes. The retry key is not echoed. The RCR identity is distinct from the native
+PR/version, the explicit `method`, all reviewed commit coordinates, and
+hexadecimal source/target ref bytes. The retry key is not echoed. The RCR identity is distinct from the native
 Git candidate identity. `delivery_acknowledged` is `null`: publishing an outbox
 obligation does not observe a destination acknowledgement, and a retry may
 recover an older merge whose delivery has since advanced.

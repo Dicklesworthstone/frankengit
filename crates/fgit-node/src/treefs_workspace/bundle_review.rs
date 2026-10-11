@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::{
     MergeObjectLimits, validate_commit_closure, validate_fast_forward_objects,
-    validate_merge_objects, validate_workspace_objects,
+    validate_merge_objects, validate_squash_objects, validate_workspace_objects,
 };
 use fgit_crypto::{git_object_id, sha256_digest};
 use fgit_forge::event::NativeMerge;
@@ -317,9 +317,24 @@ impl OneNode {
                 ..ParseLimits::default()
             },
         };
+        // Inspection selects the validator from verified native parent bytes.
+        // This is not method inference for publication: publication must seal
+        // its method explicitly and revalidate that method's exact shape.
+        let candidate_parents = source
+            .commit(candidate)
+            .map_err(BundleInspectionRefusal::Source)?
+            .parents;
         let validation = match merge {
             Some(coordinates) if coordinates.merge_commit == coordinates.source_tip => {
                 validate_fast_forward_objects(&source, coordinates, limits, &mut || {
+                    original.live().is_ok()
+                })
+            }
+            Some(coordinates)
+                if candidate_parents.as_slice()
+                    == std::slice::from_ref(&coordinates.target_tip_before) =>
+            {
+                validate_squash_objects(&source, coordinates, limits, &mut || {
                     original.live().is_ok()
                 })
             }
@@ -337,10 +352,7 @@ impl OneNode {
         // Report the actual native parents, not the roots that granted original
         // object access above. A fast-forward may span several commits, so its
         // source tip's direct parent need not be the observed target.
-        let parents = source
-            .commit(candidate)
-            .map_err(BundleInspectionRefusal::Source)?
-            .parents;
+        let parents = candidate_parents;
         let transport_only_objects = unpacked.check_coverage(&validation.objects)?;
         let comparison = compare_source(
             &source,

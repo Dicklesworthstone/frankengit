@@ -52,8 +52,9 @@ pub fn validate_merge_objects(
         source,
         merge.merge_commit,
         Some(&[merge.target_tip_before, merge.source_tip]),
-        Some(merge.base_tip),
-        None,
+        AncestryRequirement::Merge {
+            base: merge.base_tip,
+        },
         limits,
         deadline,
     )
@@ -79,8 +80,43 @@ pub fn validate_fast_forward_objects(
         source,
         merge.source_tip,
         None,
-        None,
-        Some(merge.target_tip_before),
+        AncestryRequirement::FastForward {
+            base: merge.target_tip_before,
+        },
+        limits,
+        deadline,
+    )
+}
+
+/// Verify a reviewed one-parent squash and BOTH original branch histories.
+/// The candidate must name only target-before as a parent. Its source is an
+/// additional commit root in the same deduplicated walk, so source-only trees,
+/// blobs and ancestors share every object, byte, edge and cancellation budget.
+/// The supplied base must occur through commit parents in both branch histories;
+/// a caller's edge metadata or an unrelated object in the store is no proof.
+///
+/// This returns verified bytes, not source authorization. The caller must bind
+/// source/target tips to the selected refs and source/base to the authority's
+/// admitted closure. The reviewed tree is not a claim that this validator reran
+/// a merge algorithm. No partial closure survives failure or cancellation.
+pub fn validate_squash_objects(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    merge.validate().map_err(|_| invalid())?;
+    if merge.source_tip == merge.target_tip_before {
+        return Err(invalid());
+    }
+    validate_candidate_objects(
+        source,
+        merge.merge_commit,
+        Some(&[merge.target_tip_before]),
+        AncestryRequirement::Squash {
+            base: merge.base_tip,
+            source: merge.source_tip,
+        },
         limits,
         deadline,
     )
@@ -102,8 +138,7 @@ pub fn validate_workspace_objects(
         source,
         candidate,
         Some(&[expected_parent]),
-        None,
-        None,
+        AncestryRequirement::None,
         limits,
         deadline,
     )
@@ -119,27 +154,34 @@ pub fn validate_commit_closure(
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
-    validate_candidate_objects(source, commit, None, None, None, limits, deadline)
+    validate_candidate_objects(
+        source,
+        commit,
+        None,
+        AncestryRequirement::None,
+        limits,
+        deadline,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum AncestryRequirement {
+    None,
+    Merge { base: GitOid },
+    Squash { base: GitOid, source: GitOid },
+    FastForward { base: GitOid },
 }
 
 fn validate_candidate_objects(
     source: &impl CanonicalObjectSource,
     candidate: GitOid,
     expected_parents: Option<&[GitOid]>,
-    merge_base: Option<GitOid>,
-    fast_forward_base: Option<GitOid>,
+    ancestry: AncestryRequirement,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     let format = candidate.algorithm();
     if candidate.is_zero()
-        || fast_forward_base.is_some_and(|id| {
-            id.is_zero()
-                || id.algorithm() != format
-                || id == candidate
-                || expected_parents.is_some()
-                || merge_base.is_some()
-        })
         || expected_parents.is_some_and(|parents| {
             parents.is_empty()
                 || parents.len() > 2
@@ -148,12 +190,25 @@ fn validate_candidate_objects(
                     .any(|id| id.is_zero() || id.algorithm() != format || *id == candidate)
                 || (parents.len() == 2 && parents[0] == parents[1])
         })
-        || merge_base.is_some_and(|id| {
-            id.is_zero()
-                || id.algorithm() != format
-                || expected_parents.is_none_or(|parents| parents.len() != 2)
-        })
     {
+        return Err(invalid());
+    }
+    let bad_id = |id: GitOid| id.is_zero() || id.algorithm() != format;
+    let invalid_ancestry = match ancestry {
+        AncestryRequirement::None => false,
+        AncestryRequirement::Merge { base } => {
+            bad_id(base) || expected_parents.is_none_or(|parents| parents.len() != 2)
+        }
+        AncestryRequirement::Squash { base, source } => {
+            bad_id(base)
+                || bad_id(source)
+                || expected_parents.is_none_or(|parents| parents.len() != 1)
+        }
+        AncestryRequirement::FastForward { base } => {
+            bad_id(base) || base == candidate || expected_parents.is_some()
+        }
+    };
+    if invalid_ancestry {
         return Err(invalid());
     }
     let maximum = MergeObjectLimits::default();
@@ -185,6 +240,15 @@ fn validate_candidate_objects(
         &mut pending,
         limits,
     )?;
+    if let AncestryRequirement::Squash { source, .. } = ancestry {
+        require_object(
+            source,
+            ObjectType::Commit,
+            &mut required,
+            &mut pending,
+            limits,
+        )?;
+    }
     let mut total_bytes = 0_usize;
     let mut edges = 0_usize;
 
@@ -295,21 +359,28 @@ fn validate_candidate_objects(
             require_object(target, kind, &mut required, &mut pending, limits)?;
         }
     }
-    if let Some(base) = merge_base {
-        let expected_parents = expected_parents.ok_or_else(invalid)?;
-        if !parents.contains_key(&base)
-            || !is_ancestor(base, expected_parents[1], &parents, deadline)?
-            || !is_ancestor(base, expected_parents[0], &parents, deadline)?
-        {
-            return Err(invalid());
+    match ancestry {
+        AncestryRequirement::Merge { base } | AncestryRequirement::Squash { base, .. } => {
+            let expected_parents = expected_parents.ok_or_else(invalid)?;
+            let source = match ancestry {
+                AncestryRequirement::Squash { source, .. } => source,
+                _ => expected_parents[1],
+            };
+            if !parents.contains_key(&base)
+                || !is_ancestor(base, source, &parents, deadline)?
+                || !is_ancestor(base, expected_parents[0], &parents, deadline)?
+            {
+                return Err(invalid());
+            }
         }
-    }
-    if let Some(base) = fast_forward_base
-        && !is_ancestor(base, candidate, &parents, deadline)?
-    {
-        return Err(ProjectionFailure::Refuse(
-            RefusalCode::NonFastForwardRefused,
-        ));
+        AncestryRequirement::FastForward { base } => {
+            if !is_ancestor(base, candidate, &parents, deadline)? {
+                return Err(ProjectionFailure::Refuse(
+                    RefusalCode::NonFastForwardRefused,
+                ));
+            }
+        }
+        AncestryRequirement::None => {}
     }
     checkpoint(deadline)?;
     let closure = PermittedObjectClosure::new(visited);

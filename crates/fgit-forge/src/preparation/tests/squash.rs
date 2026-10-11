@@ -451,3 +451,50 @@ fn cancellation_at_every_observed_checkpoint_returns_no_squash_candidate() {
         assert_eq!(clean(run(&uninterrupted)), baseline);
     }
 }
+
+#[test]
+fn squash_may_reuse_a_single_topic_commit_when_metadata_and_parent_bytes_are_identical() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = Source::new(format);
+        let old_tree = source.store_tree(vec![]);
+        let target = source.store_commit(old_tree, &[], "target");
+        let file = source.file(b"file", b"single topic change\n", 0o100644);
+        let tree = source.store_tree(vec![file]);
+        let incoming = source.store_commit(tree, &[target], "single topic\n");
+        let mut metadata = metadata();
+        metadata.message = b"single topic\n".to_vec();
+        for profile in [MergeProfile::PathMergeV1, MergeProfile::ExactRenamesV1] {
+            let plan = clean(prepare_merge_with_options(
+                &source,
+                format,
+                target,
+                incoming,
+                &metadata,
+                PreparationLimits::default(),
+                profile,
+                MergeCommitStyle::Squash,
+            ));
+            assert_eq!(plan.style, MergeCommitStyle::Squash);
+            assert_eq!(plan.commit, incoming);
+            assert_eq!(plan.tree, tree);
+            assert_eq!(plan.objects.len(), 1);
+            assert_eq!(
+                candidate_body(&plan),
+                format!(
+                    "tree {tree}\nparent {target}\nauthor T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\nsingle topic\n"
+                )
+                .as_bytes()
+            );
+            let ordinary = clean(prepare_merge_with_profile(
+                &source,
+                format,
+                target,
+                incoming,
+                &metadata,
+                PreparationLimits::default(),
+                profile,
+            ));
+            assert_ne!(ordinary.commit, incoming);
+        }
+    }
+}

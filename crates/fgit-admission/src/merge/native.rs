@@ -51,6 +51,9 @@ pub enum NativeMergeMethod {
     MergeCommit,
     /// Move to the already admitted source tip only after proving target ancestry.
     FastForwardOnly,
+    /// Independently reviewed commit whose sole parent is target-before, with
+    /// the source and common base verified separately from the candidate closure.
+    Squash,
 }
 
 /// A reviewed native merge. A new stream records a merge receipt, not invented
@@ -119,6 +122,27 @@ impl NativeMergeIntent {
         Ok(intent)
     }
 
+    /// Squash an EXISTING pull request into one explicitly reviewed candidate.
+    /// The candidate's sole parent must be target-before, and admission verifies
+    /// both source histories and their supplied common base from native bytes.
+    /// This is a distinct sealed method, never a fallback after merge failure.
+    pub fn squash(
+        pull_request: PullRequestNumber,
+        expected_version: AggregateVersion,
+        merge: NativeMerge,
+    ) -> Result<Self, AdmissionError> {
+        if merge.source_tip == merge.target_tip_before {
+            return Err(incoherent("native squash source equals target"));
+        }
+        let mut intent = Self::new(
+            pull_request,
+            ExpectedVersion::Exactly(expected_version),
+            merge,
+        )?;
+        intent.method = NativeMergeMethod::Squash;
+        Ok(intent)
+    }
+
     #[must_use]
     pub const fn method(&self) -> NativeMergeMethod {
         self.method
@@ -170,13 +194,18 @@ impl NativeMergeIntent {
             AsciiSlug::from_static("merge.event-batch-root"),
             event_root.bytes().as_bytes(),
         )?];
-        if self.method == NativeMergeMethod::FastForwardOnly {
+        let method = match self.method {
+            NativeMergeMethod::MergeCommit => None,
+            NativeMergeMethod::FastForwardOnly => Some(b"fast-forward-only/v1".as_slice()),
+            NativeMergeMethod::Squash => Some(b"squash/v1".as_slice()),
+        };
+        if let Some(method) = method {
             // Old two-parent seals remain byte-identical. Even the same event
             // coordinates under the legacy method cannot alias this request.
             scoped.push(ScopedEntry::new(
                 AsciiSlug::from_static("forge"),
                 AsciiSlug::from_static("merge.method"),
-                b"fast-forward-only/v1",
+                method,
             )?);
         }
         let request = SemanticRequest::build(
@@ -262,6 +291,24 @@ where
     /// validated two-parent merge. Implementations must verify parent ancestry,
     /// the entire admitted source closure, and the same current merge policy.
     fn validate_fast_forward_async<'a>(
+        &'a self,
+        _authority: &'a S,
+        _cx: &'a S::Context,
+        _basis: &'a PublicationBasis,
+        _authenticated: &'a AuthenticatedHead,
+        _intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        std::future::ready(Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        )))
+    }
+
+    /// Explicit opt-in for a one-parent squash candidate. Implementations must
+    /// independently validate its sole target parent, both source histories and
+    /// their common base under one bounded walk, plus current source selection
+    /// and merge policy. Supporting two-parent validation does not grant this
+    /// capability; an adapter that omits this hook remains fail-closed.
+    fn validate_squash_async<'a>(
         &'a self,
         _authority: &'a S,
         _cx: &'a S::Context,
@@ -529,6 +576,11 @@ where
                 NativeMergeMethod::FastForwardOnly => {
                     projection
                         .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
+                        .await?
+                }
+                NativeMergeMethod::Squash => {
+                    projection
+                        .validate_squash_async(store, cx, &basis, &authenticated, intent)
                         .await?
                 }
             };

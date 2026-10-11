@@ -44,6 +44,7 @@ use fgit_admission::{
     permitted_object_closure_root, prepare_canonical_commit, ref_state_root,
     validate_source_import,
 };
+pub use fgit_admission::merge::native::NativeMergeMethod;
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod capsule_history;
 pub mod source_retrieval;

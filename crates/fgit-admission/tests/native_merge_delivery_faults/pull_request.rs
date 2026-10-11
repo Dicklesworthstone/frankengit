@@ -5,6 +5,8 @@
 
 #[path = "pull_request/faults.rs"]
 mod faults;
+#[path = "pull_request/squash.rs"]
+mod squash;
 
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositionStateEntry};
 use fgit_forge::event::pull_request::{
