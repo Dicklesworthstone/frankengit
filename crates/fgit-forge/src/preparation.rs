@@ -31,6 +31,15 @@ pub enum MergeProfile {
     ExactRenamesV1,
 }
 
+/// Parent shape is independent of the tree merge profile. Squash retains the
+/// target as its only parent while applying the same bounded merge semantics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MergeCommitStyle {
+    #[default]
+    TwoParent,
+    Squash,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitInput {
     pub tree: GitOid,
@@ -188,6 +197,7 @@ pub struct PlannedMergeObject {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedMerge {
+    pub style: MergeCommitStyle,
     pub base: GitOid,
     pub target: GitOid,
     pub source: GitOid,
@@ -309,6 +319,32 @@ pub fn prepare_merge_with_profile<S: MergeObjectSource>(
     limits: PreparationLimits,
     profile: MergeProfile,
 ) -> Result<MergePreparation, PreparationError> {
+    prepare_merge_with_options(
+        source,
+        format,
+        target,
+        incoming,
+        metadata,
+        limits,
+        profile,
+        MergeCommitStyle::TwoParent,
+    )
+}
+
+/// Select tree semantics and commit parent shape independently. Squash creates
+/// one commit with the target as its sole parent; source ancestry, conflicts,
+/// cancellation and construction limits are checked exactly as for two parents.
+/// An already integrated source still returns `AlreadyUpToDate`.
+pub fn prepare_merge_with_options<S: MergeObjectSource>(
+    source: &S,
+    format: GitHashAlgorithm,
+    target: GitOid,
+    incoming: GitOid,
+    metadata: &MergeMetadata,
+    limits: PreparationLimits,
+    profile: MergeProfile,
+    style: MergeCommitStyle,
+) -> Result<MergePreparation, PreparationError> {
     limits.validate()?;
     metadata.validate()?;
     source.checkpoint()?;
@@ -372,20 +408,45 @@ pub fn prepare_merge_with_profile<S: MergeObjectSource>(
         });
     }
     let tree = tree.ok_or(PreparationError::InvalidTree)?;
-    finish_merge(planner, base, target, incoming, tree, metadata).map(MergePreparation::Clean)
+    finish_merge_with_style(planner, base, target, incoming, tree, metadata, style)
+        .map(MergePreparation::Clean)
 }
 
-/// Both automatic and explicit-resolution preparation use these exact commit bytes.
+/// Explicit resolution retains its existing two-parent commit contract.
 fn finish_merge<S: MergeObjectSource>(
-    mut planner: Planner<'_, S>,
+    planner: Planner<'_, S>,
     base: GitOid,
     target: GitOid,
     incoming: GitOid,
     tree: GitOid,
     metadata: &MergeMetadata,
 ) -> Result<PreparedMerge, PreparationError> {
+    finish_merge_with_style(
+        planner,
+        base,
+        target,
+        incoming,
+        tree,
+        metadata,
+        MergeCommitStyle::TwoParent,
+    )
+}
+
+fn finish_merge_with_style<S: MergeObjectSource>(
+    mut planner: Planner<'_, S>,
+    base: GitOid,
+    target: GitOid,
+    incoming: GitOid,
+    tree: GitOid,
+    metadata: &MergeMetadata,
+    style: MergeCommitStyle,
+) -> Result<PreparedMerge, PreparationError> {
+    let incoming_parent = match style {
+        MergeCommitStyle::TwoParent => format!("parent {incoming}\n"),
+        MergeCommitStyle::Squash => String::new(),
+    };
     let mut body = format!(
-        "tree {tree}\nparent {target}\nparent {incoming}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
+        "tree {tree}\nparent {target}\n{incoming_parent}author {} {} +0000\ncommitter {} {} +0000\n\n",
         metadata.author, metadata.timestamp, metadata.committer, metadata.timestamp,
     ).into_bytes();
     if body.len().saturating_add(metadata.message.len()) > planner.limits.max_output_bytes {
@@ -395,6 +456,7 @@ fn finish_merge<S: MergeObjectSource>(
     let commit = planner.emit(GitObjectKind::Commit, body)?;
     planner.source.checkpoint()?;
     Ok(PreparedMerge {
+        style,
         base,
         target,
         source: incoming,
@@ -766,6 +828,8 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
 
 #[cfg(test)]
 mod tests {
+    mod squash;
+
     use super::*;
     use std::cell::Cell;
     use std::fmt::Write as _;
