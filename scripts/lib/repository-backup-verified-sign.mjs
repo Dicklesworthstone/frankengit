@@ -1,5 +1,6 @@
 // Native verification gates publication of an ordinary detached backup approval.
 // The operator adapter neither decodes an archive nor publishes repository state.
+import { backupExportCheckpoint, checkExportVerification } from './repository-backup-export-receipt.mjs';
 import { constants } from 'node:fs';
 import { mkdtemp, open, lstat, realpath, rmdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -29,10 +30,11 @@ const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
  */
 export async function approveVerifiedRepositoryBackup(raw) {
   const keys = ['fg', 'input', 'output', 'privateKey', 'declarations', 'verificationInstance',
-    'trustedLocal', 'maximumBytes', 'timeoutMs', 'signal'];
+    'trustedLocal', 'maximumBytes', 'timeoutMs', 'signal', 'checkpoint'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))
     || raw.trustedLocal !== true) fail('backup_explicit_local_operation_required');
   const options = { ...raw };
+  const checkpoint = raw.checkpoint === undefined ? undefined : backupExportCheckpoint(raw.checkpoint);
   for (const field of ['fg', 'input', 'output', 'privateKey']) options[field] = backupPath(options[field]);
   if (!isAbsolute(options.fg)) fail('backup_absolute_fg_required');
   for (const field of ['input', 'output', 'privateKey']) options[field] = resolve(options[field]);
@@ -56,6 +58,7 @@ export async function approveVerifiedRepositoryBackup(raw) {
     options.output = join(parent, basename(options.output));
     await absent(options.output); current();
     const artifact = await hashRepositoryBackup(options.input, live); current();
+    checkExportVerification(checkpoint, artifact);
     const statement = { ...declarations, artifact: { bytes: artifact.bytes, sha256: artifact.sha256 } };
     scratch = await mkdtemp(join(tmpdir(), 'fg-verify-sign-'));
     const directory = await open(scratch, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -68,6 +71,7 @@ export async function approveVerifiedRepositoryBackup(raw) {
         '--verification-instance', instance, '--max-archive-bytes', String(live.maximumBytes),
         '--timeout-secs', String(Math.ceil(live.remaining() / 1000))];
       native = repositoryBackupReceipt(await runImportProcess(options.fg, args, live), 'verify', statement, instance);
+      checkExportVerification(checkpoint, artifact, native);
       // Do not believe a scratch_removed flag without checking the filesystem.
       // Never recursively remove unknown native files, even on a failed run.
       await absent(path);
