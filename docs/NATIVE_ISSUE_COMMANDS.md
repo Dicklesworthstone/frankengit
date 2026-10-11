@@ -57,6 +57,36 @@ opening body. Comments, edits, close and reopen all advance the same issue versi
 so competing operations cannot silently lose one another. Closing an already
 closed issue and reopening an open issue do not create invented transitions.
 
+## Assign and unassign issue work
+
+```sh
+fg issue assign "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
+  --trusted-local --principal "$PRINCIPAL_ID" \
+  --idempotency-key issue-17-assign-1 --expected-version 5 \
+  --assignee "$ASSIGNEE_PRINCIPAL_ID"
+
+fg issue unassign "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
+  --trusted-local --principal "$PRINCIPAL_ID" \
+  --idempotency-key issue-17-unassign-1 --expected-version 6 \
+  --assignee "$ASSIGNEE_PRINCIPAL_ID"
+```
+
+Repeat `--assignee` to name 1–16 distinct principals, each encoded as exactly
+32 lowercase hexadecimal characters. Input order is sorted before sealing;
+duplicates and malformed IDs refuse. `assign` adds only the named principals;
+`unassign` removes only those named, preserving all other assignments. The
+resulting set can contain at most 16 principals. Removing an absent principal
+or assigning an existing principal leaves that membership unchanged but still
+records the explicitly requested action and advances the issue version.
+
+Assignments work on open and closed issues. They are metadata: they neither
+check account existence nor grant access, membership or credentials. The
+command's authenticated `--principal` remains its actor. Assignment changes
+share the exact version and retry contract of all other issue actions.
+Snapshots expose `assignees: []` for unassigned issues, including histories
+created before these actions were supported, and history retains each delta.
+The byte and upgrade contract is [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
+
 ## Read current state and the exact discussion history
 
 ```sh
@@ -148,8 +178,11 @@ adapters must supply authenticated repository metadata access before exposing it
 
 Canonical issue replay currently retains the admission layer's finite 4,096-event
 and 32 MiB history envelope. This is not a claim of indexed large-forge scalability.
-Repository-wide mandatory Git protection, remote ACLs, issue attachments, search,
-assignment and a browser UI remain separate work.
+Repository-wide mandatory Git protection, remote ACLs, issue attachments,
+milestones, and issue locking remain separate work. The assignment controls are
+also exposed by the [HTTP API](HTTP_ISSUE_API.md),
+[MCP metadata tools](MCP_METADATA_WRITES.md), and
+[native browser](BROWSER_ISSUE_WORKFLOW.md).
 
 ## Native regression entrypoints
 
@@ -165,7 +198,9 @@ The process campaign uses a real built `fg`; every operation opens and closes th
 file-backed node. It covers both native hash formats, complete lifecycle, preserved
 fields, exact comments, historical retries, changed-key refusal, missing issues,
 pinned issue/history pages, stale snapshots, invalid body files and artifact-free
-outcome recovery. Presence of the campaign is not an execution claim.
+outcome recovery. Assignment coverage includes sorted deltas, preserved other
+assignees, pinned history, restart, stale versions and malformed IDs. Presence
+of the campaign is not an execution claim.
 
 The prerequisite repairs removed a duplicate `IssueChanged` enum insertion and
 completed its missing normal-form encoding using the existing reference trace tag

@@ -18,6 +18,7 @@ fn issue(number: u64, matching: bool) -> IssueSnapshot {
         title: if matching { "hit" } else { "miss" }.into(),
         body: String::new(),
         labels: Vec::new(),
+        assignees: Vec::new(),
         state: IssueState::Open,
         opened_by: PrincipalId::from_bytes([1; 16]),
         last_actor: PrincipalId::from_bytes([1; 16]),

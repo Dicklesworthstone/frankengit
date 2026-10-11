@@ -1,7 +1,9 @@
 //! Parse complete versioned commands without opening the node or input files.
 use fgit_authority::IdempotencyKey;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
-use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueEdit, MAX_BODY_BYTES, MAX_LABELS};
+use fgit_forge::event::issue::{
+    IssueAction, IssueCommand, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
+};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, GitHashAlgorithm, PrincipalId, RepositoryAuthorityHeadId,
@@ -52,7 +54,10 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         return Err("issue arguments exceed the bounded local profile".to_owned());
     }
     let action = arguments[0].as_str();
-    let mutate = matches!(action, "open" | "edit" | "close" | "reopen" | "comment");
+    let mutate = matches!(
+        action,
+        "open" | "edit" | "close" | "reopen" | "comment" | "assign" | "unassign"
+    );
     if !mutate && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
     }
@@ -75,6 +80,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut flags = BTreeMap::new();
     let (mut trusted, mut clear_labels) = (false, false);
     let mut labels = Vec::<String>::new();
+    let mut assignees = Vec::new();
     while cursor < arguments.len() {
         let flag = arguments[cursor].as_str();
         cursor += 1;
@@ -98,6 +104,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                     flag,
                     "--principal" | "--idempotency-key" | "--expected-version"
                 ) || (matches!(action, "open" | "edit") && matches!(flag, "--title" | "--label"))
+                    || (matches!(action, "assign" | "unassign") && flag == "--assignee")
                     || (matches!(action, "open" | "edit" | "comment")
                         && matches!(flag, "--body" | "--body-file"))
             } else {
@@ -117,6 +124,12 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 return Err("at most 32 issue labels may be supplied".to_owned());
             }
             labels.push(value.clone());
+        } else if flag == "--assignee" {
+            if assignees.len() == MAX_ASSIGNEES {
+                return Err("at most 16 issue assignees may be supplied".to_owned());
+            }
+            assignees
+                .push(PrincipalId::from_hex(value).map_err(|_| "invalid assignee principal ID")?);
         } else if flags.insert(flag, value.as_str()).is_some() {
             return Err(format!("duplicate {flag}"));
         }
@@ -132,6 +145,10 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     labels.sort();
     if labels.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err("duplicate issue label".to_owned());
+    }
+    assignees.sort();
+    if assignees.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("duplicate issue assignee".to_owned());
     }
     let format = match flags.get("--object-format").copied().unwrap_or("sha1") {
         "sha1" => GitHashAlgorithm::Sha1,
@@ -202,6 +219,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             },
             "close" => IssueAction::Close,
             "reopen" => IssueAction::Reopen,
+            "assign" => IssueAction::Assign { assignees },
+            "unassign" => IssueAction::Unassign { assignees },
             _ => unreachable!("action whitelist"),
         };
         let command = IssueCommand {

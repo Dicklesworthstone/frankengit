@@ -602,6 +602,46 @@ one version, or resource/cancellation failure cannot become a complete empty or
 partial timeline. Source-line anchors, comment editing/deletion, thread resolution
 and comment federation are outside this append-only event type.
 
+### 20.2 Native issue assignment deltas
+
+The native issue stream uses the same aggregate version for opening, field
+edits, comments, close/reopen and assignment. Assignment is a metadata relation
+from an issue to opaque `PrincipalId` values. It does not establish that a
+principal exists, authenticate a caller, grant membership or access, change
+policy, or select a notification destination. Adapters require their existing
+repository issue-write grant; the authenticated actor remains distinct from
+the principals named in the action.
+
+The canonical owner is `fgit-forge/src/event/issue.rs`. Within the existing
+native issue event payload, required `IssueAction` tags **6** (`Assign`) and
+**7** (`Unassign`) extend tags 1–5 without changing any existing bytes. Each
+new tag is a big-endian `u32`, followed by a big-endian `u32` count and that
+many raw 16-byte principal IDs. The count is 1–16 and is checked before
+allocation. IDs must be strictly increasing in byte order; duplicates and
+noncanonical order refuse. Human-facing adapters may sort supplied IDs before
+sealing but must reject duplicates. Earlier readers refuse the unfamiliar
+required tags. New readers replay all historical issue events unchanged;
+histories without assignment events yield an empty derived assignment set.
+No historical event body or identity is rewritten.
+
+`Assign` adds only the supplied principals and preserves other assignees;
+`Unassign` removes only the supplied principals and preserves the rest. Both
+apply to open or closed issues at an exact positive predecessor version.
+Each accepted action advances the issue version even when its set operation
+leaves membership unchanged. The complete resulting set has at most 16 IDs;
+exceeding it produces `ResourceBudgetExceeded` before any partial assignment
+is published. Missing or stale issue predecessors produce `EvidenceStale`.
+Assignment does not modify title, body, labels, comment count, issue state,
+opening actor, Git refs, or policy epoch.
+
+The action, selected predecessor, issue number and authenticated actor remain
+in the ordinary sealed issue command. Exact retries recover the original
+terminal decision, including refusals; key reuse cannot replace its delta.
+The existing authority-head publication includes the issue event and outbox
+obligation atomically. Derived snapshots expose the sorted `assignees` set at
+their selected authority head, while history retains the original deltas.
+Cancellation and missing evidence cannot become partial successful snapshots.
+
 ## 21. Graph and search generations
 
 Graph/search generations follow anti-rollback activation and `GRAPH_INTELLIGENCE_ARCHITECTURE.md`.

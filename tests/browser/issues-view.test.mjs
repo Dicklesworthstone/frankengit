@@ -37,8 +37,8 @@ function click(root, name) { const found = buttons(root).find(child => child.tex
 function harness(respond = () => json(page())) {
   const names = ['issue-connection', 'issue-token', 'issue-disconnect', 'issue-status', 'issue-snapshot', 'issue-list',
     'issue-show', 'show-number', 'issue-content', 'issue-paging', 'issue-change', 'change-number', 'change-version',
-    'change-action', 'change-title', 'change-body', 'change-labels', 'replace-title', 'replace-body', 'replace-labels',
-    'title-field', 'body-field', 'labels-field', 'replace-body-label', 'prepared-change', 'prepared-summary', 'prepare-change',
+    'change-action', 'change-title', 'change-body', 'change-labels', 'change-assignees', 'replace-title', 'replace-body', 'replace-labels',
+    'title-field', 'body-field', 'labels-field', 'assignees-field', 'replace-body-label', 'prepared-change', 'prepared-summary', 'prepare-change',
     'save-receipt', 'send-change', 'check-outcome', 'discard-change', 'restore-receipt',
     'issue-search', 'issue-search-query', 'issue-search-state', 'issue-search-opener',
     'issue-search-labels', 'issue-search-case', 'issue-search-scan', 'issue-search-cancel'];
@@ -55,6 +55,7 @@ function harness(respond = () => json(page())) {
       elements['change-number'].value = '1'; elements['change-version'].value = action === 'open' ? '0' : '1';
       elements['change-action'].value = action; elements['change-title'].value = fields.title ?? 'New title';
       elements['change-body'].value = fields.body ?? 'New comment'; elements['change-labels'].value = fields.labels ?? '';
+      elements['change-assignees'].value = fields.assignees ?? '';
       await elements['issue-change'].fire('submit');
     },
   };
@@ -101,6 +102,28 @@ test('edit checkboxes preserve omitted fields and explicitly clear empty labels'
   h.elements['replace-title'].checked = false; h.elements['replace-body'].checked = false;
   await h.prepare('edit'); const form = new URLSearchParams(h.client.pending.body);
   assert.equal(form.has('title'), false); assert.equal(form.has('body'), false); assert.equal(form.get('clear_labels'), 'true');
+});
+test('assignment controls display principals and publish the prepared exact-version delta', async () => {
+  const a = '11'.repeat(16), b = '22'.repeat(16);
+  const detail = history({ issue: state(1, { assignees: [a] }) });
+  const h = harness(call => json(call.method === 'POST' ? committed({ action: 'assign' }) : call.url.includes('/issues?') ? page() : detail));
+  await h.connect(); click(h.elements['issue-content'], '#1 <img onerror=alert(1)>'); await settled();
+  assert.ok(h.elements['issue-content'].textContent.includes(`Assigned principals: ${a}`));
+  click(h.elements['issue-content'], 'Remove assignees');
+  assert.equal(h.elements['change-assignees'].value, a);
+  click(h.elements['issue-content'], 'Add assignees');
+  assert.equal(h.elements['change-assignees'].value, '');
+  assert.equal(h.elements['assignees-field'].hidden, false);
+  assert.equal(h.elements['body-field'].hidden, true);
+  assert.equal(h.elements['change-version'].value, '1');
+  h.elements['change-assignees'].value = `${b}\n${a}`;
+  await h.elements['issue-change'].fire('submit');
+  assert.equal(h.calls.length, 2);
+  h.elements['change-assignees'].value = 'ff'.repeat(16);
+  h.elements['send-change'].fire('click'); await settled();
+  assert.deepEqual(new URLSearchParams(h.calls[2].body).getAll('assignee'), [a, b]);
+  assert.ok(h.calls[2].url.endsWith('/issues/1/assign'));
+  assert.match(h.elements['issue-status'].textContent, /^Committed/);
 });
 test('close and reopen prepare no title, body or label replacements', async () => {
   for (const action of ['close', 'reopen']) {

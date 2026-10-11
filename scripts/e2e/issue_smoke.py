@@ -127,6 +127,36 @@ def run_case(fg, root, fmt):
     value = json.loads(recovered.stdout)
     assert value['transaction']['tx_id'] == opened['tx_id']
     assert read('list')['snapshot_token'] == before_invalid
+
+    # Assignment is a canonical metadata delta with the same historical
+    # retry contract. Each invocation reopens the actual durable node.
+    a, b, c = '44' * 16, '55' * 16, '66' * 16
+    assert read(number=9)['issue']['assignees'] == []
+    assign_fields = ['--assignee', b, '--assignee', a]
+    assigned = mutation('assign', 9, 2, 'assign-private-key', assign_fields)
+    assert assigned['action'] == {'name': 'assign', 'assignees': [a, b]}
+    assigned_page = read(number=9)
+    assert assigned_page['issue']['assignees'] == [a, b]
+    assert assigned_page['issue']['last_actor'] == principal
+    mutation('assign', 9, 3, 'assign-more-private-key', ['--assignee', b, '--assignee', c])
+    removed = mutation('unassign', 9, 4, 'unassign-private-key', ['--assignee', a])
+    current = read(number=9)
+    assert current['issue']['assignees'] == [b, c] and current['issue']['version'] == 5
+    assert [event['action']['name'] for event in current['events']] == ['open', 'comment', 'assign', 'assign', 'unassign']
+    same_decision(assigned, mutation('assign', 9, 2, 'assign-private-key', assign_fields))
+    same_decision(removed, mutation('unassign', 9, 4, 'unassign-private-key', ['--assignee', a]))
+    assert read(number=9)['snapshot_token'] == current['snapshot_token']
+    pinned = read(number=9, fields=['--expected-head', assigned_page['snapshot_token']])
+    assert pinned == assigned_page
+    stale = mutation('assign', 9, 4, 'assignment-stale-key', ['--assignee', a], expected=3)
+    assert stale['refusal_code'] == 'EvidenceStale'
+    assert read(number=9)['issue']['assignees'] == [b, c]
+    held = read(number=9)['snapshot_token']
+    invalid = ['issue', 'assign', root, tenant, repository, '9', '--trusted-local', '--object-format', fmt,
+               '--principal', principal, '--idempotency-key', 'assignment-invalid-key', '--expected-version', '5']
+    assert invoke([*invalid, '--assignee', 'administrator'], 2, False).stdout == b''
+    assert invoke([*invalid, '--assignee', a, '--assignee', a], 2, False).stdout == b''
+    assert read(number=9)['snapshot_token'] == held
     print(f'ISSUE_LIFECYCLE format={fmt} passed commands={calls}', flush=True)
 
 

@@ -1936,7 +1936,10 @@ mod tests {
     use fgit_node::{NodeConfig, NodeRefusal, OneNode};
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
-    use super::{AtReport, CliOutcome, CliRefusal, encode_derived_id, node_config, run};
+    use super::{
+        AtReport, CliOutcome, CliRefusal, encode_derived_id, extract_init_root_layout, node_config,
+        run,
+    };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 

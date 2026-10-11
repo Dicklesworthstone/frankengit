@@ -405,3 +405,191 @@ fn issue_and_timeline_pagination_are_numeric_snapshot_pinned_and_read_only() {
     assert_eq!(snapshot(&node).basis(), after.basis());
     node.shutdown().unwrap();
 }
+
+#[test]
+fn durable_assignments_preserve_authority_bounded_sets_pinned_history_and_exact_retries() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = node(&scratch, format);
+        let before = snapshot(&node);
+        let principal = |seed| PrincipalId::from_bytes([seed; 16]);
+        accepted(apply(&node, &open(7), "open-assignment"));
+        assert!(
+            history(&node, 7, 0, None)
+                .unwrap()
+                .issue
+                .unwrap()
+                .assignees
+                .is_empty()
+        );
+        let assign = change(
+            7,
+            1,
+            IssueAction::Assign {
+                assignees: vec![principal(1), principal(2)],
+            },
+        );
+        let assigned = accepted(apply(&node, &assign, "assign"));
+        let pinned = history(&node, 7, 0, None).unwrap();
+        assert_eq!(
+            pinned.issue.as_ref().unwrap().assignees,
+            vec![principal(1), principal(2)]
+        );
+        accepted(apply(
+            &node,
+            &change(
+                7,
+                2,
+                IssueAction::Assign {
+                    assignees: vec![principal(2), principal(3)],
+                },
+            ),
+            "assign-more",
+        ));
+        let unassign = change(
+            7,
+            3,
+            IssueAction::Unassign {
+                assignees: vec![principal(2), principal(4)],
+            },
+        );
+        let unassigned = accepted(apply(&node, &unassign, "unassign"));
+        let issue = history(&node, 7, 0, None).unwrap().issue.unwrap();
+        assert_eq!(issue.assignees, vec![principal(1), principal(3)]);
+        assert_eq!(issue.version.get(), 4);
+        assert_eq!(issue.last_actor, actor());
+        assert_eq!(
+            history(&node, 7, 0, Some(pinned.source_head)).unwrap(),
+            pinned
+        );
+        let after = snapshot(&node);
+        no_code_changes(&before, &after);
+        assert_eq!(apply(&node, &assign, "assign").unwrap(), assigned);
+        assert_eq!(apply(&node, &unassign, "unassign").unwrap(), unassigned);
+        assert!(
+            apply(
+                &node,
+                &change(
+                    7,
+                    1,
+                    IssueAction::Assign {
+                        assignees: vec![principal(9)]
+                    }
+                ),
+                "assign"
+            )
+            .is_err()
+        );
+        assert_eq!(snapshot(&node).basis(), after.basis());
+
+        let cancel = node.request_context();
+        cancel.authority().cancel();
+        let remove = change(
+            7,
+            4,
+            IssueAction::Unassign {
+                assignees: vec![principal(3)],
+            },
+        );
+        assert!(
+            node.runtime()
+                .block_on(node.admit_issue_durable_in(
+                    &cancel,
+                    &session("cancel-assignment"),
+                    &remove,
+                    AdmissionLimits::default()
+                ))
+                .is_err()
+        );
+        assert_eq!(snapshot(&node).basis(), after.basis());
+        let stale = apply(
+            &node,
+            &change(
+                7,
+                3,
+                IssueAction::Assign {
+                    assignees: vec![principal(4)],
+                },
+            ),
+            "stale-assignment",
+        )
+        .unwrap();
+        assert!(matches!(
+            stale.1.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::EvidenceStale,
+                ..
+            }
+        ));
+        assert_eq!(history(&node, 7, 0, None).unwrap().issue.unwrap(), issue);
+
+        let full: Vec<_> = (1..=16).map(principal).collect();
+        accepted(apply(
+            &node,
+            &change(
+                7,
+                4,
+                IssueAction::Assign {
+                    assignees: full.clone(),
+                },
+            ),
+            "fill-assignees",
+        ));
+        let overflow = change(
+            7,
+            5,
+            IssueAction::Assign {
+                assignees: vec![principal(17)],
+            },
+        );
+        let refused = apply(&node, &overflow, "overflow-assignees").unwrap();
+        assert!(matches!(
+            refused.1.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ResourceBudgetExceeded,
+                ..
+            }
+        ));
+        assert_eq!(
+            history(&node, 7, 0, None).unwrap().issue.unwrap().assignees,
+            full
+        );
+        accepted(apply(
+            &node,
+            &change(
+                7,
+                5,
+                IssueAction::Unassign {
+                    assignees: vec![principal(1)],
+                },
+            ),
+            "make-room",
+        ));
+        accepted(apply(
+            &node,
+            &change(7, 6, overflow.action.clone()),
+            "assign-after-room",
+        ));
+        let final_page = history(&node, 7, 0, None).unwrap();
+        assert_eq!(
+            final_page.issue.as_ref().unwrap().assignees,
+            (2..=17).map(principal).collect::<Vec<_>>()
+        );
+        no_code_changes(&before, &snapshot(&node));
+        node.shutdown().unwrap();
+
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        assert_eq!(apply(&reopened, &assign, "assign").unwrap(), assigned);
+        assert_eq!(
+            apply(&reopened, &overflow, "overflow-assignees").unwrap(),
+            refused
+        );
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert_eq!(history(&reopened, 7, 0, None).unwrap(), final_page);
+        assert_eq!(
+            history(&reopened, 7, 0, Some(pinned.source_head)).unwrap(),
+            pinned
+        );
+        reopened.shutdown().unwrap();
+    }
+}

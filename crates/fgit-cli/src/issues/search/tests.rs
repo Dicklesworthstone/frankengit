@@ -62,6 +62,7 @@ fn parses_filters_and_reuses_exact_read_identity_contract() {
                 title: "HTTP bug".into(),
                 body: String::new(),
                 labels: vec!["a".into(), "z".into()],
+                assignees: Vec::new(),
                 state: IssueState::Closed,
                 opened_by: PrincipalId::from_bytes([3; 16]),
                 last_actor: PrincipalId::from_bytes([4; 16]),

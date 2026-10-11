@@ -8,7 +8,7 @@ each request. This supplies a network operator alternative; it does not change
 the trusted-local principal semantics of the native `fg` or MCP commands.
 
 The command supports issue opening, partial edits (including labels), comments,
-closing, reopening, outcome lookup and explicit same-request retry. Mutation
+closing, reopening, assigning and unassigning principals, outcome lookup and explicit same-request retry. Mutation
 semantics and terminal-response validation are the same as the served issue UI.
 All commands require the exact issue-page URL and expected tenant/repository IDs.
 HTTPS is required except for loopback HTTP. Redirects are refused; no cookies,
@@ -40,6 +40,23 @@ number and expected version. Before staging, the command reads that issue,
 checks tenant/repository identity and refuses a moved version. The native server
 still enforces the exact expected version if state changes after this observation.
 No client read is an authorization grant and no race refreshes the request.
+
+Assignment uses the same connection options and a fresh record for each command:
+
+```sh
+node scripts/forge_issues.mjs assign \
+  --url "$ISSUE_PAGE_URL" --tenant-id "$TENANT_HEX" \
+  --repository-id "$REPOSITORY_HEX" --token-file "$PRIVATE_DIR/token" \
+  --record "$PRIVATE_DIR/assign-1.json" \
+  --number 1 --expected-version 1 --assignee "$ASSIGNEE_HEX"
+```
+
+Repeat `--assignee` for up to 16 distinct principal IDs, each exactly 32 lowercase
+hexadecimal characters. `assign` adds those IDs while preserving other assignees;
+`unassign` removes only those IDs. Both require a positive exact issue version
+and reject unrelated issue fields. Assignment records issue metadata; it does
+not create a principal, grant access or establish a notification destination.
+The native server also limits the resulting issue to 16 assignees.
 
 A new immutable record is created with exclusive file creation, synchronized,
 read back and followed by parent-directory synchronization and file close before
@@ -101,7 +118,7 @@ confirmed terminal result is not retroactively rolled back by later cancellation
 or failed stdout. Output errors return failure with `operation_completed` set
 when the command had already produced its result; the original record survives.
 
-Titles, bodies, labels, safe-integer counters and response limits retain the
+Titles, bodies, labels, assignees, safe-integer counters and response limits retain the
 shipped client profile. This does not expand it to the native u64 domain. Body
 files can be empty when clearing an issue body and have a 64-KiB ceiling. Token
 files and all control files are bounded before allocation. A prepared receipt
@@ -117,15 +134,15 @@ Exit codes: **0** committed terminal result; **3** canonical terminal refusal;
 node --test tests/operator/forge-issues.test.mjs
 ```
 
-The tests execute the unchanged shipped issue client, real fetch/HTTP sockets,
+The tests execute the shipped issue client, real fetch/HTTP sockets,
 private filesystem operations and separate CLI processes, including SIGKILL
 after the simulated server receives a mutation. Their HTTP authority is explicitly
 simulated. Additional deterministic fault-injection tests require both file and
 parent synchronization before retry submission and pause a creator in `fsync`
 while a concurrent retry establishes its own barrier. They are not native
 Rust/node/authority integration or a power-loss campaign, and do not close the
-broader CLI/MCP authentication work. No Rust, server permission, dependency,
-codec or authority changes are introduced.
+broader CLI/MCP authentication work. The wrapper uses the native mutation grammar
+and does not define additional permissions, codecs or authority.
 
 ## Read, inspect and search before choosing a version
 

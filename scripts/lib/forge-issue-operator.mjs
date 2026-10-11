@@ -4,7 +4,7 @@ import { IssueClient, mutationRequest, MAX_RECEIPT_BYTES } from '../../crates/fg
 import { operatorError, operatorPath, privateRecordPath, absentRecord, readPrivateOperatorFile,
   readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
 
-const ACTIONS = ['open', 'edit', 'comment', 'close', 'reopen'];
+const ACTIONS = ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign'];
 const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray(v) &&
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const fail = code => { throw operatorError(code); };

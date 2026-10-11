@@ -14,6 +14,7 @@ open: --number N --expected-version 0 --title TEXT [--body TEXT | --body-file PR
 edit: --number N --expected-version N [--title TEXT] [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ... | --clear-labels]
 comment: --number N --expected-version N (--body TEXT | --body-file PRIVATE_FILE)
 close|reopen: --number N --expected-version N
+assign|unassign: --number N --expected-version N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...]
 status|retry: use only the connection options and the ORIGINAL --record.
 list|show|search: read only, no --record. show requires --number N.
   [--after N --expected-head TOKEN] [--limit 1..100 --max-pages 1..100]
@@ -38,7 +39,7 @@ Exit 0: committed terminal outcome or complete read; 3: terminal refusal;
 export function issueArguments(args) {
   if (!Array.isArray(args) || args.length > 140 || args.some(a => typeof a !== 'string' || a.includes('\0') || a.length > 65536) ||
       args.reduce((n, a) => n + Buffer.byteLength(a), 0) > 256 * 1024) throw operatorError('issue_operator_argument_limit');
-  const operation = args[0], map = new Map(), labels = []; let clear = false, caseSensitive = false;
+  const operation = args[0], map = new Map(), labels = [], assignees = []; let clear = false, caseSensitive = false;
   const allowed = ['--url', '--tenant-id', '--repository-id', '--token-file', '--record', '--number', '--expected-version',
     '--title', '--body', '--body-file', '--timeout-ms', '--after', '--expected-head', '--limit', '--max-pages',
     '--max-output-bytes', '--state', '--opened-by', '--query', '--max-scan'];
@@ -46,14 +47,18 @@ export function issueArguments(args) {
     const flag = args[i];
     if (flag === '--case-sensitive') { if (caseSensitive) throw operatorError('issue_operator_duplicate_option'); caseSensitive = true; continue; }
     if (flag === '--clear-labels') { if (clear) throw operatorError('issue_operator_duplicate_option'); clear = true; continue; }
-    if (flag !== '--label' && (!allowed.includes(flag) || map.has(flag))) throw operatorError('issue_operator_unknown_or_duplicate_option');
+    if (!['--label', '--assignee'].includes(flag) && (!allowed.includes(flag) || map.has(flag))) throw operatorError('issue_operator_unknown_or_duplicate_option');
     const value = args[++i]; if (value === undefined) throw operatorError('issue_operator_missing_value');
-    if (flag === '--label') labels.push(value); else map.set(flag, value);
+    if (flag === '--label') labels.push(value);
+    else if (flag === '--assignee') {
+      if (assignees.length === 16) throw operatorError('issue_operator_assignee_limit');
+      assignees.push(value);
+    } else map.set(flag, value);
   }
   if ((clear && labels.length) || (map.has('--body') && map.has('--body-file'))) throw operatorError('issue_operator_conflicting_fields');
   const reading = ['list', 'show', 'search'].includes(operation);
   if (reading) {
-    if (clear || ['--record', '--expected-version', '--title', '--body', '--body-file'].some(k => map.has(k))) throw operatorError('issue_read_mutation_option');
+    if (clear || assignees.length || ['--record', '--expected-version', '--title', '--body', '--body-file'].some(k => map.has(k))) throw operatorError('issue_read_mutation_option');
     if (operation !== 'search' && (labels.length || caseSensitive || ['--state', '--opened-by', '--query', '--max-scan'].some(k => map.has(k)))) throw operatorError('issue_read_search_inapplicable');
     const query = {};
     if (map.has('--state') && map.get('--state') !== 'all') query.state = map.get('--state');
@@ -77,6 +82,7 @@ export function issueArguments(args) {
   if (map.has('--body-file')) fields.body = 'pending private file';
   if (operation === 'open' && !Object.hasOwn(fields, 'body')) fields.body = '';
   if (labels.length || clear) fields.labels = labels;
+  if (assignees.length) fields.assignees = assignees;
   const raw = { operation, href: map.get('--url'), tenant: map.get('--tenant-id'), repository: map.get('--repository-id'),
     tokenFile: map.get('--token-file'), record: map.get('--record'),
     ...(map.has('--number') ? { number: decimal(map.get('--number'), 'issue number', 1) } : {}),

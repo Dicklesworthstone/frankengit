@@ -316,7 +316,11 @@ fn canonical_issue_lifecycle_retries_refusals_and_recovery_survive_reopen_in_bot
 fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     let f = Fixture::new(GitHashAlgorithm::Sha256);
     let mut writer = NodeTools::open(f.options(true, false, false, 0xa3)).unwrap();
-    assert_eq!(writer.tools().len(), 5);
+    assert_eq!(writer.tools().len(), 7);
+    for name in ["frankengit_issue_assign", "frankengit_issue_unassign"] {
+        assert!(writer.tools().iter().any(|tool| tool.name == name));
+        assert!(writer.is_mutation(name));
+    }
     for name in [
         "frankengit_issue_list",
         outcomes::NAME,
@@ -357,6 +361,8 @@ fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     let mut reader = NodeTools::open(f.options(false, true, false, 0xa3)).unwrap();
     assert_eq!(reader.tools().len(), 1);
     assert!(reader.call("frankengit_issue_open", &args).is_err());
+    assert!(reader.call("frankengit_issue_assign", &args).is_err());
+    assert!(reader.call("frankengit_issue_unassign", &args).is_err());
     let mut injected = key;
     injected.insert("principal".into(), text("other"));
     assert!(reader.call(outcomes::NAME, &injected).unwrap_err().invalid);
@@ -367,6 +373,109 @@ fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     let mut unbound = f.options(true, false, false, 0xa3);
     unbound.principal = None;
     assert!(NodeTools::open(unbound).is_err());
+}
+
+#[test]
+fn issue_assignment_tools_publish_read_and_recover_the_same_canonical_events() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format);
+        let mut backend = NodeTools::open(f.options(true, true, true, 0xa3)).unwrap();
+        let mut server = initialized(&mut backend);
+        assert!(!failed(&invoke(
+            &mut server,
+            &mut backend,
+            2,
+            "frankengit_issue_open",
+            opening()
+        )));
+        let a = text("11".repeat(16));
+        let b = text("22".repeat(16));
+        let args = command(
+            "7",
+            "1",
+            "assign-key",
+            &[("assignees", Value::Array(vec![b.clone(), a.clone()]))],
+        );
+        let assigned = invoke(
+            &mut server,
+            &mut backend,
+            3,
+            "frankengit_issue_assign",
+            args.clone(),
+        );
+        assert!(!failed(&assigned));
+        assert_eq!(structured(&assigned)["outcome"].text(), Some("committed"));
+        let show = object([("number", text("7"))]);
+        let current = invoke(
+            &mut server,
+            &mut backend,
+            4,
+            "frankengit_issue_show",
+            show.clone(),
+        );
+        let issue = structured(&current)["issue"].object().unwrap();
+        assert_eq!(issue["assignees"], Value::Array(vec![a.clone(), b.clone()]));
+        assert_eq!(
+            issue["last_actor"].text(),
+            Some("a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3")
+        );
+        let held = current_head(&backend);
+        let retry = invoke(
+            &mut server,
+            &mut backend,
+            5,
+            "frankengit_issue_assign",
+            args.clone(),
+        );
+        assert_eq!(structured(&retry), structured(&assigned));
+        assert_eq!(current_head(&backend), held);
+        let removed = invoke(
+            &mut server,
+            &mut backend,
+            6,
+            "frankengit_issue_unassign",
+            command(
+                "7",
+                "2",
+                "unassign-key",
+                &[("assignees", Value::Array(vec![a]))],
+            ),
+        );
+        assert_eq!(structured(&removed)["outcome"].text(), Some("committed"));
+        let current = invoke(
+            &mut server,
+            &mut backend,
+            7,
+            "frankengit_issue_show",
+            show.clone(),
+        );
+        assert_eq!(
+            structured(&current)["issue"].object().unwrap()["assignees"],
+            Value::Array(vec![b])
+        );
+        let held = current_head(&backend);
+        backend.close().unwrap();
+
+        let mut backend = NodeTools::open(f.options(true, true, true, 0xa3)).unwrap();
+        let mut server = initialized(&mut backend);
+        let retry = invoke(
+            &mut server,
+            &mut backend,
+            2,
+            "frankengit_issue_assign",
+            args,
+        );
+        assert_eq!(structured(&retry), structured(&assigned));
+        let recovered = recover(&mut server, &mut backend, 3, "unassign-key");
+        assert_eq!(
+            structured(&recovered)["tx_id"],
+            structured(&removed)["tx_id"]
+        );
+        let reopened = invoke(&mut server, &mut backend, 4, "frankengit_issue_show", show);
+        assert_eq!(structured(&reopened), structured(&current));
+        assert_eq!(current_head(&backend), held);
+        backend.close().unwrap();
+    }
 }
 
 #[test]

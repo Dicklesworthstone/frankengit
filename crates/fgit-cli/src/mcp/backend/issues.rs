@@ -132,6 +132,9 @@ fn optional(value: Option<u64>) -> Value {
 fn labels(values: &[String]) -> Value {
     Value::Array(values.iter().cloned().map(text).collect())
 }
+fn assignees(values: &[fgit_types::PrincipalId]) -> Value {
+    Value::Array(values.iter().map(|id| text(id.to_string())).collect())
+}
 fn snapshot(issue: &IssueSnapshot) -> Value {
     object([
         ("number", text(issue.number.get().to_string())),
@@ -139,6 +142,7 @@ fn snapshot(issue: &IssueSnapshot) -> Value {
         ("title", text(issue.title.clone())),
         ("body", text(issue.body.clone())),
         ("labels", labels(&issue.labels)),
+        ("assignees", assignees(&issue.assignees)),
         (
             "state",
             text(match issue.state {
@@ -182,6 +186,12 @@ fn action(action: &IssueAction) -> Value {
         IssueAction::Reopen => object([("name", text("reopen"))]),
         IssueAction::Comment { body } => {
             object([("name", text("comment")), ("body", text(body.clone()))])
+        }
+        IssueAction::Assign { assignees: values } | IssueAction::Unassign { assignees: values } => {
+            object([
+                ("name", text(action.name())),
+                ("assignees", assignees(values)),
+            ])
         }
     }
 }

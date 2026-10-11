@@ -81,6 +81,8 @@ POST {REPO_URL}/api/v1/issues/{number}/edit
 POST {REPO_URL}/api/v1/issues/{number}/close
 POST {REPO_URL}/api/v1/issues/{number}/reopen
 POST {REPO_URL}/api/v1/issues/{number}/comment
+POST {REPO_URL}/api/v1/issues/{number}/assign
+POST {REPO_URL}/api/v1/issues/{number}/unassign
 ```
 
 The caller supplies a positive issue number. There is no implicit allocator or
@@ -99,6 +101,17 @@ other actions require the exact positive predecessor version.
 | `edit` | At least one of `title`, `body`, repeated `label`, or `clear_labels=true`. Omitted fields are preserved. `body=` clears a body. |
 | `comment` | Required nonblank `body`. |
 | `close`, `reopen` | No fields besides `expected_version`. |
+| `assign`, `unassign` | Required repeated `assignee`: 1–16 distinct 32-character lowercase hexadecimal principal IDs. |
+
+Assignment adds or removes only the named principals, preserving all other
+assignees. The resulting set is bounded to 16. Input IDs are sorted before
+sealing, with duplicates rejected. Membership changes are idempotent, but each
+accepted action still advances the exact issue version. Both open and closed
+issues accept assignment deltas. These IDs are metadata, not an authentication
+mechanism, account-existence assertion, access grant or notification endpoint.
+`issues-write` remains required; naming an `issues-read` principal never widens
+that principal's credentials. The wire and upgrade contract is
+[normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
 
 Repeated labels are sorted into the canonical set; duplicate labels are rejected.
 `clear_labels=true` cannot be combined with labels. Unknown fields, duplicate
@@ -159,6 +172,12 @@ at the selected head and versioned action/comment events, plus optional
 `next_after_version`. A missing issue returns HTTP 404 with `found: false`, not
 an empty fabricated issue. An issue created after a pinned head remains absent
 when read through that earlier token.
+
+Each issue snapshot includes a sorted `assignees` array of canonical principal
+IDs, empty for unassigned or historical pre-assignment state. Assignment history
+actions are `{"name":"assign","assignees":["<principal-id>"]}` or
+`{"name":"unassign","assignees":["<principal-id>"]}`. They retain the original
+delta rather than replacing it with the current assignment set.
 
 Every page includes an algorithm-qualified `snapshot_token` and the exact
 `source_head`. Continue using that token and the returned cursor:

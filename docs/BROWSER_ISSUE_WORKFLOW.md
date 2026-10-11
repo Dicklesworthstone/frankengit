@@ -12,13 +12,22 @@ Outcome recovery additionally requires its existing endpoint switch.
 
 List issues and page their canonical event history at one explicit snapshot.
 Open an issue with an explicit number and version zero, or select an existing
-issue to prepare a comment, field edit, close or reopen at its exact version.
+issue to prepare a comment, field edit, assignment, close or reopen at its exact version.
 Title, body and labels can be replaced independently; an explicitly selected
 empty label replacement clears the set. Preparation makes no HTTP mutation.
 Inspect the prepared request, save its private recovery receipt, and send it
 explicitly. Later editor changes cannot change the prepared body or retry key.
 Native text is inert, not executable HTML or rendered Markdown. UTF-8 limits,
 exact safe integers, response byte budgets and snapshot continuity are checked.
+
+Issue details display the assigned principal IDs. **Add assignees** and
+**Remove assignees** prepare an exact-version metadata delta. Enter one
+32-character lowercase hexadecimal principal ID per line, up to 16 distinct
+IDs. Adding preserves other assignments; removing changes only the named IDs.
+The removal editor is prefilled with the current set so it can be narrowed
+before preparation. Assignments confer no repository access or membership.
+As with comments, preparing, saving a receipt and explicitly sending are
+separate actions; editing the form later cannot change the prepared request.
 
 ## Ambiguous outcomes
 

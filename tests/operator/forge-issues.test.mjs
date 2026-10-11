@@ -42,7 +42,7 @@ async function fixture(t) {
       return respond(200, { type: 'issue_history', ...common(), snapshot_token: snapshot, after_version: after, limit,
         found: Boolean(f.row), issue: f.row, events, next_after_version: f.events.length > after + events.length ? after + events.length : null });
     }
-    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen)$/.exec(url.pathname);
+    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign)$/.exec(url.pathname);
     if (!match || req.method !== 'POST') return respond(404, {});
     if (f.onMutation) f.onMutation({ key, body });
     const form = new URLSearchParams(body), action = match[1], expected = Number(form.get('expected_version'));
@@ -58,7 +58,7 @@ async function fixture(t) {
       if (committed) {
         f.version++;
         if (action === 'open') f.row = { number: 1, version: 1, title: form.get('title'), body: form.get('body'), labels: form.getAll('label'),
-          state: 'open', opened_by: actor, last_actor: actor, comments: 0 };
+          assignees: [], state: 'open', opened_by: actor, last_actor: actor, comments: 0 };
         f.row.version = f.version;
         if (action === 'close' || action === 'reopen') f.row.state = action === 'close' ? 'closed' : 'open';
         if (action === 'comment') f.row.comments++;
@@ -66,9 +66,12 @@ async function fixture(t) {
           for (const k of ['title', 'body']) if (form.has(k)) f.row[k] = form.get(k);
           if (form.has('label') || form.has('clear_labels')) f.row.labels = form.getAll('label');
         }
+        if (action === 'assign') f.row.assignees = [...new Set([...f.row.assignees, ...form.getAll('assignee')])].sort();
+        if (action === 'unassign') f.row.assignees = f.row.assignees.filter(id => !form.getAll('assignee').includes(id));
         const eventAction = { name: action };
         for (const k of ['title', 'body']) if (form.has(k)) eventAction[k] = form.get(k);
         if (form.has('label') || action === 'open') eventAction.labels = form.getAll('label');
+        if (form.has('assignee')) eventAction.assignees = form.getAll('assignee');
         f.events.push({ version: f.version, actor, action: eventAction });
       }
     }
@@ -85,7 +88,7 @@ async function fixture(t) {
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
   return f;
 }
-const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen)$/.test(c.path));
+const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign)$/.test(c.path));
 function command(args) {
   const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = []; child.stdout.on('data', b => out.push(b)); child.stderr.on('data', b => err.push(b));
@@ -201,6 +204,54 @@ test('cancellation before intake and invalid grammar cause no network effects', 
   }
   assert.throws(() => issueArguments([...flags(f, 'retry'), '--body', 'replacement']));
   assert.throws(() => issueArguments([...flags(f, 'status'), '--token', token])); assert.equal(f.calls.length, 0);
+});
+test('assignment CLI validates bounded canonical IDs before files or network effects', async t => {
+  const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16);
+  for (const operation of ['assign', 'unassign']) {
+    const args = [...flags(f, operation), '--number', '1', '--expected-version', '2'];
+    const parsed = issueArguments([...args, '--assignee', b, '--assignee', a]);
+    assert.deepEqual(parsed.options.fields, { assignees: [a, b] });
+    assert.equal(parsed.bodyFile, null);
+    for (const extra of [[], ['--assignee', a, '--assignee', a], ['--assignee', 'AA'.repeat(16)],
+      ['--assignee', 'unknown'], ['--assignee', a, '--title', 'replacement'], ['--assignee', a, '--body-file', f.tokenFile],
+      ['--assignee', a, '--label', 'bug'], ['--assignee', a, '--principal', actor]]) {
+      assert.throws(() => issueArguments([...args, ...extra]));
+    }
+    const ids = Array.from({ length: 17 }, (_, i) => i.toString(16).padStart(32, '0'));
+    assert.equal(issueArguments([...args, ...ids.slice(0, 16).flatMap(id => ['--assignee', id])]).options.fields.assignees.length, 16);
+    assert.throws(() => issueArguments([...args, ...ids.flatMap(id => ['--assignee', id])]));
+    assert.throws(() => issueArguments([...flags(f, operation), '--number', '1', '--expected-version', '0', '--assignee', a]));
+  }
+  for (const operation of ['edit', 'comment', 'close', 'reopen', 'status', 'retry']) {
+    assert.throws(() => issueArguments([...flags(f, operation), '--number', '1', '--expected-version', '2', '--assignee', a]));
+  }
+  for (const operation of ['list', 'show', 'search']) {
+    assert.throws(() => issueArguments([...flags(f, operation).slice(0, -2), '--assignee', a]));
+  }
+  assert.equal(f.calls.length, 0); assert.deepEqual(await readdir(f.root), ['token']);
+});
+test('assignment and removal CLI preserve canonical receipts and recover lost replies', async t => {
+  const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16);
+  await runIssueOperation(f.options());
+  const assigned = join(f.root, 'assign.json'), removed = join(f.root, 'unassign.json');
+  f.mode = 'lost-reply';
+  const lost = await command([...flags(f, 'assign', assigned), '--number', '1', '--expected-version', '1',
+    '--assignee', b, '--assignee', a]).done;
+  assert.equal(lost.code, 2); assert.equal(f.version, 2); assert.deepEqual(f.row.assignees, [a, b]);
+  const original = await readFile(assigned), request = JSON.parse(original).receipt.request;
+  assert.deepEqual(request.fields, { assignees: [a, b] });
+  assert.equal(request.body, `expected_version=1&assignee=${a}&assignee=${b}`);
+  assert.equal(mutations(f)[1].body, request.body); assert.equal(mutations(f)[1].key, request.key);
+  f.mode = null;
+  const recovered = await command(flags(f, 'status', assigned)).done;
+  assert.equal(recovered.code, 0, recovered.stderr); assert.equal(mutations(f).length, 2);
+  const unassigned = await command([...flags(f, 'unassign', removed), '--number', '1', '--expected-version', '2', '--assignee', a]).done;
+  assert.equal(unassigned.code, 0, unassigned.stderr); assert.equal(f.version, 3); assert.deepEqual(f.row.assignees, [b]);
+  assert.deepEqual(f.events[2].action, { name: 'unassign', assignees: [a] });
+  const oldRetry = await command(flags(f, 'retry', assigned)).done;
+  assert.equal(oldRetry.code, 0, oldRetry.stderr); assert.equal(mutations(f).length, 3);
+  assert.equal(f.version, 3); assert.deepEqual(f.row.assignees, [b]);
+  assert.deepEqual(await readFile(assigned), original);
 });
 test('CLI loads private body files, sends once and can recover in a separate process', async t => {
   const f = await fixture(t), body = join(f.root, 'draft'); await writeFile(body, 'CLI private body\n', { mode: 0o600 });

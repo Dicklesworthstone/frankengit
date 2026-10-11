@@ -36,6 +36,7 @@ export function mountIssues(document, location, options = {}) {
     byId('title-field').hidden = !full;
     byId('labels-field').hidden = !full;
     byId('body-field').hidden = !full && action !== 'comment';
+    byId('assignees-field').hidden = !['assign', 'unassign'].includes(action);
     byId('replace-body-label').hidden = action !== 'edit';
   }
   function edit(issue, action) {
@@ -44,6 +45,7 @@ export function mountIssues(document, location, options = {}) {
     byId('change-title').value = issue.title;
     byId('change-body').value = action === 'comment' ? '' : issue.body;
     byId('change-labels').value = issue.labels.join('\n');
+    byId('change-assignees').value = action === 'unassign' ? (issue.assignees ?? []).join('\n') : '';
     for (const field of ['replace-title', 'replace-body', 'replace-labels']) byId(field).checked = true;
     configureEditor(); status(`Preparing against issue #${issue.number} version ${issue.version}. Nothing sent.`);
   }
@@ -83,9 +85,10 @@ export function mountIssues(document, location, options = {}) {
         content.append(node('h2', `#${number} ${issue.title}`),
           node('p', `${issue.state} · version ${issue.version} · ${issue.comments} comments`),
           node('p', `Opened by ${issue.opened_by} · last changed by ${issue.last_actor}`),
-          node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`), body(issue));
+          node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`),
+          node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
         const actions = node('div'); actions.className = 'issue-actions';
-        for (const [label, action] of [['Comment', 'comment'], ['Edit issue', 'edit'],
+        for (const [label, action] of [['Comment', 'comment'], ['Edit issue', 'edit'], ['Add assignees', 'assign'], ['Remove assignees', 'unassign'],
           [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen']]) {
           actions.append(button(label, () => edit(issue, action)));
         }
@@ -96,6 +99,7 @@ export function mountIssues(document, location, options = {}) {
           if (Object.hasOwn(event.action, 'title')) entry.append(node('p', event.action.title));
           if (Object.hasOwn(event.action, 'body')) entry.append(body(event.action));
           if (Object.hasOwn(event.action, 'labels')) entry.append(node('p', `Labels: ${event.action.labels.join(', ') || '(none)'}`));
+          if (Object.hasOwn(event.action, 'assignees')) entry.append(node('p', `Principals: ${event.action.assignees.join(', ')}`));
           content.append(entry);
         }
         if (reply.next_after_version !== null) byId('issue-paging').append(button('Next history page', () => { void read(number, reply.next_after_version, result.head); }));
@@ -147,7 +151,7 @@ export function mountIssues(document, location, options = {}) {
   }
   function disconnect() {
     session += 1; view += 1; client.disconnect(); clearView();
-    for (const id of ['issue-token', 'change-title', 'change-body', 'change-labels', 'change-number', 'change-version', 'show-number', 'restore-receipt',
+    for (const id of ['issue-token', 'change-title', 'change-body', 'change-labels', 'change-assignees', 'change-number', 'change-version', 'show-number', 'restore-receipt',
       'issue-search-query', 'issue-search-labels', 'issue-search-opener']) byId(id).value = '';
     byId('issue-search-state').value = 'all'; byId('issue-search-case').checked = false;
     byId('issue-search-scan').value = '200';
@@ -199,6 +203,10 @@ export function mountIssues(document, location, options = {}) {
           const labels = byId('change-labels').value; fields.labels = labels === '' ? [] : labels.split('\n');
         }
       } else if (action === 'comment') fields.body = byId('change-body').value;
+      else if (action === 'assign' || action === 'unassign') {
+        const ids = byId('change-assignees').value;
+        fields.assignees = ids === '' ? [] : ids.split('\n');
+      }
       await client.stage(decimal(byId('change-number').value, 'issue number', 1),
         decimal(byId('change-version').value, 'expected version'), action, fields);
       if (current !== session) return;

@@ -34,6 +34,12 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Delegation can only narrow authority.
 - Canonical policy uses one exact input root and does not consult mutable projections, wall clock, network calls, or unversioned model output.
 - Stale/replayed/confused-deputy/cross-tenant capabilities fail deterministically.
+- Native issue assignments are bounded metadata links to opaque principal IDs.
+  Naming a principal neither verifies account existence nor grants membership,
+  repository access, credentials, or notification delivery. Assignment commands
+  require the adapter's existing issue-write grant and retain the authenticated
+  actor separately. Tests assign an existing read-only principal and verify its
+  write request remains forbidden; body-supplied actor overrides are rejected.
 
 ### 1.4 Confidentiality and privacy
 

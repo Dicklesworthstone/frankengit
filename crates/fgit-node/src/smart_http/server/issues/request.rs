@@ -2,9 +2,11 @@
 //! storage path, authority root, or executable operation outside this grammar.
 
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
-use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueEdit, MAX_BODY_BYTES, MAX_LABELS};
+use fgit_forge::event::issue::{
+    IssueAction, IssueCommand, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
+};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
-use fgit_types::{CANONICAL_CODEC_VERSION, RepositoryAuthorityHeadId};
+use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
 use super::ApiError;
@@ -100,7 +102,10 @@ impl<'a> Request<'a> {
                     .strip_prefix('/')
                     .and_then(|s| s.split_once('/'))
                     .ok_or_else(ApiError::not_found)?;
-                if !matches!(action, "open" | "edit" | "close" | "reopen" | "comment") {
+                if !matches!(
+                    action,
+                    "open" | "edit" | "close" | "reopen" | "comment" | "assign" | "unassign"
+                ) {
                     return Err(ApiError::not_found());
                 }
                 Operation::Mutate {
@@ -128,6 +133,7 @@ impl<'a> Request<'a> {
         let fields = form(body, MAX_LABELS + 4)?;
         let (mut title, mut text, mut version, mut clear_labels) = (None, None, None, None);
         let mut labels = Vec::new();
+        let mut assignees = Vec::new();
         for (key, value) in fields {
             match key.as_str() {
                 "expected_version" => set_once(&mut version, decimal(&value)?)?,
@@ -143,6 +149,15 @@ impl<'a> Request<'a> {
                 }
                 "clear_labels" if action == "edit" && value == "true" => {
                     set_once(&mut clear_labels, true)?;
+                }
+                "assignee" if matches!(action, "assign" | "unassign") => {
+                    if assignees.len() == MAX_ASSIGNEES {
+                        return Err(ApiError::too_large());
+                    }
+                    assignees.push(
+                        PrincipalId::from_hex(&value)
+                            .map_err(|_| ApiError::bad("invalid_assignee"))?,
+                    );
                 }
                 _ => return Err(ApiError::bad("unknown_or_inapplicable_field")),
             }
@@ -168,6 +183,10 @@ impl<'a> Request<'a> {
         if labels.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(ApiError::bad("duplicate_label"));
         }
+        assignees.sort();
+        if assignees.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ApiError::bad("duplicate_assignee"));
+        }
         let action = match action {
             "open" => IssueAction::Open {
                 title: title.ok_or_else(|| ApiError::bad("title_required"))?,
@@ -188,6 +207,8 @@ impl<'a> Request<'a> {
             },
             "close" => IssueAction::Close,
             "reopen" => IssueAction::Reopen,
+            "assign" => IssueAction::Assign { assignees },
+            "unassign" => IssueAction::Unassign { assignees },
             _ => return Err(ApiError::not_found()),
         };
         action
@@ -391,6 +412,53 @@ mod tests {
             .unwrap()
             .unwrap();
         Request::parse(&head)?.unwrap().command(form)
+    }
+
+    #[test]
+    fn assignment_forms_accept_bounded_principal_sets_without_authority_fields() {
+        let a = "11".repeat(16);
+        let b = "22".repeat(16);
+        for action in ["assign", "unassign"] {
+            let form = format!("expected_version=2&assignee={b}&assignee={a}");
+            let parsed = command(action, form.as_bytes()).unwrap();
+            assert_eq!(parsed.action.name(), action);
+            let (IssueAction::Assign { assignees } | IssueAction::Unassign { assignees }) =
+                parsed.action
+            else {
+                panic!("assignment");
+            };
+            assert_eq!(
+                assignees,
+                vec![
+                    PrincipalId::from_hex(&a).unwrap(),
+                    PrincipalId::from_hex(&b).unwrap()
+                ]
+            );
+            for invalid in [
+                "expected_version=2".into(),
+                format!("expected_version=0&assignee={a}"),
+                format!("{form}&assignee={a}"),
+                format!("{form}&principal={a}"),
+                format!("{form}&body=unused"),
+                "expected_version=2&assignee=admin".into(),
+                "expected_version=2&assignee=ABCDEF0123456789ABCDEF0123456789".into(),
+            ] {
+                assert!(
+                    command(action, invalid.as_bytes()).is_err(),
+                    "{action}: {invalid}"
+                );
+            }
+            let mut maximum = "expected_version=2".to_owned();
+            for seed in 1..=16u8 {
+                maximum.push_str(&format!("&assignee={}", format!("{seed:02x}").repeat(16)));
+            }
+            assert!(command(action, maximum.as_bytes()).is_ok());
+            maximum.push_str(&format!("&assignee={}", "ff".repeat(16)));
+            assert_eq!(
+                command(action, maximum.as_bytes()).unwrap_err().code,
+                "resource_limit"
+            );
+        }
     }
 
     #[test]

@@ -14,6 +14,35 @@ const terminal = { ...ids, type: 'issue_publication', principal_id: 'actor', num
   repository_commit_id: 'rcr', refusal_record_id: null, refusal_code: null, delivery_acknowledged: null };
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const fresh = fetchImpl => new IssueClient({ href: 'https://forge.example/repo.git/ui/issues/', fetchImpl, cryptoImpl: webcrypto });
+
+test('assignment forms sort bounded principal sets and reject authority or malformed IDs', () => {
+  const a = '11'.repeat(16), b = '22'.repeat(16);
+  for (const action of ['assign', 'unassign']) {
+    const request = mutationRequest(1, 2, action, { assignees: [b, a] });
+    assert.deepEqual(new URLSearchParams(request.body).getAll('assignee'), [a, b]);
+    assert.deepEqual(Object.keys(request.fields), ['assignees']);
+    for (const assignees of [[], [a, a], ['admin'], ['AA'.repeat(16)], null, Array(17).fill(a)]) {
+      assert.throws(() => mutationRequest(1, 2, action, { assignees }));
+    }
+    assert.throws(() => mutationRequest(1, 2, action, { assignees: [a], principal: b }));
+    assert.throws(() => mutationRequest(1, 0, action, { assignees: [a] }));
+    const maximum = Array.from({ length: 16 }, (_, i) => i.toString(16).padStart(2, '0').repeat(16));
+    assert.equal(mutationRequest(1, 2, action, { assignees: maximum }).fields.assignees.length, 16);
+  }
+});
+test('assignment reads validate canonical sets and retain original deltas in history', () => {
+  const a = '11'.repeat(16), b = '22'.repeat(16);
+  assert.equal(issuePage({ ...page, issues: [{ ...row, assignees: [a, b] }] }).reply.issues[0].assignees[0], a);
+  for (const assignees of [[b, a], [a, a], ['invalid'], null]) {
+    assert.throws(() => issuePage({ ...page, issues: [{ ...row, assignees }] }));
+  }
+  const reply = { ...ids, type: 'issue_history', snapshot_token: head, after_version: 1, limit: 20,
+    found: true, issue: { ...row, version: 3, assignees: [b] }, next_after_version: null,
+    events: [{ version: 2, actor: 'actor', action: { name: 'assign', assignees: [a, b] } },
+      { version: 3, actor: 'actor', action: { name: 'unassign', assignees: [a] } }] };
+  assert.deepEqual(issueHistory(reply, 1, { after: 1, head }).reply.events, reply.events);
+  assert.throws(() => issueHistory({ ...reply, events: [{ ...reply.events[0], action: { name: 'assign', assignees: [b, a] } }, reply.events[1]] }, 1, { after: 1, head }));
+});
 async function staged(fetchImpl) {
   const client = fresh(fetchImpl); await client.connect(token);
   await client.stage(1, 1, 'comment', { body: 'original' }); return client;

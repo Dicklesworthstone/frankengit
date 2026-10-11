@@ -51,20 +51,33 @@ function checkedLabels(values, canonical = false) {
       (canonical && sorted.some((label, i) => label !== labels[i]))) fail('Invalid label ordering or duplicates.');
   return sorted;
 }
+function checkedAssignees(values, canonical = false) {
+  if (!Array.isArray(values) || values.length > 16 ||
+      values.some(id => typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id))) {
+    fail('Assignees must contain at most 16 canonical principal IDs.');
+  }
+  const sorted = [...values].sort();
+  if (sorted.some((id, i) => i > 0 && id === sorted[i - 1]) ||
+      (canonical && sorted.some((id, i) => id !== values[i]))) fail('Invalid assignee ordering or duplicates.');
+  return sorted;
+}
 export function issueAction(name, fields) {
   object(fields);
-  if (!['open', 'edit', 'comment', 'close', 'reopen'].includes(name)) fail('Unsupported issue action.');
-  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : [];
+  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign'].includes(name)) fail('Unsupported issue action.');
+  const assignment = name === 'assign' || name === 'unassign';
+  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees'] : [];
   if (Object.keys(fields).some(key => !allowed.includes(key))) fail('Unknown or inapplicable issue field.');
   const result = {};
   if (own(fields, 'title')) result.title = text(fields.title, 256, 'title', true);
   if (own(fields, 'body')) result.body = text(fields.body, 64 * 1024, 'body');
   if (own(fields, 'labels')) result.labels = checkedLabels(fields.labels);
+  if (own(fields, 'assignees')) result.assignees = checkedAssignees(fields.assignees);
   if (name === 'open') {
     if (!own(result, 'title') || !own(result, 'body')) fail('Opening an issue requires title and body.');
     result.labels ??= [];
   } else if (name === 'edit' && !Object.keys(result).length) fail('Select at least one field to replace.');
   else if (name === 'comment' && (!own(result, 'body') || !result.body.trim())) fail('Comment must not be empty.');
+  else if (assignment && !result.assignees?.length) fail('Name at least one principal to assign or unassign.');
   return result;
 }
 export function mutationRequest(number, version, action, fields) {
@@ -78,6 +91,7 @@ export function mutationRequest(number, version, action, fields) {
     for (const label of checked.labels) form.append('label', label);
     if (action === 'edit' && !checked.labels.length) form.append('clear_labels', 'true');
   }
+  if (checked.assignees) for (const id of checked.assignees) form.append('assignee', id);
   const body = form.toString();
   if (body.length > MAX_FORM_BYTES) fail('Encoded issue form exceeds 256 KiB.');
   return { number, expected_version: version, action, fields: checked, body };
@@ -96,6 +110,9 @@ export function issueState(row) {
   natural(row.number, 'issue number', 1); natural(row.version, 'issue version', 1);
   issueAction('open', { title: row.title, body: row.body, labels: row.labels });
   checkedLabels(row.labels, true);
+  // Older API replies predate assignment metadata. New replies always carry
+  // the complete set; a present malformed field is never replaced with empty.
+  if (own(row, 'assignees')) checkedAssignees(row.assignees, true);
   if (!['open', 'closed'].includes(row.state)) fail('Invalid issue state.');
   opaque(row.opened_by, 'opening principal'); opaque(row.last_actor, 'last principal');
   natural(row.comments, 'comment count', 0, row.version - 1);
@@ -147,6 +164,7 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
         delete fields.body_rendered;
       }
       issueAction(name, fields);
+      if (own(fields, 'assignees')) checkedAssignees(fields.assignees, true);
       if ((event.version === 1) !== (name === 'open')) fail('Invalid opening event position.');
     });
   }
