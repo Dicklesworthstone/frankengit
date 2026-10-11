@@ -48,10 +48,7 @@ fn live(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionError> {
     }
 }
 fn infrastructure(error: AdmissionError) -> ProjectionFailure {
-    match error {
-        AdmissionError::AsyncProjectionUnavailable(code) => ProjectionFailure::Unavailable(code),
-        _ => ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid),
-    }
+    error.into_projection_unavailable(RefusalCode::AuthorityReceiptInvalid)
 }
 /// Read from the exact authenticated forge root, never a local policy file or
 /// an optional caller projection. Missing/corrupt selected bodies fail closed.

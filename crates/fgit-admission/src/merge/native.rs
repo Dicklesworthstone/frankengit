@@ -307,7 +307,9 @@ where
         &basis.body().configuration_root,
     )
     .await
-    .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+    .map_err(|error| {
+        AdmissionError::from(error).into_projection_unavailable(RefusalCode::EvidenceInvalid)
+    })?;
     let refs = match snapshot.head_target {
         Some(target) => crate::CanonicalRefState::new_with_head_target(snapshot.refs, target)
             .map_err(ProjectionFailure::Unavailable)?,
@@ -324,10 +326,7 @@ where
         projection.merge_checkpoint(cx).is_err()
     })
     .await
-    .map_err(|error| match error {
-        AdmissionError::AsyncProjectionUnavailable(code) => ProjectionFailure::Unavailable(code),
-        _ => ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid),
-    })?;
+    .map_err(|error| error.into_projection_unavailable(RefusalCode::EvidenceInvalid))?;
     projection
         .merge_checkpoint(cx)
         .map_err(ProjectionFailure::Unavailable)?;

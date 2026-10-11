@@ -579,6 +579,7 @@ impl AsyncAdmissionProjection<AsyncView> for AsyncMaterializingProjection {
 /// publishing it as a refusal would permanently decide a retryable request.
 struct UnavailableCommitProjection {
     inner: CanonicalAdmissionProjection<StagingStore, StubEvidence>,
+    authority_failure: Option<AuthorityFailure>,
 }
 
 impl AsyncAdmissionProjection<AsyncView> for UnavailableCommitProjection {
@@ -606,8 +607,12 @@ impl AsyncAdmissionProjection<AsyncView> for UnavailableCommitProjection {
         _closure: &'a ValidatedClosure,
     ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
     {
-        std::future::ready(Err(AsyncProjectionFailure::Unavailable(
-            RefusalCode::EvidenceMissing,
+        std::future::ready(Err(self.authority_failure.map_or(
+            AsyncProjectionFailure::Unavailable(RefusalCode::EvidenceMissing),
+            |failure| {
+                AdmissionError::from(failure)
+                    .into_projection_unavailable(RefusalCode::EvidenceMissing)
+            },
         )))
     }
 
@@ -818,7 +823,10 @@ fn unavailable_async_materialization_never_publishes_a_terminal_refusal() {
     let before = store
         .read_head(&context.head_key)
         .expect("fixture authority head reads before admission");
-    let projection = UnavailableCommitProjection { inner };
+    let projection = UnavailableCommitProjection {
+        inner,
+        authority_failure: None,
+    };
     let view = AsyncView(store);
 
     let result = poll_ready(admit_validated_receive_async(
@@ -846,6 +854,83 @@ fn unavailable_async_materialization_never_publishes_a_terminal_refusal() {
         after, before,
         "the unavailable materializer advanced the authority head and therefore published a terminal decision"
     );
+}
+
+/// The actual async receive driver must leave an interrupted sealed request
+/// retryable. This is a deterministic reference-store test; real database
+/// interruption inside the node projection is covered in fgit-node.
+#[test]
+fn interrupted_async_materialization_retries_the_same_seal_without_a_terminal_refusal() {
+    for reason in [
+        fgit_authority::AmbiguityReason::Cancelled,
+        fgit_authority::AmbiguityReason::Timeout,
+    ] {
+        let context = context(b"x2mv.4.51-interrupted-projection");
+        let validated = delete_main();
+        let (store, inner) = setup(&context, Basis::NamedPredecessor);
+        let before = store.read_head(&context.head_key).unwrap();
+        let projection = UnavailableCommitProjection {
+            inner,
+            authority_failure: Some(AuthorityFailure::Ambiguous(reason)),
+        };
+        let view = AsyncView(store);
+        let result = poll_ready(admit_validated_receive_async(
+            &view,
+            &(),
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &projection,
+        ));
+        assert!(
+            matches!(
+                &result,
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::CancellationInProgress
+                ))
+            ),
+            "x2mv.4.51 acceptance 1: cancellation stays nonterminal: {result:?}"
+        );
+        assert_eq!(
+            view.0.read_head(&context.head_key).unwrap(),
+            before,
+            "interruption must not publish a canonical refusal"
+        );
+
+        let live = AsyncMaterializingProjection {
+            inner: projection.inner,
+        };
+        let retry = poll_ready(admit_validated_receive_async(
+            &view,
+            &(),
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &live,
+        ))
+        .expect("permitted twin: the exact interrupted request commits on a live retry");
+        assert!(!retry.commands.is_empty());
+        assert!(retry.commands.iter().all(|command| {
+            matches!(command.terminal.outcome, DecisionOutcome::Committed { .. })
+        }));
+        let committed = view.0.read_head(&context.head_key).unwrap();
+        let repeated = poll_ready(admit_validated_receive_async(
+            &view,
+            &(),
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &live,
+        ))
+        .unwrap();
+        assert_eq!(retry.session.tx_ids, repeated.session.tx_ids);
+        assert_eq!(label(&Ok(retry)), label(&Ok(repeated)));
+        assert_eq!(
+            view.0.read_head(&context.head_key).unwrap(),
+            committed,
+            "a replay must not publish a second decision for the original seal"
+        );
+    }
 }
 
 /// The corpus produces three distinct answers.

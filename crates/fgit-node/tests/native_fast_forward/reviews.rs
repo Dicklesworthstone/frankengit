@@ -6,9 +6,7 @@ use fgit_forge::event::review::{
     CandidateBinding, CandidateReviewCommand, ReviewCommand, ReviewDecision, ReviewSubject,
 };
 use fgit_forge::review::ReviewOptions;
-use fgit_node::treefs_workspace::candidate_inspection::{
-    BundleInspectionRefusal, PullRequestInspectionRefusal,
-};
+use fgit_node::{BundleInspectionRefusal, PullRequestInspectionRefusal};
 use fgit_pack::{
     CanonicalObjectSource, CanonicalPackObject, PackLimits, PackPlanner, PackWriteError,
     PackWriteProfile, PackWriter,

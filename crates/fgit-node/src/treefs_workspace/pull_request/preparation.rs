@@ -3,7 +3,6 @@
 //! native construction. A concurrent publication refuses the attempt instead
 //! of returning a candidate for a silently refreshed subject.
 
-use fgit_admission::{AdmissionError, ProjectionFailure};
 use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::pull_request::PullRequestAction;
 use fgit_forge::event::review::ReviewSubject;
@@ -143,10 +142,9 @@ impl OneNode {
         )
         .await
         .map_err(|error| {
-            NodeWorkspaceRefusal::MergeValidation(ProjectionFailure::Unavailable(match error {
-                AdmissionError::AsyncProjectionUnavailable(code) => code,
-                _ => RefusalCode::EvidenceInvalid,
-            }))
+            NodeWorkspaceRefusal::MergeValidation(
+                error.into_projection_unavailable(RefusalCode::EvidenceInvalid),
+            )
         })?;
         let pr = page
             .pull_requests

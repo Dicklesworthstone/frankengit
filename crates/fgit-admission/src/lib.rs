@@ -65,6 +65,7 @@ pub mod evidence;
 /// re-check.
 pub mod merge;
 pub mod policy_bridge;
+mod projection_failure;
 
 /// Bounds enforced before creating per-command work or retrying a stale plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

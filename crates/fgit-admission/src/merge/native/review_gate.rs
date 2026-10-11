@@ -231,10 +231,7 @@ where
 }
 
 fn infrastructure(error: AdmissionError) -> ProjectionFailure {
-    match error {
-        AdmissionError::AsyncProjectionUnavailable(code) => ProjectionFailure::Unavailable(code),
-        _ => ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid),
-    }
+    error.into_projection_unavailable(RefusalCode::AuthorityReceiptInvalid)
 }
 pub(crate) async fn verify_at<S, C>(
     store: &S,

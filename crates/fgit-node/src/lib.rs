@@ -48,6 +48,9 @@ pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 pub mod source_retrieval;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
+pub use treefs_workspace::candidate_inspection::{
+    BundleInspectionRefusal, PullRequestInspectionRefusal,
+};
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
@@ -2513,10 +2516,17 @@ fn async_projection_unavailable(
     refusal: AdmissionMaterializationRefusal,
 ) -> AsyncProjectionFailure {
     let code = match refusal {
-        AdmissionMaterializationRefusal::Delivery(error) => match *error {
-            AdmissionError::AsyncProjectionUnavailable(code) => code,
-            _ => RefusalCode::EvidenceInvalid,
-        },
+        AdmissionMaterializationRefusal::Delivery(error) => {
+            return error.into_projection_unavailable(RefusalCode::EvidenceInvalid);
+        }
+        AdmissionMaterializationRefusal::Authority(error) => {
+            return AdmissionError::Authority(error)
+                .into_projection_unavailable(RefusalCode::EvidenceMissing);
+        }
+        AdmissionMaterializationRefusal::DecisionHistory(error) => {
+            return AdmissionError::Outcome(error)
+                .into_projection_unavailable(RefusalCode::EvidenceMissing);
+        }
         AdmissionMaterializationRefusal::Cancelled => RefusalCode::CancellationInProgress,
         AdmissionMaterializationRefusal::CanonicalRoot(code) => code,
         AdmissionMaterializationRefusal::CanonicalFrame(_) => RefusalCode::CanonicalFramingInvalid,
@@ -2528,9 +2538,7 @@ fn async_projection_unavailable(
             RefusalCode::AuthorityReceiptStale
         }
         AdmissionMaterializationRefusal::HeadAbsent
-        | AdmissionMaterializationRefusal::Authority(_)
         | AdmissionMaterializationRefusal::HeadBody(_)
-        | AdmissionMaterializationRefusal::DecisionHistory(_)
         | AdmissionMaterializationRefusal::DecisionHistoryVerification(_)
         | AdmissionMaterializationRefusal::HeadIdentity(_)
         | AdmissionMaterializationRefusal::HeadIdentityDomain(_)
@@ -9644,6 +9652,8 @@ fn admission_cache_resources() -> ResourceVector {
 
 #[cfg(test)]
 mod tests {
+    mod admission_projection;
+
     #[test]
     fn git_daemon_server_limits_require_nonzero_session_and_in_flight_bounds() {
         assert!(matches!(
