@@ -75,6 +75,7 @@ capsule state. This implements the streaming Git portion of
 ```sh
 cargo test -p fgit-pack --all-targets --locked
 cargo test -p fgit-deflate --test encode_work_accounting --locked
+cargo test -p fgit-pack --test full_bundle_stream_file --release --locked -- --include-ignored --test-threads=1 --nocapture
 ```
 
 The streaming tests exercise both native hash domains and independent native
@@ -84,3 +85,21 @@ writes and output failure. A generated source requires output progress before
 the next body is loaded and rejects a second load, making the streaming ownership
 behavior executable. These are native component checks; they are not an upstream
 Git differential result, a throughput benchmark or complete CLI verification.
+
+The real-file target has an ordinary small case and an explicitly selected large
+case. The latter generates 33 independent 4 MiB blobs plus their native tree and
+commit, in each hash domain. It requires the source payload, encoded pack and
+actual bundle file all to exceed 128 MiB. The generated source retains object
+identities and small specifications and verifies that output reaches the file
+before its next load. The native streaming reader then checks each recovered
+body's identity, type and exact content, as well as the header, refs, HEAD,
+trailer, EOF and whole-file SHA-256.
+
+Set `FGIT_STREAM_BUNDLE_ARTIFACT_DIR` to an existing directory when retaining
+these generated files for an independent consumer check. Each completed native
+verification emits a matching `.expected.tsv` containing exact object inventory,
+refs, HEAD and receipt commitments. Filenames are created exclusively; the test
+does not replace existing artifacts. By default it removes only its own bundle
+file. The large case is opt-in because it writes and verifies more than 128 MiB
+per format. It exercises the payload streaming capability; it does not fulfill
+the bead's real-CLI, signed archive, forge restoration or 1 GiB drill acceptance.
