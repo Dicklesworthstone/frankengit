@@ -1,6 +1,6 @@
 // Process ownership for the trusted native source-import command. No shell,
 // PATH lookup, Git helper, background worker or automatic resubmission.
-import { spawn } from 'node:child_process';
+import { runNativeProcess } from './native-process-owner.mjs';
 import { performance } from 'node:perf_hooks';
 
 export function importError(code, details) {
@@ -21,48 +21,29 @@ export function importLifetime(timeoutMs, signal) {
 }
 export async function runImportProcess(fg, args, live, key) {
   live.check();
-  return await new Promise((resolve, reject) => {
-    let child;
-    try { child = spawn(fg, args, { shell: false, windowsHide: true, stdio: [key === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] }); }
-    catch { reject(importError('native_import_spawn_failed')); return; }
-    const output = [], diagnostic = []; let stdoutBytes = 0, stderrBytes = 0;
-    let failure = null, escalation = null;
-    const stop = code => {
-      failure ??= importError(code);
-      if (escalation !== null) return;
-      child.kill('SIGTERM');
-      escalation = setTimeout(() => child.kill('SIGKILL'), 500);
+  let result;
+  try {
+    result = await runNativeProcess(fg, args, { timeoutMs: live.remaining(), signal: live.signal, stdin: key });
+  } catch (error) {
+    const codes = {
+      native_process_invalid_options: 'invalid_import_lifetime',
+      native_process_spawn_failed: 'native_import_spawn_failed',
+      native_process_cancelled: 'native_import_cancelled',
+      native_process_deadline: 'native_import_deadline',
+      native_process_output_failed: 'native_import_output_failed',
+      native_process_stdout_limit: 'native_import_report_limit',
+      native_process_stderr_limit: 'native_import_diagnostic_limit',
+      native_process_input_failed: 'native_import_key_pipe_failed',
+      native_process_descendants_remaining: 'native_import_containment_failed',
+      native_process_containment_failed: 'native_import_containment_failed',
     };
-    const abort = () => stop('native_import_cancelled');
-    const timer = setTimeout(() => stop('native_import_deadline'), live.remaining());
-    live.signal?.addEventListener('abort', abort, { once: true });
-    child.on('error', () => { failure ??= importError('native_import_spawn_failed'); });
-    child.stdout.on('error', () => stop('native_import_output_failed'));
-    child.stderr.on('error', () => stop('native_import_output_failed'));
-    child.stdout.on('data', chunk => {
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > 65536) stop('native_import_report_limit');
-      else output.push(chunk);
-    });
-    child.stderr.on('data', chunk => {
-      stderrBytes += chunk.length;
-      if (stderrBytes > 65536) stop('native_import_diagnostic_limit');
-      else diagnostic.push(chunk);
-    });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer); clearTimeout(escalation); live.signal?.removeEventListener('abort', abort);
-      // A stopped/abnormal child is not evidence that its repository effect was
-      // rolled back. The caller retains the exact identity for read-only lookup.
-      if (failure) reject(failure);
-      else if (signal !== null || !Number.isInteger(code)) reject(importError('native_import_process_interrupted'));
-      else resolve({ code, stdout: Buffer.concat(output), stderr: Buffer.concat(diagnostic) });
-    });
-    if (key !== undefined) {
-      child.stdin.on('error', () => stop('native_import_key_pipe_failed'));
-      child.stdin.end(key);
-    }
-    if (live.signal?.aborted) abort();
-  });
+    throw importError(codes[error.code] ?? 'native_import_process_interrupted', error.details);
+  }
+  // A stopped/abnormal child is not evidence that its repository effect was
+  // rolled back. The caller retains the exact identity for read-only lookup.
+  live.check();
+  if (result.signal !== null || !Number.isInteger(result.code)) throw importError('native_import_process_interrupted');
+  return { code: result.code, stdout: result.stdout, stderr: result.stderr };
 }
 
 // Native receipts contain ordinary integers and one JSON document. Do not
