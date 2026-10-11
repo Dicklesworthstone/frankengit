@@ -9,6 +9,7 @@ mod tests;
 use super::*;
 use super::super::{head, head_token, mutations as common, review_writes as reviews};
 use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
+use fgit_forge::preparation::MergeCommitStyle;
 use fgit_forge::{AggregateVersion, PullRequestNumber};
 use fgit_types::{PolicyEpoch, RepositoryAuthorityHeadId};
 
@@ -104,6 +105,30 @@ fn candidate_arguments(
     let arguments = Value::Object(fields);
     // Leave room for the existing RPC envelope, caller-owned key and named
     // reviewer set. Optional review text still shares the global input bound.
+    arguments.encode(json::MAX_INPUT - 4096)
+        .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
+    Ok(arguments)
+}
+
+const fn merge_method_name(style: MergeCommitStyle) -> &'static str {
+    match style {
+        MergeCommitStyle::TwoParent => "merge-commit",
+        MergeCommitStyle::Squash => "squash",
+    }
+}
+
+fn publication_arguments(
+    subject: &ReviewSubject,
+    candidate: CandidateBinding,
+    bytes: &[u8],
+    style: MergeCommitStyle,
+) -> Result<Value, ToolError> {
+    let Value::Object(mut fields) = candidate_arguments(subject, candidate, bytes)?
+    else { return Err(invalid_report()); };
+    // Reviews bind the actual commit. Publication separately binds the chosen
+    // method, so the review template must not acquire an inapplicable selector.
+    fields.insert("method".into(), text(merge_method_name(style)));
+    let arguments = Value::Object(fields);
     arguments.encode(json::MAX_INPUT - 4096)
         .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
     Ok(arguments)

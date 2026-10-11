@@ -1,9 +1,10 @@
-//! Inspect the actual uploaded two-parent result before any review or merge.
+//! Inspect the actual uploaded candidate before any review or merge.
 //! Native selection, closure checking and comparison own the evidence; this
 //! adapter supplies no new object store, admission path or approval authority.
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};
 use fgit_forge::review::{ComparisonMode, ReviewOptions};
+use fgit_node::NativeMergeMethod;
 use std::collections::BTreeSet;
 
 const LIMITS: &[(&str, usize, usize, usize)] = &[
@@ -19,6 +20,7 @@ struct Input {
     bundle: Vec<u8>,
     digest: [u8; 32],
     options: ReviewOptions,
+    style: Option<MergeCommitStyle>,
 }
 fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
     let &(_, default, minimum, maximum) = LIMITS.iter().find(|limit| limit.0 == name)
@@ -35,12 +37,18 @@ fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
 }
 fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     let mut allowed = SUBJECT_FIELDS.to_vec();
-    allowed.extend(["candidate_commit", "merge_base", "bundle_hex_chunks", "expected_bundle_sha256"]);
+    allowed.extend(["candidate_commit", "merge_base", "bundle_hex_chunks", "expected_bundle_sha256", "method"]);
     allowed.extend(LIMITS.iter().map(|limit| limit.0));
     require_fields(args, &allowed)?;
     if required(args, "operation")? != INSPECT {
         return Err(ToolError::invalid("unsupported_candidate_operation"));
     }
+    let style = match string(args, "method")? {
+        None => None,
+        Some("merge-commit") => Some(MergeCommitStyle::TwoParent),
+        Some("squash") => Some(MergeCommitStyle::Squash),
+        Some(_) => return Err(ToolError::invalid("invalid_merge_method")),
+    };
     let selection = selection(args, format)?;
     let (subject, candidate) = reviews::subject(args, format)?;
     if subject != selection.subject {
@@ -65,7 +73,7 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     options.limits.max_hunks = 256;
     options.limits.max_text_files = 32;
     options.validate().map_err(|_| ToolError::invalid("invalid_inspection_limit"))?;
-    Ok(Input { selection, candidate, bundle, digest, options })
+    Ok(Input { selection, candidate, bundle, digest, options, style })
 }
 
 pub(super) fn schema() -> Value {
@@ -74,6 +82,11 @@ pub(super) fn schema() -> Value {
         properties.insert(name.into(), oid_schema());
     }
     properties.insert("bundle_hex_chunks".into(), chunk_schema());
+    properties.insert("method".into(), object([
+        ("type", text("string")),
+        ("enum", Value::Array(vec![text("merge-commit"), text("squash")])),
+        ("description", text("Optional exact parent-shape assertion. Use squash for a squash artifact, including one identical to the source commit. Omission preserves legacy source-tip fast-forward inspection.")),
+    ]));
     properties.insert("expected_bundle_sha256".into(), object([
         ("type", text("string")), ("pattern", text("^[0-9a-f]{64}$")),
     ]));
@@ -115,8 +128,6 @@ pub(super) fn call_in(
     let subject = &input.selection.subject;
     check_selection(&input.selection, &inspected.subject, inspected.review.source_head)?;
     if inspected.candidate != input.candidate
-        || (!input.candidate.is_fast_forward(subject)
-            && inspected.parents != [subject.target_tip, subject.source_tip])
         || inspected.bundle.sha256 != input.digest
         || inspected.bundle.bytes != input.bundle.len()
         || inspected.bundle.pack_bytes == 0
@@ -131,6 +142,7 @@ pub(super) fn call_in(
     {
         return Err(invalid_report());
     }
+    let method = inspected_method(subject, input.candidate, &inspected.parents, input.style)?;
     for id in &inspected.prerequisites { check_oid(*id, backend.options.format)?; }
     if inspected.candidate_commit_body.is_empty()
         || inspected.candidate_commit_body.len() > MAX_COMMIT_BYTES
@@ -149,10 +161,23 @@ pub(super) fn call_in(
         input.options, &inspected.review,
     )?;
     let arguments = candidate_arguments(subject, input.candidate, &input.bundle)?;
-    let publication_tool = if input.candidate.is_fast_forward(subject) {
+    let publication_tool = if method == NativeMergeMethod::FastForwardOnly {
         super::super::super::merge_writes::FAST_FORWARD_NAME
     } else {
         super::super::super::merge_writes::NAME
+    };
+    let publication = match method {
+        NativeMergeMethod::MergeCommit => publication_arguments(
+            subject, input.candidate, &input.bundle, MergeCommitStyle::TwoParent,
+        )?,
+        NativeMergeMethod::Squash => publication_arguments(
+            subject, input.candidate, &input.bundle, MergeCommitStyle::Squash,
+        )?,
+        NativeMergeMethod::FastForwardOnly => {
+            let mut fields = subject_fields(subject);
+            fields.remove("policy_epoch");
+            Value::Object(fields)
+        }
     };
     let mut result = binding(backend);
     result.extend(subject_fields(subject));
@@ -161,6 +186,11 @@ pub(super) fn call_in(
         ("type".into(), text("pull_candidate_inspection")),
         ("schema_version".into(), json::number(1)),
         ("operation".into(), text(INSPECT)),
+        ("method".into(), text(match method {
+            NativeMergeMethod::MergeCommit => "merge-commit",
+            NativeMergeMethod::Squash => "squash",
+            NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
+        })),
         ("snapshot_token".into(), text(head_token(inspected.review.source_head))),
         ("candidate_commit".into(), text(raw_oid(input.candidate.commit))),
         ("merge_base".into(), text(raw_oid(input.candidate.merge_base))),
@@ -180,12 +210,41 @@ pub(super) fn call_in(
         // Inspection validates the uploaded result, not how it was constructed.
         ("merge_algorithm_verified".into(), Value::Bool(false)),
         ("candidate_arguments".into(), arguments),
+        ("publication_arguments".into(), publication),
         ("review_tool".into(), text(reviews::NAME)),
         ("publication_tool".into(), text(publication_tool)),
     ]);
     let result = Value::Object(result);
     result.encode(MAX_TOOL_RESULT).map_err(|_| ToolError::failed("candidate_response_limit"))?;
     Ok(result)
+}
+
+fn inspected_method(
+    subject: &ReviewSubject,
+    candidate: CandidateBinding,
+    parents: &[GitOid],
+    requested: Option<MergeCommitStyle>,
+) -> Result<NativeMergeMethod, ToolError> {
+    // A source-tip candidate was historically inspected as fast-forward.
+    // Explicit squash binds a different publication method even if exact Git
+    // bytes happen to reproduce that source commit. Never replace the hint.
+    match requested {
+        Some(MergeCommitStyle::TwoParent)
+            if parents == [subject.target_tip, subject.source_tip] =>
+        {
+            Ok(NativeMergeMethod::MergeCommit)
+        }
+        Some(MergeCommitStyle::Squash) if parents == [subject.target_tip] => {
+            Ok(NativeMergeMethod::Squash)
+        }
+        Some(_) => Err(invalid_report()),
+        None if candidate.is_fast_forward(subject) => Ok(NativeMergeMethod::FastForwardOnly),
+        None if parents == [subject.target_tip, subject.source_tip] => {
+            Ok(NativeMergeMethod::MergeCommit)
+        }
+        None if parents == [subject.target_tip] => Ok(NativeMergeMethod::Squash),
+        None => Err(invalid_report()),
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,9 @@ use crate::OneNode;
 use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedMerge, ResolvedPath};
-use fgit_forge::preparation::{ConflictKind, MergeEntry, MergePreparation, MergeProfile};
+use fgit_forge::preparation::{
+    ConflictKind, MergeCommitStyle, MergeEntry, MergePreparation, MergeProfile,
+};
 use fgit_types::RepositoryAuthorityHeadId;
 use fgit_wire::smart_http::HttpVersion;
 use std::io::{self, Write};
@@ -176,11 +178,12 @@ pub(super) fn build(
     outcome: &MergePreparation,
     bundle: Option<Vec<u8>>,
     profile: MergeProfile,
+    style: MergeCommitStyle,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
     build_inner(
-        node, head, subject, outcome, bundle, None, profile, maximum, live,
+        node, head, subject, outcome, bundle, None, profile, style, maximum, live,
     )
 }
 
@@ -202,6 +205,7 @@ pub(super) fn build_resolved(
         Some(bundle),
         Some(&resolutions),
         MergeProfile::PathMergeV1,
+        MergeCommitStyle::TwoParent,
         maximum,
         live,
     )
@@ -215,6 +219,7 @@ fn build_inner(
     bundle: Option<Vec<u8>>,
     resolutions: Option<&[ResolvedPath]>,
     profile: MergeProfile,
+    style: MergeCommitStyle,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
@@ -226,7 +231,9 @@ fn build_inner(
         return Err(ApiError::too_large());
     }
     if resolutions.is_some()
-        && (profile != MergeProfile::PathMergeV1 || !matches!(outcome, MergePreparation::Clean(_)))
+        && (profile != MergeProfile::PathMergeV1
+            || style != MergeCommitStyle::TwoParent
+            || !matches!(outcome, MergePreparation::Clean(_)))
     {
         return Err(ApiError::unavailable());
     }
@@ -242,7 +249,7 @@ fn build_inner(
         concat!(
             "{{\"type\":\"merge_preparation\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
             "\"repository_incarnation\":{},\"object_format\":{},\"source_head\":{},\"snapshot_token\":{},",
-            "\"profile\":{},\"read_only\":true,\"objects_staged\":false,",
+            "\"profile\":{},\"method\":{},\"read_only\":true,\"objects_staged\":false,",
             "\"transaction_created\":false,\"published\":false,\"merge_authorized\":false,",
             "\"subject\":{{\"pull_request\":{},\"pull_request_version\":{},\"policy_epoch\":{},",
             "{},{},\"source_tip\":{},\"target_tip\":{}}},"
@@ -256,6 +263,10 @@ fn build_inner(
         quote(match profile {
             MergeProfile::PathMergeV1 => "path-merge-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+        }),
+        quote(match style {
+            MergeCommitStyle::TwoParent => "merge-commit",
+            MergeCommitStyle::Squash => "squash",
         }),
         subject.pull_request.get(),
         subject.pull_request_version.get(),
@@ -274,7 +285,10 @@ fn build_inner(
                 .as_ref()
                 .filter(|bytes| !bytes.is_empty())
                 .ok_or_else(ApiError::unavailable)?;
-            if plan.source != subject.source_tip || plan.target != subject.target_tip {
+            if plan.source != subject.source_tip
+                || plan.target != subject.target_tip
+                || plan.style != style
+            {
                 return Err(ApiError::unavailable());
             }
             append(

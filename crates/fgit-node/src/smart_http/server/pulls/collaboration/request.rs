@@ -3,6 +3,7 @@
 
 use super::super::super::issues::{Rendering, parse_decimal, parse_form, parse_snapshot};
 use super::{ApiError, multipart};
+use fgit_admission::merge::native::NativeMergeMethod;
 use fgit_admission::merge::native::pull_request::reviews::gate::ReviewRequirements;
 use fgit_forge::event::review::{
     CandidateBinding, CandidateReviewCommand, ReviewCommand, ReviewDecision, ReviewSubject,
@@ -148,7 +149,7 @@ impl<'a> Request<'a> {
     ) -> Result<Command, ApiError> {
         let mut fields = BTreeMap::new();
         let mut reviewers = Vec::new();
-        for (name, value) in parse_form(bytes, 41)? {
+        for (name, value) in parse_form(bytes, 42)? {
             if name == "required_reviewer" && matches!(self.operation, Operation::Merge) {
                 reviewers.push(principal_id(&value)?);
             } else {
@@ -166,7 +167,8 @@ impl<'a> Request<'a> {
                 );
                 let review = matches!(self.operation, Operation::Review(_))
                     && matches!(name.as_str(), "expected_version" | "reason");
-                if !common && !review {
+                let merge = matches!(self.operation, Operation::Merge) && name == "method";
+                if !common && !review && !merge {
                     return Err(ApiError::bad("unknown_or_inapplicable_field"));
                 }
                 if fields.insert(name, value).is_some() {
@@ -230,6 +232,11 @@ impl<'a> Request<'a> {
                 Ok(Command::Review(command))
             }
             Operation::Merge => {
+                let method = match fields.remove("method").as_deref() {
+                    None | Some("merge-commit") => NativeMergeMethod::MergeCommit,
+                    Some("squash") => NativeMergeMethod::Squash,
+                    Some(_) => return Err(ApiError::bad("unsupported_merge_method")),
+                };
                 if reviewers.contains(&principal) {
                     return Err(ApiError::bad("submitter_cannot_review_own_merge"));
                 }
@@ -239,6 +246,7 @@ impl<'a> Request<'a> {
                     subject,
                     candidate,
                     required,
+                    method,
                 })
             }
             Operation::List(_) => Err(ApiError::bad("not_a_mutation")),
@@ -252,6 +260,7 @@ pub(super) enum Command {
         subject: ReviewSubject,
         candidate: CandidateBinding,
         required: ReviewRequirements,
+        method: NativeMergeMethod,
     },
 }
 fn take(fields: &mut BTreeMap<String, String>, name: &'static str) -> Result<String, ApiError> {
@@ -357,6 +366,8 @@ mod tests {
             "&force=true",
             "&expected_version=1",
             "&required_reviewer=admin",
+            "&method=merge-commit",
+            "&method=squash",
         ] {
             assert!(
                 request
@@ -451,5 +462,75 @@ mod tests {
         ] {
             assert!(page(Some(refused)).is_err(), "{refused}");
         }
+    }
+
+    #[test]
+    fn reviewed_publication_binds_a_closed_method_without_changing_the_review_subject() {
+        let actor = PrincipalId::from_bytes([3; 16]);
+        let format = GitHashAlgorithm::Sha1;
+        let body = fields() + &format!("&required_reviewer={}", "44".repeat(16));
+        let Command::Merge {
+            subject: expected_subject,
+            candidate: expected_candidate,
+            method: default_method,
+            ..
+        } = request(Operation::Merge).command(body.as_bytes(), format, actor).unwrap()
+        else {
+            panic!("merge");
+        };
+        assert_eq!(default_method, NativeMergeMethod::MergeCommit);
+        for (name, expected_method) in [
+            ("merge-commit", NativeMergeMethod::MergeCommit),
+            ("squash", NativeMergeMethod::Squash),
+        ] {
+            let bytes = body.clone() + &format!("&method={name}");
+            let Command::Merge { subject, candidate, required, method } =
+                request(Operation::Merge).command(bytes.as_bytes(), format, actor).unwrap()
+            else {
+                panic!("merge");
+            };
+            assert_eq!(method, expected_method);
+            assert_eq!(subject, expected_subject);
+            assert_eq!(candidate, expected_candidate);
+            assert_eq!(required.reviewers(), &[PrincipalId::from_bytes([0x44; 16])]);
+        }
+        for method in ["", "Squash", "fast-forward-only", "rebase", "merge-commit+"] {
+            let bytes = body.clone() + &format!("&method={method}");
+            assert_eq!(
+                request(Operation::Merge).command(bytes.as_bytes(), format, actor).err().unwrap().code,
+                "unsupported_merge_method"
+            );
+        }
+        for duplicate in ["method", "met%68od"] {
+            let bytes = format!("method=merge-commit&{duplicate}=squash");
+            assert_eq!(
+                request(Operation::Merge).command(bytes.as_bytes(), format, actor).err().unwrap().code,
+                "duplicate_field"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_squash_preserves_the_full_native_reviewer_limit() {
+        let actor = PrincipalId::from_bytes([255; 16]);
+        let mut body = fields() + "&method=squash";
+        for byte in 1..=32 {
+            body.push_str(&format!(
+                "&required_reviewer={}",
+                PrincipalId::from_bytes([byte; 16])
+            ));
+        }
+        let Command::Merge { required, method, .. } = request(Operation::Merge)
+            .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)
+            .unwrap()
+        else {
+            panic!("merge");
+        };
+        assert_eq!(required.reviewers().len(), 32);
+        assert_eq!(method, NativeMergeMethod::Squash);
+        body.push_str(&format!("&required_reviewer={}", PrincipalId::from_bytes([33; 16])));
+        assert!(request(Operation::Merge)
+            .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)
+            .is_err());
     }
 }

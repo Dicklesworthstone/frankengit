@@ -1,7 +1,7 @@
 # Prepare a reviewable native PR candidate over HTTP
 
-`POST {REPO_URL}/api/v1/pulls/{number}/prepare` constructs a native two-parent
-merge candidate for an existing open same-repository PR. It completes the
+`POST {REPO_URL}/api/v1/pulls/{number}/prepare` constructs a native merge-commit
+or squash candidate for an existing open same-repository PR. It completes the
 remote preparation -> candidate review -> reviewed merge workflow without
 requiring the preparation client to open local node storage.
 
@@ -61,6 +61,15 @@ version defaults:
 | `timestamp` | Explicit positive Git timestamp, emitted with UTC offset `+0000`. |
 | `message` | Exact nonempty UTF-8 commit-message bytes, including any desired final newline. |
 
+Two optional fields select independent construction semantics. `method` accepts
+`merge-commit` (the default) or `squash`. A merge commit records the ordered
+target/source parents; a squash commit records only the exact target parent and
+keeps the merged tree. `profile` accepts `path-merge-v1` (the default) or
+`exact-renames-v1`. Either tree profile supports either method. Unknown methods,
+empty values and duplicate selectors are refused. Neither method silently
+becomes a fast-forward. The separate `/resolve` endpoint remains two-parent and
+rejects `method` and `profile` fields.
+
 Obtain the PR version and coordinates from the PR read API. The existing
 `GET .../pulls/{number}/reviews` response supplies the current `policy_epoch`
 and PR version even before any votes exist; that read requires its independent
@@ -104,18 +113,20 @@ native construction. There is no path that treats the form as a mutation.
 A clean result is HTTP 200 with `Content-Type: multipart/mixed`. Its first part
 is `metadata` (`application/json`), and its second is `bundle`
 (`application/x-git-bundle`). The JSON has type `merge_preparation`, schema
-version 1, exact `source_head`, `snapshot_token`, object format, complete review
-subject, candidate base/commit/tree, and new-object count. Its bundle descriptor
+version 1, exact `source_head`, `snapshot_token`, object format, explicit `method`
+and `profile`, complete review subject, candidate base/commit/tree, and
+new-object count. Its bundle descriptor
 contains exact byte length and a SHA-256 transport checksum.
 Every result's subject preserves exact native reference bytes in authoritative
 lowercase `source_ref_hex` and `target_ref_hex`. `source_ref` and `target_ref`
 retain UTF-8 text or are null when the corresponding bytes are not UTF-8.
 
 The bundle is ordinary native Git bundle framing: SHA-1 uses v2; SHA-256 uses v3
-with an explicit object-format declaration. It names both parent prerequisites
-and the target ref's candidate commit. New objects exist only in the response,
-not in the node's object fabric. A fast-forward-capable case still constructs
-an explicit two-parent candidate under the existing PathMergeV1 profile.
+with an explicit object-format declaration. It names both source and target
+history prerequisites and the target ref's candidate commit. A source history
+prerequisite does not make the source a parent of a squash commit. New objects
+exist only in the response. A fast-forward-capable case still uses the selected
+method: two parents for `merge-commit`, only the target parent for `squash`.
 
 A conflict returns HTTP 409 JSON with `state: "conflicted"`, `candidate: null`,
 `bundle: null`, and bounded conflict diagnostics. Each path is `path_hex` over
@@ -146,7 +157,9 @@ permission/disabled-service errors 403, resource limits 413, unsupported media
 415, throttling 429, and infrastructure/evidence failures 503. Error bodies use
 the existing `pull_request_error` family. They do not invent a canonical refusal.
 
-The exact-subject node API is `OneNode::prepare_pull_request_bundle_in`. It
+The method-aware exact-subject node API is
+`OneNode::prepare_pull_request_bundle_with_options_in`; the original
+`prepare_pull_request_bundle_in` retains the default two-parent behavior. It
 selects authenticated current PR/refs/policy, then requires the existing native
 constructor to return that SAME authority head before releasing an artifact.
 This conservative check can refuse even a harmless concurrent publication.
@@ -154,7 +167,8 @@ Retained display tokens do not authorize constructing against an old policy.
 New preparation attempts still apply current credentials and hidden-ref policy.
 No retention lease or server-side candidate cache is created.
 
-Identical metadata and source coordinates produce the same native candidate.
+Identical metadata, source coordinates, tree profile and method produce the same
+native candidate.
 A restarted node can reconstruct it. An unrelated intervening publication may
 change the response's source-head metadata without changing the bundle bytes;
 clients must not confuse a transport checksum with a publication identity.
@@ -207,7 +221,9 @@ The checksum detects transport corruption; it is not an authority receipt or
 approval. Review and merge still validate the actual native candidate bytes.
 To use the existing review/merge endpoints, map `candidate.commit` to the
 `candidate_commit` form field and `candidate.merge_base` to `merge_base`, and
-preserve the returned subject's PR version, policy epoch, refs and tips.
+preserve the returned subject's PR version, policy epoch, refs and tips. Copy
+the returned `method` into the MERGE command. Review commands omit this field:
+they bind the actual commit, while publication independently binds its method.
 Supply the reviewer's own expected stream version/reason or the merger's
 explicit required-reviewer set. See [HTTP_REVIEW_MERGE_API.md](HTTP_REVIEW_MERGE_API.md).
 

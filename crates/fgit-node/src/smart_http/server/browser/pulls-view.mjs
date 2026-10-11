@@ -4,7 +4,7 @@ import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
 import { decimal, oid, unhex, fail, showReply } from './pulls-core.mjs';
 import { RECEIPT_LIMIT, fastForwardCommand } from './pulls-actions.mjs';
-import { isFastForwardCandidate } from './pulls-candidate.mjs';
+import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
 
@@ -116,7 +116,7 @@ const IDS = ['connection', 'token', 'disconnect', 'status', 'refresh', 'pr-list'
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
-  'prepare', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
+  'prepare', 'candidate-method', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
   'candidate-import', 'candidate-import-file', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
   'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file'];
 
@@ -124,6 +124,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   cryptoImpl = globalThis.crypto, downloadImpl = null } = {}) {
   const nodes = Object.fromEntries(IDS.map(id => { const el = doc.getElementById(id); if (!el) fail(`Missing UI element: ${id}`); return [id, el]; }));
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
+  nodes['candidate-method'].value ||= 'merge-commit';
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
@@ -144,20 +145,21 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['comment-body'].disabled = !canComment || busy;
     if (fastForward) fastForward.button.disabled = !connected || busy || Boolean(pending) ||
       !fastForward.available || selected?.row !== fastForward.row || Boolean(selected?.stale);
-    const resolving = Boolean(client.conflict);
+    const resolving = Boolean(client.conflict) && client.conflict.method !== 'squash';
     nodes.resolution.hidden = !resolving;
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
-    const inspectedFastForward = isFastForwardCandidate(candidate?.fields);
-    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : 'Reviewed merge';
-    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : 'Prepare merge — do not send';
+    const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash';
+    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : squash ? 'Reviewed squash' : 'Reviewed merge';
+    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
     nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
     nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
     nodes['required-reviewers'].required = !inspectedFastForward;
     nodes['merge-method-guidance'].textContent = inspectedFastForward
       ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
-      : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
+      : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
+        : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
     for (const id of ['candidate-download', 'inspection-download']) nodes[id].disabled = !candidate || busy;
     nodes.send.disabled = !connected || busy || !pending || !nodes.confirm.checked;
     nodes.recover.disabled = !connected || busy || !pending;
@@ -177,6 +179,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
       'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers']) nodes[id].value = '';
+    nodes['candidate-method'].value = 'merge-commit';
     nodes.confirm.checked = false;
   }
   function disconnect() {
@@ -431,14 +434,16 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       source_ref: data.source_ref, target_ref: data.target_ref, source_tip: data.source_tip, target_tip: data.target_tip };
     const metadata = { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value };
     nodes.candidate.replaceChildren(); resolution.clear();
-    const result = await client.prepareAndInspect(selected.row.number, fields, metadata); guard();
+    const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value); guard();
     if (result.inspection) {
       const rendered = renderInspection(doc, nodes.candidate, result.inspection);
       status(`Candidate prepared and inspected, without publication.${rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''}`);
     } else {
       item(doc, nodes.candidate, 'h3', `Preparation: ${result.metadata.state}`);
       for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
-      if (result.metadata.state === 'conflicted') {
+      if (result.metadata.state === 'conflicted' && result.metadata.method === 'squash') {
+        status('Squash has conflicts. Update the source branch to resolve them, reload this PR, and prepare a new squash for inspection.');
+      } else if (result.metadata.state === 'conflicted') {
         resolution.show(result.metadata);
         status('Choose every conflict explicitly below. Resolution constructs and inspects a new candidate; it does not record approval or publish.');
       } else status('Already up to date. No candidate, transaction or approval was produced.');
@@ -451,6 +456,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status(`Resolved candidate constructed and inspected. No vote or publication exists.${rendered.clipped ? ' Display clipped: download the full inspection before reviewing.' : ''}`);
   }));
   for (const id of ['metadata', 'prepare']) nodes[id].addEventListener('input', invalidateCandidate);
+  on('candidate-method', 'change', invalidateCandidate);
   on('candidate-download', 'click', () => run('export', async () => { downloadText('frankengit-candidate.json', client.exportCandidate()); status('Candidate receipt exported without credentials. Its bytes must be inspected before another reviewer can act.'); }));
   on('inspection-download', 'click', () => run('export', async () => {
     const candidate = client.candidate; if (!candidate) fail('No inspected candidate.');
@@ -466,13 +472,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status('Exact-candidate review prepared locally. The authenticated credential determines the reviewer, not this form.');
   }));
   on('merge', 'submit', () => run('stage', async guard => {
-    if (isFastForwardCandidate(client.candidate?.fields)) {
+    if (candidateMethod(client.candidate) === 'fast-forward-only') {
       await client.stageInspectedFastForward(); guard(); nodes.confirm.checked = false;
       status('Fast-forward request prepared for the exact inspected source tip. Nothing sent. The node rechecks ancestry, both branch tips, the PR version and current branch protection before publication.');
     } else {
-      const reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
+      const method = candidateMethod(client.candidate), reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
       await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
-      status('Merge request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.');
+      status(`${method === 'squash' ? 'Squash' : 'Merge'} request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.`);
     }
   }));
   nodes.confirm.addEventListener('change', controls);

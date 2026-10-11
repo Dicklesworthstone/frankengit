@@ -1,7 +1,7 @@
 // Exact commands and terminal decisions. Transport errors never prove rollback.
 import { keys, record, integer, principal, opaque, text, oid, binding, subject, SUBJECT_FIELDS, metadataCommand,
   matchSubject, form, utf8, fail, hex, format, branch, reference } from './pulls-core.mjs';
-import { BUNDLE_LIMIT, multipart, checkedBundle, digest } from './pulls-candidate.mjs';
+import { BUNDLE_LIMIT, multipart, checkedBundle, digest, mergeMethod } from './pulls-candidate.mjs';
 export const RECEIPT_LIMIT = 24 * 1024 * 1024;
 export function commentCommand(fields) {
   keys(fields, ['object_format', 'expected_version', 'body']);
@@ -12,12 +12,13 @@ export function commentCommand(fields) {
 }
 export function collaborationCommand(action, fields) {
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unsupported review action.');
-  keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', ...(action === 'merge' ? ['required_reviewer'] : ['expected_version', 'reason'])]);
+  keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', ...(action === 'merge' ? ['required_reviewer', 'method'] : ['expected_version', 'reason'])]);
   const result = { ...subject(fields), merge_base: oid(fields.merge_base, fields.object_format), candidate_commit: oid(fields.candidate_commit, fields.object_format) };
   if (action === 'merge') {
     if (!Array.isArray(fields.required_reviewer) || !fields.required_reviewer.length || fields.required_reviewer.length > 32) fail('Select 1 through 32 explicit required reviewers.');
     result.required_reviewer = fields.required_reviewer.map(principal).sort();
     if (new Set(result.required_reviewer).size !== result.required_reviewer.length) fail('Duplicate required reviewer.');
+    if (Object.hasOwn(fields, 'method')) result.method = mergeMethod(fields.method);
   } else {
     result.expected_version = integer(fields.expected_version, 'reviewer stream version', action === 'withdraw' ? 1 : 0, Number.MAX_SAFE_INTEGER - 1);
     result.reason = text(fields.reason, 4096, 'review reason');
@@ -93,6 +94,8 @@ export function publication(reply, pending, status) {
     matchSubject(reply.subject, fields, pending.number, fields.object_format);
     if (oid(reply.merge_base, fields.object_format) !== fields.merge_base || oid(reply.candidate_commit, fields.object_format) !== fields.candidate_commit) fail('Terminal candidate changed.');
     if (merge) {
+      const expectedMethod = Object.hasOwn(fields, 'method') ? mergeMethod(fields.method) : 'merge-commit';
+      if (mergeMethod(reply.method === undefined ? 'merge-commit' : reply.method) !== expectedMethod) fail('Terminal merge method changed.');
       if (!Array.isArray(reply.required_reviewers) || JSON.stringify(reply.required_reviewers) !== JSON.stringify(fields.required_reviewer)) fail('Terminal reviewer requirements changed.');
     } else if (reply.required_reviewers !== null) fail('Review unexpectedly contains merge requirements.');
   }

@@ -1,4 +1,4 @@
-//! Native two-parent construction over one exact open-PR subject. Conflicts and
+//! Native merge-commit or squash construction over one exact open-PR subject. Conflicts and
 //! an already-integrated source never acquire a bundle or publishable candidate.
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};
@@ -14,6 +14,7 @@ struct Input {
     metadata: MergeMetadata,
     limits: PreparationLimits,
     profile: MergeProfile,
+    style: MergeCommitStyle,
 }
 
 fn bound(args: &Object, field: &str, default: usize, maximum: usize) -> Result<usize, ToolError> {
@@ -29,7 +30,7 @@ fn bound(args: &Object, field: &str, default: usize, maximum: usize) -> Result<u
 fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     let mut allowed = SUBJECT_FIELDS.to_vec();
     allowed.extend([
-        "author", "committer", "timestamp", "message_hex", "merge_profile",
+        "author", "committer", "timestamp", "message_hex", "merge_profile", "method",
         "max_commits", "max_tree_entries", "max_output_bytes", "max_conflicts",
     ]);
     require_fields(args, &allowed)?;
@@ -40,6 +41,11 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
         "path-merge-v1" => MergeProfile::PathMergeV1,
         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
         _ => return Err(ToolError::invalid("invalid_merge_profile")),
+    };
+    let style = match string(args, "method")?.unwrap_or("merge-commit") {
+        "merge-commit" => MergeCommitStyle::TwoParent,
+        "squash" => MergeCommitStyle::Squash,
+        _ => return Err(ToolError::invalid("invalid_merge_method")),
     };
     let limits = PreparationLimits {
         max_commits: bound(args, "max_commits", 4096, 4096)?,
@@ -55,6 +61,7 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
         metadata: super::super::prepare::metadata(args)?,
         limits,
         profile,
+        style,
     })
 }
 
@@ -68,6 +75,10 @@ pub(super) fn schema() -> Value {
     properties.insert("merge_profile".into(), object([
         ("type", text("string")), ("default", text("path-merge-v1")),
         ("enum", Value::Array(vec![text("path-merge-v1"), text("exact-renames-v1")])),
+    ]));
+    properties.insert("method".into(), object([
+        ("type", text("string")), ("default", text("merge-commit")),
+        ("enum", Value::Array(vec![text("merge-commit"), text("squash")])),
     ]));
     for (name, default, maximum) in [
         ("max_commits", 4096, 4096), ("max_tree_entries", 100_000, 100_000),
@@ -93,9 +104,9 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let input = parse(args, backend.options.format)?;
     let request = fgit_cli::command_request_context(&backend.node);
     let prepared = backend.node.runtime().block_on(
-        backend.node.prepare_pull_request_bundle_with_profile_in(
+        backend.node.prepare_pull_request_bundle_with_options_in(
             &request, &input.selection.subject, &Default::default(),
-            &input.metadata, input.limits, input.profile,
+            &input.metadata, input.limits, input.profile, input.style,
         ),
     ).map_err(preparation_error)?;
     check_selection(&input.selection, &prepared.subject, prepared.source_head)?;
@@ -110,9 +121,26 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             MergeProfile::PathMergeV1 => "path-merge-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
         })),
+        ("method".into(), text(merge_method_name(input.style))),
         ("complete".into(), Value::Bool(true)),
     ]);
     result.extend(render(backend.options.format, &input, &prepared.outcome, prepared.bundle.as_deref())?);
+    let inspection = match result.get("candidate_arguments") {
+        Some(Value::Object(arguments)) => {
+            let mut fields = arguments.clone();
+            fields.insert("operation".into(), text(INSPECT));
+            fields.insert("method".into(), text(merge_method_name(input.style)));
+            fields.insert("expected_head".into(), text(head_token(prepared.source_head)));
+            fields.insert("expected_bundle_sha256".into(), result["bundle_sha256"].clone());
+            let arguments = Value::Object(fields);
+            arguments.encode(json::MAX_INPUT - 4096)
+                .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
+            arguments
+        }
+        Some(Value::Null) => Value::Null,
+        _ => return Err(invalid_report()),
+    };
+    result.insert("inspection_arguments".into(), inspection);
     Ok(Value::Object(result))
 }
 
@@ -124,13 +152,14 @@ fn render(
 ) -> Result<Object, ToolError> {
     let subject = &input.selection.subject;
     let mut result = Object::new();
-    for field in ["candidate_arguments", "candidate_commit", "root_tree", "bundle_sha256", "parents"] {
+    for field in ["candidate_arguments", "publication_arguments", "candidate_commit", "root_tree", "bundle_sha256", "parents"] {
         result.insert(field.into(), Value::Null);
     }
     result.insert("candidate_available".into(), Value::Bool(false));
     match outcome {
         MergePreparation::Clean(plan) => {
             if plan.target != subject.target_tip || plan.source != subject.source_tip
+                || plan.style != input.style
                 || plan.objects.is_empty() || plan.objects.len() > input.limits.max_objects
                 || plan.objects.windows(2).any(|p| p[0].id >= p[1].id)
             { return Err(invalid_report()); }
@@ -138,6 +167,7 @@ fn render(
             let candidate = CandidateBinding { merge_base: plan.base, commit: plan.commit };
             let bytes = bundle.ok_or_else(invalid_report)?;
             let arguments = candidate_arguments(subject, candidate, bytes)?;
+            let publication = publication_arguments(subject, candidate, bytes, input.style)?;
             let mut total = 0usize;
             let mut commit = None;
             for object in &plan.objects {
@@ -157,11 +187,15 @@ fn render(
                 ("candidate_commit".into(), text(raw_oid(plan.commit))),
                 ("root_tree".into(), text(raw_oid(plan.tree))),
                 ("merge_base".into(), text(raw_oid(plan.base))),
-                ("parents".into(), Value::Array(vec![text(raw_oid(plan.target)), text(raw_oid(plan.source))])),
+                ("parents".into(), Value::Array(match input.style {
+                    MergeCommitStyle::TwoParent => vec![text(raw_oid(plan.target)), text(raw_oid(plan.source))],
+                    MergeCommitStyle::Squash => vec![text(raw_oid(plan.target))],
+                })),
                 ("bundle_sha256".into(), text(hex(&sha256_digest(bytes)))),
                 ("bundle_bytes".into(), text(bytes.len().to_string())),
                 ("generated_objects".into(), text(plan.objects.len().to_string())),
                 ("candidate_arguments".into(), arguments),
+                ("publication_arguments".into(), publication),
                 ("review_tool".into(), text(reviews::NAME)),
                 ("publication_tool".into(), text(super::super::super::merge_writes::NAME)),
             ]);

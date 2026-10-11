@@ -183,10 +183,11 @@ pub(super) fn execute(
             subject,
             candidate,
             required,
+            method,
         } => drive_request_while(
             node,
             &context,
-            node.apply_reviewed_merge_bundle_durable_in(
+            node.apply_reviewed_merge_bundle_with_method_durable_in(
                 &context,
                 authenticated.principal_id(),
                 authenticated.client_idempotency_key().as_bytes(),
@@ -196,6 +197,7 @@ pub(super) fn execute(
                 upload.bundle.unwrap_or(&[]),
                 required.policy_epoch(),
                 required.reviewers(),
+                *method,
             ),
             &mut live,
         )

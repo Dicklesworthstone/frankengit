@@ -1,7 +1,7 @@
 // Native PR client. Views are immutable observations, never merge permission.
 import { Transport, integer, principal, snapshot, listReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
   hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record } from './pulls-core.mjs';
-import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, isFastForwardCandidate, PREPARATION_LIMIT } from './pulls-candidate.mjs';
+import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, candidateMethod, mergeMethod, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
 import { commentsReply } from './pulls-comments.mjs';
@@ -202,20 +202,20 @@ export class PullClient {
   #check(epoch, serial = null) {
     if (!this.connected || epoch !== this.#transport.epoch || (serial !== null && serial !== this.#candidateSerial)) fail('Operation superseded; stale work was not selected.');
   }
-  async prepareAndInspect(number, fields, metadata) {
+  async prepareAndInspect(number, fields, metadata, method = 'merge-commit') {
     const scope = this.#selected(); integer(number, 'PR number', 1);
-    const normalized = preparationCommand(fields, metadata), selected = subject(fields);
+    const normalized = preparationCommand(fields, metadata, method), selected = subject(fields);
     if (scope.format !== selected.object_format) fail('Candidate hash domain differs from the repository.');
     this.invalidateCandidate(); const serial = this.#candidateSerial, epoch = this.#transport.epoch;
     const response = await this.#transport.request(`pulls/${number}/prepare`, {
       method: 'POST', body: form(normalized), statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
     });
-    const result = await preparationReply(response, number, selected, scope, this.#transport.crypto);
+    const result = await preparationReply(response, number, selected, scope, this.#transport.crypto, false, method);
     this.#check(epoch, serial);
     if (!result.artifact) {
       if (result.metadata.state === 'conflicted') {
         const commitMetadata = Object.fromEntries(['author', 'committer', 'timestamp', 'message'].map(name => [name, normalized[name]]));
-        this.#conflict = { number, scope, fields: selected, metadata: commitMetadata, report: copy(result.metadata) };
+        this.#conflict = { number, scope, method, fields: selected, metadata: commitMetadata, report: copy(result.metadata) };
       }
       return { metadata: result.metadata, inspection: null };
     }
@@ -225,6 +225,7 @@ export class PullClient {
   async resolveAndInspect(choices) {
     const scope = this.#selected(), conflict = this.#conflict;
     if (!conflict || Object.keys(scope).some(key => scope[key] !== conflict.scope[key])) fail('Prepare conflicts in this repository before resolving them.');
+    if (conflict.method === 'squash') fail('Resolve squash conflicts on the source branch, then prepare and inspect again.');
     this.#artifact = null;
     const serial = ++this.#candidateSerial, epoch = this.#transport.epoch;
     const upload = await resolutionUpload(conflict.report, conflict.fields, conflict.metadata, choices, this.#transport.crypto);
@@ -240,13 +241,13 @@ export class PullClient {
     this.#check(epoch, serial); this.#conflict = null;
     return { metadata: result.metadata, inspection: inspected.reply };
   }
-  async inspect(number, fields, bundle) {
+  async inspect(number, fields, bundle, method) {
     const scope = this.#selected(); integer(number, 'PR number', 1);
     const selected = candidateFields(fields), bytes = checkedBundle(bundle).slice();
     if (scope.format !== selected.object_format) fail('Candidate hash domain differs from the repository.');
     this.invalidateCandidate(); const serial = this.#candidateSerial, epoch = this.#transport.epoch;
     const sha256 = await digest(bytes, this.#transport.crypto); this.#check(epoch, serial);
-    return this.#inspect({ number, scope, fields: selected, bundle: bytes, sha256 }, epoch, serial);
+    return this.#inspect({ number, scope, ...(method === undefined ? {} : { method: mergeMethod(method) }), fields: selected, bundle: bytes, sha256 }, epoch, serial);
   }
   async #inspect(artifact, epoch, serial) {
     this.#check(epoch, serial);
@@ -262,14 +263,14 @@ export class PullClient {
   }
   exportCandidate() {
     if (!this.connected || !this.#artifact) fail('Inspect a candidate before exporting it.');
-    const { number, scope, fields, bundle, sha256 } = this.#artifact;
-    return JSON.stringify({ schema: 'frankengit-browser-candidate-v1', number, scope, fields, bundle_base64: base64(bundle), sha256 });
+    const { number, scope, method, fields, bundle, sha256 } = this.#artifact;
+    return JSON.stringify({ schema: 'frankengit-browser-candidate-v1', number, scope, ...(method === undefined ? {} : { method }), fields, bundle_base64: base64(bundle), sha256 });
   }
   async importCandidate(serialized) {
     const scope = this.#selected(); this.invalidateCandidate();
     const serial = this.#candidateSerial; text(serialized, RECEIPT_LIMIT, 'candidate receipt');
     const receipt = JSON.parse(serialized);
-    keys(receipt, ['schema', 'number', 'scope', 'fields', 'bundle_base64', 'sha256']);
+    keys(receipt, ['schema', 'number', 'scope', 'method', 'fields', 'bundle_base64', 'sha256']);
     if (receipt.schema !== 'frankengit-browser-candidate-v1') fail('Unsupported candidate receipt.');
     const supplied = receiptScope(receipt.scope);
     if (Object.keys(scope).some(key => scope[key] !== supplied[key])) fail('Candidate belongs to another repository incarnation.');
@@ -279,7 +280,7 @@ export class PullClient {
     this.#check(epoch, serial);
     // A matching checksum is not trusted inspection. Imported bytes ALWAYS go
     // through the native candidate verifier before review/merge controls open.
-    return this.inspect(number, fields, bytes);
+    return this.inspect(number, fields, bytes, Object.hasOwn(receipt, 'method') ? mergeMethod(receipt.method) : undefined);
   }
   async stageMetadata(number, action, fields) { return this.#stage(number, action, fields, null); }
   async stageComment(number, version, body) {
@@ -293,15 +294,16 @@ export class PullClient {
   async stageMerge(requiredReviewers) {
     if (!this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a merge.');
     const { number, fields, bundle } = this.#artifact;
-    if (isFastForwardCandidate(fields)) fail('An existing source-tip candidate requires explicit fast-forward publication.');
+    const method = candidateMethod(this.#artifact);
+    if (method === 'fast-forward-only') fail('An existing source-tip candidate requires explicit fast-forward publication.');
     // Caller-selected reviewers are explicit requirements, not inferred votes.
     // The node independently enforces opener/submitter and current-policy gates.
-    return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers }, bundle);
+    return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers, ...(method === 'squash' ? { method } : {}) }, bundle);
   }
   async stageInspectedFastForward() {
     if (!this.connected || !this.#artifact) fail('Inspect the exact source-tip candidate before preparing a fast-forward.');
     const { number, fields } = this.#artifact;
-    if (!isFastForwardCandidate(fields)) fail('Fast-forward requires the inspected source tip and its exact target base.');
+    if (candidateMethod(this.#artifact) !== 'fast-forward-only') fail('Fast-forward requires the inspected source tip and its exact target base.');
     const { object_format, pull_request_version, source_ref, source_tip, target_ref, target_tip } = fields;
     // This is the explicit native fast-forward schema. Current repository
     // protection supplies its review requirements; no bundle or caller-selected

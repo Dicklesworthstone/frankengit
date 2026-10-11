@@ -170,7 +170,8 @@ pub(super) fn build(
         || comparison.compared_before != subject.target_tip
         || comparison.requested_after != value.candidate.commit
         || (!value.candidate.is_fast_forward(subject)
-            && value.parents != [subject.target_tip, subject.source_tip])
+            && value.parents != [subject.target_tip, subject.source_tip]
+            && value.parents != [subject.target_tip])
         || value.prerequisites.len() > 64
         || value.candidate_commit_body.len() > 2 * 1024 * 1024
         || comparison.entries.len() > 512

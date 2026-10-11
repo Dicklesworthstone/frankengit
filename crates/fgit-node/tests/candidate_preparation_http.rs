@@ -16,7 +16,12 @@ use fgit_wire::visibility::RefVisibility;
 
 #[test]
 fn remote_candidate_is_deterministic_unstaged_and_reviewable_after_restart() {
-    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+    for (format, method) in [
+        (GitHashAlgorithm::Sha1, "merge-commit"),
+        (GitHashAlgorithm::Sha1, "squash"),
+        (GitHashAlgorithm::Sha256, "merge-commit"),
+        (GitHashAlgorithm::Sha256, "squash"),
+    ] {
         let root = Scratch::new();
         let config = root.config(format);
         let (node, data) = fixture(&root, format);
@@ -30,7 +35,7 @@ fn remote_candidate_is_deterministic_unstaged_and_reviewable_after_restart() {
             .len();
         let path = root.0.join("credentials");
         configure(&node, &path);
-        let server = Server::start(node, &path, 4, true, true);
+        let server = Server::start(node, &path, 5, true, true);
         committed(&post(
             &server.client,
             1,
@@ -44,12 +49,41 @@ fn remote_candidate_is_deterministic_unstaged_and_reviewable_after_restart() {
         let reviews = get(&server.client, "/api/v1/pulls/1/reviews", 'b'); // 2
         status(&reviews, 200);
         let epoch = PolicyEpoch::try_new(numeric(&reviews.body, "policy_epoch")).unwrap();
-        let command = preparation_form(&data, epoch);
+        let command = preparation_form(&data, epoch) + &format!("&method={method}");
         let original = prepare(&server.client, 1, 'd', &command, false); // 3
         let (candidate, metadata) = extract(&original, data.clone());
         assert_eq!(candidate.epoch, epoch);
+        assert!(metadata.contains(&format!("\"method\":\"{method}\"")));
         assert_eq!(prepare(&server.client, 1, 'd', &command, true), original); // 4
-        assert_eq!(server.finish().accepted_sessions(), 4);
+        let mut inspection_body = b"--inspection-boundary\r\nContent-Disposition: form-data; name=\"command\"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n".to_vec();
+        inspection_body.extend_from_slice(common(&candidate).as_bytes());
+        inspection_body.extend_from_slice(b"\r\n--inspection-boundary\r\nContent-Disposition: form-data; name=\"bundle\"\r\nContent-Type: application/x-git-bundle\r\n\r\n");
+        inspection_body.extend_from_slice(&candidate.bundle);
+        inspection_body.extend_from_slice(b"\r\n--inspection-boundary--\r\n");
+        let inspected = exchange(
+            &server.client,
+            &request(
+                &server.client,
+                "POST",
+                "/api/v1/pulls/1/inspect",
+                'd',
+                &format!(
+                    "Content-Type: multipart/form-data; boundary=inspection-boundary\r\nContent-Length: {}\r\n",
+                    inspection_body.len()
+                ),
+                &inspection_body,
+            ),
+            true,
+        ); // 5
+        status(&inspected, 200);
+        let parents = if method == "squash" {
+            format!("\"parents\":[\"{}\"]", data.target_tip)
+        } else {
+            format!("\"parents\":[\"{}\",\"{}\"]", data.target_tip, data.source_tip)
+        };
+        assert!(inspected.body.contains(&parents));
+        assert!(inspected.body.contains("\"merge_authorized\":false"));
+        assert_eq!(server.finish().accepted_sessions(), 5);
         let node = reopen(&config);
         assert_eq!(
             generation(&node),
@@ -102,7 +136,7 @@ fn remote_candidate_is_deterministic_unstaged_and_reviewable_after_restart() {
             ),
             vote
         ); // 3
-        let merge = merge_form(&candidate, &[REVIEWER]);
+        let merge = merge_form(&candidate, &[REVIEWER]) + &format!("&method={method}");
         let published = send(
             &server.client,
             "merge",
@@ -113,6 +147,7 @@ fn remote_candidate_is_deterministic_unstaged_and_reviewable_after_restart() {
             false,
         ); // 4
         accepted(&published);
+        assert!(published.body.contains(&format!("\"method\":\"{method}\"")));
         assert_eq!(
             send(
                 &server.client,

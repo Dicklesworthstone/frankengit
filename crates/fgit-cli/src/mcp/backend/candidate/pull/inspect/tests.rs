@@ -117,3 +117,70 @@ fn discovery_requires_the_complete_native_subject_and_has_no_mutation_fields() {
     ]).encode(json::MAX_INPUT).unwrap();
     assert!(json::parse(wire.as_bytes()).is_ok());
 }
+
+#[test]
+fn explicit_method_hints_are_closed_and_never_override_actual_parent_shape() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let original = args(format);
+        let baseline = parse(&original, format).unwrap();
+        assert_eq!(baseline.style, None);
+        let subject = &baseline.selection.subject;
+        let parents = [subject.target_tip, subject.source_tip];
+        assert_eq!(
+            inspected_method(subject, baseline.candidate, &parents, None).unwrap(),
+            NativeMergeMethod::MergeCommit
+        );
+        assert_eq!(
+            inspected_method(subject, baseline.candidate, &parents[..1], None).unwrap(),
+            NativeMergeMethod::Squash
+        );
+        for (method, style) in [
+            ("merge-commit", MergeCommitStyle::TwoParent),
+            ("squash", MergeCommitStyle::Squash),
+        ] {
+            let mut input = original.clone();
+            input.insert("method".into(), text(method));
+            assert_eq!(parse(&input, format).unwrap().style, Some(style));
+        }
+        assert!(inspected_method(subject, baseline.candidate, &parents, Some(MergeCommitStyle::Squash)).is_err());
+        assert!(inspected_method(subject, baseline.candidate, &parents[..1], Some(MergeCommitStyle::TwoParent)).is_err());
+        for wrong in [vec![], vec![subject.source_tip], vec![subject.source_tip, subject.target_tip],
+            vec![subject.target_tip, subject.source_tip, subject.target_tip]]
+        {
+            assert!(inspected_method(subject, baseline.candidate, &wrong, None).is_err());
+            assert!(inspected_method(subject, baseline.candidate, &wrong, Some(MergeCommitStyle::Squash)).is_err());
+        }
+        for value in [Value::Null, Value::Bool(true), json::number(1), text(""),
+            text("Squash"), text("fast-forward-only"), text("rebase")]
+        {
+            let mut input = original.clone();
+            input.insert("method".into(), value);
+            assert!(parse(&input, format).is_err());
+        }
+    }
+}
+
+#[test]
+fn an_identical_source_commit_keeps_explicit_squash_separate_from_legacy_fast_forward() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let input = parse(&args(format), format).unwrap();
+        let subject = &input.selection.subject;
+        let candidate = CandidateBinding { merge_base: subject.target_tip, commit: subject.source_tip };
+        candidate.validate(subject).unwrap();
+        let parents = [subject.target_tip];
+        assert_eq!(
+            inspected_method(subject, candidate, &parents, None).unwrap(),
+            NativeMergeMethod::FastForwardOnly
+        );
+        assert_eq!(
+            inspected_method(subject, candidate, &parents, Some(MergeCommitStyle::Squash)).unwrap(),
+            NativeMergeMethod::Squash
+        );
+        assert!(inspected_method(subject, candidate, &parents, Some(MergeCommitStyle::TwoParent)).is_err());
+        // Fast-forward inspection may prove a longer admitted source history;
+        // that proof cannot satisfy an explicit one-parent squash assertion.
+        let intermediate = GitOid::from_hex(format, &"55".repeat(format.digest_len())).unwrap();
+        assert!(inspected_method(subject, candidate, &[intermediate], None).is_ok());
+        assert!(inspected_method(subject, candidate, &[intermediate], Some(MergeCommitStyle::Squash)).is_err());
+    }
+}

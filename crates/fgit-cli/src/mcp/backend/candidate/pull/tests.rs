@@ -3,6 +3,7 @@ mod support;
 mod inspection;
 mod resolution;
 mod fast_forward;
+mod squash;
 use support::*;
 
 #[test]

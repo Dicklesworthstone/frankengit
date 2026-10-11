@@ -141,6 +141,52 @@ candidate under the same key is a different sealed request and refuses.
 Known terminal outcomes remain distinguishable from cleanup and transport
 failures.
 
+## HTTP, MCP and browser workflow
+
+The HTTP preparation endpoint accepts `method=squash` alongside the existing
+exact PR subject and commit metadata. `profile=path-merge-v1` and
+`profile=exact-renames-v1` remain independent choices. The response identifies
+its method even for conflicts and no-op results. Carry that method into
+`POST .../pulls/{number}/merge` with the exact bundle and required reviewers.
+Review and inspection HTTP forms omit the selector; native inspection verifies
+the actual commit parents, and reviews bind the actual commit identity.
+Reviewed publication independently validates and seals the selected method,
+then returns it in the terminal receipt.
+
+With MCP, call `frankengit_source_candidate` with
+`operation: "prepare_pull_merge"` and `method: "squash"`. A clean result includes:
+
+- `inspection_arguments`: pass directly to `frankengit_source_candidate`.
+  They pin the preparation head and bundle digest and retain the selected method.
+- `candidate_arguments`: use with `frankengit_pull_review`, adding the caller's
+  review version, decision and durable key. These arguments contain no method.
+- `publication_arguments`: use with `frankengit_pull_merge_reviewed`, adding
+  the caller's durable key and required reviewers. These arguments include
+  `method: "squash"`.
+
+The inspector returns the verified parent list and a matching publication
+template. An explicit squash assertion remains squash when its candidate
+identity equals the source tip. Read, review and merge grants remain separate;
+a candidate result supplies no authenticated sponsor or approval.
+
+In the pull-request browser, select **Squash (one target parent)** before
+preparing. The client verifies the returned method and inspects the exact
+candidate. Exported candidate receipts preserve the selection and require
+native reinspection when imported. Review requests remain method-free, while
+staged merge requests preserve squash in their exact request bytes and recovery
+key. Editing the selection cannot change an already staged request. A terminal
+receipt that contradicts its method leaves the outcome uncertain and retains
+the original request for recovery or exact retry.
+
+The existing explicit conflict resolver constructs two-parent commits. For a
+conflicted squash, the browser directs the author to resolve the source branch
+and prepare again; it does not enable that resolver for squash.
+
+See the [HTTP preparation API](HTTP_CANDIDATE_PREPARATION_API.md),
+[HTTP reviewed merge API](HTTP_REVIEW_MERGE_API.md),
+[MCP candidate API](MCP_PULL_CANDIDATES.md) and
+[MCP inspection API](MCP_PULL_INSPECTION.md) for complete field and grant rules.
+
 ## Native API surface and current limits
 
 The method-aware entry points are:
@@ -166,7 +212,11 @@ source-only closure validation, combined budgets, cancellation, atomic
 publication, stale tips/versions, exact reviews, retry and restart. Cargo
 validation for this change was blocked by a full shared filesystem before
 first-party compilation; the execution service subsequently disconnected.
-The added Rust tests are not reported as executed.
+The added Rust tests are not reported as executed. The full Node browser suite
+also requires execution on a working host. Focused checks of the actual browser
+core, candidate and action module source ran in V8, with only missing UTF-8 and
+form-encoding platform APIs supplied by the harness; these checks do not cover
+WebCrypto, browser rendering, network transport or native admission.
 
 See [native preparation](NATIVE_MERGE_PREPARATION.md),
 [bundle publication](MERGE_BUNDLE_COMMAND.md), and the
