@@ -4,6 +4,9 @@ mod branches;
 mod candidate;
 pub mod candidate_inspection;
 mod full_bundle;
+pub use full_bundle::{
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+};
 mod initial_commit;
 mod merge_prepare;
 mod native_merge;

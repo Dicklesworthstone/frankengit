@@ -1,4 +1,5 @@
 use super::*;
+mod streaming;
 use crate::{MaterializedAdmission, NodeConfig};
 use fgit_authority::IdempotencyKey;
 use fgit_crypto::{GitObjectKind, git_object_id};

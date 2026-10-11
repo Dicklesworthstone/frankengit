@@ -34,6 +34,10 @@ use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
 mod incremental;
+mod streaming;
+pub use streaming::{
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+};
 
 fn bundle_error(error: impl Into<FullBundleError>) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::FullBundle(Box::new(error.into()))

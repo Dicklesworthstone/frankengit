@@ -61,6 +61,9 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use treefs_workspace::{
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
