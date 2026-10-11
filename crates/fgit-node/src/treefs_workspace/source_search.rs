@@ -281,7 +281,7 @@ impl OneNode {
             database_exhaustion: &exhaustion,
             session_is_live: None,
         };
-        let parse = ParseLimits {
+        let mut parse = ParseLimits {
             tree_reference_bytes: self.object_format.digest_len(),
             max_object_bytes: inner.maximum_object_bytes,
             max_tree_entries: limits.max_entries,
@@ -407,6 +407,15 @@ impl OneNode {
             .map_err(|_| search_error(SearchError::InvalidObjectFormat))?;
         let tree_oid = A::parse_hex(&tree.to_string())
             .map_err(|_| search_error(SearchError::InvalidObjectFormat))?;
+        // An index builder may inspect a file beyond its indexing ceiling to
+        // record a verified omission. Keep that bounded intake separate from
+        // both the file's indexing limit and the commit/tree parser ceiling.
+        // Ordinary searches retain their original per-file allocation bound.
+        let blob_bytes = query
+            .maximum_blob_bytes(limits)
+            .min(limits.max_total_bytes.max(limits.max_file_bytes));
+        let host_bytes = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
+        parse.max_object_bytes = host_bytes.min(METADATA_OBJECT_BYTES.max(blob_bytes));
         let base = BaseView::<A>::new(
             self.repository_id,
             rcr,
@@ -416,11 +425,15 @@ impl OneNode {
             PathPolicy::default(),
         );
         let original = NodeTreeSource {
-            inner,
+            inner: VerifiedFabricPackSource {
+                maximum_object_bytes: host_bytes,
+                ..inner
+            },
             selected: selected.selected_closure(),
             workspace,
         };
-        let source = bounded_source(&original, request, limits);
+        let mut source = bounded_source(&original, request, limits);
+        source.max_bytes = blob_bytes;
         // The allocation-side budget includes the two metadata reads above,
         // just as the TreeCapability fetch/file budgets do. Semantic source
         // counters still count only blobs, not commits or directory entries.
@@ -444,6 +457,11 @@ impl OneNode {
 trait LocalSearch: Sync {
     type Report;
     fn scope(&self) -> &SourceQuery;
+    /// Allocation ceiling for native blob verification. Only index builders
+    /// that persist explicit omissions opt into the finite corpus allowance.
+    fn maximum_blob_bytes(&self, limits: SearchLimits) -> usize {
+        limits.max_file_bytes
+    }
     fn empty(&self, source: SourceSearchReport) -> Self::Report;
     fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(
         &self,

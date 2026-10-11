@@ -64,6 +64,17 @@ Current path authorization and native blob verification precede an omission.
 This is part of the immutable manifest commitment, not an operator-provided
 skip list or an unverified filesystem warning.
 
+Native symbol build and refresh distinguish the per-file **indexing** ceiling
+from the blob-verification **intake** ceiling. They may read a blob up to the
+selected finite corpus allowance, bounded additionally by the node's configured
+object limit and remaining shared fetch budget, before recording `file_bytes`.
+The original bytes must still verify against the selected native identity.
+Commit and tree reads keep their separate 8 MiB metadata ceiling. Ordinary live
+search keeps its per-file allocation ceiling; it does not acquire this
+index-builder intake allowance. A source exceeding the corpus, host-object or
+remaining fetch allowance still refuses the operation before the publication
+barrier, rather than being represented as an authenticated omission.
+
 | Reason | Meaning | Diagnostic |
 | --- | --- | --- |
 | `file_bytes` | The verified source exceeds the selected per-file scanner limit. | `limit`: positive and at most 8 MiB; `byte_offset`: null. |

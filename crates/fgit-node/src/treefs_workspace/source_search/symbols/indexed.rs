@@ -34,6 +34,9 @@ impl LocalSearch for Build {
     fn scope(&self) -> &SourceQuery {
         &self.0
     }
+    fn maximum_blob_bytes(&self, limits: SearchLimits) -> usize {
+        limits.max_total_bytes
+    }
     fn empty(&self, source: SourceSearchReport) -> Self::Report {
         Ok(data::Corpus::empty(source))
     }

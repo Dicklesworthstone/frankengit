@@ -14,6 +14,8 @@ use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, RefN
 use support::*;
 
 type Failure = AccessError<NodeWorkspaceRefusal, GenerationAuthorityError>;
+#[path = "source_symbol_index/oversized.rs"]
+mod oversized;
 const A:&[u8]=b"// fn ThingFake() {}\r\n#[allow(dead_code)]\r\npub struct Thing;\r\npub fn ThingWorker() { let _ = \"fn ThingString(){}\"; }\r\nmacro_rules! ThingMaker { () => { fn ThingGenerated(){} } }\r\n";
 const B: &[u8] = b"fn ThingLocal() {}\nfn r#type() {}\n";
 const RAW_PATH: &[u8] = b"raw\xff.rs";
