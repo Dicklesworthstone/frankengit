@@ -35,9 +35,10 @@ pin canonical source. The source can move after selection; a build receipt
 names its original source, not guaranteed freshness when stdout is delivered.
 
 An unrelated oversized tracker or fixture outside the union is not read as a
-source blob. Every selected regular file must still fit the existing limits;
-a failure never silently drops that file. Narrow the union rather than claim
-whole-repository coverage. Build limits can be reduced with `--max-file-bytes`,
+source blob. Selected regular files above the per-file limit are verified and
+recorded as explicit omissions; their bytes still consume the source budget.
+Host limits, corruption and exhausted aggregate limits refuse the build.
+Build limits can be reduced with `--max-file-bytes`,
 `--max-source-bytes`, `--max-files`, `--max-entries` and `--max-depth`.
 
 ## Search, paginate and retain independent floors
@@ -57,6 +58,9 @@ do not select a different index. Work and payload reads can be narrowed with
 Output explicitly states `coverage: "explicit-path-union"`,
 `whole_repository: false`, the canonical `scope_prefixes_hex`, and scope SHA-256.
 `complete_within_scope` is not a negative answer about the rest of the repository.
+For omission-bearing generations, schema 2 reports `coverage_complete: false`,
+the omission inventory and a separate `page_complete` flag;
+`complete_within_scope` stays false even after the final matching page.
 All counters, including document IDs, generation numbers, offsets and cursors,
 are decimal JSON strings. Preserve their exact values rather than round them.
 Paths and terms are hex, so raw name bytes never become terminal control text.

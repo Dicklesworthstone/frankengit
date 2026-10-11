@@ -73,7 +73,10 @@ export function verifyWordSpans(bytes, q, spans, checkpoint = () => {}) {
   checkpoint();
 }
 export function indexReply(reply, selected, q, scope = null, pin = null, previous = null, minimum = null) {
-  const source = coordinates(reply, selected, scope, pin);
+  record(reply);
+  const partial = reply.schema_version === 2;
+  if (partial && reply.index_profile !== 'ascii-word-postings-omissions-v1') fail('Unsupported indexed coverage profile.');
+  const source = coordinates(reply, selected, scope, pin, partial ? 2 : 1);
   const mode = sourceMode(q.sourceMode), revalidated = mode === 'revalidated';
   if (previous && sourceMode(previous.query.sourceMode) !== mode) fail('Indexed continuation changed source mode.');
   const sources = revalidated ? currentSources(reply, source, previous) : null;
@@ -122,7 +125,47 @@ export function indexReply(reply, selected, q, scope = null, pin = null, previou
   if ((previous && !hits.length) || (reply.complete ? reply.next_after !== null : (!hits.length || hits.length !== q.maxMatches || reply.next_after !== lastId))) fail('Invalid indexed completion or continuation.');
   const seen = (previous?.seen ?? 0) + hits.length;
   if (seen > stats.documents || (!reply.complete && seen >= stats.documents)) fail('Indexed page exceeds the corpus.');
-  return { ...source, ...(sources ? { sources } : {}), query: copy(q), index, selectedIndex, stats, hits, complete: reply.complete, nextAfter: reply.next_after, seen };
+  const omissions = lexicalOmissions(reply, selected.format, partial, stats, new Set(hits.map(hit => hit.pathHex)), retained);
+  if (previous && (previous.coverageComplete !== !partial || !sameOmissions(previous.omissions, omissions))) {
+    fail('Indexed continuation changed source coverage.');
+  }
+  return { ...source, ...(sources ? { sources } : {}), query: copy(q), index, selectedIndex, stats, hits,
+    complete: reply.complete, coverageComplete: !partial, omissions, nextAfter: reply.next_after, seen };
+}
+
+function sameOmissions(left, right) {
+  return left.length === right.length && left.every((entry, i) =>
+    ['pathHex', 'blob', 'sourceBytes', 'reason', 'offset', 'limit'].every(field => entry[field] === right[i][field]));
+}
+function lexicalOmissions(reply, format, partial, stats, matchedPaths, retained) {
+  const fields = ['index_profile', 'coverage_complete', 'coverage_scope', 'omitted_files', 'omitted_source_bytes', 'omissions'];
+  if (!partial) {
+    if (fields.some(field => Object.hasOwn(reply, field))) fail('A v1 indexed result cannot carry omission metadata.');
+    return [];
+  }
+  if (reply.coverage_complete !== false || Object.hasOwn(reply, 'coverage_scope') ||
+      !Array.isArray(reply.omissions) || !reply.omissions.length || reply.omissions.length > 20_000 ||
+      reply.omitted_files !== reply.omissions.length || stats.documents + reply.omissions.length > 20_000) {
+    fail('Invalid indexed coverage inventory.');
+  }
+  let previous = '', bytes = 0;
+  const omissions = reply.omissions.map(raw => {
+    keys(raw, ['path_hex', 'blob', 'source_bytes', 'reason', 'limit']);
+    pathHex(raw.path_hex);
+    const path = unhex(raw.path_hex, 4096), blob = oid(raw.blob, format);
+    const sourceBytes = integer(raw.source_bytes, 'omitted source bytes', 1, 64 * 1024 * 1024);
+    const limit = integer(raw.limit, 'omitted file limit', 1, FILE_LIMIT);
+    if (path.filter(byte => byte === 47).length >= 64 || raw.path_hex <= previous ||
+        matchedPaths.has(raw.path_hex) || /^0+$/.test(blob) || raw.reason !== 'file_bytes' || sourceBytes <= limit) {
+      fail('Invalid omitted indexed path, identity or file-size diagnostic.');
+    }
+    bytes += sourceBytes; retained += path.length + 96;
+    if (bytes + stats.sourceBytes > 64 * 1024 * 1024 || retained > 2 * 1024 * 1024) fail('Indexed omission metadata exceeds its corpus or result budget.');
+    previous = raw.path_hex;
+    return { pathHex: raw.path_hex, blob, sourceBytes, reason: raw.reason, offset: null, limit };
+  });
+  if (reply.omitted_source_bytes !== bytes) fail('Omitted indexed source-byte accounting changed.');
+  return omissions;
 }
 export async function verifyIndexedFile(bytes, hit, q, algorithm, crypto, checkpoint) {
   checkpoint();
@@ -375,7 +418,8 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
   keys(reply.generation_vector, ['lexical', 'symbols']);
   const lexical = vectorEntry(reply.generation_vector.lexical);
   if (!sameActivation(content.index, path.index) || !sameActivation(lexical, content.index) ||
-      ['documents', 'sourceBytes', 'nonRegular'].some(key => content.stats[key] !== path.stats[key])) {
+      ['documents', 'sourceBytes', 'nonRegular'].some(key => content.stats[key] !== path.stats[key]) ||
+      content.coverageComplete !== path.coverageComplete || !sameOmissions(content.omissions, path.omissions)) {
     fail('Combined lexical channels changed generation or corpus.');
   }
   // Maintenance may advance the observed head between reads, not the queried
@@ -414,6 +458,11 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
     documents.set(hit.pathHex, hit); identities.set(hit.documentId, hit.pathHex);
     retained += hit.pathHex.length / 2 + hit.spans.length * 24 + 64;
   }
+  // Both channel receipts retain the same whole-corpus inventory. Charge it
+  // once per channel, just like duplicate lexical hits across the channels.
+  for (const channel of [content, path]) for (const omission of channel.omissions) {
+    retained += omission.pathHex.length / 2 + 96;
+  }
   if (symbols.state === 'available') {
     payload += symbols.result.stats.payloadBytes; work += symbols.result.stats.work;
     for (const hit of symbols.result.hits) {
@@ -428,7 +477,7 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
       retained += omission.pathHex.length / 2 + 96;
     }
   }
-  const complete = content.complete && path.complete && (symbols.state === 'not_requested' ||
+  const complete = content.complete && path.complete && content.coverageComplete && path.coverageComplete && (symbols.state === 'not_requested' ||
     (symbols.state === 'available' && symbols.result.complete && symbols.result.coverageComplete));
   if (integer(reply.retained_result_bytes, 'combined retained bytes', 0, q.maxResultBytes) !== retained ||
       integer(reply.completed_payload_bytes_read, 'successful channel payload bytes', 0, q.maxPayloadBytes) !== payload ||

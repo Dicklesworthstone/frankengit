@@ -16,8 +16,8 @@ pub use fgit_graph::GenerationActivation;
 use fgit_graph::lexical::{IndexError, LexicalError, LexicalIndexStore, LexicalNamespace};
 // Re-export the owned graph types used by this public node boundary.
 pub use fgit_graph::lexical::{
-    IndexedLexicalReport, LexicalChannel, LexicalQuery, LexicalQueryLimits, LexicalReadLimits,
-    LexicalSource,
+    IndexedLexicalReport, LexicalChannel, LexicalOmission, LexicalOmissionReason, LexicalQuery,
+    LexicalQueryLimits, LexicalReadLimits, LexicalSource, OMISSION_PROFILE,
 };
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};

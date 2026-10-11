@@ -195,6 +195,8 @@ impl InitialReport {
     pub fn complete(&self) -> bool {
         self.content.results.complete
             && self.path.results.complete
+            && self.content.coverage_complete
+            && self.path.coverage_complete
             && match &self.symbols {
                 SymbolChannel::NotRequested => true,
                 SymbolChannel::Unavailable(_) => false,
@@ -261,8 +263,14 @@ fn lexical_result_bytes(
     total: &mut usize,
     maximum: usize,
 ) -> Result<(), RetrievalError> {
+    report
+        .validate_coverage()
+        .map_err(|_| RetrievalError::Invalid("lexical coverage"))?;
     for hit in &report.results.hits {
         add_result(total, hit.path.len() + hit.spans.len() * 24 + 64, maximum)?;
+    }
+    for omission in &report.omissions {
+        add_result(total, omission.path.len() + 96, maximum)?;
     }
     Ok(())
 }
@@ -273,7 +281,13 @@ fn check_lexical_join(
     if content.source != path.source {
         return Err(RetrievalError::MixedSource);
     }
-    if content.generation != path.generation {
+    if content.generation != path.generation
+        || content.indexed_documents != path.indexed_documents
+        || content.indexed_source_bytes != path.indexed_source_bytes
+        || content.non_regular_entries != path.non_regular_entries
+        || content.coverage_complete != path.coverage_complete
+        || content.omissions != path.omissions
+    {
         return Err(RetrievalError::MixedGeneration);
     }
     Ok(())

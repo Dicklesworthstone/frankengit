@@ -59,6 +59,8 @@ impl RevalidatedInitialReport {
     pub fn complete(&self) -> bool {
         self.content.results.complete
             && self.path.results.complete
+            && self.content.coverage_complete
+            && self.path.coverage_complete
             && match &self.symbols {
                 SymbolChannel::NotRequested => true,
                 SymbolChannel::Unavailable(_) => false,

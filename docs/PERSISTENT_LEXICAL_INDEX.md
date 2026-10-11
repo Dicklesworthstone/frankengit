@@ -38,6 +38,36 @@ of truncation. A continuation keeps the exact generation, normalized query and
 last returned ID. A caller changing those parameters is issuing another query,
 not continuing the same result. The library does not mint an HTTP cursor token.
 
+## Explicit omissions and source coverage
+
+Native builders enumerate every selected regular file and verify its native
+blob before deciding whether its body fits the configured per-file indexing
+limit. Oversized files can be recorded as `LexicalOmission` rows instead of
+aborting the entire build. Each row binds the exact raw path, native blob ID,
+verified source-byte count, `FileBytes` reason and applied limit. Paths are
+strictly ordered, unique and disjoint from indexed documents. Binary bytes
+retain the existing tokenization behavior; no new binary-file exclusion applies.
+
+`PreparedLexicalIndex::with_omissions` and the corresponding scoped/refresh
+constructors accept these records from the native source owner. The original
+constructors remain strict. Omission-free preparations preserve their original
+v1 bytes. Nonempty omissions select `source-lexical-index` schema 2.0 and v2
+manifest/evidence frames, bound to `ascii-word-postings-omissions-v1`;
+document/posting catalogs and segments retain their existing encoding. Readers
+check the matching generation, profile and catalogs before returning results.
+
+`IndexedLexicalReport.coverage_complete` is independent of result pagination.
+`results.complete` means the selected postings have no further matching page;
+it does not establish coverage of an omitted file. Every page retains the same
+authenticated omission inventory, including queries with no matching documents.
+The combined indexed-plus-omitted corpus remains bounded to 20,000 files and
+64 MiB. Omission metadata and returned hits share the 2 MiB result allowance.
+Preparation and manifest decoding reject an omission inventory that cannot
+fit that allowance on its own, so it cannot publish an unqueryable generation.
+Source corruption, missing objects, host limits, exhausted aggregate budgets
+and cancellation remain errors, never omission reasons. This profile only
+permits the explicit per-file-size omission; oversized tokens still refuse.
+
 ## Persistence and generation lifecycle
 
 `PreparedLexicalIndex::new` consumes complete segments plus the exact source
@@ -52,8 +82,9 @@ namespace. A publish stages segment bodies and distinct document, posting,
 evidence and manifest catalogs before invoking the existing generation authority.
 The catalogs reference the same segment bodies, with distinct canonical schema
 families. Evidence records builder/source/count commitments; it is not an
-independent completeness attestation. No existing codec or generation encoding
-is modified and no external dependency, new runtime or competing store is added.
+independent completeness attestation. Existing v1 encodings remain unchanged;
+the explicit omission profile uses the versioned metadata described above.
+No external dependency, new runtime or competing store is added.
 
 The resulting graph generation is `DeterministicDerived`, bound to the explicit
 builder profile and source stamp. Generation CAS, predecessor checks, receipt
@@ -84,8 +115,10 @@ owner obligation. Holding a selection does not prevent GC or grant access.
 A segment has at most 2048 documents, 32768 dictionary entries, 65536 postings
 and 1 MiB of encoded data. A complete generation has at most 128 segments,
 20000 documents, 64 MiB of source data and 32 MiB of encoded payloads. A file is
-at most 8 MiB, a path 4096 bytes and a word 128 bytes. Limits are hard refusals,
-not permission to omit records. Empty indexes contain no segment but still have
+at most 8 MiB for indexing, a path 4096 bytes and a word 128 bytes. Only the
+explicit omission constructors permit per-file-size exclusions, with their
+verified bytes still charged to the aggregate budget. Other limits are hard
+refusals. Empty indexes contain no segment but still have
 all metadata catalogs and a generation root.
 
 Queries retain at most 4096 hits and 2 MiB of result metadata. Their shared work
@@ -117,10 +150,11 @@ shared cross-segment budgets, foreign selection reuse, genuine async suspension,
 per-call contexts and wrong generation classes. Async/fault adapters are explicit
 test doubles; source stamps in these tests are fixtures, not a live node builder.
 
-Rust/Cargo are unavailable in the implementation environment. These Rust tests,
-compilation, rustfmt, Clippy, durable FrankenSQLite execution, full-workspace and
-release gates have not been executed. Changed-file whitespace and uploaded blob
-checks do not replace those gates. Focused checks in the pinned build lane:
+The pinned nightly graph test lane covers codec compatibility, omission
+integrity, scope and refresh behavior, empty and paginated partial coverage,
+and exact shared result-budget boundaries. These graph tests do not by
+themselves establish native durability, full-workspace or release conformance.
+Focused checks in the pinned build lane:
 
 ```bash
 cargo check --locked -p fgit-graph --all-targets

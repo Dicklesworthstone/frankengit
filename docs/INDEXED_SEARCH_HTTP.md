@@ -110,6 +110,24 @@ and number, and the distinct selected current index head. The latter does not
 replace the generation used by the query. Responses explicitly report
 `read_only: true`, `transaction_created: false`, and `published: false`.
 
+An omission-bearing generation returns `schema_version: 2` and the additional
+`index_profile: ascii-word-postings-omissions-v1`, `coverage_complete: false`,
+`omitted_files`, `omitted_source_bytes` and `omissions`. Each omission carries
+`path_hex`, native `blob`, verified `source_bytes`, `reason: file_bytes` and
+the applied `limit`. Counts describe the complete indexed scope, independently
+of the query's path filter. A v1 response remains byte-compatible and represents
+complete regular-file coverage under the original profile.
+
+The same extension applies to explicit current-source revalidation; its query
+profile and separate original/current provenance remain intact. `complete`
+continues to describe pagination. Consumers must also check source coverage
+before interpreting zero hits as absence. Omissions are identical across pages.
+Joined Initial retrieval reports overall incompleteness if either lexical
+channel omits a file, even when both channels have exhausted their postings.
+The trusted-local `fg search --indexed-current` command returns exit 3 for this
+case and includes the omission inventory in its JSON. `fg-index ... query`
+also exposes the versioned coverage metadata.
+
 Each hit contains an absolute `document_id`, lossless `path_hex`, native `blob`,
 source `content_bytes`, and one span per normalized term. `query_index` indexes
 `terms_hex`; `byte_offset` and `byte_length` refer to original content bytes in

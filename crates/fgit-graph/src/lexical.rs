@@ -15,8 +15,9 @@ mod encoding;
 mod stored;
 pub use stored::scoped;
 pub use stored::{
-    IndexError, IndexedLexicalReport, LexicalIndexStore, LexicalReadLimits, LexicalRefreshStats,
-    LexicalReuse, LexicalSelection, LexicalSource, PreparedLexicalIndex, RefreshDocument,
+    IndexError, IndexedLexicalReport, LexicalIndexStore, LexicalOmission, LexicalOmissionReason,
+    LexicalReadLimits, LexicalRefreshStats, LexicalReuse, LexicalSelection, LexicalSource,
+    PreparedLexicalIndex, RefreshDocument,
 };
 #[cfg(test)]
 mod long_word_tests;
@@ -30,6 +31,7 @@ use fgit_types::{
 use std::collections::{BTreeMap, btree_map::Entry};
 
 pub const PROFILE: &str = "ascii-word-postings-v1";
+pub const OMISSION_PROFILE: &str = "ascii-word-postings-omissions-v1";
 pub const MAX_SEGMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_DOCUMENTS: usize = 2048;
 pub const MAX_POSTINGS: usize = 65_536;

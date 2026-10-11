@@ -3,7 +3,7 @@
 //! semantics. This boundary retains the scope through reuse and preparation.
 
 use super::super::{
-    LexicalRefreshStats, LexicalReuse, MAX_INDEX_DOCUMENTS, RefreshDocument,
+    LexicalOmission, LexicalRefreshStats, LexicalReuse, MAX_INDEX_DOCUMENTS, RefreshDocument,
 };
 use super::{
     AsyncAuthorityStore, AuthorityStore, GenerationActivation, IndexError, LexicalError,
@@ -57,10 +57,25 @@ impl ScopedLexicalReuse {
         excluded: usize,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(PreparedScopedLexicalIndex, LexicalRefreshStats), IndexError> {
+        self.prepare_with_omissions(source, rows, excluded, Vec::new(), live)
+    }
+
+    pub fn prepare_with_omissions(
+        &self,
+        source: LexicalSource,
+        rows: &[RefreshDocument<'_>],
+        excluded: usize,
+        omissions: Vec<LexicalOmission>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedScopedLexicalIndex, LexicalRefreshStats), IndexError> {
         check(live)?;
         // Bound the scope-validation pass before walking caller input. The
         // shared engine subsequently checks ordering, identity, bytes and work.
-        if rows.len() > MAX_INDEX_DOCUMENTS {
+        if rows
+            .len()
+            .checked_add(omissions.len())
+            .is_none_or(|n| n > MAX_INDEX_DOCUMENTS)
+        {
             return Err(LexicalError::Limit("indexed documents").into());
         }
         for row in rows {
@@ -69,7 +84,15 @@ impl ScopedLexicalReuse {
                 return Err(LexicalError::Invalid("document outside index scope").into());
             }
         }
-        let (inner, stats) = self.inner.prepare(source, rows, excluded, live)?;
+        for omission in &omissions {
+            check(live)?;
+            if !self.scope.includes(&omission.path) {
+                return Err(LexicalError::Invalid("omission outside index scope").into());
+            }
+        }
+        let (inner, stats) = self
+            .inner
+            .prepare_with_omissions(source, rows, excluded, omissions, live)?;
         Ok((
             PreparedScopedLexicalIndex {
                 scope: self.scope.clone(),
@@ -91,7 +114,9 @@ impl<S: AuthorityStore> ScopedLexicalIndexStore<'_, S> {
     ) -> Result<ScopedLexicalReuse, IndexError> {
         check(live)?;
         self.agrees(&selection.scope)?;
-        let inner = self.inner.load_refresh_base(&selection.inner, limits, live)?;
+        let inner = self
+            .inner
+            .load_refresh_base(&selection.inner, limits, live)?;
         Ok(ScopedLexicalReuse {
             scope: self.scope.clone(),
             inner,

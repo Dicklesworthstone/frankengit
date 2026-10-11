@@ -23,10 +23,18 @@ preliminary source read is not used to manufacture the stamp.
 
 Every selected regular file is enumerated through verified TreeFS. Executable
 files are included; symlinks and gitlinks are counted but never followed.
+An otherwise valid blob exceeding `max_file_bytes` is verified and recorded
+with its exact path, blob, byte count and applied limit as an authenticated
+omission. It still consumes file, fetch and total-source budgets. This lets
+remaining files be indexed without claiming complete source coverage. The
+host's object limit and shared allocation budget still constrain intake before
+allocation; metadata retains its separate 8 MiB ceiling.
 Missing objects, unsupported paths/modes, incomplete scope, oversized words,
 cancellation or exhausted budgets fail the entire build. `max_matches` does
 not truncate an inventory. Empty regular files contribute path terms; a truly
 empty committed tree has an authenticated empty index, not an uninitialized one.
+An index whose regular files are all omitted is also queryable, but explicitly
+has `coverage_complete: false` and a nonempty omission inventory.
 An unborn reference still refuses because it does not select a commit.
 
 Files are sorted by raw path bytes and assigned consecutive positive document

@@ -31,6 +31,115 @@ fn index_token(activation: &GenerationActivation) -> String {
         hex(id.digest().as_bytes())
     )
 }
+
+#[test]
+fn authenticated_http_reports_omissions_across_pages_revalidation_and_initial_channels() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, commit) = fixture(&root, format);
+        let before = generation(&node);
+        let (source, activation) = node
+            .runtime()
+            .block_on(node.build_source_index_local_in(
+                &node.outbox_delivery_context(),
+                &RefName::try_new(b"refs/heads/main").unwrap(),
+                None,
+                Some(commit),
+                None,
+                fgit_forge::source_search::SearchLimits {
+                    max_file_bytes: TEXT.len() - 1,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let path = root.0.join("credentials");
+        credentials(&node, &path);
+        let server = Server::start(node, &path, 6, true, false);
+        let found = post(&server.client, "search-index", 'a', &form(format), false);
+        status(&found, 200);
+        assert_eq!(number(&found.body, "schema_version"), 2);
+        assert_eq!(
+            text(&found.body, "index_profile"),
+            "ascii-word-postings-omissions-v1"
+        );
+        assert_eq!(number(&found.body, "returned_hits"), 3);
+        assert_eq!(number(&found.body, "omitted_files"), 1);
+        assert_eq!(
+            number(&found.body, "omitted_source_bytes"),
+            TEXT.len() as u64
+        );
+        assert!(found.body.contains("\"complete\":true,\"next_after\":null"));
+        assert!(found.body.contains("\"coverage_complete\":false"));
+        assert!(found.body.contains(&format!(
+            "\"omissions\":[{{\"path_hex\":\"{}\"",
+            hex(b"alpha.txt")
+        )));
+        let revalidated = post(
+            &server.client,
+            "search-index",
+            'a',
+            &(form(format) + "&source_mode=revalidated"),
+            true,
+        );
+        status(&revalidated, 200);
+        assert_eq!(
+            text(&revalidated.body, "profile"),
+            "source-lexical-revalidated-v1"
+        );
+        assert_eq!(number(&revalidated.body, "schema_version"), 2);
+        assert!(revalidated.body.contains("\"coverage_complete\":false"));
+        let first = post(
+            &server.client,
+            "search-index",
+            'a',
+            &(form(format) + "&limit=1"),
+            false,
+        );
+        status(&first, 200);
+        assert!(first.body.contains("\"complete\":false"));
+        let next = number(&first.body, "next_after");
+        let head = source.source_head.as_internal_object_id();
+        let continuation = format!(
+            "{}&after={next}&expected_head=alg:{}:{}&expected_commit={commit}&index_token={}&index_number={}",
+            form(format),
+            head.algorithm().code_point(),
+            hex(head.digest().as_bytes()),
+            index_token(&activation),
+            activation.authority_generation.get()
+        );
+        let rest = post(&server.client, "search-index", 'a', &continuation, true);
+        status(&rest, 200);
+        assert_eq!(number(&rest.body, "returned_hits"), 2);
+        assert!(rest.body.contains("\"complete\":true,\"next_after\":null"));
+        assert_eq!(
+            rest.body.split_once("\"omissions\":").unwrap().1,
+            first.body.split_once("\"omissions\":").unwrap().1
+        );
+        let initial = post(&server.client, "search-initial", 'a', &form(format), false);
+        status(&initial, 200);
+        assert!(
+            initial
+                .body
+                .split_once("\"complete\":")
+                .unwrap()
+                .1
+                .starts_with("false")
+        );
+        assert_eq!(
+            initial.body.matches("\"coverage_complete\":false").count(),
+            2
+        );
+        assert_eq!(initial.body.matches("\"omitted_files\":1").count(), 2);
+        let denied = post(&server.client, "search-index", 'b', &form(format), false);
+        status(&denied, 403);
+        assert!(!denied.body.contains("\"omissions\""));
+        assert_eq!(server.finish().accepted_sessions(), 6);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before);
+        node.shutdown().unwrap();
+    }
+}
 #[test]
 fn indexed_http_serves_native_content_path_and_binary_results_for_both_formats() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {

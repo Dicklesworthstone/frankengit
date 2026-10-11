@@ -168,7 +168,6 @@ fn reuse_obeys_source_and_previous_payload_budgets_before_any_candidate_barrier(
     let before = generation(&node);
     for limits in [
         SearchLimits { max_files: 1, ..Default::default() },
-        SearchLimits { max_file_bytes: 1, ..Default::default() },
         SearchLimits { max_total_bytes: original.index.indexed_source_bytes - 1, ..Default::default() },
     ] {
         let mut called = false;

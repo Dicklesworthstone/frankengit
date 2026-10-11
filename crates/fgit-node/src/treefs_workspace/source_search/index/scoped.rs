@@ -76,7 +76,7 @@ impl OneNode {
             SourceQuery::new(b"index", SearchCase::Exact, scope.prefixes())
                 .map_err(search_error)?,
         );
-        let (head, forge_position_root, inventory) = match self.object_format {
+        let (head, forge_position_root, mut inventory) = match self.object_format {
             Format::Sha1 => {
                 self.select_source_local_format::<Sha1, _>(
                     request,
@@ -114,12 +114,14 @@ impl OneNode {
         let parts = segments(source.namespace, &inventory.documents, &mut request_live)
             .map_err(index_error)?;
         let excluded = inventory.source.non_regular_entries;
+        let omissions = std::mem::take(&mut inventory.omissions);
         drop(inventory); // Source file buffers are not retained during async staging.
-        let prepared = PreparedScopedLexicalIndex::new(
+        let prepared = PreparedScopedLexicalIndex::with_omissions(
             source.clone(),
             scope.clone(),
             parts,
             excluded,
+            omissions,
             &mut request_live,
         )
         .map_err(index_error)?;

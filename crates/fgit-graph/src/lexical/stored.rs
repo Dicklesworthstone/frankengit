@@ -4,8 +4,10 @@
 //! neither object existence nor an interrupted write implies publication.
 
 mod manifest;
+mod omissions;
 mod refresh;
 pub mod scoped;
+pub use omissions::{LexicalOmission, LexicalOmissionReason};
 pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
 mod scope_tests;
@@ -15,8 +17,9 @@ mod tests;
 use super::{
     BTreeMap, Digest, Entry, GitHashAlgorithm, GitOid, IndexedDocument, LexicalError, LexicalHit,
     LexicalNamespace, LexicalQuery, LexicalQueryLimits, LexicalReport, LexicalSegment,
-    MAX_DOCUMENTS, MAX_FILE_BYTES, MAX_POSTINGS, MAX_SEGMENT_BYTES, MAX_SOURCE_BYTES, MAX_TERMS,
-    PROFILE, Postings, QueryBudget, SourceDocument, Term, bounded_add, check, path_valid,
+    MAX_DOCUMENTS, MAX_FILE_BYTES, MAX_POSTINGS, MAX_RESULT_BYTES, MAX_SEGMENT_BYTES,
+    MAX_SOURCE_BYTES, MAX_TERMS, OMISSION_PROFILE, PROFILE, Postings, QueryBudget, SourceDocument,
+    Term, bounded_add, check, path_valid,
 };
 use crate::{
     BuilderProfileId, GenerationActivation, GenerationAuthority, GenerationAuthorityError,
@@ -114,10 +117,23 @@ impl PreparedLexicalIndex {
         non_regular_entries: usize,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Self, IndexError> {
+        Self::with_omissions(source, segments, non_regular_entries, Vec::new(), live)
+    }
+
+    /// Prepare an explicitly incomplete, source-bound generation. The source
+    /// owner supplies verified omissions; ordinary constructors remain strict.
+    pub fn with_omissions(
+        source: LexicalSource,
+        segments: Vec<LexicalSegment>,
+        non_regular_entries: usize,
+        omissions: Vec<LexicalOmission>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Self, IndexError> {
         check(live)?;
         if segments.len() > MAX_SEGMENTS {
             return Err(LexicalError::Limit("index segments").into());
         }
+        omissions::validate(&omissions, source.namespace.object_format, 0, 0, live)?;
         let mut refs = Vec::with_capacity(segments.len());
         let mut payloads = Vec::with_capacity(segments.len());
         let mut total = 0usize;
@@ -126,6 +142,7 @@ impl PreparedLexicalIndex {
             if segment.namespace() != source.namespace {
                 return Err(LexicalError::NamespaceMismatch.into());
             }
+            omissions::disjoint(&omissions, segment.documents(), live)?;
             let bytes = segment.encode(live)?;
             let root = segment.root(live)?;
             bounded_add(&mut total, bytes.len(), MAX_INDEX_BYTES, "index bytes")?;
@@ -136,7 +153,7 @@ impl PreparedLexicalIndex {
                 bytes,
             });
         }
-        let manifest = Manifest::new(source, refs, non_regular_entries)?;
+        let manifest = Manifest::with_omissions(source, refs, non_regular_entries, omissions)?;
         let metadata = manifest.payloads(live)?;
         for payload in &metadata {
             bounded_add(
@@ -172,6 +189,10 @@ impl PreparedLexicalIndex {
             .chain(&self.segments)
             .map(|p| p.bytes.len())
             .sum()
+    }
+    #[must_use]
+    pub fn omissions(&self) -> &[LexicalOmission] {
+        &self.manifest.omissions
     }
 }
 
@@ -241,10 +262,58 @@ pub struct IndexedLexicalReport {
     pub results: LexicalReport,
     pub indexed_documents: usize,
     pub indexed_source_bytes: usize,
+    /// Whether every selected regular file was indexed, independent of pages.
+    pub coverage_complete: bool,
+    pub omissions: Vec<LexicalOmission>,
     pub non_regular_entries: usize,
     pub segments_read: usize,
     pub payload_bytes_read: usize,
     pub generation_bytes_read: usize,
+}
+impl IndexedLexicalReport {
+    /// Validate source coverage before rendering it independently of result
+    /// pagination. Returns omitted bytes, all charged to the original budget.
+    pub fn validate_coverage(&self) -> Result<usize, IndexError> {
+        if self.coverage_complete != self.omissions.is_empty()
+            || self.non_regular_entries > 50_000
+            || self.results.hits.len() > self.indexed_documents
+            || (self.indexed_documents == 0 && self.indexed_source_bytes != 0)
+        {
+            return Err(LexicalError::Invalid("reported coverage").into());
+        }
+        let omitted_bytes = omissions::validate(
+            &self.omissions,
+            self.source.namespace.object_format,
+            self.indexed_documents,
+            self.indexed_source_bytes,
+            &mut || true,
+        )?;
+        let mut result_bytes = 0;
+        let mut hit_source_bytes = 0;
+        omissions::charge_results(&self.omissions, &mut result_bytes, &mut || true)?;
+        for hit in &self.results.hits {
+            bounded_add(
+                &mut hit_source_bytes,
+                hit.content_bytes as usize,
+                self.indexed_source_bytes,
+                "reported hit source bytes",
+            )?;
+            bounded_add(
+                &mut result_bytes,
+                hit.path.len() + hit.spans.len() * 24 + 64,
+                MAX_RESULT_BYTES,
+                "result bytes",
+            )?;
+        }
+        if self.results.hits.iter().any(|hit| {
+            self.omissions
+                .binary_search_by(|row| row.path.cmp(&hit.path))
+                .is_ok()
+        }) {
+            return Err(LexicalError::Invalid("reported omitted match").into());
+        }
+        Ok(omitted_bytes)
+    }
 }
 
 /// Exactly one tenant/repository/incarnation/ref index. Head and payload keys
@@ -298,13 +367,13 @@ impl<'a, S> LexicalIndexStore<'a, S> {
         };
         Ok(GraphGenerationBody::new(
             self.view,
-            manifest::schema(),
+            prepared.manifest.schema(),
             GraphAuthorityClass::DeterministicDerived,
             GraphSourceStamp {
                 source_rcr_id: source.source_rcr,
                 source_forge_position_root: source.forge_position_root,
-                builder_profile: BuilderProfileId::try_new(PROFILE.as_bytes())?,
-                parser_model_root: manifest::profile_root()?,
+                builder_profile: BuilderProfileId::try_new(prepared.manifest.profile().as_bytes())?,
+                parser_model_root: prepared.manifest.profile_root()?,
             },
             root("documents")?,
             root("postings")?,
@@ -344,17 +413,24 @@ impl<'a, S> LexicalIndexStore<'a, S> {
         raw: &[u8],
         live: &mut impl FnMut() -> bool,
     ) -> Result<(Manifest, Vec<Payload>), IndexError> {
+        let (profile, profile_root) = if body.graph_schema_id() == manifest::omission_schema() {
+            (OMISSION_PROFILE, manifest::omission_profile_root()?)
+        } else {
+            (PROFILE, manifest::profile_root()?)
+        };
         if body.graph_view_id() != self.view
-            || body.graph_schema_id() != manifest::schema()
+            || (body.graph_schema_id() != manifest::schema()
+                && body.graph_schema_id() != manifest::omission_schema())
             || body.authority_class() != GraphAuthorityClass::DeterministicDerived
-            || body.source().builder_profile != BuilderProfileId::try_new(PROFILE.as_bytes())?
-            || body.source().parser_model_root != manifest::profile_root()?
+            || body.source().builder_profile != BuilderProfileId::try_new(profile.as_bytes())?
+            || body.source().parser_model_root != profile_root
         {
             return Err(LexicalError::Invalid("index generation profile").into());
         }
         let manifest = Manifest::decode(raw, *body.index_manifest_root(), self.namespace, live)?;
         self.check_source(&manifest.source)?;
-        if body.source().source_rcr_id != manifest.source.source_rcr
+        if body.graph_schema_id() != manifest.schema()
+            || body.source().source_rcr_id != manifest.source.source_rcr
             || body.source().source_forge_position_root != manifest.source.forge_position_root
         {
             return Err(IndexError::SourceMismatch);
@@ -550,7 +626,7 @@ impl<S: AuthorityStore> LexicalIndexStore<'_, S> {
         query_limits: LexicalQueryLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<IndexedLexicalReport, IndexError> {
-        let mut scan = Scan::new(selection, read_limits, query_limits)?;
+        let mut scan = Scan::new(selection, read_limits, query_limits, live)?;
         self.check_source(selection.source())?;
         if selection.store_instance != self.store.instance_id() {
             return Err(IndexError::SourceMismatch);
@@ -572,7 +648,15 @@ impl<S: AuthorityStore> LexicalIndexStore<'_, S> {
                 &mut scan.bytes,
                 read_limits,
             )?;
-            if scan.observe(reference, &bytes, self.namespace, query, after, live)? {
+            if scan.observe(
+                reference,
+                &bytes,
+                self.namespace,
+                &selection.manifest.omissions,
+                query,
+                after,
+                live,
+            )? {
                 break;
             }
         }
@@ -707,7 +791,7 @@ impl<S: AsyncAuthorityStore> LexicalIndexStore<'_, S> {
         query_limits: LexicalQueryLimits,
         live: &mut (impl FnMut() -> bool + Send),
     ) -> Result<IndexedLexicalReport, IndexError> {
-        let mut scan = Scan::new(selection, read_limits, query_limits)?;
+        let mut scan = Scan::new(selection, read_limits, query_limits, live)?;
         self.check_source(selection.source())?;
         if selection.store_instance != self.store.instance_id() {
             return Err(IndexError::SourceMismatch);
@@ -727,7 +811,15 @@ impl<S: AsyncAuthorityStore> LexicalIndexStore<'_, S> {
                 &mut scan.bytes,
                 read_limits,
             )?;
-            if scan.observe(reference, &bytes, self.namespace, query, after, live)? {
+            if scan.observe(
+                reference,
+                &bytes,
+                self.namespace,
+                &selection.manifest.omissions,
+                query,
+                after,
+                live,
+            )? {
                 break;
             }
         }
@@ -748,14 +840,21 @@ impl Scan {
         selection: &LexicalSelection,
         limits: LexicalReadLimits,
         query: LexicalQueryLimits,
+        live: &mut impl FnMut() -> bool,
     ) -> Result<Self, IndexError> {
         limits.validate()?;
         if selection.payload_bytes > limits.max_payload_bytes {
             return Err(LexicalError::Limit("index read bytes").into());
         }
+        let mut budget = QueryBudget::new(query)?;
+        omissions::charge_results(
+            &selection.manifest.omissions,
+            &mut budget.result_bytes,
+            live,
+        )?;
         Ok(Self {
             hits: Vec::new(),
-            budget: QueryBudget::new(query)?,
+            budget,
             bytes: selection.payload_bytes,
             segments: 0,
             more: false,
@@ -789,6 +888,7 @@ impl Scan {
         reference: &SegmentRef,
         bytes: &[u8],
         namespace: LexicalNamespace,
+        omissions: &[LexicalOmission],
         query: &LexicalQuery,
         after: Option<u64>,
         live: &mut impl FnMut() -> bool,
@@ -797,6 +897,7 @@ impl Scan {
         if SegmentRef::new(&segment, reference.root, bytes.len())? != *reference {
             return Err(LexicalError::CommitmentMismatch.into());
         }
+        omissions::disjoint(omissions, segment.documents(), live)?;
         self.more = segment.search_into(query, after, &mut self.budget, &mut self.hits, live)?;
         Ok(self.more)
     }
@@ -818,6 +919,8 @@ impl Scan {
             },
             indexed_documents: selection.manifest.document_count(),
             indexed_source_bytes: selection.manifest.source_bytes(),
+            coverage_complete: selection.manifest.omissions.is_empty(),
+            omissions: selection.manifest.omissions.clone(),
             non_regular_entries: selection.manifest.non_regular_entries,
             segments_read: self.segments,
             payload_bytes_read: self.bytes,

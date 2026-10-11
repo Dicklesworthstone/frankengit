@@ -147,7 +147,7 @@ impl OneNode {
                 .map_err(search_error)?,
             reuse: Reuse::Scoped(&reuse),
         };
-        let (head, forge_position_root, inventory) = match self.object_format {
+        let (head, forge_position_root, mut inventory) = match self.object_format {
             Format::Sha1 => {
                 self.select_source_local_format::<Sha1, _>(
                     request,
@@ -190,17 +190,22 @@ impl OneNode {
                 content: row.bytes.as_deref(),
             })
             .collect();
+        let omitted_files = inventory.omissions.len();
+        let omitted_bytes: usize = inventory.omissions.iter().map(|row| row.source_bytes).sum();
+        let omissions = std::mem::take(&mut inventory.omissions);
         let (prepared, stats) = reuse
-            .prepare(
+            .prepare_with_omissions(
                 source.clone(),
                 &rows,
                 inventory.source.non_regular_entries,
+                omissions,
                 &mut request_live,
             )
             .map_err(index_error)?;
-        if stats.rebuilt_documents != inventory.source.files_read
-            || stats.rebuilt_source_bytes != inventory.source.bytes_read
-            || stats.rebuilt_documents + stats.reused_documents != inventory.source.files_selected
+        if stats.rebuilt_documents + omitted_files != inventory.source.files_read
+            || stats.rebuilt_source_bytes + omitted_bytes != inventory.source.bytes_read
+            || stats.rebuilt_documents + stats.reused_documents + omitted_files
+                != inventory.source.files_selected
         {
             return Err(index_error(LexicalError::Invalid(
                 "native scoped refresh accounting",

@@ -3,7 +3,7 @@
 //! indexing rights, no repository is created, and no predecessor is refreshed.
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_forge::source_search::SearchLimits;
-use fgit_graph::lexical::{LexicalChannel, LexicalQuery};
+use fgit_graph::lexical::{LexicalChannel, LexicalQuery, OMISSION_PROFILE};
 use fgit_graph::{GenerationActivation, GenerationRecovery, GraphGenerationId};
 use fgit_node::{NodeConfig, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{
@@ -235,6 +235,30 @@ fn execute(node: &OneNode, command: &Command) -> Result<String, NodeWorkspaceRef
                 Default::default(),
                 Default::default(),
             ))?;
+            let omitted_bytes = report
+                .validate_coverage()
+                .map_err(|error| NodeWorkspaceRefusal::SourceIndex(Box::new(error)))?;
+            let mut coverage = String::new();
+            if !report.coverage_complete {
+                coverage = format!(
+                    ",\"schema_version\":2,\"index_profile\":\"{OMISSION_PROFILE}\",\"coverage_complete\":false,\"omitted_files\":{},\"omitted_source_bytes\":{omitted_bytes},\"omissions\":[",
+                    report.omissions.len(),
+                );
+                for (ordinal, omission) in report.omissions.iter().enumerate() {
+                    coverage.push_str(&format!(
+                        "{}{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"source_bytes\":{},\"reason\":\"{}\",\"limit\":{}}}",
+                        if ordinal == 0 { "" } else { "," }, hex(&omission.path), omission.blob,
+                        omission.source_bytes, omission.reason.as_str(), omission.limit,
+                    ));
+                    if coverage.len() > 8 * 1024 * 1024 {
+                        return Err(NodeWorkspaceRefusal::SourceIndex(Box::new(
+                            fgit_graph::lexical::LexicalError::Limit("coverage output bytes")
+                                .into(),
+                        )));
+                    }
+                }
+                coverage.push(']');
+            }
             let hits = report
                 .results
                 .hits
@@ -250,7 +274,7 @@ fn execute(node: &OneNode, command: &Command) -> Result<String, NodeWorkspaceRef
                 .collect::<Vec<_>>()
                 .join(",");
             Ok(format!(
-                "{{\"type\":\"index_query\",{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"complete\":{},\"next_after\":{},\"hits\":[{}],\"read_only\":true}}",
+                "{{\"type\":\"index_query\",{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"complete\":{},\"next_after\":{},\"hits\":[{}],\"read_only\":true{coverage}}}",
                 activation_fields(&report.generation),
                 token(report.source.source_head.as_internal_object_id()),
                 report.source.commit,

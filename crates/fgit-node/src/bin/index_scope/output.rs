@@ -1,7 +1,7 @@
 //! Bounded lossless operator JSON; raw repository paths never become JSON text.
 use super::options::{Options, invalid};
 use fgit_graph::lexical::scoped::ScopedLexicalReport;
-use fgit_graph::lexical::{LexicalChannel, LexicalRefreshStats, LexicalSource};
+use fgit_graph::lexical::{LexicalChannel, LexicalRefreshStats, LexicalSource, OMISSION_PROFILE};
 use fgit_graph::{GenerationActivation, GenerationRecovery, GraphGenerationId};
 use fgit_types::{InternalObjectId, RepositoryIncarnationId};
 use std::io;
@@ -100,7 +100,18 @@ fn start(
     options: &Options,
     incarnation: RepositoryIncarnationId,
 ) -> io::Result<Output> {
-    let mut out = Output(format!("{{\"type\":{},\"schema_version\":1", quote(kind)));
+    start_version(kind, options, incarnation, 1)
+}
+fn start_version(
+    kind: &str,
+    options: &Options,
+    incarnation: RepositoryIncarnationId,
+    schema_version: u8,
+) -> io::Result<Output> {
+    let mut out = Output(format!(
+        "{{\"type\":{},\"schema_version\":{schema_version}",
+        quote(kind)
+    ));
     out.pair("tenant_id", &options.tenant.to_string())?;
     out.pair("repository_id", &options.repository.to_string())?;
     out.pair("repository_incarnation", &incarnation.to_string())?;
@@ -170,11 +181,20 @@ fn refresh_counts(out: &mut Output, stats: &LexicalRefreshStats) -> io::Result<(
     for (key, value) in [
         ("reused_documents", stats.reused_documents),
         ("rebuilt_documents", stats.rebuilt_documents),
-        ("prior_documents_not_reused", stats.prior_documents_not_reused),
+        (
+            "prior_documents_not_reused",
+            stats.prior_documents_not_reused,
+        ),
         ("reused_source_bytes", stats.reused_source_bytes),
         ("rebuilt_source_bytes", stats.rebuilt_source_bytes),
-        ("previous_payload_bytes_read", stats.previous_payload_bytes_read),
-        ("previous_generation_bytes_read", stats.previous_generation_bytes_read),
+        (
+            "previous_payload_bytes_read",
+            stats.previous_payload_bytes_read,
+        ),
+        (
+            "previous_generation_bytes_read",
+            stats.previous_generation_bytes_read,
+        ),
         ("build_work_bytes", stats.build_work_bytes),
     ] {
         out.number(key, value as u64)?;
@@ -191,7 +211,15 @@ pub fn searched(
         return Err(invalid("Unexpected result scope."));
     }
     let report = &report.index;
-    let mut out = start("scoped_index_search", options, incarnation)?;
+    let omitted_bytes = report
+        .validate_coverage()
+        .map_err(|_| invalid("Invalid source coverage."))?;
+    let mut out = start_version(
+        "scoped_index_search",
+        options,
+        incarnation,
+        if report.coverage_complete { 1 } else { 2 },
+    )?;
     out.flag("read_only", true)?;
     out.source(&report.source)?;
     out.activation("index", &report.generation)?;
@@ -205,7 +233,10 @@ pub fn searched(
     )?;
     out.paths("terms_hex", report.query.terms())?;
     out.paths("query_prefixes_hex", report.query.prefixes())?;
-    out.flag("complete_within_scope", report.results.complete)?;
+    out.flag(
+        "complete_within_scope",
+        report.results.complete && report.coverage_complete,
+    )?;
     for (key, value) in [("after", after), ("next_after", report.results.next_after)] {
         match value {
             Some(value) => out.number(key, value)?,
@@ -249,6 +280,26 @@ pub fn searched(
         out.push("]}")?;
     }
     out.push("]")?;
+    if !report.coverage_complete {
+        out.pair("index_profile", OMISSION_PROFILE)?;
+        out.flag("page_complete", report.results.complete)?;
+        out.flag("coverage_complete", false)?;
+        out.number("omitted_files", report.omissions.len() as u64)?;
+        out.number("omitted_source_bytes", omitted_bytes as u64)?;
+        out.push(",\"omissions\":[")?;
+        for (ordinal, omission) in report.omissions.iter().enumerate() {
+            out.push(&format!(
+                "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"reason\":{},\"limit\":{}}}",
+                if ordinal == 0 { "" } else { "," },
+                quote(&hex(&omission.path)),
+                quote(&omission.blob.to_string()),
+                quote(&omission.source_bytes.to_string()),
+                quote(omission.reason.as_str()),
+                quote(&omission.limit.to_string()),
+            ))?;
+        }
+        out.push("]")?;
+    }
     out.finish()
 }
 pub fn recovered(
@@ -313,7 +364,10 @@ mod tests {
         assert!(out.0.contains("\"reused_documents\":\"2\""));
         assert!(out.0.contains("\"rebuilt_documents\":\"0\""));
         assert!(out.0.contains("\"prior_documents_not_reused\":\"1\""));
-        assert!(out.0.contains(&format!("\"reused_source_bytes\":\"{}\"", usize::MAX)));
+        assert!(
+            out.0
+                .contains(&format!("\"reused_source_bytes\":\"{}\"", usize::MAX))
+        );
         assert!(out.0.contains("\"rebuilt_source_bytes\":\"0\""));
         assert!(out.0.contains("\"previous_payload_bytes_read\":\"42\""));
         assert!(out.0.contains("\"previous_generation_bytes_read\":\"17\""));

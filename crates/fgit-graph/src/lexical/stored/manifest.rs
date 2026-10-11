@@ -1,23 +1,28 @@
 use super::{
-    Digest, IndexError, LexicalError, LexicalNamespace, LexicalQuery, LexicalSegment,
-    LexicalSource, MAX_DOCUMENTS, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS,
-    MAX_SEGMENT_BYTES, MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, QueryBudget,
-    RepositoryAuthorityHeadId, RepositoryCommitId, SchemaFamily, SchemaId, bounded_add, check,
-    path_valid,
+    Digest, IndexError, LexicalError, LexicalNamespace, LexicalOmission, LexicalQuery,
+    LexicalSegment, LexicalSource, MAX_DOCUMENTS, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS,
+    MAX_POSTINGS, MAX_SEGMENT_BYTES, MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, OMISSION_PROFILE,
+    PROFILE, QueryBudget, RepositoryAuthorityHeadId, RepositoryCommitId, SchemaFamily, SchemaId,
+    bounded_add, check, omissions, path_valid,
 };
 use crate::lexical::encoding::{
     count, decode_limits, namespace_read, namespace_write, oid_read, payload_root,
 };
-use fgit_codec::{CanonicalBody, CodecRefusal, Decoder, Encoder, decode_body, encode_body};
+use fgit_codec::{
+    CanonicalBody, CodecRefusal, Decoder, Encoder, decode_body, encode_body, read_frame_header,
+};
 use fgit_types::DomainTag;
 
 macro_rules! frame {
     ($name:ident, $family:literal) => {
+        frame!($name, $family, 1);
+    };
+    ($name:ident, $family:literal, $major:literal) => {
         struct $name(Vec<u8>);
         impl CanonicalBody for $name {
             const DOMAIN: DomainTag = DomainTag::from_static("frankengit/generation/v1");
             const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static($family);
-            const SCHEMA_MAJOR: u16 = 1;
+            const SCHEMA_MAJOR: u16 = $major;
             const SCHEMA_MINOR: u16 = 0;
             fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
                 out.write_bytes($family, &self.0)
@@ -29,16 +34,24 @@ macro_rules! frame {
     };
 }
 frame!(ManifestFrame, "source-lexical-manifest");
+frame!(OmissionManifestFrame, "source-lexical-manifest", 2);
 frame!(DocumentsFrame, "source-lexical-documents");
 frame!(PostingsFrame, "source-lexical-postings");
 frame!(EvidenceFrame, "source-lexical-evidence");
+frame!(OmissionEvidenceFrame, "source-lexical-evidence", 2);
 frame!(ProfileFrame, "source-lexical-profile");
 
 pub(super) const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("source-lexical-index"), 1, 0)
 }
+pub(super) const fn omission_schema() -> SchemaId {
+    SchemaId::new(SchemaFamily::from_static("source-lexical-index"), 2, 0)
+}
 pub(super) fn profile_root() -> Result<Digest, LexicalError> {
     payload_root(&ProfileFrame(b"ascii-word-postings-v1\0ASCII-alnum-underscore\0ASCII-fold\0first-byte-span\0content,path\0AND\0absolute-document-id-order".to_vec()))
+}
+pub(super) fn omission_profile_root() -> Result<Digest, LexicalError> {
+    payload_root(&ProfileFrame(b"ascii-word-postings-omissions-v1\0ASCII-alnum-underscore\0ASCII-fold\0first-byte-span\0content,path\0AND\0absolute-document-id-order\0verified-native-file-bytes-omissions\0shared-source-document-budgets".to_vec()))
 }
 #[derive(Clone, Debug)]
 pub(super) struct Payload {
@@ -177,12 +190,14 @@ pub(super) struct Manifest {
     pub source: LexicalSource,
     pub segments: Vec<SegmentRef>,
     pub non_regular_entries: usize,
+    pub omissions: Vec<LexicalOmission>,
 }
 impl Manifest {
-    pub(super) fn new(
+    pub(super) fn with_omissions(
         source: LexicalSource,
         segments: Vec<SegmentRef>,
         non_regular_entries: usize,
+        omissions: Vec<LexicalOmission>,
     ) -> Result<Self, IndexError> {
         if [source.commit, source.tree]
             .iter()
@@ -236,11 +251,40 @@ impl Manifest {
             )?;
             previous = Some(entry);
         }
+        omissions::validate(
+            &omissions,
+            source.namespace.object_format,
+            documents,
+            source_bytes,
+            &mut || true,
+        )?;
         Ok(Self {
             source,
             segments,
             non_regular_entries,
+            omissions,
         })
+    }
+    pub(super) const fn schema(&self) -> SchemaId {
+        if self.omissions.is_empty() {
+            schema()
+        } else {
+            omission_schema()
+        }
+    }
+    pub(super) const fn profile(&self) -> &'static str {
+        if self.omissions.is_empty() {
+            PROFILE
+        } else {
+            OMISSION_PROFILE
+        }
+    }
+    pub(super) fn profile_root(&self) -> Result<Digest, LexicalError> {
+        if self.omissions.is_empty() {
+            profile_root()
+        } else {
+            omission_profile_root()
+        }
     }
     pub(super) fn document_count(&self) -> usize {
         self.segments.iter().map(|s| s.documents as usize).sum()
@@ -278,7 +322,7 @@ impl Manifest {
         }
         let mut evidence = Encoder::new();
         source_write(&mut evidence, &self.source)?;
-        evidence.write_digest(&profile_root()?)?;
+        evidence.write_digest(&self.profile_root()?)?;
         evidence.write_scalar(self.document_count() as u64);
         evidence.write_scalar(self.source_bytes() as u64);
         evidence.write_scalar(self.non_regular_entries as u64);
@@ -294,11 +338,35 @@ impl Manifest {
                 return Err(LexicalError::Limit("manifest bytes").into());
             }
         }
+        // V1 encodings retain their exact identities when coverage is complete.
+        // V2 carries the same ordered omission receipts in both evidence and
+        // manifest commitments; older readers refuse the required major.
+        let (evidence, manifest) = if self.omissions.is_empty() {
+            (
+                payload("evidence", EvidenceFrame(evidence.into_bytes()))?,
+                payload("manifest", ManifestFrame(manifest.into_bytes()))?,
+            )
+        } else {
+            evidence.write_scalar(self.omissions.len() as u32);
+            manifest.write_scalar(self.omissions.len() as u32);
+            for omission in &self.omissions {
+                check(live)?;
+                omission.write(&mut evidence)?;
+                omission.write(&mut manifest)?;
+                if evidence.len() > MAX_SEGMENT_BYTES || manifest.len() > MAX_SEGMENT_BYTES {
+                    return Err(LexicalError::Limit("omission metadata bytes").into());
+                }
+            }
+            (
+                payload("evidence", OmissionEvidenceFrame(evidence.into_bytes()))?,
+                payload("manifest", OmissionManifestFrame(manifest.into_bytes()))?,
+            )
+        };
         let result = vec![
             payload("documents", DocumentsFrame(documents.into_bytes()))?,
             payload("postings", PostingsFrame(postings.into_bytes()))?,
-            payload("evidence", EvidenceFrame(evidence.into_bytes()))?,
-            payload("manifest", ManifestFrame(manifest.into_bytes()))?,
+            evidence,
+            manifest,
         ];
         check(live)?;
         Ok(result)
@@ -313,11 +381,23 @@ impl Manifest {
         if raw.len() > MAX_SEGMENT_BYTES {
             return Err(LexicalError::Limit("manifest bytes").into());
         }
-        let frame = decode_body::<ManifestFrame>(raw, decode_limits())?;
-        if payload_root(&frame)? != expected || encode_body(&frame)? != raw {
+        let (header, _) = read_frame_header(raw, decode_limits())?;
+        let has_omissions = header.schema == OmissionManifestFrame::schema_id();
+        let (bytes, root, canonical) = if has_omissions {
+            let frame = decode_body::<OmissionManifestFrame>(raw, decode_limits())?;
+            let root = payload_root(&frame)?;
+            let canonical = encode_body(&frame)?;
+            (frame.0, root, canonical)
+        } else {
+            let frame = decode_body::<ManifestFrame>(raw, decode_limits())?;
+            let root = payload_root(&frame)?;
+            let canonical = encode_body(&frame)?;
+            (frame.0, root, canonical)
+        };
+        if root != expected || canonical != raw {
             return Err(LexicalError::CommitmentMismatch.into());
         }
-        let mut input = Decoder::new(&frame.0, decode_limits());
+        let mut input = Decoder::new(&bytes, decode_limits());
         let source = source_read(&mut input)?;
         if source.namespace != namespace {
             return Err(LexicalError::NamespaceMismatch.into());
@@ -329,8 +409,20 @@ impl Manifest {
             check(live)?;
             segments.push(SegmentRef::read(&mut input)?);
         }
+        let mut omissions = Vec::new();
+        if has_omissions {
+            let n = count(&mut input, MAX_INDEX_DOCUMENTS, 42, "omitted documents")?;
+            if n == 0 {
+                return Err(LexicalError::Invalid("empty omission manifest").into());
+            }
+            omissions.reserve(n);
+            for _ in 0..n {
+                check(live)?;
+                omissions.push(LexicalOmission::read(&mut input, namespace.object_format)?);
+            }
+        }
         input.finish()?;
-        let manifest = Self::new(source, segments, non_regular_entries)?;
+        let manifest = Self::with_omissions(source, segments, non_regular_entries, omissions)?;
         check(live)?;
         Ok(manifest)
     }

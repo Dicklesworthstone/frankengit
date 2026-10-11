@@ -288,7 +288,7 @@ fn separate_scopes_cannot_exchange_floors_or_continuations() {
     node.shutdown().unwrap();
 }
 #[test]
-fn selected_oversized_files_refuse_before_the_candidate_barrier_and_keep_the_old_index() {
+fn selected_oversized_files_preserve_scope_coverage_without_weakening_total_budgets() {
     let root = Scratch::new();
     let (node, _) = fixture(&root, GitHashAlgorithm::Sha1);
     let coverage = scope(&[b"alpha.txt"]);
@@ -305,6 +305,7 @@ fn selected_oversized_files_refuse_before_the_candidate_barrier_and_keep_the_old
                 Some(first.generation_id),
                 SearchLimits {
                     max_file_bytes: 1,
+                    max_total_bytes: TEXT.len() - 1,
                     ..Default::default()
                 },
                 &mut |_| {
@@ -320,10 +321,43 @@ fn selected_oversized_files_refuse_before_the_candidate_barrier_and_keep_the_old
         &node,
         &coverage,
         Some(first.generation_id),
-        Default::default(),
+        SearchLimits {
+            max_file_bytes: 1,
+            max_total_bytes: TEXT.len(),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(second.authority_generation > first.authority_generation);
+    let partial = search(&node, &coverage).unwrap();
+    assert_eq!(partial.scope, coverage);
+    assert_eq!(partial.index.generation, second);
+    assert!(partial.index.results.complete);
+    assert!(!partial.index.coverage_complete);
+    assert!(partial.index.results.hits.is_empty());
+    assert_eq!(partial.index.omissions.len(), 1);
+    assert_eq!(partial.index.omissions[0].path, b"alpha.txt");
+    assert_eq!(partial.index.validate_coverage().unwrap(), TEXT.len());
+    let (_, third, stats) = node
+        .runtime()
+        .block_on(node.refresh_scoped_source_index_local_in(
+            &node.outbox_delivery_context(),
+            &reference(),
+            &coverage,
+            None,
+            None,
+            second.generation_id,
+            Default::default(),
+            Default::default(),
+        ))
+        .unwrap();
+    assert_eq!(stats.reused_documents, 0);
+    assert_eq!(stats.rebuilt_documents, 1);
+    assert_eq!(stats.rebuilt_source_bytes, TEXT.len());
+    let restored = search(&node, &coverage).unwrap();
+    assert!(restored.index.coverage_complete);
+    assert!(restored.index.omissions.is_empty());
+    assert_eq!(restored.index.generation, third);
     node.shutdown().unwrap();
 }
 #[test]

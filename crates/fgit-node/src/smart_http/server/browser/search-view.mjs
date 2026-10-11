@@ -286,14 +286,18 @@ export function mount(document, location, options = {}) {
       region.append(article);
     }
   }
-  function renderOmissions(omissions, region, version) {
+  function renderOmissions(omissions, region, version, lexical = false) {
     const section = element('section'), rows = element('ul'), paging = element('nav');
-    section.setAttribute('aria-label', 'Omitted Rust files');
+    section.setAttribute('aria-label', lexical ? 'Omitted indexed files' : 'Omitted Rust files');
     paging.setAttribute('aria-label', 'Omitted file pages');
     const bytes = omissions.reduce((total, entry) => total + entry.sourceBytes, 0);
-    section.append(element('h3', `${omissions.length} omitted Rust files · ${bytes} source bytes`),
-      element('p', 'Coverage is incomplete for the recorded Rust corpus. These whole files contributed no declarations. Omissions cover the whole recorded corpus, independently of the name or path filter and match pagination.'),
-      element('p', 'No matching declarations does not establish absence in omitted files. A bounded index refresh rescans them; valid results remain usable.'), rows, paging);
+    section.append(element('h3', `${omissions.length} omitted ${lexical ? '' : 'Rust '}files · ${bytes} source bytes`),
+      element('p', lexical
+        ? 'Source coverage is incomplete. These whole files exceeded the recorded file byte limit and contributed no content or path words. Omissions cover the whole recorded corpus, independently of the words or path filter and match pagination.'
+        : 'Coverage is incomplete for the recorded Rust corpus. These whole files contributed no declarations. Omissions cover the whole recorded corpus, independently of the name or path filter and match pagination.'),
+      element('p', lexical
+        ? 'No matching indexed documents does not establish absence in omitted files. The recorded limits describe the index build, independently of this query’s file-navigation limit. Valid indexed results remain usable.'
+        : 'No matching declarations does not establish absence in omitted files. A bounded index refresh rescans them; valid results remain usable.'), rows, paging);
     function page(at) {
       if (version !== resultVersion || busy) return;
       rows.replaceChildren(); paging.replaceChildren();
@@ -315,10 +319,12 @@ export function mount(document, location, options = {}) {
       element('pre', `Queried index ${value.index.number}: ${value.index.token}\nObserved index head ${value.selectedIndex.number}: ${value.selectedIndex.token}`),
       element('p', `${stats.documents} indexed regular files · ${stats.sourceBytes} indexed source bytes · ${stats.nonRegular} non-regular entries excluded.`),
       element('p', `This page read ${stats.segments} segments / ${stats.payloadBytes} payload bytes / ${stats.generationBytes} generation bytes and used ${stats.work} native work units. This is not a live source scan.`),
-      element('p', value.complete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
+      element('p', value.complete ? (value.coverageComplete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
+        : `All matching indexed documents have been returned; ${value.seen} visited. Source coverage is incomplete.`)
         : allowNext ? `${value.seen} matching documents visited; more remain in this exact index. Fetch the next page explicitly.`
           : `${value.seen} matching documents shown; this combined channel is truncated. Narrow the query or increase its per-channel limit.`));
     renderSources(value, region);
+    if (!value.coverageComplete) renderOmissions(value.omissions, region, version, true);
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(display(unhex(hit.pathHex)), () => {
@@ -335,6 +341,12 @@ export function mount(document, location, options = {}) {
       resultButtons.add(next); region.append(next);
     }
   }
+  function indexedStatus(value) {
+    if (!value.coverageComplete) return `Indexed source coverage is incomplete: ${value.omissions.length} files omitted.${value.complete
+      ? ' Matches from indexed files are complete.' : ' More indexed documents remain; use Next indexed page.'}`;
+    return value.complete ? 'Indexed query complete according to the native server. Open a document to verify its bytes and word positions.'
+      : 'More indexed documents remain; use Next indexed page. The original generation is still pinned.';
+  }
   async function nextIndexed() {
     if (busy || result?.query.mode !== 'indexed' || result.nextAfter === null) return;
     work++; const id = work; busy = true; clearResults(); sync(); status('Reading the next page from the original source and index generation…');
@@ -342,7 +354,7 @@ export function mount(document, location, options = {}) {
       const value = await client.nextIndexed();
       if (id !== work) return;
       busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.complete ? 'Indexed query complete according to the native server.' : 'More indexed documents remain. The original generation is still pinned.');
+      status(indexedStatus(value));
     } catch (error) { errorAt(error, id); }
   }
   async function search() {
@@ -351,7 +363,7 @@ export function mount(document, location, options = {}) {
       const value = await client.search(readQuery(document));
       if (id !== work) return;
       busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable channels, match truncation and omitted files are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (!value.coverageComplete ? `Declaration source coverage is incomplete: ${value.omissions.length} Rust files omitted.${value.complete ? ' Matching declarations from indexed files are complete.' : ' Matching declarations are also truncated.'}` : value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? (value.complete ? 'Indexed query complete according to the native server. Open a document to verify its bytes and word positions.' : 'More indexed documents remain; use Next indexed page.') : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
+      status(value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable channels, match truncation and omitted files are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (!value.coverageComplete ? `Declaration source coverage is incomplete: ${value.omissions.length} Rust files omitted.${value.complete ? ' Matching declarations from indexed files are complete.' : ' Matching declarations are also truncated.'}` : value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? indexedStatus(value) : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
     } catch (error) { errorAt(error, id); }
   }
   function renderFile(value) {

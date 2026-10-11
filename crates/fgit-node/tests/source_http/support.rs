@@ -81,11 +81,16 @@ fn loose(
 ) -> GitOid {
     let id = git_object_id(format, kind, body);
     let raw = [format!("{name} {}\0", body.len()).as_bytes(), body].concat();
-    let length = u16::try_from(raw.len()).unwrap();
-    let mut encoded = vec![0x78, 0x01, 0x01];
-    encoded.extend(length.to_le_bytes());
-    encoded.extend((!length).to_le_bytes());
-    encoded.extend(&raw);
+    let mut encoded = vec![0x78, 0x01];
+    let chunks = raw.chunks(usize::from(u16::MAX));
+    let count = chunks.len();
+    for (ordinal, chunk) in chunks.enumerate() {
+        let length = u16::try_from(chunk.len()).unwrap();
+        encoded.push(u8::from(ordinal + 1 == count));
+        encoded.extend(length.to_le_bytes());
+        encoded.extend((!length).to_le_bytes());
+        encoded.extend(chunk);
+    }
     let (a, b) = raw.iter().fold((1_u32, 0_u32), |(a, b), byte| {
         let next = (a + u32::from(*byte)) % 65_521;
         (next, (b + next) % 65_521)
@@ -107,6 +112,14 @@ pub fn fixture_with_config(
     root: &Scratch,
     format: GitHashAlgorithm,
     config: NodeConfig,
+) -> (OneNode, GitOid) {
+    fixture_with_text(root, format, config, TEXT)
+}
+pub fn fixture_with_text(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    config: NodeConfig,
+    text: &[u8],
 ) -> (OneNode, GitOid) {
     let (mut node, _) = OneNode::init(config).unwrap();
     let selected = node
@@ -151,7 +164,7 @@ pub fn fixture_with_config(
     let mut entries = Vec::new();
     // Git order and ordinary byte order agree for these distinct names.
     for (mode, name, id) in [
-        ("100644", b"alpha.txt".as_slice(), blob(TEXT)),
+        ("100644", b"alpha.txt".as_slice(), blob(text)),
         ("100644", BINARY_PATH, blob(BINARY)),
         ("40000", b"dir".as_slice(), nested),
         ("100644", b"empty".as_slice(), blob(&[])),

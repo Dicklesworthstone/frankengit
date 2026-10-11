@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { mount, readQuery, display } from '../../crates/fgit-node/src/smart_http/server/browser/search-view.mjs';
 import { indexQuery } from '../../crates/fgit-node/src/smart_http/server/browser/search-index.mjs';
 import { token, href, document as indexedDocument, page, input, blobPage, response, hex, utf8, webcrypto, indexToken, source } from './indexed_search_fixture.mjs';
+import { omission, partialReply } from '../../tests/browser/search-index-omission-fixtures.mjs';
 
 const html = await readFile(new URL('../../crates/fgit-node/src/smart_http/server/browser/search.html', import.meta.url), 'utf8');
 class Element {
@@ -35,7 +36,7 @@ function dom() {
   }
   const get = id => { assert.ok(controls.has(id), `missing shipped control ${id}`); return controls.get(id); };
   for (const [id, value] of Object.entries({ mode: 'indexed-content', encoding: 'utf8', case: 'exact',
-    'prefix-encoding': 'utf8', format: 'sha1', token, query: 'Alpha\nBETA' })) get(id).value = value;
+    'prefix-encoding': 'utf8', 'index-source-mode': 'exact', format: 'sha1', token, query: 'Alpha\nBETA' })) get(id).value = value;
   const events = new Element();
   return { get, controls, document: { getElementById: get, createElement: tag => new Element(tag), defaultView: events }, events };
 }
@@ -125,6 +126,56 @@ test('next-page control keeps exact index, source and query while replacing the 
   assert.match(f.results(), /src\/z.rs/); assert.doesNotMatch(f.results(), /src\/a.rs/);
   assert.equal(f.next(), undefined);
   await f.app.nextIndexed(); assert.equal(f.calls.length, 2); assertReadCalls(f.calls);
+});
+test('indexed omissions stay visible and escaped through local display, verified navigation and final matching page', async () => {
+  const first = indexedDocument(), second = indexedDocument({ id: 2, path: 'src/z.rs' });
+  const entries = Array.from({ length: 55 }, (_, i) => omission('sha1',
+    Buffer.from(`vendor/${String(i).padStart(5, '0')}${i === 0 ? '<img>\x1b\xff' : ''}.bin`, 'latin1')));
+  const f = fixture({ limit: '1', respond: (call, _, q) => {
+    if (call.path.endsWith('/blob')) return response(blobPage(first, call.fields));
+    const last = call.fields.has('after');
+    return response(partialReply(page(q, [last ? second : first], { after: last ? 1 : null,
+      complete: last, next_after: last ? null : 1, indexed_documents: 2,
+      indexed_source_bytes: first.bytes.length + second.bytes.length }), entries));
+  } });
+  await f.app.connect(); await f.app.search();
+  assert.match(f.status(), /source coverage is incomplete: 55 files omitted/);
+  assert.match(f.status(), /More indexed documents remain/);
+  assert.match(f.results(), /whole recorded corpus/); assert.match(f.results(), /contributed no content or path words/);
+  assert.match(f.results(), /No matching indexed documents does not establish absence/);
+  assert.match(f.results(), /limit 64 bytes/); assert.doesNotMatch(f.results(), /omitted Rust files/);
+  assert.equal(f.get('results').all('li').length, 50); assert.equal(f.get('results').all('img').length, 0);
+  assert.ok(!f.results().includes('\x1b')); assert.ok(f.results().includes('\\x1b\\xff'));
+  const nextOmissions = f.get('results').all('button').find(button => button.textContent === 'Next omitted files');
+  nextOmissions.click(); assert.equal(f.get('results').all('li').length, 5);
+  assert.match(f.results(), /51–55 of 55/); assert.equal(f.calls.length, 1);
+  await f.app.openIndexed(0); assert.match(f.file(), /Native blob verified/);
+  assert.match(f.results(), /55 omitted files/); assert.equal(f.calls.length, 2);
+  await f.app.nextIndexed(); assert.equal(f.calls.length, 3); assert.equal(f.next(), undefined);
+  assert.match(f.status(), /source coverage is incomplete: 55 files omitted/);
+  assert.match(f.status(), /Matches from indexed files are complete/);
+  assert.doesNotMatch(f.status(), /Indexed query complete/);
+  assert.match(f.results(), /All matching indexed documents have been returned/);
+  f.app.refresh(); nextOmissions.click(); assert.equal(f.results(), ''); assert.equal(f.calls.length, 3);
+  assertReadCalls(f.calls);
+});
+test('empty indexed matches with omitted files remain a visibly incomplete source answer', async () => {
+  const f = fixture({ respond: (call, _, q) => response(partialReply(page(q, []))) });
+  await f.app.connect(); await f.app.search();
+  assert.match(f.results(), /0 indexed documents/); assert.match(f.results(), /1 omitted files/);
+  assert.match(f.status(), /source coverage is incomplete/); assert.equal(f.next(), undefined);
+  assert.equal(f.get('results').all('article').length, 0); assert.equal(f.calls.length, 1);
+});
+test('malformed omission metadata clears displayed hits without replacing the retained source pin', async () => {
+  let invalid = false;
+  const f = fixture({ respond: (call, _, q) => {
+    const result = partialReply(page(q)); if (invalid) result.coverage_complete = true;
+    return response(result);
+  } });
+  await f.app.connect(); await f.app.search(); const pin = f.get('snapshot').textContent;
+  invalid = true; await f.app.search();
+  assert.equal(f.results(), ''); assert.equal(f.file(), ''); assert.equal(f.get('snapshot').textContent, pin);
+  assert.match(f.status(), /coverage inventory/); assert.equal(f.calls.length, 2);
 });
 for (const [code, message] of [['source_index_uninitialized', /operator to build/], ['source_index_stale', /reconcile/], ['index_checkpoint_unavailable', /operator must recover/]]) {
   test(`${code}: stable explicit diagnostic with no scan/build/retry`, async () => {

@@ -234,6 +234,8 @@ fn revalidated_rows_share_integrity_checks_and_keep_large_document_ids_as_string
         },
         indexed_documents: 1,
         indexed_source_bytes: 6,
+        coverage_complete: true,
+        omissions: Vec::new(),
         non_regular_entries: 0,
         segments_read: 1,
         payload_bytes_read: 100,

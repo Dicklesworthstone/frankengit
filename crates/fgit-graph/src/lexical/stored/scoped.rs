@@ -9,9 +9,9 @@
 use super::{
     AsyncAuthorityStore, AuthorityStore, GenerationActivation, GenerationReadLimits,
     GraphGenerationId, GraphViewId, HeadKey, IndexError, IndexedLexicalReport, LexicalError,
-    LexicalIndexStore, LexicalNamespace, LexicalQuery, LexicalQueryLimits, LexicalReadLimits,
-    LexicalSegment, LexicalSelection, LexicalSource, MAX_SEGMENTS, PreparedLexicalIndex, RefName,
-    bounded_add, check, key_prefix, path_valid,
+    LexicalIndexStore, LexicalNamespace, LexicalOmission, LexicalQuery, LexicalQueryLimits,
+    LexicalReadLimits, LexicalSegment, LexicalSelection, LexicalSource, MAX_SEGMENTS,
+    PreparedLexicalIndex, RefName, bounded_add, check, key_prefix, omissions, path_valid,
 };
 
 mod refresh;
@@ -123,9 +123,34 @@ impl PreparedScopedLexicalIndex {
         non_regular_entries: usize,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Self, IndexError> {
+        Self::with_omissions(
+            source,
+            scope,
+            segments,
+            non_regular_entries,
+            Vec::new(),
+            live,
+        )
+    }
+
+    pub fn with_omissions(
+        source: LexicalSource,
+        scope: LexicalScope,
+        segments: Vec<LexicalSegment>,
+        non_regular_entries: usize,
+        omissions: Vec<LexicalOmission>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Self, IndexError> {
         check(live)?;
         if segments.len() > MAX_SEGMENTS {
             return Err(LexicalError::Limit("index segments").into());
+        }
+        omissions::validate(&omissions, source.namespace.object_format, 0, 0, live)?;
+        for omission in &omissions {
+            check(live)?;
+            if !scope.includes(&omission.path) {
+                return Err(LexicalError::Invalid("omission outside index scope").into());
+            }
         }
         for segment in &segments {
             for document in segment.documents() {
@@ -135,7 +160,13 @@ impl PreparedScopedLexicalIndex {
                 }
             }
         }
-        let inner = PreparedLexicalIndex::new(source, segments, non_regular_entries, live)?;
+        let inner = PreparedLexicalIndex::with_omissions(
+            source,
+            segments,
+            non_regular_entries,
+            omissions,
+            live,
+        )?;
         Ok(Self { scope, inner })
     }
     #[must_use]
@@ -153,6 +184,10 @@ impl PreparedScopedLexicalIndex {
     #[must_use]
     pub fn encoded_bytes(&self) -> usize {
         self.inner.encoded_bytes()
+    }
+    #[must_use]
+    pub fn omissions(&self) -> &[LexicalOmission] {
+        self.inner.omissions()
     }
 }
 
@@ -226,6 +261,12 @@ impl<'a, S> ScopedLexicalIndexStore<'a, S> {
         for hit in &index.results.hits {
             check(live)?;
             if !self.scope.includes(&hit.path) {
+                return Err(IndexError::SourceMismatch);
+            }
+        }
+        for omission in &index.omissions {
+            check(live)?;
+            if !self.scope.includes(&omission.path) {
                 return Err(IndexError::SourceMismatch);
             }
         }

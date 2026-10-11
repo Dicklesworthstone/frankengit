@@ -84,10 +84,184 @@ fn report() -> IndexedLexicalReport {
         },
         indexed_documents: 0,
         indexed_source_bytes: 0,
+        coverage_complete: true,
+        omissions: Vec::new(),
         non_regular_entries: 0,
         segments_read: 0,
         payload_bytes_read: 0,
         generation_bytes_read: 0,
+    }
+}
+
+fn partial_lexical_report(format: GitHashAlgorithm) -> IndexedLexicalReport {
+    let mut report = report();
+    report.source.namespace.object_format = format;
+    report.source.commit = git_object_id(format, GitObjectKind::Commit, b"commit");
+    report.source.tree = git_object_id(format, GitObjectKind::Tree, b"tree");
+    report.results.hits.push(lexical::LexicalHit {
+        document_id: 1,
+        path: b"src/thing.rs".to_vec(),
+        blob: git_object_id(format, GitObjectKind::Blob, b"Thing"),
+        content_bytes: 5,
+        spans: vec![lexical::LexicalSpan {
+            query_index: 0,
+            byte_offset: 0,
+            byte_length: 5,
+        }],
+    });
+    report.indexed_documents = 1;
+    report.indexed_source_bytes = 5;
+    report.segments_read = 1;
+    report.payload_bytes_read = 100;
+    report.coverage_complete = false;
+    report.omissions.push(lexical::LexicalOmission {
+        path: b"vendor/oversized.bin".to_vec(),
+        blob: git_object_id(format, GitObjectKind::Blob, &[b'x'; 128]),
+        source_bytes: 128,
+        reason: lexical::LexicalOmissionReason::FileBytes,
+        limit: 64,
+    });
+    report
+}
+
+#[test]
+fn omitted_lexical_files_keep_completed_initial_pages_incomplete() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let content = partial_lexical_report(format);
+        let mut path = content.clone();
+        path.query = query().path;
+        path.results.hits[0].spans[0].byte_offset = 4;
+        check_lexical_join(&content, &path).unwrap();
+        let mut initial = InitialReport {
+            vector: GenerationVector {
+                lexical: content.generation.clone(),
+                symbols: None,
+            },
+            content,
+            path,
+            symbols: SymbolChannel::NotRequested,
+            result_bytes: 0,
+        };
+        assert!(initial.content.results.complete && initial.path.results.complete);
+        assert_eq!(initial.content.results.hits.len(), 1);
+        assert_eq!(initial.path.results.hits.len(), 1);
+        assert!(
+            !initial.complete(),
+            "exhausted matches do not cover omitted source"
+        );
+        initial.content.results.hits.clear();
+        initial.path.results.hits.clear();
+        assert!(
+            !initial.complete(),
+            "no matches must not hide source omissions"
+        );
+
+        // A genuinely covered corpus at the same page boundary stays complete.
+        initial.content.coverage_complete = true;
+        initial.content.omissions.clear();
+        initial.path.coverage_complete = true;
+        initial.path.omissions.clear();
+        assert!(initial.complete());
+    }
+}
+
+#[test]
+fn lexical_omissions_share_the_initial_result_budget_with_hits_in_each_channel() {
+    let report = partial_lexical_report(GitHashAlgorithm::Sha1);
+    // One 12-byte path, one span and its document record cost 100 bytes; the
+    // 20-byte omitted path and its diagnostic cost another 116 bytes.
+    let channel_bytes = 216;
+    let mut total = 0;
+    lexical_result_bytes(&report, &mut total, channel_bytes).unwrap();
+    assert_eq!(total, channel_bytes);
+    let mut short = 0;
+    assert!(matches!(
+        lexical_result_bytes(&report, &mut short, channel_bytes - 1),
+        Err(RetrievalError::Limit("retained result bytes"))
+    ));
+    assert!(short <= channel_bytes - 1);
+
+    // Initial keeps each channel's receipt, including duplicate omissions.
+    lexical_result_bytes(&report, &mut total, 2 * channel_bytes).unwrap();
+    assert_eq!(total, 2 * channel_bytes);
+    let mut short = channel_bytes;
+    assert!(matches!(
+        lexical_result_bytes(&report, &mut short, 2 * channel_bytes - 1),
+        Err(RetrievalError::Limit("retained result bytes"))
+    ));
+    let mut no_hits = report;
+    no_hits.results.hits.clear();
+    let mut total = 0;
+    lexical_result_bytes(&no_hits, &mut total, 116).unwrap();
+    assert_eq!(total, 116, "omissions still occupy an empty matching page");
+    total = 0;
+    assert!(lexical_result_bytes(&no_hits, &mut total, 115).is_err());
+}
+
+#[test]
+fn same_source_and_generation_cannot_join_different_lexical_coverage_inventories() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let content = partial_lexical_report(format);
+        for change in 0..6 {
+            let mut path = content.clone();
+            match change {
+                0 => path.omissions[0].path = b"vendor/other.bin".to_vec(),
+                1 => {
+                    path.omissions[0].blob =
+                        git_object_id(format, GitObjectKind::Blob, &[b'y'; 128])
+                }
+                2 => path.omissions[0].source_bytes += 1,
+                3 => path.omissions[0].limit += 1,
+                4 => {
+                    path.coverage_complete = true;
+                    path.omissions.clear();
+                }
+                _ => {
+                    let mut extra = path.omissions[0].clone();
+                    extra.path = b"vendor/z.bin".to_vec();
+                    path.omissions.push(extra);
+                }
+            }
+            path.validate_coverage().unwrap();
+            assert_eq!(content.source, path.source);
+            assert_eq!(content.generation, path.generation);
+            assert!(
+                matches!(
+                    check_lexical_join(&content, &path),
+                    Err(RetrievalError::MixedGeneration)
+                ),
+                "coverage change {change}"
+            );
+        }
+        let mut later = content.clone();
+        later.selected_generation_head = generation(b"later-observed-head", 2);
+        check_lexical_join(&content, &later).unwrap();
+    }
+}
+
+#[test]
+fn invalid_lexical_coverage_cannot_be_budgeted_as_a_successful_initial_channel() {
+    let original = partial_lexical_report(GitHashAlgorithm::Sha1);
+    for change in 0..4 {
+        let mut report = original.clone();
+        match change {
+            0 => report.coverage_complete = true,
+            1 => report.omissions[0].path = report.results.hits[0].path.clone(),
+            2 => report.indexed_documents = 0,
+            _ => report.indexed_source_bytes = 4,
+        }
+        let mut total = 17;
+        assert!(
+            matches!(
+                lexical_result_bytes(&report, &mut total, MAX_RESULT_BYTES),
+                Err(RetrievalError::Invalid("lexical coverage"))
+            ),
+            "invalid coverage case {change}"
+        );
+        assert_eq!(
+            total, 17,
+            "invalid coverage must fail before result accounting"
+        );
     }
 }
 
