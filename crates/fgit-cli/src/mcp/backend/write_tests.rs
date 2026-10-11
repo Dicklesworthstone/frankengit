@@ -415,10 +415,7 @@ fn issue_assignment_tools_publish_read_and_recover_the_same_canonical_events() {
         );
         let issue = structured(&current)["issue"].object().unwrap();
         assert_eq!(issue["assignees"], Value::Array(vec![a.clone(), b.clone()]));
-        assert_eq!(
-            issue["last_actor"].text(),
-            Some("a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3")
-        );
+        assert_eq!(issue["last_actor"], text("a3".repeat(16)));
         let held = current_head(&backend);
         let retry = invoke(
             &mut server,
