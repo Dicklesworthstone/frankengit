@@ -8,6 +8,7 @@ import { isAbsolute, resolve, dirname, basename, join, sep } from 'node:path';
 import { runImportProcess, importJson } from './native-import-process.mjs';
 import { BACKUP_LIMITS, backupError, backupPath, backupLifetime, exact, readBackupControl, publishBackupControl } from './repository-backup-io.mjs';
 import { backupDecimal, backupPolicy, authenticateRepositoryBackupFile } from './repository-backup-approval.mjs';
+import { stageNativeBackupApproval, assertNativeBackupApproval } from './repository-backup-native-approval.mjs';
 
 const IDENTITY = ['tenant_id', 'repository_id', 'incarnation_id', 'object_format'];
 const COMMON = ['type', 'schema_version', 'sha256', ...IDENTITY, 'head_generation', 'objects', 'references', 'payload_bytes',
@@ -18,10 +19,10 @@ const RESTORE = ['destination_instance', 'source_tokens_preserved', 'reopened_an
   'streaming', 'resume_requested', 'already_published'];
 function fail(code) { throw backupError(code); }
 const nativeInteger = (v, minimum, maximum) => (typeof v === 'bigint' || Number.isSafeInteger(v)) && BigInt(v) >= minimum && BigInt(v) <= maximum;
-export function repositoryBackupReceipt(process, operation, statement, instance, resume = false) {
+export function repositoryBackupReceipt(process, operation, statement, instance, resume = false, approval) {
   if (process.code !== 0) { const e = backupError('backup_native_refused'); e.native_exit_code = process.code; e.native_diagnostic = process.stderr?.subarray(0, 4096).toString('utf8') ?? ''; throw e; }
   const v = importJson(process.stdout);
-  if (!exact(v, [...COMMON, ...(operation === 'verify' ? VERIFY : RESTORE)])
+  if (!exact(v, [...COMMON, ...(operation === 'verify' ? VERIFY : RESTORE), ...(approval ? ['approval'] : [])])
     || v.type !== `repository_source_backup_${operation}` || v.schema_version !== 1
     || IDENTITY.some(k => v[k] !== statement[k]) || v.sha256 !== statement.artifact.sha256
     || !nativeInteger(v.head_generation, 1n, 18446744073709551615n) || String(v.head_generation) !== statement.head_generation
@@ -29,7 +30,8 @@ export function repositoryBackupReceipt(process, operation, statement, instance,
     || !nativeInteger(v.objects, 0n, 100000n) || !nativeInteger(v.references, 0n, 100000n)
     || !nativeInteger(v.payload_bytes, 0n, BigInt(statement.artifact.bytes))
     || ['complete', 'object_graph_verified', 'original_payload_commitments_verified', 'node_closed'].some(k => v[k] !== true)
-    || v.signature_verified !== false || v.routing_published !== false || v.scope !== 'authority_and_selected_git_objects') fail('backup_native_receipt_mismatch');
+    || v.signature_verified !== Boolean(approval) || v.routing_published !== false || v.scope !== 'authority_and_selected_git_objects') fail('backup_native_receipt_mismatch');
+  if (approval) assertNativeBackupApproval(v.approval, approval);
   const field = operation === 'verify' ? 'verification_instance' : 'destination_instance';
   if (!nativeInteger(v[field], 1n, 9223372036854775807n) || String(v[field]) !== instance) fail('backup_native_instance_mismatch');
   if (operation === 'verify') {
@@ -82,10 +84,11 @@ async function privateCanonicalPath(path) {
   if (!stat.isDirectory() || typeof process.getuid !== 'function' || stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o077n)) fail('backup_private_parent_required');
   return join(parent, basename(path));
 }
-function nativeArgs(operation, input, output, statement, instance, live, resume = false) {
+function nativeArgs(operation, input, output, statement, instance, live, approval, resume = false) {
   const args = ['backup', operation, input, output, '--trusted-local', '--expected-sha256', statement.artifact.sha256,
     operation === 'verify' ? '--verification-instance' : '--destination-instance', instance,
     '--max-archive-bytes', String(live.maximumBytes), '--timeout-secs', String(Math.ceil(live.remaining() / 1000))];
+  args.push(...approval.args);
   if (resume) args.push('--resume');
   return args;
 }
@@ -96,6 +99,7 @@ async function checkRecord(path, bytes, live) {
 export async function runApprovedRepositoryBackup(raw) {
   const options = repositoryBackupOptions(raw), live = backupLifetime({ maximumBytes: options.maximumBytes, timeoutMs: options.timeoutMs, signal: options.signal });
   let state = options.resume ? 'existing_unknown' : 'not_started', scratch = null, record = null, nativeReceipt = null;
+  let nativeApproval = null, failure = null;
   const progress = async phase => { await options.onProgress(Object.freeze({ phase })); live.check(); };
   try {
     const encoded = await readBackupControl(options.approval, BACKUP_LIMITS.envelopeBytes, live);
@@ -117,6 +121,7 @@ export async function runApprovedRepositoryBackup(raw) {
       if (options.resume) await checkRecord(options.approvalRecord, record, live);
       else { await absent(options.destination); await absent(options.approvalRecord); }
     }
+    nativeApproval = await stageNativeBackupApproval(encoded, key, authentication, live);
     // The native verifier needs a fresh scratch root. The adapter owns only its
     // private parent; unknown native children are NEVER recursively removed.
     scratch = await mkdtemp(join(tmpdir(), 'fg-approved-backup-'));
@@ -126,41 +131,60 @@ export async function runApprovedRepositoryBackup(raw) {
       identity = await directory.stat({ bigint: true });
       if (!identity.isDirectory() || (identity.mode & 0o077n)) fail('backup_private_parent_required');
       const path = join(scratch, 'native'); live.check(); verified.checkCurrent();
-      const result = await runImportProcess(options.fg, nativeArgs('verify', options.input, path, statement, options.verificationInstance, live), live);
-      nativeReceipt = repositoryBackupReceipt(result, 'verify', statement, options.verificationInstance);
+      await nativeApproval.check();
+      const result = await runImportProcess(options.fg, nativeArgs('verify', options.input, path, statement, options.verificationInstance, live, nativeApproval), live);
+      nativeReceipt = repositoryBackupReceipt(result, 'verify', statement, options.verificationInstance, false, nativeApproval.expected);
       await absent(path);
       const current = await lstat(scratch, { bigint: true });
       if (!current.isDirectory() || !same(current, identity)) fail('backup_scratch_changed');
       await rmdir(scratch); scratch = null;
     } finally { await directory.close(); }
     await progress('preflight_verified'); verified.checkCurrent();
-    if (options.operation === 'verify') return { type: 'approved_repository_backup_verify', state: 'complete', authentication,
-      native: nativeReceipt, signed_identity_matched_native: true, archive_bytes_authenticated: true, destination_changed: false };
+    if (options.operation === 'verify') { state = 'complete'; return { type: 'approved_repository_backup_verify', state: 'complete', authentication,
+      native: nativeReceipt, signed_identity_matched_native: true, archive_bytes_authenticated: true, destination_changed: false }; }
     if (options.resume) await checkRecord(options.approvalRecord, record, live);
     else await publishBackupControl(options.approvalRecord, record, live);
     await progress('approval_recorded'); verified.checkCurrent();
     await checkRecord(options.approvalRecord, record, live);
     const preflight = nativeReceipt;
     await progress('restore_starting'); await checkRecord(options.approvalRecord, record, live); verified.checkCurrent();
+    await nativeApproval.check();
     state = 'restore_attempted_unknown';
     // Native restore independently rechecks the signed digest before directory
     // creation and on every pass of its pinned handle. A prior pathname read
-    // never authorizes changed bytes. No private key or approval path is passed.
+    // never authorizes changed bytes. Only the owned approval and public-key
+    // snapshots are passed; no signing/private key enters the native process.
     const result = await runImportProcess(options.fg, nativeArgs('restore', options.input, options.destination, statement,
-      options.destinationInstance, live, options.resume), live);
-    nativeReceipt = repositoryBackupReceipt(result, 'restore', statement, options.destinationInstance, options.resume);
+      options.destinationInstance, live, nativeApproval, options.resume), live);
+    nativeReceipt = repositoryBackupReceipt(result, 'restore', statement, options.destinationInstance, options.resume, nativeApproval.expected);
     if (['objects', 'references', 'payload_bytes'].some(k => String(nativeReceipt[k]) !== String(preflight[k]))) fail('backup_restore_preflight_mismatch');
     state = 'complete';
     // Confirmed native publication wins over cancellation/expiry at completion.
-    // Approval gates submission, not an in-native effect-time revocation lease.
+    // Native signed mode checks approval again before authority publication.
+    // This is expiry enforcement, not an external key-revocation lease.
     return { type: 'approved_repository_backup_restore', state, destination: options.destination,
       approval_record: options.approvalRecord, approval_record_sha256: createHash('sha256').update(record).digest('hex'),
       authentication, native: nativeReceipt, signed_identity_matched_native: true, approval_checked_before_restore: true,
-      approval_effect_time_enforced: false, cancellation_requested: Boolean(live.signal?.aborted),
+      approval_effect_time_enforced: true, cancellation_requested: Boolean(live.signal?.aborted),
       complete_capsule_restored: false, external_effects_replayed: false };
-  } catch (error) {
+  } catch (caught) {
+    const error = caught instanceof Error ? caught : backupError('backup_observer_failed');
+    failure = error;
     error.state = state; error.verification_scratch = scratch; error.approval_record = options.approvalRecord ?? null;
     if (state === 'complete') error.native_receipt = nativeReceipt;
     throw error;
+  } finally {
+    if (nativeApproval) {
+      // Failed containment does not establish that the child stopped using its
+      // inputs. Retain them for diagnosis instead of claiming successful cleanup.
+      if (failure?.code === 'native_import_containment_failed') failure.approval_scratch = nativeApproval.directory;
+      else {
+        try { await nativeApproval.close(); }
+        catch (error) {
+          if (failure) { failure.cleanup_error = error.code; failure.approval_scratch = nativeApproval.directory; }
+          else { error.state = state; error.native_receipt = nativeReceipt; throw error; }
+        }
+      }
+    }
   }
 }

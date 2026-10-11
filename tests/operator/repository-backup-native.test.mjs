@@ -44,16 +44,18 @@ async function fixture(t, format = 'sha1') {
 for (const format of ['sha1', 'sha256']) {
   test(`signed ${format} archive verifies before native restore, then resumes the exact approval`, async t => {
     const f = await fixture(t, format), result = await f.run();
-    assert.equal(result.state, 'complete'); assert.equal(result.native.signature_verified, false);
+    assert.equal(result.state, 'complete'); assert.equal(result.native.signature_verified, true);
     assert.equal(result.authentication.signature_verified, true); assert.equal(result.signed_identity_matched_native, true);
     assert.equal(result.native.head_generation, f.data.head_generation); assert.equal(result.native.destination_instance, '9223372036854775807');
-    assert.equal(result.approval_effect_time_enforced, false); assert.equal(result.complete_capsule_restored, false);
+    assert.equal(result.approval_effect_time_enforced, true); assert.equal(result.complete_capsule_restored, false);
     assert.ok(await exists(join(f.options.destination, 'authority-visible')));
     assert.equal((await lstat(f.options.approvalRecord)).mode & 0o777, 0o600);
     const calls = await f.calls(); assert.deepEqual(calls.map(c => c.args.slice(0, 2)), [['backup', 'verify'], ['backup', 'restore']]);
     for (const call of calls) {
       assert.ok(call.args.includes('--expected-sha256')); assert.ok(call.args.includes(result.authentication.statement.artifact.sha256));
       assert.ok(!call.args.includes(f.options.approval)); assert.ok(!call.args.includes(f.options.trustKey));
+      for (const flag of ['--approval', '--trust-key', '--tenant-id', '--repository-id', '--incarnation-id', '--object-format', '--minimum-head-generation']) assert.ok(call.args.includes(flag));
+      for (const flag of ['--approval', '--trust-key']) assert.ok(!await exists(call.args[call.args.indexOf(flag) + 1]), 'owned controls cleaned after the child closes');
     }
     const record = await readFile(f.options.approvalRecord), resumed = await f.run({ resume: true });
     assert.equal(resumed.native.already_published, true); assert.equal(resumed.native.resume_requested, true);
@@ -67,7 +69,7 @@ test('verify-only operation never creates a restore record or destination', asyn
   assert.ok(!await exists(f.options.destination)); assert.ok(!await exists(f.options.approvalRecord));
 });
 for (const [mismatch, wrong] of [['tenant_id', '99'.repeat(16)], ['repository_id', '99'.repeat(16)], ['incarnation_id', '99'.repeat(16)],
-  ['object_format', 'sha256'], ['head_generation', 1], ['archive_bytes', 1], ['sha256', '0'.repeat(64)], ['signature_verified', true],
+  ['object_format', 'sha256'], ['head_generation', 1], ['archive_bytes', 1], ['sha256', '0'.repeat(64)], ['signature_verified', false],
   ['object_graph_verified', false], ['authority_import_verified', false], ['destination_authority_published', true], ['verification_instance', 12]]) {
   test(`native ${mismatch} disagreement refuses before ANY restore call`, async t => {
     const f = await fixture(t); await f.mode({ mismatch, wrong });
