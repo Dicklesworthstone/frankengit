@@ -45,6 +45,7 @@ use fgit_admission::{
     validate_source_import,
 };
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
+mod capsule_history;
 pub mod source_retrieval;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
@@ -68,15 +69,12 @@ pub use treefs_workspace::{
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
     HeadRead, IdempotencyKey, ImmutableKey, ImmutableRead, KeyError, OutcomeLookup, PutOutcome,
-    StoreInstanceId, initialize_repository_async, next_batch_to_replay, outcome_index_root,
-    read_authority_head_body_async, read_decision_batch_body_async, read_hidden_ref_policy_async,
+    StoreInstanceId, initialize_repository_async, outcome_index_root, read_hidden_ref_policy_async,
     read_repository_incarnation_configuration_async, record_creation_attempt_async,
     resolve_outcome_async, stage_latest_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
-use fgit_chronicle::{
-    PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async, verify_pair,
-};
+use fgit_chronicle::{PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async};
 use fgit_codec::schema::{
     CreationAttemptBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
     RepositoryIncarnationConfigurationBodyV2_1,
@@ -1181,6 +1179,8 @@ pub enum AdmissionMaterializationRefusal {
     DecisionHistory(Box<fgit_authority::OutcomeFailure>),
     /// A decoded head and batch did not satisfy the chronicle successor rules.
     DecisionHistoryVerification(fgit_chronicle::ChronicleRefusal),
+    /// An unchanged decision tail was not an authenticated capsule activation.
+    CheckpointTransition(Box<fgit_chronicle::CheckpointTransitionRefusal>),
     /// The authenticated head belongs to a different repository.
     RepositoryMismatch {
         /// Repository selected by the caller/node configuration.
@@ -1244,6 +1244,7 @@ impl Display for AdmissionMaterializationRefusal {
             ),
             Self::DecisionHistory(error) => Display::fmt(error, formatter),
             Self::DecisionHistoryVerification(error) => Display::fmt(error, formatter),
+            Self::CheckpointTransition(error) => Display::fmt(error, formatter),
             Self::RepositoryMismatch { expected, observed } => write!(
                 formatter,
                 "authenticated admission head repository {observed:?} differs from {expected:?}"
@@ -1296,6 +1297,7 @@ impl Error for AdmissionMaterializationRefusal {
             Self::HeadBody(error) => Some(error),
             Self::DecisionHistory(error) => Some(error.as_ref()),
             Self::DecisionHistoryVerification(error) => Some(error),
+            Self::CheckpointTransition(error) => Some(error.as_ref()),
             Self::HeadIdentity(error)
             | Self::CommitIdentity(error)
             | Self::CanonicalFrame(error) => Some(error),
@@ -2845,8 +2847,9 @@ fn repository_commit_id(
 ///
 /// A refusal-only batch advances the head but does not change the object
 /// closure, so this deliberately walks predecessors until it finds an RCR.
-/// Every hop re-identifies the predecessor, verifies the batch/successor pair,
-/// and is bounded by the authority replay ceiling before another immutable read.
+/// Every hop re-identifies the predecessor and verifies either its new decision
+/// batch or its exact state-preserving capsule activation. Both kinds of edge
+/// consume the authority replay bound before another immutable read.
 async fn select_authority_closure_in<Authority>(
     authority: &Authority,
     cx: &Authority::Context,
@@ -2863,51 +2866,48 @@ where
     let mut closure_roots: Vec<Digest> = Vec::new();
 
     loop {
-        ensure_materializer_catch_up_live(is_cancelled)?;
-        let Some(batch_id) = fgit_authority::next_batch_to_replay(&successor, &mut walked)
-            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?
-        else {
-            if successor.predecessor_head_id.is_some() {
-                return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
-            }
-            return match (latest_record, closure_roots.len()) {
-                (None, 0) => {
-                    if !current_refs.refs().is_empty() {
-                        return Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure);
+        let (basis, batch) = match capsule_history::predecessor_in(
+            authority,
+            cx,
+            &successor,
+            &mut walked,
+            is_cancelled,
+        )
+        .await?
+        {
+            capsule_history::HistoryStep::Genesis => {
+                return match (latest_record, closure_roots.len()) {
+                    (None, 0) => {
+                        if !current_refs.refs().is_empty() {
+                            return Err(
+                                AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure,
+                            );
+                        }
+                        let closure = PermittedObjectClosure::default();
+                        let root = permitted_object_closure_root(&closure)
+                            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+                        Ok((vec![root], ClosureSelectionSource::EmptyGenesis))
                     }
-                    let closure = PermittedObjectClosure::default();
-                    let root = permitted_object_closure_root(&closure)
-                        .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
-                    Ok((vec![root], ClosureSelectionSource::EmptyGenesis))
-                }
-                (None, _) => Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound),
-                (Some(latest), 1) => Ok((
-                    closure_roots,
-                    ClosureSelectionSource::RepositoryCommit(latest),
-                )),
-                (Some(latest), united_roots) => Ok((
-                    closure_roots,
-                    ClosureSelectionSource::CumulativeHistory {
-                        latest,
-                        united_roots,
-                    },
-                )),
-            };
+                    (None, _) => Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound),
+                    (Some(latest), 1) => Ok((
+                        closure_roots,
+                        ClosureSelectionSource::RepositoryCommit(latest),
+                    )),
+                    (Some(latest), united_roots) => Ok((
+                        closure_roots,
+                        ClosureSelectionSource::CumulativeHistory {
+                            latest,
+                            united_roots,
+                        },
+                    )),
+                };
+            }
+            capsule_history::HistoryStep::Checkpoint { predecessor } => {
+                successor = predecessor.body().clone();
+                continue;
+            }
+            capsule_history::HistoryStep::Decision { predecessor, batch } => (predecessor, batch),
         };
-        let predecessor_id = successor
-            .predecessor_head_id
-            .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
-        ensure_materializer_catch_up_live(is_cancelled)?;
-        let predecessor = read_authority_head_body_async(authority, cx, predecessor_id)
-            .await
-            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?;
-        ensure_materializer_catch_up_live(is_cancelled)?;
-        let batch = read_decision_batch_body_async(authority, cx, batch_id)
-            .await
-            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?;
-        let basis = PublicationBasis::new(predecessor_id, predecessor.clone());
-        verify_pair(&CryptoBodyIdentity, &basis, &batch, &successor)
-            .map_err(AdmissionMaterializationRefusal::DecisionHistoryVerification)?;
 
         if let (Some(record), None) = (batch.committed_rcrs.last(), latest_record) {
             let record_id = repository_commit_id(record)?;
@@ -2955,7 +2955,7 @@ where
             }
         }
 
-        successor = predecessor;
+        successor = basis.body().clone();
     }
 }
 
@@ -7578,37 +7578,41 @@ impl OneNode {
         .await?;
         let mut walked = 0_usize;
         let mut history = Vec::new();
+        let is_cancelled = || request.authority().checkpoint().is_err();
 
-        while let Some(batch_id) = next_batch_to_replay(&successor, &mut walked)
-            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?
-        {
-            if request.authority().checkpoint().is_err() {
-                return Err(AdmissionMaterializationRefusal::Cancelled);
-            }
-            let predecessor_id = successor
-                .predecessor_head_id
-                .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
-            let predecessor = read_authority_head_body_async(
+        loop {
+            let (basis, batch) = match capsule_history::predecessor_in(
                 &self.authority,
                 request.authority(),
-                predecessor_id,
+                &successor,
+                &mut walked,
+                &is_cancelled,
             )
-            .await
-            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?;
-            let batch =
-                read_decision_batch_body_async(&self.authority, request.authority(), batch_id)
-                    .await
-                    .map_err(|error| {
-                        AdmissionMaterializationRefusal::DecisionHistory(Box::new(error))
-                    })?;
-            let basis = PublicationBasis::new(predecessor_id, predecessor.clone());
-            verify_pair(&CryptoBodyIdentity, &basis, &batch, &successor)
-                .map_err(AdmissionMaterializationRefusal::DecisionHistoryVerification)?;
+            .await?
+            {
+                capsule_history::HistoryStep::Genesis => break,
+                capsule_history::HistoryStep::Checkpoint { predecessor } => {
+                    // The verified edge preserves ref/forge state. Retain the
+                    // real predecessor's identity for the actual batch below;
+                    // the checkpoint does not create a historical batch row.
+                    successor_id = predecessor.id();
+                    successor = predecessor.body().clone();
+                    continue;
+                }
+                capsule_history::HistoryStep::Decision { predecessor, batch } => {
+                    (predecessor, batch)
+                }
+            };
+            let batch_id = successor
+                .decision_tail_id
+                .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
+            let predecessor_id = basis.id();
+            let predecessor = basis.body();
             let predecessor_refs = read_historical_ref_state_in(
                 &self.authority,
                 request.authority(),
                 self.repository_id,
-                &predecessor,
+                predecessor,
             )
             .await?;
             let mut ref_updates = Vec::new();
@@ -7622,7 +7626,6 @@ impl OneNode {
                     ref_updates.push((name.as_bytes().to_vec(), None));
                 }
             }
-            let is_cancelled = || request.authority().checkpoint().is_err();
             let mut forge_events = Vec::new();
             for record in &batch.committed_rcrs {
                 fgit_admission::merge::native::history::verify_record_evidence(
@@ -7675,7 +7678,7 @@ impl OneNode {
                 forge_events,
                 ref_updates,
             });
-            successor = predecessor;
+            successor = predecessor.clone();
             successor_id = predecessor_id;
             successor_refs = predecessor_refs;
         }
@@ -9656,6 +9659,7 @@ fn admission_cache_resources() -> ResourceVector {
 #[cfg(test)]
 mod tests {
     mod admission_projection;
+    mod capsule_history;
 
     #[test]
     fn git_daemon_server_limits_require_nonzero_session_and_in_flight_bounds() {

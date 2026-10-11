@@ -7,12 +7,13 @@
 
 use super::{AdmissionError, ForgeEventCursor, Record, checkpoint, unavailable};
 use fgit_authority::{AsyncAuthorityStore, authority_head_identity};
-use fgit_chronicle::{PublicationBasis, verify_pair};
-use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody};
+use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
+use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_types::{HeadGeneration, RefusalCode, RepositoryId};
 
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
+    /// Maximum predecessor edges, including checkpoint-only activations.
     pub(super) batches: usize,
     pub(super) records: usize,
 }
@@ -23,8 +24,10 @@ impl Limits {
     };
 
     fn validate(self) -> Result<(), AdmissionError> {
-        if self.batches == 0 || self.batches > Self::DEFAULT.batches
-            || self.records == 0 || self.records > Self::DEFAULT.records
+        if self.batches == 0
+            || self.batches > Self::DEFAULT.batches
+            || self.records == 0
+            || self.records > Self::DEFAULT.records
         {
             return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
         }
@@ -49,7 +52,8 @@ where
     // PublicationBasis is a public value. Never label a different body's
     // results with an asserted head ID, including on an empty/stale fast path.
     if authority_head_identity(basis.body())
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))? != basis.id()
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
+        != basis.id()
     {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
@@ -57,7 +61,10 @@ where
         if cursor.repository_sequence == 0 {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
-        let latest = basis.body().latest_repository_sequence.map_or(0, |n| n.get());
+        let latest = basis
+            .body()
+            .latest_repository_sequence
+            .map_or(0, |n| n.get());
         if cursor.repository_sequence > latest {
             return Err(unavailable(RefusalCode::EvidenceStale));
         }
@@ -68,32 +75,33 @@ where
     let mut batches = 0usize;
     let mut records = 0usize;
     let mut cursor_record_seen = false;
-    while let Some(batch_id) = successor.decision_tail_id {
-        checkpoint(cancelled)?;
-        if batches >= limits.batches {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        batches += 1;
-        let predecessor_id = successor.predecessor_head_id
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        let predecessor = fgit_authority::read_authority_head_body_async(
-            store, cx, predecessor_id,
-        ).await?;
-        checkpoint(cancelled)?;
-        let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id).await?;
-        checkpoint(cancelled)?;
-        verify_pair(
-            &CryptoBodyIdentity,
-            &PublicationBasis::new(predecessor_id, predecessor.clone()),
-            &batch,
+    loop {
+        let (predecessor, batch) = match read_history_step_async(
+            store,
+            cx,
             &successor,
-        ).map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+            &mut batches,
+            limits.batches,
+            cancelled,
+        )
+        .await
+        .map_err(super::storage::history_step_refusal)?
+        {
+            HistoryStep::Genesis => break,
+            HistoryStep::Checkpoint { predecessor } => {
+                successor = predecessor.body().clone();
+                continue;
+            }
+            HistoryStep::Decision { predecessor, batch } => (predecessor, batch),
+        };
         // Charge all examined records, even those before the cursor in its
         // own microbatch. Filtering is not permission to evade work bounds.
-        records = records.checked_add(batch.committed_rcrs.len())
+        records = records
+            .checked_add(batch.committed_rcrs.len())
             .filter(|count| *count <= limits.records)
             .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        reverse.try_reserve(batch.committed_rcrs.len())
+        reverse
+            .try_reserve(batch.committed_rcrs.len())
             .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         for record in batch.committed_rcrs.iter().rev() {
             checkpoint(cancelled)?;
@@ -110,9 +118,10 @@ where
                 policy_epoch: record.policy_epoch,
                 event_root: record.forge_event_batch_root,
             });
-            cursor_record_seen |= after.is_some_and(|cursor| sequence == cursor.repository_sequence);
+            cursor_record_seen |=
+                after.is_some_and(|cursor| sequence == cursor.repository_sequence);
         }
-        successor = predecessor;
+        successor = predecessor.body().clone();
         if cursor_record_seen {
             // This predecessor was read and commitment-checked, and the entire
             // boundary batch was verified. No trust is placed in a bare number.

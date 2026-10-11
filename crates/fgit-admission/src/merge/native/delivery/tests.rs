@@ -216,6 +216,137 @@ fn exact_empty_legacy_outbox_is_permitted_but_arbitrary_missing_root_refuses() {
 }
 
 #[test]
+fn legacy_roots_cross_verified_genesis_checkpoints_without_inventing_state() {
+    let store = AsyncView::new();
+    let body = initial_basis().body().clone();
+    let mut basis = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&body).unwrap(),
+        body,
+    );
+    let expected = run(read_in(&store, &(), &basis, &|| false)).unwrap();
+    for _ in 0..2 {
+        (basis, _) = storage::checkpoint_test_support::stage_checkpoint(&store.0, &basis);
+        assert_eq!(
+            run(read_in(&store, &(), &basis, &|| false)).unwrap(),
+            expected
+        );
+        assert!(basis.body().decision_tail_id.is_none());
+    }
+
+    let mut missing = basis.body().clone();
+    missing.last_checkpoint_id = Some(fgit_codec::harness::capsule_id());
+    let missing = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&missing).unwrap(),
+        missing,
+    );
+    assert!(matches!(
+        run(read_in(&store, &(), &missing, &|| false)),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceMissing
+        )),
+    ));
+
+    let mut changed = basis.body().clone();
+    changed.outbox_root = digest_of(0xee);
+    let changed = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&changed).unwrap(),
+        changed,
+    );
+    assert!(matches!(
+        run(read_in(&store, &(), &changed, &|| false)),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceInvalid
+        )),
+    ));
+    assert_eq!(
+        run(read_in(&store, &(), &basis, &|| false)).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn legacy_roots_survive_decisions_before_and_after_checkpoint_activation() {
+    use fgit_authority::{collect_cumulative_outcomes, initialize_repository, publish_decisions};
+    use fgit_chronicle::{PublicationPlan, ResultingRoots};
+    use fgit_codec::CryptoBodyIdentity;
+    use fgit_types::{CANONICAL_CODEC_VERSION, RefusalRecordId, TenantId, TxId};
+
+    let store = AsyncView::new();
+    let key = HeadKey::new(b"legacy-checkpoint-admission".to_vec()).unwrap();
+    let body = initial_basis().body().clone();
+    let mut basis = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&body).unwrap(),
+        body,
+    );
+    initialize_repository(&store.0, &key, basis.body()).unwrap();
+    let expected = run(read_in(&store, &(), &basis, &|| false)).unwrap();
+
+    for turn in 0..2 {
+        let HeadRead::Present(receipt) = store.0.read_head(&key).unwrap() else {
+            panic!("model head absent")
+        };
+        let witness = collect_cumulative_outcomes(&store.0, &key).unwrap();
+        let mut plan = PublicationPlan::open(basis.clone()).unwrap();
+        let digest = digest_of(0xd0 + turn);
+        plan.refuse(
+            TxId::from_digest(digest.algorithm(), CANONICAL_CODEC_VERSION, *digest.bytes()),
+            RefusalCode::QuotaExceeded,
+            RefusalRecordId::from_digest(
+                digest.algorithm(),
+                CANONICAL_CODEC_VERSION,
+                *digest.bytes(),
+            ),
+        );
+        let publication = plan
+            .seal(
+                &CryptoBodyIdentity,
+                ResultingRoots::carried_forward(&basis),
+                &witness,
+                receipt.token(),
+            )
+            .unwrap();
+        publish_decisions(
+            &store.0,
+            &key,
+            receipt.token(),
+            publication.batch(),
+            publication.head(),
+            TenantId::from_bytes([0xda; 16]),
+        )
+        .unwrap();
+        basis = PublicationBasis::new(
+            fgit_authority::authority_head_identity(publication.head()).unwrap(),
+            publication.head().clone(),
+        );
+        assert_eq!(
+            run(read_in(&store, &(), &basis, &|| false)).unwrap(),
+            expected
+        );
+        let HeadRead::Present(receipt) = store.0.read_head(&key).unwrap() else {
+            panic!("model head absent")
+        };
+        let (checkpoint, _) = storage::checkpoint_test_support::stage_checkpoint(&store.0, &basis);
+        assert!(matches!(
+            store
+                .0
+                .compare_exchange_head(
+                    &key,
+                    receipt.token(),
+                    checkpoint.generation(),
+                    &fgit_codec::encode_body(checkpoint.body()).unwrap()
+                )
+                .unwrap(),
+            CasOutcome::Committed(_),
+        ));
+        basis = checkpoint;
+        assert_eq!(
+            run(read_in(&store, &(), &basis, &|| false)).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn repeated_staging_resolves_identical_state_without_publishing_a_head() {
     let store = AsyncView::new();
     let (state, events, effect) = fixture();

@@ -7,12 +7,12 @@
 use std::collections::BTreeMap;
 
 use fgit_authority::AsyncAuthorityStore;
-use fgit_chronicle::{PublicationBasis, verify_pair};
+use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
 use fgit_codec::{
     CanonicalBody, CanonicalForgePositionState, CanonicalOutboxDeliveryReceipt,
-    CanonicalOutboxEffectState, CanonicalOutboxState, CanonicalOutboxStateEntry,
-    CryptoBodyIdentity, DecodeLimits, ForgePositionStateEntry, OutboxDeliveryDisposition,
-    OutboxDeliveryIdentityInput, decode_body, derive_outbox_delivery_key,
+    CanonicalOutboxEffectState, CanonicalOutboxState, CanonicalOutboxStateEntry, DecodeLimits,
+    ForgePositionStateEntry, OutboxDeliveryDisposition, OutboxDeliveryIdentityInput, decode_body,
+    derive_outbox_delivery_key,
 };
 use fgit_forge::ForgeEventBatch;
 use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey};
@@ -161,30 +161,28 @@ where
     }
     let mut successor = basis.body().clone();
     let mut walked = 0;
-    while let Some(batch_id) = successor.decision_tail_id {
-        checkpoint(cancelled)?;
-        if walked >= MAX_LEGACY_BATCHES {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        walked += 1;
-        let predecessor_id = successor
-            .predecessor_head_id
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        let predecessor =
-            fgit_authority::read_authority_head_body_async(store, cx, predecessor_id).await?;
-        checkpoint(cancelled)?;
-        let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id).await?;
-        verify_pair(
-            &CryptoBodyIdentity,
-            &PublicationBasis::new(predecessor_id, predecessor.clone()),
-            &batch,
+    loop {
+        let predecessor = match read_history_step_async(
+            store,
+            cx,
             &successor,
+            &mut walked,
+            MAX_LEGACY_BATCHES,
+            cancelled,
         )
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-        if predecessor.outbox_root != selected_root || successor.outbox_root != selected_root {
+        .await
+        .map_err(storage::history_step_refusal)?
+        {
+            HistoryStep::Genesis => break,
+            HistoryStep::Checkpoint { predecessor } | HistoryStep::Decision { predecessor, .. } => {
+                predecessor
+            }
+        };
+        if predecessor.body().outbox_root != selected_root || successor.outbox_root != selected_root
+        {
             return Err(unavailable(RefusalCode::EvidenceMissing));
         }
-        successor = predecessor;
+        successor = predecessor.body().clone();
     }
     if successor.repository_id != repository
         || successor.predecessor_head_id.is_some()

@@ -5,11 +5,11 @@
 //! not establish which attempt is current.
 
 use fgit_authority::AsyncAuthorityStore;
-use fgit_chronicle::{PublicationBasis, verify_pair};
+use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
 use fgit_codec::{
     CanonicalBody, CanonicalOutboxDeliveryReceipt, CanonicalOutboxEffectState,
-    CanonicalOutboxState, CanonicalOutboxStateEntry, CryptoBodyIdentity, DecodeLimits,
-    OutboxDeliveryDisposition, RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body,
+    CanonicalOutboxState, CanonicalOutboxStateEntry, DecodeLimits, OutboxDeliveryDisposition,
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body,
 };
 use fgit_resource::{ObligationState, ReconcileState};
 use fgit_types::{AsciiSlug, Digest, RefusalCode, RepositoryId};
@@ -63,7 +63,8 @@ where
 /// microbatch is still checked.
 ///
 /// Genesis-seeded obligations retain the full genesis verification path. The
-/// 4,096-batch / 65,536-record budgets apply to the examined suffix; a genuinely
+/// 4,096-head-edge / 65,536-record budgets apply to the examined suffix;
+/// checkpoint activations consume head edges without adding records. A genuinely
 /// old unresolved obligation can still exhaust them. Use [`latest_progress`]
 /// when the requested operation is a complete history audit.
 pub async fn latest_progress_for_entry<S, C>(
@@ -121,33 +122,31 @@ where
     let mut chain = ReverseProgress::new(key);
     let mut batches = 0_usize;
     let mut records = 0_usize;
-    while let Some(batch_id) = successor.decision_tail_id {
-        checkpoint(cancelled)?;
-        if batches >= MAX_HISTORY_BATCHES {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        batches += 1;
-        let predecessor_id = successor
-            .predecessor_head_id
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        let predecessor =
-            fgit_authority::read_authority_head_body_async(store, cx, predecessor_id).await?;
-        checkpoint(cancelled)?;
-        let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id).await?;
-        checkpoint(cancelled)?;
-        verify_pair(
-            &CryptoBodyIdentity,
-            &PublicationBasis::new(predecessor_id, predecessor.clone()),
-            &batch,
+    loop {
+        let (predecessor, batch) = match read_history_step_async(
+            store,
+            cx,
             &successor,
+            &mut batches,
+            MAX_HISTORY_BATCHES,
+            cancelled,
         )
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+        .await
+        .map_err(storage::history_step_refusal)?
+        {
+            HistoryStep::Genesis => break,
+            HistoryStep::Checkpoint { predecessor } => {
+                successor = predecessor.body().clone();
+                continue;
+            }
+            HistoryStep::Decision { predecessor, batch } => (predecessor, batch),
+        };
         records = records
             .checked_add(batch.committed_rcrs.len())
             .filter(|count| *count <= MAX_HISTORY_RECORDS)
             .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        // verify_pair proves that this is repository sequence order, including
-        // batches containing several commits interleaved with refusals.
+        // The verified decision step proves repository sequence order,
+        // including batches with several commits interleaved with refusals.
         let mut creation_found = false;
         for record in batch.committed_rcrs.iter().rev() {
             let evidence = verify_record_evidence(store, cx, repository, record, cancelled).await?;
@@ -181,18 +180,12 @@ where
         if creation_found {
             let entry = boundary.ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
             verify_creation_binding(store, cx, &successor, entry, cancelled).await?;
-            verify_before_creation(
-                store,
-                cx,
-                &PublicationBasis::new(predecessor_id, predecessor),
-                entry.delivery_key(),
-                cancelled,
-            )
-            .await?;
+            verify_before_creation(store, cx, &predecessor, entry.delivery_key(), cancelled)
+                .await?;
             checkpoint(cancelled)?;
             return chain.finish();
         }
-        successor = predecessor;
+        successor = predecessor.body().clone();
     }
     if successor.repository_id != repository
         || successor.generation != fgit_types::HeadGeneration::FIRST

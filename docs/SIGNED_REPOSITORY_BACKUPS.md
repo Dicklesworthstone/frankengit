@@ -317,3 +317,37 @@ exports its archive, deletes the source, then verifies/restores and resumes with
 an empty executable search path for every `fg` invocation. It is skipped unless
 `FG_NATIVE_BIN` is supplied. These checks do not establish full service or signed
 capsule recovery, exhaustive power-loss behavior or the broader bead's closure.
+
+## Native history across activated checkpoints
+
+An existing capsule activation advances the authority head without adding a
+decision batch. Native materialization, selected source closure, historical
+batch reads, legacy forge/outbox reconstruction, outbox progress and forge-event
+pages verify those edges through one shared bounded history reader. The reader
+re-identifies the predecessor and inspects the original canonical capsule bytes.
+It requires the successor to equal that predecessor with exactly the next
+generation, exact predecessor ID and new checkpoint pointer. Every other head
+field stays equal, including decision positions and state roots. An actual
+decision edge still requires the complete decision-batch verification.
+
+Each checkpoint consumes one predecessor-edge allowance and contributes no
+synthetic decision, event or progress record. Missing, corrupt or mismatched
+capsule evidence refuses the read. Cancellation is checked around immutable
+reads before their results are interpreted. Current-head operations and genuine
+historical decision/RCR positions retain their existing meanings. Retained
+metadata pagination still enforces its checkpoint-epoch boundary; identifying an
+older checkpoint-only head as a separate historical projection position remains
+outside this reader integration.
+
+Source-backup authority snapshots retain canonical capsule bodies and predecessor
+heads in their existing immutable-body enumeration, subject to the same finite
+authority snapshot limits. Restore imports those original bodies before head
+publication. The native checkpoint regression exercises real admission on both
+sides of activation, close/reopen, source export/restore and exact history/ref/
+object readback. The focused contract and admission tests cover malformed edges,
+missing evidence, cancellation, deterministic retries and bounded traversal.
+These are executable test targets; their presence alone does not establish that
+a native execution gate passed.
+
+General signed-capsule archive restore, external-artifact replay and the complete
+forge recovery drill remain separate integration work.

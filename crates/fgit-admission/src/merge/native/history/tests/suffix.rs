@@ -12,10 +12,12 @@ use fgit_authority::{
     CasOutcome, HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead,
     MemoryAuthorityStore, PutOutcome, StoreInstanceId, authority_head_identity, body_key_for_id,
 };
-use fgit_chronicle::{batch_evidence_root, batch_identity, repository_commit_identity};
+use fgit_chronicle::{
+    batch_evidence_root, batch_identity, repository_commit_identity, verify_pair,
+};
 use fgit_codec::{
-    Decoder, Encoder, OutboxDeliveryIdentityInput, RepositoryDecision, RepositoryDecisionBatchBody,
-    derive_outbox_delivery_key, encode_body,
+    CryptoBodyIdentity, Decoder, Encoder, OutboxDeliveryIdentityInput, RepositoryDecision,
+    RepositoryDecisionBatchBody, derive_outbox_delivery_key, encode_body,
 };
 use fgit_forge::{
     AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload,
@@ -223,6 +225,12 @@ impl Fixture {
                 &encode_body(head).unwrap(),
             )
             .unwrap();
+    }
+    fn checkpoint(&mut self) -> ImmutableKey {
+        let (basis, capsule_key) =
+            storage::checkpoint_test_support::stage_checkpoint(&self.store.memory, &self.basis);
+        self.basis = basis;
+        capsule_key
     }
     fn outbox(&self) -> CanonicalOutboxState {
         CanonicalOutboxState::try_new(
@@ -461,6 +469,55 @@ impl Fixture {
 
 fn batch_key(head: &RepositoryAuthorityHeadBody) -> ImmutableKey {
     body_key_for_id(head.decision_tail_id.unwrap().as_internal_object_id()).unwrap()
+}
+
+#[test]
+fn progress_history_skips_checkpoint_edges_and_accepts_later_decisions() {
+    let mut fixture = Fixture::new();
+    fixture.checkpoint();
+    fixture.create();
+    fixture.checkpoint();
+    let progress = fixture.defer();
+    fixture.progress(&progress);
+    fixture.checkpoint();
+    fixture.checkpoint();
+    assert_eq!(fixture.read().unwrap(), Some(progress.clone()));
+    assert_eq!(fixture.audit().unwrap(), Some(progress.clone()));
+    fixture.append(Vec::new());
+    fixture.checkpoint();
+    assert_eq!(fixture.read().unwrap(), Some(progress.clone()));
+    assert_eq!(fixture.audit().unwrap(), Some(progress));
+}
+
+#[test]
+fn progress_checkpoint_loss_corruption_and_cancellation_refuse_without_partial_history() {
+    let mut fixture = Fixture::new();
+    fixture.create();
+    let progress = fixture.defer();
+    fixture.progress(&progress);
+    let capsule = fixture.checkpoint();
+    for corrupt in [false, true] {
+        fixture.store.fault(Some(capsule.clone()), corrupt);
+        assert!(fixture.read().is_err());
+        assert!(fixture.audit().is_err());
+        fixture.store.fault(None, false);
+        assert_eq!(fixture.read().unwrap(), Some(progress.clone()));
+    }
+    fixture.store.reset();
+    assert!(matches!(
+        run(latest_progress(
+            &fixture.store,
+            &(),
+            &fixture.basis,
+            fixture.entry.unwrap().delivery_key(),
+            &|| fixture.store.count() >= 1
+        )),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::CancellationInProgress
+        )),
+    ));
+    assert_eq!(fixture.store.count(), 1, "stop before reading the capsule");
+    assert_eq!(fixture.audit().unwrap(), Some(progress));
 }
 
 #[test]
