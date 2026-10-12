@@ -4,6 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fgit_diff::{
+    AncestryQueryScratch, CommitAncestryIndex, CommitGraph, MergeBaseError, MergeBaseLimits,
+    ParentSet,
+};
 use fgit_forge::event::NativeMerge;
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{CanonicalObjectSource, Deadline, PackError, PackWriteError, verify_native_object};
@@ -359,29 +363,14 @@ fn validate_candidate_objects(
             require_object(target, kind, &mut required, &mut pending, limits)?;
         }
     }
-    match ancestry {
-        AncestryRequirement::Merge { base } | AncestryRequirement::Squash { base, .. } => {
-            let expected_parents = expected_parents.ok_or_else(invalid)?;
-            let source = match ancestry {
-                AncestryRequirement::Squash { source, .. } => source,
-                _ => expected_parents[1],
-            };
-            if !parents.contains_key(&base)
-                || !is_ancestor(base, source, &parents, deadline)?
-                || !is_ancestor(base, expected_parents[0], &parents, deadline)?
-            {
-                return Err(invalid());
-            }
-        }
-        AncestryRequirement::FastForward { base } => {
-            if !is_ancestor(base, candidate, &parents, deadline)? {
-                return Err(ProjectionFailure::Refuse(
-                    RefusalCode::NonFastForwardRefused,
-                ));
-            }
-        }
-        AncestryRequirement::None => {}
-    }
+    validate_ancestry(
+        ancestry,
+        candidate,
+        expected_parents,
+        &parents,
+        limits,
+        deadline,
+    )?;
     checkpoint(deadline)?;
     let closure = PermittedObjectClosure::new(visited);
     let object_closure_root =
@@ -440,6 +429,99 @@ fn require_object(
     Ok(())
 }
 
+/// This adapter only sees native commits whose bytes, kinds and complete
+/// closure were independently verified in this request. It never reads a
+/// store or extends the caller's authority-selected object closure.
+struct VerifiedCommitGraph<'a>(&'a BTreeMap<GitOid, Vec<GitOid>>);
+
+impl CommitGraph for VerifiedCommitGraph<'_> {
+    type CommitId = GitOid;
+    type Error = ProjectionFailure;
+
+    fn parents_of(&self, commit: &GitOid) -> Result<ParentSet<GitOid>, ProjectionFailure> {
+        let mut parents = self.0.get(commit).ok_or_else(invalid)?.clone();
+        // GitCompatibleImport permits repeated historical parent headers.
+        // Reachability uses a simple graph, but the original headers remain
+        // untouched: their bytes and every edge have already been charged,
+        // and candidate parents were compared in their exact native order.
+        parents.sort_unstable();
+        parents.dedup();
+        Ok(ParentSet::Complete(parents))
+    }
+}
+
+fn validate_ancestry(
+    ancestry: AncestryRequirement,
+    candidate: GitOid,
+    expected_parents: Option<&[GitOid]>,
+    parents: &BTreeMap<GitOid, Vec<GitOid>>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<(), ProjectionFailure> {
+    let (base, source, target) = match ancestry {
+        AncestryRequirement::None => return Ok(()),
+        AncestryRequirement::Merge { base } => {
+            let expected = expected_parents.ok_or_else(invalid)?;
+            (base, expected[1], expected[0])
+        }
+        AncestryRequirement::Squash { base, source } => {
+            let expected = expected_parents.ok_or_else(invalid)?;
+            (base, source, expected[0])
+        }
+        AncestryRequirement::FastForward { base } => {
+            // Cold index construction costs more than this single query.
+            // Retain the exact checkpointed walk until an independently
+            // verified index can be safely reused. The full native closure
+            // has still been verified before this early ancestry answer.
+            return if is_ancestor(base, candidate, parents, deadline)? {
+                Ok(())
+            } else {
+                Err(ProjectionFailure::Refuse(
+                    RefusalCode::NonFastForwardRefused,
+                ))
+            };
+        }
+    };
+    let graph_limits = MergeBaseLimits {
+        max_commits: limits.max_objects,
+        max_edges: limits.max_edges,
+    };
+    // Merge and squash share one index across their two queries after the
+    // full native object walk. Squash needs the source root as well as the
+    // candidate; duplicate/redundant roots are harmless.
+    // The request owns both this immutable index and its query scratch, so a
+    // later attempt must independently verify every object again.
+    let index = CommitAncestryIndex::build_with_checkpoints(
+        &VerifiedCommitGraph(parents),
+        [candidate, source],
+        graph_limits,
+        || checkpoint(deadline),
+    )
+    .map_err(ancestry_failure)?;
+    // An absent common base cannot satisfy either branch's ancestry.
+    if index.generation(&base).is_none() {
+        return Err(invalid());
+    }
+    let mut scratch = AncestryQueryScratch::default();
+    if !index
+        .is_ancestor(&base, &source, &mut scratch, graph_limits, || {
+            checkpoint(deadline)
+        })
+        .map_err(ancestry_failure)?
+    {
+        return Err(invalid());
+    }
+    if !index
+        .is_ancestor(&base, &target, &mut scratch, graph_limits, || {
+            checkpoint(deadline)
+        })
+        .map_err(ancestry_failure)?
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn is_ancestor(
     ancestor: GitOid,
     tip: GitOid,
@@ -461,6 +543,19 @@ fn is_ancestor(
         }
     }
     Ok(false)
+}
+
+fn ancestry_failure(error: MergeBaseError<GitOid, ProjectionFailure>) -> ProjectionFailure {
+    match error {
+        MergeBaseError::Source(failure) => failure,
+        MergeBaseError::CommitLimitExceeded { .. } | MergeBaseError::EdgeLimitExceeded { .. } => {
+            budget()
+        }
+        MergeBaseError::ShallowBoundary { .. }
+        | MergeBaseError::DuplicateParent { .. }
+        | MergeBaseError::GraphClosureViolation
+        | MergeBaseError::Cycle => invalid(),
+    }
 }
 
 fn parse_oid(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, ProjectionFailure> {
