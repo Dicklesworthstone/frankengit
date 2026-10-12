@@ -4,6 +4,7 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { backupError, BACKUP_LIMITS } from './lib/repository-backup-io.mjs';
+import { MAX_BACKUP_CANDIDATES } from './lib/repository-backup-selection.mjs';
 import { backupDecimal } from './lib/repository-backup-approval.mjs';
 import { selectedRepositoryBackupOptions, runSelectedRepositoryBackup } from './lib/repository-backup-selected.mjs';
 
@@ -12,9 +13,10 @@ export const SELECTION_USAGE = `Usage: node scripts/select_repository_backup_nat
   --trust-key PUBLIC_PEM          Independently trusted Ed25519 key
   --tenant-id HEX --repository-id HEX --incarnation-id HEX --object-format sha1|sha256
   --minimum-head-generation N     Independently retained minimum checkpoint
-  --max-archive-bytes N           Archive ceiling and selection replica-read budget
-                                 (default 1 GiB; shared across replica attempts)
+  --max-archive-bytes N           Per-archive ceiling (default 1 GiB)
+  --max-replica-bytes N           Aggregate selection read ceiling (default archive ceiling)
   --timeout-secs N                Whole selection/native operation, 1..3600
+  --witness DIRECTORY             Existing independently retained recovery witness
 Native verify/restore additionally require:
   --fg ABSOLUTE_PATH --trusted-local --verification-instance N
 Restore additionally requires:
@@ -28,8 +30,15 @@ path order and within the shared read/time budget. All-copy failure refuses.
 Selection is only within the supplied set, NOT proof of the newest global head.
 Native checks remain required; select itself neither opens a node nor restores.
 Resume never switches checkpoints or weakens the original approval policy.
+Initialize witness storage with scripts/repository_backup_witness.mjs init.
+With --witness, retain signed newer observations across runs and hold its exclusive
+lease through native verification, restore and child cleanup. Missing/corrupt
+witnesses and crash-held leases refuse; they are never automatically reset.
+Unwitnessed operations retain their previous supplied-set-only semantics.
+--max-replica-bytes bounds selection reads only (at most 64 TiB). It does not
+increase --max-archive-bytes or the budgets of native verification and restore.
 `;
-const FIELDS = { '--trust-key': 'trustKey', '--fg': 'fg', '--verification-instance': 'verificationInstance',
+const FIELDS = { '--witness': 'witness', '--trust-key': 'trustKey', '--fg': 'fg', '--verification-instance': 'verificationInstance',
   '--destination': 'destination', '--destination-instance': 'destinationInstance', '--approval-record': 'approvalRecord' };
 const POLICY = { '--tenant-id': 'tenant_id', '--repository-id': 'repository_id', '--incarnation-id': 'incarnation_id',
   '--object-format': 'object_format', '--minimum-head-generation': 'minimum_head_generation' };
@@ -48,11 +57,12 @@ export function selectionArguments(args) {
     if (seen.has(flag)) fail('backup_duplicate_option'); seen.add(flag);
     if (flag === '--trusted-local') { result.trustedLocal = true; continue; }
     if (flag === '--resume') { result.resume = true; continue; }
-    if (!Object.hasOwn(FIELDS, flag) && !Object.hasOwn(POLICY, flag) && !['--max-archive-bytes', '--timeout-secs'].includes(flag)) fail('backup_unknown_option');
+    if (!Object.hasOwn(FIELDS, flag) && !Object.hasOwn(POLICY, flag) && !['--max-archive-bytes', '--max-replica-bytes', '--timeout-secs'].includes(flag)) fail('backup_unknown_option');
     const value = next(++at);
     if (Object.hasOwn(FIELDS, flag)) result[FIELDS[flag]] = value;
     else if (Object.hasOwn(POLICY, flag)) result.policy[POLICY[flag]] = value;
     else if (flag === '--timeout-secs') result.timeoutMs = Number(backupDecimal(value, 3600n)) * 1000;
+    else if (flag === '--max-replica-bytes') result.maximumReplicaBytes = Number(backupDecimal(value, BigInt(BACKUP_LIMITS.maximumArchiveBytes * MAX_BACKUP_CANDIDATES)));
     else result.maximumBytes = Number(backupDecimal(value, BigInt(BACKUP_LIMITS.maximumArchiveBytes)));
   }
   selectedRepositoryBackupOptions(result); // Complete validation before any I/O.
@@ -79,6 +89,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       selected_head_generation: error.selected_head_generation ?? null,
       replica_attempts: error.replica_attempts ?? [], replica_bytes_read: error.replica_bytes_read ?? null,
       approval_record: error.approval_record ?? null, verification_scratch: error.verification_scratch ?? null,
+      witness: error.witness ?? null, witness_lock_retained: error.witness_lock_retained ?? false,
+      witness_cleanup_error: error.witness_cleanup_error ?? null, witness_publication_state: error.witness_publication_state ?? null,
+      approval_scratch: error.approval_scratch ?? null, cleanup_error: error.cleanup_error ?? null,
+      native_receipt: error.native_receipt ?? null,
       completed_result: error.completed_result ?? null }) + '\n');
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
 }
