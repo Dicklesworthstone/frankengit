@@ -138,3 +138,9 @@ export async function authenticateRepositoryBackupFile(path, encoded, publicPem,
   if (artifact.sha256 !== verified.authentication.statement.artifact.sha256 || artifact.bytes !== verified.authentication.statement.artifact.bytes) fail('backup_artifact_mismatch');
   return { ...verified, streaming: { read_calls: artifact.read_calls, maximum_read_bytes: artifact.maximum_read_bytes } };
 }
+
+// The same strict SPKI parser as approval verification; never trust a key ID
+// supplied by a witness file or an unauthenticated envelope.
+export function repositoryBackupTrustedKeyId(publicPem) {
+  return keyId(pem(publicPem, false));
+}

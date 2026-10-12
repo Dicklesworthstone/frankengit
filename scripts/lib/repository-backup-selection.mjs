@@ -101,7 +101,7 @@ async function readCheckpointReplicas(highest, statement, live, payloadBudget) {
   throw explain(firstFailure);
 }
 
-/** Read-only selection. Every supplied approval must authenticate in the exact
+/** Read-only without a witness; witnessed selection also retains signed observations. Every supplied approval must authenticate in the exact
  * external namespace. Compare full u64 generations BEFORE testing winner expiry,
  * floor, size or availability. Never substitute a lower generation after failure.
  * Missing/corrupt copies may fail over only within that exact signed statement,
@@ -111,7 +111,7 @@ async function readCheckpointReplicas(highest, statement, live, payloadBudget) {
  * Returned paths are not pinned handles; downstream consumers must reauthenticate
  * and enforce `checkpoint`, and still perform native archive/authority checks.
  */
-export async function selectRepositoryBackup(candidates, trustKey, expected, options = {}) {
+export async function selectRepositoryBackup(candidates, trustKey, expected, options = {}, witness = null) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) fail('backup_invalid_options');
   const { maximumReplicaBytes, ...lifetimeOptions } = options;
   const live = backupLifetime(lifetimeOptions), rows = repositoryBackupCandidates(candidates);
@@ -134,6 +134,9 @@ export async function selectRepositoryBackup(candidates, trustKey, expected, opt
       signal: live.signal, ...(fixed === undefined ? {} : { now: fixed }),
     });
     live.check();
+    // Persist authenticated observations before artifact/time checks or caller
+    // progress. A later failure must not forget a newer checkpoint on restart.
+    if (witness) await witness.observe(encoded);
     const statement = verified.checkpoint.statement, generation = BigInt(statement.head_generation);
     const signedBytes = JSON.stringify(statement);
     const observation = Object.freeze({ ...row, head_generation: statement.head_generation,
@@ -148,6 +151,7 @@ export async function selectRepositoryBackup(candidates, trustKey, expected, opt
   // choice, even if their artifact bytes or approval lifetimes happen to agree.
   const highest = inspected.filter(row => BigInt(row.observation.head_generation) === maximum);
   if (highest.some(row => row.signedBytes !== winner.signedBytes)) fail('backup_checkpoint_ambiguous');
+  if (witness) witness.require(winner.verified.checkpoint.statement);
   const statement = winner.verified.checkCurrent().statement; live.check();
   if (BigInt(statement.artifact.bytes) > BigInt(live.maximumBytes)) fail('backup_selected_archive_limit');
   await live.onProgress(Object.freeze({ phase: 'checkpoint_selected', head_generation: statement.head_generation }));
@@ -163,11 +167,12 @@ export async function selectRepositoryBackup(candidates, trustKey, expected, opt
     selected, checkpoint, authentication, candidates: Object.freeze(observations),
     candidate_set_sha256: hash(JSON.stringify({ policy, trusted_key_id: authentication.trusted_key_id, candidates: observations })),
     highest_supplied_generation_selected: true, selected_artifact_authenticated: true,
-    identical_statement_candidates: highest.length, read_only: true,
+    identical_statement_candidates: highest.length, read_only: witness === null,
+    ...(witness ? { recovery_witness: witness.snapshot(), highest_retained_generation_enforced: true } : {}),
     replica_attempts: replica.attempts,
     native_content_verified: false, newest_checkpoint_verified: false, candidate_set_completeness_verified: false,
     streaming: Object.freeze({ read_calls: artifact.read_calls, maximum_read_bytes: artifact.maximum_read_bytes,
       total_payload_bytes_read: String(replica.totalBytes), total_payload_read_calls: replica.totalReads,
       replica_payload_byte_budget: String(payloadBudget) }) });
-  return Object.freeze({ report, checkCurrent() { live.check(); winner.verified.checkCurrent(); } });
+  return Object.freeze({ report, checkCurrent() { live.check(); winner.verified.checkCurrent(); if (witness) witness.require(statement); } });
 }
