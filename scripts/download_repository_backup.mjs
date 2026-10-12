@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BACKUP_LIMITS, backupError, backupLifetime, backupPath, readBackupControl } from './lib/repository-backup-io.mjs';
 import { backupDecimal, backupPolicy } from './lib/repository-backup-approval.mjs';
-import { downloadRepositoryBackup, MAX_DOWNLOAD_SOURCES } from './lib/repository-backup-download.mjs';
+import { MAX_DOWNLOAD_SOURCES } from './lib/repository-backup-download.mjs';
+import { downloadRepositoryBackupWithWitness } from './lib/repository-backup-download-witness.mjs';
 import { repositoryBackupReplicationCheckpoint } from './lib/repository-backup-replication.mjs';
 
 export const DOWNLOAD_USAGE = `Usage: node scripts/download_repository_backup.mjs [OPTIONS]
@@ -15,6 +16,7 @@ export const DOWNLOAD_USAGE = `Usage: node scripts/download_repository_backup.mj
   --replica-directory DIRECTORY   Existing owner-private local directory
   --tenant-id HEX --repository-id HEX --incarnation-id HEX --object-format sha1|sha256
   --minimum-head-generation N     Independently retained checkpoint floor
+  --witness DIRECTORY            Existing independently retained checkpoint witness
   --ca-file CERTIFICATE_PEM       Optional independently selected TLS CA certificate
   --checkpoint APPROVAL_SHA256 TRUSTED_KEY_ID   Constrain an exact original intent
   --max-archive-bytes N           Per-archive ceiling (default 1 GiB, max 1 TiB)
@@ -32,9 +34,12 @@ commands, whose native and retained-witness checks remain mandatory.
 URLs may contain access tokens: the source file must be private, singly linked,
 and not a symlink. Use an independently obtained approval and trust key, not a
 key learned from a download endpoint. No global newest-checkpoint claim is made.
+With --witness, retain signed observations before network work and hold its lease
+through publication and cleanup. Missing/corrupt witnesses or crash-held leases
+refuse; no lock stealing or automatic initialization is performed.
 `;
 const fields = { '--sources': 'sourceFile', '--approval': 'approval', '--trust-key': 'trustKey',
-  '--replica-directory': 'destination', '--ca-file': 'caFile' };
+  '--replica-directory': 'destination', '--ca-file': 'caFile', '--witness': 'witness' };
 const policyFields = { '--tenant-id': 'tenant_id', '--repository-id': 'repository_id',
   '--incarnation-id': 'incarnation_id', '--object-format': 'object_format', '--minimum-head-generation': 'minimum_head_generation' };
 const fail = code => { throw backupError(code); };
@@ -78,7 +83,7 @@ export async function runDownloadCommand(args, output = process.stdout, diagnost
   catch { fail('backup_download_invalid_source_file'); }
   finally { bytes.fill(0); }
   live.check();
-  const result = await downloadRepositoryBackup({ ...options, sources, timeoutMs: live.remaining(), signal,
+  const result = await downloadRepositoryBackupWithWitness({ ...options, sourceFile, sources, timeoutMs: live.remaining(), signal,
     onProgress: async event => {
       // At most 34 records: pin + two per source + downloaded artifact.
       if (progressJson && ['checkpoint_pinned', 'source_started', 'source_unavailable', 'download_verified'].includes(event.phase)) {
@@ -106,6 +111,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       streaming: error.download_streaming ?? null, publication_state: error.publication_state ?? null,
       replica: error.replica ?? null, retained_download: error.retained_download ?? null,
       download_cleanup_error: error.download_cleanup_error ?? null, cleanup_error: error.cleanup_error ?? null,
+      witness: error.witness ?? null, witness_lock_retained: error.witness_lock_retained ?? false,
+      witness_cleanup_error: error.witness_cleanup_error ?? null, witness_publication_state: error.witness_publication_state ?? null,
       completed_result: error.completed_result ?? null }) + '\n');
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
 }

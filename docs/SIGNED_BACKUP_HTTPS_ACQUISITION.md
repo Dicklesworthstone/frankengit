@@ -102,12 +102,40 @@ conflicts refuse rather than overwrite. Errors preserve publication state and an
 confirmed completion receipt. Failed final stdout delivery is not rollback.
 The CLI emits only bounded redacted milestones when `--progress-json` is selected.
 
+## Retained checkpoint witness
+
+Append `--witness /independent/recovery-witness` to use an existing checkpoint
+witness initialized by `scripts/repository_backup_witness.mjs init`. The CLI and
+`downloadRepositoryBackupWithWitness` library entrypoint retain authenticated
+newer or conflicting observations before expiry, archive-size and network checks.
+An unavailable, expired, future-dated or over-budget higher checkpoint therefore
+cannot be forgotten by omitting its approval on the next invocation. Missing or
+corrupt witness state, a weaker retained floor and conflicting statements refuse
+before network access. Invalid signatures are never retained as observations.
+
+The existing exclusive witness lease spans HTTPS acquisition, request/socket
+drain, approval-last publication and owned-file cleanup. A killed owner leaves a
+blocking lease, without automatic lock stealing or reset. Ordinary cancellation
+releases the lease after drain but preserves recorded checkpoint evidence. Exact
+approval/key pins bind the observed statement to the downloader and publisher;
+a valid substituted approval cannot retarget the handoff. A failure releasing a
+witness after confirmed publication retains `completed_result` rather than
+implying rollback. The result includes the witness snapshot and
+`highest_retained_generation_enforced`; global currentness remains unproved.
+
+The witness must be separate from the destination, approval, Ed25519 key, optional
+TLS CA and private URL file. Lexical and resolved physical paths are checked
+before witness ownership and after trusted progress observers, including parent
+aliases. Stable owner-controlled ancestors remain required; this is not isolation
+against malicious same-user writers. URL contents are neither persisted in the
+witness nor included in download diagnostics.
+
 This command processes ONE explicit approval, not the highest checkpoint across
-several approval files. The external minimum generation is mandatory. It does not
-modify a retained checkpoint witness or claim knowledge of the newest global
-checkpoint. Use the existing witnessed native verify/restore command for the
-returned candidate so retained higher/conflicting observations still gate native
-restoration. Download success is not restore admission or a native archive check.
+several approval files. Without `--witness`, the original supplied-approval and
+external-floor semantics remain unchanged. Neither mode establishes knowledge of
+unobserved newer checkpoints. Use the existing witnessed native verify/restore
+command for the returned candidate: acquisition success is not restore admission,
+a native archive check or complete capsule recovery.
 
 ## Verification and non-claims
 
@@ -115,6 +143,7 @@ restoration. Download success is not restore admission or a native archive check
 node --test --test-concurrency=1 \
   scripts/tests/repository-backup-download.test.mjs \
   scripts/tests/repository-backup-download-cli.test.mjs \
+  scripts/tests/repository-backup-download-witness.test.mjs \
   scripts/tests/repository-backup-replication.test.mjs
 ```
 
