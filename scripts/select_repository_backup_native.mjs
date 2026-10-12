@@ -35,8 +35,8 @@ With --witness, retain signed newer observations across runs and hold its exclus
 lease through native verification, restore and child cleanup. Missing/corrupt
 witnesses and crash-held leases refuse; they are never automatically reset.
 Unwitnessed operations retain their previous supplied-set-only semantics.
---max-replica-bytes bounds selection reads only (at most 64 TiB). It does not
-increase --max-archive-bytes or the budgets of native verification and restore.
+--max-replica-bytes is shared across replica attempts (at most 64 TiB). It
+bounds selection reads only, not --max-archive-bytes or native operation budgets.
 `;
 const FIELDS = { '--witness': 'witness', '--trust-key': 'trustKey', '--fg': 'fg', '--verification-instance': 'verificationInstance',
   '--destination': 'destination', '--destination-instance': 'destinationInstance', '--approval-record': 'approvalRecord' };
