@@ -90,9 +90,10 @@ function pullDiffReply(reply, observed, mode, scope) {
 }
 
 export class PullClient {
-  #transport; #scope = null; #pending = null; #busy = false; #artifact = null; #conflict = null; #candidateSerial = 0;
+  #transport; #recoveryPrincipal = null; #scope = null; #pending = null; #busy = false; #artifact = null; #conflict = null; #candidateSerial = 0;
   constructor(options) { this.#transport = new Transport(options); }
   get connected() { return this.#transport.connected; }
+  get recoveryOnly() { return this.#recoveryPrincipal !== null; }
   get binding() { return this.connected && this.#scope ? copy(this.#scope) : null; }
   get busy() { return this.#busy; }
   get pending() {
@@ -106,15 +107,31 @@ export class PullClient {
     return { ...copy(safe), bundle_bytes: bundle.length };
   }
   get conflict() { return this.connected && this.#conflict ? copy(this.#conflict.report) : null; }
-  async connect(token) {
-    this.#scope = null; this.invalidateCandidate();
-    await this.#transport.connect(token, this.#pending?.fingerprint ?? null);
+  // Recovery mode can be selected before importing a receipt, including when
+  // the original bearer has been revoked. It never authorizes reads or sends;
+  // the original principal must be selected from independently retained facts.
+  async connect(token, options = {}) {
+    this.disconnect();
+    keys(options, ['recoveryOnly', 'originalPrincipal']);
+    const recovering = options.recoveryOnly === undefined ? false : options.recoveryOnly;
+    if (typeof recovering !== 'boolean' || (!recovering && options.originalPrincipal !== undefined)) fail('Choose an explicit recovery-only connection.');
+    const expected = recovering ? principal(options.originalPrincipal) : null;
+    if (expected && this.#pending?.observedPrincipal && expected !== this.#pending.observedPrincipal) fail('Selected original principal conflicts with the retained observation.');
+    const selected = expected && this.#pending ? { key: this.#pending.key, principal: expected } : null;
+    this.#recoveryPrincipal = expected; // Restrict before any credential-hashing await.
+    const connecting = this.#transport.connect(token, this.#pending?.fingerprint ?? null, selected);
+    const epoch = this.#transport.epoch;
+    await connecting; this.#check(epoch);
     this.#scope = this.#pending ? copy(this.#pending.scope) : null;
   }
-  disconnect() { this.#transport.disconnect(); this.#scope = null; this.invalidateCandidate(); }
+  disconnect() { this.#transport.disconnect(); this.#recoveryPrincipal = null; this.#scope = null; this.invalidateCandidate(); }
+  #ordinary() {
+    if (this.recoveryOnly) fail('Recovery-only connection cannot read, prepare, discard or resend mutations. Reconnect explicitly for ordinary work.');
+  }
   invalidateCandidate() { this.#candidateSerial += 1; this.#artifact = null; this.#conflict = null; }
   cancelReads() { this.#transport.cancelReads(); }
   async list({ after = 0, limit = 20, head = null } = {}) {
+    this.#ordinary();
     integer(after, 'PR cursor'); integer(limit, 'page size', 1, 100);
     if (head !== null) snapshot(head); if (after && !head) fail('Continuation requires its original snapshot.');
     const query = new URLSearchParams({ after: String(after), limit: String(limit) });
@@ -124,6 +141,7 @@ export class PullClient {
     this.#scope = checked.binding; return checked;
   }
   async show(number, head = null, { render = false } = {}) {
+    this.#ordinary();
     if (typeof render !== 'boolean') fail('Invalid Markdown presentation choice.');
     integer(number, 'PR number', 1); if (head !== null) snapshot(head);
     const query = new URLSearchParams(); if (head) query.set('expected_head', head);
@@ -134,6 +152,7 @@ export class PullClient {
     this.#scope = checked.binding; return checked;
   }
   async reviews(number, { after = null, limit = 20, head = null } = {}) {
+    this.#ordinary();
     integer(number, 'PR number', 1); integer(limit, 'page size', 1, 100);
     if (after !== null) principal(after); if (head !== null) snapshot(head);
     if (after !== null && head === null) fail('Review continuation requires its original snapshot.');
@@ -147,6 +166,7 @@ export class PullClient {
 
   // Conversation pages carry their own snapshot and stream version.
   async comments(number, { after = 0, limit = 20, head = null, render = false } = {}) {
+    this.#ordinary();
     integer(number, 'PR number', 1); integer(after, 'comment cursor'); integer(limit, 'page size', 1, 100);
     if (typeof render !== 'boolean') fail('Invalid Markdown presentation choice.');
     if (head !== null) snapshot(head); if (after && head === null) fail('Comment continuation requires its original snapshot.');
@@ -196,6 +216,7 @@ export class PullClient {
   }
 
   #selected() {
+    this.#ordinary();
     if (!this.connected || !this.#scope) fail('Read this repository with a scoped credential before preparing new work.');
     return copy(this.#scope);
   }
@@ -329,6 +350,7 @@ export class PullClient {
     } finally { this.#busy = false; }
   }
   discardUnsent() {
+    this.#ordinary();
     if (this.#busy || this.#pending?.sent || this.#pending?.exported) fail('A dispatched or exported request cannot be treated as an unsent draft.');
     this.#pending = null;
   }
@@ -348,12 +370,14 @@ export class PullClient {
     const receipt = JSON.parse(serialized); keys(receipt, ['schema', 'origin', 'route', 'request']);
     const p = receipt.request; keys(p, ['number', 'action', 'fields', 'scope', 'fingerprint', 'nonce', 'key', 'bundle_base64', 'observedTx', 'observedPrincipal']);
     if (receipt.schema !== 'frankengit-pr-retry-v1' || receipt.origin !== this.#transport.root.origin || receipt.route !== this.#transport.root.route ||
-        p.fingerprint !== this.#transport.fingerprint || typeof p.key !== 'string' || !/^fgpr1-[0-9a-f]{32}-[0-9a-f]{64}$/.test(p.key)) fail('Receipt does not belong to this repository and original credential.');
+        typeof p.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(p.fingerprint) ||
+        (!this.recoveryOnly && p.fingerprint !== this.#transport.fingerprint) || typeof p.key !== 'string' || !/^fgpr1-[0-9a-f]{32}-[0-9a-f]{64}$/.test(p.key)) fail('Receipt does not belong to this repository and original credential.');
     requestPath(p.number, p.action);
     const scope = receiptScope(p.scope);
     if (this.#scope && Object.keys(scope).some(key => scope[key] !== this.#scope[key])) fail('Receipt repository incarnation changed.');
     if (p.observedTx !== null) text(p.observedTx, 256, 'transaction', true);
     if (p.observedPrincipal !== null) principal(p.observedPrincipal);
+    if (this.recoveryOnly && p.observedPrincipal !== null && p.observedPrincipal !== this.#recoveryPrincipal) fail('Receipt principal conflicts with the selected original principal.');
     const bundle = p.bundle_base64 === null ? null : fromBase64(p.bundle_base64);
     const body = requestBody(p.action, p.fields, bundle, p.nonce);
     if (body.fields.object_format !== scope.format) fail('Receipt hash domain mismatch.');
@@ -363,6 +387,10 @@ export class PullClient {
       const key = await requestKey(this.#transport.root, p.fingerprint, scope, p.number, p.action, p.nonce, body, this.#transport.crypto);
       this.#check(epoch);
       if (key !== p.key) fail('Recovery key does not commit to this exact command and bundle.');
+      // Validate the original credential-bound commitment before narrowing the
+      // transport. Do not replace its fingerprint/key or label a user's selected
+      // identity as an observed principal. The response must independently match.
+      if (this.recoveryOnly) this.#transport.restrictToRecovery({ key, principal: this.#recoveryPrincipal });
       this.#scope = scope;
       this.#pending = { number: p.number, action: p.action, fields: body.fields, scope, fingerprint: p.fingerprint,
         nonce: p.nonce, key, contentType: body.contentType, bytes: body.bytes, bundle, sent: true, exported: true,
@@ -371,6 +399,7 @@ export class PullClient {
     } finally { this.#busy = false; }
   }
   async send() {
+    this.#ordinary();
     if (!this.connected || !this.#pending || this.#busy) fail('Connect and prepare a request; only one mutation may be in flight.');
     const p = this.#pending; this.#busy = true; p.sent = true;
     try {
