@@ -209,6 +209,11 @@ export async function jsonRequest(address, token, { path = 'protection', method 
             (incoming.headers['content-encoding'] ?? 'identity').toLowerCase() !== 'identity') {
           finish(new ProtectionError('unsupported_response_encoding', { outcomeUnknown: isWrite })); return;
         }
+        const framingNames = incoming.rawHeaders.filter((_, i) => i % 2 === 0).map(name => name.toLowerCase())
+          .filter(name => ['content-type', 'content-length', 'content-encoding'].includes(name));
+        if (new Set(framingNames).size !== framingNames.length) {
+          finish(new ProtectionError('ambiguous_response_headers', { outcomeUnknown: isWrite })); return;
+        }
         const declared = incoming.headers['content-length'];
         if (declared !== undefined && (!/^(0|[1-9][0-9]*)$/.test(declared) || BigInt(declared) > BigInt(maximum))) {
           finish(new ProtectionError('response_byte_limit', { outcomeUnknown: isWrite })); return;
@@ -216,6 +221,7 @@ export async function jsonRequest(address, token, { path = 'protection', method 
         let bytes = 0; const chunks = [];
         incoming.on('error', () => finish(new ProtectionError('response_incomplete', { outcomeUnknown: isWrite })));
         incoming.on('data', chunk => {
+          if (finishing) return;
           bytes += chunk.length;
           if (bytes > maximum || chunks.length >= 16_384) finish(new ProtectionError('response_byte_limit', { outcomeUnknown: isWrite }));
           else chunks.push(chunk);
@@ -241,4 +247,116 @@ export async function inspectProtection(address, token, { expectedScope = null, 
   const { value } = await jsonRequest(address, token, { ...options, path: `protection${query}`, method: 'GET' });
   snapshotReply(value, expected, expectedHead);
   return value;
+}
+
+function codePoint(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65535) fail('invalid_refusal_code_point');
+}
+function result(kind, tx, sequence, principal, rcr = null, refusal = null, refusalId = null, refusalPoint = null) {
+  return { state: kind, terminal: ['committed', 'refused'].includes(kind), tx_id: tx,
+    decision_sequence: sequence, principal_id: principal, repository_commit_id: rcr,
+    refusal_code: refusal, refusal_record_id: refusalId, refusal_code_point: refusalPoint };
+}
+export function publicationReply(value, intent, status) {
+  fields(value, ['type', 'schema_version', ...SCOPE_FIELDS, 'principal_id', 'expected_version', 'expected_epoch',
+    'resulting_epoch', 'tx_id', 'outcome', 'decision_sequence', 'repository_commit_id', 'refusal_record_id',
+    'refusal_code', 'refusal_code_point', 'delivery_acknowledged']);
+  binding(value, intent.scope);
+  if (value.type !== 'review_protection_publication' || value.schema_version !== 1 ||
+      identity(value.principal_id) !== intent.principal_id || value.expected_version !== intent.source.version ||
+      value.expected_epoch !== intent.source.policy_epoch || value.delivery_acknowledged !== null ||
+      !['committed', 'refused'].includes(value.outcome) || status !== (value.outcome === 'committed' ? 200 : 409)) fail('terminal_does_not_match_intent');
+  opaque(value.tx_id); decimal(value.decision_sequence, 1n);
+  if (value.outcome === 'committed') {
+    opaque(value.repository_commit_id);
+    if (value.resulting_epoch !== (BigInt(intent.source.policy_epoch) + 1n).toString() ||
+        value.refusal_record_id !== null || value.refusal_code !== null || value.refusal_code_point !== null) fail('inconsistent_terminal_decision');
+  } else {
+    opaque(value.refusal_record_id); opaque(value.refusal_code); codePoint(value.refusal_code_point);
+    if (value.repository_commit_id !== null || value.resulting_epoch !== null) fail('inconsistent_terminal_decision');
+  }
+  return result(value.outcome, value.tx_id, value.decision_sequence, value.principal_id,
+    value.repository_commit_id, value.refusal_code, value.refusal_record_id, value.refusal_code_point);
+}
+export function outcomeReply(value, intent) {
+  fields(value, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'principal_id',
+    'selector', 'command_index', 'state', 'terminal', 'transaction', 'decision', 'read_only', 'request_reexecuted',
+    'absence_proves_non_commit', 'session_completeness_established']);
+  binding(value, intent.scope, false);
+  if (value.type !== 'transaction_outcome' || value.schema_version !== 1 || identity(value.principal_id) !== intent.principal_id ||
+      value.selector !== 'transaction' || value.command_index !== null || value.read_only !== true || value.request_reexecuted !== false ||
+      value.absence_proves_non_commit !== false || value.session_completeness_established !== false ||
+      !['key_not_observed', 'seal_not_observed', 'undecided', 'committed', 'refused'].includes(value.state) ||
+      value.terminal !== ['committed', 'refused'].includes(value.state)) fail('invalid_original_outcome');
+  const present = !['key_not_observed', 'seal_not_observed'].includes(value.state);
+  if (present !== (value.transaction !== null)) fail('inconsistent_outcome_transaction');
+  if (present) {
+    const transaction = fields(value.transaction, ['tx_id', 'seal_id', 'request_schema', 'canonical_request_digest']);
+    opaque(transaction.tx_id); opaque(transaction.seal_id); opaque(transaction.request_schema);
+    const digest = fields(transaction.canonical_request_digest, ['algorithm', 'hex']);
+    codePoint(digest.algorithm);
+    if (!digest.algorithm || typeof digest.hex !== 'string' || !/^(?:[0-9a-f]{2}){1,64}$/.test(digest.hex)) fail('invalid_seal_digest');
+  }
+  if (!value.terminal) {
+    if (value.decision !== null) fail('inconsistent_nonterminal_outcome');
+    return result(value.state, value.transaction?.tx_id ?? null, null, value.principal_id);
+  }
+  const committed = value.state === 'committed';
+  const decision = fields(value.decision, committed ? ['kind', 'decision_sequence', 'repository_commit_id']
+    : ['kind', 'decision_sequence', 'code', 'code_point', 'refusal_record_id']);
+  if (decision.kind !== value.state) fail('inconsistent_terminal_decision');
+  decimal(decision.decision_sequence, 1n);
+  if (committed) opaque(decision.repository_commit_id);
+  else { opaque(decision.code); codePoint(decision.code_point); opaque(decision.refusal_record_id); }
+  return result(value.state, value.transaction.tx_id, decision.decision_sequence, value.principal_id,
+    decision.repository_commit_id ?? null, decision.code ?? null, decision.refusal_record_id ?? null, decision.code_point ?? null);
+}
+export function observation(intent, kind, status, reply) {
+  if (!['publication', 'outcome'].includes(kind) || (kind === 'outcome' && status !== 200)) fail('invalid_observation_kind');
+  const selected = kind === 'publication' ? publicationReply(reply, intent, status) : outcomeReply(reply, intent);
+  return { record: { schema: 'frankengit-review-protection-observation-v1', intent_sha256: intent.intent_sha256, kind, status, reply: structuredClone(reply) },
+    summary: selected };
+}
+export function verifyObservation(value, intent) {
+  fields(value, ['schema', 'intent_sha256', 'kind', 'status', 'reply']);
+  if (value.schema !== 'frankengit-review-protection-observation-v1' || value.intent_sha256 !== intent.intent_sha256) fail('observation_intent_mismatch');
+  return observation(intent, value.kind, value.status, value.reply);
+}
+export function extendsObservation(next, known) {
+  if (!known) return;
+  const n = next.summary, k = known.summary;
+  if ((k.tx_id !== null && n.tx_id !== k.tx_id) || n.principal_id !== k.principal_id ||
+      (k.terminal && JSON.stringify(n) !== JSON.stringify(k))) fail('outcome_regressed_or_conflicted');
+  const previousSeal = known.record.reply.transaction, nextSeal = next.record.reply.transaction;
+  if (previousSeal && nextSeal && JSON.stringify(previousSeal) !== JSON.stringify(nextSeal)) fail('outcome_seal_changed');
+}
+export function publicationPreflight(value, token, expectedEndpoint, confirmation) {
+  const intent = validateIntent(value);
+  if (endpoint(expectedEndpoint) !== intent.endpoint) fail('independent_endpoint_pin_mismatch');
+  if (confirmation !== intent.intent_sha256) fail('explicit_intent_confirmation_required');
+  if (tokenFingerprint(token) !== intent.credential_sha256) fail('original_token_required_for_resend');
+  return intent;
+}
+export async function publishIntent(value, token, { expectedEndpoint, confirmation, known = null, timeoutMs = 30_000, signal } = {}) {
+  const intent = publicationPreflight(value, token, expectedEndpoint, confirmation);
+  const prior = known === null ? null : verifyObservation(known, intent);
+  try {
+    const reply = await jsonRequest(intent.endpoint, token, { method: 'POST', path: 'protection', body: intent.request.body,
+      key: intent.request.key, maximum: 32 * 1024, timeoutMs, signal });
+    const selected = observation(intent, 'publication', reply.status, reply.value); extendsObservation(selected, prior);
+    return selected;
+  } catch (error) { error.outcomeUnknown = true; throw error; }
+}
+export async function recoverIntent(value, token, { expectedEndpoint, known = null, timeoutMs = 30_000, signal } = {}) {
+  const intent = validateIntent(value);
+  if (endpoint(expectedEndpoint) !== intent.endpoint) fail('independent_endpoint_pin_mismatch');
+  const prior = known === null ? null : verifyObservation(known, intent);
+  // Rotation permits only this bodyless original-key lookup. It does not change
+  // the prepared credential fingerprint or enable publication with a new token.
+  try {
+    const reply = await jsonRequest(intent.endpoint, token, { method: 'POST', path: 'outcomes', key: intent.request.key,
+      maximum: 32 * 1024, timeoutMs, signal });
+    const selected = observation(intent, 'outcome', reply.status, reply.value); extendsObservation(selected, prior);
+    return selected;
+  } catch (error) { error.outcomeUnknown = true; throw error; }
 }

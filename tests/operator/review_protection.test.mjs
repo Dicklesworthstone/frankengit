@@ -164,7 +164,7 @@ test('CLI inspect and preparation run real HTTP reads but never dispatch mutatio
   assert.equal(await run(['inspect', ...common], { output: async text => output.push(JSON.parse(text)) }), 0);
   assert.equal(await run(['prepare', ...common, '--principal', ACTOR, '--policy-file', f.policy, '--intent', f.intent], { output: async text => output.push(JSON.parse(text)) }), 0);
   assert.equal(p.calls.length, 2); assert.ok(p.calls.every(call => call.method === 'GET' && !call.body));
-  assert.equal(output[1].transaction_created, false); assert.equal(output[1].published, false);
+  assert.equal(output[1].mutation_sent_by_this_command, false); assert.equal(output[1].original_outcome, 'not_queried');
   assert.deepEqual(output[1].administrators.added, ['c'.repeat(32)]);
   assert.equal(await run(['show-intent', '--intent', f.intent], { output: async text => output.push(JSON.parse(text)) }), 0);
   assert.deepEqual(output[2], output[1]); assert.equal(p.calls.length, 2);

@@ -5,6 +5,8 @@ import { resolve, dirname, join } from 'node:path';
 import { LIMITS, ProtectionError, canonical, parseJson, validateIntent, tokenFingerprint } from './review_protection.mjs';
 const fail = code => { throw new ProtectionError(code); };
 function privateStat(stat, directory = false) {
+  if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined ||
+      constants.O_DIRECTORY === undefined || constants.O_NONBLOCK === undefined) fail('posix_operator_profile_required');
   if ((directory ? !stat.isDirectory() : !stat.isFile()) || (stat.mode & 0o077) !== 0 ||
       (typeof process.getuid === 'function' && stat.uid !== process.getuid()) || (!directory && stat.nlink !== 1)) fail('private_owned_regular_file_required');
 }
