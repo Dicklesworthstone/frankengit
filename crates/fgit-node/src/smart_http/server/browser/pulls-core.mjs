@@ -255,10 +255,18 @@ function requirePublicationEnvelope(path, method, body, key, read) {
     fail('Publication and outcome recovery require an explicit POST, recovery key and non-read lifecycle.');
   }
 }
+// Rotated credentials can inspect an original principal's outcome, never replay
+// its command in another principal's idempotency namespace. The caller must
+// select the expected original principal explicitly; absence cannot identify it.
+function recoverySelection(value) {
+  keys(value, ['key', 'principal']);
+  if (typeof value.key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(value.key)) fail('Invalid original recovery key.');
+  return Object.freeze({ key: value.key, principal: principal(value.principal) });
+}
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
@@ -267,20 +275,38 @@ export class Transport {
   }
   get connected() { return Boolean(this.#token); }
   get fingerprint() { return this.#fingerprint; }
+  get recoveryOnly() { return this.#recovery !== null; }
   get epoch() { return this.#epoch; }
   get crypto() { return this.#crypto; }
-  async connect(token, requiredFingerprint = null) {
+  async connect(token, requiredFingerprint = null, recovery = null) {
     this.disconnect(); const epoch = this.#epoch;
+    const selected = recovery === null ? null : recoverySelection(recovery);
+    if (selected && this.#search) fail('Search has no outcome recovery profile.');
     if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
-    if (requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
-    this.#fingerprint = fingerprint; this.#token = token;
+    if (!selected && requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
+    // Install the restriction before making a rotated credential visible, even
+    // to another microtask awaiting this connection. Ordinary connect is unchanged.
+    this.#recovery = selected; this.#fingerprint = fingerprint; this.#token = token;
   }
-  disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; }
+  disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; this.#recovery = null; }
+  restrictToRecovery(selection) {
+    const selected = recoverySelection(selection);
+    if (!this.connected || this.#search || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
+    if (this.#recovery && (selected.key !== this.#recovery.key || selected.principal !== this.#recovery.principal)) fail('Reconnect explicitly before selecting another recovery identity.');
+    // Receipt restoration invokes this only after verifying its original key.
+    this.#recovery = selected;
+  }
   cancelReads() { for (const c of this.#reads) c.abort(); }
   async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false, headerNames = [] } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
+    const recovery = this.#recovery;
+    if (recovery) {
+      if (path !== 'outcomes' || method !== 'POST' || body !== undefined || key !== recovery.key ||
+          read !== false || binary !== false || !Array.isArray(statuses) || statuses.length !== 1 || statuses[0] !== 200) fail('Recovery-only connection permits only the original key lookup; it cannot resend a mutation.');
+      maximum = Math.min(integer(maximum, 'recovery response limit', 1, REPLY_LIMIT), 32 * 1024);
+    }
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
@@ -376,7 +402,9 @@ export class Transport {
       if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
       const bytes = await readBytes(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
-      return { status: response.status, type, value: binary ? bytes : json(bytes),
+      const value = binary ? bytes : json(bytes);
+      if (recovery && principal(record(value).principal_id) !== recovery.principal) fail('Recovery credential does not identify the selected original principal. Outcome remains unknown.');
+      return { status: response.status, type, value,
         ...(capturedHeaders.length ? { headers: Object.fromEntries(capturedHeaders.map(name => [name, response.headers.get(name)])) } : {}) };
     } catch (error) { if (epoch === this.#epoch && error.status === 401) this.disconnect(); throw error; }
     finally {
