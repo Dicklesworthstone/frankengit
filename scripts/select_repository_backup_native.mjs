@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Explicit candidates, independently supplied trust, no directory scan or retry.
+// Explicit candidates and independent trust; same-checkpoint replica failover
+// never retries a native mutation or selects an older checkpoint.
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { backupError, BACKUP_LIMITS } from './lib/repository-backup-io.mjs';
@@ -11,7 +12,8 @@ export const SELECTION_USAGE = `Usage: node scripts/select_repository_backup_nat
   --trust-key PUBLIC_PEM          Independently trusted Ed25519 key
   --tenant-id HEX --repository-id HEX --incarnation-id HEX --object-format sha1|sha256
   --minimum-head-generation N     Independently retained minimum checkpoint
-  --max-archive-bytes N           Selected artifact ceiling (default 1 GiB)
+  --max-archive-bytes N           Archive ceiling and selection replica-read budget
+                                 (default 1 GiB; shared across replica attempts)
   --timeout-secs N                Whole selection/native operation, 1..3600
 Native verify/restore additionally require:
   --fg ABSOLUTE_PATH --trusted-local --verification-instance N
@@ -20,7 +22,9 @@ Restore additionally requires:
   --resume                       Match the exact existing native intent/approval
 
 Rank signed generations before checking winner availability or expiry. A newer
-unusable or ambiguous checkpoint refuses, never falls back to an older archive.
+ambiguous checkpoint refuses, never falls back to an older archive. Missing or
+corrupt copies may fail over only to the EXACT SAME signed statement, in stable
+path order and within the shared read/time budget. All-copy failure refuses.
 Selection is only within the supplied set, NOT proof of the newest global head.
 Native checks remain required; select itself neither opens a node nor restores.
 Resume never switches checkpoints or weakens the original approval policy.
@@ -72,6 +76,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exitCode = 1;
     process.stderr.write(JSON.stringify({ type: 'repository_backup_selection_error', code: error.code ?? 'backup_selection_failed',
       state: error.state ?? 'not_started', selected: error.selection?.selected ?? null,
+      selected_head_generation: error.selected_head_generation ?? null,
+      replica_attempts: error.replica_attempts ?? [], replica_bytes_read: error.replica_bytes_read ?? null,
       approval_record: error.approval_record ?? null, verification_scratch: error.verification_scratch ?? null,
       completed_result: error.completed_result ?? null }) + '\n');
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
