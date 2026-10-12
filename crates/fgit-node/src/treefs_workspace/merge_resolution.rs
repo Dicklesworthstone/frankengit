@@ -2,13 +2,13 @@
 //! materializer as automatic merge preparation. No canonical mutation.
 
 use super::{
-    Cell, MergeMetadata, MergeObjectSource, NodeRequestContext, NodeWorkspaceRefusal, OneNode,
-    ParseLimits, PreparationLimits, RefName, RefVisibility, RepositoryAuthorityHeadId,
-    SelectedSource, VerifiedFabricPackSource, bundle_for_plan,
+    Cell, MergeCommitStyle, MergeMetadata, MergeObjectSource, NodeRequestContext,
+    NodeWorkspaceRefusal, OneNode, ParseLimits, PreparationLimits, RefName, RefVisibility,
+    RepositoryAuthorityHeadId, SelectedSource, VerifiedFabricPackSource, bundle_for_plan,
 };
 use fgit_forge::preparation::resolution::{
-    ConflictResolution, ResolutionError, ResolutionInputs, ResolvedMerge, prepare_resolved_merge,
-    validate_resolutions,
+    ConflictResolution, ResolutionError, ResolutionInputs, ResolvedMerge,
+    prepare_resolved_merge_with_style, validate_resolutions,
 };
 use fgit_types::cell::{ReadMode, admits_read};
 
@@ -84,6 +84,33 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PreparationLimits,
     ) -> Result<ResolvedMergeBundle, NodeResolutionRefusal> {
+        self.prepare_resolved_pull_request_bundle_with_style_in(
+            request,
+            subject,
+            merge_base,
+            visibility,
+            resolutions,
+            metadata,
+            limits,
+            MergeCommitStyle::TwoParent,
+        )
+        .await
+    }
+
+    /// Resolve an exact open PR into the selected merge or squash commit style.
+    /// PR, policy, both tips, visibility and the unique base are rechecked under
+    /// one authenticated head before constructing a complete candidate bundle.
+    pub async fn prepare_resolved_pull_request_bundle_with_style_in(
+        &self,
+        request: &NodeRequestContext,
+        subject: &fgit_forge::event::review::ReviewSubject,
+        merge_base: fgit_types::GitOid,
+        visibility: &RefVisibility,
+        resolutions: &[ConflictResolution],
+        metadata: &MergeMetadata,
+        limits: PreparationLimits,
+        style: MergeCommitStyle,
+    ) -> Result<ResolvedMergeBundle, NodeResolutionRefusal> {
         let inputs = ResolutionInputs {
             base: merge_base,
             target: subject.target_tip,
@@ -95,7 +122,7 @@ impl OneNode {
         let head = self
             .validate_pull_request_preparation_in(request, subject, visibility)
             .await?;
-        self.prepare_resolved_merge_bundle_in(
+        self.prepare_resolved_merge_bundle_with_style_in(
             request,
             &subject.target_ref,
             &subject.source_ref,
@@ -105,6 +132,7 @@ impl OneNode {
             resolutions,
             metadata,
             limits,
+            style,
         )
         .await
     }
@@ -128,6 +156,38 @@ impl OneNode {
         resolutions: &[ConflictResolution],
         metadata: &MergeMetadata,
         limits: PreparationLimits,
+    ) -> Result<ResolvedMergeBundle, NodeResolutionRefusal> {
+        self.prepare_resolved_merge_bundle_with_style_in(
+            request,
+            target,
+            incoming,
+            visibility,
+            expected_head,
+            inputs,
+            resolutions,
+            metadata,
+            limits,
+            MergeCommitStyle::TwoParent,
+        )
+        .await
+    }
+
+    /// Construct exact conflict resolutions with an explicit commit parent style.
+    /// Squash uses the target as its sole parent while preserving all existing
+    /// source-closure, resolution, visibility, budget and cancellation checks.
+    /// Publication still requires independent inspection and ordinary admission.
+    pub async fn prepare_resolved_merge_bundle_with_style_in(
+        &self,
+        request: &NodeRequestContext,
+        target: &RefName,
+        incoming: &RefName,
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        inputs: ResolutionInputs,
+        resolutions: &[ConflictResolution],
+        metadata: &MergeMetadata,
+        limits: PreparationLimits,
+        style: MergeCommitStyle,
     ) -> Result<ResolvedMergeBundle, NodeResolutionRefusal> {
         inputs.validate(self.object_format)?;
         validate_resolutions(resolutions, limits)?;
@@ -195,13 +255,14 @@ impl OneNode {
             read_bytes: Cell::new(0),
             budget_failed: Cell::new(false),
         };
-        let resolved = prepare_resolved_merge(
+        let resolved = prepare_resolved_merge_with_style(
             &source,
             self.object_format,
             inputs,
             resolutions,
             metadata,
             limits,
+            style,
         )?;
         let bundle = bundle_for_plan(&source, target, incoming, &resolved.plan, limits)?;
         source.checkpoint().map_err(ResolutionError::from)?;

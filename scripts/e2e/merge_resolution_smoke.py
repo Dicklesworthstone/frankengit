@@ -25,7 +25,8 @@ CASES = [
 ]
 
 
-def expected_objects(algorithm, history, content, mode):
+def expected_objects(algorithm, history, content, mode, method="merge-commit"):
+    require(method in ("merge-commit", "squash"), "unsupported expected method")
     objects = {}
 
     def add(kind, body):
@@ -40,20 +41,22 @@ def expected_objects(algorithm, history, content, mode):
     entries = [] if result is None else [(b"text", mode, result["oid"])]
     directory = add("tree", tree(entries))
     root = add("tree", tree([(b"dir", 0o40000, directory), (b"keep", 0o100644, history["kept"])]))
-    candidate = add("commit", commit(root, [history["target"], history["source"]], MESSAGE))
+    parents = [history["target"]] if method == "squash" else [history["target"], history["source"]]
+    candidate = add("commit", commit(root, parents, MESSAGE))
     return candidate, root, result, objects
 
 
-def args(node, output, history, choices):
+def args(node, output, history, choices, method="merge-commit"):
     return ["merge", "resolve", node, TENANT, REPOSITORY, TARGET, output,
             "--trusted-local", "--profile", "path-v1", "--source-ref", SOURCE,
             "--expected-target", history["target"], "--expected-source", history["source"],
             "--merge-base", history["base"], "--author", IDENTITY,
-            "--timestamp", "1", "--message", MESSAGE.decode(), *choices]
+            "--timestamp", "1", "--message", MESSAGE.decode(), "--method", method, *choices]
 
 
-def check_report(report, bundle, algorithm, history, choice, content, mode):
-    expected, root, result, objects = expected_objects(algorithm, history, content, mode)
+def check_report(report, bundle, algorithm, history, choice, content, mode, method="merge-commit"):
+    expected, root, result, objects = expected_objects(algorithm, history, content, mode, method)
+    require(report.get("method") == method, "resolution method changed")
     require(report["type"] == "merge_resolution" and report["schema_version"] == 1, "receipt schema")
     require(report["profile"] == "path-resolved-v1" and report["outcome"] == "prepared", "resolution profile")
     require(report["published_to_repository"] is False and report["node_closed"] is True, "publication/lifecycle")
@@ -77,13 +80,21 @@ def check_report(report, bundle, algorithm, history, choice, content, mode):
     return expected
 
 
-def run_format(binary, algorithm):
-    with tempfile.TemporaryDirectory(prefix=f"fg-resolve-{algorithm}-") as temporary:
+def run_format(binary, algorithm, method):
+    with tempfile.TemporaryDirectory(prefix=f"fg-resolve-{algorithm}-{method}-") as temporary:
         root = Path(temporary)
         source, node = root / "source", root / "node"
         history = fixture(source, algorithm, conflict=True)
         invoke(binary, ["init", node, TENANT, REPOSITORY, algorithm])
         invoke(binary, ["import", node, TENANT, REPOSITORY, PRINCIPAL, "resolve-fixture", source])
+        opened = json.loads(invoke(binary, [
+            "pr", "open", node, TENANT, REPOSITORY, "17", "--trusted-local",
+            "--principal", PRINCIPAL, "--idempotency-key", "open-resolution-pr",
+            "--expected-version", "0", "--source-ref", SOURCE, "--target-ref", TARGET,
+            "--expected-source", history["source"], "--expected-target", history["target"],
+            "--title", "Resolve this exact pull request", "--body", "Explicit per-path choices",
+        ]).stdout)
+        require(opened["outcome"] == "committed", "open existing PR for coupled publication")
         before = current_state(binary, node)
         prepared = []
         for index, (choice, content, mode) in enumerate(CASES):
@@ -94,10 +105,10 @@ def run_format(binary, algorithm):
             else:
                 choices = ["--" + choice.lower() + "-hex", PATH.hex()]
             output = root / f"candidate-{index}.bundle"
-            command = args(node, output, history, choices)
+            command = args(node, output, history, choices, method)
             result = invoke(binary, command)
             report, data = json.loads(result.stdout), output.read_bytes()
-            candidate = check_report(report, data, algorithm, history, choice, content, mode)
+            candidate = check_report(report, data, algorithm, history, choice, content, mode, method)
             inspection = json.loads(invoke(binary, ["merge", "inspect", node, TENANT, REPOSITORY, TARGET, output,
                 "--trusted-local", "--source-ref", SOURCE, "--expected-source", history["source"],
                 "--expected-target", history["target"], "--merge-base", history["base"], "--expected-commit", candidate]).stdout)
@@ -107,25 +118,28 @@ def run_format(binary, algorithm):
             require(output.read_bytes() == data, "existing candidate was replaced")
             prepared.append((output, report, choices))
         repeated = root / "repeated.bundle"
-        invoke(binary, args(node, repeated, history, prepared[4][2]))
+        invoke(binary, args(node, repeated, history, prepared[4][2], method))
         require(repeated.read_bytes() == prepared[4][0].read_bytes(), "non-deterministic resolved artifact")
         for index, choices in enumerate([
             ["--ours", "dir/text", "--theirs", "dir/text"], ["--ours", "keep"],
             ["--ours", "dir/absent"], ["--delete", "../outside"],
         ]):
             output = root / f"refused-{index}.bundle"
-            require(invoke(binary, args(node, output, history, choices), success=False).returncode == 2, "negative exit class")
+            require(invoke(binary, args(node, output, history, choices, method), success=False).returncode == 2, "negative exit class")
             require(not output.exists(), "invalid resolution left a candidate")
         for field, wrong in [("target", history["base"]), ("base", history["target"])]:
             changed = {**history, field: wrong}
             output = root / f"stale-{field}.bundle"
-            require(invoke(binary, args(node, output, changed, prepared[0][2]), success=False).returncode == 2, "stale pins")
+            require(invoke(binary, args(node, output, changed, prepared[0][2], method), success=False).returncode == 2, "stale pins")
             require(not output.exists(), "stale resolution left a candidate")
         require(current_state(binary, node) == before, "refusal changed authority")
         output, report, choices = prepared[4]
         command = apply_args(node, output, report, "resolved-review", 17)
+        command[command.index("--expected-version") + 1] = "1"
+        command.extend(["--method", method])
         terminal = json.loads(invoke(binary, command).stdout)
         require(terminal["outcome"] == "committed" and terminal["published_to_repository"] is True, "real publication")
+        require(terminal["method"] == method, "publication changed the resolution method")
         after = current_state(binary, node)
         require(report["candidate_commit"].encode() in after[0] and after != before, "published target")
         retry = json.loads(invoke(binary, command).stdout)
@@ -133,38 +147,41 @@ def run_format(binary, algorithm):
             require(terminal[field] == retry[field], "retry changed original terminal identity")
         require(current_state(binary, node) == after, "retry published a second decision")
         stale_output = root / "after-publication.bundle"
-        require(invoke(binary, args(node, stale_output, history, choices), success=False).returncode == 2, "moved target")
+        require(invoke(binary, args(node, stale_output, history, choices, method), success=False).returncode == 2, "moved target")
         require(not stale_output.exists() and current_state(binary, node) == after, "stale recomputation mutated state")
-        print(json.dumps({"type": "merge_resolution_smoke", "format": algorithm, "cases": len(CASES), "rust_executed": True}))
+        print(json.dumps({"type": "merge_resolution_smoke", "format": algorithm, "method": method, "cases": len(CASES), "rust_executed": True}))
 
 
 def self_test():
     rejected = 0
-    for algorithm in ("sha1", "sha256"):
+    for algorithm, method in ((algorithm, method) for algorithm in ("sha1", "sha256")
+                              for method in ("merge-commit", "squash")):
         with tempfile.TemporaryDirectory() as temporary:
             history = fixture(Path(temporary) / "source", algorithm, conflict=True)
             for choice, content, mode in CASES:
-                candidate, root, result, objects = expected_objects(algorithm, history, content, mode)
+                candidate, root, result, objects = expected_objects(algorithm, history, content, mode, method)
                 signature = "# v2 git bundle\n" if algorithm == "sha1" else "# v3 git bundle\n@object-format=sha256\n"
                 header = (signature + f'-{history["target"]} target\n-{history["source"]} source\n{candidate} {TARGET}\n\n').encode()
                 bundle = header + synthetic_pack(algorithm, [objects[key] for key in sorted(objects)])
                 conflict = {"path_hex": PATH.hex(), "kind": "Content"}
                 for field, (_, data, original_mode) in zip(("ours", "theirs", "base"), CASES[:3]):
                     conflict[field] = {"mode": original_mode, "oid": oid(algorithm, "blob", data)}
-                report = {"type": "merge_resolution", "schema_version": 1, "profile": "path-resolved-v1", "outcome": "prepared",
+                report = {"type": "merge_resolution", "schema_version": 1, "profile": "path-resolved-v1", "method": method, "outcome": "prepared",
                     "published_to_repository": False, "node_closed": True, "bundle_created": True, "repository_id": REPOSITORY,
                     "source_head": "fixture-only", "object_format": algorithm, "expected_target": history["target"],
                     "expected_source": history["source"], "merge_base": history["base"], "candidate_commit": candidate,
                     "root_tree": root, "target_reference_hex": TARGET.encode().hex(), "source_reference_hex": SOURCE.encode().hex(),
                     "bundle_sha256": hashlib.sha256(bundle).hexdigest(), "bundle_bytes": len(bundle), "object_count": len(objects),
                     "resolution_count": 1, "resolutions": [{"conflict": conflict, "choice": choice, "result": result}]}
-                check_report(report, bundle, algorithm, history, choice, content, mode)
+                check_report(report, bundle, algorithm, history, choice, content, mode, method)
                 for field, bad in [("candidate_commit", history["target"]), ("published_to_repository", True),
-                                   ("bundle_sha256", "0" * 64), ("resolution_count", 0)]:
+                                   ("bundle_sha256", "0" * 64), ("resolution_count", 0),
+                                   ("method", "squash" if method == "merge-commit" else "merge-commit"),
+                                   ("method", None)]:
                     damaged = copy.deepcopy(report)
                     damaged[field] = bad
                     try:
-                        check_report(damaged, bundle, algorithm, history, choice, content, mode)
+                        check_report(damaged, bundle, algorithm, history, choice, content, mode, method)
                     except AssertionError:
                         rejected += 1
                     else:
@@ -185,7 +202,8 @@ def main():
     binary = options.fg.resolve(strict=True)
     fingerprint = hashlib.sha256(binary.read_bytes()).hexdigest()
     for algorithm in ("sha1", "sha256"):
-        run_format(binary, algorithm)
+        for method in ("merge-commit", "squash"):
+            run_format(binary, algorithm, method)
     require(hashlib.sha256(binary.read_bytes()).hexdigest() == fingerprint, "binary changed during campaign")
     print(json.dumps({"type": "merge_resolution_binary", "sha256": fingerprint, "rust_executed": True}))
 
