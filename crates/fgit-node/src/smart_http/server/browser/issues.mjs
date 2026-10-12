@@ -458,11 +458,23 @@ export class IssueClient {
     const digest = await this.#crypto.subtle.digest('SHA-256', encoder.encode(message));
     return `fgui-${nonce}-${asHex(new Uint8Array(digest))}`;
   }
-  async stage(number, version, action, fields) {
+  async stage(number, version, action, fields, expectedBinding = null) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     if (this.#pending || this.#busy) fail('Resolve or discard the existing prepared change first.');
     const request = mutationRequest(number, version, action, fields);
-    const epoch = this.#epoch, fingerprint = this.#fingerprint, binding = this.binding;
+    const epoch = this.#epoch, fingerprint = this.#fingerprint;
+    let binding = this.binding;
+    if (expectedBinding !== null) {
+      // An offline intent may constrain its expected destination without a read.
+      // This is not an observed repository or a grant: it only tightens reply
+      // checks and never installs a view binding or selects a native principal.
+      object(expectedBinding);
+      if (Object.keys(expectedBinding).length !== 2 ||
+          !['tenant', 'repository'].every(key => own(expectedBinding, key) &&
+            typeof expectedBinding[key] === 'string' && /^[0-9a-f]{32}$/.test(expectedBinding[key]))) fail('Invalid expected issue repository.');
+      if (binding && (binding.tenant !== expectedBinding.tenant || binding.repository !== expectedBinding.repository)) fail('Expected issue repository differs from the observed binding.');
+      binding = clone(expectedBinding);
+    }
     this.#busy = true;
     try {
       const nonce = asHex(this.#crypto.getRandomValues(new Uint8Array(16)));
