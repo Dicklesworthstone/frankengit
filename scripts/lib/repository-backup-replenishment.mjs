@@ -59,6 +59,7 @@ export async function replenishRepositoryBackups(raw, witness = null) {
     state, checkpoint, destinations: options.destinations, active_destination: active,
     completed_replicas: Object.freeze(replicas.slice()), final_scrub: finalScrub,
     source_selection: selected?.report ?? null,
+    ...(witness ? { recovery_witness: witness.snapshot(), highest_retained_generation_enforced: true } : {}),
     all_destinations_verified: state === 'complete', atomic_publication: false,
     native_content_verified: false, newest_checkpoint_verified: false, complete_capsule_verified: false,
     failure_domain_independence_verified: false, simultaneous_availability_verified: false,
@@ -77,10 +78,20 @@ export async function replenishRepositoryBackups(raw, witness = null) {
         || await realpath(target.requested) !== target.path) fail('backup_replenishment_directory_changed');
     }
   }
+  async function checkWitnessInputs(includeSource = false) {
+    if (!witness) return;
+    const directory = witness.snapshot().directory, paths = [options.trustKey];
+    if (includeSource && selected) paths.push(selected.report.selected.input, selected.report.selected.approval);
+    for (const path of paths) {
+      gate();
+      if (overlaps(await realpath(path), directory)) fail('backup_witness_separate_path_required');
+    }
+  }
   async function progress(stage, event) {
     await options.onProgress(Object.freeze({ ...event, stage, active_destination: active,
       completed_destinations: replicas.length, replenishment_bytes_read: String(totalBytes) }));
     gate(); await checkTargets();
+    await checkWitnessInputs(stage === 'publication' || event.phase === 'checkpoint_pinned');
   }
   // Select/scrub expose per-copy progress; reset only at their explicit boundary.
   // Every child also has a hard remaining-byte limit independent of observers.
@@ -118,7 +129,7 @@ export async function replenishRepositoryBackups(raw, witness = null) {
       if (targets.slice(0, -1).some(other => same(other.identity, target.identity) || overlaps(other.path, path))) fail('backup_replenishment_destination_overlap');
       if (witness && overlaps(path, witness.snapshot().directory)) fail('backup_witness_separate_path_required');
     }
-    await checkTargets();
+    await checkTargets(); await checkWitnessInputs();
     selected = await evaluate(selectRepositoryBackup, options.candidates, 'selection');
     if (checkpoint && (checkpoint.approval_sha256 !== selected.report.checkpoint.approval_sha256
       || checkpoint.trusted_key_id !== selected.report.checkpoint.trusted_key_id)) fail('backup_replication_checkpoint_mismatch');

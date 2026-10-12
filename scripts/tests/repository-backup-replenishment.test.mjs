@@ -228,8 +228,8 @@ test('primitive observer failure preserves prior completion evidence', async t =
 
 test('whole-operation deadline is not reset for the next destination', async t => {
   const f = await fixture(t);
-  await assert.rejects(f.run({ timeoutMs: 500, async onProgress(e) {
-    if (e.phase === 'replica_complete') await delay(550);
+  await assert.rejects(f.run({ timeoutMs: 3000, async onProgress(e) {
+    if (e.phase === 'replica_complete') await delay(3100);
   } }), error => { assert.equal(error.code, 'backup_deadline'); assert.equal(error.replenishment.completed_replicas.length, 1); return true; });
   await absent(f.paths[1].approval);
 });
@@ -280,4 +280,11 @@ test('single-destination publisher accepts exact pins and reports monotonic work
     assert.equal(error.code, 'backup_replication_checkpoint_mismatch'); assert.equal(error.streaming.total_payload_bytes_read, String(N)); return true;
   });
   assert.deepEqual(await readdir(f.destinations[1]), []);
+});
+
+test('all sixteen permitted destinations fit the declared bounded work model', async t => {
+  const f = await fixture(t, 'sha256', 16), result = await f.run();
+  assert.equal(result.completed_replicas.length, 16); assert.equal(result.final_scrub.distinct_authenticated_files, 16);
+  assert.equal(result.streaming.total_payload_bytes_read, String(65 * N));
+  assert.deepEqual(result.destinations, [...f.destinations].sort());
 });
