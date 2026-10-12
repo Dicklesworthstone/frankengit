@@ -64,7 +64,10 @@ async function scan(path, maximum, live, consume, privateKey = false) {
     if ((await file.read(buffer, 0, 1, offset)).bytesRead) throw backupError('backup_file_changed');
     const after = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
     if (!named.isFile() || !sameFile(before, after) || !sameFile(after, named)) throw backupError('backup_file_changed');
-    live.check(); return { bytes: String(offset), read_calls: reads, maximum_read_bytes: maximumRead };
+    // Identity is evidence about this verified open/readback interval only, not
+    // an independent failure domain or a lease on the path after return.
+    live.check(); return { bytes: String(offset), read_calls: reads, maximum_read_bytes: maximumRead,
+      file_identity: Object.freeze({ device: String(before.dev), inode: String(before.ino) }) };
   } finally { buffer.fill(0); await file.close(); }
 }
 export async function hashRepositoryBackup(path, live) {
