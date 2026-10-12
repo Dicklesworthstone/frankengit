@@ -99,7 +99,7 @@ pub(super) fn execute(
         let resolved = drive_request_while(
             node,
             &context,
-            node.prepare_resolved_pull_request_bundle_in(
+            node.prepare_resolved_pull_request_bundle_with_style_in(
                 &context,
                 &command.subject,
                 command.base,
@@ -107,6 +107,7 @@ pub(super) fn execute(
                 &command.choices,
                 &command.metadata,
                 PreparationLimits::default(),
+                command.style,
             ),
             &mut live,
         )
@@ -127,6 +128,7 @@ pub(super) fn execute(
             &command.subject,
             resolved.resolved,
             resolved.bundle,
+            command.style,
             maximum,
             &mut live,
         );

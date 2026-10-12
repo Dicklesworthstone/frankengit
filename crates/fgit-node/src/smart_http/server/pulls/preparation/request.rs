@@ -35,6 +35,7 @@ pub(super) struct PreparationCommand {
 pub(super) struct ResolutionCommand {
     pub subject: ReviewSubject,
     pub metadata: MergeMetadata,
+    pub style: MergeCommitStyle,
     pub base: GitOid,
     pub choices: Vec<ConflictResolution>,
 }
@@ -147,6 +148,11 @@ impl<'a> Request<'a> {
             return Err(ApiError::bad("not_a_resolution_request"));
         }
         let (mut fields, descriptors) = self.fields(bytes)?;
+        let style = match fields.remove("method").as_deref() {
+            None | Some("merge-commit") => MergeCommitStyle::TwoParent,
+            Some("squash") => MergeCommitStyle::Squash,
+            Some(_) => return Err(ApiError::bad("unsupported_merge_method")),
+        };
         let base = oid(&take(&mut fields, "merge_base")?, format)?;
         let (subject, metadata) = self.subject_and_metadata(fields, format)?;
         let mut choices = Vec::new();
@@ -225,6 +231,7 @@ impl<'a> Request<'a> {
         Ok(ResolutionCommand {
             subject,
             metadata,
+            style,
             base,
             choices,
         })
@@ -234,7 +241,7 @@ impl<'a> Request<'a> {
         let mut fields = BTreeMap::new();
         let mut resolutions = Vec::new();
         let maximum = if self.resolution {
-            12 + resolution_upload::MAX_FILES
+            13 + resolution_upload::MAX_FILES
         } else {
             13
         };
@@ -259,8 +266,9 @@ impl<'a> Request<'a> {
                     | "committer"
                     | "timestamp"
                     | "message"
+                    | "method"
             ) && !(name == "merge_base" && self.resolution)
-                && !(matches!(name.as_str(), "profile" | "method") && !self.resolution)
+                && !(name == "profile" && !self.resolution)
             {
                 return Err(ApiError::bad("unknown_preparation_field"));
             }
@@ -635,7 +643,44 @@ mod tests {
     }
 
     #[test]
-    fn merge_method_duplicates_and_resolution_methods_refuse_before_construction() {
+    fn resolved_candidates_keep_a_closed_method_and_legacy_default() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let bytes = form(format)
+                + &format!(
+                    "&merge_base={}&resolution=61:ours",
+                    "c".repeat(format.digest_len() * 2)
+                );
+            let baseline = request(true)
+                .resolved_command(bytes.as_bytes(), BTreeMap::new(), format)
+                .unwrap();
+            assert_eq!(baseline.style, MergeCommitStyle::TwoParent);
+            for (method, style) in [
+                ("merge-commit", MergeCommitStyle::TwoParent),
+                ("squash", MergeCommitStyle::Squash),
+            ] {
+                let explicit = bytes.clone() + &format!("&method={method}");
+                let parsed = request(true)
+                    .resolved_command(explicit.as_bytes(), BTreeMap::new(), format)
+                    .unwrap();
+                assert_eq!(parsed.style, style);
+                assert_eq!(parsed.subject, baseline.subject);
+                assert_eq!(parsed.metadata, baseline.metadata);
+                assert_eq!(parsed.base, baseline.base);
+                assert_eq!(parsed.choices, baseline.choices);
+            }
+            for method in ["", "Squash", "fast-forward-only", "rebase", "merge-commit+"] {
+                let invalid = bytes.clone() + &format!("&method={method}");
+                let error = request(true)
+                    .resolved_command(invalid.as_bytes(), BTreeMap::new(), format)
+                    .unwrap_err();
+                assert_eq!(error.code, "unsupported_merge_method");
+                assert!(!error.outcome_unknown);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_merge_methods_refuse_for_automatic_and_resolved_construction() {
         let format = GitHashAlgorithm::Sha1;
         for duplicate in ["method", "met%68od"] {
             let bytes = format!("method=merge-commit&{duplicate}=squash");
@@ -643,18 +688,12 @@ mod tests {
                 request(false).command(bytes.as_bytes(), format).unwrap_err().code,
                 "duplicate_field"
             );
-        }
-        for method in ["merge-commit", "squash"] {
-            let bytes = form(format)
-                + &format!(
-                    "&merge_base={}&resolution=61:ours&method={method}",
-                    "c".repeat(40)
-                );
-            let error = request(true)
-                .resolved_command(bytes.as_bytes(), BTreeMap::new(), format)
-                .unwrap_err();
-            assert_eq!(error.code, "unknown_preparation_field");
-            assert!(!error.outcome_unknown);
+            assert_eq!(
+                request(true)
+                    .resolved_command(bytes.as_bytes(), BTreeMap::new(), format)
+                    .unwrap_err().code,
+                "duplicate_field"
+            );
         }
     }
 }

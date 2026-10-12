@@ -225,16 +225,15 @@ export class PullClient {
   async resolveAndInspect(choices) {
     const scope = this.#selected(), conflict = this.#conflict;
     if (!conflict || Object.keys(scope).some(key => scope[key] !== conflict.scope[key])) fail('Prepare conflicts in this repository before resolving them.');
-    if (conflict.method === 'squash') fail('Resolve squash conflicts on the source branch, then prepare and inspect again.');
     this.#artifact = null;
     const serial = ++this.#candidateSerial, epoch = this.#transport.epoch;
-    const upload = await resolutionUpload(conflict.report, conflict.fields, conflict.metadata, choices, this.#transport.crypto);
+    const upload = await resolutionUpload(conflict.report, conflict.fields, conflict.metadata, choices, this.#transport.crypto, conflict.method);
     this.#check(epoch, serial);
     const response = await this.#transport.request(`pulls/${conflict.number}/resolve`, {
       method: 'POST', body: new Blob([upload.bytes]), contentType: upload.contentType,
       statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
     });
-    const result = await preparationReply(response, conflict.number, conflict.fields, scope, this.#transport.crypto, true);
+    const result = await preparationReply(response, conflict.number, conflict.fields, scope, this.#transport.crypto, true, conflict.method);
     this.#check(epoch, serial);
     verifyResolutionResult(result.metadata, upload.expected);
     const inspected = await this.#inspect(result.artifact, epoch, serial);
@@ -397,3 +396,4 @@ export class PullClient {
     } finally { this.#busy = false; }
   }
 }
+

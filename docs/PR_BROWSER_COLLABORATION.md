@@ -23,7 +23,8 @@ of that bead, the full forge or the 1.0 compatibility matrix.
    number, expected version, hash format, both branch refs/tips, title and body.
    Preparation creates only a local immutable request. A separate confirmed
    Send action dispatches it.
-3. Select an open PR and explicitly enter policy epoch and commit metadata.
+3. Select an open PR, choose merge-commit or squash, and explicitly enter policy
+   epoch and commit metadata.
    Native preparation constructs a candidate without staging or publication.
    The browser validates the returned multipart envelope and bundle SHA-256,
    then sends the actual bundle to native read-only inspection. It validates
@@ -32,17 +33,21 @@ of that bead, the full forge or the 1.0 compatibility matrix.
 4. For a conflicted preparation, choose exactly one explicit resolution for
    every reported path: base, ours (target), theirs (source), deletion, or a
    custom regular file. A missing side cannot implicitly delete a path. The
-   original PR version, tips, policy epoch, merge base and commit metadata stay
-   fixed. Resolution constructs a candidate through the native read-only
-   resolver; the client verifies every returned path, choice, side, mode and
-   native blob identity, then requires the actual bundle to pass inspection.
+   original PR version, tips, policy epoch, merge base, commit metadata and
+   selected method stay fixed. Both merge-commit and squash use this editor.
+   Resolution constructs a candidate through the native read-only
+   resolver; the client verifies the returned method and every path, choice,
+   side, mode and native blob identity, then requires the actual bundle to pass
+   inspection. Squash inspection verifies the sole exact target parent.
 5. Inspect changed paths and modes, text hunks, and explicit binary/object-only
    entries. A candidate receipt can be shared with another reviewer. Import
    ALWAYS calls native inspection again; receipt checksums are not authority.
 6. Prepare an approval, request-changes or withdrawal with an explicit reviewer
    stream version and reason. The credential—not a supplied reviewer field—
    determines the actor. A merge request names an explicit nonempty distinct
-   reviewer set. Displayed votes never select reviewers or grant permission.
+   reviewer set. Reviews bind the candidate without a method field; publication
+   retains its method, including resolved squash. Displayed votes never select
+   reviewers or grant permission.
 7. Review the saved action, subject, candidate, versions and key; confirm and
    send it. The native admission path independently enforces the current
    policy, reviewer independence, native object closure and exact-head CAS.
@@ -135,7 +140,8 @@ Repository-local JavaScript checks:
 ```sh
 node --test tests/browser/pulls-core.test.mjs \
   tests/browser/pulls-actions.test.mjs tests/browser/pulls-view.test.mjs \
-  tests/browser/pulls-resolution.test.mjs tests/browser/pulls-resolution-view.test.mjs
+  tests/browser/pulls-resolution.test.mjs tests/browser/pulls-resolution-view.test.mjs \
+  tests/browser/pulls-squash.test.mjs
 node --test tests/browser/*.test.mjs
 ```
 
@@ -143,9 +149,9 @@ The DOM/HTTP fixtures are test doubles, not native Git pack verification or a
 live node. The candidate fixture commits are hashed independently; their
 transport bundle is deliberately not presented as native conformance evidence.
 Rust static-route tests are in `browser/pulls.rs`; they require the normal
-`fgit-node` test target and were not executed in the implementation environment
-because Rust/Cargo was unavailable. Live browser rendering and native-node
-interoperability were not exercised in this implementation session. Full workspace, Clippy, release and live-node acceptance remain gates.
+`fgit-node` test target. Passing client fixtures does not establish live browser
+rendering or native-node interoperability. Full workspace, Clippy, release and
+live-node acceptance require their own execution evidence.
 
 Automatic construction never invents conflict resolutions; all choices enter
 the existing native resolver and its object-selection and policy checks. There

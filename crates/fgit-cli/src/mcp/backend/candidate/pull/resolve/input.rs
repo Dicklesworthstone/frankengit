@@ -19,6 +19,7 @@ pub(super) struct Input {
     pub base: GitOid,
     pub resolutions: Vec<ConflictResolution>,
     pub metadata: MergeMetadata,
+    pub style: MergeCommitStyle,
     pub limits: PreparationLimits,
     review: Object,
 }
@@ -103,10 +104,15 @@ fn resolutions(args: &Object) -> Result<Vec<ConflictResolution>, ToolError> {
 
 pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     let mut allowed = SUBJECT_FIELDS.to_vec();
-    allowed.extend(["merge_base", "resolutions", "author", "committer", "timestamp", "message_hex"]);
+    allowed.extend(["merge_base", "resolutions", "author", "committer", "timestamp", "message_hex", "method"]);
     allowed.extend(LIMITS.iter().map(|limit| limit.0));
     require_fields(args, &allowed)?;
     if required(args, "operation")? != RESOLVE { return Err(ToolError::invalid("unsupported_candidate_operation")); }
+    let style = match string(args, "method")?.unwrap_or("merge-commit") {
+        "merge-commit" => MergeCommitStyle::TwoParent,
+        "squash" => MergeCommitStyle::Squash,
+        _ => return Err(ToolError::invalid("invalid_merge_method")),
+    };
     let limits = PreparationLimits {
         max_commits: bound(args, "max_commits")?,
         max_tree_entries: bound(args, "max_tree_entries")?,
@@ -125,13 +131,19 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
     }
     Ok(Input {
         selection: selection(args, format)?, base: oid(args, "merge_base", format)?, resolutions,
-        metadata: super::super::super::prepare::metadata(args)?, limits, review,
+        metadata: super::super::super::prepare::metadata(args)?, style, limits, review,
     })
 }
 
 pub(super) fn schema() -> Value {
     let mut properties = subject_properties(RESOLVE);
     properties.insert("merge_base".into(), oid_schema());
+    properties.insert("method".into(), object([
+        ("type", text("string")),
+        ("enum", Value::Array(vec![text("merge-commit"), text("squash")])),
+        ("default", text("merge-commit")),
+        ("description", text("Commit parent shape for the exact PathMergeV1 conflict choices. Squash keeps only the selected target parent; this does not select a different tree merge profile.")),
+    ]));
     for name in ["author", "committer"] { properties.insert(name.into(), text_schema(1024)); }
     properties.insert("timestamp".into(), super::super::super::super::decimal_schema());
     properties.insert("message_hex".into(), hex_schema(4096));

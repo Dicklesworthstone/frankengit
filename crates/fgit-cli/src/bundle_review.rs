@@ -90,18 +90,11 @@ pub fn run(arguments: &[String], merging: bool) -> Result<(), String> {
             return Err(format!("{error}; node shutdown also failed: {cleanup}"));
         }
     };
-    let expected_parents = input.merge.as_ref().map_or_else(
-        || vec![input.base],
-        |merge| vec![input.base, merge.source_tip],
-    );
-    let fast_forward = input.merge.as_ref().is_some_and(|merge| {
-        merge.merge_commit == merge.source_tip && merge.base_tip == merge.target_tip_before
-    });
     if result.review.comparison.mode != ComparisonMode::Direct
         || result.review.comparison.requested_before != input.base
         || result.review.comparison.compared_before != input.base
         || result.review.comparison.requested_after != input.candidate
-        || (!fast_forward && result.parents != expected_parents)
+        || !parent_shape_matches(&input, &result.parents)
         || result.bundle_bytes != bytes.len()
         || result.merge_base != input.merge.as_ref().map(|merge| merge.base_tip)
     {
@@ -158,6 +151,25 @@ pub fn run(arguments: &[String], merging: bool) -> Result<(), String> {
         return Err("inspection JSON exceeds the output limit".into());
     }
     emit(&mut std::io::stdout().lock(), &report)
+}
+
+// Native inspection already authenticates the complete candidate and original
+// closures. This transport postcondition retains their exact permitted shapes;
+// it never selects or authorizes the separate publication method.
+fn parent_shape_matches(input: &Input, parents: &[GitOid]) -> bool {
+    match &input.merge {
+        Some(merge) => {
+            // A fast-forward can span several commits. Its source tip's direct
+            // parents need not equal the observed target; native ancestry
+            // validation owns that proof before this response is rendered.
+            let fast_forward = merge.merge_commit == merge.source_tip
+                && merge.base_tip == merge.target_tip_before;
+            fast_forward
+                || parents == [input.base, merge.source_tip]
+                || parents == [input.base]
+        }
+        None => parents == [input.base],
+    }
 }
 
 fn parse(arguments: &[String], merging: bool) -> Result<Input, String> {
@@ -353,6 +365,7 @@ mod tests {
                 vec!["--comparison", "merge-base"],
                 vec!["--approve", "yes"],
                 vec!["--principal", "x"],
+                vec!["--method", "squash"],
                 vec!["--expected-commit", "bad"],
                 vec!["--max-changes", "0"],
                 vec!["--object-format", "sha256"],
@@ -367,6 +380,62 @@ mod tests {
             assert!(parse(&args, merging).is_err());
         }
     }
+    #[test]
+    fn merge_parent_shapes_accept_verified_squash_and_ordered_two_parent_results() {
+        for width in [40, 64] {
+            let parsed = parse(&input(true, width), true).unwrap();
+            let merge = parsed.merge.as_ref().unwrap();
+            assert!(parent_shape_matches(&parsed, &[parsed.base]));
+            assert!(parent_shape_matches(&parsed, &[parsed.base, merge.source_tip]));
+            for parents in [
+                vec![],
+                vec![merge.source_tip],
+                vec![merge.base_tip],
+                vec![merge.source_tip, parsed.base],
+                vec![parsed.base, parsed.base],
+                vec![parsed.base, merge.base_tip],
+                vec![parsed.base, merge.source_tip, merge.source_tip],
+            ] {
+                assert!(!parent_shape_matches(&parsed, &parents), "{parents:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_inspection_still_requires_exactly_its_target_parent() {
+        for width in [40, 64] {
+            let parsed = parse(&input(false, width), false).unwrap();
+            assert!(parent_shape_matches(&parsed, &[parsed.base]));
+            for parents in [
+                vec![],
+                vec![parsed.candidate],
+                vec![parsed.base, parsed.base],
+                vec![parsed.base, parsed.candidate],
+            ] {
+                assert!(!parent_shape_matches(&parsed, &parents), "{parents:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fast_forward_inspection_retains_native_validated_source_history() {
+        for width in [40, 64] {
+            let mut arguments = input(true, width);
+            let expected = arguments.iter().position(|arg| arg == "--expected-commit").unwrap();
+            arguments[expected + 1] = "c".repeat(width);
+            let base = arguments.iter().position(|arg| arg == "--merge-base").unwrap();
+            arguments[base + 1] = "a".repeat(width);
+            let parsed = parse(&arguments, true).unwrap();
+            let intermediate = parse_oid(&"d".repeat(width)).unwrap();
+            // This response guard must not replace the native fast-forward
+            // validator with an immediate-parent-equals-target requirement.
+            assert!(parent_shape_matches(&parsed, &[intermediate]));
+            arguments[base + 1] = "d".repeat(width);
+            let changed = parse(&arguments, true).unwrap();
+            assert!(!parent_shape_matches(&changed, &[intermediate]));
+        }
+    }
+
     #[test]
     fn raw_refs_pins_and_paths_reuse_the_existing_review_contract() {
         let mut args = input(true, 64);

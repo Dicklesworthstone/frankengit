@@ -16,6 +16,12 @@ from the conflict report, explicit `author`, `committer`, `timestamp` and
 `message_hex`, and a nonempty `resolutions` array. Optional `expected_head`
 pins the result to the independently retained authority snapshot.
 
+Optional `method` accepts `merge-commit` (the legacy default) or `squash`.
+Preserve the selection from conflict preparation. A squash commit has the
+exact target as its sole parent; merge-commit has target then source as its
+ordered parents. This selects commit style, not different conflict or tree
+semantics. Invalid values, types and duplicate method keys are rejected.
+
 Each resolution has a raw `path_hex` and one closed `choice`:
 
 - `base`, `ours`, or `theirs` selects that actual conflict's existing entry.
@@ -32,6 +38,7 @@ For example, the additional fields on an otherwise exact subject can be:
 ```json
 {
   "operation": "resolve_pull_merge",
+  "method": "squash",
   "merge_base": "<exact native common-base commit>",
   "resolutions": [
     {
@@ -57,8 +64,9 @@ latest-tip refresh or automatic choice for a missing resolution.
 
 ## One native preparation followed by mandatory inspection
 
-The adapter calls `OneNode::prepare_resolved_pull_request_bundle_in`. The native
-owner validates the exact open PR, tips, policy epoch and unique common base,
+The adapter calls `OneNode::prepare_resolved_pull_request_bundle_with_style_in`
+with the selected style as its final argument. The native owner validates the
+exact open PR, tips, policy epoch and unique common base,
 reproduces PathMergeV1 conflicts, and requires every and only those conflicts to
 be resolved. Non-conflict edits, missing choices, ambiguous ancestry and unsupported
 native cases fail without a candidate. An already clean merge is not a conflict
@@ -68,8 +76,8 @@ this operation does not silently reinterpret an exact-renames conflict report.
 Returned per-path receipts are checked against the submitted choices, including
 the exact blob identity and mode for file bytes. The adapter then passes the
 complete generated bundle into the same native `inspect_pull_merge` handler,
-pinned to preparation's selecting head. Both phases use the SAME
-`NodeRequestContext`; entering inspection does not reset cancellation or the
+pinned to preparation's selecting head and explicitly asserting the method.
+Both phases use the SAME `NodeRequestContext`; entering inspection does not reset cancellation or the
 server-work budget. Generated object bodies are released before pack inspection.
 Each native phase retains its own finite object/work ceilings within that shared
 request. A concurrent head change refuses the composition rather than combining
@@ -77,11 +85,14 @@ preparation at one snapshot with inspection at another.
 
 Only a fully inspected result is returned. It contains the complete actual
 target-before-to-candidate diff, original commit body, ordered parents, bundle
-measurements, exact `candidate_arguments`, and `resolved_paths` receipts.
+measurements, explicit `method`, exact `candidate_arguments`, repeatable
+`inspection_arguments`, method-aware `publication_arguments`, and
+`resolved_paths` receipts.
 `inspection_performed` is true and `completion_scope` is `entire_candidate_tree`.
 A choice of ours can legitimately produce an empty tree diff while retaining an
-explicit two-parent merge commit. Empty content and binary changes keep their
-existing native review representations. `merge_algorithm_verified` remains the
+explicit commit of the selected style, including a one-target-parent squash.
+Empty content and binary changes keep their existing native review
+representations. `merge_algorithm_verified` remains the
 inspector's non-claim; its job is checking uploaded result bytes, not attesting
 how an arbitrary bundle was constructed.
 
@@ -93,10 +104,20 @@ The operation remains read-only and occupies the same existing tool registry
 entry. No objects are staged, refs changed, forge events admitted, idempotency keys
 minted, or review votes created by preparation/inspection.
 
-Use the exact returned `candidate_arguments` with the existing named `review_tool`
-and `publication_tool`, supplying the caller-owned decision/version/reviewer/key
-fields under independently launched identities. The PR opener and merge submitter
-cannot satisfy the named-reviewer gate with their own votes. A read success grants
+Use the returned argument objects for their respective operations:
+
+- Pass `inspection_arguments` directly to `frankengit_source_candidate` to repeat
+  native inspection at the selected head. They retain the method, candidate,
+  bundle digest and inspection limits and fit the existing input envelope.
+- Pass `candidate_arguments` to the named `review_tool`, adding the reviewer's
+  decision, review version and durable key. These arguments omit method because
+  the review binds the complete native commit identity.
+- Pass `publication_arguments` to the named `publication_tool`, adding the
+  merger's durable key and required reviewers. These arguments retain the method;
+  omission would select the publication tool's legacy two-parent default.
+
+Use independently launched identities for the required grants. The PR opener
+and merge submitter cannot satisfy the named-reviewer gate with their own votes. A read success grants
 no merge permission, and current branch protection still applies. Review changes
 authority, so handoff arguments deliberately omit the inspection head pin while
 retaining exact PR/tip/epoch/candidate semantics. Original-key retries recover the
@@ -127,16 +148,18 @@ copied into an error code.
 
 ## Evidence
 
-Authored regressions cover closed shapes, exact/empty/binary payloads, aggregate
-byte ceilings, duplicate/overlapping/unsafe paths and native receipt matching.
+Authored regressions cover closed method values/types and the legacy default,
+exact/empty/binary payloads, aggregate byte ceilings, duplicate/overlapping/unsafe
+paths and native receipt matching.
 Persisted SHA-1/SHA-256 tests cover all conflict choices, actual inspection without
 staging, stale/base/phase-budget/non-conflict refusal twins, cancellation and
-independent grants. The full workflow test resolves and inspects, verifies that
-an unapproved candidate cannot commit, obtains a distinct review, publishes the
+independent grants. The full workflow test runs both methods in both formats,
+checks exact parents and repeatable inspection arguments, resolves and inspects,
+verifies that an unapproved candidate cannot commit, obtains a distinct review, publishes the
 coupled PR/ref transition, retries the original key, reopens, and reads exact
 resolved and untouched sibling bytes.
 
-This session has no Rust toolchain or built `fg`. These tests are authored, not
-executed passing evidence; compilation, Rust tests, formatting, Clippy and
-real-binary end-to-end validation remain outstanding. No full agent-day or bead
-closure is asserted by adding this local workflow integration.
+Test definitions are not executed passing evidence. Run the native MCP tests
+and real-binary workflow on the pinned toolchain when validating a revision;
+source parsing and client fixtures do not establish native admission behavior.
+No full agent-day or bead closure is asserted by this local workflow integration.

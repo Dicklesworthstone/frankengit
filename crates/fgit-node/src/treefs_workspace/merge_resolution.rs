@@ -611,3 +611,7 @@ mod tests {
         node.shutdown().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "merge_resolution/squash_tests.rs"]
+mod squash_tests;

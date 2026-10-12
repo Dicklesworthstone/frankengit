@@ -20,9 +20,9 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let input = input::parse(args, backend.options.format)?;
     let request = fgit_cli::command_request_context(&backend.node);
     let artifact = backend.node.runtime().block_on(
-        backend.node.prepare_resolved_pull_request_bundle_in(
+        backend.node.prepare_resolved_pull_request_bundle_with_style_in(
             &request, &input.selection.subject, input.base, &Default::default(),
-            &input.resolutions, &input.metadata, input.limits,
+            &input.resolutions, &input.metadata, input.limits, input.style,
         ),
     ).map_err(|error| {
         if error.is_snapshot_unavailable() {
@@ -42,7 +42,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     check_selection(&input.selection, subject, artifact.source_head)?;
     let plan = &artifact.resolved.plan;
     if plan.base != input.base || plan.target != subject.target_tip || plan.source != subject.source_tip
-        || artifact.bundle_sha256 != sha256_digest(&artifact.bundle)
+        || plan.style != input.style || artifact.bundle_sha256 != sha256_digest(&artifact.bundle)
     {
         return Err(invalid_report());
     }
@@ -51,9 +51,12 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let Value::Object(mut inspection) = candidate_arguments(subject, candidate, &artifact.bundle)?
     else { return Err(invalid_report()); };
     inspection.insert("operation".into(), text(INSPECT));
+    inspection.insert("method".into(), text(merge_method_name(input.style)));
     inspection.insert("expected_head".into(), text(head_token(artifact.source_head)));
     inspection.insert("expected_bundle_sha256".into(), text(hex(&artifact.bundle_sha256)));
     input.inspection_limits(&mut inspection);
+    Value::Object(inspection.clone()).encode(json::MAX_INPUT - 4096)
+        .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
     // Drop generated object bodies before expanding the inspection. Its exact
     // head pin prevents merging a preparation with a newer PR or hidden policy.
     drop(artifact);
@@ -65,6 +68,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     result.insert("resolution_count".into(), text(input.resolutions.len().to_string()));
     result.insert("resolved_paths".into(), paths);
     result.insert("inspection_performed".into(), Value::Bool(true));
+    result.insert("inspection_arguments".into(), Value::Object(inspection));
     let result = Value::Object(result);
     result.encode(MAX_TOOL_RESULT).map_err(|_| ToolError::failed("candidate_response_limit"))?;
     Ok(result)

@@ -47,8 +47,40 @@ A fast-forwardable branch still receives squash construction. If a one-commit
 source already has exactly the selected tree, parent and complete metadata
 bytes, native hashing can reproduce the source commit identity. This is valid
 only with the same one-target-parent shape; it does not change the explicitly
-sealed publication method. An already integrated source remains a no-op, and
-conflicts produce no candidate or bundle.
+sealed publication method. An already integrated source remains a no-op.
+Automatic preparation reports conflicts without a candidate or bundle; resolve
+them explicitly before inspection and publication.
+
+## Resolve conflicts while retaining squash
+
+The native resolver supports squash using the same exact PathMergeV1 conflict
+set as a two-parent merge. Submit one choice for every conflict and preserve
+the selected input tips and unique base:
+
+```bash
+fg merge resolve "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
+  refs/heads/main ./resolved-squash.bundle \
+  --trusted-local --profile path-v1 --method squash \
+  --source-ref refs/heads/topic \
+  --expected-target "$EXPECTED_TARGET" --expected-source "$EXPECTED_SOURCE" \
+  --merge-base "$MERGE_BASE" \
+  --author 'Operator <operator@example.invalid>' \
+  --timestamp 1791676800 --message 'Resolve and squash topic' \
+  --file src/example.rs 100644 ./resolved-example.rs
+```
+
+Base, ours (target), theirs (source), deletion and exact regular-file bytes are
+available. Side choices retain their exact object identity and mode; a missing
+side requires explicit deletion. All actual conflicts must be resolved, and
+clean paths cannot be overridden. Binary and empty files keep their exact
+bytes. The conflict discovery and reconstruction passes share existing budgets.
+
+The receipt records `method: "squash"`; the resulting commit has only the target
+parent. Inspect that exact candidate, collect any required independent reviews,
+and carry `--method squash` into publication below. Choosing ours may leave the
+target tree unchanged while still creating the explicitly selected squash
+commit. See [native conflict resolution](NATIVE_MERGE_RESOLUTION.md) for the
+complete path grammar, limits and create-only artifact rules.
 
 ## Publish the exact candidate
 
@@ -153,6 +185,12 @@ the actual commit parents, and reviews bind the actual commit identity.
 Reviewed publication independently validates and seals the selected method,
 then returns it in the terminal receipt.
 
+For a conflicted PathMergeV1 preparation, submit all exact path choices to
+`POST .../pulls/{number}/resolve` with `method=squash`, the same PR subject,
+merge base and metadata. The response reports `state: "resolved"` and
+`method: "squash"`. The resolver accepts the method but retains its existing
+PathMergeV1 tree profile; a profile override is rejected.
+
 With MCP, call `frankengit_source_candidate` with
 `operation: "prepare_pull_merge"` and `method: "squash"`. A clean result includes:
 
@@ -163,6 +201,12 @@ With MCP, call `frankengit_source_candidate` with
 - `publication_arguments`: use with `frankengit_pull_merge_reviewed`, adding
   the caller's durable key and required reviewers. These arguments include
   `method: "squash"`.
+
+`operation: "resolve_pull_merge"` accepts the same method plus explicit conflict
+choices and merge base. It constructs and natively inspects the resolved bundle
+in one request, then returns all three argument objects with the same separation
+between inspection, review and publication. Its inspection template also retains
+the original inspection limits.
 
 The inspector returns the verified parent list and a matching publication
 template. An explicit squash assertion remains squash when its candidate
@@ -178,14 +222,20 @@ key. Editing the selection cannot change an already staged request. A terminal
 receipt that contradicts its method leaves the outcome uncertain and retains
 the original request for recovery or exact retry.
 
-The existing explicit conflict resolver constructs two-parent commits. For a
-conflicted squash, the browser directs the author to resolve the source branch
-and prepare again; it does not enable that resolver for squash.
+For a conflicted squash, the browser enables the existing per-path resolution
+editor. The client fixes the original subject, base, metadata and selected
+method before reading file bytes. It verifies the returned method and every
+resolution's exact path, side, mode and content identity, then requires native
+inspection of the one-target-parent candidate. Changing the method cancels an
+in-flight candidate selection. A resolved candidate still needs a separate
+review and a newly confirmed publication request.
 
 See the [HTTP preparation API](HTTP_CANDIDATE_PREPARATION_API.md),
 [HTTP reviewed merge API](HTTP_REVIEW_MERGE_API.md),
-[MCP candidate API](MCP_PULL_CANDIDATES.md) and
-[MCP inspection API](MCP_PULL_INSPECTION.md) for complete field and grant rules.
+[MCP candidate API](MCP_PULL_CANDIDATES.md),
+[MCP inspection API](MCP_PULL_INSPECTION.md),
+[HTTP conflict resolution](HTTP_CONFLICT_RESOLUTION_API.md) and
+[MCP conflict resolution](MCP_PULL_RESOLUTION.md) for complete field and grant rules.
 
 ## Native API surface and current limits
 
@@ -194,6 +244,9 @@ The method-aware entry points are:
 - `prepare_merge_with_options(..., profile, style)` in `fgit-forge`;
 - `OneNode::prepare_merge_bundle_with_options_in(..., profile, style)`;
 - `OneNode::prepare_pull_request_bundle_with_options_in(..., profile, style)`;
+- `prepare_resolved_merge_with_style(..., limits, style)` in `fgit-forge`;
+- `OneNode::prepare_resolved_merge_bundle_with_style_in(..., limits, style)`;
+- `OneNode::prepare_resolved_pull_request_bundle_with_style_in(..., limits, style)`;
 - `OneNode::apply_merge_bundle_with_method_durable_in(..., method)`;
 - `OneNode::apply_reviewed_merge_bundle_with_method_durable_in(..., method)`.
 
@@ -203,20 +256,32 @@ projections must explicitly implement the squash validation hook; the default
 refuses publication.
 
 Automatic squash uses the existing bounded merge rules and conflict behavior.
-The explicit conflict-resolution constructor retains its two-parent contract.
+Explicit conflict resolution supports both styles under PathMergeV1, including
+manual binary content and whole-side choices. Its original entry points retain
+their default two-parent contract through wrappers.
 A squash candidate never claims Git `ort` equivalence or execution of project
 tests.
 
 Regression source covers both hash formats, native bytes, method separation,
 source-only closure validation, combined budgets, cancellation, atomic
-publication, stale tips/versions, exact reviews, retry and restart. Cargo
-validation for this change was blocked by a full shared filesystem before
-first-party compilation; the execution service subsequently disconnected.
-The added Rust tests are not reported as executed. The full Node browser suite
-also requires execution on a working host. Focused checks of the actual browser
-core, candidate and action module source ran in V8, with only missing UTF-8 and
-form-encoding platform APIs supplied by the harness; these checks do not cover
-WebCrypto, browser rendering, network transport or native admission.
+publication, stale tips/versions, exact reviews, retry and restart. Resolved
+squash regressions add all conflict choices, exact byte/parent receipts, shared
+resolution budgets, an empty target diff, and the HTTP/MCP review-to-publication
+lifecycle. Test source alone does not establish a native execution pass.
+
+The focused browser suite uses the actual client modules and WebCrypto with
+controlled DOM/HTTP fixtures:
+
+```sh
+node --test --test-concurrency=1 \
+  tests/browser/pulls-squash.test.mjs \
+  tests/browser/pulls-resolution.test.mjs \
+  tests/browser/pulls-resolution-view.test.mjs
+```
+
+It covers method preservation, exact resolution choices, substituted response
+refusals, file-read cancellation and separate publication confirmation. This
+client suite does not establish live server or native admission behavior.
 
 See [native preparation](NATIVE_MERGE_PREPARATION.md),
 [bundle publication](MERGE_BUNDLE_COMMAND.md), and the

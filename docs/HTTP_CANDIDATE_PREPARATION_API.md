@@ -67,8 +67,10 @@ target/source parents; a squash commit records only the exact target parent and
 keeps the merged tree. `profile` accepts `path-merge-v1` (the default) or
 `exact-renames-v1`. Either tree profile supports either method. Unknown methods,
 empty values and duplicate selectors are refused. Neither method silently
-becomes a fast-forward. The separate `/resolve` endpoint remains two-parent and
-rejects `method` and `profile` fields.
+becomes a fast-forward. The separate `/resolve` endpoint accepts the same
+optional `method` and retains the existing `PathMergeV1` conflict oracle;
+resolution still rejects a `profile` override. See
+[explicit conflict resolution](HTTP_CONFLICT_RESOLUTION_API.md).
 
 Obtain the PR version and coordinates from the PR read API. The existing
 `GET .../pulls/{number}/reviews` response supplies the current `policy_epoch`
@@ -245,9 +247,10 @@ Multipart delimiters are bounded, deterministic and checked for collision with
 both parts, with cancellation checkpoints during scanning.
 
 This does not implement rename heuristics, external attribute drivers,
-cross-repository PRs, remote conflict resolution, disk-spooled candidates, or
-indefinitely retained preparation sessions. It reuses the existing deterministic
-PathMergeV1 construction and typed unsupported/error behavior.
+cross-repository PRs, disk-spooled candidates, or indefinitely retained
+preparation sessions. Remote explicit PathMergeV1 conflict resolution uses the
+separate `/resolve` endpoint. Construction retains the selected bounded native
+tree profile and typed unsupported/error behavior.
 
 Focused checks:
 

@@ -137,73 +137,101 @@ fn resolution_and_nested_inspection_never_reset_the_request_or_infer_read_grants
 #[test]
 fn resolved_candidate_crosses_independent_review_and_merge_grants_then_recovers_after_reopen() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let mut f = Fixture::new(format, true);
-        let before = f.head();
-        let args = arguments(&f, file(b"resolved\n"));
-        let result = f.call(NAME, &args).unwrap();
-        let result = result.object().unwrap();
-        let mut publication = result["candidate_arguments"].object().unwrap().clone();
-        let candidate = oid(&publication, "candidate_commit", format).unwrap();
-        let mut review = publication.clone();
-        review.insert("idempotency_key".into(), text("review-resolved"));
-        review.insert("review_version".into(), text("0"));
-        review.insert("decision".into(), text("approve"));
-        assert_eq!(f.call(reviews::NAME, &review).unwrap_err().code, "tool_not_granted");
-        publication.insert("required_reviewers".into(), Value::Array(vec![text(hex(actor(2).as_bytes()))]));
-        publication.insert("idempotency_key".into(), text("unapproved-merge"));
-        assert_eq!(f.call("frankengit_pull_merge_reviewed", &publication).unwrap_err().code, "tool_not_granted");
-        assert_eq!(f.head(), before);
+        for method in ["merge-commit", "squash"] {
+            let mut f = Fixture::new(format, true);
+            let before = f.head();
+            let mut args = arguments(&f, file(b"resolved\n"));
+            args.insert("method".into(), text(method));
+            let result = f.call(NAME, &args).unwrap();
+            let result = result.object().unwrap();
+            assert_eq!(result["method"].text(), Some(method));
+            let parents = if method == "squash" {
+                vec![text(raw_oid(f.subject.target_tip))]
+            } else {
+                vec![text(raw_oid(f.subject.target_tip)), text(raw_oid(f.subject.source_tip))]
+            };
+            assert_eq!(result["parents"], Value::Array(parents.clone()));
+            let inspect_args = result["inspection_arguments"].object().unwrap().clone();
+            assert_eq!(inspect_args["method"].text(), Some(method));
+            assert_eq!(inspect_args["expected_head"], result["snapshot_token"]);
+            let inspected = f.call(NAME, &inspect_args).unwrap();
+            let inspected = inspected.object().unwrap();
+            for field in ["method", "parents", "candidate_commit_body_hex", "candidate_arguments", "publication_arguments"] {
+                assert_eq!(inspected[field], result[field]);
+            }
+            let mut publication = result["publication_arguments"].object().unwrap().clone();
+            assert_eq!(publication["method"].text(), Some(method));
+            let candidate = oid(&publication, "candidate_commit", format).unwrap();
+            let mut review = result["candidate_arguments"].object().unwrap().clone();
+            assert!(!review.contains_key("method"));
+            assert!(f.backend().node.read_git_object(candidate).is_err());
+            review.insert("idempotency_key".into(), text("review-resolved"));
+            review.insert("review_version".into(), text("0"));
+            review.insert("decision".into(), text("approve"));
+            assert_eq!(f.call(reviews::NAME, &review).unwrap_err().code, "tool_not_granted");
+            publication.insert("required_reviewers".into(), Value::Array(vec![text(hex(actor(2).as_bytes()))]));
+            publication.insert("idempotency_key".into(), text("unapproved-merge"));
+            assert_eq!(f.call("frankengit_pull_merge_reviewed", &publication).unwrap_err().code, "tool_not_granted");
+            assert_eq!(f.head(), before);
 
-        // A distinct launch identity owns merge authority, not the resolver.
-        let mut merger = f.options();
-        merger.source = false; merger.pulls = false;
-        merger.writes.merges = true; merger.principal = Some(actor(3));
-        f.reopen(merger.clone());
-        let unapproved = f.call("frankengit_pull_merge_reviewed", &publication);
-        if let Ok(value) = unapproved {
-            assert_ne!(value.object().unwrap()["outcome"].text(), Some("committed"));
+            // A distinct launch identity owns merge authority, not the resolver.
+            let mut merger = f.options();
+            merger.source = false; merger.pulls = false;
+            merger.writes.merges = true; merger.principal = Some(actor(3));
+            f.reopen(merger.clone());
+            let unapproved = f.call("frankengit_pull_merge_reviewed", &publication);
+            if let Ok(value) = unapproved {
+                assert_ne!(value.object().unwrap()["outcome"].text(), Some("committed"));
+            }
+            assert_eq!(tips(&f), (f.subject.target_tip, f.subject.source_tip));
+
+            // Neither the PR opener (1) nor merge submitter (3) supplies the vote.
+            let mut reviewer = merger.clone();
+            reviewer.writes = Default::default(); reviewer.writes.reviews = true;
+            reviewer.principal = Some(actor(2));
+            f.reopen(reviewer);
+            let approved = f.call(reviews::NAME, &review).unwrap();
+            assert_eq!(approved.object().unwrap()["outcome"].text(), Some("committed"));
+            let after_review = f.head();
+            assert_ne!(after_review, before);
+            assert_eq!(f.call(reviews::NAME, &review).unwrap(), approved);
+            assert_eq!(f.head(), after_review);
+            assert_eq!(tips(&f), (f.subject.target_tip, f.subject.source_tip));
+
+            f.reopen(merger.clone());
+            // This is a NEW post-approval operation, not a retry of the refused key.
+            publication.insert("idempotency_key".into(), text("approved-resolved-merge"));
+            let response = f.protocol_call("frankengit_pull_merge_reviewed", publication.clone());
+            let committed = content(&response);
+            assert_eq!(committed["outcome"].text(), Some("committed"));
+            assert_eq!(committed["method"].text(), Some(method));
+            assert_eq!(committed["coupled_pr_and_ref"], Value::Bool(true));
+            let after = f.head();
+            assert_eq!(tips(&f), (candidate, f.subject.source_tip));
+            let stored = f.backend().node.read_git_object(candidate).unwrap();
+            assert_eq!(git_object_id(format, GitObjectKind::Commit, stored.payload()), candidate);
+            let body = std::str::from_utf8(stored.payload()).unwrap();
+            let actual_parents = body.lines().filter_map(|line| line.strip_prefix("parent "))
+                .map(text).collect::<Vec<_>>();
+            assert_eq!(actual_parents, parents);
+            assert_eq!(f.call("frankengit_pull_merge_reviewed", &publication).unwrap().object().unwrap(), committed);
+            assert_eq!(f.head(), after);
+            f.reopen(merger.clone());
+            assert_eq!(f.call("frankengit_pull_merge_reviewed", &publication).unwrap().object().unwrap(), committed);
+            assert_eq!(f.head(), after);
+
+            let mut reader = merger;
+            reader.writes = Default::default(); reader.principal = None;
+            reader.source = true; reader.pulls = true;
+            f.reopen(reader);
+            for (path, expected) in [(b"README".as_slice(), b"resolved\n".as_slice()), (b"sibling", b"unchanged\n")] {
+                let blob = f.call("frankengit_source_blob", &fields([
+                    ("reference", text("refs/heads/main")), ("path_hex", text(hex(path))),
+                ])).unwrap();
+                assert_eq!(blob.object().unwrap()["bytes_hex"].text(), Some(hex(expected).as_str()));
+            }
+            assert!(f.call(NAME, &args).is_err(), "merged PRs and old pins cannot refresh themselves");
+            assert_eq!(f.head(), after);
         }
-        assert_eq!(tips(&f), (f.subject.target_tip, f.subject.source_tip));
-
-        // Neither the PR opener (1) nor merge submitter (3) supplies the vote.
-        let mut reviewer = merger.clone();
-        reviewer.writes = Default::default(); reviewer.writes.reviews = true;
-        reviewer.principal = Some(actor(2));
-        f.reopen(reviewer);
-        let approved = f.call(reviews::NAME, &review).unwrap();
-        assert_eq!(approved.object().unwrap()["outcome"].text(), Some("committed"));
-        let after_review = f.head();
-        assert_ne!(after_review, before);
-        assert_eq!(f.call(reviews::NAME, &review).unwrap(), approved);
-        assert_eq!(f.head(), after_review);
-        assert_eq!(tips(&f), (f.subject.target_tip, f.subject.source_tip));
-
-        f.reopen(merger.clone());
-        // This is a NEW post-approval operation, not a retry of the refused key.
-        publication.insert("idempotency_key".into(), text("approved-resolved-merge"));
-        let response = f.protocol_call("frankengit_pull_merge_reviewed", publication.clone());
-        let committed = content(&response);
-        assert_eq!(committed["outcome"].text(), Some("committed"));
-        assert_eq!(committed["coupled_pr_and_ref"], Value::Bool(true));
-        let after = f.head();
-        assert_eq!(tips(&f), (candidate, f.subject.source_tip));
-        assert_eq!(f.call("frankengit_pull_merge_reviewed", &publication).unwrap().object().unwrap(), committed);
-        assert_eq!(f.head(), after);
-        f.reopen(merger.clone());
-        assert_eq!(f.call("frankengit_pull_merge_reviewed", &publication).unwrap().object().unwrap(), committed);
-        assert_eq!(f.head(), after);
-
-        let mut reader = merger;
-        reader.writes = Default::default(); reader.principal = None;
-        reader.source = true; reader.pulls = true;
-        f.reopen(reader);
-        for (path, expected) in [(b"README".as_slice(), b"resolved\n".as_slice()), (b"sibling", b"unchanged\n")] {
-            let blob = f.call("frankengit_source_blob", &fields([
-                ("reference", text("refs/heads/main")), ("path_hex", text(hex(path))),
-            ])).unwrap();
-            assert_eq!(blob.object().unwrap()["bytes_hex"].text(), Some(hex(expected).as_str()));
-        }
-        assert!(f.call(NAME, &args).is_err(), "merged PRs and old pins cannot refresh themselves");
-        assert_eq!(f.head(), after);
     }
 }

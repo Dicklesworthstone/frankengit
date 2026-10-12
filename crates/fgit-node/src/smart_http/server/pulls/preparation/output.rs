@@ -193,6 +193,7 @@ pub(super) fn build_resolved(
     subject: &ReviewSubject,
     resolved: ResolvedMerge,
     bundle: Vec<u8>,
+    style: MergeCommitStyle,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
@@ -205,7 +206,7 @@ pub(super) fn build_resolved(
         Some(bundle),
         Some(&resolutions),
         MergeProfile::PathMergeV1,
-        MergeCommitStyle::TwoParent,
+        style,
         maximum,
         live,
     )
@@ -232,7 +233,6 @@ fn build_inner(
     }
     if resolutions.is_some()
         && (profile != MergeProfile::PathMergeV1
-            || style != MergeCommitStyle::TwoParent
             || !matches!(outcome, MergePreparation::Clean(_)))
     {
         return Err(ApiError::unavailable());

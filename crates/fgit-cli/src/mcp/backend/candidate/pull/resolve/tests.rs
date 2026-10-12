@@ -118,6 +118,11 @@ fn discovery_advertises_exact_conflicts_and_explicit_empty_regular_files() {
     assert_eq!(body["additionalProperties"], Value::Bool(false));
     let properties = body["properties"].object().unwrap();
     assert_eq!(properties["operation"].object().unwrap()["const"].text(), Some(RESOLVE));
+    let method = properties["method"].object().unwrap();
+    assert_eq!(method["enum"], Value::Array(vec![text("merge-commit"), text("squash")]));
+    assert_eq!(method["default"].text(), Some("merge-commit"));
+    let Value::Array(required_method) = &body["required"] else { unreachable!() };
+    assert!(!required_method.contains(&text("method")));
     let Value::Array(required) = &body["required"] else { unreachable!() };
     for name in ["merge_base", "resolutions", "author", "committer", "timestamp", "message_hex"] {
         assert!(required.contains(&text(name)));
@@ -162,4 +167,37 @@ fn receipts_require_the_exact_set_and_matching_side_or_verified_file_bytes() {
         observed.conflict.path = b"undeclared".to_vec();
         assert!(receipts(format, &[requested], &[observed]).is_err());
     }
+}
+
+#[test]
+fn resolution_method_is_closed_optional_and_preserves_the_exact_subject() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let original = args(format, vec![side(b"a", "ours")]);
+        let baseline = input::parse(&original, format).unwrap();
+        assert_eq!(baseline.style, MergeCommitStyle::TwoParent);
+        for (method, style) in [
+            ("merge-commit", MergeCommitStyle::TwoParent),
+            ("squash", MergeCommitStyle::Squash),
+        ] {
+            let mut query = original.clone();
+            query.insert("method".into(), text(method));
+            let parsed = input::parse(&query, format).unwrap();
+            assert_eq!(parsed.style, style);
+            assert_eq!(parsed.selection.subject, baseline.selection.subject);
+            assert_eq!(parsed.base, baseline.base);
+            assert_eq!(parsed.metadata, baseline.metadata);
+            assert_eq!(parsed.resolutions, baseline.resolutions);
+        }
+        for method in ["", "Squash", "squash/v1", "fast-forward-only", "rebase", "merge-commit+"] {
+            let mut query = original.clone();
+            query.insert("method".into(), text(method));
+            assert_eq!(input::parse(&query, format).err().unwrap().code, "invalid_merge_method");
+        }
+        for value in [Value::Null, Value::Bool(true), json::number(1), Value::Array(vec![])] {
+            let mut query = original.clone();
+            query.insert("method".into(), value);
+            assert!(input::parse(&query, format).is_err());
+        }
+    }
+    assert!(json::parse(br#"{"method":"merge-commit","method":"squash"}"#).is_err());
 }

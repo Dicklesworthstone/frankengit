@@ -90,7 +90,7 @@
       <label>Or import a shared candidate receipt (up to 24 MiB) <input id="candidate-import-file" type="file" accept="application/json,.json" required></label>
       <button type="submit">Reinspect imported candidate — read only</button>
     </form>
-    <p>Browser candidate bundles are capped at 16 MiB. Merge-commit conflicts offer explicit per-path resolution below. Resolve squash conflicts on the source branch, then prepare and inspect the updated PR again.</p>
+    <p>Browser candidate bundles are capped at 16 MiB. Merge-commit and squash conflicts offer explicit per-path resolution below. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
     <button id="candidate-download" type="button">Download candidate receipt</button>
     <button id="inspection-download" type="button">Download full inspection JSON</button>
     <div id="candidate"></div>
@@ -144,3 +144,4 @@
 <footer>One repository authority. Separate observation, intent, publication, and delivery acknowledgement.</footer>
 </body>
 </html>
+

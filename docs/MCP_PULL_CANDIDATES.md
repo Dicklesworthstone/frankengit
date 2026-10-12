@@ -28,7 +28,10 @@ profile executes hooks, attributes or external merge drivers.
 first records the ordered target/source parents; squash records exactly the
 target parent and keeps the merged tree. Empty, unknown or duplicate methods
 are rejected. Neither choice falls back to a fast-forward. Explicit conflict
-resolution remains two-parent and rejects a method selector.
+resolution accepts the same selector while retaining the PathMergeV1 conflict
+oracle. Carry the selected method into
+[`resolve_pull_merge`](MCP_PULL_RESOLUTION.md); its exact choices do not select
+a different merge profile.
 
 The native PR selector validates the open PR, recorded version, policy epoch,
 branch pair and exact tips, and fences source construction to the same head.

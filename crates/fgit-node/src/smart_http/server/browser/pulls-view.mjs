@@ -145,7 +145,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['comment-body'].disabled = !canComment || busy;
     if (fastForward) fastForward.button.disabled = !connected || busy || Boolean(pending) ||
       !fastForward.available || selected?.row !== fastForward.row || Boolean(selected?.stale);
-    const resolving = Boolean(client.conflict) && client.conflict.method !== 'squash';
+    const resolving = Boolean(client.conflict);
     nodes.resolution.hidden = !resolving;
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
     resolution.setDisabled(!connected || busy || !resolving);
@@ -441,11 +441,9 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     } else {
       item(doc, nodes.candidate, 'h3', `Preparation: ${result.metadata.state}`);
       for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
-      if (result.metadata.state === 'conflicted' && result.metadata.method === 'squash') {
-        status('Squash has conflicts. Update the source branch to resolve them, reload this PR, and prepare a new squash for inspection.');
-      } else if (result.metadata.state === 'conflicted') {
+      if (result.metadata.state === 'conflicted') {
         resolution.show(result.metadata);
-        status('Choose every conflict explicitly below. Resolution constructs and inspects a new candidate; it does not record approval or publish.');
+        status(`Choose every conflict explicitly below. Resolution constructs and inspects a new ${result.metadata.method === 'squash' ? 'squash' : 'merge'} candidate; it does not record approval or publish.`);
       } else status('Already up to date. No candidate, transaction or approval was produced.');
     }
   }));
@@ -504,3 +502,4 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
 }
 if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) mountPulls(document);
+
