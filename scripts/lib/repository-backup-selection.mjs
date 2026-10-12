@@ -40,7 +40,7 @@ const REPLICA_UNAVAILABLE = new Set([
   'backup_file_size_or_type', 'backup_file_changed', 'backup_artifact_mismatch',
 ]);
 
-async function readCheckpointReplicas(highest, statement, live) {
+async function readCheckpointReplicas(highest, statement, live, payloadBudget) {
   const expectedBytes = Number(statement.artifact.bytes), attempts = [];
   let totalBytes = 0, totalReads = 0, firstFailure;
   const explain = error => {
@@ -51,11 +51,11 @@ async function readCheckpointReplicas(highest, statement, live) {
   };
   for (const [index, candidate] of highest.entries()) {
     live.check(); candidate.verified.checkCurrent();
-    // maximumBytes bounds both a single archive and all streamed replica bytes.
+    // The aggregate replica budget is separate from the per-archive ceiling.
     // Do not begin a copy that cannot finish inside the remaining shared budget.
     // Control-file reads and the scanner's bounded one-byte EOF probes are not
     // part of this payload counter. No retry resets the absolute time budget.
-    if (expectedBytes > live.maximumBytes - totalBytes) {
+    if (expectedBytes > payloadBudget - totalBytes) {
       const error = backupError('backup_replica_read_budget');
       error.cause = firstFailure;
       throw explain(error);
@@ -105,12 +105,19 @@ async function readCheckpointReplicas(highest, statement, live) {
  * external namespace. Compare full u64 generations BEFORE testing winner expiry,
  * floor, size or availability. Never substitute a lower generation after failure.
  * Missing/corrupt copies may fail over only within that exact signed statement,
- * in canonical path order and within one shared maximumBytes/time budget.
+ * in canonical path order and within one shared read/time budget. maximumBytes
+ * always caps a single archive; optional maximumReplicaBytes caps aggregate
+ * replica reads (default: maximumBytes, preserving the existing strict bound).
  * Returned paths are not pinned handles; downstream consumers must reauthenticate
  * and enforce `checkpoint`, and still perform native archive/authority checks.
  */
 export async function selectRepositoryBackup(candidates, trustKey, expected, options = {}) {
-  const live = backupLifetime(options), rows = repositoryBackupCandidates(candidates);
+  if (!options || typeof options !== 'object' || Array.isArray(options)) fail('backup_invalid_options');
+  const { maximumReplicaBytes, ...lifetimeOptions } = options;
+  const live = backupLifetime(lifetimeOptions), rows = repositoryBackupCandidates(candidates);
+  const payloadBudget = maximumReplicaBytes ?? live.maximumBytes;
+  if (!Number.isSafeInteger(payloadBudget) || payloadBudget < 1
+    || payloadBudget > BACKUP_LIMITS.maximumArchiveBytes * MAX_BACKUP_CANDIDATES) fail('backup_invalid_options');
   const policy = backupPolicy(expected), keyPath = resolve(backupPath(trustKey));
   const fixed = options.now; // Capture a testing clock, never learn time from input.
   const key = await readBackupControl(keyPath, BACKUP_LIMITS.keyBytes, live);
@@ -148,7 +155,7 @@ export async function selectRepositoryBackup(candidates, trustKey, expected, opt
   // First choose the signed checkpoint, then its available byte replica. Lower
   // artifacts are NEVER opened. Successful hashing is not native verification;
   // the consumer must reauthenticate the selected replica's own approval pin.
-  const replica = await readCheckpointReplicas(highest, statement, live);
+  const replica = await readCheckpointReplicas(highest, statement, live, payloadBudget);
   winner = replica.winner;
   const { authentication, artifact } = replica, selected = winner.observation;
   const checkpoint = Object.freeze({ approval_sha256: selected.approval_sha256, trusted_key_id: authentication.trusted_key_id });
@@ -161,6 +168,6 @@ export async function selectRepositoryBackup(candidates, trustKey, expected, opt
     native_content_verified: false, newest_checkpoint_verified: false, candidate_set_completeness_verified: false,
     streaming: Object.freeze({ read_calls: artifact.read_calls, maximum_read_bytes: artifact.maximum_read_bytes,
       total_payload_bytes_read: String(replica.totalBytes), total_payload_read_calls: replica.totalReads,
-      replica_payload_byte_budget: String(live.maximumBytes) }) });
+      replica_payload_byte_budget: String(payloadBudget) }) });
   return Object.freeze({ report, checkCurrent() { live.check(); winner.verified.checkCurrent(); } });
 }
