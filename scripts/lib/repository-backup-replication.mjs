@@ -6,7 +6,7 @@ import { open, lstat, realpath, link, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { BACKUP_LIMITS, backupError, backupLifetime, backupPath, readBackupControl,
-  publishBackupControl } from './repository-backup-io.mjs';
+  publishBackupControl, exact } from './repository-backup-io.mjs';
 import { backupPolicy, verifyRepositoryBackupApproval } from './repository-backup-approval.mjs';
 import { repositoryBackupCandidates, selectRepositoryBackup } from './repository-backup-selection.mjs';
 
@@ -17,11 +17,22 @@ const sameFile = (a, b) => fields.every(key => a[key] === b[key]);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = code => { throw backupError(code); };
 
+// A pin restricts the selected intent; it is never a substitute for signature,
+// independent trust, freshness, artifact or destination verification.
+export function repositoryBackupReplicationCheckpoint(value) {
+  if (value === undefined) return undefined;
+  if (!exact(value, ['approval_sha256', 'trusted_key_id'])
+    || typeof value.approval_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.approval_sha256)
+    || typeof value.trusted_key_id !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value.trusted_key_id)) fail('backup_replication_invalid_checkpoint');
+  return Object.freeze({ approval_sha256: value.approval_sha256, trusted_key_id: value.trusted_key_id });
+}
+
 export function repositoryBackupReplicationOptions(value) {
   const keys = ['candidates', 'trustKey', 'policy', 'destination', 'maximumBytes',
-    'maximumTotalBytes', 'timeoutMs', 'signal', 'onProgress', 'now'];
+    'maximumTotalBytes', 'timeoutMs', 'signal', 'onProgress', 'now', 'checkpoint'];
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !keys.includes(key))) fail('backup_invalid_replication_options');
+  const checkpoint = repositoryBackupReplicationCheckpoint(value.checkpoint);
   const candidates = repositoryBackupCandidates(value.candidates), policy = backupPolicy(value.policy);
   const trustKey = resolve(backupPath(value.trustKey)), destination = resolve(backupPath(value.destination));
   backupPath(trustKey); backupPath(destination);
@@ -32,7 +43,7 @@ export function repositoryBackupReplicationOptions(value) {
   const maximumTotalBytes = value.maximumTotalBytes ?? live.maximumBytes * 4;
   if (!Number.isSafeInteger(maximumTotalBytes) || maximumTotalBytes < 1
     || maximumTotalBytes > BACKUP_LIMITS.maximumArchiveBytes * 4) fail('backup_replication_read_limit');
-  return Object.freeze({ candidates, policy, trustKey, destination,
+  return Object.freeze({ candidates, policy, trustKey, destination, checkpoint,
     maximumBytes: live.maximumBytes, maximumTotalBytes, timeoutMs: value.timeoutMs,
     signal: live.signal, onProgress: live.onProgress, now: value.now });
 }
@@ -57,8 +68,11 @@ export async function replicateRepositoryBackup(raw) {
     if (bytes > options.maximumTotalBytes - totalBytes) fail('backup_replication_read_budget');
   };
   const charge = bytes => { budget(bytes); totalBytes += bytes; readCalls++; };
+  const accounting = () => Object.freeze({ total_payload_bytes_read: String(totalBytes), read_calls: readCalls,
+    maximum_read_bytes: CHUNK, total_payload_byte_budget: String(options.maximumTotalBytes) });
   const progress = async (phase, details = {}) => {
-    await options.onProgress(Object.freeze({ phase, ...details, publication_state: state }));
+    await options.onProgress(Object.freeze({ phase, ...details, publication_state: state,
+      total_payload_bytes_read: String(totalBytes) }));
     gate();
   };
   function privateDirectory(stat) {
@@ -157,6 +171,8 @@ export async function replicateRepositoryBackup(raw) {
         await progress('selection', event);
       },
     });
+    if (options.checkpoint && (options.checkpoint.approval_sha256 !== selected.report.checkpoint.approval_sha256
+      || options.checkpoint.trusted_key_id !== selected.report.checkpoint.trusted_key_id)) fail('backup_replication_checkpoint_mismatch');
     await progress('selection_complete');
     // Reopen control paths only with the exact selected approval/key pins.
     // A different valid signature, key, or formatting cannot substitute intent.
@@ -255,13 +271,12 @@ export async function replicateRepositoryBackup(raw) {
       disposition: Object.freeze({ archive: archiveDisposition, approval: approvalDisposition }),
       archive_readback_verified: true, body_before_approval: true, files_and_directory_synced: true,
       native_content_verified: false, newest_checkpoint_verified: false, complete_capsule_verified: false,
-      streaming: Object.freeze({ total_payload_bytes_read: String(totalBytes), read_calls: readCalls,
-        maximum_read_bytes: CHUNK, total_payload_byte_budget: String(options.maximumTotalBytes) }) });
+      streaming: accounting() });
     return completed;
   } catch (caught) {
     failure = caught instanceof Error ? caught : backupError('backup_replication_observer_failed');
     failure.publication_state = state; failure.replica = candidate ?? null;
-    failure.selection = selected?.report ?? null;
+    failure.selection = selected?.report ?? null; failure.streaming = accounting();
     throw failure;
   } finally {
     let cleanup;
@@ -274,7 +289,7 @@ export async function replicateRepositoryBackup(raw) {
         failure.cleanup_error = 'backup_replication_cleanup_failed'; failure.retained_temporary = temporaryIdentity ? temporary : null;
       } else {
         cleanup.publication_state = state; cleanup.replica = candidate ?? null;
-        cleanup.completed_result = completed; throw cleanup;
+        cleanup.completed_result = completed; cleanup.streaming = accounting(); throw cleanup;
       }
     }
   }
