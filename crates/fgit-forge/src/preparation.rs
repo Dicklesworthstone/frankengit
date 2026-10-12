@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_diff::{
-    CommitGraph, ContentMergeError, ContentMergeOptions, ContentMergeOutcome, MergeBaseError,
-    MergeBaseLimits, MergeBaseResult, MergeCancellation, ParentSet, merge_bases_all,
-    merge_content_with_cancellation,
+    AncestryQueryScratch, CommitAncestryIndex, CommitGraph, ContentMergeError, ContentMergeOptions,
+    ContentMergeOutcome, MergeBaseError, MergeBaseLimits, MergeBaseQueryResult, MergeBaseResult,
+    MergeCancellation, ParentSet, merge_content_with_cancellation,
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
@@ -277,6 +277,34 @@ impl<S: MergeObjectSource> CommitGraph for Graph<'_, S> {
     }
 }
 
+/// Build one exact, request-owned parent snapshot from the selected source.
+/// The immutable index is discarded with this call: no prior source selection
+/// can make missing objects, a narrowed budget or cancellation disappear.
+/// Automatic preparation, explicit resolution and review share this graph
+/// boundary, while object disclosure and eventual publication remain owned by
+/// the caller's source and admission path respectively.
+pub(crate) fn source_merge_bases<S: MergeObjectSource>(
+    source: &S,
+    format: GitHashAlgorithm,
+    left: GitOid,
+    right: GitOid,
+    limits: MergeBaseLimits,
+) -> MergeBaseQueryResult<GitOid, MergeSourceError> {
+    let index = CommitAncestryIndex::build_with_checkpoints(
+        &Graph { source, format },
+        [left, right],
+        limits,
+        || source.checkpoint(),
+    )?;
+    index.merge_bases_all(
+        &left,
+        &right,
+        &mut AncestryQueryScratch::default(),
+        limits,
+        || source.checkpoint(),
+    )
+}
+
 struct Cancellation<'a, S>(&'a S);
 impl<S: MergeObjectSource> MergeCancellation for Cancellation<'_, S> {
     fn is_cancelled(&self) -> bool {
@@ -354,9 +382,9 @@ pub fn prepare_merge_with_options<S: MergeObjectSource>(
     {
         return Err(PreparationError::ObjectFormat);
     }
-    let graph = Graph { source, format };
-    let bases = merge_bases_all(
-        &graph,
+    let bases = source_merge_bases(
+        source,
+        format,
         target,
         incoming,
         MergeBaseLimits {
@@ -828,6 +856,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
 
 #[cfg(test)]
 mod tests {
+    mod ancestry;
     mod squash;
 
     use super::*;

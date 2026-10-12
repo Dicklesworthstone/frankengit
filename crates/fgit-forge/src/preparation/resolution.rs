@@ -3,10 +3,10 @@
 //! User choices replace only reproduced conflicts, never clean paths or refs.
 
 use super::{
-    BTreeMap, GitHashAlgorithm, GitObjectKind, GitOid, Graph, MergeBaseLimits, MergeBaseResult,
+    BTreeMap, GitHashAlgorithm, GitObjectKind, GitOid, MergeBaseLimits, MergeBaseResult,
     MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource, MergeSourceError, Planner,
     PreparationError, PreparationLimits, PreparedMerge, finish_merge, git_object_id,
-    merge_bases_all,
+    source_merge_bases,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,9 +205,9 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
     validate_resolutions(resolutions, limits)?;
     metadata.validate()?;
     source.checkpoint()?;
-    let graph = Graph { source, format };
-    let bases = merge_bases_all(
-        &graph,
+    let bases = source_merge_bases(
+        source,
+        format,
         inputs.target,
         inputs.source,
         MergeBaseLimits {
