@@ -18,9 +18,10 @@ const overlaps = (a, b) => a === b || a.startsWith(b + sep) || b.startsWith(a + 
 
 export function repositoryBackupReplenishmentOptions(value) {
   const keys = ['candidates', 'destinations', 'trustKey', 'policy', 'checkpoint',
-    'maximumBytes', 'maximumTotalBytes', 'timeoutMs', 'signal', 'onProgress', 'now'];
+    'maximumBytes', 'maximumTotalBytes', 'timeoutMs', 'signal', 'onProgress', 'now', 'sourceHandoff'];
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !keys.includes(key))) fail('backup_invalid_replenishment_options');
+  if (value.sourceHandoff !== undefined && typeof value.sourceHandoff !== 'boolean') fail('backup_invalid_replenishment_options');
   const candidates = repositoryBackupCandidates(value.candidates), policy = backupPolicy(value.policy);
   const checkpoint = repositoryBackupReplicationCheckpoint(value.checkpoint);
   const trustKey = resolve(backupPath(value.trustKey)); backupPath(trustKey);
@@ -33,7 +34,7 @@ export function repositoryBackupReplenishmentOptions(value) {
   const maximumTotalBytes = value.maximumTotalBytes ?? live.maximumBytes * (1 + 4 * destinations.length);
   if (!Number.isSafeInteger(maximumTotalBytes) || maximumTotalBytes < 1
     || maximumTotalBytes > MAX_REPLENISHMENT_READ_BYTES) fail('backup_replenishment_read_limit');
-  return Object.freeze({ candidates, destinations: Object.freeze(destinations), policy, checkpoint,
+  return Object.freeze({ candidates, destinations: Object.freeze(destinations), policy, checkpoint, sourceHandoff: value.sourceHandoff === true,
     trustKey, maximumBytes: live.maximumBytes, maximumTotalBytes, timeoutMs: value.timeoutMs,
     signal: live.signal, onProgress: live.onProgress, now: value.now });
 }
@@ -52,7 +53,7 @@ export async function replenishRepositoryBackups(raw, witness = null) {
     signal: options.signal, now: options.now });
   const targets = [], replicas = [];
   let selected, checkpoint = options.checkpoint ?? null, totalBytes = 0, active = null;
-  let state = 'not_started', finalScrub = null, completed = null, problem;
+  let state = 'not_started', finalScrub = null, completed = null, problem, source;
   const remaining = () => options.maximumTotalBytes - totalBytes;
   const gate = () => { live.check(); selected?.checkCurrent(); };
   const snapshot = () => Object.freeze({ type: 'repository_backup_replenishment', schema_version: 1,
@@ -81,7 +82,10 @@ export async function replenishRepositoryBackups(raw, witness = null) {
   async function checkWitnessInputs(includeSource = false) {
     if (!witness) return;
     const directory = witness.snapshot().directory, paths = [options.trustKey];
-    if (includeSource && selected) paths.push(selected.report.selected.input, selected.report.selected.approval);
+    if (includeSource && selected) {
+      const currentSource = source ?? selected.report.selected;
+      paths.push(currentSource.input, currentSource.approval);
+    }
     for (const path of paths) {
       gate();
       if (overlaps(await realpath(path), directory)) fail('backup_witness_separate_path_required');
@@ -140,7 +144,7 @@ export async function replenishRepositoryBackups(raw, witness = null) {
     if (bytes * 4 * targets.length > remaining()) fail('backup_replenishment_read_budget');
     state = 'publishing';
     await progress('replenishment', { phase: 'checkpoint_pinned', checkpoint });
-    const source = { input: selected.report.selected.input, approval: selected.report.selected.approval };
+    source = { input: selected.report.selected.input, approval: selected.report.selected.approval };
     for (const target of targets) {
       gate(); await checkTargets(); active = target.path;
       const base = totalBytes;
@@ -156,6 +160,10 @@ export async function replenishRepositoryBackups(raw, witness = null) {
         totalBytes = base + Number(receipt.streaming.total_payload_bytes_read);
         // Record confirmed completion BEFORE invoking an observer or next gate.
         replicas.push(Object.freeze({ destination: target.path, receipt }));
+        // Explicit sealed-job mode can retire dependency on a lost original.
+        // The next publisher still reauthenticates this exact envelope/key pin
+        // and every archive byte; a receipt never replaces current readback.
+        if (options.sourceHandoff) source = receipt.candidate;
       } catch (error) {
         if (error.streaming) totalBytes = base + Number(error.streaming.total_payload_bytes_read);
         if (error.completed_result) replicas.push(Object.freeze({ destination: target.path, receipt: error.completed_result }));
