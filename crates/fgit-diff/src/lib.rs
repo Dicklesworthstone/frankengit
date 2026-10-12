@@ -30,6 +30,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod ancestry;
+pub use ancestry::{AncestryQueryScratch, AncestryQueryWork, CommitAncestryIndex};
+
 /// The requested tokenization and deterministic edit-selection profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiffProfile {
@@ -1606,10 +1609,35 @@ where
     Graph: CommitGraph,
     Starts: IntoIterator<Item = Graph::CommitId>,
 {
-    let mut pending: BTreeSet<_> = starts.into_iter().collect();
+    load_graph_with_checkpoints(graph, starts, limits, &mut || Ok(()))
+}
+
+fn load_graph_with_checkpoints<Graph, Starts, Checkpoint>(
+    graph: &Graph,
+    starts: Starts,
+    limits: MergeBaseLimits,
+    checkpoint: &mut Checkpoint,
+) -> ParentSnapshotResult<Graph::CommitId, Graph::Error>
+where
+    Graph: CommitGraph,
+    Starts: IntoIterator<Item = Graph::CommitId>,
+    Checkpoint: FnMut() -> Result<(), Graph::Error>,
+{
+    checkpoint().map_err(MergeBaseError::Source)?;
+    let mut pending = BTreeSet::new();
+    for start in starts {
+        checkpoint().map_err(MergeBaseError::Source)?;
+        if !pending.contains(&start) && pending.len() >= limits.max_commits {
+            return Err(MergeBaseError::CommitLimitExceeded {
+                limit: limits.max_commits,
+            });
+        }
+        pending.insert(start);
+    }
     let mut snapshot = BTreeMap::new();
     let mut edge_count = 0_usize;
     while let Some(commit) = pending.iter().next().cloned() {
+        checkpoint().map_err(MergeBaseError::Source)?;
         pending.remove(&commit);
         if snapshot.contains_key(&commit) {
             continue;
@@ -1624,6 +1652,7 @@ where
         else {
             return Err(MergeBaseError::ShallowBoundary { commit });
         };
+        checkpoint().map_err(MergeBaseError::Source)?;
         parents.sort();
         if parents.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(MergeBaseError::DuplicateParent { commit });
@@ -1639,9 +1668,13 @@ where
                 limit: limits.max_edges,
             });
         }
-        pending.extend(parents.iter().cloned());
+        for parent in &parents {
+            checkpoint().map_err(MergeBaseError::Source)?;
+            pending.insert(parent.clone());
+        }
         snapshot.insert(commit, parents);
     }
+    checkpoint().map_err(MergeBaseError::Source)?;
     Ok(snapshot)
 }
 
