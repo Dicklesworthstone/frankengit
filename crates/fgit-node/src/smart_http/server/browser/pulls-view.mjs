@@ -112,13 +112,13 @@ async function fileText(input) {
   if (bytes.length > RECEIPT_LIMIT || bytes.length !== file.size) fail('Invalid receipt size.');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
-const IDS = ['connection', 'token', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number',
+const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load',
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
   'prepare', 'candidate-method', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
-  'candidate-import', 'candidate-import-file', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
-  'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file'];
+  'candidate-import', 'candidate-import-file', 'candidate-import-submit', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
+  'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
 
 export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImpl = globalThis.fetch,
   cryptoImpl = globalThis.crypto, downloadImpl = null } = {}) {
@@ -133,8 +133,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     el.addEventListener('click', event => { event.preventDefault(); handler(); }); parent.append(el); return el; };
   const on = (id, event, handler) => nodes[id].addEventListener(event, ev => { ev.preventDefault(); handler(); });
   function controls() {
-    const busy = Boolean(operation) || client.busy, connected = client.connected, pending = client.pending, candidate = client.candidate;
-    for (const id of ['refresh', 'new-pr', 'candidate-import-file', 'receipt-import-file']) nodes[id].disabled = !connected || busy;
+    const busy = Boolean(operation) || client.busy, recovering = client.recoveryOnly,
+      connected = client.connected && !recovering, pending = client.pending, candidate = client.candidate;
+    nodes['recovery-only'].disabled = busy;
+    nodes['original-principal'].disabled = busy || !nodes['recovery-only'].checked;
+    nodes['original-principal'].required = nodes['recovery-only'].checked;
+    nodes['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
+      ? 'RECOVERY ONLY: the selected original principal must match the authenticated outcome response. No PR reads or mutation sends are permitted. Reconnect explicitly for ordinary work.'
+      : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is submitted.';
+    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit']) nodes[id].disabled = !connected || busy;
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open' || selected.row.data.source_ref === null || selected.row.data.target_ref === null;
     nodes['reviews-load'].disabled = !connected || busy || !selected;
@@ -161,17 +168,22 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
         : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
     for (const id of ['candidate-download', 'inspection-download']) nodes[id].disabled = !candidate || busy;
+    nodes.confirm.disabled = !connected || busy || !pending;
+    if (recovering) nodes.confirm.checked = false;
     nodes.send.disabled = !connected || busy || !pending || !nodes.confirm.checked;
-    nodes.recover.disabled = !connected || busy || !pending;
-    nodes.discard.disabled = busy || !pending || pending.sent || pending.exported;
+    nodes.recover.disabled = !client.connected || busy || !pending;
+    nodes.discard.disabled = recovering || busy || !pending || pending.sent || pending.exported;
     nodes['receipt-download'].disabled = busy || !pending;
-    nodes['receipt-import-file'].disabled ||= Boolean(pending);
+    nodes['receipt-import-file'].disabled = !client.connected || busy || Boolean(pending);
+    nodes['receipt-import-submit'].disabled = nodes['receipt-import-file'].disabled;
     nodes.pending.textContent = pending ? displayText(`Prepared ${pending.action} for PR #${pending.number}\n` +
       `Key: ${pending.key}\n${pending.body_bytes} body bytes; ${pending.bundle_bytes} bundle bytes\n` +
       `Dispatch attempted: ${pending.sent}; recovery copy exported: ${pending.exported}\n` +
       `Repository: ${pending.scope.repository}; incarnation: ${pending.scope.incarnation}\n` +
       `${JSON.stringify(pending.fields, null, 2)}\n` +
-      'Only Send/Retry dispatches these exact bytes. Edits elsewhere do not change this request. An absent outcome is not proof of failure.') : 'No prepared mutation.';
+      (recovering ? 'RECOVERY ONLY: check this original key or export the unchanged receipt. This credential cannot send or retry the command. An absent outcome is not proof of failure.'
+        : 'Only Send/Retry dispatches these exact bytes. Edits elsewhere do not change this request. An absent outcome is not proof of failure.'))
+      : recovering ? 'No retained request. Import its original recovery receipt; do not construct a replacement command.' : 'No prepared mutation.';
   }
   function clearViews() {
     clearComments();
@@ -192,6 +204,9 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     controls();
   }
   async function run(kind, action) {
+    if (client.recoveryOnly && !['connect', 'recover', 'restore', 'export'].includes(kind)) {
+      status('Recovery-only connection cannot read, prepare, discard or resend mutations. Keep the original request; only outcome lookup is permitted.'); controls(); return;
+    }
     if (operation || client.busy) { status('An operation is still settling. Its exact request has not been replaced.'); return; }
     const id = ++generation; operation = { id, kind }; controls();
     const guard = () => { if (generation !== id) fail('Operation superseded.'); };
@@ -200,7 +215,9 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       if (generation === id) {
         if (!client.connected) { clearViews(); nodes.token.value = ''; }
         const uncertainty = client.pending?.sent || error.outcomeUnknown;
-        status(`${error.message || 'Operation unavailable.'}${uncertainty ? ' Outcome remains unknown unless a terminal decision was already shown. Keep the original request and recover or retry it unchanged.' : ''}`);
+        status(`${error.message || 'Operation unavailable.'}${uncertainty
+          ? client.recoveryOnly ? ' Outcome remains unknown. Keep the original receipt and use only its outcome lookup; do not resend with a replacement credential.'
+            : ' Outcome remains unknown unless a terminal decision was already shown. Keep the original request and recover or retry it unchanged.' : ''}`);
       }
     } finally { if (generation === id) { operation = null; controls(); } }
   }
@@ -371,6 +388,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     });
   }
   function renderTerminal(result) {
+    if (client.recoveryOnly) {
+      nodes.confirm.checked = false;
+      if (result.terminal) {
+        clearComments(); resolution.clear(); nodes.candidate.replaceChildren();
+        status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. ` +
+          'Recovered using the original key without reexecuting the command. External delivery acknowledgement is not established. Recovery-only mode remains active; reconnect explicitly before reading or preparing new work.');
+      } else status(`Outcome unknown (${result.state}). No request was reexecuted. Absence never proves non-commit. Keep the original receipt and check its outcome again; this credential cannot resend it.`);
+      return;
+    }
     if (result.action === 'comment') {
       nodes.confirm.checked = false;
       if (result.terminal) {
@@ -392,13 +418,21 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('connection', 'submit', () => {
     const token = nodes.token.value; nodes.token.value = '';
     if (operation || client.busy) { status('Settle the current operation or disconnect before changing credentials.'); return; }
+    const options = nodes['recovery-only'].checked
+      ? { recoveryOnly: true, originalPrincipal: nodes['original-principal'].value } : {};
     clearViews();
     void run('connect', async guard => {
-      await client.connect(token); guard(); status('Connected locally. Loading the PR API requires its independent read grant. Recovery receipts can also be restored.');
+      await client.connect(token, options); guard();
+      if (client.recoveryOnly) {
+        status('Connected locally for outcome recovery only. The server will authenticate the selected principal on lookup. Import the original receipt or check the retained request; nothing has been sent.');
+        return;
+      }
+      status('Connected locally. Loading the PR API requires its independent read grant. Recovery receipts can also be restored.');
       try { const result = await client.list(); guard(); renderList(result); }
       catch (error) { guard(); if (!client.connected) throw error; status(`Credential retained for recovery. PR listing was not available: ${error.message}`); }
     });
   });
+  nodes['recovery-only'].addEventListener('change', controls);
   on('disconnect', 'click', disconnect);
   on('refresh', 'click', () => loadList());
   on('select-pr', 'submit', () => run('read', async guard => {
@@ -415,7 +449,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status('Comment prepared locally. Review its exact body and discussion version below, then send it explicitly.');
   }));
   on('new-pr', 'click', () => {
-    if (operation || !client.connected) return;
+    if (operation || !client.connected || client.recoveryOnly) return;
     clearComments();
     invalidateCandidate(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
@@ -488,11 +522,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('discard', 'click', () => run('discard', async () => { client.discardUnsent(); nodes.confirm.checked = false; status('Never-exported, never-dispatched draft discarded.'); }));
   on('receipt-download', 'click', () => run('export', async () => {
     downloadText('frankengit-pr-recovery.json', client.exportReceipt());
-    status('Recovery receipt exported without the token. It contains private command and candidate data. Keep the original credential; this copy may be submitted elsewhere.');
+    status(client.recoveryOnly
+      ? 'Original recovery receipt exported without either token. It retains the original command, key and credential fingerprint. Keep it private; this page remains lookup-only, and the copy may still be submitted elsewhere with the original credential.'
+      : 'Recovery receipt exported without the token. It contains private command and candidate data. Keep the original credential; this copy may be submitted elsewhere.');
   }));
   on('receipt-import', 'submit', () => run('restore', async guard => {
     const serialized = await fileText(nodes['receipt-import-file']); guard(); await client.restoreReceipt(serialized); guard(); nodes.confirm.checked = false;
-    status('Exact request restored. Check its original outcome or explicitly retry the same bytes; no mutation has been sent by importing it.');
+    status(client.recoveryOnly
+      ? 'Original request restored for outcome lookup only. Its key, fingerprint and bytes are unchanged. No mutation was sent; this credential cannot resend the command.'
+      : 'Exact request restored. Check its original outcome or explicitly retry the same bytes; no mutation has been sent by importing it.');
   }));
   doc.defaultView.addEventListener('beforeunload', event => {
     if (client.pending || client.busy) { event.preventDefault(); event.returnValue = ''; }
@@ -502,4 +540,3 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
 }
 if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) mountPulls(document);
-

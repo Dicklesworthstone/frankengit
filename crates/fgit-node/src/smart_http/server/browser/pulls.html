@@ -17,9 +17,13 @@
     <p>The same-origin APIs enforce independent Git-read, PR-read/write, review, merge, and outcome-recovery grants. No displayed approval grants merge authority.</p>
     <form id="connection" autocomplete="off">
       <label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <label class="confirmation"><input id="recovery-only" type="checkbox"> Outcome lookup only — original token rotated or revoked</label>
+      <label>Original principal ID <input id="original-principal" autocomplete="off" spellcheck="false" maxlength="32" pattern="[0-9a-f]{32}" aria-describedby="recovery-help" disabled></label>
+      <p id="recovery-help">For recovery only, enter the original 32-character lowercase hexadecimal principal ID from a trusted retained record or operator configuration. Use a current token for that same principal with its independent outcome-recovery grant. This does not change the original request or allow a resend. Changing this selection takes effect only on Connect.</p>
       <button type="submit">Connect</button><button id="disconnect" type="button">Disconnect and clear views</button>
     </form>
     <p>Use HTTPS outside loopback. The token is kept only in this page’s memory, not in cookies, URLs, or saved receipts.</p>
+    <p id="connection-mode" role="status" aria-live="polite"></p>
     <p id="status" role="status" aria-live="polite"></p>
   </section>
   <div class="columns">
@@ -29,7 +33,7 @@
       <div id="pr-list"></div><div id="list-paging"></div>
       <form id="select-pr">
         <label>PR number <input id="select-number" inputmode="numeric" pattern="[1-9][0-9]*" required></label>
-        <button type="submit">Load latest PR snapshot</button>
+        <button id="select-load" type="submit">Load latest PR snapshot</button>
       </form>
       <button id="new-pr" type="button">Compose a new PR</button>
     </section>
@@ -88,7 +92,7 @@
     </form>
     <form id="candidate-import">
       <label>Or import a shared candidate receipt (up to 24 MiB) <input id="candidate-import-file" type="file" accept="application/json,.json" required></label>
-      <button type="submit">Reinspect imported candidate — read only</button>
+      <button id="candidate-import-submit" type="submit">Reinspect imported candidate — read only</button>
     </form>
     <p>Browser candidate bundles are capped at 16 MiB. Merge-commit and squash conflicts offer explicit per-path resolution below. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
     <button id="candidate-download" type="button">Download candidate receipt</button>
@@ -135,8 +139,8 @@
     <button id="discard" type="button">Discard never-exported, unsent draft</button>
     <p>A lost response does not prove failure. Sent or exported requests remain pending until a canonical terminal outcome is observed. No retries run automatically.</p>
     <form id="receipt-import">
-      <label>Restore a saved request using its original token <input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
-      <button type="submit">Restore exact request — do not send</button>
+      <label>Restore a saved request — original token for retry, or recovery-only connection for outcome lookup <input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
+      <button id="receipt-import-submit" type="submit">Restore exact request — do not send</button>
     </form>
     <p>Recovery copies contain private proposal and candidate bytes, but no access token. Export before leaving this page. A downloaded copy might be dispatched elsewhere, so it can no longer be treated as a disposable draft.</p>
   </section>
@@ -144,4 +148,3 @@
 <footer>One repository authority. Separate observation, intent, publication, and delivery acknowledgement.</footer>
 </body>
 </html>
-
