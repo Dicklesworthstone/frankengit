@@ -384,7 +384,7 @@ export class IssueClient {
   cancelReads() {
     for (const controller of this.#readControllers) controller.abort();
   }
-  async #request(path, { method = 'GET', body, key, maximum = MAX_REPLY_BYTES, view = false, terminalReply = false } = {}) {
+  async #request(path, { method = 'GET', body, key, maximum = MAX_REPLY_BYTES, view = false, terminalReply = false, historyReply = false } = {}) {
     if (!this.#token) fail('Connect an explicitly scoped token first.');
     const epoch = this.#epoch;
     const controller = new AbortController(); this.#controllers.add(controller);
@@ -404,10 +404,13 @@ export class IssueClient {
       if (response.redirected || (response.url && new URL(response.url).origin !== this.#root.origin)) fail('API redirect refused.');
       // Native issue refusals carry a canonical terminal decision with 409.
       // Other 409 bodies (snapshot/key reuse) must still fail publication validation.
-      if (terminalReply ? ![200, 409].includes(response.status) : !response.ok) throw httpError(response.status);
+      // Only a single-issue history may carry the native 404 absence envelope.
+      // Generic 404s, lists and mutations must never become empty observations.
+      if (terminalReply ? ![200, 409].includes(response.status)
+        : historyReply ? ![200, 404].includes(response.status) : !response.ok) throw httpError(response.status);
       const result = await readJson(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
-      return terminalReply ? { reply: result, status: response.status } : result;
+      return terminalReply || historyReply ? { reply: result, status: response.status } : result;
     } catch (error) {
       if (epoch === this.#epoch && error.status === 401) this.disconnect();
       throw error;
@@ -425,9 +428,10 @@ export class IssueClient {
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
     if (render) query.set('render', 'html_safe');
-    const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true });
+    const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
     const options = { after, limit, head, binding: this.#binding };
-    const checked = number === null ? issuePage(raw, options) : issueHistory(raw, number, options);
+    const checked = number === null ? issuePage(raw, options) : issueHistory(raw.reply, number, options);
+    if (number !== null && raw.status === 404 && checked.reply.found) fail('Issue presence and HTTP status disagree.');
     this.#binding = checked.binding;
     return checked;
   }
