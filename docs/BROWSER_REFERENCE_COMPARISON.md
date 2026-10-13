@@ -48,6 +48,34 @@ repository-controlled filesystem path. Executable modes do not create executable
 files; symlink targets are downloaded only as inert payload bytes. Directory and
 gitlink identities are labelled but never followed by the file controls.
 
+## Download complete historical files
+
+Ordinary historical file views now offer **Download complete historical file —
+verify blob** in addition to range previews. This reads up to **8 MiB** through
+at most eight native 1 MiB `historical-blob` requests (one request for an empty
+file). The source preview supplies the expected blob ID, root tree, kind and
+complete size. The client copies those constraints before asynchronous work and
+checks them on every response, along with the original authorized reference,
+ref tip, historical commit, repository incarnation and snapshot. A changed
+source record, size, kind, range or continuation refuses the download.
+
+All requests and final SHA-1/SHA-256 verification share one read deadline. Each
+encoded JSON page is bounded to 2 MiB plus 64 KiB of metadata. The client allocates
+the complete Git blob frame only after validating the first response, fills it
+with contiguous ranges, and compares the final native hash to the preview's
+expected object ID. No byte prefix, file download URL or partial artifact is
+released on cancellation, permission loss, corrupt content or missing ranges.
+Files over 8 MiB remain previewable but their full-download action refuses before
+network access. Symlink/executable entries are inert blob payloads, as above.
+
+The generated `frankengit-history-<blob-id>.bin` file contains only the complete
+verified bytes. Its accompanying downloadable JSON is explicitly a local
+`browser_historical_file_verification` record, not a native authority receipt;
+it includes identities and byte/page counts, not credentials or the full payload.
+**Back to historical file** retains the original commit. The existing comparison
+endpoint and its 1 MiB-per-side diff budget remain unchanged. Neither download
+profile proves path-chain membership, ancestry, author identity or branch freshness.
+
 ## Complete results versus bounded rendering
 
 The request and validator enforce these limits independently of the server's own
@@ -98,7 +126,9 @@ Run the existing history-client regressions alongside the new client/UI cases:
 ```sh
 node --test tests/browser/history.test.mjs \
   tests/browser/history-compare.test.mjs \
-  tests/browser/history-compare-view.test.mjs
+  tests/browser/history-compare-view.test.mjs \
+  tests/browser/history-download.test.mjs \
+  tests/browser/history-download-view.test.mjs
 ```
 
 The new tests execute the production modules, native WebCrypto hashing, real

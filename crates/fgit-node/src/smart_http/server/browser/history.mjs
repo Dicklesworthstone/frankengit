@@ -1,7 +1,8 @@
 // Read-only repository investigation. No arbitrary route, write key, mutation,
 // credential persistence, automatic retry, or client-side authorization oracle.
-import { fail, keys, integer, format, oid, utf8, copy, form, readBytes, json } from './pulls-core.mjs';
+import { fail, keys, integer, format, oid, utf8, hex, unhex, copy, form, readBytes, json } from './pulls-core.mjs';
 import { HISTORY_LIMITS, fullRef, bytePath, logPage, blamePage, historicalPage, comparisonQuery, comparisonPage, COMPARISON_LIMITS } from './history-data.mjs';
+export const HISTORICAL_FILE_LIMIT = 8 * 1024 * 1024;
 const ENDPOINTS = new Set(['log', 'blame', 'historical-tree', 'historical-blob', 'diff']);
 function rootFor(href) {
   const page = new URL(href), suffix = '/ui/history/';
@@ -43,8 +44,10 @@ export class HistoryClient {
   async #run(work) {
     if (!this.connected) fail('Connect a source-read credential first.');
     this.cancel(); const generation = this.#generation, controller = new AbortController(); this.#active = controller;
+    const deadline = performance.now() + this.#timeout;
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     const check = () => {
+      if (performance.now() >= deadline) controller.abort();
       controller.signal.throwIfAborted();
       if (generation !== this.#generation || !this.connected) fail('History read superseded.');
     };
@@ -52,7 +55,7 @@ export class HistoryClient {
     catch (error) { if (generation === this.#generation && error.status === 401) this.disconnect(); throw error; }
     finally { clearTimeout(timer); if (this.#active === controller) this.#active = null; }
   }
-  async #request(endpoint, fields, signal) {
+  async #request(endpoint, fields, signal, maximum = HISTORY_LIMITS.reply) {
     if (!ENDPOINTS.has(endpoint)) fail('Unsupported read-only history endpoint.');
     const url = new URL(endpoint, this.#root.api), response = await this.#fetch(url, {
       method: 'POST', body: form(fields), signal, redirect: 'error', credentials: 'omit', mode: 'same-origin', cache: 'no-store',
@@ -63,7 +66,7 @@ export class HistoryClient {
       if (response.redirected || (response.url && response.url !== url.href)) fail('History redirect refused.');
       if (response.status !== 200) throw httpError(response.status);
       if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) fail('History requires a JSON response.');
-      return json(await readBytes(response, signal, HISTORY_LIMITS.reply));
+      return json(await readBytes(response, signal, maximum));
     // Stream cleanup can return a non-settling promise. It must not hide a
     // refusal or keep a cancelled read alive beyond the owned deadline.
     } finally { if (response.body && !response.body.locked) void response.body.cancel().catch(() => {}); }
@@ -160,14 +163,61 @@ export class HistoryClient {
     } else query.offset = integer(options.offset ?? 0, 'source byte offset', 0, 16 * 1024 * 1024);
     return this.#run((signal, check) => this.#historical(selection, query, signal, check));
   }
-  async #historical(selection, query, signal, check) {
+  async #historical(selection, query, signal, check, maximum = HISTORY_LIMITS.reply) {
     const fields = { ref: selection.ref, object_format: selection.object_format, expected_head: selection.head,
       expected_ref_tip: selection.tip, at_commit: query.commit, limit: query.limit };
     if (query.path_hex !== null) fields.path_hex = query.path_hex;
     if (query.kind === 'tree' && query.after !== null) fields.after_hex = query.after;
     if (query.kind === 'blob') fields.offset = query.offset;
-    const raw = await this.#request(`historical-${query.kind}`, fields, signal); check();
+    const raw = await this.#request(`historical-${query.kind}`, fields, signal, maximum); check();
     return historicalPage(raw, selection, query, this.#crypto, check);
+  }
+  // Explicit full-file acquisition from an already inspected historical entry.
+  // No chunk or local artifact is exposed until the complete Git blob hashes.
+  // The preview's object, tree, kind and size are constraints, never authority.
+  async downloadHistorical(commit, path, expected) {
+    const selection = this.#base(), algorithm = selection.object_format;
+    keys(expected, ['object_id', 'root_tree', 'kind', 'total_bytes']);
+    const wanted = { object_id: oid(expected.object_id, algorithm), root_tree: oid(expected.root_tree, algorithm),
+      kind: expected.kind, total_bytes: integer(expected.total_bytes, 'complete historical file bytes', 0, HISTORICAL_FILE_LIMIT) };
+    if (!['file', 'executable', 'symlink'].includes(wanted.kind)) fail('Only historical blob payloads can be downloaded.');
+    const query = { kind: 'blob', commit: oid(commit, algorithm), path_hex: bytePath(path) };
+    return this.#run(async (signal, check) => {
+      const header = utf8.encode(`blob ${wanted.total_bytes}\0`);
+      const pageLimit = Math.max(1, Math.ceil(wanted.total_bytes / HISTORY_LIMITS.blob));
+      let framed = null, offset = 0, pages = 0, sourceRecord = null, sourceHead = null;
+      do {
+        check();
+        if (++pages > pageLimit) fail('Historical file page bound exceeded.');
+        const part = await this.#historical(selection, { ...query, offset, limit: HISTORY_LIMITS.blob }, signal, check,
+          2 * HISTORY_LIMITS.blob + 65536);
+        check(); const source = part.source;
+        if (oid(source.object_id, algorithm) !== wanted.object_id || oid(source.root_tree, algorithm) !== wanted.root_tree ||
+            source.kind !== wanted.kind || source.total_bytes !== wanted.total_bytes ||
+            (sourceRecord !== null && (source.source_rcr !== sourceRecord || source.source_head !== sourceHead))) {
+          fail('Historical file changed its inspected expectation or source record.');
+        }
+        if (framed === null) {
+          sourceRecord = source.source_rcr; sourceHead = source.source_head;
+          framed = new Uint8Array(header.length + wanted.total_bytes); framed.set(header);
+        }
+        const chunk = unhex(source.content_hex, HISTORY_LIMITS.blob);
+        framed.set(chunk, header.length + offset); offset += chunk.length;
+        if (source.next_offset === null) break;
+      } while (offset < wanted.total_bytes);
+      if (offset !== wanted.total_bytes || pages !== pageLimit) fail('Historical file acquisition is incomplete.');
+      check();
+      const actual = hex(new Uint8Array(await this.#crypto.subtle.digest(algorithm === 'sha1' ? 'SHA-1' : 'SHA-256', framed)));
+      check();
+      if (actual !== wanted.object_id) fail('Complete historical bytes do not match the expected native blob identity.');
+      // This local verification record is explicitly distinct from a server
+      // receipt. It does not certify path ancestry, authors or branch freshness.
+      const raw = { type: 'browser_historical_file_verification', schema_version: 1, read_only: true,
+        transaction_created: false, published: false, full_blob_verified: true, ...wanted, pages,
+        object_format: algorithm, repository: selection.scope, ref: selection.ref,
+        snapshot_token: selection.head, source_ref_tip: selection.tip, at_commit: query.commit, path_hex: query.path_hex };
+      return { selection, query, ...wanted, pages, bytes: framed.slice(header.length), fullBlobVerified: true, raw };
+    });
   }
   async origin(index) {
     const blame = this.#blame;

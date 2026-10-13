@@ -1,4 +1,4 @@
-import { HistoryClient } from './history.mjs';
+import { HistoryClient, HISTORICAL_FILE_LIMIT } from './history.mjs';
 import { bytePath, HISTORY_LIMITS } from './history-data.mjs';
 import { decimal, text, utf8, hex, unhex } from './pulls-core.mjs';
 const LINE_PAGE = 200, PREVIEW_BYTES = 65536;
@@ -127,6 +127,12 @@ export function mountHistory(doc, options = {}) {
         node('pre', bytePreview(source.content_hex)));
       if (result.originBytesVerified) ui.content.append(node('p', `Historical origin bytes reproduce the attributed line ${result.attribution.line} exactly.`),
         button('Open origin file from beginning', () => historical('blob', query.commit, query.path_hex)));
+      if (!result.comparisonSide) {
+        const download = button('Download complete historical file — verify blob', () => downloadHistorical(query.commit, query.path_hex,
+          { object_id: source.object_id, root_tree: source.root_tree, kind: source.kind, total_bytes: source.total_bytes }));
+        download.disabled = source.total_bytes > HISTORICAL_FILE_LIMIT;
+        ui.content.append(download, node('p', 'Complete historical downloads are limited to 8 MiB. All ranges share one deadline and must hash to this object before bytes are offered.'));
+      }
       if (source.next_offset !== null) ui.paging.append(button('Next file range', () => result.comparisonSide
         ? comparisonFile(result.comparisonSide, query.path_hex, { offset: source.next_offset, limit: query.limit })
         : historical('blob', query.commit, query.path_hex, { offset: source.next_offset, limit: query.limit })));
@@ -197,6 +203,15 @@ export function mountHistory(doc, options = {}) {
     const link = doc.createElement('a'); link.href = url; link.download = name; doc.body.append(link);
     try { link.click(); } finally { link.remove(); setTimeout(() => { URL.revokeObjectURL(url); downloadUrls.delete(url); }, 1000); }
   }
+  const downloadHistorical = (commit, path, expected) => run(() => client.downloadHistorical(commit, path, expected), result => {
+    if (result.fullBlobVerified !== true) throw new Error('No verified complete historical file was produced.');
+    ui.content.append(node('h2', `Verified historical file: ${pathLabel(result.query.path_hex)}`),
+      node('p', `Commit: ${result.query.commit}. Blob: ${result.object_id}. ${result.total_bytes} bytes acquired in ${result.pages} bounded range reads.`),
+      node('p', 'The complete payload matches its native Git blob ID. No path-chain, author authentication, or current branch freshness claim.'));
+    ui.breadcrumbs.append(button('Back to historical file', () => historical('blob', result.query.commit, result.query.path_hex)));
+    downloadBytes(`frankengit-history-${result.object_id}.bin`, result.bytes);
+    ui.status.textContent = 'Complete historical file hash-checked and downloaded as inert bytes.';
+  });
   const comparisonFile = (side, path, options = {}) => run(() => client.comparisonFile(side, path, options), renderSource);
   const downloadCompared = (side, path) => run(() => client.comparisonFile(side, path, { offset: 0, limit: HISTORY_LIMITS.blob }), result => {
     if (!result.fullBlobVerified) throw new Error('Complete compared file unavailable; no partial download was produced.');

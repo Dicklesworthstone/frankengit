@@ -28,6 +28,7 @@
       <label>Blame end line (exclusive; blank means end of file)<input id="history-end" inputmode="numeric"></label>
       <button id="history-blame" type="button">Blame file at selected ref tip</button>
     </form>
+    <p class="hint">Open a historical file to download its complete, hash-checked bytes up to 8 MiB. Larger files remain available as previews; complete downloads never release a partial prefix.</p>
     <p class="hint">Path history compares exact entries against every parent, without rename guesses. Blame is same-path line provenance, not proof of human authorship. A moved snapshot is refused rather than silently refreshed.</p>
     <section aria-labelledby="history-compare-heading">
       <h2 id="history-compare-heading">Compare branches before opening a pull request</h2>
