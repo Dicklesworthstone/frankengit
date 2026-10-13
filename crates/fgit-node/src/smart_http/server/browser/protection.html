@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Review protection</title>
+  <link rel="stylesheet" href="./browser.css">
+  <script type="module" src="./protection-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Repository review protection</span><a href="../">Source</a></header>
+  <main>
+    <h1>Inspect repository review protection</h1>
+    <p>This independent administration page does not require the pull-request or source-browser profiles. The native protection API authorizes every operation.</p>
+    <form id="protection-connect">
+      <label>Protection-read token<input id="protection-token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <label>Expected principal ID<input id="protection-actor" autocomplete="off" spellcheck="false" maxlength="32" required></label>
+      <button type="submit">Connect and inspect</button>
+      <button id="protection-reload" type="button" disabled>Inspect current policy explicitly</button>
+      <button id="protection-disconnect" type="button">Disconnect</button>
+    </form>
+    <p class="hint">Credentials remain in page memory only. HTTPS is required outside trusted loopback. No bootstrap, silent refresh, or automatic retry is performed. Listing an administrator is not proof that the current credential can act as that principal.</p>
+    <div id="protection-status" role="status" aria-live="polite">Connect an independently scoped protection credential.</div>
+    <section id="protection-snapshot" aria-label="Exact native protection snapshot"></section>
+    <section id="protection-policy" aria-label="Complete review protection policy"></section>
+  </main>
+  <footer>Versions and epochs remain exact 64-bit decimal strings. Branches retain their native bytes. Repository data is inert text, not executable markup.</footer>
+</body>
+</html>
