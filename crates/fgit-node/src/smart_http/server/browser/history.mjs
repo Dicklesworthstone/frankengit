@@ -1,8 +1,8 @@
 // Read-only repository investigation. No arbitrary route, write key, mutation,
 // credential persistence, automatic retry, or client-side authorization oracle.
 import { fail, keys, integer, format, oid, utf8, copy, form, readBytes, json } from './pulls-core.mjs';
-import { HISTORY_LIMITS, fullRef, bytePath, logPage, blamePage, historicalPage } from './history-data.mjs';
-const ENDPOINTS = new Set(['log', 'blame', 'historical-tree', 'historical-blob']);
+import { HISTORY_LIMITS, fullRef, bytePath, logPage, blamePage, historicalPage, comparisonQuery, comparisonPage, COMPARISON_LIMITS } from './history-data.mjs';
+const ENDPOINTS = new Set(['log', 'blame', 'historical-tree', 'historical-blob', 'diff']);
 function rootFor(href) {
   const page = new URL(href), suffix = '/ui/history/';
   if (!['http:', 'https:'].includes(page.protocol) || page.username || page.password || page.search || page.hash ||
@@ -24,7 +24,7 @@ function httpError(status) {
   error.status = status; return error;
 }
 export class HistoryClient {
-  #root; #fetch; #crypto; #timeout; #token = ''; #generation = 0; #active = null; #selection = null; #scope = null; #blame = null;
+  #root; #fetch; #crypto; #timeout; #token = ''; #generation = 0; #active = null; #selection = null; #scope = null; #blame = null; #comparison = null; #beforePin = null;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30000 }) {
@@ -39,7 +39,7 @@ export class HistoryClient {
     this.#token = token;
   }
   cancel() { this.#generation++; this.#active?.abort(); this.#active = null; this.#blame = null; }
-  disconnect() { this.cancel(); this.#token = ''; this.#selection = null; this.#scope = null; }
+  disconnect() { this.cancel(); this.#token = ''; this.#selection = null; this.#scope = null; this.#comparison = null; this.#beforePin = null; }
   async #run(work) {
     if (!this.connected) fail('Connect a source-read credential first.');
     this.cancel(); const generation = this.#generation, controller = new AbortController(); this.#active = controller;
@@ -64,7 +64,9 @@ export class HistoryClient {
       if (response.status !== 200) throw httpError(response.status);
       if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) fail('History requires a JSON response.');
       return json(await readBytes(response, signal, HISTORY_LIMITS.reply));
-    } finally { if (response.body && !response.body.locked) await response.body.cancel().catch(() => {}); }
+    // Stream cleanup can return a non-settling promise. It must not hide a
+    // refusal or keep a cancelled read alive beyond the owned deadline.
+    } finally { if (response.body && !response.body.locked) void response.body.cancel().catch(() => {}); }
   }
   #base() {
     if (!this.#selection) fail('Open a reference before investigating its history.');
@@ -74,7 +76,7 @@ export class HistoryClient {
     return { ref: selection.ref, object_format: selection.object_format, expected_head: selection.head, expected_commit: selection.tip };
   }
   async open(ref, algorithm) {
-    this.#selection = null;
+    this.#selection = null; this.#comparison = null; this.#beforePin = null;
     return this.#run(async (signal, check) => {
       const request = { ref: fullRef(ref), object_format: format(algorithm) }, options = logOptions();
       const raw = await this.#request('log', { ...request, after: 0, limit: options.limit }, signal); check();
@@ -90,6 +92,48 @@ export class HistoryClient {
       if (query.path_hex !== null) fields.path_hex = query.path_hex;
       const raw = await this.#request('log', fields, signal); check();
       return logPage(raw, selection, selection, query, this.#crypto, check);
+    });
+  }
+  // The first read selects the before tip at the already-pinned authority head.
+  // Later modes/filters keep that tip. Only an explicit reopen clears this pin.
+  async compare(beforeRef, options = {}) {
+    const selection = this.#base(), query = comparisonQuery(beforeRef, options);
+    const retained = this.#beforePin?.ref === query.before_ref ? this.#beforePin.tip : null;
+    if (query.expected_before !== null) query.expected_before = oid(query.expected_before, selection.object_format);
+    if (retained !== null && query.expected_before !== null && retained !== query.expected_before) fail('Before-tip pin changed. Reopen explicitly.');
+    query.expected_before ??= retained;
+    this.#comparison = null;
+    return this.#run(async (signal, check) => {
+      const fields = { before_ref: query.before_ref, after_ref: selection.ref, object_format: selection.object_format,
+        expected_head: selection.head, expected_after: selection.tip, mode: query.mode, context_lines: 3,
+        path_prefix_hex: query.path_prefixes_hex, ...COMPARISON_LIMITS };
+      if (query.expected_before !== null) fields.expected_before = query.expected_before;
+      const raw = await this.#request('diff', fields, signal); check();
+      const result = comparisonPage(raw, selection, query, check); check();
+      this.#beforePin = { ref: query.before_ref, tip: result.before };
+      this.#comparison = copy(result); return result;
+    });
+  }
+  // File reads use that side's authorized ref, not an arbitrary OID lookup.
+  // Merge-base mode reads the base commit while retaining the original ref tip.
+  async comparisonFile(side, path, options = {}) {
+    const compared = this.#comparison;
+    if (!compared || !['before', 'after'].includes(side)) fail('Select a complete reference comparison first.');
+    keys(options, ['offset', 'limit']); bytePath(path);
+    const entry = compared.entries.find(value => value.path_hex === path), identity = entry?.[side];
+    const kinds = { '100644': 'file', '100755': 'executable', '120000': 'symlink' };
+    if (!identity || !Object.hasOwn(kinds, identity.mode)) fail('This comparison side has no readable file; directories and gitlinks are not followed.');
+    const selection = { ...compared.selection, ref: side === 'before' ? compared.query.before_ref : compared.selection.ref,
+      tip: side === 'before' ? compared.before : compared.after };
+    const query = { kind: 'blob', commit: side === 'before' ? compared.base : compared.after, path_hex: path,
+      offset: integer(options.offset ?? 0, 'comparison byte offset', 0, 16 * 1024 * 1024),
+      limit: integer(options.limit ?? 65536, 'comparison file range', 1, HISTORY_LIMITS.blob) };
+    return this.#run(async (signal, check) => {
+      const result = await this.#historical(selection, query, signal, check); check();
+      if (oid(result.source.object_id, selection.object_format) !== identity.object_id || result.source.kind !== kinds[identity.mode] ||
+          oid(result.source.root_tree, selection.object_format) !== (side === 'before' ? compared.beforeTree : compared.afterTree)) fail('Historical file differs from its compared entry.');
+      return { ...result, comparisonSide: side, comparisonEntry: copy(entry),
+        fullBlobVerified: query.offset === 0 && result.source.returned_bytes === result.source.total_bytes };
     });
   }
   async blame(path, options = {}) {
