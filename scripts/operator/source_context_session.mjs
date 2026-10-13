@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { command, fail, sha256 } from './source_context.mjs';
+import { mergeContextExcerpts, mergeLimits } from './source_context_merge.mjs';
 import { normalizeFollowup, continuationQuery, continueCapture } from './source_context_continue.mjs';
 import { absolute, privateDirectory, readPrivate, absentBundle, loadBundle, publishBundle, bundleCommitment } from './source_context_export.mjs';
 
@@ -120,7 +121,7 @@ async function verifyCandidate(dir, requestHash, parent, selected, check) {
 }
 // Every reservation is retained, including rejected or interrupted reads. No
 // failed channel's unreported work is refunded from a successful-channel tally.
-async function readState(root, sessionHash, minimumTip, check) {
+async function readState(root, sessionHash, minimumTip, check, observe = null, throughTip = null) {
   absolute(root); hash(sessionHash); hash(minimumTip);
   await names(root, ['session.json', 'base', 'steps'], check);
   const manifest = await record(join(root, 'session.json'), check);
@@ -131,12 +132,16 @@ async function readState(root, sessionHash, minimumTip, check) {
   const limits = sessionLimits(manifest.value.limits);
   let current = await loadBundle(join(root, 'base'), manifest.value.base_manifest_sha256, check);
   const source = current.capture.summary.source;
+  observe?.(current, 0);
   const allowed = Array.from({ length: MAX_SESSION_STEPS }, (_, i) => String(i + 1).padStart(4, '0'));
-  const entries = (await names(join(root, 'steps'), allowed, check)).sort();
+  const entries = throughTip === sessionHash ? [] : (await names(join(root, 'steps'), allowed, check)).sort();
   let used = Object.fromEntries(DIMENSIONS.map(k => [k, 0])), tip = sessionHash, minimumSeen = minimumTip === tip;
   const history = []; let pending = null;
   for (let i = 0; i < entries.length; i++) {
     check();
+    // Read-only export may select an independently retained immutable prefix.
+    // Ordinary status/reservation/dispatch still verify the complete history.
+    if (throughTip !== null && tip === throughTip) break;
     if (entries[i] !== allowed[i] || pending) fail('context_session_history_gap');
     const dir = stepPath(root, i + 1);
     const files = await names(dir, ['request.json', 'started.json', 'candidate.json', 'bundle', 'terminal.json'], check);
@@ -159,6 +164,7 @@ async function readState(root, sessionHash, minimumTip, check) {
         const { candidate, loaded } = await verifyCandidate(dir, request.hash, current.capture, selected, check);
         if (!same(t, capturedTerminal(request.hash, candidate.hash))) fail('context_session_terminal_changed');
         current = loaded;
+        observe?.(current, i + 1);
       } else {
         fields(t, ['schema', 'request_sha256', 'state', 'error_code', 'http_status']);
         if (t.schema !== `${SESSION_PROFILE}/terminal` || t.request_sha256 !== request.hash || t.state !== 'read_refused' ||
@@ -229,6 +235,47 @@ export async function createSession(root, parentBundle, parentManifest, requeste
 export async function inspectSession(root, sessionHash, minimumTip, options = {}) {
   const time = clock(options);
   return receipt(await readState(root, sessionHash, minimumTip, time.check));
+}
+// Accumulate projections only from payloads already checked by this SAME
+// replay. The callback is private: no externally supplied visitor can perform
+// effects before a later terminal/source/checkpoint verification fails.
+export async function assembleSessionContext(root, sessionHash, throughTip, requestedLimits = {}, options = {}) {
+  const time = clock(options), limits = mergeLimits(requestedLimits), entries = [];
+  let metadataBytes = 0;
+  const observe = (loaded, sequence) => {
+    time.check();
+    const { capture, receipt: bundle } = loaded, s = capture.summary, r = capture.native_response.retrieval;
+    const channel = value => ({ complete: value.complete, coverage_complete: value.coverage_complete ?? true,
+      omissions: value.omissions ?? [], indexed_source_bytes: value.indexed_source_bytes });
+    const evidence = { request_sha256: capture.request_sha256, response_sha256: capture.response_sha256,
+      complete: s.complete, retrieval_complete: r.complete, candidate_files: s.candidate_files,
+      returned_files: s.returned_files, omitted_files: s.omitted_files,
+      lexical_generation: s.lexical_generation, lexical_checkpoint: s.lexical_checkpoint,
+      content: channel(r.content), path: channel(r.path),
+      symbols: s.symbols ?? { state: 'not_requested' },
+      symbol_omissions: r.symbols.result?.omissions ?? [],
+      selection: capture.native_response.selection, ranking: s.ranking ?? null };
+    metadataBytes += Buffer.byteLength(JSON.stringify({ query: s.query, evidence }));
+    if (metadataBytes > limits.max_metadata_bytes) fail('context_union_metadata_limit');
+    entries.push({ sequence, manifest_sha256: bundle.manifest_sha256, capture_sha256: bundle.capture_sha256,
+      source: s.source, query: s.query, evidence, files: capture.native_response.files });
+  };
+  const state = await readState(root, sessionHash, throughTip, time.check, observe, throughTip);
+  if (state.tip !== throughTip || state.pending) fail('context_session_checkpoint_unavailable');
+  const merged = mergeContextExcerpts(entries, limits, time.check);
+  const binding = { session_sha256: sessionHash, tip_sha256: throughTip, selected_terminal_prefix_only: true,
+    later_steps_not_examined: true, history: state.history, reserved_at_tip: state.used,
+    session_limits: state.limits, refused_steps: state.history.filter(h => h.state === 'read_refused').length };
+  const value = { schema: 'frankengit-context-session-view-v1', session: binding, context: merged.view };
+  const json = encode(value);
+  // Session identities and numeric accounting are control data. Source and query
+  // strings are quoted by the merger; neither projection executes repository text.
+  const text = Buffer.concat([Buffer.from(`SESSION TERMINAL PREFIX ${sessionHash} ${throughTip}\n${JSON.stringify(binding)}\n`), merged.text]);
+  if (json.length > limits.max_output_bytes || text.length > limits.max_output_bytes) fail('context_union_output_limit');
+  time.check();
+  return { value, json, text, json_sha256: sha256(json), text_sha256: sha256(text),
+    all_captured_queries_complete: entries.every(e => e.evidence.complete),
+    session_sha256: sessionHash, tip_sha256: throughTip, refused_steps: binding.refused_steps };
 }
 export async function reserveSessionStep(root, sessionHash, expectedTip, followup, options = {}) {
   const time = clock(options), delta = normalizeFollowup(followup);
