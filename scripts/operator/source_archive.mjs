@@ -170,10 +170,36 @@ export function validateCapture(capture, options = {}) {
     gitlinks: entries.filter(row => row.kind === 'gitlink').length };
 }
 
+// A prior capture supplies bytes, never the current source selection. Verify
+// its complete proof before any connection, then detach and rehash each unique
+// blob so caller mutation during asynchronous reads cannot change reused data.
+// Prior-input limits are the fixed capture ceilings; tighter output limits are
+// applied later to every current file, including each reused occurrence.
+function reusableBlobs(capture, selection, check) {
+  const blobs = new Map();
+  if (capture === undefined) return blobs;
+  check(); validateCapture(capture); check();
+  const previous = archiveSelection(capture.selection);
+  if (['endpoint', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format']
+      .some(key => previous[key] !== selection[key])) fail('Reuse capture belongs to another endpoint or repository scope.');
+  for (const file of capture.files) {
+    check();
+    const id = oid(file.object_id, selection.object_format), bytes = Buffer.from(file.bytes);
+    if (gitHash('blob', bytes, selection.object_format) !== id) fail('Reuse bytes changed during capture validation.');
+    const previous = blobs.get(id);
+    if (previous && !previous.bytes.equals(bytes)) fail('Conflicting reusable blob identities.');
+    if (!previous) blobs.set(id, { bytes, prior: true });
+  }
+  check(); return blobs;
+}
+
 export async function captureSource(selected, token, options = {}) {
-  fields(options, ['limits', 'signal', 'ca'], []);
+  fields(options, ['limits', 'signal', 'ca', 'reuse'], []);
   const selection = archiveSelection(selected), limits = archiveLimits(options.limits), algorithm = selection.object_format;
   const reader = new SourceReader(selection.endpoint, token, limits, options);
+  const blobs = reusableBlobs(options.reuse, selection, () => reader.check());
+  const reuse = { blob_requests: 0, downloaded_blob_bytes: 0, reused_files: 0,
+    reused_blob_bytes: 0, deduplicated_files: 0, deduplicated_blob_bytes: 0 };
   const base = { ref: selection.ref, object_format: algorithm, expected_commit: selection.expected_commit };
   if (selection.expected_head !== null) base.expected_head = selection.expected_head;
   const log = await reader.read('log', { ...base, after: '0', limit: '1' }, 256 * 1024);
@@ -229,9 +255,22 @@ export async function captureSource(selected, token, options = {}) {
     }
   }
   for (const file of files) {
+    reader.check();
+    const cached = blobs.get(file.object_id);
+    if (cached) {
+      integer(cached.bytes.length, 0, limits.maxBlobBytes, 'blob size');
+      blobBytes = add(blobBytes, cached.bytes.length, limits.maxTotalBlobBytes, 'Blob bytes');
+      const prefix = cached.prior ? 'reused' : 'deduplicated';
+      reuse[`${prefix}_files`]++; reuse[`${prefix}_blob_bytes`] += cached.bytes.length;
+      // Current path/kind come exclusively from the fresh, fully checked trees.
+      // Each output buffer is independent; no file aliases a prior or sibling.
+      capture.files.push({ ...file, bytes: Buffer.from(cached.bytes) });
+      continue;
+    }
     let offset = 0, bytes = null;
     do {
       reader.check(); const limit = Math.min(1024 * 1024, limits.maxBlobBytes);
+      reuse.blob_requests++;
       const value = await reader.read('blob', { ...expected, path_hex: file.path_hex, offset: String(offset), limit: String(limit) }, 2 * limit + 65536);
       checkSource(value);
       if (value.type !== 'source_blob' || value.path_hex !== file.path_hex || oid(value.object_id, algorithm) !== file.object_id ||
@@ -245,8 +284,10 @@ export async function captureSource(selected, token, options = {}) {
       if (value.next_offset === null) break;
     } while (true);
     if (gitHash('blob', bytes, algorithm) !== file.object_id) fail('Blob bytes fail native identity verification.');
+    reuse.downloaded_blob_bytes += bytes.length;
+    blobs.set(file.object_id, { bytes, prior: false });
     capture.files.push({ ...file, bytes });
   }
   reader.check(); validateCapture(capture, limits); reader.check();
-  return { capture, metrics: { requests: reader.requests, wire_bytes: reader.wireBytes, tree_bytes: treeBytes, blob_bytes: blobBytes } };
+  return { capture, metrics: { requests: reader.requests, wire_bytes: reader.wireBytes, tree_bytes: treeBytes, blob_bytes: blobBytes, ...reuse } };
 }
