@@ -153,3 +153,6 @@ fn cancelled_and_unpolled_hydration_does_not_change_the_repository_or_index_vect
     assert_eq!(again.retrieval().generations(), report.generations());
     assert_eq!(generation(&node), before); node.shutdown().unwrap();
 }
+
+#[path = "source_context/http.rs"]
+mod http;
