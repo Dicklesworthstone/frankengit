@@ -1,6 +1,7 @@
 //! Source reads share one authenticated selection. The explicit local index
 //! builder publishes only derived generations; every search remains read-only.
 
+mod context;
 mod index;
 mod regex;
 mod symbols;
