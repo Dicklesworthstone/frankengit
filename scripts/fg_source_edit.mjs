@@ -4,11 +4,15 @@ import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
 import { captureSourceEdit, oid } from './operator/source_edit_candidate.mjs';
+import { bindVerifiedEditSource, SOURCE_PACKAGE_BYTES } from './operator/source_edit_from_package.mjs';
 import { parse, fail, clock } from './operator/source_edit_wire.mjs';
 import { saveSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply } from './operator/source_edit_publish.mjs';
 
 const USAGE = `node scripts/fg_source_edit.mjs prepare --selection PRIVATE_JSON --patch-file PRIVATE_PATCH
   --token-file PRIVATE_TOKEN --output ABSENT_CANDIDATE_DIRECTORY [--ca-file PRIVATE_PEM]
+node scripts/fg_source_edit.mjs prepare-verified --selection PRIVATE_JSON --package PRIVATE_SOURCE_PACKAGE
+  --expect PRIVATE_INDEPENDENT_SELECTION --patch-file PRIVATE_PATCH --token-file PRIVATE_TOKEN
+  --output ABSENT_CANDIDATE_DIRECTORY [--ca-file PRIVATE_PEM]
 node scripts/fg_source_edit.mjs inspect --candidate PRIVATE_DIRECTORY --sha256 MANIFEST_HASH
 node scripts/fg_source_edit.mjs stage --candidate PRIVATE_DIRECTORY --sha256 MANIFEST_HASH
   --principal ORIGINAL_PRINCIPAL_HEX --confirm-candidate NATIVE_COMMIT --journal ABSENT_PRIVATE_DIRECTORY
@@ -28,9 +32,10 @@ Exit 0: successful preparation/inspection/staging or committed terminal;
 2: refusal/error; 3: unresolved outcome; 4: retained result/output uncertainty.
 No PR, checkout, Git subprocess, token persistence, force, redirect or retry.`;
 function options(args) {
-  if (!Array.isArray(args) || args.length > 19 || args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_edit_cli_arguments');
+  if (!Array.isArray(args) || args.length > 23 || args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_edit_cli_arguments');
   const op = args[0], profiles = {
     prepare: [['--selection', '--patch-file', '--token-file', '--output'], ['--ca-file']],
+    'prepare-verified': [['--selection', '--package', '--expect', '--patch-file', '--token-file', '--output'], ['--ca-file']],
     inspect: [['--candidate', '--sha256'], []],
     stage: [['--candidate', '--sha256', '--principal', '--confirm-candidate', '--journal'], []],
     apply: [['--journal', '--request-sha256', '--token-file'], ['--ca-file']],
@@ -48,7 +53,7 @@ function options(args) {
   const timeout = f.get('--timeout-ms') ?? '30000';
   if (!/^[1-9][0-9]{0,5}$/.test(timeout) || Number(timeout) > 300000) fail('source_edit_cli_timeout');
   for (const [k, value] of f) {
-    if (['--selection', '--patch-file', '--token-file', '--output', '--candidate', '--journal', '--ca-file'].includes(k)) absolute(value);
+    if (['--selection', '--package', '--expect', '--patch-file', '--token-file', '--output', '--candidate', '--journal', '--ca-file'].includes(k)) absolute(value);
     if (['--sha256', '--request-sha256'].includes(k) && !/^[0-9a-f]{64}$/.test(value)) fail('source_edit_pin');
   }
   return { op, f, timeout: Number(timeout) };
@@ -101,11 +106,22 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
         token = tokenBytes.subarray(0, 64).toString('ascii');
       } finally { tokenBytes.fill(0); }
       const ca = f.has('--ca-file') ? await privateFile(f.get('--ca-file'), 131072, time.check) : undefined;
-      if (op === 'prepare') {
-        const selection = await json(f.get('--selection')), patch = await privateFile(f.get('--patch-file'), 1048576, time.check);
+      if (op === 'prepare' || op === 'prepare-verified') {
+        let selection = await json(f.get('--selection'));
+        let packageEvidence = null;
+        if (op === 'prepare-verified') {
+          const expected = parse(await privateFile(f.get('--expect'), 128 * 1024, time.check), 128 * 1024);
+          const packageBytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time.check);
+          packageEvidence = await bindVerifiedEditSource(packageBytes, expected, selection, time.check);
+          selection = packageEvidence.request;
+        }
+        const patch = await privateFile(f.get('--patch-file'), 1048576, time.check);
         const value = await captureSourceEdit(selection, patch, token, { ...local(), ...(ca ? { ca } : {}) });
         result = await saveSourceEdit(f.get('--output'), value.capture, value.bundle, local());
         result.metrics = value.metrics;
+        if (packageEvidence) result.source_package = {
+          sha256: packageEvidence.package_sha256, commit: packageEvidence.verified_commit,
+          paths: packageEvidence.verified_paths.length, authority_verified: false, publication_authorized: false };
       } else {
         const network = { ...local(), ...(ca ? { ca } : {}) };
         result = op === 'apply' ? await dispatchSourceApply(f.get('--journal'), f.get('--request-sha256'), token, network)

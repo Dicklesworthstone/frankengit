@@ -90,6 +90,41 @@ or policy change between phases is handled by native current-state admission.
 The client never refreshes the expected commit or converts a conflict into a
 new candidate. A saved candidate can be stale and legitimately refused.
 
+## Prepare only from independently verified selected source
+
+For agent-driven edits, the stronger `prepare-verified` entry point requires the
+ordinary explicit source-edit selection **plus** a portable selected-source
+package and its independently retained expected selection. The package is
+verified before any source-change request is sent. Its native hash format and
+commit must match the edit base, and every edited path must be one of the files
+independently selected in that package.
+
+```bash
+node scripts/fg_source_edit.mjs prepare-verified \
+  --selection /private/edit/selection.json \
+  --package /private/context/selected-source.json \
+  --expect /private/context/independent-selection.json \
+  --patch-file /private/edit/change.patch \
+  --token-file /private/edit/read-token \
+  --output /private/edit/candidate
+```
+
+This deliberately does **not** derive repository scope, branch, author identity,
+permissions, or publication authority from the package. Those remain explicit
+inputs and native server decisions. The package establishes only that the
+operator independently retained the selected commit/path/blob bytes that the
+edit claims as its base. An edit cannot use this mode to name an unselected path
+or silently switch commits. New-file creation is therefore outside this initial
+verified-package profile; use ordinary `prepare` when an explicit new path is
+intended and independently review that broader effect.
+
+The command returns the verified package SHA-256, commit, and selected-path count
+alongside the ordinary saved-candidate receipt. That stdout metadata is a local
+precondition receipt, not an authority token and not part of the native mutation
+request. The saved candidate remains in the unchanged source-edit capture format,
+so existing offline inspection, staging, one-shot apply, and original-key
+recovery continue to use the same validators.
+
 ## Stage explicitly, then apply once
 
 Select the expected original publishing principal independently; the token must
