@@ -6,6 +6,12 @@ It calls the existing FrankenGit API, not GitHub. Related work is
 `frankengit-root-doctrine-x2mv.4.13` and `.4.20`; this does not close either bead.
 The existing branch-tip synchronization tool remains separate and unchanged.
 
+The same client and CLI now also support exact-candidate approval, change
+requests, withdrawal and reviewed merge-commit/squash. Their separate bundle
+intent schema, confirmations and durable workflow are documented in
+[REMOTE_REVIEWED_MERGES.md](REMOTE_REVIEWED_MERGES.md). The six original form-only
+commands below retain their existing intent bytes, keys and requirements.
+
 ## Supported commands
 
 `preparePull` in `scripts/operator/remote_pull.mjs` accepts an explicit endpoint,
@@ -27,8 +33,10 @@ The four lifecycle operations carry complete metadata because that is the
 native command contract; even close/reopen must not silently replace a newer
 PR's coordinates. Refs are explicit UTF-8 `refs/heads/...` names. Byte-only refs
 are not lossy-decoded or silently renamed. Input tips are full, raw lowercase
-native OIDs in the selected hash domain. There is no arbitrary route, force,
-review assertion, policy override, bundle, or alternative merge-method field.
+native OIDs in the selected hash domain. These six original form-only commands
+accept no arbitrary route, force, review assertion, policy override, bundle, or
+alternative merge-method field. Candidate review/merge is a separate explicit
+action profile, never a fallback for a failed fast-forward.
 Titles are bounded to 256 UTF-8 bytes; bodies to 64 KiB. Encoded forms are bounded
 to 256 KiB (8 KiB for fast-forward); retained intents to 1 MiB, independently of
 the 32 KiB publication response limit. The larger intent bound accounts for both
@@ -79,7 +87,9 @@ The native forms do not carry an atomic expected-incarnation precondition. A
 preflight read and a receipt check cannot add that server-side guarantee; an
 operator must not replace an endpoint's repository identity during a command.
 This client does not remove trusted-local CLI/MCP privileges, implement native
-IAM, run checks, grant approval, or implement reviewed merge-commit/squash.
+IAM, run checks, or grant authority. Its separate exact-candidate operations can
+submit an authenticated reviewer statement or request a reviewed merge; the
+native engine still decides whether any review or merge may be published.
 
 Run the focused client tests:
 
@@ -203,7 +213,9 @@ Run the combined client, filesystem and actual-process tests:
 bash scripts/verify_remote_pulls.sh
 ```
 
-The executed combined suite has 129 tests. It includes real processes killed
+At the candidate-CLI checkpoint, the combined suite has 241 tests: all 129
+original tests, 69 candidate client tests and 43 candidate CLI/file tests.
+It includes real processes killed
 with SIGTERM/SIGKILL, credential rotation, broken pipes, immutable-file races,
 unsafe file refusal, and both hash domains. HTTP replies are explicit native
 contract fixtures; no live `fg` or native admission/policy execution is claimed.

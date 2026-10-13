@@ -5,7 +5,7 @@ import { open, lstat, mkdir, realpath, link, unlink } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { PULL_LIMITS, PullError, failPull, pullFields, pullHash, pullCanonical, parsePullJson,
-  pullTokenFingerprint, validatePullIntent, validatePullPublication, pullOutcomeScope } from './pull_command.mjs';
+  pullTokenFingerprint, validatePullIntent, validatePullPublication, pullOutcomeScope, validatePullBundle } from './pull_command.mjs';
 import { validateOutcomeReply } from './transaction_outcome.mjs';
 
 export const PULL_RECORD_LIMIT = 128 * 1024;
@@ -31,7 +31,7 @@ export async function privatePullDirectory(path) {
 }
 function same(a, b) { return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs; }
 export async function readPullPrivate(path, maximum, { sync = false } = {}) {
-  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > PULL_LIMITS.intent || typeof sync !== 'boolean') failPull('pull_file_limit');
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > PULL_LIMITS.bundle || typeof sync !== 'boolean') failPull('pull_file_limit');
   const absolute = resolve(path); await privatePullDirectory(dirname(absolute));
   const before = await lstat(absolute, { bigint: true }); privateStat(before);
   if (before.size > BigInt(maximum)) failPull('pull_file_limit');
@@ -39,7 +39,7 @@ export async function readPullPrivate(path, maximum, { sync = false } = {}) {
   try {
     const selected = await file.stat({ bigint: true }); privateStat(selected);
     if (!same(before, selected)) failPull('pull_file_changed');
-    const bytes = Buffer.alloc(maximum + 1); let used = 0;
+    const bytes = Buffer.alloc(Number(before.size) + 1); let used = 0;
     while (used < bytes.length) {
       const next = await file.read(bytes, used, bytes.length - used, used);
       if (!next.bytesRead) break; used += next.bytesRead;
@@ -63,11 +63,16 @@ async function writeNew(path, bytes) {
   const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
 }
-export async function savePullIntent(path, value) {
+export async function savePullIntent(path, value, bundle = null) {
   const intent = validatePullIntent(value), absolute = resolve(path), parent = dirname(absolute);
+  // The fixed-name payload is copied and verified before any asynchronous I/O.
+  // Publish its bytes first, then the small intent that selects their checksum.
+  const payload = intent.bundle ? validatePullBundle(intent, bundle) : null;
+  if (payload === null && bundle !== null) failPull('unexpected_pull_bundle');
   await privatePullDirectory(parent); await mkdir(absolute, { mode: 0o700 });
   await privatePullDirectory(absolute);
   // An interrupted slot is never erased, repaired, or reused automatically.
+  if (payload !== null) { await writeNew(join(absolute, 'candidate.bundle'), payload); await syncDirectory(absolute); }
   await writeNew(join(absolute, 'intent.json'), Buffer.from(pullCanonical(intent)));
   await syncDirectory(absolute); await syncDirectory(parent);
   return intent;
@@ -79,6 +84,15 @@ export async function loadPullIntent(path, { sync = false } = {}) {
   if (!bytes.equals(Buffer.from(pullCanonical(intent)))) failPull('noncanonical_pull_intent_file');
   if (sync) { await syncDirectory(directory); await syncDirectory(dirname(directory)); }
   return intent;
+}
+// Outcome recovery intentionally loads only intent.json. Losing bundle bytes
+// cannot prevent an original-key lookup or justify inventing a replacement key.
+export async function loadPullBundle(path, value, { sync = false } = {}) {
+  const intent = validatePullIntent(value);
+  if (!intent.bundle) failPull('unexpected_pull_bundle');
+  const directory = await privatePullDirectory(path);
+  const bytes = await readPullPrivate(join(directory, 'candidate.bundle'), PULL_LIMITS.bundle, { sync });
+  return validatePullBundle(intent, bytes);
 }
 export function pullRecord(intent, result, error = null) {
   const value = { schema: 'frankengit-remote-pull-record-v1', intent_sha256: pullHash(pullCanonical(validatePullIntent(intent))),
