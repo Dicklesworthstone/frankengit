@@ -8,6 +8,7 @@ import { indexCommand, indexQuery, indexReply, verifyIndexedFile, symbolCommand,
 import { splitContextQuery, contextCommand, joinInitialContext } from './search-context.mjs';
 import { verifyContextFiles } from './search-context-verify.mjs';
 import { acquireContextMembership } from './search-context-membership.mjs';
+import { acquireContextPackage } from './search-context-package.mjs';
 
 export class CodeSearch {
   #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null; #symbolMinimum = null;
@@ -120,6 +121,14 @@ export class CodeSearch {
     const combined = this.#result, selected = this.#selection;
     if (!combined?.context || combined.query.mode !== 'initial') fail('Load source context before checking membership.');
     return this.#run(check => acquireContextMembership(combined, selected.reference, independentCommit,
+      (path, options) => this.#transport.request(path, options), this.#transport.crypto, check, limits));
+  }
+  // A portable package owns both membership evidence and complete blob bodies.
+  // Never derive the independent root from the response or refresh this selection.
+  async acquireContextPackage(independentCommit, limits = {}) {
+    const combined = this.#result, selected = this.#selection;
+    if (!combined?.context || combined.query.mode !== 'initial') fail('Load source context before packaging it.');
+    return this.#run(check => acquireContextPackage(combined, selected.reference, independentCommit,
       (path, options) => this.#transport.request(path, options), this.#transport.crypto, check, limits));
   }
   async openInitial(channel, hitIndex) {
