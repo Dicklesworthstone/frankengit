@@ -230,3 +230,128 @@ export async function acquireContextMembership(result, reference, independentCom
   const verified = await verifyMembershipProof(proof, expected, crypto, check, limits); check();
   return { proof, verified, requests, limits, scope, pin, generationVector };
 }
+
+// Inert consent/import/export controls. The independent commit is never filled
+// from the server or from an imported proof. Offline replay never calls acquire.
+export const MEMBERSHIP_PROOF_BYTES = 12 * 1024 * 1024;
+export function mountContextMembership(document, result, { acquire, run, current, idle, cancelRead,
+  display, cryptoImpl = globalThis.crypto, urlApi = globalThis.URL, timeoutMs = 30000 }) {
+  integer(timeoutMs, 'membership deadline', 1, 300000);
+  const basis = copy({ query: { mode: result.query.mode }, scope: { format: result.scope.format },
+    pin: { commit: result.pin.commit }, context: { files: result.context.files.map(({ pathHex, blob }) => ({ pathHex, blob })) } });
+  const node = (tag, text = '') => { const el = document.createElement(tag); el.textContent = text; return el; };
+  const section = node('section'); section.id = 'context-membership';
+  section.append(node('h3', 'Prove selected paths under an independent commit'),
+    node('p', 'Supply a commit ID obtained independently of this server. This check binds each selected path, mode and blob ID to that commit. Full blob bytes, repository authority, freshness, signatures and search coverage are separate checks.'),
+    node('p', 'Acquire reads original commit bytes and complete needed parent trees, including sibling names and IDs. It does not read unrelated subtrees or any blob body. Exported proofs retain those private tree names and IDs. No request runs automatically.'));
+  const field = (id, label, value, type = 'text') => {
+    const wrapper = node('label', label), input = node('input'); input.id = id; input.type = type;
+    input.value = value; input.autocomplete = 'off'; input.spellcheck = false; wrapper.append(input); section.append(wrapper); return input;
+  };
+  const commit = field('context-membership-commit', 'Independently selected commit ID (not supplied by this page)', ''); commit.maxLength = 71;
+  const budgets = Object.fromEntries(Object.entries(MEMBERSHIP_LIMITS).map(([name, max]) => {
+    const labels = { maxRequests: 'Maximum metadata requests', maxTrees: 'Maximum parent trees',
+      maxEntries: 'Maximum entries across all parent trees', maxTreeBytes: 'Maximum encoded tree bytes' };
+    const el = field(`context-membership-${name}`, labels[name], String(max), 'number');
+    el.min = '1'; el.max = String(max); el.step = '1'; return [name, el];
+  }));
+  const consent = field('context-membership-consent', 'I independently selected this commit. For Acquire, permit the additional bounded parent-tree reads.', '', 'checkbox');
+  const button = (id, label) => { const el = node('button', label); el.id = id; el.type = 'button'; section.append(el); return el; };
+  const submit = button('context-membership-acquire', 'Acquire and verify selected membership');
+  const file = field('context-membership-file', 'Or choose one saved membership proof (up to 12 MiB)', '', 'file'); file.accept = 'application/json,.json';
+  const inspect = button('context-membership-inspect', 'Verify saved proof locally — no network');
+  const download = button('context-membership-download', 'Download replayable membership proof');
+  const status = node('p'); status.id = 'context-membership-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const output = node('pre'); output.id = 'context-membership-result'; section.append(status, output);
+  let generation = 0, working = false, disposed = false, chosen = null, url = null, active = null;
+  const signature = () => JSON.stringify([commit.value, ...Object.values(budgets).map(el => el.value)]);
+  const revoke = () => { if (url !== null) { urlApi.revokeObjectURL(url); url = null; } };
+  function sync() {
+    const enabled = !disposed && current() && idle() && !working, hasFiles = basis.context.files.length > 0;
+    for (const el of [commit, ...Object.values(budgets), consent, file]) el.disabled = !enabled || !hasFiles;
+    submit.disabled = inspect.disabled = !enabled || !hasFiles || !consent.checked || commit.value === '';
+    download.disabled = !enabled || chosen === null || chosen.signature !== signature();
+  }
+  function invalidate() {
+    generation++; active?.abort(); active = null; working = false; chosen = null; consent.checked = false; revoke(); output.textContent = '';
+    status.textContent = 'No selected membership proof. Enter and independently confirm its commit before checking.'; sync();
+  }
+  const changed = () => { if (working) cancelRead(); invalidate(); };
+  for (const el of [commit, ...Object.values(budgets)]) for (const event of ['input', 'change']) el.addEventListener(event, changed);
+  file.addEventListener('change', changed);
+  consent.addEventListener('change', () => { if (working) changed(); else sync(); });
+  function proofCopy(proof) {
+    const text = JSON.stringify(proof);
+    if (typeof text !== 'string' || text.length > MEMBERSHIP_PROOF_BYTES || utf8.encode(text).length > MEMBERSHIP_PROOF_BYTES) refuse('proof export exceeds its byte bound.');
+    return JSON.parse(text);
+  }
+  async function fileBytes(selected, signal) {
+    signal.throwIfAborted();
+    // Observe eventual rejection even when cancellation wins the race. A File
+    // read cannot authorize I/O to the repository or select another proof.
+    let abort;
+    const canceled = new Promise((resolve, reject) => { abort = () => reject(signal.reason ?? new Error('Canceled'));
+      signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort(); });
+    try {
+      const buffer = await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return selected.arrayBuffer(); }), canceled]);
+      signal.throwIfAborted();
+      if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== selected.size || buffer.byteLength > MEMBERSHIP_PROOF_BYTES) refuse('saved proof size changed.');
+      return new Uint8Array(buffer);
+    } finally { signal.removeEventListener('abort', abort); }
+  }
+  async function execute(local) {
+    if (disposed || !current() || !idle() || working || !consent.checked || !basis.context.files.length) return;
+    const selectedFile = file.files?.[0], inputCount = file.files?.length, stamp = signature();
+    const serial = ++generation, controller = new AbortController(); active = controller; working = true;
+    chosen = null; consent.checked = false; revoke(); output.textContent = ''; sync();
+    const guard = () => {
+      controller.signal.throwIfAborted();
+      if (disposed || serial !== generation || !current() || signature() !== stamp) refuse('selection superseded.');
+    };
+    const timer = setTimeout(() => { controller.abort(new Error('Membership deadline exceeded')); cancelRead(); }, timeoutMs);
+    try {
+      const limits = membershipLimits(Object.fromEntries(Object.entries(budgets).map(([name, el]) => {
+        if (!/^[1-9][0-9]{0,8}$/.test(el.value)) refuse('invalid metadata limit.'); return [name, Number(el.value)];
+      })));
+      const expected = contextMembershipSelection(basis, commit.value, limits);
+      if (local && (inputCount !== 1 || !selectedFile || !Number.isSafeInteger(selectedFile.size) || selectedFile.size < 1 || selectedFile.size > MEMBERSHIP_PROOF_BYTES)) refuse('choose one bounded saved proof.');
+      if (local) file.value = '';
+      status.textContent = local ? 'Verifying saved proof locally. No network request is made.' : 'Reading and verifying the complete needed parent trees…';
+      const answer = await run(async hostCheck => {
+        const check = () => { hostCheck(); guard(); };
+        check(); let proof;
+        if (local) {
+          const data = await fileBytes(selectedFile, controller.signal); check();
+          proof = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data));
+        } else { const acquired = await acquire(expected.commit, limits); check(); proof = proofCopy(acquired.proof); }
+        const verified = await verifyMembershipProof(proof, expected, cryptoImpl, check, limits); check();
+        return { proof: proofCopy(proof), verified };
+      });
+      guard(); chosen = { ...answer, signature: stamp };
+      output.textContent = `Commit ${answer.verified.commit}\nRoot tree ${answer.verified.rootTree}\n` +
+        `${answer.verified.files.length} selected paths; ${answer.verified.trees} parent trees; ${answer.verified.treeBytes} tree bytes.\n` +
+        answer.verified.files.map(row => `${display(unhex(row.pathHex, 4096))}: ${row.kind} ${row.blob}`).join('\n');
+      status.textContent = 'Selected path/mode/blob identities verified under the independently supplied commit. Blob bodies, repository authority, freshness, signatures and search coverage were NOT verified by this operation.';
+    } catch {
+      if (!disposed && serial === generation) { chosen = null; output.textContent = ''; status.textContent = 'Membership verification failed or was canceled. No successful subset, replacement root or automatic retry was selected.'; }
+    } finally {
+      clearTimeout(timer); if (active === controller) active = null; if (serial === generation) working = false; sync();
+    }
+  }
+  submit.addEventListener('click', event => { event.preventDefault(); return execute(false); });
+  inspect.addEventListener('click', event => { event.preventDefault(); return execute(true); });
+  download.addEventListener('click', event => {
+    event.preventDefault(); if (disposed || !current() || !idle() || working || !chosen || chosen.signature !== signature()) return;
+    let anchor;
+    try {
+      const serialized = JSON.stringify(proofCopy(chosen.proof)); revoke();
+      url = urlApi.createObjectURL(new Blob([serialized], { type: 'application/json' }));
+      anchor = node('a'); anchor.href = url; anchor.download = 'frankengit-context-membership.json'; section.append(anchor); anchor.click();
+      status.textContent = 'Private membership proof exported without credentials. Replay requires an independently selected commit and expected path/blob IDs; this is not an authority, freshness, full-blob or search-coverage proof.';
+    } catch { revoke(); status.textContent = 'Proof export failed. No network request was made.'; }
+    finally { anchor?.remove(); }
+  });
+  invalidate();
+  return { element: section, submit, inspect, download, sync, invalidate,
+    dispose() { const wasWorking = working; disposed = true; if (wasWorking) cancelRead(); invalidate(); commit.value = ''; file.value = ''; } };
+}
