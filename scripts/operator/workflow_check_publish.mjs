@@ -6,8 +6,11 @@ import { configuration as watchConfiguration, status as watchStatus, dispatchRep
 import { absolute, contains, directory, executable, fail, lock, names, parseJson, readPrivate, runNative, writeNew } from './workflow_watch_io.mjs';
 import { encode, sha256, hex, record, keys, integer, text, digest, principal, oid, pin,
   conclusion, historyPage, jobKey, validateJob, publication, validateTerminal } from './workflow_check_protocol.mjs';
+import { lookupOutcome, outcomeEndpoint } from './transaction_outcome.mjs';
+import { recoveryScope, recoveryRecord, validateRecoveryRecord, recoveredTerminal, matchPublication } from './workflow_check_outcome.mjs';
 
-const MAX_RUNS = 128, MAX_JOBS = 128, MANIFEST_BYTES = 1024 * 1024, STATE_BYTES = 32 * 1024 * 1024;
+const MAX_RUNS = 128, MAX_JOBS = 128, MANIFEST_BYTES = 1024 * 1024, STATE_BYTES = 64 * 1024 * 1024;
+const PLAN_RECEIPT_BYTES = 32 * 1024 * 1024;
 export function configuration(value) {
   keys(value, ['schema', 'watch', 'state_directory', 'principal_id']);
   if (value.schema !== 'frankengit-workflow-check-publisher-v1') fail('Unsupported workflow publisher configuration.');
@@ -41,15 +44,19 @@ function manifest(value, config) {
 // Reserve room for every start and terminal BEFORE admitting a new plan. The
 // reader's aggregate ceiling must not make an already-started job unrecoverable.
 function capacity(config, plans) {
-  let reserved = encode(config).length;
+  // Keep the original plan/start/native-terminal admission ceiling unchanged.
+  // Extra outcome records have a separate allowance; recovery must not narrow
+  // which already-admitted plans remain readable or enlarge new-work capacity.
+  let original = encode(config).length, recovery = 8192;
   for (const plan of plans) {
-    reserved += encode(plan).length + plan.jobs.length * 2 * 8192;
-    if (reserved > STATE_BYTES) fail('Workflow publication receipt capacity reached; retain existing custody.');
+    original += encode(plan).length + plan.jobs.length * 2 * 8192;
+    recovery += plan.jobs.length * 2 * 8192;
+    if (original > PLAN_RECEIPT_BYTES || original + recovery > STATE_BYTES) fail('Workflow publication receipt capacity reached; retain existing custody.');
   }
 }
 async function inventory(config, initialize = false) {
   await directory(config.state_directory);
-  const files = await names(config.state_directory, MAX_RUNS * (1 + 2 * MAX_JOBS) + 2);
+  const files = await names(config.state_directory, MAX_RUNS * (1 + 4 * MAX_JOBS) + 4);
   const fileSet = new Set(files);
   const saved = await readPrivate(join(config.state_directory, 'binding.json'), 128 * 1024, true);
   if (saved && !saved.equals(encode(config))) fail('Workflow publisher configuration changed; original principal and keys must be retained.');
@@ -58,7 +65,14 @@ async function inventory(config, initialize = false) {
     if (!initialize) return [];
     await writeNew(join(config.state_directory, 'binding.json'), encode(config));
   }
-  const groups = new Map(), selected = new Set(['binding.json', 'owner.lock']); let total = 0;
+  const remote = await readPrivate(join(config.state_directory, 'recovery-binding.json'), 8192, true);
+  if (remote) {
+    const value = parseJson(remote, 8192);
+    keys(value, ['schema', 'publisher_binding_sha256', 'endpoint']);
+    if (value.schema !== 'frankengit-workflow-check-recovery-binding-v1' || value.publisher_binding_sha256 !== binding(config)) fail('Recovery endpoint lost its publisher binding.');
+    outcomeEndpoint(value.endpoint);
+  }
+  const groups = new Map(), selected = new Set(['binding.json', 'owner.lock', 'recovery.lock', 'recovery-binding.json']); let total = remote?.length ?? 0;
   const read = async (path, maximum) => {
     const raw = await readPrivate(path, maximum); total += raw.length;
     if (total > STATE_BYTES) fail('Publication custody exceeds aggregate read budget.');
@@ -72,8 +86,8 @@ async function inventory(config, initialize = false) {
     if (plan.watch_id !== match[1]) fail('Publication plan filename changed.');
     const rows = [];
     for (let index = 0; index < plan.jobs.length; index++) {
-      const job = plan.jobs[index], row = { job, index, started: false, terminal: null };
-      for (const kind of ['started', 'terminal']) {
+      const job = plan.jobs[index], row = { job, index, started: false, terminal: null, observed: null, recovered: null };
+      for (const kind of ['started', 'terminal', 'observed', 'recovered']) {
         const name = `${kind}-${plan.watch_id}-${String(index).padStart(3, '0')}.json`;
         selected.add(name);
         if (!fileSet.has(name)) continue;
@@ -82,9 +96,16 @@ async function inventory(config, initialize = false) {
           keys(value, ['schema', 'request_sha256']);
           if (value.schema !== 'frankengit-workflow-check-start-v1' || value.request_sha256 !== sha256(encode(job))) fail('Original publication-start identity changed.');
           row.started = true;
-        } else row.terminal = validateTerminal(value, job);
+        } else if (kind === 'terminal') row.terminal = validateTerminal(value, job);
+        else {
+          if (!remote) fail('Saved outcome lost its independent endpoint binding.');
+          row[kind] = validateRecoveryRecord(value, config, job, kind === 'recovered' ? row.observed : null);
+          if (row[kind].reply.transaction === null || (kind === 'recovered' && (!row.observed || !row[kind].reply.terminal))) fail('Saved outcome lost its original transaction observation.');
+        }
       }
-      if (row.terminal && !row.started) fail('Terminal publication lost its original start responsibility.');
+      matchPublication(row.terminal, row.observed); matchPublication(row.terminal, row.recovered);
+      row.terminal ??= row.recovered ? recoveredTerminal(row.recovered) : row.observed ? recoveredTerminal(row.observed) : null;
+      if ((row.terminal || row.observed || row.recovered) && !row.started) fail('Terminal publication lost its original start responsibility.');
       rows.push(row);
     }
     selected.add(file); groups.set(plan.watch_id, { plan, rows });
@@ -218,6 +239,7 @@ async function submit(config, group, row, cx) {
   const nativeResult = await native(config, args, cx, false);
   const reply = parseJson(nativeResult.stdout, 128 * 1024);
   const terminal = publication(reply, config, job, nativeResult.code);
+  matchPublication(terminal, row.observed); matchPublication(terminal, row.recovered);
   try {
     await writeNew(jobPath(config, group.plan.watch_id, index, 'terminal'), encode(terminal));
     row.terminal = terminal;
@@ -237,7 +259,8 @@ export async function status(config) {
   config = configuration(config);
   const groups = await inventory(config);
   const owner = await lstat(join(config.state_directory, 'owner.lock')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-  return { ...summary(groups), read_only: true, owner_present: owner };
+  const recovering = await lstat(join(config.state_directory, 'recovery.lock')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+  return { ...summary(groups), read_only: true, owner_present: owner, recovery_owner_present: recovering };
 }
 async function owned(config, work) {
   await directory(config.state_directory); await executable(config.watch.fg);
@@ -311,4 +334,93 @@ export async function serve(config, options = {}) {
     return { type: 'workflow_check_service', schema_version: 1, polls, publications, stopped: options.signal?.aborted === true,
       poll_limit_reached: polls === maxPolls, last, authoritative_check: false, execution_retried: false };
   });
+}
+
+
+// This lock protects only local recovery observations. A retained publisher
+// owner.lock is deliberately neither acquired nor removed: an outcome receipt
+// cannot prove that a crashed native process was reaped or its node closed.
+export async function recover(config, address, token, options = {}) {
+  config = configuration(config); address = outcomeEndpoint(address);
+  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A current same-principal outcome credential is required.');
+  if (!options || typeof options !== 'object' || Array.isArray(options) ||
+      Object.keys(options).some(key => !['maxLookups', 'timeoutMs', 'requestTimeoutMs', 'signal', 'ca', 'onObservation'].includes(key))) fail('Unsupported workflow recovery options.');
+  const maxLookups = integer(options.maxLookups ?? 128, 1, 128), requestTimeout = integer(options.requestTimeoutMs ?? 30000, 1, 300000);
+  const timeout = integer(options.timeoutMs ?? 660000, 1, 660000), signal = options.signal;
+  if (signal !== undefined && !(signal instanceof AbortSignal)) fail('Invalid recovery cancellation signal.');
+  const observer = options.onObservation ?? (() => {});
+  if (typeof observer !== 'function') fail('Invalid recovery observer.');
+  const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length && options.ca.length <= 128 * 1024
+    ? Buffer.from(options.ca) : fail('Invalid recovery TLS CA.');
+  const deadline = performance.now() + timeout;
+  const check = () => { signal?.throwIfAborted(); if (performance.now() >= deadline) fail('Workflow recovery deadline exceeded.'); };
+  check(); await directory(config.state_directory);
+  // Refuse accidental initialization: only existing, verified publisher plans
+  // can select original keys. No original run files or executable are read.
+  await inventory(config);
+  if (!await readPrivate(join(config.state_directory, 'binding.json'), 128 * 1024, true)) fail('Retain the original publisher binding and plans before recovery.');
+  const release = await lock(join(config.state_directory, 'recovery.lock'));
+  let result, failure, groups, lookups = 0, terminalCount = 0;
+  const snapshot = () => ({ ...summary(groups), type: 'workflow_check_recovery', remote_read_only: true,
+    request_reexecuted: false, absence_proves_non_commit: false, process_containment_asserted: false,
+    local_observations_persisted: true, lookups, recovered_terminals: terminalCount,
+    limit_reached: groups.some(group => group.rows.some(row => row.started && !row.terminal)) && lookups === maxLookups,
+    stopped: signal?.aborted === true });
+  try {
+    groups = await inventory(config);
+    const endpointPath = join(config.state_directory, 'recovery-binding.json');
+    const expected = encode({ schema: 'frankengit-workflow-check-recovery-binding-v1', publisher_binding_sha256: binding(config), endpoint: address });
+    const saved = await readPrivate(endpointPath, 8192, true);
+    if (saved && !saved.equals(expected)) fail('Recovery endpoint changed; retain the independently selected original endpoint.');
+    check(); if (!saved) await writeNew(endpointPath, expected);
+    for (const group of groups) for (const row of group.rows) {
+      if (!row.started || row.terminal) continue;
+      if (signal?.aborted || lookups === maxLookups) { result = snapshot(); return result; }
+      check();
+      const reply = await lookupOutcome(address, token, { ...recoveryScope(config), key: row.job.key }, {
+        signal, ca, timeoutMs: Math.max(1, Math.min(requestTimeout, Math.floor(deadline - performance.now()))), known: row.observed?.reply ?? null });
+      lookups++;
+      const observed = recoveryRecord(reply, config, row.job, row.observed), terminal = recoveredTerminal(observed);
+      try {
+        // An active native sender may have finalized while this read was in flight.
+        const nativeBytes = await readPrivate(jobPath(config, group.plan.watch_id, row.index, 'terminal'), 8192, true);
+        if (nativeBytes) {
+          const local = validateTerminal(parseJson(nativeBytes, 8192), row.job);
+          matchPublication(local, observed);
+          if (!reply.terminal) fail('A newer local terminal was retained during recovery; repeat the read instead of losing knowledge.');
+          row.terminal = local;
+        }
+        if (reply.transaction !== null) {
+          const kind = row.observed ? 'recovered' : 'observed';
+          if (!row.observed || terminal) {
+            const bytes = encode(observed);
+            if (bytes.length > 8192) fail('Recovery observation exceeds its reserved receipt capacity.');
+            await writeNew(jobPath(config, group.plan.watch_id, row.index, kind), bytes);
+            row[kind] = observed;
+          }
+        }
+        if (terminal) { row.terminal ??= terminal; terminalCount++; }
+        // No post-response cancellation check: retain a validated terminal even
+        // when stopping. Cancellation prevents only the next original-key read.
+        await observer({ type: 'workflow_check_outcome_observed', schema_version: 1, watch_id: group.plan.watch_id,
+          job: row.job.job, state: reply.state, terminal: reply.terminal, tx_id: reply.transaction?.tx_id ?? null,
+          decision: reply.decision, check_id: null, authoritative_check: false, execution_retried: false, request_reexecuted: false });
+      } catch (error) {
+        if (terminal) error.retained_terminal = terminal;
+        throw error;
+      }
+    }
+    // Reconcile concurrent native receipts before reporting complete custody.
+    groups = await inventory(config); result = snapshot(); return result;
+  } catch (error) {
+    failure = error;
+    if (groups) error.retained_recovery = snapshot();
+    throw error;
+  } finally {
+    try { await release(); }
+    catch (error) {
+      if (failure) failure.cleanup_error = error.message;
+      else { error.retained_recovery = result; throw error; }
+    }
+  }
 }
