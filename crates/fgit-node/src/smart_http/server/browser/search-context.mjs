@@ -28,6 +28,15 @@ function hexBytes(value, maximum) {
   if (typeof value !== 'string' || value.length > maximum * 2 || value.length % 2 || /[^0-9a-f]/u.test(value)) reject('invalid byte encoding.');
   return value;
 }
+// Native GitOid Display includes its hash domain, while initialReply installs
+// bare digests. Compare semantic identities only after enforcing the selected
+// repository's domain and exact digest width; never strip an arbitrary prefix.
+function nativeBlob(value, algorithm) {
+  if (!['sha1', 'sha256'].includes(algorithm) || typeof value !== 'string') reject('invalid native blob identity.');
+  const raw = value.startsWith(`${algorithm}:`) ? value.slice(algorithm.length + 1) : value;
+  if (!new RegExp(`^[0-9a-f]{${algorithm === 'sha1' ? 40 : 64}}$`).test(raw) || /^0+$/.test(raw)) reject('invalid native blob identity.');
+  return raw;
+}
 function decode(value) {
   return Uint8Array.from({ length: value.length / 2 }, (_, i) => Number.parseInt(value.slice(i * 2, i * 2 + 2), 16));
 }
@@ -155,7 +164,7 @@ function plan(retrieval, limits, checkpoint) {
 // Never accept a server-selected ordering, rounded score or omitted origin just
 // because the totals are plausible. The entire closed receipt must match the
 // locally reproduced selection, including unselected-candidate competition.
-function checkRanking(received, expected, checkpoint) {
+function checkRanking(received, expected, algorithm, checkpoint) {
   checkpoint();
   object(received, Object.keys(expected));
   for (const name of ['profile', 'rank_constant', 'score_scale', 'input_order', 'tie_break', 'ranked_over', 'semantic_relevance']) {
@@ -165,7 +174,8 @@ function checkRanking(received, expected, checkpoint) {
   for (let i = 0; i < expected.selected.length; i++) {
     checkpoint();
     const row = object(received.selected[i], ['position', 'path_hex', 'blob', 'score_q16', 'contributions']), wanted = expected.selected[i];
-    for (const name of ['position', 'path_hex', 'blob', 'score_q16']) if (row[name] !== wanted[name]) reject('ranked winner evidence changed.');
+    for (const name of ['position', 'path_hex', 'score_q16']) if (row[name] !== wanted[name]) reject('ranked winner evidence changed.');
+    if (nativeBlob(row.blob, algorithm) !== wanted.blob) reject('ranked winner evidence changed.');
     if (!Array.isArray(row.contributions) || row.contributions.length !== wanted.contributions.length) reject('ranked contributions changed.');
     for (let j = 0; j < wanted.contributions.length; j++) {
       checkpoint();
@@ -224,7 +234,7 @@ export function contextReply(reply, retrieval, input, checkpoint = () => {}) {
       reply.selection !== limits.selection || typeof reply.complete !== 'boolean') reject('unsupported hydration profile.');
   for (let i = 0; i < limitNames.length; i++) if (reply[wireNames[i]] !== limits[limitNames[i]]) reject('context limit echo changed.');
   const selected = plan(retrieval, limits, checkpoint), number = selected.files.length;
-  if (selected.ranking) checkRanking(reply.ranking, selected.ranking, checkpoint);
+  if (selected.ranking) checkRanking(reply.ranking, selected.ranking, retrieval.scope?.format, checkpoint);
   const perFile = Math.min(MAX_FILE, Math.floor(limits.maxSourceBytes / Math.max(1, number)));
   if (!perFile || reply.source_file_limit !== perFile || !Array.isArray(reply.files) || reply.files.length !== number ||
       reply.candidate_files !== selected.candidateFiles || reply.returned_files !== number ||
@@ -235,7 +245,7 @@ export function contextReply(reply, retrieval, input, checkpoint = () => {}) {
     checkpoint();
     object(raw, ['path_hex', 'blob', 'source_bytes', 'anchors', 'excerpts']);
     const file = selected.files[i];
-    if (raw.path_hex !== file.pathHex || raw.blob !== file.blob) reject('file escaped the selected membership/order or changed identity.');
+    if (raw.path_hex !== file.pathHex || nativeBlob(raw.blob, retrieval.scope?.format) !== file.blob) reject('file escaped the selected membership/order or changed identity.');
     const bytes = count(raw.source_bytes, 'file source bytes', 0, perFile);
     sourceBytes += bytes;
     if (sourceBytes > limits.maxSourceBytes || (file.sourceBytes !== null && file.sourceBytes !== bytes)) reject('file source accounting changed.');

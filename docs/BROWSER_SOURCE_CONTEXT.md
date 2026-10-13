@@ -37,6 +37,13 @@ evidence, downgrades to alphabetical selection, mixed identities, reordered inpu
 channels and arbitrary weights are refused. Invalid responses do not advance the
 source pin or generation checkpoints, and do not trigger retries or fallback.
 
+Native replies spell blob identities as `sha1:<digest>` or `sha256:<digest>`,
+while validated Initial results retain bare digests. The context join validates
+the selected hash domain and exact digest before comparing either spelling;
+file membership and ranked-selection receipts use the same identity rule.
+The wire receipt is not rewritten, and this comparison is not a substitute
+for full-file hash verification.
+
 ## Inspection and report export
 
 The priority table shows each selected file's fixed-point score and channel
@@ -64,12 +71,24 @@ and ranking to their defaults.
 
 ## Verification boundary
 
-`node --test tests/browser/search-context*.test.mjs` runs the decoder and browser
-contract tests. Ranking golden values follow native test source at
+`node --test tests/browser/search-context*.test.mjs` runs the focused tests.
+Ranking golden values follow native test source at
 `9da3ef87c0ccd6ca061a3e6b00a72f9b9c9ba166`, including the exact `4279` corroborated
-late-path example and raw-byte ties. Decoder tests use explicit native-schema,
-prevalidated Initial fixtures. Controller/view tests execute the production
-modules with explicitly substituted shared Transport/Initial dependencies and a
-fake DOM. They are not live native HTTP, real-browser, Rust-refinement,
-authorization/CAS, or full-workspace acceptance evidence. No bead closure follows
-from these tests.
+late-path example and raw-byte ties. The earlier decoder fixtures assume a
+prevalidated Initial result, and the isolated controller/view tests substitute
+shared dependencies or use a fake DOM; they cannot establish that the complete
+production request path is connected.
+
+`search-context-transport.test.mjs` imports the real shared Transport and uses
+Fetch, WebCrypto and loopback HTTP sockets. `search-context-production.test.mjs`
+imports the complete CodeSearch dependency graph unchanged and exercises actual
+request framing, nested Initial validation, hydration/ranking joins, checkpoint
+retention, report export and paged full-file hashing. Its independently defined
+operator fixtures use native-schema replies with hash-qualified object IDs;
+no shared production import is replaced and no response is prevalidated.
+These tests detect both the missing transport route and the qualified/bare
+identity mismatch that the earlier isolated tests missed.
+
+The HTTP peers are explicit protocol fixtures, not live Rust servers. These
+checks are not real-browser, Rust-refinement, native authorization/CAS, or
+full-workspace acceptance evidence. No bead closure follows from them.
