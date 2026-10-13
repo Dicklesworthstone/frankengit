@@ -3,7 +3,7 @@
 import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
 import { decimal, oid, unhex, fail, showReply } from './pulls-core.mjs';
-import { RECEIPT_LIMIT, fastForwardCommand } from './pulls-actions.mjs';
+import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, protectionChanges } from './pulls-actions.mjs';
 import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
@@ -539,4 +539,235 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   status('Connect with a repository token. Credentials remain only in page memory.'); controls();
   return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
 }
-if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) mountPulls(document);
+
+// Review-protection administration has its own connection and native client.
+// A PR-read/review token is never borrowed, and a displayed policy is evidence,
+// not permission to publish. Only an explicitly confirmed saved intent is sent.
+export function mountProtection(doc, { href = doc.defaultView.location.href, fetchImpl = globalThis.fetch,
+  cryptoImpl = globalThis.crypto, downloadImpl = null } = {}) {
+  const parent = doc.getElementById('pr-collaboration');
+  if (!parent || doc.getElementById('protection-panel')) fail('Protection needs one PR shell and may only be mounted once.');
+  const client = new ProtectionClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
+  const panel = element(doc, 'details'); panel.id = 'protection-panel';
+  item(doc, panel, 'summary', 'Repository review protection — administrator');
+  item(doc, panel, 'p', 'Inspect the complete native policy, then propose a complete replacement. Omitted branches lose protection; omitted administrators lose policy administration. The node checks current authority. First installation is trusted-local only.');
+  const nodes = {}, rows = [];
+  let operation = false, generation = 0, rowNumber = 0, preview = null;
+  const named = (parent, tag, name, label = '') => {
+    const el = item(doc, parent, tag, label); el.id = `protection-${name}`; nodes[name] = el; return el;
+  };
+  const field = (parent, name, label, tag = 'input') => {
+    const wrapper = item(doc, parent, 'label', label), input = named(wrapper, tag, name);
+    if (tag === 'input') input.type = 'text';
+    input.autocomplete = 'off'; input.spellcheck = false; return input;
+  };
+  const button = (parent, name, label) => { const el = named(parent, 'button', name, label); el.type = 'button'; return el; };
+  const connection = named(panel, 'form', 'connection'); connection.autocomplete = 'off';
+  const token = field(connection, 'token', 'Independent protection bearer token'); token.type = 'password'; token.maxLength = 64;
+  const person = field(connection, 'principal', 'Intended authenticated principal ID (independently known)'); person.maxLength = 32;
+  const recoveryOnly = field(connection, 'recovery-only', 'Recovery only, including a rotated credential'); recoveryOnly.type = 'checkbox';
+  button(connection, 'connect', 'Connect protection credential').type = 'submit';
+  button(panel, 'disconnect', 'Disconnect protection credential');
+  named(panel, 'p', 'mode');
+  const statusNode = named(panel, 'p', 'status'); statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
+  button(panel, 'load', 'Load complete protection policy — read only');
+  named(panel, 'pre', 'snapshot');
+  const editor = named(panel, 'form', 'editor');
+  item(doc, editor, 'h3', 'Complete replacement');
+  const administrators = field(editor, 'administrators', 'All policy administrators, one principal ID per line', 'textarea');
+  administrators.maxLength = 32 * 33; administrators.rows = 4;
+  named(editor, 'div', 'branches');
+  button(editor, 'add-branch', 'Add protected branch');
+  const clear = field(editor, 'clear', 'Explicitly remove ALL branch protection (requires no branch rules)'); clear.type = 'checkbox';
+  button(editor, 'preview', 'Preview all changes — do not prepare or send').type = 'submit';
+  named(panel, 'pre', 'changes');
+  button(panel, 'stage', 'Prepare this exact preview — do not send');
+  named(panel, 'pre', 'pending');
+  const confirm = field(panel, 'confirm', 'I have reviewed the saved complete replacement and authorize this exact Send/Retry'); confirm.type = 'checkbox';
+  button(panel, 'send', 'Send/Retry original protection request');
+  button(panel, 'recover', 'Look up original protection outcome — do not resend');
+  button(panel, 'discard', 'Discard never-sent, never-exported draft');
+  button(panel, 'export', 'Download original protection recovery receipt');
+  item(doc, panel, 'p', 'Recovery receipts contain private policy data, but no bearer token. Save one before leaving after preparing a request. A timeout, disconnect or absent outcome never proves non-commit.');
+  parent.append(panel);
+  const status = message => { statusNode.textContent = displayText(message); };
+  const pendingView = () => {
+    const pending = client.pending;
+    if (!pending) { nodes.pending.textContent = 'No prepared protection request.'; return; }
+    const intent = pending.intent;
+    nodes.pending.textContent = displayText(`SAVED COMPLETE REPLACEMENT — edits cannot change this request\n` +
+      `Origin: ${intent.origin}\nRoute: ${intent.route}\nPrincipal: ${intent.principal}\nKey: ${intent.key}\n` +
+      `Tenant: ${intent.source.scope.tenant}\nRepository: ${intent.source.scope.repository}\nIncarnation: ${intent.source.scope.incarnation}\n` +
+      `Source head: ${intent.source.head}\nExpected version: ${intent.source.version}\nExpected epoch: ${intent.source.epoch}\n` +
+      `Dispatch attempted: ${pending.sent}; receipt exported: ${pending.exported}; clear all: ${intent.clear}\n` +
+      `Changes:\n${JSON.stringify(protectionChanges(intent.source.policy, intent.replacement), null, 2)}\n` +
+      `Complete replacement:\n${JSON.stringify(intent.replacement, null, 2)}`);
+  };
+  function controls() {
+    const busy = operation || client.busy, pending = client.pending;
+    const ordinary = client.connected && !client.recoveryOnly;
+    const editable = ordinary && !busy && !pending && Boolean(client.observed?.policy);
+    for (const input of [token, person, recoveryOnly, nodes.connect]) input.disabled = busy;
+    nodes.mode.textContent = !client.connected ? 'Disconnected. No protection credential is active.' : client.recoveryOnly
+      ? 'RECOVERY ONLY. Only the retained original outcome may be read; no policy read, replacement preparation or resend is allowed.'
+      : 'Ordinary protection connection. Connecting locally does not establish an authenticated role or grant.';
+    nodes.load.disabled = !ordinary || busy || Boolean(pending);
+    for (const input of [administrators, clear, nodes['add-branch'], nodes.preview]) input.disabled = !editable;
+    for (const row of rows) for (const input of [row.reference, row.reviewers, row.remove]) input.disabled = !editable;
+    nodes['add-branch'].disabled ||= rows.length >= 64;
+    nodes.stage.disabled = !editable || !preview;
+    confirm.disabled = !ordinary || busy || !pending;
+    if (!ordinary || !pending) confirm.checked = false;
+    nodes.send.disabled = !ordinary || busy || !pending || !confirm.checked;
+    nodes.recover.disabled = !client.connected || busy || !pending;
+    nodes.discard.disabled = !ordinary || busy || !pending || pending.sent || pending.exported;
+    nodes.export.disabled = busy || !pending;
+    pendingView();
+  }
+  function clearEditor() {
+    preview = null; rows.length = 0; nodes.branches.replaceChildren(); administrators.value = '';
+    clear.checked = false; confirm.checked = false; nodes.changes.textContent = ''; nodes.snapshot.textContent = '';
+  }
+  function changed() {
+    preview = null; nodes.changes.textContent = 'Inputs changed. Preview the complete replacement again.';
+    confirm.checked = false; controls();
+  }
+  function addRow(data = { reference_hex: '', required_reviewers: [] }) {
+    if (rows.length >= 64) fail('At most 64 branch rules can be edited.');
+    const group = element(doc, 'fieldset'); nodes.branches.append(group);
+    item(doc, group, 'legend', `Protected branch ${++rowNumber}`);
+    const refLabel = item(doc, group, 'label', 'Exact branch bytes, lowercase hexadecimal (including refs/heads/)');
+    const reference = item(doc, refLabel, 'input'); reference.type = 'text'; reference.maxLength = 2048;
+    reference.autocomplete = 'off'; reference.spellcheck = false; reference.value = data.reference_hex;
+    const readable = item(doc, group, 'pre', data.reference_hex ? `Display only: ${displayBytes(data.reference_hex)}` : 'Enter exact branch bytes.');
+    const reviewersLabel = item(doc, group, 'label', 'All required reviewer IDs for this branch, one per line');
+    const reviewers = item(doc, reviewersLabel, 'textarea'); reviewers.rows = 3; reviewers.maxLength = 32 * 33;
+    reviewers.spellcheck = false; reviewers.value = data.required_reviewers.join('\n');
+    const remove = item(doc, group, 'button', 'Remove this branch rule'); remove.type = 'button';
+    const row = { reference, reviewers, remove }; rows.push(row);
+    reference.addEventListener('input', () => {
+      readable.textContent = 'Edited exact branch bytes; inspect the complete replacement in the preview.'; changed();
+    });
+    reviewers.addEventListener('input', changed);
+    remove.addEventListener('click', event => {
+      event.preventDefault();
+      if (operation || client.busy || client.pending || !client.connected || client.recoveryOnly || !client.observed?.policy) return;
+      rows.splice(rows.indexOf(row), 1); group.remove(); changed();
+    });
+  }
+  const people = input => {
+    if (input.value.length > 32 * 33) fail('A principal list exceeds its editing limit.');
+    // Newline and comma separate IDs; principal validation never trims or
+    // repairs a malformed ID. The wire policy validator remains authoritative.
+    return input.value.split(/[\r\n,]+/u).filter(value => value !== '');
+  };
+  function draft() {
+    if (rows.some(row => row.reference.value.length > 2048)) fail('A branch byte string exceeds its editing limit.');
+    return { replacement: protectionPolicy({ administrators: people(administrators),
+      branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers) })) }), clear: clear.checked };
+  }
+  function requireDraftAccess() {
+    if (!client.connected || client.recoveryOnly || client.pending || !client.observed?.policy) fail('Load an installed policy with an ordinary protection connection and no pending request.');
+  }
+  async function run(action) {
+    if (operation || client.busy) { status('A protection operation is still settling. The original request is not replaced.'); return; }
+    const id = ++generation; operation = true; controls();
+    const guard = () => { if (id !== generation) fail('Protection view superseded.'); };
+    try { await action(guard); }
+    catch (error) {
+      if (id === generation) {
+        if (!client.connected) clearEditor();
+        status(`${error.message || 'Protection operation unavailable.'}${client.pending?.sent || error.outcomeUnknown
+          ? ' Outcome remains unknown. Keep the original receipt and key; absence or disconnect does not prove non-commit.' : ''}`);
+      }
+    } finally {
+      if (id === generation) operation = false;
+      controls();
+    }
+  }
+  function disconnect() {
+    generation++; operation = false; client.disconnect(); token.value = ''; person.value = ''; clearEditor(); controls();
+    status(client.pending ? 'Disconnected. The original request remains in memory. Export its receipt before leaving; no rollback is inferred.'
+      : 'Disconnected. Protection credentials and policy views cleared.');
+  }
+  function terminal(result) {
+    confirm.checked = false;
+    if (result.terminal) {
+      clearEditor();
+      status(`Canonical ${result.outcome}: transaction ${result.tx}, sequence ${result.sequence}, ` +
+        (result.rcr ? `record ${result.rcr}. ` : `refusal ${result.refusal}. `) +
+        'External delivery acknowledgement is not established. Reload the complete policy explicitly before preparing another replacement.');
+    } else status(`Outcome unknown (${result.state}). No command was reexecuted. Keep the original request; absence does not prove non-commit.`);
+  }
+  const on = (name, event, handler) => nodes[name].addEventListener(event, ev => { ev.preventDefault(); return handler(); });
+  on('connection', 'submit', () => {
+    const credential = token.value, principal = person.value, mode = recoveryOnly.checked; token.value = '';
+    return run(async guard => {
+      clearEditor(); await client.connect(credential, principal, { recoveryOnly: mode }); guard();
+      status(mode ? 'Connected locally for original-outcome recovery only. The server must authenticate the independently entered principal.'
+        : 'Connected locally. Load the complete native protection policy explicitly; no request has been sent.');
+    });
+  });
+  on('disconnect', 'click', disconnect);
+  on('load', 'click', () => run(async guard => {
+    if (!client.connected || client.recoveryOnly || client.pending) fail('Ordinary access with no pending request is required to reload protection.');
+    clearEditor(); const source = await client.load(); guard();
+    nodes.snapshot.textContent = displayText(`Tenant: ${source.scope.tenant}\nRepository: ${source.scope.repository}\nIncarnation: ${source.scope.incarnation}\n` +
+      `Object format: ${source.scope.format}\nSource head: ${source.head}\nPolicy version: ${source.version}\nPolicy epoch: ${source.epoch}\n` +
+      `Complete policy:\n${JSON.stringify(source.policy, null, 2)}`);
+    if (!source.policy) { status('No policy is installed. Remote bootstrap is forbidden; first installation is trusted-local only.'); return; }
+    administrators.value = source.policy.administrators.join('\n');
+    for (const row of source.policy.branches) addRow(row);
+    status(source.policy.branches.length ? 'Complete installed policy loaded. Editing and previewing do not publish.'
+      : 'Installed policy has no protected branches. Administrators still exist; this is not an uninstalled policy.');
+  }));
+  administrators.addEventListener('input', changed); clear.addEventListener('change', changed);
+  on('add-branch', 'click', () => {
+    if (operation || client.busy) return;
+    try { requireDraftAccess(); addRow(); changed(); } catch (error) { status(error.message); }
+  });
+  on('editor', 'submit', () => run(async () => {
+    requireDraftAccess(); preview = null; nodes.changes.textContent = '';
+    const proposed = draft();
+    if (proposed.clear !== (proposed.replacement.branches.length === 0)) fail('An empty branch policy needs explicit clear-all confirmation; clear-all cannot accompany branch rules.');
+    const source = client.observed;
+    preview = { ...proposed, source };
+    nodes.changes.textContent = displayText(`PREVIEW ONLY — no request prepared or sent\nExpected version: ${source.version}\nExpected epoch: ${source.epoch}\n` +
+      `Clear ALL branch protection: ${proposed.clear}\n` +
+      `All changes:\n${JSON.stringify(protectionChanges(source.policy, proposed.replacement), null, 2)}\n` +
+      `Complete replacement:\n${JSON.stringify(proposed.replacement, null, 2)}`);
+    status('Review every administrator and branch/reviewer addition and removal. Omitted entries are deleted, not preserved. Prepare explicitly to save this exact preview.');
+  }));
+  on('stage', 'click', () => run(async guard => {
+    requireDraftAccess();
+    if (!preview || JSON.stringify(draft()) !== JSON.stringify({ replacement: preview.replacement, clear: preview.clear }) ||
+        JSON.stringify(client.observed) !== JSON.stringify(preview.source)) fail('Inputs or the source policy changed. Preview again before preparing.');
+    await client.stage(preview.replacement, preview.clear); guard(); preview = null; confirm.checked = false;
+    status('Exact protection replacement prepared locally, not sent. Inspect the saved request, save its receipt, then explicitly confirm Send/Retry.');
+  }));
+  confirm.addEventListener('change', controls);
+  on('send', 'click', () => run(async guard => {
+    if (!client.connected || client.recoveryOnly || !client.pending || !confirm.checked) fail('Explicitly confirm the original request using an ordinary protection connection.');
+    confirm.checked = false; const result = await client.send(); guard(); terminal(result);
+  }));
+  on('recover', 'click', () => run(async guard => { const result = await client.recover(); guard(); terminal(result); }));
+  on('discard', 'click', () => run(async () => {
+    if (!client.connected || client.recoveryOnly) fail('Discard requires an ordinary protection connection.');
+    client.discardUnsent(); changed(); status('Never-dispatched, never-exported draft discarded. Preview the complete replacement again before preparing.');
+  }));
+  on('export', 'click', () => run(async () => {
+    download('frankengit-protection-recovery.json', client.exportReceipt());
+    status('Original recovery receipt exported without the bearer token. Keep it private and retain the original credential; the command may be submitted elsewhere.');
+  }));
+  doc.defaultView.addEventListener('beforeunload', event => {
+    if (client.pending || client.busy || operation) { event.preventDefault(); event.returnValue = ''; }
+  });
+  doc.defaultView.addEventListener('pagehide', disconnect);
+  status('Connect independently for protection administration. No protection request runs automatically.'); controls();
+  return { client, disconnect };
+}
+
+if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) {
+  mountPulls(document);
+  mountProtection(document);
+}
