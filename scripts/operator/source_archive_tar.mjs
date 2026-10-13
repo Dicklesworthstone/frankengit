@@ -125,7 +125,7 @@ function tarRecords(bytes) {
 
 // Offline verification parses only this closed deterministic tar profile. It
 // never extracts members, follows paths/links, opens a socket or refreshes source.
-export function inspectSourceArchive(bytes, expectedHash) {
+function verifiedSourceArchive(bytes, expectedHash) {
   if (typeof expectedHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectedHash)) fail('An independently retained archive SHA-256 is required.');
   if (!Buffer.isBuffer(bytes) || bytes.length > TAR_LIMIT || sha256(bytes) !== expectedHash) fail('Source archive SHA-256 mismatch.');
   const records = tarRecords(bytes), manifestRecord = records.get(MANIFEST);
@@ -152,5 +152,19 @@ export function inspectSourceArchive(bytes, expectedHash) {
     const wanted = planned.ordered[index++];
     if (actual.name !== wanted.name || actual.type !== wanted.type || !actual.bytes.equals(wanted.bytes)) fail('Source archive order or contents changed.');
   }
-  return receipt(planned, expectedHash, bytes.length);
+  return { capture, receipt: receipt(planned, expectedHash, bytes.length) };
+}
+
+export function inspectSourceArchive(bytes, expectedHash) {
+  return verifiedSourceArchive(bytes, expectedHash).receipt;
+}
+
+// Restore only in-memory source bytes, not host paths or authority. Reuse goes
+// through exactly the same full archive verifier as offline inspection; there
+// is no trusted-manifest or header-only shortcut. Detach every payload so the
+// caller can release or mutate its archive buffer without changing the result.
+export function restoreSourceCapture(bytes, expectedHash) {
+  const { capture } = verifiedSourceArchive(bytes, expectedHash);
+  capture.files = capture.files.map(file => ({ ...file, bytes: Buffer.from(file.bytes) }));
+  return capture;
 }

@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { lstat } from 'node:fs/promises';
 import { captureSource, archiveSelection, archiveLimits, sha256 } from './operator/source_archive.mjs';
-import { buildSourceArchive, inspectSourceArchive, TAR_LIMIT } from './operator/source_archive_tar.mjs';
+import { buildSourceArchive, inspectSourceArchive, restoreSourceCapture, TAR_LIMIT } from './operator/source_archive_tar.mjs';
 import { parse } from './operator/source_archive_transport.mjs';
 import { absolute, directory, readPrivate, writeNew } from './operator/workflow_watch_io.mjs';
 
@@ -12,6 +12,7 @@ const USAGE = `usage:
   node scripts/fg_source_archive.mjs capture --selection <private-json-file>
     --token-file <private-token-file> --layout <portable|objects> --output <new-archive.tar>
     [--ca-file <private-pem-file>] [--limits <private-json-file>]
+    [--reuse-archive <private-prior-archive.tar> --reuse-sha256 <retained-hash>]
   node scripts/fg_source_archive.mjs inspect --archive <private-archive.tar> --sha256 <retained-hash>
 
 All paths must be normalized absolute paths with owner-private 0700 parents.
@@ -20,21 +21,25 @@ Portable layout stores ASCII source paths, symlink payloads as regular files and
 unhydrated gitlinks as empty directories; executable file bits are not installed.
 Objects layout preserves arbitrary native names in the proof manifest, with safe
 object-ID payload names. Neither layout is a checkout or a repository backup.
+Reuse checks the complete prior archive before connecting, then reads a fresh
+commit and every tree. The new archive is self-contained, never a delta chain.
 No extraction, overwrite, redirect, mutation, implicit source refresh or retry.
 Exit 0: verified archive/inspection; 2: refused; 3: cancelled before publication;
 4: file publication or output delivery needs inspection using retained hash.
-See docs/VERIFIED_SOURCE_ARCHIVE.md.`;
+See docs/VERIFIED_SOURCE_ARCHIVE.md and docs/SOURCE_ARCHIVE_REUSE.md.`;
 function options(args) {
   const operation = args[0], fields = new Map();
   const required = operation === 'capture' ? ['--selection', '--token-file', '--layout', '--output'] : ['--archive', '--sha256'];
-  const allowed = operation === 'capture' ? [...required, '--ca-file', '--limits'] : required;
-  if (!['capture', 'inspect'].includes(operation) || args.length > 13 || args.length % 2 !== 1) throw new Error(USAGE);
+  const allowed = operation === 'capture' ? [...required, '--ca-file', '--limits', '--reuse-archive', '--reuse-sha256'] : required;
+  if (!['capture', 'inspect'].includes(operation) || args.length > 17 || args.length % 2 !== 1) throw new Error(USAGE);
   for (let index = 1; index < args.length; index += 2) {
     const flag = args[index], value = args[index + 1];
     if (!allowed.includes(flag) || fields.has(flag) || !value || value.startsWith('--')) throw new Error(USAGE);
     fields.set(flag, value);
   }
   if (required.some(flag => !fields.has(flag))) throw new Error(USAGE);
+  if (fields.has('--reuse-archive') !== fields.has('--reuse-sha256') ||
+      (fields.has('--reuse-sha256') && !/^[0-9a-f]{64}$/.test(fields.get('--reuse-sha256')))) throw new Error(USAGE);
   return { operation, fields };
 }
 async function privateFile(path, maximum) {
@@ -78,7 +83,16 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const token = tokenBytes.subarray(0, 64).toString('ascii');
       const ca = fields.has('--ca-file') ? await privateFile(fields.get('--ca-file'), 128 * 1024) : undefined;
       const deadline = performance.now() + limits.timeoutMs;
-      const { capture, metrics } = await captureSource(selection, token, { limits, signal: stop.signal, ca });
+      const reuseHash = fields.get('--reuse-sha256');
+      const reuse = fields.has('--reuse-archive')
+        ? restoreSourceCapture(await privateFile(fields.get('--reuse-archive'), TAR_LIMIT), reuseHash) : undefined;
+      stop.signal.throwIfAborted();
+      // Reading and verifying the prior archive spends this operation's time;
+      // the network phase receives only the remaining budget, not a fresh one.
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining < 1) throw new Error('Source archive deadline exceeded before acquisition.');
+      const { capture, metrics } = await captureSource(selection, token, {
+        limits: { ...limits, timeoutMs: remaining }, signal: stop.signal, ca, reuse });
       stop.signal.throwIfAborted(); const archive = buildSourceArchive(capture, fields.get('--layout'));
       inspectSourceArchive(archive.bytes, archive.receipt.archive_sha256);
       stop.signal.throwIfAborted();
@@ -90,7 +104,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const saved = await privateFile(path, TAR_LIMIT);
       if (sha256(saved) !== attempted.archive_sha256) throw new Error('Published archive changed during readback.');
       receipt = { ...inspectSourceArchive(saved, attempted.archive_sha256), archive_path: path, read_metrics: metrics,
-        stop_requested: stop.signal.aborted };
+        ...(reuseHash === undefined ? {} : { reuse_archive_sha256: reuseHash }), stop_requested: stop.signal.aborted };
     }
     await write(stdout, receipt); return 0;
   } catch (error) {
