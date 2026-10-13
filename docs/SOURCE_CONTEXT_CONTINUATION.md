@@ -83,3 +83,45 @@ They cover both Git hash formats, strongest full-width checkpoints, symbols,
 source mismatch, path/budget attenuation, input mutation, cancellation, deadline
 and refusal behavior. They do not establish live Rust-node interoperability or
 complete Agent Protocol adoption. FG-032 remains open.
+
+## Operator command
+
+Save a bounded follow-up JSON in a 0600 file inside a 0700 private directory:
+
+```json
+{"terms":["rollback"],"prefixes_hex":["737263"],"limits":{"context_max_files":4}}
+```
+
+Use the manifest hash retained from the prior capture or inspection receipt:
+
+```bash
+node scripts/fg_source_context.mjs continue \
+  --bundle /private/context/previous \
+  --expected-sha256 "$PREVIOUS_MANIFEST_SHA256" \
+  --followup-file /private/context/followup.json \
+  --token-file /private/context/read-token \
+  --output /private/context/next
+```
+
+There is deliberately no `--endpoint` or full-query override for `continue`.
+The output must be absent and outside the prior bundle directory. The command
+uses the same create-only export, hash-pinned offline inspection and exit codes
+as `capture`. The printed receipt adds `continued_from`; retain it alongside
+both independently pinned manifest hashes. This link is not embedded in the v1
+capture or recreated by offline `inspect`. The stored new query does retain its
+exact inherited source pins and independent generation floors.
+
+`--require-complete` refuses to export an incomplete new answer, preserving the
+old bundle. SIGTERM/SIGINT drain the current network read; no prefix is exported.
+A successful new export followed by stdout failure reports exit 4 and retains
+both the new export receipt and parent link. No output error undoes either
+bundle. `capture` and `inspect` keep their existing grammar and response shapes.
+
+```bash
+node --test tests/operator/source_context_continue*.test.mjs
+```
+
+These additional tests execute real CLI child processes, private files and HTTP
+sockets against the same explicit protocol peers. They cover both hash formats,
+legacy capture/inspect, output refusal, partial results, stdout loss, cancellation,
+ranked/symbol continuations, fresh credentials, and independently pinned reopen.
