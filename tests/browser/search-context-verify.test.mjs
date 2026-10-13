@@ -124,3 +124,28 @@ test('multi-page source is budgeted before read and hashed with all bytes', asyn
   const v = await run(s, { maxRequests: 2 }); assert.equal(v.requests, 2);
   assert.equal(v.files[0].blob, createHash('sha1').update(`blob ${s.f.bytes.length}\0`).update(s.f.bytes).digest('hex'));
 });
+
+test('path-only empty source still needs one read and the exact empty Git blob hash', async () => {
+  const s = sample(); s.f.bytes = Buffer.alloc(0); const file = s.result.context.files[0];
+  file.blob = oid(s.f.bytes, 'sha1'); file.sourceBytes = 0; file.anchors = file.anchors.filter(a => a.channel === 'path');
+  file.excerpts = [{ offset: 0, bytesHex: '' }]; s.result.context.sourceBytesRead = 0; s.result.context.excerptBytes = 0;
+  s.result.content.hits = []; s.result.symbols = { state: 'not_requested' };
+  Object.assign(s.result.path.hits[0], { blob: file.blob, contentBytes: 0 });
+  const receipt = await run(s, { maxSourceBytes: 1, maxRequests: 1 });
+  assert.equal(receipt.requests, 1); assert.equal(receipt.sourceBytesRead, 0); assert.equal(receipt.files[0].blob, 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
+});
+test('valid raw declaration names on a later line are verified with their exact coordinates', async () => {
+  const s = sample(); s.f.bytes = Buffer.from('// fixture\n\tpub fn r#type() {}\n');
+  const at = s.f.bytes.indexOf('type'), file = s.result.context.files[0], id = oid(s.f.bytes, 'sha1');
+  Object.assign(file, { pathHex: hex('src/type.rs'), blob: id, sourceBytes: s.f.bytes.length,
+    excerpts: [{ offset: 0, bytesHex: hex(s.f.bytes) }], anchors: [
+      { channel: 'content', offset: at, length: 4 }, { channel: 'path', offset: 4, length: 4 }, { channel: 'symbol', offset: at, length: 4 }] });
+  s.result.context.sourceBytesRead = s.f.bytes.length; s.result.context.excerptBytes = s.f.bytes.length;
+  for (const [channel, offset] of [['content', at], ['path', 4]]) {
+    s.result[channel].query.termsHex = [hex('type')]; Object.assign(s.result[channel].hits[0], {
+      pathHex: file.pathHex, blob: id, contentBytes: s.f.bytes.length, spans: [{ queryIndex: 0, offset, length: 4 }] });
+  }
+  Object.assign(s.result.symbols.result.hits[0], { pathHex: file.pathHex, blob: id, offset: at, length: 4, nameHex: hex('type'),
+    rawIdentifier: true, line: 2, column: at - 11 + 1, excerptOffset: 11, excerptHex: hex(s.f.bytes.subarray(11, -1)) });
+  const receipt = await run(s); assert.equal(receipt.files[0].declarations, 1); assert.equal(receipt.files[0].blob, id);
+});

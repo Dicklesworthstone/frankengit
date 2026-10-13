@@ -3,6 +3,7 @@ import { CodeSearch } from './search.mjs';
 import { byteInput } from './search-data.mjs';
 import { sourceMode } from './search-current.mjs';
 import { mountContextControls, readContextQuery, renderSourceContext } from './search-context.mjs';
+import { mountContextVerification } from './search-context-verify.mjs';
 import { decimal, fail, unhex } from './pulls-core.mjs';
 
 const indexedMode = mode => ['indexed-content', 'indexed-path'].includes(mode);
@@ -91,19 +92,20 @@ export function mount(document, location, options = {}) {
   const element = (tag, text = '') => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (label, action) => { const el = element('button', label); el.type = 'button'; el.addEventListener('click', action); return el; };
   const contextControls = mountContextControls(document, get('initial-controls'), () => invalidate());
-  let contextView = null;
+  let contextView = null, contextVerification = null;
   let work = 0, resultVersion = 0, busy = false, result = null, verified = null, downloadUrl = null, resultButtons = new Set();
   const status = message => { get('status').textContent = message; };
   function clearFile() {
     verified = null; get('file').replaceChildren();
     if (downloadUrl !== null) { urlApi.revokeObjectURL(downloadUrl); downloadUrl = null; }
   }
-  function clearResults() { contextView?.dispose(); contextView = null; resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
+  function clearResults() { contextVerification?.dispose(); contextVerification = null; contextView?.dispose(); contextView = null; resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
   function sync() {
     get('submit-search').disabled = !client.connected || busy;
     get('refresh').disabled = !client.connected || busy;
     get('cancel').disabled = !busy;
     for (const b of resultButtons) b.disabled = !client.connected || busy;
+    contextVerification?.sync();
     const mode = get('mode').value, regex = mode === 'regex', indexed = indexedMode(mode), symbols = mode === 'symbols', combined = mode === 'initial';
     contextControls.sync(combined);
     const symbolEnabled = symbols || (combined && get('initial-symbol-name').value !== '');
@@ -147,7 +149,7 @@ export function mount(document, location, options = {}) {
     work++; busy = false; client.discardResults(); clearResults(); sync();
     status(client.connected ? 'Query changed. Search again; the existing snapshot remains pinned.' : 'Enter a read-scoped token to begin.');
   }
-  function cancel() { work++; busy = false; client.cancel(); clearFile(); sync(); status('Read canceled. No write or retry was attempted.'); }
+  function cancel() { work++; busy = false; client.cancel(); contextVerification?.invalidate(); clearFile(); sync(); status('Read canceled. No write or retry was attempted.'); }
   function refresh() {
     work++; busy = false; client.refreshSnapshot(); clearResults(); showPin(); sync();
     status('Snapshot released. The next search selects current state; repository identity must still match.');
@@ -238,6 +240,10 @@ export function mount(document, location, options = {}) {
     if (value.context) {
       contextView = renderSourceContext(document, value, { display, urlApi,
         current: () => client.connected && !busy && version === resultVersion && result === value });
+      contextVerification = mountContextVerification(document, value, { display, urlApi,
+        current: () => client.connected && !busy && version === resultVersion && result === value,
+        verify: limits => verifySelectedContext(value, version, limits) });
+      contextView.element.append(contextVerification.element);
       region.append(contextView.element); resultButtons.add(contextView.download);
     }
     region.append(element('h2', `${value.totalHits} results across combined channels`),
@@ -430,6 +436,18 @@ export function mount(document, location, options = {}) {
       region.append(element('p', `Content preview [0, ${Math.min(value.bytes.length, PREVIEW_BYTES)}). Path terms are not content matches.`),
         element('pre', display(value.bytes.subarray(0, PREVIEW_BYTES), true)));
     }
+  }
+  async function verifySelectedContext(expected, version, limits) {
+    if (busy || result !== expected || version !== resultVersion) fail('The selected context changed.');
+    work++; const id = work; busy = true; clearFile(); sync();
+    status('Reading and verifying all selected context files at the original snapshot…');
+    try {
+      const receipt = await client.verifyContext(limits);
+      if (id !== work || version !== resultVersion || result !== expected) fail('Context verification superseded.');
+      busy = false; sync(); status('Complete selected context verified against its native blob identities. Repository authority and coverage remain unverified.');
+      return receipt;
+    } catch (error) { errorAt(error, id); throw error; }
+    finally { if (id === work) { busy = false; sync(); } }
   }
   async function openInitial(channel, index) {
     if (!result || result.query.mode !== 'initial' || busy) return;

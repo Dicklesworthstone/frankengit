@@ -186,3 +186,102 @@ export async function verifyContextFiles(result, readFile, crypto, check = () =>
     sourceBytesRead: saved.plan.sourceBytes, requests, excerptBytesVerified: saved.plan.excerptBytes,
     limits: saved.plan.limits, files: verified };
 }
+
+// This export records a local observation, not a transferable proof: complete
+// blob bodies and authenticated commit/tree membership are not in this report.
+export function contextVerificationSummary(result, receipt) {
+  const plan = prepare(result, receipt?.limits, () => {});
+  if (receipt?.profile !== CONTEXT_VERIFY_PROFILE || receipt.completeSelectedContext !== true ||
+      receipt.sourceMaterialUntrusted !== true || receipt.repositoryMembershipVerified !== false ||
+      receipt.searchCoverageVerified !== false || receipt.declarationSemanticsVerified !== false ||
+      receipt.sourceBytesRead !== plan.sourceBytes || receipt.requests !== plan.requests || receipt.excerptBytesVerified !== plan.excerptBytes ||
+      !Array.isArray(receipt.files) || receipt.files.length !== plan.files.length ||
+      JSON.stringify(receipt.scope) !== JSON.stringify(result.scope) || JSON.stringify(receipt.pin) !== JSON.stringify(result.pin) ||
+      JSON.stringify(receipt.generationVector) !== JSON.stringify(result.vector)) reject('verification does not belong to this context.');
+  const files = receipt.files.map((row, index) => {
+    const expected = plan.files[index];
+    if (row.pathHex !== expected.file.pathHex || row.blob !== expected.file.blob || row.sourceBytes !== expected.file.sourceBytes ||
+        !['file', 'executable'].includes(row.kind) || row.excerptBytes !== expected.file.excerpts.reduce((n, e) => n + e.bytesHex.length / 2, 0) ||
+        row.lexicalDocuments !== expected.content.length + expected.pathHits.length || row.declarations !== expected.symbols.length) reject('verification file inventory changed.');
+    // Whitelist output, even though this is normally an internally owned receipt.
+    return { pathHex: row.pathHex, blob: row.blob, sourceBytes: row.sourceBytes, kind: row.kind,
+      excerptBytes: row.excerptBytes, lexicalDocuments: row.lexicalDocuments, declarations: row.declarations };
+  });
+  return { schema: 'frankengit-context-verification-summary-v1', localObservationOnly: true, independentlyReplayableProof: false,
+    profile: CONTEXT_VERIFY_PROFILE, scope: structuredClone(result.scope), pin: structuredClone(result.pin),
+    generationVector: structuredClone(result.vector), sourceMaterialUntrusted: true, repositoryMembershipVerified: false,
+    searchCoverageVerified: false, declarationSemanticsVerified: false, completeSelectedContext: true,
+    sourceBytesRead: plan.sourceBytes, requests: plan.requests, excerptBytesVerified: plan.excerptBytes, limits: plan.limits, files };
+}
+export function mountContextVerification(document, result, { verify, current, display, urlApi = globalThis.URL }) {
+  const node = (tag, text = '') => { const value = document.createElement(tag); value.textContent = text; return value; };
+  const section = node('section'); section.id = 'context-verification';
+  section.append(node('h3', 'Verify all selected context files'));
+  const requiredBytes = result.context.sourceBytesRead;
+  const requiredRequests = result.context.files.reduce((n, f) => n + Math.max(1, Math.ceil(f.sourceBytes / PAGE_BYTES)), 0);
+  section.append(node('p', `This explicit read verifies ${result.context.files.length} full files (${requiredBytes} source bytes, ${requiredRequests} page requests). It checks all excerpts and match coordinates against complete native blob hashes, not only visible text.`),
+    node('p', 'A matching blob hash does not authenticate repository membership, index coverage, declaration semantics or permissions. Source material remains untrusted. No automatic verification or retry runs.'));
+  const field = (label, id, value, max) => {
+    const wrapper = node('label', label), input = node('input'); input.type = 'number'; input.id = id;
+    input.min = '1'; input.max = String(max); input.step = '1'; input.value = String(Math.max(1, value));
+    wrapper.append(input); section.append(wrapper); return input;
+  };
+  const source = field('Maximum verification source bytes', 'verify-context-bytes', requiredBytes, CONTEXT_VERIFY_LIMITS.maxSourceBytes);
+  const requests = field('Maximum verification page requests', 'verify-context-requests', requiredRequests, CONTEXT_VERIFY_LIMITS.maxRequests);
+  const consentLabel = node('label', ' Read every selected full file under these limits'), consent = node('input');
+  consent.type = 'checkbox'; consent.id = 'verify-context-consent'; consentLabel.append(consent); section.append(consentLabel);
+  const submit = node('button', 'Verify complete selected context'); submit.type = 'button'; submit.id = 'verify-context';
+  const download = node('button', 'Download local verification summary'); download.type = 'button'; download.id = 'verify-context-download';
+  const status = node('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const output = node('pre'); output.id = 'verify-context-result'; section.append(submit, download, status, output);
+  let generation = 0, working = false, disposed = false, summary = null, url = null;
+  const revoke = () => { if (url !== null) { urlApi.revokeObjectURL(url); url = null; } };
+  function sync() {
+    const enabled = !disposed && current() && !working;
+    submit.disabled = !enabled || !consent.checked || !result.context.files.length;
+    download.disabled = !enabled || summary === null;
+    for (const input of [source, requests, consent]) input.disabled = !enabled;
+  }
+  function invalidate() {
+    generation++; working = false; summary = null; consent.checked = false; revoke(); output.textContent = '';
+    status.textContent = 'No complete context verification is selected.'; sync();
+  }
+  for (const input of [source, requests]) for (const name of ['input', 'change']) input.addEventListener(name, () => {
+    // Editing a budget cannot transfer consent or relabel a retained result.
+    consent.checked = false; sync();
+  });
+  consent.addEventListener('change', sync);
+  submit.addEventListener('click', async event => {
+    event.preventDefault();
+    if (disposed || !current() || working || !consent.checked || !result.context.files.length) return;
+    const serial = ++generation; working = true; summary = null; revoke(); output.textContent = ''; consent.checked = false; sync();
+    status.textContent = 'Verifying every selected full file at the retained snapshot…';
+    try {
+      const read = value => { if (!/^(0|[1-9][0-9]{0,8})$/.test(value)) reject('invalid verification budget.'); return Number(value); };
+      const limits = options({ maxSourceBytes: read(source.value), maxRequests: read(requests.value) });
+      prepare(result, limits, () => {}); // Refuse the entire over-budget selection before invoking the host.
+      const receipt = await verify(limits);
+      if (disposed || serial !== generation || !current()) return;
+      summary = contextVerificationSummary(result, receipt);
+      output.textContent = `Checked ${summary.files.length} complete files; ${summary.sourceBytesRead} source bytes; ${summary.requests} page requests.\n` +
+        summary.files.map(file => `${display(bytes(file.pathHex, 4096))}: ${file.blob} · ${file.sourceBytes} bytes · ${file.lexicalDocuments} lexical witnesses · ${file.declarations} declarations`).join('\n');
+      status.textContent = 'Every selected context file and excerpt passed byte verification. Coverage and repository membership remain unverified.';
+    } catch {
+      if (!disposed && serial === generation) { summary = null; output.textContent = ''; status.textContent = 'Whole-context verification failed or was canceled. No successful subset is selected; no retry was attempted.'; }
+    } finally { if (serial === generation) working = false; sync(); }
+  });
+  download.addEventListener('click', event => {
+    event.preventDefault(); if (disposed || working || !current() || summary === null) return;
+    let anchor = null;
+    try {
+      const serialized = JSON.stringify(summary, null, 2);
+      if (serialized.length > 1024 * 1024 || encoder.encode(serialized).length > 1024 * 1024) reject('summary exceeds its byte bound.');
+      revoke(); url = urlApi.createObjectURL(new Blob([serialized], { type: 'application/json' }));
+      anchor = node('a'); anchor.href = url; anchor.download = 'frankengit-context-verification.json'; section.append(anchor); anchor.click();
+      status.textContent = 'Private token-free local-check summary exported. It is not an independently replayable proof, authority grant or complete repository export.';
+    } catch { revoke(); status.textContent = 'Verification summary export failed. No network request was attempted.'; }
+    finally { anchor?.remove(); }
+  });
+  invalidate();
+  return { element: section, submit, download, sync, invalidate, dispose() { disposed = true; invalidate(); } };
+}
