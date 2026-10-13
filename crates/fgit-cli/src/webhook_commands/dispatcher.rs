@@ -18,6 +18,7 @@ use fgit_types::{AsciiSlug, Digest, GitHashAlgorithm, HeadGeneration, Repository
 
 use crate::publication_support::quote;
 use super::subscription::require_subscription;
+mod fanout;
 mod journal;
 mod status;
 use journal::{Journal, Plan, State, hex};
@@ -34,7 +35,8 @@ A complete outbox snapshot is selected on every sweep; no append-ordered key
 cursor is assumed. The private local journal is locked and synced BEFORE each
 send. Restarted in-flight attempts remain unknown and consume the next ordinal.
 A retry can duplicate an effect. Local HTTP acceptance NEVER settles canonical
-outbox state. Checkpoints retain all outcomes and budgets. No fan-out, HTTPS or exactly-once guarantee.
+outbox state. Checkpoints retain all outcomes and budgets. No HTTPS or exactly-once guarantee.
+For bounded multi-destination delivery, see: fg webhook dispatch fanout --help.
 Continuous mode drains on SIGTERM/SIGINT or a regular stop file. Blocking DNS
 and filesystem calls cannot be preempted. All directories must be operator-owned.
 Exit 0: no pending/failed selected work; 1: pending/backoff/bound; 2: refusal or
@@ -135,6 +137,9 @@ pub(super) fn run_migration(args: &[String]) -> Result<u8, String> { journal::mi
 pub(super) fn run_status(args: &[String]) -> Result<u8, String> { status::run(args) }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|arg| arg == "fanout") {
+        return fanout::run(&args[1..]);
+    }
     let mut output = std::io::stdout().lock();
     if args == ["--help"] {
         writeln!(output, "{USAGE}").map_err(|e| e.to_string())?;
@@ -374,6 +379,10 @@ fn sweep(
         let mut destination = WebhookDeliveryDestination::new(options.destination, registration, options.policy(), store.dead_letters());
         destination.timeout = options.timeout;
         let now = clock()?;
+        // Reserving an ordinal is write-ahead evidence, not confirmation.
+        // A crash or cancellation after reserve must remain unknown. Fan-out
+        // caps admission before this boundary; it must never replay an attempt
+        // outside the journal or turn HTTP acceptance into canonical settlement.
         let ordinal = journal.reserve(key, payload, now, retry_at(schedule, key, attempt, now)?)?;
         summary.attempts += 1;
         // The durable reservation and closed repository runtime precede every
