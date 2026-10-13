@@ -133,3 +133,89 @@ and dispatch, required symbols, same-source rejection, retained tips, corrupt
 records/payloads, cancellation, SIGKILL during a streamed read, and process exit
 after export followed by original-candidate recovery. They are not live Rust
 server interoperability or whole-workspace verification. FG-032 remains open.
+
+## Operator commands
+
+The `scripts/fg_context_session.mjs` operator consumes the same API. Its JSON
+input and credential files must be owner-private 0600 files in 0700 directories.
+The session path must not exist at initialization and cannot be inside the
+parent bundle. An example limits file is the five-field object above.
+
+```bash
+node scripts/fg_context_session.mjs init \
+  --session /private/context/session \
+  --from-bundle /private/context/previous \
+  --from-sha256 "$PREVIOUS_MANIFEST_SHA256" \
+  --limits-file /private/context/session-limits.json
+
+node scripts/fg_context_session.mjs step \
+  --session /private/context/session \
+  --session-sha256 "$SESSION_SHA256" --tip-sha256 "$TIP_SHA256" \
+  --followup-file /private/context/followup.json \
+  --token-file /private/context/read-token
+
+node scripts/fg_context_session.mjs status \
+  --session /private/context/session \
+  --session-sha256 "$SESSION_SHA256" --tip-sha256 "$LAST_RETAINED_TIP_SHA256"
+```
+
+`init` returns the session root and initial tip; retain both. A settled `step`
+returns a new tip, full reservation totals, remaining ceilings, immutable history,
+and the latest independently inspectable bundle. Use that new tip for the next
+step, including when the previous step returned a read refusal. The first tip
+equals the session root, but they are different fields: never replace the session
+root when advancing the tip. There is no endpoint or source override.
+
+`status` is read-only and offline. It verifies that the supplied retained tip
+occurs in the checked history; it can report a later observed tip. `step` requires
+an exact current tip and refuses stale writers. Neither command reconstructs a
+missing tip. The complete ledger and referenced source bundles are reverified;
+status does not simply trust a cached numeric budget total.
+
+```bash
+node scripts/fg_context_session.mjs recover \
+  --session /private/context/session \
+  --session-sha256 "$SESSION_SHA256" --tip-sha256 "$LAST_RETAINED_TIP_SHA256" \
+  --request-sha256 "$ORIGINAL_REQUEST_SHA256" \
+  --candidate-sha256 "$ORIGINAL_CANDIDATE_SHA256"
+```
+
+Recovery has no token or network options. A candidate pin is mandatory when a
+candidate exists; missing or mismatched pins refuse. With no candidate, omit that
+flag: recovery reports the pending state without creating a result or retry.
+An already settled request recovers its original terminal observation. A valid
+export is resynced before its session terminal is confirmed. Missing or corrupt
+backing stays an error.
+
+For a reservation whose state is exactly `reserved`, an operator may explicitly
+use `dispatch` with the session/root/tip, `--request-sha256` and `--token-file`.
+It cannot alter the saved query. It submits the never-started read once and
+returns the candidate/request hashes for `recover`. The durable started marker
+permanently prevents redispatch, regardless of process liveness or elapsed time.
+Ordinary `step` composes reservation, dispatch and finalization automatically.
+
+All commands accept a finite `--timeout-ms` up to 300000, default 30000. Only
+`step` and `dispatch` accept `--ca-file`. One operation deadline spans private
+input reads and the library calls; SIGINT/SIGTERM requests the same drain.
+Filesystem calls already submitted are awaited rather than assumed cancelled.
+A confirmed local result is never undone by late cancellation or lost stdout.
+
+Exit 0 means initialization or a successful settled complete observation; exit 3
+means staged/pending/partial data; exit 2 means a refused read or error; exit 4
+means a result was retained but output failed. A status/recovery success is not a
+claim that a past refused acquisition succeeded: inspect each history state's
+`captured` or `read_refused` tag. Output failure reports `retained_result` when
+available. Failures after reservation retain `retained_reservation`; the session
+path is always named so its unresolved state can be inspected. No command clears
+or overwrites a partial state or retries against a different source.
+
+```bash
+bash scripts/verify_source_context_sessions.sh
+```
+
+The additional tests spawn the actual CLI for both hash formats and inspect its
+files and wire traffic. They cover init/step/status, dispatch-once and offline
+candidate recovery, stale tips, quotas, partial responses, invalid controls,
+private credentials, concurrent processes, deadline/SIGTERM/SIGKILL, custody
+records before HTTP observation and lost stdout. They use the same explicit
+native-schema HTTP peers, not a Rust server or a hardware power-loss oracle.
