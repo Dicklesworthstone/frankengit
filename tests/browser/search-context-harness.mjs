@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const root = new URL('../../crates/fgit-node/src/smart_http/server/browser/', import.meta.url);
 const core = `
+export { binding, hex, keys, oid, record, snapshot, utf8 } from '${new URL('pulls-core.mjs', root).href}';
 export const copy = value => structuredClone(value);
 export const decimal = (value, name, min = 0) => integer(Number(value), name, min);
 export const unhex = value => Uint8Array.from({ length: value.length / 2 }, (_, i) => Number.parseInt(value.slice(i * 2, i * 2 + 2), 16));
@@ -57,7 +58,7 @@ export { unused as indexCommand, unused as indexQuery, unused as indexReply, unu
 export async function setup(t, dispatch, timeoutMs = 30000) {
   const dir = await mkdtemp(join(tmpdir(), 'fgit-context-controller-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  for (const name of ['search.mjs', 'search-context.mjs', 'search-context-verify.mjs', 'search-view.mjs']) await copyFile(new URL(name, root), join(dir, name));
+  for (const name of ['search.mjs', 'search-context.mjs', 'search-context-verify.mjs', 'search-context-membership.mjs', 'search-view.mjs']) await copyFile(new URL(name, root), join(dir, name));
   for (const [name, bytes] of [['pulls-core.mjs', core], ['search-data.mjs', data], ['search-index.mjs', index], ['search-current.mjs', `export const sourceMode = value => value ?? 'exact';`]]) await writeFile(join(dir, name), bytes);
   const { CodeSearch } = await import(pathToFileURL(join(dir, 'search.mjs')).href);
   const calls = [];

@@ -7,6 +7,7 @@ import { indexCommand, indexQuery, indexReply, verifyIndexedFile, symbolCommand,
 
 import { splitContextQuery, contextCommand, joinInitialContext } from './search-context.mjs';
 import { verifyContextFiles } from './search-context-verify.mjs';
+import { acquireContextMembership } from './search-context-membership.mjs';
 
 export class CodeSearch {
   #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null; #symbolMinimum = null;
@@ -112,6 +113,14 @@ export class CodeSearch {
         this.#readFile(selected, combined, file, check, file.sourceBytes, charge),
       this.#transport.crypto, check, limits);
     });
+  }
+  // Independent commit consent, not the server-reported pin as a trust root.
+  // Metadata verification deliberately remains separate from full-blob checks.
+  async verifyContextMembership(independentCommit, limits = {}) {
+    const combined = this.#result, selected = this.#selection;
+    if (!combined?.context || combined.query.mode !== 'initial') fail('Load source context before checking membership.');
+    return this.#run(check => acquireContextMembership(combined, selected.reference, independentCommit,
+      (path, options) => this.#transport.request(path, options), this.#transport.crypto, check, limits));
   }
   async openInitial(channel, hitIndex) {
     const combined = this.#result;
