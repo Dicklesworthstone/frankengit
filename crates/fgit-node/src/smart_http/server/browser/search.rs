@@ -14,6 +14,10 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
             "text/javascript; charset=utf-8",
             include_str!("search-index.mjs"),
         )),
+        b"/ui/search/search-context.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("search-context.mjs"),
+        )),
         b"/ui/search/search-current.mjs" => Some((
             "text/javascript; charset=utf-8",
             include_str!("search-current.mjs"),
@@ -107,6 +111,7 @@ mod tests {
             "search-data.mjs",
             "search-index.mjs",
             "search-current.mjs",
+            "search-context.mjs",
             "search-view.mjs",
             "pulls-core.mjs",
             "search.css",
@@ -164,6 +169,7 @@ mod tests {
             include_str!("search-data.mjs"),
             include_str!("search-index.mjs"),
             include_str!("search-current.mjs"),
+            include_str!("search-context.mjs"),
             include_str!("search-view.mjs"),
         ] {
             for forbidden in [

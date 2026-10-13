@@ -5,6 +5,8 @@ import { PAGE_BYTES, fields, filePage, query, searchCommand, searchReply, select
 
 import { indexCommand, indexQuery, indexReply, verifyIndexedFile, symbolCommand, symbolQuery, symbolReply, initialCommand, initialQuery, initialReply } from './search-index.mjs';
 
+import { splitContextQuery, contextCommand, joinInitialContext } from './search-context.mjs';
+
 export class CodeSearch {
   #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null; #symbolMinimum = null;
   constructor(options) {
@@ -47,11 +49,12 @@ export class CodeSearch {
   }
   async search(input) {
     this.discardResults();
+    const hydration = splitContextQuery(input); input = hydration.input;
     const q = input?.mode === 'indexed' ? indexQuery(input) : input?.mode === 'symbols' ? symbolQuery(input) : input?.mode === 'initial' ? initialQuery(input) : query(input); // Copies caller arrays before the first await.
     return this.#run(async check => {
       if (q.mode === 'indexed') return this.#indexed(q, null, check);
       if (q.mode === 'symbols') return this.#symbols(q, check);
-      if (q.mode === 'initial') return this.#initial(q, check);
+      if (q.mode === 'initial') return this.#initial(q, check, hydration.limits);
       const selected = this.#selection, command = searchCommand(selected, this.#pin, q);
       const response = await this.#transport.request(command.path, { method: 'POST', body: command.body });
       check();
@@ -81,15 +84,17 @@ export class CodeSearch {
     this.#scope = result.scope; this.#pin = result.pin; this.#symbolMinimum = result.index; this.#result = result;
     return copy(result);
   }
-  async #initial(q, check) {
+  async #initial(q, check, context = null) {
     const selected = this.#selection, minimum = { lexical: this.#indexMinimum, symbols: this.#symbolMinimum };
     const body = initialCommand(selected, this.#pin, q, minimum);
-    const response = await this.#transport.request('source/search-initial', { method: 'POST', body });
+    const response = await this.#transport.request(context ? 'source/context-initial' : 'source/search-initial',
+      { method: 'POST', body: context ? contextCommand(body, context) : body });
     check();
-    const result = initialReply(response.value, selected, q, this.#scope, this.#pin, minimum);
+    const validate = value => initialReply(value, selected, q, this.#scope, this.#pin, minimum);
+    const result = context ? joinInitialContext(response.value, validate, context, check) : validate(response.value);
     check();
     // Install the source, both checkpoints and all results only after every
-    // channel and the aggregate receipt have passed validation.
+    // channel, aggregate receipt and any requested hydration have passed validation.
     this.#scope = result.scope; this.#pin = result.pin; this.#indexMinimum = result.lexicalCheckpoint;
     if (result.symbols.state === 'available') this.#symbolMinimum = result.symbols.result.index;
     this.#result = result;
