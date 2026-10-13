@@ -95,3 +95,130 @@ CAS, review invalidation, live deployment, or full-workspace acceptance.
 
 Related: comprehensive plan sections 25.1, 25.4, 25.8; bridge bead
 `frankengit-root-doctrine-x2mv.4.20`. No broad bead closure or approval-reuse claim.
+
+## Confirm and publish
+
+Review the complete `show` output, including changed source and target IDs. Send
+only the plan whose digest was reviewed, supplying the endpoint independently:
+
+```sh
+node scripts/fg_pull_sync.mjs send \
+  --state /srv/pr-tip-plan \
+  --endpoint https://forge.example/team/repo.git \
+  --token-file /srv/control/token \
+  --confirm "$REVIEWED_PLAN_SHA256" \
+  --max-requests 128
+```
+
+The original credential fingerprint must match for publication. The native server
+still authenticates the token and checks its independent PR-write grant. A local
+principal pin is not authority. `send` never rediscovers tips, edits metadata,
+creates a PR, moves a ref, or sends a merge or review. The native engine admits
+one exact-version `update` per changed PR and rechecks both branch tips. A concurrent
+PR edit or branch move produces a native refusal, not overwritten expectations.
+
+A batch is **not atomic** across PRs: earlier decisions remain committed when a
+later request fails. Every request acquires a synced `started-NNN.json` marker
+before opening its update socket. A validated committed/refused receipt is saved
+before proceeding. Each request keeps its original key. Limits can leave later
+requests prepared but unstarted; another explicitly confirmed `send` continues
+those requests without rediscovery. All selected work shares one deadline.
+
+## Lost replies and recovery
+
+An interrupted update remains unknown until reconciled. Normal `send` refuses
+when any original request is unresolved. Read-only remote recovery requires no
+local native executable or repository storage, and can use a replacement token
+for the same original principal:
+
+```sh
+node scripts/fg_pull_sync.mjs recover \
+  --state /srv/pr-tip-plan \
+  --endpoint https://forge.example/team/repo.git \
+  --token-file /srv/control/current-outcome-token \
+  --max-requests 128
+
+node scripts/fg_pull_sync.mjs status --state /srv/pr-tip-plan
+```
+
+The replacement credential needs the server's independent outcome-read permission.
+Recovery selects only started requests and calls the existing bodyless original-key
+`/api/v1/outcomes` endpoint. It never publishes, recreates missing branches, modifies
+the plan, or starts a prepared request. It retains the first transaction/seal
+observation and terminal decision as bounded, create-only records. An outcome
+already durably retained in that first observation remains known even when writing
+the duplicate terminal record failed. Status and subsequent sends use that
+retained evidence; they do not repair or recreate files automatically.
+
+`key_not_observed`, `seal_not_observed`, and `undecided` are NOT rollback decisions.
+To explicitly retry an unresolved request, supply `send --retry`, the same original
+credential, endpoint, and reviewed plan digest. Each started request first performs
+an outcome lookup. A terminal result is saved without resubmission; otherwise the
+explicit retry can submit only its original unchanged body/key. It never replans
+against later source. A different original transaction/seal, a conflicting terminal,
+or knowledge learned concurrently rejects the operation before another mutation.
+
+## Ownership, interruption, and limits
+
+One sender holds `owner.lock`; read-only recovery uses a separate `recovery.lock`.
+Recovery never removes or steals a sender's lock, even after SIGKILL. A recovered
+canonical outcome is not proof that the old sender has stopped. Operators must
+reconcile process ownership separately before any intentional lock removal.
+SIGTERM/SIGINT stop new work, close the active owned socket, and preserve started
+responsibility. A fully received valid decision is persisted even if cancellation
+arrives while local storage is finishing. Filesystem or output failures do not
+turn that decision into an invented rollback.
+
+The 128-request plan admits at most three 16 KiB observation records per request,
+in addition to the 20 MiB plan. No history is evicted. Each sweep handles at most
+128 pending requests: each retry can make one lookup and at most one identical
+update; recovery makes lookups only. Network responses and aggregate discovery
+bytes are bounded before further accumulation. Control-file/storage calls remain
+subject to filesystem latency; deadlines are not a hardware real-time guarantee.
+No credentials are persisted, and parser diagnostics do not quote malformed server
+bytes that could reflect a credential.
+
+The plan needs stable private storage and independent operator review. Checksums
+are integrity evidence, not signatures, rollback-proof storage, or a way to trust
+an attacker-controlled same-UID filesystem. Deleting a whole plan/namespace loses
+its responsibility records; automatic reconstruction or a new key is not recovery.
+
+## Exit status and test scope
+
+- **0**: the requested result is complete and selected publications are committed,
+  or there was no work. A successful inspect/show is not publication evidence.
+- **1**: at least one canonical PR update was refused.
+- **2**: input, read, or local operation failed without a newly established terminal.
+- **3**: publication remains prepared/unknown, a work bound left pending requests,
+  or an interrupted submitted request has no complete validated reply.
+- **4**: a terminal/result was established but local persistence, cleanup, or output
+  failed. Inspect saved state and retained diagnostics; do not assume rollback.
+
+`show` says publication status was not queried. `status` is an offline view of
+retained historical decisions, not a claim of current source or current reviews.
+
+Run the focused tests:
+
+```sh
+node --test tests/operator/pull_sync*.test.mjs
+```
+
+In addition to discovery, the tests exercise actual private files, HTTP/TLS sockets,
+private-CA verification, CLI processes, SIGTERM/SIGKILL, exact resends, partial batches,
+stale selections, credential rotation, parallel recovery, receipt/write failures,
+output loss, and exact full-width decision counters. The executable/HTTP authority
+peer is a native-schema contract fixture, NOT Rust `fg`. Native authorization/CAS,
+review freshness, deployment correctness, and a full Rust workspace pass require
+separate real-node validation. No automatic per-push subscription, CI trigger,
+approval survival policy, or broad PR-product completeness is claimed.
+
+
+### Concurrent receipt readers
+
+Publication and recovery can inspect the same create-only receipt while its
+synced temporary hard link is being removed. A reader retries only that local
+observation for at most 32 attempts over 250 ms; every successful read still
+requires the original private-file, single-link, stability, scope and schema
+checks. This does not retry a network request. An interrupted write or persistent
+hard link continues to refuse, with its files preserved for inspection. No
+reader unlinks another process's temporary file or steals an owner lock.

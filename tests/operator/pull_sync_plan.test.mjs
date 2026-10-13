@@ -110,3 +110,11 @@ test('truncation, MIME confusion and oversized replies fail closed', async t => 
     await assert.rejects(syncRequest(f.dest.endpoint, TOKEN, op, { timeoutMs: 100 }));
   }
 });
+
+test('a caller can tighten, never enlarge, each closed response allocation bound', async t => {
+  const f = await fixture(t);
+  await assert.rejects(syncRequest(f.dest.endpoint, TOKEN, { kind: 'show', number: 1, head: null }, { maximum: 1 }), /byte_limit/);
+  const count = f.calls.length;
+  await assert.rejects(syncRequest(f.dest.endpoint, TOKEN, { kind: 'show', number: 1, head: null }, { maximum: 0 }));
+  assert.equal(f.calls.length, count);
+});

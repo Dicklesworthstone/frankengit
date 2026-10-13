@@ -68,7 +68,9 @@ export async function discover(dest, token, selected, options = {}) {
   let head = null, sourceHead = null, pages = 0, totalBytes = 0, scanned = 0;
   const request = async operation => {
     if (++pages > LIMITS.pages) fail('sync_discovery_page_limit');
-    const reply = await syncRequest(dest.endpoint, token, operation, { signal: cx.signal, ca: cx.ca, timeoutMs: cx.remaining() });
+    if (totalBytes >= LIMITS.metadata) fail('sync_discovery_byte_limit');
+    const reply = await syncRequest(dest.endpoint, token, operation, { signal: cx.signal, ca: cx.ca, timeoutMs: cx.remaining(),
+      maximum: Math.min(8 * 1024 * 1024, LIMITS.metadata - totalBytes) });
     totalBytes += reply.bytes; if (totalBytes > LIMITS.metadata) fail('sync_discovery_byte_limit');
     cx.remaining(); return reply;
   };

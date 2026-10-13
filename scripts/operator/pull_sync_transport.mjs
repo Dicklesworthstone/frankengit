@@ -19,7 +19,7 @@ export function tokenValue(token) {
 }
 export function parseSyncJson(bytes, maximum = 8 * 1024 * 1024) {
   if (!Buffer.isBuffer(bytes) || bytes.length > maximum) fail('sync_json_byte_limit');
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
     if (typeof value !== 'number') return value;
     if (!/^(0|[1-9][0-9]*)$/.test(context?.source ?? '')) fail('invalid_sync_json_counter');
     if (key === 'decision_sequence') {
@@ -27,7 +27,11 @@ export function parseSyncJson(bytes, maximum = 8 * 1024 * 1024) {
       return context.source;
     }
     return integer(value, 'sync JSON counter');
-  });
+  }); } catch (error) {
+    // A parser exception can quote server bytes, including reflected secrets.
+    if (error instanceof PullSyncError) throw error;
+    fail('invalid_sync_json');
+  }
 }
 function envelope(operation) {
   const limit = 50;
@@ -68,12 +72,13 @@ export async function syncRequest(address, token, operation, options = {}) {
   const base = outcomeEndpoint(address); tokenValue(token);
   const selected = envelope(operation);
   if (!options || typeof options !== 'object' || Array.isArray(options) ||
-      Object.keys(options).some(key => !['timeoutMs', 'signal', 'ca'].includes(key))) fail('invalid_sync_transport_options');
+      Object.keys(options).some(key => !['timeoutMs', 'signal', 'ca', 'maximum'].includes(key))) fail('invalid_sync_transport_options');
+  const maximum = Math.min(selected.maximum, integer(options.maximum ?? selected.maximum, 'response byte bound', 1, 8 * 1024 * 1024));
   const timeout = integer(options.timeoutMs ?? 30000, 'request timeout', 1, 300000), signal = options.signal;
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('invalid_sync_signal');
   const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length && options.ca.length <= 128 * 1024
     ? Buffer.from(options.ca) : fail('invalid_sync_ca');
-  if (signal?.aborted) signal.throwIfAborted();
+  signal?.throwIfAborted();
   const url = new URL(`${base}/api/v1/${selected.path}`);
   return new Promise((resolve, reject) => {
     let request, response, result, failure, finished = false, closed = false, timer;
@@ -105,7 +110,7 @@ export async function syncRequest(address, token, operation, options = {}) {
         const length = incoming.headers['content-length'];
         if (new Set(names).size !== names.length || !/^application\/json(?:\s*;|$)/i.test(incoming.headers['content-type'] ?? '') ||
             (incoming.headers['content-encoding'] ?? 'identity').toLowerCase() !== 'identity') { finish(new PullSyncError('sync_response_encoding')); return; }
-        if (length !== undefined && (!/^(0|[1-9][0-9]*)$/.test(length) || BigInt(length) > BigInt(selected.maximum))) {
+        if (length !== undefined && (!/^(0|[1-9][0-9]*)$/.test(length) || BigInt(length) > BigInt(maximum))) {
           finish(new PullSyncError('sync_response_byte_limit')); return;
         }
         const chunks = []; let size = 0;
@@ -113,13 +118,13 @@ export async function syncRequest(address, token, operation, options = {}) {
         incoming.on('data', chunk => {
           if (finished) return;
           size += chunk.length;
-          if (size > selected.maximum || chunks.length >= 16384) finish(new PullSyncError('sync_response_byte_limit'));
+          if (size > maximum || chunks.length >= 16384) finish(new PullSyncError('sync_response_byte_limit'));
           else chunks.push(chunk);
         });
         incoming.once('end', () => {
           if (finished) return;
           if (!incoming.complete || (length !== undefined && BigInt(length) !== BigInt(size))) { finish(new PullSyncError('sync_response_incomplete')); return; }
-          try { finish(null, { status: incoming.statusCode, bytes: size, value: parseSyncJson(Buffer.concat(chunks, size), selected.maximum) }); }
+          try { finish(null, { status: incoming.statusCode, bytes: size, value: parseSyncJson(Buffer.concat(chunks, size), maximum) }); }
           catch (error) { finish(error); }
         });
       });
