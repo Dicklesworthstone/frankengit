@@ -57,7 +57,7 @@ export { unused as indexCommand, unused as indexQuery, unused as indexReply, unu
 export async function setup(t, dispatch, timeoutMs = 30000) {
   const dir = await mkdtemp(join(tmpdir(), 'fgit-context-controller-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  for (const name of ['search.mjs', 'search-context.mjs', 'search-view.mjs']) await copyFile(new URL(name, root), join(dir, name));
+  for (const name of ['search.mjs', 'search-context.mjs', 'search-context-verify.mjs', 'search-view.mjs']) await copyFile(new URL(name, root), join(dir, name));
   for (const [name, bytes] of [['pulls-core.mjs', core], ['search-data.mjs', data], ['search-index.mjs', index], ['search-current.mjs', `export const sourceMode = value => value ?? 'exact';`]]) await writeFile(join(dir, name), bytes);
   const { CodeSearch } = await import(pathToFileURL(join(dir, 'search.mjs')).href);
   const calls = [];

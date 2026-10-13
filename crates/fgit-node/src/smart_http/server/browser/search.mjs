@@ -6,6 +6,7 @@ import { PAGE_BYTES, fields, filePage, query, searchCommand, searchReply, select
 import { indexCommand, indexQuery, indexReply, verifyIndexedFile, symbolCommand, symbolQuery, symbolReply, initialCommand, initialQuery, initialReply } from './search-index.mjs';
 
 import { splitContextQuery, contextCommand, joinInitialContext } from './search-context.mjs';
+import { verifyContextFiles } from './search-context-verify.mjs';
 
 export class CodeSearch {
   #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null; #symbolMinimum = null;
@@ -100,6 +101,18 @@ export class CodeSearch {
     this.#result = result;
     return copy(result);
   }
+  // Explicit second read: verify every hydrated file, not just the clicked hit.
+  // One operation owns every page, hash and witness check; no pin is refreshed.
+  async verifyContext(limits = {}) {
+    const combined = this.#result;
+    if (!combined?.context || combined.query.mode !== 'initial') fail('Load source context before verifying it.');
+    return this.#run(async check => {
+      const selected = this.#selection;
+      return verifyContextFiles(combined, (file, charge) =>
+        this.#readFile(selected, combined, file, check, file.sourceBytes, charge),
+      this.#transport.crypto, check, limits);
+    });
+  }
   async openInitial(channel, hitIndex) {
     const combined = this.#result;
     if (!combined || combined.query.mode !== 'initial' || !['content', 'path', 'symbols'].includes(channel)) fail('Select a combined search result channel.');
@@ -154,10 +167,11 @@ export class CodeSearch {
       return { hit: copy(hit), query: copy(result.query), scope: copy(result.scope), pin: copy(result.pin), ...file, ...verified };
     });
   }
-  async #readFile(selected, result, hit, check, total = null) {
+  async #readFile(selected, result, hit, check, total = null, charge = () => {}) {
     let bytes = null, offset = 0, kind = null;
     do {
       check();
+      charge();
       const response = await this.#transport.request('source/blob', { method: 'POST', body: form({
         ...fields(selected, result.pin), path_hex: hit.pathHex, offset, limit: PAGE_BYTES,
       }) });
