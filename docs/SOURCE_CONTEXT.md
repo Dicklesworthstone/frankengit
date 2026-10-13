@@ -13,7 +13,7 @@ through the existing bounded TreeFS source. Symlinks and gitlinks cannot become
 context files. A source or policy move is a refusal, not an automatic retry.
 
 Candidates are the union of content, path, and available symbol results, deduped
-by raw path. Conflicting identities or lengths cannot merge. The first
+by raw path. Conflicting identities or lengths cannot merge. By default, the first
 `max_files` distinct raw-byte paths are selected; `candidate_files` and
 `omitted_files` make this deliberate selection visible. Omitted index coverage,
 result truncation and unavailable optional symbols remain in the original
@@ -56,7 +56,8 @@ Authorization: Bearer <read-scoped credential>
 The endpoint reuses the complete `search-initial` grammar: `object_format`, full
 `ref`, repeated `term_hex`, optional `path_prefix_hex`, exact source pins,
 independent lexical/symbol checkpoint pairs, optional/required symbol options,
-and aggregate retrieval limits. It adds four optional context fields:
+and aggregate retrieval limits. It adds four optional context budget fields
+and one explicit selection profile:
 
 | Field | Default | Range |
 | --- | --- | --- |
@@ -64,6 +65,7 @@ and aggregate retrieval limits. It adds four optional context fields:
 | `context_radius_bytes` | 128 | 0-4096 |
 | `context_max_source_bytes` | 67108864 | 1-67108864 |
 | `context_max_excerpt_bytes` | 262144 | 1-1048576 |
+| `context_selection` | `raw-path-prefix` | `raw-path-prefix` or `context-weighted-rrf-q16-v1` |
 
 Zero radius preserves source matches themselves; path-only hits still receive a
 two-byte-or-shorter preamble. All fields and both sets of limits are checked
@@ -98,7 +100,7 @@ omissions and per-channel query evidence. Its zero source-read counters describe
 index retrieval only. **Top-level** `source_blobs_read` and `source_bytes_read`
 report actual context source reads. `source_file_limit` reports the fixed
 per-selected-path allocation share. `candidate_files`, `returned_files`,
-`omitted_files`, `selection: raw-path-prefix` and `complete` expose selection
+`omitted_files`, `selection` and `complete` expose selection
 and coverage without confusing an omitted file with an empty one.
 
 Each `files` entry has `path_hex`, native `blob`, `source_bytes`, typed `anchors`
@@ -109,6 +111,79 @@ markup, commands, a JSON fragment or authorization. Hex conversion is chunked,
 bounded and cancellation-checked; all output shares the existing gateway response
 ceiling, including the nested retrieval. Neither a large requested excerpt limit
 nor a successful native read overrides that final encoded-response ceiling.
+
+## Opt-in deterministic document fusion
+
+Use `OneNode::hydrate_source_initial_ranked_local_in(request, report, limits)`
+in native code, or add this field to the HTTP request above:
+
+```text
+context_selection=context-weighted-rrf-q16-v1
+```
+
+The native method returns a `RankedContext` containing the unchanged source
+context and a `ContextRanking`. The existing native method and omitted or
+explicit `context_selection=raw-path-prefix` keep alphabetical selection and
+the old response shape. `search-initial` remains index-only and rejects this field.
+Unknown profiles, duplicate selectors and caller-supplied weights are refused.
+
+For each available channel, collapse consecutive hits to distinct raw paths and
+assign one-based document ranks in the reader's existing order. Multiple symbol
+declarations in one file contribute once and do not push later document ranks
+back. For each document, sum the following integer contribution over its channels:
+
+```text
+contribution_q16 = floor(weight * 65536 / (60 + document_rank))
+weights: content = 1, path = 1, symbol = 2
+score_q16 = sum(contribution_q16)
+```
+
+Sort by descending score, breaking ties by ascending raw path bytes, then select
+at most `context_max_files`. The complete fixed profile owns constants, weights,
+rounding, deduplication and tie breaks; changing them requires another profile.
+There is no floating-point accumulation or clock-dependent ordering. Identical
+native blobs at different paths remain distinct candidates, while conflicting
+blob identities for one path fail before deduplication or selection.
+
+**Input channel order is raw-path order, not BM25 or semantic relevance.** This
+profile rewards cross-channel agreement and weights an explicitly requested
+symbol channel; it is not a measured relevance improvement or compiler resolution.
+It ranks only the channel hits actually returned, not hidden, omitted, truncated
+or otherwise unsearched source. Changing upstream result limits may change the
+candidate universe. The original query, generation vector, coverage omissions,
+optional-channel state and truncation remain attached; fusion never upgrades
+`complete` or manufactures an unavailable channel's contribution.
+
+For example, a code file with content rank 2, path rank 1 and symbol rank 1
+receives `1057 + 1074 + 2148 = 4279` Q16 units. An alphabetical file mentioned
+only by content at rank 1 receives 1074. With one context slot, the corroborated
+code file is selected instead of the alphabetical distraction. This example is
+an arithmetic fixture, not a corpus benchmark.
+
+Ranked HTTP responses set `selection` to the named profile and append `ranking`.
+It includes the profile, rank constant, score scale, input order, tie break,
+`ranked_over: returned-channel-hits`, `semantic_relevance: false`, and `selected`
+entries in priority order. Each entry carries one-based `position`, `path_hex`,
+native `blob`, `score_q16`, and per-channel `document_rank`, fixed `weight` and
+`score_q16` contributions. The gateway checks identity joins, contribution sums
+and order before sending. Excerpts in `files` remain in raw-path order; use the
+receipt's selected order for presentation. Both parts share the final response
+ceiling. These are auditable derived receipts, not signed or canonical proofs.
+
+All selected paths still pass through the same current-source TreeFS hydrator.
+An oversized, unavailable or corrupt winner fails the whole request; ranking
+cannot silently substitute a cheaper lower-ranked file. Source shares are fixed
+before decoding exactly as for the default strategy. Rank collection admits at
+most 1024 input hits per channel and 2 MiB of distinct path bytes, and checkpoints
+cancellation throughout the bounded preparation and encoding.
+
+The fusion regressions cover exact arithmetic, duplicate declarations, channel
+arrival-order parity, raw-byte ties, conflicting identities, rank/byte ceilings
+and cancellation. Native/TCP scenarios require a tight context budget to choose
+corroborated code, preserve legacy behavior, reproduce receipts after reopen,
+and retain source pins, budget failures, scope, revocation and no-match behavior.
+These tests are included in the existing commands below; their presence is not
+an assertion that they have run at an arbitrary later revision.
 
 ## Verification and scope
 

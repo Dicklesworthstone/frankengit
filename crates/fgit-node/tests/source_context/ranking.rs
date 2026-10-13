@@ -106,3 +106,5 @@ fn ranked_source_pins_cancellation_and_unpolled_reads_preserve_existing_state() 
     assert!(ranked(&node, report, Default::default()).is_err());
     assert_eq!(generation(&node), after); node.shutdown().unwrap();
 }
+
+mod http;
