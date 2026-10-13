@@ -156,3 +156,6 @@ fn cancelled_and_unpolled_hydration_does_not_change_the_repository_or_index_vect
 
 #[path = "source_context/http.rs"]
 mod http;
+
+#[path = "source_context/ranking.rs"]
+mod ranking;

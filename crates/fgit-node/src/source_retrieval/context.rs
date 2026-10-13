@@ -6,6 +6,8 @@ use fgit_types::GitOid;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+pub mod ranked;
+
 pub const PROFILE: &str = "source-initial-context-v1";
 const MAX_FILES: usize = 32;
 const MAX_ANCHORS: usize = 4096;
@@ -143,6 +145,18 @@ impl Plan {
     pub(crate) fn new(report: &InitialReport, limits: ContextLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, RetrievalError> {
+        Self::with_ranking(report, limits, None, cancelled)
+    }
+    pub(crate) fn ranked(report: &InitialReport, limits: ContextLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Self, ranked::ContextRanking), RetrievalError> {
+        let ranking = ranked::ContextRanking::build(report, limits, cancelled)?;
+        let plan = Self::with_ranking(report, limits, Some(&ranking), cancelled)?;
+        Ok((plan, ranking))
+    }
+    fn with_ranking(report: &InitialReport, limits: ContextLimits,
+        ranking: Option<&ranked::ContextRanking>, cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, RetrievalError> {
         limits.validate()?;
         check(cancelled)?;
         let mut files = BTreeMap::new();
@@ -159,7 +173,19 @@ impl Plan {
             }
         }
         let candidate_files = files.len();
-        let mut files: BTreeMap<_,_> = files.into_iter().take(limits.max_files).collect();
+        let mut files: BTreeMap<_,_> = if let Some(ranking) = ranking {
+            if ranking.candidate_files() != candidate_files || ranking.selected().len() > limits.max_files {
+                return Err(RetrievalError::Invalid("context ranking inventory"));
+            }
+            let mut selected = BTreeMap::new();
+            for row in ranking.selected() {
+                check(cancelled)?;
+                let file = files.remove(row.path()).ok_or(RetrievalError::Invalid("context ranking path"))?;
+                if file.blob != row.blob() { return Err(RetrievalError::MixedSource); }
+                selected.insert(file.path.clone(), file);
+            }
+            selected
+        } else { files.into_iter().take(limits.max_files).collect() };
         let mut anchors = 0usize;
         for (channel, report) in [(ContextChannel::Content, report.content()), (ContextChannel::Path, report.path())] {
             for hit in &report.results.hits {

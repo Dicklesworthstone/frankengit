@@ -3,6 +3,7 @@
 use super::*;
 use crate::source_retrieval::{InitialReport, RetrievalError};
 use crate::source_retrieval::context::{Assembly, ContextLimits, InitialContext, Plan};
+use crate::source_retrieval::context::ranked::RankedContext;
 use fgit_forge::source_search::SearchCase;
 use fgit_treefs::BaseEntry;
 
@@ -71,16 +72,35 @@ impl OneNode {
     pub async fn hydrate_source_initial_local_in(&self, request: &NodeRequestContext,
         initial: InitialReport, limits: ContextLimits,
     ) -> Result<InitialContext, RetrievalError> {
+        let plan = Plan::new(&initial, limits, &|| !workspace_request_live(request))?;
+        self.hydrate_source_initial_plan_local_in(request, initial, limits, &plan).await
+    }
+
+    /// Explicit weighted document fusion, not semantic ranking or authorization.
+    /// The receipt records distinct-path channel ranks and fixed-point scores;
+    /// the original source/generation/coverage evidence is preserved unchanged.
+    /// Native traversal and returned files stay in raw-path order. Selected
+    /// oversized/missing files fail, rather than being replaced by lower ranks.
+    pub async fn hydrate_source_initial_ranked_local_in(&self, request: &NodeRequestContext,
+        initial: InitialReport, limits: ContextLimits,
+    ) -> Result<RankedContext, RetrievalError> {
+        let (plan, ranking) = Plan::ranked(&initial, limits, &|| !workspace_request_live(request))?;
+        let context = self.hydrate_source_initial_plan_local_in(request, initial, limits, &plan).await?;
+        RankedContext::finish(context, ranking)
+    }
+
+    async fn hydrate_source_initial_plan_local_in(&self, request: &NodeRequestContext,
+        initial: InitialReport, limits: ContextLimits, plan: &Plan,
+    ) -> Result<InitialContext, RetrievalError> {
         if !workspace_request_live(request) { return Err(failure(SearchError::Cancelled)); }
         let expected = initial.source();
         if expected.namespace.tenant != self.tenant_id || expected.namespace.repository != self.repository_id
             || expected.namespace.incarnation != self.repository_incarnation_id()
             || expected.namespace.object_format != self.object_format
         { return Err(RetrievalError::MixedSource); }
-        let plan = Plan::new(&initial, limits, &|| !workspace_request_live(request))?;
         let file_limit = limits.file_limit(plan.files.len())?;
         let paths: Vec<_> = plan.files.iter().map(|file| file.path.clone()).collect();
-        let query = Hydrate { initial: &initial, plan: &plan, limits,
+        let query = Hydrate { initial: &initial, plan, limits,
             scope: SourceQuery::new(b"context", SearchCase::Exact, &paths).map_err(failure)? };
         let reads = SearchLimits { max_file_bytes: file_limit, max_total_bytes: limits.max_source_bytes,
             ..Default::default() };
@@ -94,6 +114,6 @@ impl OneNode {
             return Err(RetrievalError::MixedSource);
         }
         if !workspace_request_live(request) { return Err(failure(SearchError::Cancelled)); }
-        InitialContext::finish(initial, &plan, assembled?, file_limit)
+        InitialContext::finish(initial, plan, assembled?, file_limit)
     }
 }
