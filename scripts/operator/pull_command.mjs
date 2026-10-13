@@ -3,10 +3,15 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
 
-export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024 });
+export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024, bundle: 16 * 1024 * 1024 });
 export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'comment', 'fast-forward']);
+// Keep the original form-only list stable for existing consumers. Candidate
+// operations are a distinct profile with independently bound bundle bytes.
+export const PULL_REVIEW_ACTIONS = Object.freeze(['approve', 'request-changes', 'withdraw', 'merge']);
+export const isPullReview = action => PULL_REVIEW_ACTIONS.includes(action);
+const REVIEW_SCHEMA = 'frankengit-remote-pull-candidate-intent-v1';
 const U64 = 18446744073709551615n, SCHEMA = 'frankengit-remote-pull-intent-v1';
-const COUNTERS = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence'];
+const COUNTERS = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence', 'policy_epoch', 'review_expected_version'];
 export class PullError extends Error {
   constructor(code, { phase = 'validation', dispatched = false, publication = null, status = null } = {}) {
     super(code); this.name = 'PullError'; this.code = code; this.phase = phase;
@@ -100,6 +105,7 @@ export function parsePullJson(bytes, { wire = false, maximum = PULL_LIMITS.inten
 }
 export function pullCommand(number, action, input, format) {
   pullU64(number, 1n);
+  if (isPullReview(action)) return candidateCommand(number, action, input, format);
   if (!PULL_ACTIONS.includes(action) || !['sha1', 'sha256'].includes(format)) failPull('unsupported_pull_command');
   const ff = action === 'fast-forward', comment = action === 'comment';
   const names = comment ? ['expected_version', 'body'] :
@@ -126,37 +132,52 @@ export function pullCommand(number, action, input, format) {
 function intentFor(input) {
   const scope = pullScope(input.scope), command = pullCommand(input.number, input.action, input.fields, scope.object_format);
   if (typeof input.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(input.nonce)) failPull('invalid_pull_nonce');
-  const basis = { schema: SCHEMA, endpoint: outcomeEndpoint(input.endpoint), scope, ...command,
-    nonce: input.nonce, credential_fingerprint: hash(input.credential_fingerprint) };
-  const result = { ...basis, key: `fgp1-${basis.nonce}-${pullHash(JSON.stringify(basis))}` };
+  const review = isPullReview(input.action);
+  if (input.action === 'merge' && command.fields.required_reviewers.includes(scope.principal_id)) failPull('pull_submitter_cannot_review_merge');
+  const basis = { schema: review ? REVIEW_SCHEMA : SCHEMA, endpoint: outcomeEndpoint(input.endpoint), scope, ...command,
+    nonce: input.nonce, credential_fingerprint: hash(input.credential_fingerprint),
+    ...(review ? { bundle: candidateBundle(input.action, input.bundle) } : {}) };
+  const result = { ...basis, key: `${review ? 'fgpc1' : 'fgp1'}-${basis.nonce}-${pullHash(JSON.stringify(basis))}` };
   if (Buffer.byteLength(pullCanonical(result)) > PULL_LIMITS.intent) failPull('pull_intent_limit');
   return result;
 }
-export function preparePull(input, token) {
+export function preparePull(input, token, bundle = null) {
   pullFields(input, ['endpoint', 'scope', 'number', 'action', 'fields']);
-  return intentFor({ ...input, nonce: randomBytes(16).toString('hex'), credential_fingerprint: pullTokenFingerprint(token) });
+  const payload = isPullReview(input.action) && input.action !== 'withdraw';
+  if (!payload && bundle !== null) failPull('unexpected_pull_bundle');
+  const descriptor = payload ? pullBundleDescriptor(bundle) : null;
+  const intent = intentFor({ ...input, nonce: randomBytes(16).toString('hex'),
+    credential_fingerprint: pullTokenFingerprint(token), ...(isPullReview(input.action) ? { bundle: descriptor } : {}) });
+  // A boundary collision refuses preparation rather than silently changing a
+  // saved nonce/key later. No Git object, pack or policy is decoded here.
+  if (payload) checkBoundary(intent, bundle);
+  return intent;
 }
 export function validatePullIntent(value) {
-  pullFields(value, ['schema', 'endpoint', 'scope', 'number', 'action', 'fields', 'body', 'nonce', 'credential_fingerprint', 'key']);
+  pullFields(value, ['schema', 'endpoint', 'scope', 'number', 'action', 'fields', 'body', 'nonce', 'credential_fingerprint', 'key',
+    ...(isPullReview(value?.action) ? ['bundle'] : [])]);
   const result = intentFor(value);
-  if (value.schema !== SCHEMA || value.body !== result.body || value.key !== result.key ||
+  if (value.schema !== result.schema || value.body !== result.body || value.key !== result.key ||
       JSON.stringify(value.fields) !== JSON.stringify(result.fields)) failPull('pull_intent_changed');
   return result;
 }
 export function validatePullPublication(value, input, status) {
-  const intent = validatePullIntent(input), ff = intent.action === 'fast-forward', comment = intent.action === 'comment';
-  const names = ['type', 'schema_version', ...Object.keys(intent.scope), 'number', 'action', 'tx_id', 'outcome', 'decision_sequence',
+  const intent = validatePullIntent(input), ff = intent.action === 'fast-forward', comment = intent.action === 'comment', review = isPullReview(intent.action);
+  const names = ['type', 'schema_version', ...Object.keys(intent.scope), ...(review ? [] : ['number']), 'action', 'tx_id', 'outcome', 'decision_sequence',
     'repository_commit_id', 'refusal_record_id', 'refusal_code', 'refusal_code_point', 'delivery_acknowledged',
-    ...(ff ? ['pull_request_version', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip']
+    ...(review ? ['subject', 'merge_base', 'candidate_commit', 'required_reviewers', 'review_expected_version', ...(intent.action === 'merge' ? ['method'] : [])]
+      : ff ? ['pull_request_version', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip']
       : ['expected_version', ...(comment ? ['comment_version', 'refs_changed'] : [])])];
   pullFields(value, names);
   const committed = value.outcome === 'committed', f = intent.fields;
-  if (value.type !== (ff ? 'fast_forward_merge_publication' : comment ? 'pull_request_comment_publication' : 'pull_request_publication') ||
+  if (value.type !== (review ? (intent.action === 'merge' ? 'reviewed_merge_publication' : 'candidate_review_publication')
+        : ff ? 'fast_forward_merge_publication' : comment ? 'pull_request_comment_publication' : 'pull_request_publication') ||
       value.schema_version !== 1 || Object.keys(intent.scope).some(key => value[key] !== intent.scope[key]) ||
-      value.number !== intent.number || value.action !== intent.action || !['committed', 'refused'].includes(value.outcome) ||
+      (!review && value.number !== intent.number) || value.action !== intent.action || !['committed', 'refused'].includes(value.outcome) ||
       status !== (committed ? 200 : 409) || value.delivery_acknowledged !== null) failPull('pull_publication_mismatch');
   const version = ff ? 'pull_request_version' : 'expected_version';
-  if (value[version] !== f[version]) failPull('pull_publication_version');
+  if (review) checkCandidatePublication(value, intent);
+  if (!review && value[version] !== f[version]) failPull('pull_publication_version');
   if (ff) for (const side of ['source', 'target']) {
     if (value[`${side}_ref`] !== f[`${side}_ref`] || value[`${side}_ref_hex`] !== Buffer.from(f[`${side}_ref`]).toString('hex') ||
         oid(value[`${side}_tip`], intent.scope.object_format, true) !== f[`${side}_tip`]) failPull('pull_publication_coordinates');
@@ -172,4 +193,90 @@ export function validatePullPublication(value, input, status) {
         value.refusal_code_point < 0 || value.refusal_code_point > 65535) failPull('pull_publication_conflict');
   }
   return structuredClone(value);
+}
+
+// Candidate commands name an exact reviewed artifact. The native engine still
+// checks the bundle, Git closure, current source, policy and independent votes.
+function candidateCommand(number, action, input, format) {
+  if (!['sha1', 'sha256'].includes(format)) failPull('invalid_pull_format');
+  const merge = action === 'merge';
+  pullFields(input, ['pull_request_version', 'policy_epoch', 'source_ref', 'target_ref', 'source_tip', 'target_tip',
+    'merge_base', 'candidate_commit', ...(merge ? ['required_reviewers', 'method'] : ['expected_version', 'reason'])]);
+  const f = { pull_request_version: pullU64(input.pull_request_version, 1n, U64 - 1n), policy_epoch: pullU64(input.policy_epoch, 1n) };
+  for (const side of ['source', 'target']) f[`${side}_ref`] = branch(input[`${side}_ref`]);
+  if (f.source_ref === f.target_ref) failPull('invalid_pull_coordinates');
+  for (const name of ['source_tip', 'target_tip', 'merge_base', 'candidate_commit']) f[name] = oid(input[name], format);
+  if (merge) {
+    if (!['merge-commit', 'squash'].includes(input.method)) failPull('explicit_reviewed_merge_method_required');
+    if (!Array.isArray(input.required_reviewers) || !input.required_reviewers.length || input.required_reviewers.length > 32) failPull('invalid_pull_reviewers');
+    f.required_reviewers = Array.from(input.required_reviewers, id => {
+      if (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id)) failPull('invalid_pull_reviewers');
+      return id;
+    }).sort();
+    if (new Set(f.required_reviewers).size !== f.required_reviewers.length) failPull('invalid_pull_reviewers');
+    f.method = input.method;
+  } else {
+    f.expected_version = pullU64(input.expected_version, action === 'withdraw' ? 1n : 0n, U64 - 1n);
+    f.reason = text(input.reason, 4096);
+    if (!f.reason.trim()) failPull('empty_pull_review_reason');
+  }
+  const form = new URLSearchParams({ object_format: format });
+  for (const [name, value] of Object.entries(f)) {
+    if (name === 'required_reviewers') for (const id of value) form.append('required_reviewer', id);
+    else form.append(name, value);
+  }
+  const body = form.toString();
+  if (body.length > PULL_LIMITS.form) failPull('pull_form_limit');
+  return { number, action, fields: f, body };
+}
+function candidateBundle(action, value) {
+  if (action === 'withdraw') {
+    if (value !== null) failPull('unexpected_pull_bundle');
+    return null;
+  }
+  pullFields(value, ['size', 'sha256']);
+  if (!Number.isSafeInteger(value.size) || value.size < 1 || value.size > PULL_LIMITS.bundle) failPull('pull_bundle_limit');
+  return { size: value.size, sha256: hash(value.sha256) };
+}
+export function pullBundleDescriptor(bytes) {
+  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > PULL_LIMITS.bundle ||
+      (typeof SharedArrayBuffer !== 'undefined' && bytes.buffer instanceof SharedArrayBuffer)) failPull('pull_bundle_limit');
+  return { size: bytes.length, sha256: pullHash(bytes) };
+}
+function boundary(intent) { return `fg-pull-candidate-${intent.nonce}`; }
+function checkBoundary(intent, bytes) {
+  if (bytes.includes(Buffer.from(`--${boundary(intent)}`)) || intent.body.includes(`--${boundary(intent)}`)) failPull('pull_bundle_boundary_collision');
+}
+export function validatePullBundle(input, bytes) {
+  const intent = validatePullIntent(input);
+  if (!isPullReview(intent.action) || intent.bundle === null) failPull('unexpected_pull_bundle');
+  const observed = pullBundleDescriptor(bytes);
+  if (observed.size !== intent.bundle.size || observed.sha256 !== intent.bundle.sha256) failPull('pull_bundle_changed');
+  checkBoundary(intent, bytes);
+  return Buffer.from(bytes); // Detach before asynchronous work can see caller edits.
+}
+export function pullEnvelope(input, bundle = null) {
+  const intent = validatePullIntent(input);
+  if (!isPullReview(intent.action) || intent.bundle === null) {
+    if (bundle !== null) failPull('unexpected_pull_bundle');
+    return { contentType: 'application/x-www-form-urlencoded', body: Buffer.from(intent.body) };
+  }
+  const bytes = validatePullBundle(intent, bundle), marker = boundary(intent);
+  return { contentType: `multipart/form-data; boundary=${marker}`, body: Buffer.concat([
+    Buffer.from(`--${marker}\r\nContent-Disposition: form-data; name="command"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n${intent.body}\r\n--${marker}\r\nContent-Disposition: form-data; name="bundle"; filename="candidate.bundle"\r\nContent-Type: application/x-git-bundle\r\n\r\n`),
+    bytes, Buffer.from(`\r\n--${marker}--\r\n`),
+  ]) };
+}
+function checkCandidatePublication(value, intent) {
+  const f = intent.fields, s = value.subject, merge = intent.action === 'merge', format = intent.scope.object_format;
+  pullFields(s, ['number', 'pull_request_version', 'policy_epoch', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip']);
+  if (s.number !== intent.number || s.pull_request_version !== f.pull_request_version || s.policy_epoch !== f.policy_epoch ||
+      value.review_expected_version !== (merge ? null : f.expected_version)) failPull('pull_review_subject_changed');
+  for (const side of ['source', 'target']) {
+    if (s[`${side}_ref`] !== f[`${side}_ref`] || s[`${side}_ref_hex`] !== Buffer.from(f[`${side}_ref`]).toString('hex') ||
+        oid(s[`${side}_tip`], format, true) !== f[`${side}_tip`]) failPull('pull_review_subject_changed');
+  }
+  for (const name of ['merge_base', 'candidate_commit']) if (oid(value[name], format, true) !== f[name]) failPull('pull_review_candidate_changed');
+  if (merge ? value.method !== f.method || JSON.stringify(value.required_reviewers) !== JSON.stringify(f.required_reviewers)
+    : value.required_reviewers !== null) failPull('pull_merge_requirements_changed');
 }

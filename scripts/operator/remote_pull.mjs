@@ -5,11 +5,11 @@ import { request as httpsRequest } from 'node:https';
 import { performance } from 'node:perf_hooks';
 import { lookupOutcome, validateOutcomeReply, OutcomeError } from './transaction_outcome.mjs';
 import { PULL_LIMITS, PullError, pullFields, failPull, pullOutcomeScope, pullTokenFingerprint,
-  validatePullIntent, validatePullPublication, parsePullJson } from './pull_command.mjs';
+  validatePullIntent, validatePullPublication, parsePullJson, isPullReview, validatePullBundle, pullEnvelope } from './pull_command.mjs';
 export { preparePull, validatePullIntent, pullCanonical, parsePullJson, PullError } from './pull_command.mjs';
 
 function configuration(options, send) {
-  pullFields(options, ['timeoutMs', 'signal', 'ca', 'known', 'publication', ...(send ? ['confirmKey', 'confirmFastForward'] : [])], []);
+  pullFields(options, ['timeoutMs', 'signal', 'ca', 'known', 'publication', ...(send ? ['confirmKey', 'confirmFastForward', 'confirmCandidate', 'confirmMergeMethod', 'bundle'] : [])], []);
   const timeoutMs = options.timeoutMs ?? 30000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000 ||
       (options.signal !== undefined && !(options.signal instanceof AbortSignal))) failPull('invalid_pull_options');
@@ -31,7 +31,7 @@ function errorFor(error, phase, dispatched, publication) {
   return new PullError(error instanceof PullError || error instanceof OutcomeError ? error.code : 'pull_operation_unavailable',
     { status: error instanceof PullError || error instanceof OutcomeError ? error.status : null, phase, dispatched, publication });
 }
-function postPull(intent, token, options) {
+function postPull(intent, token, options, envelope) {
   return new Promise((resolve, reject) => {
     let request, response, value, failure, timer, finished = false, closed = false, delivered = false;
     const signal = options.signal;
@@ -44,12 +44,13 @@ function postPull(intent, token, options) {
     const abort = () => finish(new PullError('pull_cancelled'));
     if (signal?.aborted) { abort(); return; }
     try {
-      const suffix = intent.action === 'comment' ? 'comments' : intent.action;
+      const suffix = intent.action === 'comment' ? 'comments' :
+        isPullReview(intent.action) && intent.action !== 'merge' ? `reviews/${intent.action}` : intent.action;
       const url = new URL(`${intent.endpoint}/api/v1/pulls/${intent.number}/${suffix}`);
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, maxHeaderSize: 16384, rejectUnauthorized: true, ...(options.ca ? { ca: options.ca } : {}),
         headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': intent.key, Accept: 'application/json',
-          'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(Buffer.byteLength(intent.body)),
+          'Content-Type': envelope.contentType, 'Content-Length': String(envelope.body.length),
           'Accept-Encoding': 'identity', Connection: 'close', 'Cache-Control': 'no-store' },
       });
       request.once('close', () => { closed = true; if (!finished) finish(new PullError('pull_response_incomplete')); else deliver(); });
@@ -84,7 +85,7 @@ function postPull(intent, token, options) {
       });
       signal?.addEventListener('abort', abort, { once: true });
       timer = setTimeout(() => finish(new PullError('pull_timeout')), options.timeoutMs);
-      if (signal?.aborted) abort(); else request.end(intent.body);
+      if (signal?.aborted) abort(); else request.end(envelope.body);
     } catch { finish(new PullError('pull_transport_unavailable')); }
   });
 }
@@ -92,13 +93,20 @@ async function operate(input, token, options, send) {
   // Detach every caller-owned value before the first await. A concurrent form
   // edit cannot change the authenticated scope, bytes, deadline or trust roots.
   const intent = validatePullIntent(input), config = configuration(options, send);
+  const deadline = performance.now() + config.timeoutMs;
   const fingerprint = pullTokenFingerprint(token), scope = pullOutcomeScope(intent.scope);
   let publication = config.publication == null ? null : validatePullPublication(config.publication, intent,
     config.publication.outcome === 'committed' ? 200 : 409);
   const known = config.known == null ? null : validateOutcomeReply(config.known, scope);
   if (send && (fingerprint !== intent.credential_fingerprint || config.confirmKey !== intent.key)) failPull('confirm_original_pull_key_and_credential');
   if (send && (intent.action === 'fast-forward' ? config.confirmFastForward !== true : config.confirmFastForward !== undefined)) failPull('explicit_fast_forward_confirmation_required');
-  const deadline = performance.now() + config.timeoutMs;
+  const review = isPullReview(intent.action);
+  if (send && (review ? config.confirmCandidate !== intent.fields.candidate_commit : config.confirmCandidate !== undefined)) failPull('explicit_pull_candidate_confirmation_required');
+  if (send && (intent.action === 'merge' ? config.confirmMergeMethod !== intent.fields.method : config.confirmMergeMethod !== undefined)) failPull('explicit_reviewed_merge_method_required');
+  // No bundle is needed for lookup or a previously observed terminal. When
+  // supplied for publication, snapshot and verify it before the first await.
+  let bundle = null;
+  if (config.bundle !== undefined) bundle = validatePullBundle(intent, config.bundle);
   const remaining = () => {
     if (config.signal?.aborted) failPull('pull_cancelled');
     const duration = Math.ceil(deadline - performance.now());
@@ -114,8 +122,8 @@ async function operate(input, token, options, send) {
       return { outcome: before, publication, dispatched: false };
     }
     phase = 'publication';
-    const transport = remaining(); dispatched = true;
-    publication = await postPull(intent, token, transport);
+    const envelope = pullEnvelope(intent, bundle), transport = remaining(); dispatched = true;
+    publication = await postPull(intent, token, transport, envelope);
     phase = 'confirmation';
     const outcome = matching(await lookup(before), publication);
     return { outcome, publication, dispatched: true };
