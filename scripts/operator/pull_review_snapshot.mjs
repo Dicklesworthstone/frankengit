@@ -317,5 +317,7 @@ export async function capturePullReviews(input, token, options = {}) {
   }
   if (signal?.aborted) failReview('review_cancelled');
   if (performance.now() > deadline) failReview('review_timeout');
-  return validateReviewCapture(capture);
+  const validated = validateReviewCapture(capture);
+  if (performance.now() > deadline) failReview('review_timeout');
+  return validated;
 }
