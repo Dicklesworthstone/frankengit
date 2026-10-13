@@ -9,12 +9,13 @@
 <body>
   <header><strong>FrankenGit</strong><span>Repository review protection</span><a href="../">Source</a></header>
   <main>
-    <h1>Inspect repository review protection</h1>
+    <h1>Administer repository review protection</h1>
     <p>This independent administration page does not require the pull-request or source-browser profiles. The native protection API authorizes every operation.</p>
     <form id="protection-connect">
-      <label>Protection-read token<input id="protection-token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <label>Protection credential<input id="protection-token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
       <label>Expected principal ID<input id="protection-actor" autocomplete="off" spellcheck="false" maxlength="32" required></label>
-      <button type="submit">Connect and inspect</button>
+      <label><input id="protection-recovery-only" type="checkbox">Recovery-only on next connection (including rotated credentials)</label>
+      <button type="submit">Connect without submitting</button>
       <button id="protection-reload" type="button" disabled>Inspect current policy explicitly</button>
       <button id="protection-disconnect" type="button">Disconnect</button>
     </form>
@@ -22,6 +23,33 @@
     <div id="protection-status" role="status" aria-live="polite">Connect an independently scoped protection credential.</div>
     <section id="protection-snapshot" aria-label="Exact native protection snapshot"></section>
     <section id="protection-policy" aria-label="Complete review protection policy"></section>
+    <section aria-labelledby="protection-editor-title">
+      <h2 id="protection-editor-title">Replace the complete native policy</h2>
+      <p>Inspect first. Existing administrators authorize the replacement; the proposed administrator set cannot authorize itself. These controls manage exact branches and all-required reviewers, not wildcard rules or status checks.</p>
+      <form id="protection-edit">
+        <label>Complete administrator set, one principal ID per line<textarea id="protection-administrators" rows="4" maxlength="2048" spellcheck="false" disabled></textarea></label>
+        <label>Complete branch rules: reference hex, a space, comma-separated reviewer IDs<textarea id="protection-rules" rows="8" maxlength="262144" spellcheck="false" disabled></textarea></label>
+        <label><input id="protection-clear" type="checkbox" disabled>Explicitly clear every branch rule (rules field must be empty)</label>
+        <button id="protection-prepare" type="submit" disabled>Freeze full replacement without submitting</button>
+      </form>
+      <p class="hint">One rule per line; at most 64 branches and 32 reviewers per branch. Native reference bytes are hex so non-UTF-8 names survive editing. Resource refusals never truncate a policy. Every successful replacement advances the policy epoch and invalidates earlier candidate approvals.</p>
+      <section id="protection-preview" aria-label="Frozen original policy replacement"></section>
+      <label><input id="protection-confirm" type="checkbox" disabled>I reviewed this frozen full replacement and authorize this explicit submission.</label>
+      <label><input id="protection-ownership-confirm" type="checkbox" disabled>I acknowledge that this replacement removes the submitting principal as a policy administrator.</label>
+      <nav>
+        <button id="protection-send" type="button" disabled>Submit frozen replacement</button>
+        <button id="protection-retry" type="button" disabled>Retry exact original request and key</button>
+        <button id="protection-lookup" type="button" disabled>Look up original outcome without resubmitting</button>
+        <button id="protection-discard" type="button" disabled>Discard never-sent, never-exported draft</button>
+      </nav>
+      <h2>Recover an uncertain publication</h2>
+      <p>Disconnect, timeout, missing keys and transport errors do not prove non-commit. Save the original receipt, not a re-created replacement. A rotated credential is outcome-only and must identify the same original principal.</p>
+      <button id="protection-export" type="button" disabled>Export original token-free receipt below</button>
+      <label>Private recovery receipt (copy and save securely)<textarea id="protection-receipt" rows="6" maxlength="2097152" spellcheck="false" autocomplete="off"></textarea></label>
+      <button id="protection-restore" type="button" disabled>Restore receipt without submitting</button>
+      <p class="hint">Receipts use the shared protection client format and can move between the PR panel and this page for the exact same origin and repository. They contain policy data and a credential fingerprint, never the bearer token. No automatic retry, save, restore, or publication occurs.</p>
+      <pre id="protection-terminal" aria-label="Validated native terminal outcome"></pre>
+    </section>
   </main>
   <footer>Versions and epochs remain exact 64-bit decimal strings. Branches retain their native bytes. Repository data is inert text, not executable markup.</footer>
 </body>
