@@ -76,6 +76,70 @@ export/inspection receipts retain symbol query, availability, generation and
 coverage; text also retains the omission inventory. `--require-complete` refuses
 to publish a partial bundle. No score, excerpt or local hash grants authority.
 
+## Ranked capture and priority-ordered export
+
+Add the optional query field `selection` to use the already-defined native
+ranking profile. For example, this is a fragment for the same private query:
+
+```json
+{
+  "symbols": { "name": "Recover", "match": "prefix", "policy": "required" },
+  "selection": "context-weighted-rrf-q16-v1",
+  "limits": { "context_max_files": 4 }
+}
+```
+
+The client sends `context_selection` to the native endpoint. Omitted selection
+retains the original request and capture serialization. Explicit `raw-path-prefix`
+keeps alphabetical selection; no ranking receipt may appear in that response.
+Unknown profiles, extra weights/constants, duplicate control fields at the native
+endpoint, and silent downgrade to alphabetical selection are not accepted.
+There is no retry with a different selection or increased budget.
+
+The client reconstructs the entire **returned** candidate universe from the
+validated content, path, and available symbol channels. Distinct paths receive
+one-based ranks per channel in raw-byte order; repeated declarations in one file
+contribute once. It recomputes every contribution using the fixed rule:
+
+```text
+floor(weight * 65536 / (60 + distinct_document_rank))
+weights: content 1, path 1, symbol 2
+order: descending total score, then ascending raw path bytes
+```
+
+It then checks the complete selected prefix against the received receipt:
+positions, native blob identities, candidate paths, per-channel ranks and weights,
+individual contributions, total scores, and tie breaks. Merely checking that
+supplied scores add up would miss an otherwise self-consistent lower-ranked
+substitute. This client rejects that substitute even if its source bytes hash
+correctly. It also refuses missing contributors, fabricated optional-symbol
+contributions, wrong scope, and incorrect coverage/completeness claims.
+
+`capture.json` retains the native raw-path-ordered `files` inventory. Its summary
+adds a freshly recomputed, normalized `ranking`, not a reference to unchecked
+server data. `context.txt` records that ranking and presents the selected files
+in checked priority order, while keeping every source excerpt quoted as untrusted
+data. CLI export and inspection receipts name the selection profile. Offline
+inspection recomputes selection and the text projection in addition to checking
+the independently retained manifest and payload hashes. It performs no network
+read and needs no credential.
+
+Source and excerpt budgets are unchanged. A failed highest-ranked file cannot
+be swapped out for another candidate, and `--require-complete` still rejects
+partial file selection or incomplete upstream coverage. Ranking covers only
+hits actually returned by the bounded channel queries. It does not turn a
+truncated result into a complete repository inventory, independently authenticate
+ancestry, or grant access. Input ranks are **raw-path order, not relevance order**;
+this profile rewards cross-channel agreement, not semantic understanding. No
+measured relevance or latency improvement is asserted.
+
+The ranking tests use an independent BigInt arithmetic oracle and literal
+contribution expectations. Real operator processes also exercise ranked capture,
+priority text, partial-result refusal, offline reopen, and rejection of a
+rewritten local score even when supplied with its new manifest hash. That last
+case tests semantic revalidation, not a substitute for retaining the original
+manifest hash independently.
+
 ## Verification boundary
 
 ```bash

@@ -101,7 +101,15 @@ export function renderText(value) {
   };
   if (summary.symbols) append({ symbol_query: summary.query.symbols, symbols: summary.symbols,
     symbol_omissions: capture.native_response.retrieval.symbols.result?.omissions ?? [] });
-  for (const file of capture.native_response.files) {
+  if (summary.ranking) append({ selection: summary.ranking.profile, ranking: summary.ranking });
+  // Preserve the native raw-path file inventory in capture.json, but present
+  // checked priority order to the context consumer. Inspection recomputes it.
+  const files = summary.ranking ? summary.ranking.selected.map(row => {
+    const file = capture.native_response.files.find(file => file.path_hex === row.path_hex);
+    if (!file) fail('context_ranked_export_file_missing');
+    return file;
+  }) : capture.native_response.files;
+  for (const file of files) {
     append({ path_hex: file.path_hex, blob: file.blob, source_bytes: file.source_bytes, anchors: file.anchors,
       complete_blob_hash_verified: summary.full_blob_hash_verified_paths.includes(file.path_hex) });
     for (const window of file.excerpts) {
@@ -117,7 +125,8 @@ function receipt(path, manifest, manifestBytes, summary) {
     complete: summary.complete, source: summary.source, lexical_checkpoint: summary.lexical_checkpoint,
     returned_files: summary.returned_files, omitted_files: summary.omitted_files, excerpt_bytes: summary.excerpt_bytes,
     source_material_untrusted: true, authority_verified: false, agent_context_packet: false,
-    ...(summary.symbols ? { symbols: summary.symbols } : {}) };
+    ...(summary.symbols ? { symbols: summary.symbols } : {}),
+    ...(summary.ranking ? { selection: summary.ranking.profile } : {}) };
 }
 export async function publishBundle(path, value, { signal } = {}) {
   absolute(path);

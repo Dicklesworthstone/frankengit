@@ -7,6 +7,7 @@ import { request as httpsRequest } from 'node:https';
 export const LIMITS = Object.freeze({ response: 8 * 1024 * 1024, request: 256 * 1024,
   files: 32, anchors: 4096, windows: 128, source: 64 * 1024 * 1024, file: 8 * 1024 * 1024,
   excerpts: 1024 * 1024, results: 100, work: 16 * 1024 * 1024, payload: 32 * 1024 * 1024 });
+export const RANKING_PROFILE = "context-weighted-rrf-q16-v1";
 const U64 = 18446744073709551615n;
 const SYMBOL_KINDS = Object.freeze(['enum', 'function', 'macro', 'module', 'struct', 'trait', 'type', 'union']);
 const channelShare = (total, q, ordinal) => {
@@ -87,7 +88,7 @@ function atLeast(observed, floor) {
       (observed.number === floor.number && observed.token !== floor.token))) fail('context_index_checkpoint_regressed');
 }
 export function query(input) {
-  keys(input, ['schema', 'scope', 'reference', 'terms', 'prefixes_hex', 'expected_head', 'expected_commit', 'minimum_lexical', 'symbols', 'minimum_symbol', 'limits'],
+  keys(input, ['schema', 'scope', 'reference', 'terms', 'prefixes_hex', 'expected_head', 'expected_commit', 'minimum_lexical', 'symbols', 'minimum_symbol', 'selection', 'limits'],
     ['schema', 'scope', 'reference', 'terms']);
   if (input.schema !== 'frankengit-source-context-query-v1') fail('unsupported_context_query');
   keys(input.scope, ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format']);
@@ -114,6 +115,7 @@ export function query(input) {
     symbols = { name: value.name, match: value.match ?? 'exact', policy: value.policy ?? 'optional', kinds: [...new Set(kinds)].sort() };
   }
   if (!symbols && input.minimum_symbol != null) fail('context_symbol_floor_without_query');
+  if (Object.hasOwn(input, 'selection') && !['raw-path-prefix', RANKING_PROFILE].includes(input.selection)) fail('unsupported_context_selection');
   const limits = input.limits ?? {}; keys(limits, Object.keys(defaults), []);
   const selected = { ...defaults, ...limits };
   for (const [name, maximum, minimum] of [['max_results_per_channel', 100, 1], ['max_work', LIMITS.work, symbols ? 3 : 2],
@@ -124,7 +126,8 @@ export function query(input) {
     expected_head: input.expected_head == null ? null : token(input.expected_head),
     expected_commit: input.expected_commit == null ? null : oid(input.expected_commit, scope.object_format),
     minimum_lexical: input.minimum_lexical == null ? null : activation(input.minimum_lexical), limits: selected,
-    ...(symbols ? { symbols, minimum_symbol: input.minimum_symbol == null ? null : activation(input.minimum_symbol) } : {}) };
+    ...(symbols ? { symbols, minimum_symbol: input.minimum_symbol == null ? null : activation(input.minimum_symbol) } : {}),
+    ...(Object.hasOwn(input, 'selection') ? { selection: input.selection } : {}) };
 }
 export function command(input) {
   const q = query(input), values = { object_format: q.scope.object_format, ref: q.reference, ...q.limits };
@@ -134,6 +137,7 @@ export function command(input) {
   if (q.symbols) Object.assign(values, { symbol_name_hex: Buffer.from(q.symbols.name).toString('hex'),
     symbol_match: q.symbols.match, symbol_policy: q.symbols.policy });
   if (q.minimum_symbol) Object.assign(values, { minimum_symbol_token: q.minimum_symbol.token, minimum_symbol_number: q.minimum_symbol.number });
+  if (q.selection) values.context_selection = q.selection;
   const body = new URLSearchParams(values);
   for (const kind of q.symbols?.kinds ?? []) body.append('symbol_kind', kind);
   for (const t of q.terms) body.append('term_hex', Buffer.from(t).toString('hex'));
@@ -318,11 +322,71 @@ function symbols(channel, vector, q, selected, sourceHead, check) {
     payload: value.payload_bytes_read, work: value.work_units, matches: value.matches };
 }
 
+// Recompute the COMPLETE returned candidate ordering, not just the scores in
+// the selected prefix. A self-consistent receipt for a lower-scoring substitute
+// must fail even when all of its arithmetic and hydrated source bytes agree.
+function ranking(value, q, candidates, channels, check) {
+  check();
+  keys(value, ['profile', 'rank_constant', 'score_scale', 'input_order', 'tie_break', 'ranked_over', 'semantic_relevance', 'selected']);
+  if (value.profile !== RANKING_PROFILE || value.rank_constant !== 60 || value.score_scale !== 65536 ||
+      value.input_order !== 'raw-path-distinct-documents' || value.tie_break !== 'raw-path-ascending' ||
+      value.ranked_over !== 'returned-channel-hits' || value.semantic_relevance !== false || !Array.isArray(value.selected)) fail('context_ranking_profile_changed');
+  let pathBytes = 0;
+  const scores = new Map();
+  for (const [path, candidate] of candidates) {
+    check(); pathBytes += path.length / 2;
+    if (pathBytes > 2 * 1024 * 1024) fail('context_ranking_path_limit');
+    scores.set(path, { path_hex: path, blob: candidate.blob, score_q16: 0, contributions: [] });
+  }
+  for (const [channel, hits] of channels) {
+    if (hits.length > 1024) fail('context_ranking_hit_limit');
+    const weight = channel === 'symbol' ? 2 : 1;
+    let previous = null, documentRank = 0;
+    for (const hit of hits) {
+      check();
+      if (previous === hit.path_hex) continue;
+      previous = hit.path_hex; documentRank++;
+      const row = scores.get(hit.path_hex);
+      if (!row) fail('context_ranking_unknown_candidate');
+      // Products and sums are below 2^53: exact integer arithmetic, no
+      // accumulated floating scores and no caller-supplied weights/constant.
+      const contribution = Math.floor(weight * 65536 / (60 + documentRank));
+      row.score_q16 += contribution;
+      row.contributions.push({ channel, document_rank: documentRank, weight, score_q16: contribution });
+    }
+  }
+  const selected = [...scores.values()].sort((a, b) => {
+    check(); return b.score_q16 - a.score_q16 || (a.path_hex < b.path_hex ? -1 : a.path_hex > b.path_hex ? 1 : 0);
+  }).slice(0, q.limits.context_max_files).map((row, ordinal) => ({ position: ordinal + 1, ...row }));
+  if (value.selected.length !== selected.length) fail('context_ranking_selection_changed');
+  for (let i = 0; i < selected.length; i++) {
+    check();
+    const actual = value.selected[i], expected = selected[i];
+    keys(actual, ['position', 'path_hex', 'blob', 'score_q16', 'contributions']);
+    if (actual.position !== expected.position || actual.path_hex !== expected.path_hex ||
+        oid(actual.blob, q.scope.object_format) !== expected.blob || actual.score_q16 !== expected.score_q16 ||
+        !Array.isArray(actual.contributions) || actual.contributions.length !== expected.contributions.length) fail('context_ranking_selection_changed');
+    for (let j = 0; j < expected.contributions.length; j++) {
+      check();
+      const contribution = actual.contributions[j];
+      keys(contribution, ['channel', 'document_rank', 'weight', 'score_q16']);
+      if (Object.keys(expected.contributions[j]).some(k => contribution[k] !== expected.contributions[j][k])) fail('context_ranking_contribution_changed');
+    }
+  }
+  check();
+  // Fresh, normalized data; no response-owned object can mutate the checked
+  // ordering when a capture is projected into a private text export.
+  return { profile: RANKING_PROFILE, rank_constant: 60, score_scale: 65536,
+    input_order: 'raw-path-distinct-documents', tie_break: 'raw-path-ascending',
+    ranked_over: 'returned-channel-hits', semantic_relevance: false, selected };
+}
+
 export function validate(reply, input, check = () => {}) {
   const q = query(input), limits = q.limits; check(); record(reply);
   if (reply.type !== 'source_context_initial' || reply.schema_version !== 1 || reply.profile !== 'source-initial-context-v1' ||
       reply.read_only !== true || reply.transaction_created !== false || reply.source_material_untrusted !== true ||
-      reply.selection !== 'raw-path-prefix' || Object.hasOwn(reply, 'ranking') || !Array.isArray(reply.files)) fail('unsupported_native_context');
+      reply.selection !== (q.selection ?? 'raw-path-prefix') ||
+      (reply.selection === 'raw-path-prefix' && Object.hasOwn(reply, 'ranking')) || !Array.isArray(reply.files)) fail('unsupported_native_context');
   for (const k of ['context_max_files', 'context_radius_bytes', 'context_max_source_bytes', 'context_max_excerpt_bytes']) if (reply[k] !== limits[k]) fail('context_budget_echo_changed');
   const r = record(reply.retrieval), selected = source(r, q);
   if (r.type !== 'source_search_initial' || r.schema_version !== 1 || r.profile !== 'source-initial-retrieval-v1' || r.phase !== 'Initial' ||
@@ -371,7 +435,10 @@ export function validate(reply, input, check = () => {}) {
       raw: hit.raw_identifier, excerptOffset: hit.excerpt_offset, excerpt: Buffer.from(hit.excerpt_hex, 'hex') });
     candidates.set(hit.path_hex, row);
   }
-  const paths = [...candidates.keys()].sort().slice(0, limits.context_max_files), fileLimit = Math.min(LIMITS.file, Math.floor(limits.context_max_source_bytes / Math.max(1, paths.length)));
+  const ranked = q.selection === RANKING_PROFILE
+    ? ranking(reply.ranking, q, candidates, [['content', r.content.hits], ['path', r.path.hits], ['symbol', symbol.matches]], check) : null;
+  const paths = ranked ? ranked.selected.map(row => row.path_hex).sort() : [...candidates.keys()].sort().slice(0, limits.context_max_files);
+  const fileLimit = Math.min(LIMITS.file, Math.floor(limits.context_max_source_bytes / Math.max(1, paths.length)));
   if (!fileLimit || reply.source_file_limit !== fileLimit || reply.candidate_files !== candidates.size || reply.returned_files !== paths.length ||
       reply.files.length !== paths.length || reply.omitted_files !== candidates.size - paths.length || reply.source_blobs_read !== paths.length ||
       reply.complete !== (r.complete && paths.length === candidates.size)) fail('context_selection_or_completeness_changed');
@@ -436,7 +503,8 @@ export function validate(reply, input, check = () => {}) {
     source_material_untrusted: true, agent_context_packet: false, authority_verified: false,
     source_bytes_read: sourceBytes, excerpt_bytes: excerptBytes,
     ...(q.symbols ? { symbols: { state: symbol.state, ...(symbol.reason ? { reason: symbol.reason } : {}),
-      generation: symbol.generation, coverage_complete: symbol.coverage, complete: symbol.complete } } : {}) };
+      generation: symbol.generation, coverage_complete: symbol.coverage, complete: symbol.complete } } : {}),
+    ...(ranked ? { ranking: ranked } : {}) };
 }
 
 // Closed single-request acquisition. Never follows redirects or changes the
