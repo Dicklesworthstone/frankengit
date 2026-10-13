@@ -12,9 +12,9 @@ const USAGE = `usage: node scripts/fg_source_context.mjs capture
        node scripts/fg_source_context.mjs inspect
   --bundle <absolute-private-bundle-directory> --expected-sha256 <retained-manifest-sha256>
 
-One native content/path query supplies source excerpts under the original scope,
-source pins, lexical checkpoint and explicit budgets. No fallback, automatic
-retry, symbol channel, semantic ranking, workflow execution or write is allowed.
+One native content/path query, with optional explicit symbols, supplies excerpts
+under the original scope, source pins, independent index checkpoints and budgets.
+No fallback, automatic retry, semantic ranking, workflow execution or write is allowed.
 Tokens are read from 0600 files in private 0700 directories, never argv or output.
 Outputs are capture.json (byte-exact hex excerpts), context.txt (quoted untrusted
 source), and a last-written manifest.json. Keep its printed hash independently.
