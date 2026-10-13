@@ -11,7 +11,7 @@ function fields(value, allowed) {
 }
 // Bound and detach every caller-controlled collection before the first await.
 // The ordinary query normalizer still owns the full grammar after inheritance.
-function changes(value) {
+export function normalizeFollowup(value) {
   fields(value, ['terms', 'prefixes_hex', 'symbols', 'selection', 'limits']);
   if (!Array.isArray(value.terms) || !value.terms.length || value.terms.length > 32) fail('invalid_context_followup_terms');
   for (const term of value.terms) if (typeof term !== 'string' || !/^[A-Za-z0-9_]{1,128}$/.test(term)) fail('invalid_context_followup_terms');
@@ -59,6 +59,12 @@ function nextQuery(summary, delta) {
   return next;
 }
 
+// Pure preparation used by durable session reservation before any network I/O.
+// The caller must obtain summary from loadBundle; this grants no authority.
+export function continuationQuery(summary, followup) {
+  return nextQuery(summary, normalizeFollowup(followup));
+}
+
 /// Verify one independently pinned private bundle and issue ONE follow-up read.
 /// Endpoint, namespace, full ref, source snapshot and checkpoint floors come
 /// from the verified capture, never from repository excerpts or delta fields.
@@ -76,7 +82,7 @@ export async function continueCapture(bundle, expectedManifest, credential, foll
     if (performance.now() - started >= timeout) fail('context_deadline_exceeded');
   };
   check();
-  const delta = changes(followup), ca = options.ca === undefined ? undefined : Buffer.from(options.ca);
+  const delta = normalizeFollowup(followup), ca = options.ca === undefined ? undefined : Buffer.from(options.ca);
   const previous = await loadBundle(bundle, expectedManifest, check);
   check();
   const address = endpoint(previous.capture.endpoint), selected = nextQuery(previous.capture.summary, delta);

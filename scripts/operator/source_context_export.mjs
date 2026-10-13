@@ -130,12 +130,27 @@ function receipt(path, manifest, manifestBytes, summary) {
     ...(summary.symbols ? { symbols: summary.symbols } : {}),
     ...(summary.ranking ? { selection: summary.ranking.profile } : {}) };
 }
+function material(value, check = () => {}) {
+  const capture = checkedCapture(structuredClone(value), check), bytes = encoded(capture), text = renderText(capture, check);
+  if (bytes.length > CAPTURE_LIMIT) fail('context_capture_export_limit');
+  const manifest = { schema: 'frankengit-source-context-export-v1', files: [
+    { name: 'capture.json', bytes: bytes.length, sha256: sha256(bytes) },
+    { name: 'context.txt', bytes: text.length, sha256: sha256(text) }], source_material_untrusted: true };
+  check();
+  return { capture, bytes, text, manifest, manifestBytes: encoded(manifest) };
+}
+// The same bytes as publishBundle, computed before publication so a durable
+// owner can retain an exact candidate and recover without another acquisition.
+export function bundleCommitment(value, check = () => {}) {
+  const { manifest, manifestBytes } = material(value, check);
+  return { manifest_sha256: sha256(manifestBytes), capture_sha256: manifest.files[0].sha256,
+    text_sha256: manifest.files[1].sha256 };
+}
 export async function publishBundle(path, value, { signal } = {}) {
   absolute(path);
   // Copy and fully check all material before filesystem publication. Exports do
   // not contain credentials, raw headers, a bearer-token fingerprint or a key.
-  const capture = checkedCapture(structuredClone(value)), bytes = encoded(capture), text = renderText(capture);
-  if (bytes.length > CAPTURE_LIMIT) fail('context_capture_export_limit');
+  const { capture, bytes, text, manifest, manifestBytes } = material(value);
   signal?.throwIfAborted(); await absentBundle(path); signal?.throwIfAborted();
   await mkdir(path, { mode: 0o700 });
   let result;
@@ -144,10 +159,6 @@ export async function publishBundle(path, value, { signal } = {}) {
     await syncDirectory(dirname(path));
     await writeNew(join(path, 'capture.json'), bytes); signal?.throwIfAborted();
     await writeNew(join(path, 'context.txt'), text); signal?.throwIfAborted();
-    const manifest = { schema: 'frankengit-source-context-export-v1', files: [
-      { name: 'capture.json', bytes: bytes.length, sha256: sha256(bytes) },
-      { name: 'context.txt', bytes: text.length, sha256: sha256(text) }], source_material_untrusted: true };
-    const manifestBytes = encoded(manifest);
     // Read back both payloads before the root marker. Missing/torn payloads
     // never get a completed manifest. Never overwrite or erase a partial export.
     if (!bytes.equals(await readPrivate(join(path, 'capture.json'), CAPTURE_LIMIT)) ||
