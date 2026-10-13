@@ -402,3 +402,6 @@ mod tests {
         assert_eq!(visits, 1);
     }
 }
+
+#[cfg(all(test, unix))]
+mod integration;
