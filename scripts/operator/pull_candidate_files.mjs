@@ -1,9 +1,10 @@
 // Private, root-last custody for the native candidate capture/inspect CLI.
 // These files retain read observations, never approval or repository authority.
 import { constants } from 'node:fs';
-import { open, lstat, realpath, mkdir, opendir } from 'node:fs/promises';
+import { open, lstat, realpath, mkdir, opendir, link, unlink } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { randomBytes } from 'node:crypto';
 import { validateCandidateCapture, candidateCanonical, candidateHash } from './pull_candidate_capture.mjs';
 import { candidateKeys, candidateJson, candidateToken, candidateFail, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 import { BUNDLE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-candidate.mjs';
@@ -139,4 +140,17 @@ export async function loadCandidatePackage(path, expectedHash, options = {}) {
   if (!root.equals(await read(join(absolute, 'manifest.json'), CANDIDATE_MANIFEST_LIMIT, check))) candidateFail('candidate_package_changed');
   await inventory(absolute, bundle !== null, check); check();
   return { ...checked, path: absolute, sha256: expectedHash, bundle_path: bundle === null ? null : join(absolute, 'candidate.bundle') };
+}
+
+// Create-only publication of the small sender input. The staging file survives
+// interrupted final-name publication; no existing destination is replaced.
+export async function saveCandidateJson(path, value, options = {}) {
+  const check = candidateClock(options), bytes = Buffer.from(candidateCanonical(value));
+  if (bytes.length > 512 * 1024) candidateFail('candidate_draft_file_limit');
+  const absolute = await absent(path, check), parent = dirname(absolute);
+  const temporary = join(parent, `.candidate-draft-${randomBytes(16).toString('hex')}.pending`);
+  await writeNew(temporary, bytes); check();
+  await link(temporary, absolute); await syncDirectory(parent);
+  await unlink(temporary); await syncDirectory(parent);
+  return { path: absolute, sha256: candidateHash(bytes), bytes: bytes.length };
 }
