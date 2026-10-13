@@ -12,7 +12,7 @@ export function gitHash(kind, value, algorithm) {
   const body = Buffer.from(value);
   return createHash(algorithm).update(`${kind} ${body.length}\0`).update(body).digest('hex');
 }
-export function fixture(algorithm = 'sha1') {
+export function fixture(algorithm = 'sha1', bodies = {}) {
   const width = algorithm === 'sha1' ? 40 : 64, tag = id => `${algorithm}:${id}`;
   const beforeTree = 'b'.repeat(width), afterTree = 'c'.repeat(width);
   const commit = (tree, message) => {
@@ -22,7 +22,7 @@ export function fixture(algorithm = 'sha1') {
   };
   const beforeCommit = commit(beforeTree, 'before'), afterCommit = commit(afterTree, 'after'), baseCommit = commit(beforeTree, 'base');
   const beforeRef = 'refs/heads/main', afterRef = 'refs/heads/topic';
-  const beforeBody = Buffer.from('before\r\n'), afterBody = Buffer.from('after\n');
+  const beforeBody = Buffer.from(bodies.before ?? 'before\r\n'), afterBody = Buffer.from(bodies.after ?? 'after\n');
   const beforeBlob = gitHash('blob', beforeBody, algorithm), afterBlob = gitHash('blob', afterBody, algorithm);
   const scope = { tenant_id: 'tenant-fixture', repository_id: 'repo-fixture', repository_incarnation: 'incarnation-fixture', object_format: algorithm };
   const common = { schema_version: 1, ...scope, source_head: 'fixture-authority-head', snapshot_token: `alg:2:${'a'.repeat(64)}`,

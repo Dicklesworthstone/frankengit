@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FrankenGit · History and blame</title>
+  <title>FrankenGit · History, blame and comparison</title>
   <link rel="stylesheet" href="../browser.css">
   <script type="module" src="./history-view.mjs"></script>
 </head>
 <body>
-  <header><strong>FrankenGit</strong><span>History and line provenance</span><span class="badge">Read only</span><a href="../">Current source</a></header>
+  <header><strong>FrankenGit</strong><span>History, line provenance and branch comparison</span><span class="badge">Read only</span><a href="../">Current source</a></header>
   <main>
     <h1>Investigate an exact repository snapshot</h1>
     <p>Follow commit history, inspect historical files, and trace exact lines through all merge parents. Names, messages and source are inert data. Commit identity does not authenticate its author.</p>
@@ -29,10 +29,24 @@
       <button id="history-blame" type="button">Blame file at selected ref tip</button>
     </form>
     <p class="hint">Path history compares exact entries against every parent, without rename guesses. Blame is same-path line provenance, not proof of human authorship. A moved snapshot is refused rather than silently refreshed.</p>
+    <section aria-labelledby="history-compare-heading">
+      <h2 id="history-compare-heading">Compare branches before opening a pull request</h2>
+      <p>The selected reference above is the <strong>after</strong> side. Choose the <strong>before</strong> reference below. Both are read at the selected authority snapshot; neither reference is moved.</p>
+      <form id="history-compare">
+        <label>Before reference<input id="history-before-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
+        <label>Expected before tip (optional independent pin)<input id="history-before-tip" autocomplete="off" spellcheck="false" maxlength="71" placeholder="Full lowercase native commit ID"></label>
+        <label>Comparison mode<select id="history-compare-mode"><option value="direct">Direct: before tip → selected after tip</option><option value="merge-base">Merge base → selected after tip</option></select></label>
+        <label>Optional exact path prefixes, one per line<textarea id="history-compare-paths" rows="3" maxlength="65536" spellcheck="false"></textarea></label>
+        <label>Prefix encoding<select id="history-compare-path-kind"><option value="text">UTF-8 text</option><option value="hex">Raw lowercase hex bytes</option></select></label>
+        <button id="history-compare-run" type="submit" disabled>Compare pinned references — read only</button>
+      </form>
+      <p class="hint">Direct mode includes divergence on both sides. Merge-base mode shows changes since the common ancestor, not the result of a merge. A successful read retains the observed before tip for later modes and filters; reopen explicitly to select new tips. Prefixes match complete path components, not globs; use hex for non-UTF-8 names or names containing newlines. Up to 512 changed paths, 64 text files, 4,096 hunks, and 2 MiB of path/hunk bytes are accepted; over-budget results are refused, not silently truncated.</p>
+      <p class="hint">Open either side of a changed file at its original commit, or download up to 1 MiB of complete, hash-checked blob bytes. Binary and symlink payloads stay inert; gitlinks are never followed. Diff consistency checks do not prove merge-base ancestry or grant approval or merge permission.</p>
+    </section>
     <div id="history-status" role="status" aria-live="polite">Connect an explicitly scoped repository token to begin.</div>
     <nav><button id="history-cancel" type="button">Cancel read</button><button id="history-download" type="button" disabled>Download validated response</button></nav>
     <nav id="history-breadcrumbs" aria-label="Historical path"></nav>
-    <section id="history-content" aria-label="History, blame or historical source"></section>
+    <section id="history-content" aria-label="History, comparison, blame or historical source"></section>
     <nav id="history-paging" aria-label="Result pages"></nav>
   </main>
   <footer>No writes, persistent credentials, executable repository markup, automatic retries, or third-party requests. Native authority still governs every read.</footer>
