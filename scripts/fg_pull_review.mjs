@@ -15,14 +15,17 @@ draft   --capture PRIVATE_CAPTURE_JSON --sha256 RETAINED_CAPTURE_HASH
 
 Selection: endpoint, scope {tenant_id, repository_id, repository_incarnation,
 object_format}, number (decimal string), expected_head (snapshot token or null).
-Choice: principal_id, explicit action approve/request-changes/withdraw/merge.
+Choice: principal_id and explicit action. approve/request-changes/withdraw/merge
+use candidate review subjects. update/close/reopen/fast-forward use captured PR
+metadata; update accepts an explicit title and/or body replacement, not new tips.
 Approve/request-changes also require reason, merge_base, candidate_commit.
 Withdraw requires only reason: its original subject/candidate is retained.
 Merge requires merge_base, candidate_commit, method merge-commit|squash, and
 required_reviewers. Candidate OIDs are raw native lowercase hex, chosen by you.
 
 Capture only reads the native API; inspect and draft are offline and take no token.
-Draft outputs input for scripts/remote_pull.mjs prepare. It does NOT approve,
+Draft outputs input for scripts/remote_pull.mjs prepare. close/reopen preserve
+all metadata; fast-forward still needs --fast-forward-only at the separate sender. It does NOT approve,
 create a request/key, upload a bundle, merge, or claim any vote grants permission.
 Use the existing prepare/inspect/send/recover workflow for explicit publication.
 
@@ -69,7 +72,9 @@ export async function run(args, { output = text => write(process.stdout, text), 
     } else {
       value = await loadReviewCapture(flags.capture, flags.sha256);
       if (action === 'inspect') { await output(reviewCanonical(value)); return 0; }
-      value = draftPullReview(value, parseReviewJson(await readReviewPrivate(flags.input, 16384)));
+      // A native body is 64 KiB, but JSON escaping can expand it sixfold.
+      // Bound the choice envelope separately; the drafter still enforces native UTF-8 limits.
+      value = draftPullReview(value, parseReviewJson(await readReviewPrivate(flags.input, 512 * 1024)));
     }
     if (signal?.aborted) failReview('review_cancelled');
     started = true; saved = await saveReviewJson(destination, value);

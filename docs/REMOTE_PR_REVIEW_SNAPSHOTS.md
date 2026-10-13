@@ -138,7 +138,8 @@ The draft is the existing `prepare` input shape, not a new mutation protocol.
 The CLI's draft receipt records the source capture hash; the native command
 carries the observed PR/reviewer versions and policy epoch, not that local hash.
 This adapter's tests verify the inspected native command vocabulary and output
-shape; they do not execute the separate remote sender or Rust admission.
+shape; the lifecycle suite below additionally executes the complete remote sender,
+not Rust admission.
 
 For `approve` and `request-changes`, the exact predecessor is selected from all
 captured pages, or zero only after the complete visible stream has been read.
@@ -200,5 +201,66 @@ The executed profile is Node 22.16.0. In addition to the core HTTP/TLS cases,
 these tests drive real CLI processes and private files, exact later-page review
 predecessors, stale withdrawal subjects, both merge methods, missing/byte-only
 records, corruption/pins, concurrent output writers, signals and broken stdout.
-No live `fg`, native policy, sender integration, full workspace or production
-readiness is claimed.
+No live `fg`, native policy, full workspace or production readiness is claimed.
+The additional integration coverage below exercises the real operator sender,
+not the native server behind it.
+
+## Snapshot-derived lifecycle commands
+
+The same offline `draft` command also supports `update`, `close`, `reopen`, and
+`fast-forward`. It copies the full recorded PR metadata and exact predecessor
+version from the verified capture, avoiding manual transcription of branch tips,
+versions and text into the sender. The original capture is never changed.
+
+| Choice action | Additional choice fields | Captured state required |
+| --- | --- | --- |
+| `update` | Explicit `title` and/or `body` | Open PR with metadata |
+| `close` | None | Open PR with metadata |
+| `reopen` | None | Closed PR with metadata |
+| `fast-forward` | None | Open PR with different recorded tips |
+
+Each choice still requires `principal_id`. Omitted edit fields are preserved;
+an explicit empty `body` clears the body. A title must remain nonempty. Even
+close/reopen carry the complete unchanged source/target references, tips, title
+and body because that is the existing native mutation contract. None of these
+choices accepts a tip, expected-version, force, policy or merge-method override.
+Byte-only reference names and exhausted stream versions refuse, as they do for
+candidate drafts. Merged/legacy merge-only PRs cannot be reopened by this profile.
+
+For example, use this private choice JSON to edit only the title:
+
+```json
+{"action":"update","principal_id":"44444444444444444444444444444444","title":"Revised PR title"}
+```
+
+Run `draft` as above, inspect the resulting private command input, and use the
+existing `remote_pull.mjs prepare` and separately confirmed `send` commands.
+`fast-forward` produces a `pull_request_version` field, not a review-stream
+predecessor, and still requires the sender's **`--fast-forward-only`** switch.
+Drafting cannot grant the stronger merge permission or prove ancestry. The
+native driver checks current refs, PR version, ancestry and protection during
+publication. A stale capture can cause a canonical refusal; this tool never
+recaptures, replans or resubmits automatically. Open-PR creation and comments
+are not inferred from this read: a comment needs its independent discussion
+version, which this snapshot does not contain.
+
+The combined verification command now runs **132 tests**: the 50 original
+reader cases, 32 recovered drafting/CLI/file cases, and 50 additional lifecycle
+and sender-integration cases. The new cases import the complete unchanged
+`pull_command.mjs`, `remote_pull.mjs` and `transaction_outcome.mjs` modules. They
+run actual capture -> draft -> prepare -> submit -> recover calls over HTTP,
+with both Git hash domains, full-u64 counters, permitted/refused terminals,
+exact wire fields, candidate review/withdrawal and both reviewed merge methods,
+fast-forward consent, lost replies and rotated-credential recovery. CLI draft
+outputs are also passed to the actual command preparer. Opaque candidate test
+bytes do not claim Git-bundle validity. All server replies remain explicit
+native-schema fixtures, not an executed Rust engine or authorization oracle.
+The three executed existing module blobs are respectively `d571b772`,
+`fe20ef08` and `9d497c67`; they are not replaced or modified by this change.
+
+The draft choice file permits up to 512 KiB of JSON so a valid 64 KiB native
+body remains editable even when JSON escaping expands each byte sixfold. The
+drafter still checks the 64 KiB UTF-8 body and 256-byte title limits independently.
+Six CLI cases cover exact ASCII, multibyte and escaped-body limits, overflow and
+an oversized envelope; valid cases also pass through the real sender. Before
+removing the inherited 16 KiB choice-file cap, all three valid-body cases failed.

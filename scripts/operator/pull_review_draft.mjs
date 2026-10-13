@@ -3,6 +3,7 @@
 import { validateReviewCapture, reviewFields, reviewPrincipal, reviewText, reviewU64,
   reviewOid, failReview } from './pull_review_snapshot.mjs';
 const U64 = 18446744073709551615n;
+const LIFECYCLE = ['update', 'close', 'reopen', 'fast-forward'];
 function writableVersion(value, minimum = 0n) {
   reviewU64(value, minimum); if (BigInt(value) === U64) failReview('review_version_exhausted'); return value;
 }
@@ -13,6 +14,7 @@ function selectedCandidate(value, format) {
 }
 export function draftPullReview(input, choice) {
   const capture = validateReviewCapture(input), action = choice?.action;
+  if (LIFECYCLE.includes(action)) return draftLifecycle(capture, choice);
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) failReview('explicit_review_action_required');
   const merge = action === 'merge', withdraw = action === 'withdraw';
   reviewFields(choice, ['action', 'principal_id', ...(withdraw ? [] : ['merge_base', 'candidate_commit']),
@@ -57,4 +59,32 @@ export function draftPullReview(input, choice) {
   return { endpoint: selection.endpoint, scope: { tenant_id: selection.scope.tenant_id,
     repository_id: selection.scope.repository_id, repository_incarnation: selection.scope.repository_incarnation,
     principal_id: principal, object_format: selection.scope.object_format }, number: selection.number, action, fields };
+}
+
+// Complete metadata is required even for native close/reopen commands. Copy it
+// from one validated snapshot; never refresh tips or silently replace text.
+function draftLifecycle(capture, choice) {
+  const { action } = choice, update = action === 'update', ff = action === 'fast-forward';
+  reviewFields(choice, ['action', 'principal_id', ...(update ? ['title', 'body'] : [])], ['action', 'principal_id']);
+  const principal = reviewPrincipal(choice.principal_id), { selection, pull } = capture;
+  if (!pull.found) failReview('review_pull_missing');
+  const row = pull.pull_request;
+  if (row.data === null || row.state !== (action === 'reopen' ? 'closed' : 'open')) failReview('pull_draft_state_conflict');
+  if (update && !['title', 'body'].some(key => Object.hasOwn(choice, key))) failReview('pull_draft_edit_required');
+  const fields = { [ff ? 'pull_request_version' : 'expected_version']: writableVersion(row.version, 1n) };
+  for (const side of ['source', 'target']) {
+    if (row.data[`${side}_ref`] === null) failReview('byte_only_review_form_unsupported');
+    fields[`${side}_ref`] = row.data[`${side}_ref`];
+  }
+  for (const side of ['source', 'target']) fields[`${side}_tip`] = nativeInput(row.data[`${side}_tip`], selection.scope.object_format);
+  if (ff) {
+    // This is only the intended fast-forward command. The native engine checks
+    // actual ancestry, current refs, permissions and protection during admission.
+    if (fields.source_tip === fields.target_tip) failReview('pull_draft_already_up_to_date');
+  } else {
+    fields.title = update && Object.hasOwn(choice, 'title') ? reviewText(choice.title, 256, true) : row.data.title;
+    fields.body = update && Object.hasOwn(choice, 'body') ? reviewText(choice.body, 65536) : row.data.body;
+  }
+  return { endpoint: selection.endpoint, scope: { ...selection.scope, principal_id: principal },
+    number: selection.number, action, fields };
 }
