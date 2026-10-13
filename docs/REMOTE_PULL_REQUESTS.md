@@ -92,3 +92,118 @@ modules and use real HTTP/TLS sockets with explicit native-schema peers. OpenSSL
 is used only by the test to generate ephemeral certificates. These tests are not
 a live Rust-node, native authorization/ancestry, full-workspace or deployment
 pass. The shared outcome module remains unchanged at blob `9d497c67e0b2f49895efd4259d7a28c5129f7541`.
+
+## Durable command-line workflow
+
+The CLI uses private files rather than token arguments, environment credentials,
+or access to the node's storage root. Node 22.16.0 and POSIX filesystem semantics
+are the exercised profile. Create an owner-private directory outside a Git
+worktree, provision a 64-character lowercase hexadecimal bearer token in a mode
+0600 file, and write an input JSON file in that directory. An optional final
+newline is accepted in the token file. Do not put a real token in shell history.
+
+For example, this input opens PR 37. Replace the illustrative IDs and OIDs with
+independently obtained repository/principal identity and current native tips:
+
+```json
+{
+  "endpoint": "https://forge.example/repo.git",
+  "scope": {
+    "tenant_id": "11111111111111111111111111111111",
+    "repository_id": "22222222222222222222222222222222",
+    "repository_incarnation": "33333333333333333333333333333333",
+    "principal_id": "44444444444444444444444444444444",
+    "object_format": "sha1"
+  },
+  "number": "37",
+  "action": "open",
+  "fields": {
+    "expected_version": "0",
+    "source_ref": "refs/heads/topic",
+    "target_ref": "refs/heads/main",
+    "source_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "target_tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "title": "Review the topic branch",
+    "body": "Explicit PR description."
+  }
+}
+```
+
+```sh
+node scripts/remote_pull.mjs prepare --input /private/pr-input.json \
+  --token-file /private/token --request-dir /private/pr-37
+node scripts/remote_pull.mjs inspect --request-dir /private/pr-37
+node scripts/remote_pull.mjs send --request-dir /private/pr-37 \
+  --token-file /private/token --confirm-key EXACT_KEY_FROM_PREPARE \
+  --record /private/pr-37-first-result.json
+```
+
+The existing native PR API/browser supplies current metadata and discussion
+versions. `inspect` above inspects the saved local intent, not live state. It
+prints private command data; do not route its output into public logs. `prepare`
+prints only identifying receipt fields, not the token or PR body. All JSON output
+escapes control/bidirectional formatting characters; repository text stays data.
+
+A fast-forward input uses `action:"fast-forward"` and only
+`pull_request_version`, `source_ref`, `target_ref`, `source_tip`, `target_tip`
+inside `fields`. Its send command additionally requires `--fast-forward-only`.
+That switch is refused for other actions. The server can refuse a protected or
+non-fast-forward merge; there is no fallback or second strategy submission.
+
+Recover an interrupted command using the **same request directory**:
+
+```sh
+node scripts/remote_pull.mjs recover --request-dir /private/pr-37 \
+  --token-file /private/original-or-rotated-token \
+  --record /private/pr-37-recovered.json \
+  --known /private/pr-37-first-result.json
+```
+
+Omit `--known` when interruption produced no complete prior record. Recovery
+never sends a mutation. `--known` binds a retained observation to this exact
+request and refuses changed transactions, seals, terminal decisions or scope.
+Both network commands require a **new** `--record` destination. Existing files
+are never overwritten. `--ca-file PRIVATE_PEM` provides an explicit CA, and
+`--timeout-ms` bounds the combined preflight/publication/confirmation network
+operation. Bounded filesystem operations are outside that network deadline and
+cannot be preempted as a hard real-time filesystem guarantee.
+
+The entire canonical intent is saved and synced before sending; later commands
+revalidate and resync it before I/O. Files must be owner-private, regular and
+singly linked, with stable device/inode, size and nanosecond timestamp checks.
+Aliases, symlinks, special files, unsafe parents and worktree locations refuse.
+This is an operator-controlled-filesystem profile, not confinement against a
+hostile writer swapping parent directories or rolling retained files back.
+
+Preparation creates its slot once. Interrupted/partial intent files refuse and
+are retained for diagnosis, not erased or silently replaced. A killed process
+never justifies choosing another key. The native original-key endpoint remains
+the recovery source even when local result publication was interrupted.
+
+A result is written and synced under a new private staging name before a
+create-only hard link publishes the final name. The staging link is then removed
+and the directory synced. An interrupted publication may retain a `.pending`
+file or a temporarily multiply-linked final file; those are not silently fixed
+or accepted as stable records. Retain them and recover from the original request
+into a different new record. A result-name race leaves the existing file intact
+and emits the newly observed native evidence in the error diagnostic. Lost
+stdout after a completed result write leaves that result available on disk.
+These checks are not a universal hardware power-loss durability guarantee.
+
+Exit codes: **0** for local preparation/inspection or confirmed native commit,
+**1** for a native terminal refusal, **2** for local validation/file failure
+before network admission, **3** for incomplete/unknown network work or result
+output failure. No nonzero exit proves rollback. A valid publication whose
+confirmation fails is retained in its result record, and supplying that record
+on a later send suppresses resubmission while checking the original outcome.
+
+Run the combined client, filesystem and actual-process tests:
+
+```sh
+bash scripts/verify_remote_pulls.sh
+```
+
+The executed combined suite has 129 tests. It includes real processes killed
+with SIGTERM/SIGKILL, credential rotation, broken pipes, immutable-file races,
+unsafe file refusal, and both hash domains. HTTP replies are explicit native
+contract fixtures; no live `fg` or native admission/policy execution is claimed.
