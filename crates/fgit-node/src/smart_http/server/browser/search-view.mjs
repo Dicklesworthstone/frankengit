@@ -2,6 +2,7 @@
 import { CodeSearch } from './search.mjs';
 import { byteInput } from './search-data.mjs';
 import { sourceMode } from './search-current.mjs';
+import { mountContextControls, readContextQuery, renderSourceContext } from './search-context.mjs';
 import { decimal, fail, unhex } from './pulls-core.mjs';
 
 const indexedMode = mode => ['indexed-content', 'indexed-path'].includes(mode);
@@ -39,7 +40,7 @@ export function readQuery(document) {
   const mode = value('mode'), encoding = value('encoding');
   const raw = value('query'), prefixes = value('prefixes');
   if (mode === 'initial') return {
-    mode, termsHex: lines(raw, 32).map(line => byteInput(line, encoding, 128)),
+    ...readContextQuery(document), mode, termsHex: lines(raw, 32).map(line => byteInput(line, encoding, 128)),
     prefixesHex: prefixes === '' ? [] : lines(prefixes, 128).map(line => byteInput(line, value('prefix-encoding'), 4096)),
     symbol: value('initial-symbol-name') === '' ? null : {
       nameHex: byteInput(value('initial-symbol-name'), encoding, 128), match: value('symbol-match'),
@@ -89,19 +90,22 @@ export function mount(document, location, options = {}) {
   const get = id => document.getElementById(id);
   const element = (tag, text = '') => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (label, action) => { const el = element('button', label); el.type = 'button'; el.addEventListener('click', action); return el; };
+  const contextControls = mountContextControls(document, get('initial-controls'), () => invalidate());
+  let contextView = null;
   let work = 0, resultVersion = 0, busy = false, result = null, verified = null, downloadUrl = null, resultButtons = new Set();
   const status = message => { get('status').textContent = message; };
   function clearFile() {
     verified = null; get('file').replaceChildren();
     if (downloadUrl !== null) { urlApi.revokeObjectURL(downloadUrl); downloadUrl = null; }
   }
-  function clearResults() { resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
+  function clearResults() { contextView?.dispose(); contextView = null; resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
   function sync() {
     get('submit-search').disabled = !client.connected || busy;
     get('refresh').disabled = !client.connected || busy;
     get('cancel').disabled = !busy;
     for (const b of resultButtons) b.disabled = !client.connected || busy;
     const mode = get('mode').value, regex = mode === 'regex', indexed = indexedMode(mode), symbols = mode === 'symbols', combined = mode === 'initial';
+    contextControls.sync(combined);
     const symbolEnabled = symbols || (combined && get('initial-symbol-name').value !== '');
     get('case').disabled = indexed || symbols || combined; get('max-bytes').disabled = indexed || combined;
     get('index-work').disabled = !(indexed || symbols || combined);
@@ -136,7 +140,7 @@ export function mount(document, location, options = {}) {
     if (state.indexMinimum) get('snapshot').textContent += `\nRetained index checkpoint ${state.indexMinimum.number}: ${state.indexMinimum.token}`;
   }
   function disconnect(message = 'Disconnected. Token, queries, results and source bytes discarded.') {
-    work++; busy = false; client.disconnect(); clearResults();
+    work++; busy = false; client.disconnect(); clearResults(); contextControls.reset();
     get('token').value = ''; get('query').value = ''; get('prefixes').value = ''; get('initial-symbol-name').value = ''; showPin(); sync(); status(message);
   }
   function invalidate() {
@@ -231,6 +235,11 @@ export function mount(document, location, options = {}) {
     for (const [index, group] of value.groups.entries()) region.append(renderGroup(group, index, version));
   }
   function renderInitial(value, region, version) {
+    if (value.context) {
+      contextView = renderSourceContext(document, value, { display, urlApi,
+        current: () => client.connected && !busy && version === resultVersion && result === value });
+      region.append(contextView.element); resultButtons.add(contextView.download);
+    }
     region.append(element('h2', `${value.totalHits} results across combined channels`),
       element('p', 'One native request selected one source snapshot and an exact generation vector. Channels remain separate; duplicate files across channels are not deduplicated or ranked.'),
       element('pre', `Lexical generation ${value.vector.lexical.number}: ${value.vector.lexical.token}\nSymbol generation ${value.vector.symbols ? `${value.vector.symbols.number}: ${value.vector.symbols.token}` : 'not contributed'}`),
@@ -363,7 +372,9 @@ export function mount(document, location, options = {}) {
       const value = await client.search(readQuery(document));
       if (id !== work) return;
       busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable channels, match truncation and omitted files are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (!value.coverageComplete ? `Declaration source coverage is incomplete: ${value.omissions.length} Rust files omitted.${value.complete ? ' Matching declarations from indexed files are complete.' : ' Matching declarations are also truncated.'}` : value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? indexedStatus(value) : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
+      status(value.context ? (value.context.complete
+        ? 'Source context retrieved at one pinned snapshot. Partial excerpts are server-reported bytes, not independently verified blobs.'
+        : 'Source context is incomplete. Hydration omissions and retrieval coverage are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable channels, match truncation and omitted files are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (!value.coverageComplete ? `Declaration source coverage is incomplete: ${value.omissions.length} Rust files omitted.${value.complete ? ' Matching declarations from indexed files are complete.' : ' Matching declarations are also truncated.'}` : value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? indexedStatus(value) : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
     } catch (error) { errorAt(error, id); }
   }
   function renderFile(value) {
