@@ -54,6 +54,29 @@ function pathBytes(path, depth = ARCHIVE_LIMITS.maxDepth) {
   if (parts.length > depth) fail('Source tree depth budget exceeded.');
   return bytes;
 }
+// Exact byte paths, never glob/prefix authority. Sparse proofs retain every
+// entry in each needed parent tree but do not descend into unrelated subtrees.
+export const MAX_PATH_PROOF_FILES = 32;
+export function sourcePaths(paths, depth = ARCHIVE_LIMITS.maxDepth) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > MAX_PATH_PROOF_FILES) fail('Invalid sparse source path count.');
+  let bytes = 0;
+  const selected = paths.map(path => {
+    bytes += pathBytes(path, depth).length;
+    if (bytes > 32768) fail('Sparse source path byte budget exceeded.');
+    return path;
+  }).sort();
+  if (new Set(selected).size !== selected.length) fail('Duplicate sparse source path.');
+  return Object.freeze(selected);
+}
+function pathScope(paths, depth) {
+  const selected = sourcePaths(paths, depth), files = new Set(selected), directories = new Set([null]);
+  for (const path of selected) {
+    const bytes = Buffer.from(path, 'hex');
+    for (let at = 0; at < bytes.length; at++) if (bytes[at] === 47) directories.add(bytes.subarray(0, at).toString('hex'));
+  }
+  if (selected.some(path => directories.has(path))) fail('A sparse file cannot also be an ancestor directory.');
+  return { selected, files, directories };
+}
 function nameBytes(name) {
   const bytes = pathBytes(name);
   if (bytes.includes(47)) fail('Tree entry is not an immediate name.');
@@ -118,9 +141,20 @@ function add(value, amount, maximum, label) { if (amount > maximum - value) fail
 // Validation is also used by the archive writer so mutated/reconstructed public
 // captures cannot become a complete export without repeating the original proof.
 export function validateCapture(capture, options = {}) {
-  const limits = archiveLimits(options);
-  fields(capture, ['schema', 'selection', 'snapshot_token', 'source_head', 'source_rcr', 'commit', 'trees', 'files']);
-  if (capture.schema !== 'frankengit-source-capture-v1') fail('Unsupported source capture.');
+  return validateCaptured(capture, archiveLimits(options), null);
+}
+// The root and selected paths are independent inputs, not values trusted from
+// the proof itself. A sparse capture can never pass the complete archive gate.
+export function validatePathCapture(capture, selected, paths, options = {}) {
+  const limits = archiveLimits(options), expected = archiveSelection(selected), wanted = pathScope(paths, limits.maxDepth);
+  if (JSON.stringify(archiveSelection(capture?.selection)) !== JSON.stringify(expected) ||
+      JSON.stringify(capture.paths_hex) !== JSON.stringify(wanted.selected)) fail('Sparse proof changed its independent selection.');
+  return validateCaptured(capture, limits, wanted);
+}
+function validateCaptured(capture, limits, wanted) {
+  fields(capture, ['schema', 'selection', 'snapshot_token', 'source_head', 'source_rcr', 'commit', 'trees', 'files',
+    ...(wanted ? ['paths_hex'] : [])]);
+  if (capture.schema !== (wanted ? 'frankengit-source-path-capture-v1' : 'frankengit-source-capture-v1')) fail('Unsupported source capture.');
   const selection = archiveSelection(capture.selection), algorithm = selection.object_format;
   snapshot(capture.snapshot_token); opaque(capture.source_head); opaque(capture.source_rcr);
   if (selection.expected_head !== null && selection.expected_head !== capture.snapshot_token) fail('Capture changed its supplied snapshot pin.');
@@ -148,16 +182,18 @@ export function validateCapture(capture, options = {}) {
   }
   const queue = [{ path_hex: null, object_id: tree }], entries = [], visited = new Set(), used = new Set();
   for (let index = 0; index < queue.length; index++) {
-    const wanted = queue[index], found = trees.get(wanted.path_hex);
-    if (!found || found.id !== wanted.object_id || visited.has(wanted.path_hex)) fail('Missing or changed directory membership.');
-    visited.add(wanted.path_hex);
+    const directory = queue[index], found = trees.get(directory.path_hex);
+    if (!found || found.id !== directory.object_id || visited.has(directory.path_hex)) fail('Missing or changed directory membership.');
+    visited.add(directory.path_hex);
     for (const row of found.entries) {
-      const path = wanted.path_hex === null ? row.name_hex : `${wanted.path_hex}2f${row.name_hex}`;
+      const path = directory.path_hex === null ? row.name_hex : `${directory.path_hex}2f${row.name_hex}`;
       pathBytes(path, limits.maxDepth);
       if (entries.length >= limits.maxEntries) fail('Source entry budget exceeded.');
       entries.push({ path_hex: path, object_id: row.object_id, kind: row.kind });
-      if (row.kind === 'directory') { queue.push({ path_hex: path, object_id: row.object_id }); if (queue.length > limits.maxTrees) fail('Directory budget exceeded.'); }
-      else if (row.kind !== 'gitlink') {
+      if (wanted?.files.has(path) && ['directory', 'gitlink'].includes(row.kind)) fail('Sparse selection requires a file body, not a directory or gitlink.');
+      if (row.kind === 'directory' && (!wanted || wanted.directories.has(path))) {
+        queue.push({ path_hex: path, object_id: row.object_id }); if (queue.length > limits.maxTrees) fail('Directory budget exceeded.');
+      } else if (row.kind !== 'directory' && row.kind !== 'gitlink' && (!wanted || wanted.files.has(path))) {
         const file = files.get(path);
         if (!file || file.object_id !== row.object_id || file.kind !== row.kind) fail('Missing or changed file membership.');
         used.add(path);
@@ -165,7 +201,8 @@ export function validateCapture(capture, options = {}) {
     }
   }
   if (visited.size !== trees.size || used.size !== files.size) fail('Unreachable extra source material.');
-  return { root_tree: tree, entries: entries.sort((a, b) => a.path_hex < b.path_hex ? -1 : 1),
+  if (wanted && (used.size !== wanted.files.size || visited.size !== wanted.directories.size)) fail('Missing selected source path.');
+  return { ...(wanted ? { complete_repository: false, verified_paths_hex: [...wanted.selected] } : {}), root_tree: tree, entries: entries.sort((a, b) => a.path_hex < b.path_hex ? -1 : 1),
     tree_bytes: treeBytes, blob_bytes: blobBytes, files: files.size, directories: trees.size,
     gitlinks: entries.filter(row => row.kind === 'gitlink').length };
 }
@@ -195,6 +232,14 @@ function reusableBlobs(capture, selection, check) {
 
 export async function captureSource(selected, token, options = {}) {
   fields(options, ['limits', 'signal', 'ca', 'reuse'], []);
+  return captureSelectedSource(selected, token, options, null);
+}
+export async function captureSourcePaths(selected, token, paths, options = {}) {
+  fields(options, ['limits', 'signal', 'ca'], []);
+  const wanted = pathScope(paths, archiveLimits(options.limits).maxDepth);
+  return captureSelectedSource(selected, token, options, wanted);
+}
+async function captureSelectedSource(selected, token, options, wanted) {
   const selection = archiveSelection(selected), limits = archiveLimits(options.limits), algorithm = selection.object_format;
   const reader = new SourceReader(selection.endpoint, token, limits, options);
   const blobs = reusableBlobs(options.reuse, selection, () => reader.check());
@@ -212,7 +257,8 @@ export async function captureSource(selected, token, options = {}) {
   const original = commitTree(commit, algorithm);
   if (commit.object_id !== selection.expected_commit || oid(row.tree, algorithm) !== original.tree || !Array.isArray(row.parents) ||
       JSON.stringify(row.parents.map(value => oid(value, algorithm))) !== JSON.stringify(original.parents)) fail('Commit summary differs from original bytes.');
-  const capture = { schema: 'frankengit-source-capture-v1', selection, snapshot_token: log.snapshot_token,
+  const capture = { schema: wanted ? 'frankengit-source-path-capture-v1' : 'frankengit-source-capture-v1',
+    ...(wanted ? { paths_hex: [...wanted.selected] } : {}), selection, snapshot_token: log.snapshot_token,
     source_head: log.source_head, source_rcr: null, commit, trees: [], files: [] };
   const expected = { ...base, expected_head: log.snapshot_token }, queue = [{ path_hex: null, object_id: original.tree }], files = [];
   let entryCount = 0, treeBytes = 0, blobBytes = 0;
@@ -248,12 +294,14 @@ export async function captureSource(selected, token, options = {}) {
     for (const row of entries) {
       const path = item.path_hex === null ? row.name_hex : `${item.path_hex}2f${row.name_hex}`; pathBytes(path, limits.maxDepth);
       const next = { path_hex: path, object_id: row.object_id, kind: row.kind };
-      if (row.kind === 'directory') {
+      if (wanted?.files.has(path) && ['directory', 'gitlink'].includes(row.kind)) fail('Sparse selection requires a file body, not a directory or gitlink.');
+      if (row.kind === 'directory' && (!wanted || wanted.directories.has(path))) {
         if (queue.length >= limits.maxTrees) fail('Directory budget exceeded.');
         queue.push({ path_hex: path, object_id: row.object_id });
-      } else if (row.kind !== 'gitlink') files.push(next);
+      } else if (row.kind !== 'directory' && row.kind !== 'gitlink' && (!wanted || wanted.files.has(path))) files.push(next);
     }
   }
+  if (wanted && (files.length !== wanted.files.size || queue.length !== wanted.directories.size)) fail('Missing selected source path.');
   for (const file of files) {
     reader.check();
     const cached = blobs.get(file.object_id);
@@ -288,6 +336,6 @@ export async function captureSource(selected, token, options = {}) {
     blobs.set(file.object_id, { bytes, prior: false });
     capture.files.push({ ...file, bytes });
   }
-  reader.check(); validateCapture(capture, limits); reader.check();
+  reader.check(); validateCaptured(capture, limits, wanted); reader.check();
   return { capture, metrics: { requests: reader.requests, wire_bytes: reader.wireBytes, tree_bytes: treeBytes, blob_bytes: blobBytes, ...reuse } };
 }
