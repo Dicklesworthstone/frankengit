@@ -7,9 +7,10 @@ import { webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
 import { pathBytes } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
 import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
-import { absolute, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
+import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
 import { canonical, sha256 } from './source_changes.mjs';
 import { parse } from './source_edit_wire.mjs';
+import { ownSelectedSourceInput, mergeSelectedSourcePackages } from './source_package_union.mjs';
 
 export const WORKSPACE_SCHEMA = 'frankengit-selected-source-workspace-v1';
 export const WORKSPACE_LIMITS = Object.freeze({ files: 32, fileBytes: 1048576,
@@ -97,10 +98,27 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
   // No caller-owned mutable bytes or expectation remain across the first await.
   const bytes = Buffer.from(inputBytes), expected = expectation(independentExpected);
   const loaded = await readSourcePackage(bytes, expected, webcrypto, time.check); time.check();
+  return publishWorkspace(root, bytes, expected, loaded, time);
+}
+// One root-last owner for both initial materialization and expansion. Overrides
+// are private owned snapshots from the predecessor, never caller-minted source.
+async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null) {
   const value = manifest(bytes, expected, loaded.verified), encoded = canonical(value);
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
-  const hash = sha256(encoded), answer = receipt(root, hash, value);
+  const hash = sha256(encoded), answer = { ...receipt(root, hash, value), ...(expansion ? {
+    type: 'source_workspace_expanded', expansion, original_workspace_changed: false,
+  } : {}) };
+  const bodies = new Map(loaded.package.blobs.map(b => [b.oid, b.bytesHex])), outputs = new Map();
+  let total = 0;
+  for (const f of value.files) {
+    const file = carried.has(f.path_hex) ? carried.get(f.path_hex)
+      : { bytes: Buffer.from(bodies.get(f.blob), 'hex'), executable: f.executable };
+    total += file?.bytes.length ?? 0;
+    if (total > WORKSPACE_LIMITS.totalBytes) fail('source_workspace_materialization_budget');
+    outputs.set(f.path_hex, file);
+  }
   await directory(dirname(root)); time.check();
+  await beforeRoot?.(); time.check();
   // mkdir is the exclusive ownership boundary. A competing creator cannot
   // replace an existing slot, and no interrupted slot is deleted or recycled.
   await mkdir(root, { mode: 0o700 });
@@ -115,18 +133,18 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
     }
     const ordered = [...dirs].sort((a, b) => a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1);
     for (const hex of ordered) { time.check(); await mkdir(localPath(root, hex), { mode: 0o700 }); await privateDirectory(localPath(root, hex)); }
-    const bodies = new Map(loaded.package.blobs.map(b => [b.oid, b.bytesHex]));
-    for (const f of value.files) { time.check(); await writeFileNew(localPath(root, f.path_hex), Buffer.from(bodies.get(f.blob), 'hex'), f.executable); }
+    for (const [path, f] of outputs) { time.check(); if (f) await writeFileNew(localPath(root, path), f.bytes, f.executable); }
     // Read every owned output before the last-written root marks completion.
     const snapshot = await readWorkspaceFiles(root, value.files.map(f => f.path_hex), { check: time.check, timeoutMs: time.remaining() });
-    for (const f of value.files) {
-      const actual = snapshot.files.get(f.path_hex);
-      if (!actual || actual.executable !== f.executable || actual.bytes.toString('hex') !== bodies.get(f.blob)) fail('source_workspace_readback');
+    for (const [path, wanted] of outputs) {
+      const actual = snapshot.files.get(path);
+      if (wanted === null ? actual !== null : !actual || actual.executable !== wanted.executable ||
+          !actual.bytes.equals(wanted.bytes)) fail('source_workspace_readback');
     }
     if (!bytes.equals(await readPrivate(join(root, 'source.json'), SOURCE_PACKAGE_BYTES)) ||
         !canonical(expected).equals(await readPrivate(join(root, 'expected.json'), WORKSPACE_LIMITS.expectedBytes))) fail('source_workspace_readback');
     for (const hex of ordered.reverse()) { time.check(); await syncRaw(localPath(root, hex)); }
-    await snapshot.recheck(); time.check();
+    await snapshot.recheck(); await beforeRoot?.(); time.check();
     // Once root publication begins, drain sync/readback; a late stop does not
     // imply absence. The returned pin always names these exact completed bytes.
     await writeNew(join(root, 'manifest.json'), encoded);
@@ -134,6 +152,39 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
     await syncDirectory(root); await syncDirectory(dirname(root));
     return { ...answer, stop_requested: time.signal?.aborted ?? false };
   } catch (error) { error.publication_unconfirmed = answer; throw error; }
+}
+// Admit additional independently selected source WITHOUT resetting local edits,
+// changing the immutable commit, scanning unselected paths or modifying the old
+// workspace. The create-only result is an ordinary v1 workspace, not a rebase.
+export async function expandSourceWorkspace(root, workspaceHash, additionalBytes, additionalExpected, output, options = {}) {
+  const time = lifetime(options); absolute(root); absolute(output); pin(workspaceHash);
+  if (contains(root, output) || contains(output, root)) fail('source_workspace_overlapping_output');
+  const additional = ownSelectedSourceInput(additionalBytes, additionalExpected);
+  // Check host path limits too before any input I/O; the source package itself
+  // supports byte components larger than a POSIX materialization can create.
+  selectedPaths(additional.expected.files.map(f => f.pathHex));
+  await directory(dirname(output));
+  try { await lstat(output); fail('source_workspace_output_exists'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const baseline = await loadSourceWorkspace(root, workspaceHash, { check: time.check, timeoutMs: time.remaining() });
+  const merged = await mergeSelectedSourcePackages(baseline.packageBytes, baseline.expected,
+    additional.bytes, additional.expected, { check: time.check, signal: time.signal, timeoutMs: time.remaining() });
+  const oldPaths = new Set(baseline.expected.files.map(f => f.pathHex));
+  const added = merged.expected.files.filter(f => !oldPaths.has(f.pathHex)).map(f => f.pathHex);
+  if (!added.length) fail('source_workspace_no_expansion');
+  selectedPaths(merged.expected.files.map(f => f.pathHex));
+  // A newly selected path already present locally may be untracked user work.
+  // Refuse instead of silently replacing it with the fetched baseline version.
+  const snapshot = await readWorkspaceFiles(root, merged.expected.files.map(f => f.pathHex),
+    { check: time.check, timeoutMs: time.remaining() });
+  if (added.some(p => snapshot.files.get(p) !== null)) fail('source_workspace_expansion_occupied');
+  const carried = new Map([...snapshot.files].filter(([p]) => oldPaths.has(p)));
+  const loaded = await readSourcePackage(merged.packageBytes, merged.expected, webcrypto, time.check);
+  await snapshot.recheck(); time.check();
+  const expansion = { ...merged.provenance, original_workspace_sha256: workspaceHash,
+    added_paths_hex: added, preserved_selected_paths: carried.size,
+    preserved_deletions: [...carried.values()].filter(f => f === null).length,
+    unselected_local_files_copied: false, atomic_filesystem_snapshot: false };
+  return publishWorkspace(output, merged.packageBytes, merged.expected, loaded, time, carried, snapshot.recheck, expansion);
 }
 export async function loadSourceWorkspace(root, expectedHash, options = {}) {
   const time = lifetime(options); absolute(root); pin(expectedHash);
