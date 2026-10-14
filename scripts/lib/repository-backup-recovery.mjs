@@ -149,6 +149,11 @@ function privateDirectory(stat) {
 export async function recoverRepositoryBackup(raw) {
   let options = repositoryBackupRecoveryOptions(raw);
   const live = backupLifetime({ maximumBytes: options.maximumBytes, timeoutMs: options.timeoutMs, signal: options.signal });
+  // Selection drops losing acquisition plans, not the independent approvals
+  // that constrained it. Protect ALL supplied approval paths until native work
+  // and cache publication finish, without opening losing payload/control paths.
+  const retainedCandidates = options.candidates;
+  const protectedPaths = () => physicalPaths(retainedCandidates ? { ...options, candidates: retainedCandidates } : options, live);
   if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined || constants.O_DIRECTORY === undefined) fail('backup_unsupported_filesystem');
   let phase = 'validating', checkpoint = null, candidate = null, acquisition = null, native = null, complete = null;
   let reconstruction = null, checkpointSelection = null;
@@ -156,7 +161,7 @@ export async function recoverRepositoryBackup(raw) {
     operation: options.operation, resume_requested: options.resume, ...(options.repairCatalog ? { reconstruction } : {}),
     ...(checkpointSelection ? { checkpoint_selection: checkpointSelection } : {}) });
   try {
-    const initialPaths = await physicalPaths(options, live);
+    const initialPaths = await protectedPaths();
     return await withRepositoryBackupWitness(options.witness, options.trustKey, options.policy,
       { maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal }, async witness => {
         phase = 'authenticating';
@@ -166,7 +171,7 @@ export async function recoverRepositoryBackup(raw) {
             options.trustKey, options.policy, { maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal,
               async onProgress(event) {
                 await options.onProgress(Object.freeze({ stage: 'selection', ...event }));
-                const current = await physicalPaths(options, live);
+                const current = await protectedPaths();
                 for (const k of ['witness', 'cacheDirectory', 'destination', 'approvalRecord', 'fg']) {
                   if (current[k] !== initialPaths[k]) fail('backup_recovery_path_changed');
                 }
@@ -209,12 +214,12 @@ export async function recoverRepositoryBackup(raw) {
         const gate = () => { live.check(); inspected.checkCurrent(); witness.require(statement); };
         gate();
         if (BigInt(statement.artifact.bytes) > BigInt(live.maximumBytes)) fail('backup_selected_archive_limit');
-        const paths = await physicalPaths(options, live);
+        const paths = await protectedPaths();
         privateDirectory(await lstat(options.cacheDirectory, { bigint: true }));
         const directory = await open(paths.cacheDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
         let identity, problem;
         async function checkPaths() {
-          const current = await physicalPaths(options, live);
+          const current = await protectedPaths();
           if (current.witness !== witness.snapshot().directory || current.cacheDirectory !== paths.cacheDirectory) fail('backup_recovery_path_changed');
           // Native output must not be redirected between acquisition and submission.
           for (const k of ['destination', 'approvalRecord', 'fg']) if (current[k] !== paths[k]) fail('backup_recovery_path_changed');
