@@ -10,6 +10,7 @@ import { preparationCommand, preparationReply, inspectionReply, multipart, makeB
 import { CandidateError, candidateFail, candidateKeys, candidateEndpoint, candidateToken, candidateJson,
   candidateRequest, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 import { resolutionUpload, verifyResolutionResult, RESOLUTION_FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-resolution.mjs';
+import { candidateCommitMatches } from './pull_candidate_commit.mjs';
 export { CandidateError, candidateJson, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 export const CANDIDATE_CAPTURE_SCHEMA = 'frankengit-pull-candidate-capture-v1';
 export const RESOLVED_CAPTURE_SCHEMA = 'frankengit-pull-resolved-candidate-capture-v1';
@@ -191,6 +192,15 @@ export async function validateCandidateCapture(input, suppliedBundle = null) {
         'candidate_commit', 'parents', 'prerequisites', 'candidate_commit_body_hex', 'bundle', 'comparison']);
       await inspectionReply(capture.inspection, prepared.artifact, webcrypto);
       sameHead(capture.inspection, capture.pull, request);
+      if (!candidateCommitMatches({
+        bodyHex: capture.inspection.candidate_commit_body_hex,
+        format: observed.binding.format,
+        tree: oid(prepared.metadata.candidate.tree, observed.binding.format),
+        targetTip: prepared.artifact.fields.target_tip,
+        sourceTip: prepared.artifact.fields.source_tip,
+        method: request.method,
+        metadata: request.metadata,
+      })) candidateFail('candidate_commit_metadata_or_tree_changed');
       if (oid(capture.inspection.comparison.after_tree, observed.binding.format) !== oid(prepared.metadata.candidate.tree, observed.binding.format)) {
         candidateFail('candidate_tree_report_changed');
       }
