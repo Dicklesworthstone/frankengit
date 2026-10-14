@@ -44,6 +44,8 @@ function matches(draft, candidate, pin) {
     package_sha256: m.package_sha256, patch_sha256: m.patch_sha256,
     source_commit: m.source_commit, candidate_commit: candidate.candidate_commit,
     effect_count: m.effects.length, no_op_count: m.no_op_paths_hex.length,
+    ...(m.creation_preconditions ? { created_path_count: m.creation_preconditions.paths.length,
+      creation_absence_independently_verified: true } : {}),
     intended_effect_reports_matched: true, before_membership_independently_verified: true,
     native_bundle_validation_observed: true, candidate_tree_independently_verified: false,
     bundle_objects_independently_verified: false, publication_authorized: false };

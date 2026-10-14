@@ -4,6 +4,7 @@
 import { createHash, webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
 import { buildPatch, EDIT_LIMITS, pathBytes } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
+import { verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 
 export { SOURCE_PACKAGE_BYTES };
@@ -77,6 +78,9 @@ function changes(value, bound) {
       result.executable = row.executable;
     }
     switch (row.operation) {
+      case 'create':
+        fields(row, ['path_hex', 'operation', 'content_hex', 'content_utf8', 'executable'], ['path_hex', 'operation', 'executable']);
+        result.content_hex = encoded(row, 'content', charge); break;
       case 'replace':
         fields(row, ['path_hex', 'operation', 'content_hex', 'content_utf8', 'executable'], ['path_hex', 'operation']);
         result.content_hex = encoded(row, 'content', charge); break;
@@ -106,13 +110,17 @@ function changes(value, bound) {
     }
     return result;
   }).sort((a, b) => a.path_hex < b.path_hex ? -1 : 1);
+  // Never create a file at an ancestor of another edit, or infer that deleting
+  // an old file authorizes a directory replacement in the same edit set.
+  for (const row of owned) if (owned.some(other => other.path_hex !== row.path_hex &&
+      row.path_hex.startsWith(`${other.path_hex}2f`))) fail('source_changes_paths');
   return { schema: CHANGES_SCHEMA, changes: owned };
 }
 // Every splice addresses the ORIGINAL file, never an earlier splice's output.
 // Preflight all extents and projected sizes before allocating any after-image.
 function projected(row, before, bound, check) {
   if (row.operation === 'delete') return 0;
-  if (row.operation === 'replace') return row.content_hex.length / 2;
+  if (row.operation === 'replace' || row.operation === 'create') return row.content_hex.length / 2;
   let size = before.length;
   for (const part of row.splices ?? []) {
     check(); const removed = part.before_hex.length / 2;
@@ -125,7 +133,7 @@ function projected(row, before, bound, check) {
 }
 function afterImage(row, before, size, check) {
   if (row.operation === 'delete') return null;
-  if (row.operation === 'replace') return Buffer.from(row.content_hex, 'hex');
+  if (row.operation === 'replace' || row.operation === 'create') return Buffer.from(row.content_hex, 'hex');
   if (row.operation === 'mode') return Buffer.from(before);
   const result = Buffer.alloc(size); let old = 0, next = 0;
   for (const part of row.splices) {
@@ -149,11 +157,23 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   const source = Buffer.from(packageBytes), selected = expectation(expected), owned = changes(input, bound);
   const packageHash = sha256(source), expectedHash = sha256(canonical(selected)), changesHash = sha256(canonical(owned));
   const loaded = await readSourcePackage(source, selected, webcrypto, check); check();
+  const created = owned.changes.filter(row => row.operation === 'create').map(row => row.path_hex);
+  const creationPreconditions = created.length === 0 ? null : await verifyPathAbsence(
+    loaded.package.membership, selected, created, webcrypto, check);
+  check();
   const files = new Map(loaded.verified.files.map(file => [file.pathHex, file]));
   const bodies = new Map(loaded.package.blobs.map(blob => [blob.oid, blob.bytesHex]));
   let retained = 0;
   const plans = owned.changes.map(row => {
     check(); const file = files.get(row.path_hex);
+    if (row.operation === 'create') {
+      // All creation targets were proved absent together under the independent
+      // commit. Lack of a selected body alone never reaches this path.
+      const size = row.content_hex.length / 2;
+      retained += size;
+      if (retained > bound.totalBytes) fail('source_changes_retained_budget');
+      return { row, file: null, before: null, size };
+    }
     if (!file) fail('source_changes_unselected_path');
     if (file.sourceBytes > bound.fileBytes) fail('source_changes_file_budget');
     const before = Buffer.from(bodies.get(file.blob), 'hex');
@@ -171,20 +191,20 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
     return { row: execution, file, before, size };
   });
   const edits = plans.map(({ row, file, before, size }) => {
-    check(); const bytes = afterImage(row, before, size, check), oldMode = file.kind === 'executable' ? 0o100755 : 0o100644;
+    check(); const bytes = afterImage(row, before, size, check), oldMode = file?.kind === 'executable' ? 0o100755 : 0o100644;
     if (bytes?.includes(0)) fail('source_changes_binary_unsupported');
-    return { path_hex: row.path_hex, before: { mode: oldMode, bytes: new Uint8Array(before) },
+    return { path_hex: row.path_hex, before: before === null ? null : { mode: oldMode, bytes: new Uint8Array(before) },
       after: bytes === null ? null : { mode: row.executable === undefined ? oldMode : row.executable ? 0o100755 : 0o100644,
         bytes: new Uint8Array(bytes) } };
   });
-  const noops = edits.filter(e => e.after !== null && e.before.mode === e.after.mode &&
+  const noops = edits.filter(e => e.before !== null && e.after !== null && e.before.mode === e.after.mode &&
     Buffer.from(e.before.bytes).equals(Buffer.from(e.after.bytes))).map(e => e.path_hex);
   if (noops.length === edits.length) fail('source_changes_no_effect');
   // A checkpointing signal adapter keeps the encoder's existing synchronous
   // loops and every digest await under the caller's one remaining-time budget.
   const patch = await buildPatch(edits, selected.format, { crypto: webcrypto, signal: { throwIfAborted: check } }); check();
   if (patch.bytes.length > bound.patchBytes) fail('source_changes_patch_budget');
-  for (const effect of patch.paths) if (effect.old_blob !== files.get(effect.path_hex).blob) fail('source_changes_old_identity');
+  for (const effect of patch.paths) if (effect.old_blob !== (files.get(effect.path_hex)?.blob ?? null)) fail('source_changes_old_identity');
   const bytes = Buffer.from(patch.bytes);
   const manifest = { schema: 'frankengit-source-change-draft-v1', object_format: selected.format,
     source_commit: loaded.verified.commit, root_tree: loaded.verified.rootTree,
@@ -194,5 +214,8 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
     before_bytes_verified: true, after_images_locally_constructed: true,
     native_patch_applied: false, authority_verified: false, freshness_verified: false,
     publication_authorized: false, source_material_untrusted: true };
+  // Preserve byte-identical v1 drafts for existing-file operations. A creation
+  // draft additionally commits to its concrete, reproducible absence witnesses.
+  if (creationPreconditions !== null) manifest.creation_preconditions = creationPreconditions;
   check(); return { bytes, manifest };
 }

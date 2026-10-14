@@ -47,11 +47,15 @@ A private changes JSON file has this closed schema:
 ```
 
 `path_hex` is the exact original repository byte path, not a glob or local
-filesystem path. The example selects `src/main.rs`. Every changed path must be
-present in the independently verified package.
+filesystem path. The example selects `src/main.rs`. Existing-file operations must
+name a file present in the independently verified package. A `create` instead
+requires proof of absence under that same independent commit, as described below.
 
 Supported operations:
 
+- `create`: supply exactly one of `content_utf8` or `content_hex` and an explicit
+  `executable: true` or `false`. The target must be proved absent, not just absent
+  from the package's selected file list. An empty value creates an empty file.
 - `replace`: supply exactly one of `content_utf8` or `content_hex` for the entire
   after-image. An empty value is an empty file, not deletion.
 - `replace-once`: supply one `before_utf8` or `before_hex`, and one `after_utf8`
@@ -74,8 +78,56 @@ refused by this profile rather than silently converted or delegated elsewhere.
 
 Duplicate paths, file/ancestor conflicts, unsafe paths and inapplicable fields
 are refused. A mix of effective edits and no-ops records each no-op explicitly;
-an entirely unchanged request is refused. New paths and renames are not inferred:
-the current package proves membership, not the absence required by a create.
+an entirely unchanged request is refused. Creation is never inferred from a
+`replace`, and renames are never inferred from a delete/create pair.
+
+### Creating files without assuming sparse absence
+
+For example, to add `src/new.rs`:
+
+```json
+{
+  "schema": "frankengit-source-changes-v1",
+  "changes": [
+    {
+      "path_hex": "7372632f6e65772e7273",
+      "operation": "create",
+      "content_utf8": "pub fn new_feature() {}\n",
+      "executable": false
+    }
+  ]
+}
+```
+
+The existing source package retains complete parent trees, including unselected
+sibling entries. `verifyPathAbsence` reuses the membership verifier's bounded
+Git decoder, native hashes and commit-to-tree traversal; it does not introduce
+another parser or trust a saved success flag. It walks each explicit target
+through those verified entries. A missing entry proves the whole remaining path
+absent, allowing a new directory chain such as `new_module/sub/file.rs` when
+`new_module` is absent from the proved root tree.
+
+An existing file, executable, directory, symlink or gitlink at the target refuses.
+An existing non-directory ancestor refuses. An existing directory whose full
+contents are not in the proof also refuses: omission of a subtree or a blob is
+not absence. Acquire a new independently pinned package containing an existing
+anchor file in that directory before trying again; no implicit reads, widened
+selection, refresh or overwrite is performed. Empty repositories and existing
+empty directories without a selected anchor remain outside this package profile.
+
+The draft's optional `creation_preconditions` records the exact target, first
+absent prefix, parent path and parent tree ID for each creation. The reviewed
+draft hash covers these witnesses, the independent commit and after-image. Old
+and new paths share the same edit-count, path-byte, retained-byte, patch and time
+budgets; file/ancestor collisions across creations, updates and deletions refuse.
+This is absence at a named Git commit, not current repository authority, an access
+grant or permission to publish. Native preparation and admission still own those
+checks. A concurrent branch move does not make an old absence proof fresh.
+
+Existing-file-only drafts keep their original bytes and review hashes. Creation
+drafts report `created_path_count`; candidate inspection additionally reports
+`creation_absence_independently_verified`. Standard saved-candidate and original
+idempotency-key recovery formats are unchanged.
 
 ## Review an offline draft
 
@@ -91,7 +143,8 @@ This command makes no network request and requires no token. It creates
 `patch.diff` followed by `manifest.json`. Inspect both and independently retain
 the returned `manifest_sha256`. The manifest binds the original package hash,
 normalized expected selection and edit hashes, verified source commit/root tree,
-exact patch hash/size, old/new blob IDs and modes, and explicit no-op paths.
+exact patch hash/size, old/new blob IDs and modes, explicit no-op paths, and any
+commit-bound creation preconditions.
 Neither the manifest nor patch grants mutation authority.
 
 A reviewed draft is not silently changed to accommodate a moved branch, a new
@@ -186,7 +239,9 @@ This authoring CLI has no stage/apply endpoint and never automatically publishes
 The defaults are hard ceilings: 32 edit paths, 1 MiB per edited before/after file,
 4 MiB of retained before-plus-after bytes, 4,096 total splices, 1 MiB of generated
 patch input, and a 10 MiB changes JSON envelope. The existing package remains
-bounded to 32 MiB encoded and 8 MiB full logical source. An encoded patch may hit
+bounded to 32 MiB encoded and 8 MiB full logical source. Absence verification
+shares the membership profile: at most 128 complete trees, 16,384 entries, 4 MiB
+of tree bytes, 32 creation targets and 32 KiB of target path bytes. An encoded patch may hit
 its limit before either individual file does. The library accepts narrower edit
 limits; the CLI uses the fixed profile. `--timeout-ms` is 1–300,000 (30,000 default)
 across input reads, local verification, and any native preparation/inspection.

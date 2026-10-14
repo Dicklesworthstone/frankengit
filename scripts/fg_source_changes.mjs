@@ -29,8 +29,10 @@ Inspect-candidate regenerates and checks offline; it accepts no credential.
 The standard saved candidate is consumed by fg_source_edit.mjs stage/apply/recover,
 which separately requires principal/candidate consent and owns original-key recovery.
 This command never publishes repository state, invents a new base, retries,
-extracts files, runs source, calls Git, or creates new repository paths.
-NUL-bearing binary edits and absence proofs for new paths are not supported.
+extracts files, runs source, or calls Git. Explicit create operations require an
+executable choice and absence proved by the package's committed parent trees.
+Missing parent evidence refuses; there is no overwrite or implicit proof fetch.
+NUL-bearing binary edits are not supported.
 Exit 0: complete result; 2: refusal; 3: cancelled before local publication;
 4: a local output or result may exist; inspect its retained location and hashes.`;
 function options(args) {
@@ -74,7 +76,8 @@ async function saveDraft(path, draft, check) {
   const receipt = { type: 'source_change_draft_saved', directory: path, manifest_sha256: sha256(bytes),
     patch_sha256: draft.manifest.patch_sha256, source_commit: draft.manifest.source_commit,
     object_format: draft.manifest.object_format, effect_count: draft.manifest.effects.length,
-    no_op_count: draft.manifest.no_op_paths_hex.length, remote_mutation_attempted: false };
+    no_op_count: draft.manifest.no_op_paths_hex.length, remote_mutation_attempted: false,
+    ...(draft.manifest.creation_preconditions ? { created_path_count: draft.manifest.creation_preconditions.paths.length } : {}) };
   await absent(path); check(); await mkdir(path, { mode: 0o700 });
   try {
     // Once this output slot is owned, drain writes/sync/readback after a stop.

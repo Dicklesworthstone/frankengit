@@ -107,7 +107,7 @@ function host(crypto, check) { if (!crypto?.subtle || typeof check !== 'function
 
 // Offline verification: expected root and files must come from the caller, not
 // from the proof. Only needed complete parent trees are admitted. No network I/O.
-export async function verifyMembershipProof(proof, expected, crypto = globalThis.crypto, check = () => {}, input = {}) {
+async function verifiedMembership(proof, expected, crypto, check, input) {
   host(crypto, check); const limits = membershipLimits(input), selected = selection(expected, limits);
   exact(proof, ['schema', 'objectFormat', 'commit', 'trees', 'files']);
   if (proof.schema !== MEMBERSHIP_PROFILE || proof.objectFormat !== selected.format || !Array.isArray(proof.trees) ||
@@ -154,9 +154,60 @@ export async function verifyMembershipProof(proof, expected, crypto = globalThis
     }
   }
   if (visited.size !== trees.size || found.size !== selected.files.length || claimed.some(file => found.get(file.pathHex) !== file.kind)) refuse('incomplete selected membership.');
-  check(); return { profile: MEMBERSHIP_PROFILE, commit: selected.commit, rootTree: original.root,
+  check(); const receipt = { profile: MEMBERSHIP_PROFILE, commit: selected.commit, rootTree: original.root,
     commitMembershipVerified: true, blobBytesVerified: false, authorityVerified: false, freshnessVerified: false,
     searchCoverageVerified: false, signatureVerified: false, files: claimed, trees: trees.size, entries, treeBytes };
+  return { receipt, trees, format: selected.format };
+}
+export async function verifyMembershipProof(proof, expected, crypto = globalThis.crypto, check = () => {}, input = {}) {
+  return (await verifiedMembership(proof, expected, crypto, check, input)).receipt;
+}
+
+// A missing selected blob or omitted subtree says nothing about absence. Reuse
+// the same complete, hash-verified parent trees and only conclude absence at an
+// actually missing entry. An existing unproved directory is a typed refusal;
+// files, symlinks and gitlinks are never traversed. No new reads or permissions.
+export const ABSENCE_PROFILE = 'frankengit-context-path-absence-v1';
+export async function verifyPathAbsence(proof, expected, paths, crypto = globalThis.crypto, check = () => {}, input = {}) {
+  host(crypto, check);
+  if (!Array.isArray(paths) || !paths.length || paths.length > 32) refuse('select 1 through 32 absent paths.');
+  let previous = '', total = 0;
+  // Own target paths before any asynchronous work, just as the shared kernel
+  // owns its proof and independent expected selection before the first digest.
+  const selected = paths.map(pathHex => {
+    check(); const parts = path(pathHex);
+    if (pathHex <= previous || (total += pathHex.length / 2) > 32768) refuse('absent path order, duplicates or byte limit.');
+    previous = pathHex; return { pathHex, parts };
+  });
+  const targets = new Set(selected.map(row => row.pathHex));
+  for (const row of selected) for (let n = 1; n < row.parts.length; n++) {
+    check(); if (targets.has(row.parts.slice(0, n).join('2f'))) refuse('absent file/ancestor collision.');
+  }
+  const verified = await verifiedMembership(proof, expected, crypto, check, input); check();
+  const trees = new Map();
+  for (const [pathHex, tree] of verified.trees) {
+    const entries = new Map();
+    for (const entry of tree.rows) { check(); entries.set(entry.name_hex, entry); }
+    trees.set(pathHex, { id: tree.id, entries });
+  }
+  const absent = selected.map(({ pathHex, parts }) => {
+    let parentPathHex = null;
+    for (let at = 0; at < parts.length; at++) {
+      check(); const tree = trees.get(parentPathHex);
+      if (!tree) refuse('existing parent tree is not proved.');
+      const entry = tree.entries.get(parts[at]);
+      const prefix = parentPathHex === null ? parts[at] : `${parentPathHex}2f${parts[at]}`;
+      if (!entry) return { pathHex, absentPrefixHex: prefix, parentPathHex, parentTree: tree.id };
+      if (at === parts.length - 1) refuse('requested path already exists.');
+      if (entry.kind !== 'directory') refuse('existing ancestor is not a directory.');
+      parentPathHex = prefix;
+    }
+    return refuse('incomplete absence traversal.');
+  });
+  check(); return { profile: ABSENCE_PROFILE, objectFormat: verified.format,
+    commit: verified.receipt.commit, rootTree: verified.receipt.rootTree,
+    pathAbsenceVerified: true, paths: absent, authorityVerified: false,
+    freshnessVerified: false, publicationAuthorized: false };
 }
 
 // Obtain only the commit and needed parent-tree pages through the existing

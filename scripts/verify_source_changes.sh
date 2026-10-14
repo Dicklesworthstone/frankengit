@@ -8,4 +8,6 @@ git --version
 openssl version
 node --test scripts/tests/source_changes.test.mjs \
   scripts/tests/source_changes_prepare.test.mjs \
-  scripts/tests/source_changes_cli.test.mjs
+  scripts/tests/source_changes_cli.test.mjs \
+  scripts/tests/source_creation.test.mjs \
+  scripts/tests/source_creation_pipeline.test.mjs
