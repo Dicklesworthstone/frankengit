@@ -68,7 +68,7 @@ export async function nativePeer(format = 'sha1', options = {}) {
     const body = Buffer.from(`tree ${tree}\nparent ${fixture.commit}\nauthor ${m.author} ${m.timestamp} +0000\ncommitter ${m.committer} ${m.timestamp} +0000\n\n${m.message}`);
     const commit = git(['hash-object', '-w', '-t', 'commit', '--stdin'], body).toString().trim();
     git(['update-ref', 'refs/heads/candidate', commit]);
-    const bundle = git(['bundle', 'create', '-', '--all']);
+    let bundle = git(['bundle', 'create', '-', '--all']);
     const before = treeEntries(fixture.tree), after = treeEntries(tree), entries = [];
     for (const path_hex of [...new Set([...before.keys(), ...after.keys()])].sort()) {
       if (peer.fault === 'unreported-addition' && path_hex === hidden) continue;
@@ -82,11 +82,38 @@ export async function nativePeer(format = 'sha1', options = {}) {
       entries[0].kind = entries[0].after === null ? 'deleted' : entries[0].before.mode === entries[0].after.mode ? 'modified' : 'mode_changed';
     }
     if (peer.fault === 'wrong-old-blob') entries[0].before.oid = 'e'.repeat(format === 'sha1' ? 40 : 64);
+    // Optional fixture matching patch.rs::pack, rather than the older full
+    // history fixture. Derive the inventory from Git's actual changed entries
+    // and tree walk, never from the production JS expected-inventory function.
+    let packedCount = git(['rev-list', '--objects', '--all']).toString().trim().split('\n').length;
+    if (options.nativePatchBundle) {
+      const dirty = new Set(['']), ids = new Set([commit]);
+      for (const entry of entries) {
+        if (entry.after) ids.add(entry.after.oid);
+        const path = Buffer.from(entry.path_hex, 'hex');
+        for (let at = 0; at < path.length; at++) if (path[at] === 47) dirty.add(path.subarray(0, at).toString('hex'));
+      }
+      ids.add(tree);
+      const raw = git(['ls-tree', '-r', '-t', '-z', tree]); let at = 0;
+      while (at < raw.length) {
+        const nul = raw.indexOf(0, at), tab = raw.indexOf(9, at);
+        const [, kind, id] = raw.subarray(at, tab).toString('ascii').split(' ');
+        if (kind === 'tree' && dirty.has(raw.subarray(tab + 1, nul).toString('hex'))) ids.add(id);
+        at = nul + 1;
+      }
+      peer.packedIds = [...ids].sort(); packedCount = ids.size;
+      peer.packHeader = Buffer.from(`${format === 'sha1' ? '# v2 git bundle\n' : '# v3 git bundle\n@object-format=sha256\n'}-${fixture.commit} patch base\n${commit} ${ref}\n\n`);
+      peer.packObjects = selected => git(['pack-objects', '--stdout', '--window=0', '--no-reuse-delta', '--no-reuse-object'], selected.join('\n') + '\n');
+      peer.objectBody = id => git(['cat-file', '-p', id]);
+      peer.objectKind = id => git(['cat-file', '-t', id]).toString().trim();
+      bundle = Buffer.concat([peer.packHeader, peer.packObjects(peer.packedIds)]);
+      if (peer.transformPack) bundle = peer.transformPack(bundle);
+    }
     const paths = entries.map(e => ({ path_hex: e.path_hex, old_blob: e.before?.oid ?? null,
       new_blob: e.after?.oid ?? null, new_mode: e.after?.mode ?? null, hunks: e.before?.oid === e.after?.oid ? 0 : 1 }));
     const preparation = { type: 'source_preparation', schema_version: 1, ...scope, ref, ref_hex,
       source_commit: fixture.commit, source_rcr: 'rcr-before', candidate_commit: commit, root_tree: tree,
-      patch_sha256: sha256(patch), object_count: git(['rev-list', '--objects', '--all']).toString().trim().split('\n').length,
+      patch_sha256: sha256(patch), object_count: packedCount,
       ...effects, bundle: { bytes: bundle.length, sha256: sha256(bundle) }, paths };
     const inspection = { type: 'source_inspection', schema_version: 1, ...scope, ref, ref_hex, source_head: 'head-before', snapshot_token: 'alg:1:1234',
       expected_commit: fixture.commit, candidate_commit: commit, parents: [fixture.commit], bundle_bytes: bundle.length,
