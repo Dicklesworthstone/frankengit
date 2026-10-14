@@ -3,12 +3,14 @@
 import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
-import { createSourceWorkspace, inspectSourceWorkspace, lifetime, pin, fail,
+import { createSourceWorkspace, expandSourceWorkspace, inspectSourceWorkspace, lifetime, pin, fail,
   SOURCE_PACKAGE_BYTES, WORKSPACE_LIMITS } from './operator/source_workspace.mjs';
 import { captureWorkspaceChanges, inspectWorkspaceChangeCapture } from './operator/source_workspace_changes.mjs';
 import { parse } from './operator/source_edit_wire.mjs';
 const USAGE = `node scripts/fg_source_workspace.mjs create --package PRIVATE_PACKAGE
   --expect PRIVATE_INDEPENDENT_EXPECTATION --output ABSENT_DIRECTORY
+node scripts/fg_source_workspace.mjs expand --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
+  --package PRIVATE_ADDITIONAL_PACKAGE --expect PRIVATE_ADDITIONAL_EXPECTATION --output ABSENT_DIRECTORY
 node scripts/fg_source_workspace.mjs status --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
 node scripts/fg_source_workspace.mjs capture --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
   --paths PRIVATE_PATH_SELECTION --output ABSENT_CAPTURE_DIRECTORY
@@ -19,7 +21,11 @@ parents must be real owner-private POSIX directories. Source/expected inputs are
 bounded owner-private regular files; the independent expectation is never chosen
 from the package. Create re-verifies every selected commit/tree/blob, saves the
 immutable inputs and materializes only those paths below files/. Keep the returned
-workspace_sha256 independently. Edit files/ with your own trusted tools; no tool
+workspace_sha256 independently. Expand verifies additional source at the SAME commit,
+preserves originally selected edits/deletions/modes and creates a new workspace.
+It never changes the original or copies unselected local files. Occupied newly
+selected paths refuse. Keep the NEW workspace hash; this is not a branch refresh.
+Edit files/ with your own trusted tools; no tool
 is run here. Status checks the original inputs and reads only originally selected
 paths. It does not discover other local files or attest an atomic filesystem view.
 Capture requires {paths_hex:[...]} with every intended local path. Include
@@ -41,6 +47,7 @@ function options(args) {
   if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 13 ||
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_workspace_arguments');
   const op = args[0], required = op === 'create' ? ['--package', '--expect', '--output']
+    : op === 'expand' ? ['--workspace', '--sha256', '--package', '--expect', '--output']
     : op === 'status' ? ['--workspace', '--sha256']
     : op === 'capture' ? ['--workspace', '--sha256', '--paths', '--output']
     : op === 'inspect-capture' ? ['--capture', '--sha256'] : null;
@@ -81,10 +88,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
   try {
     if (args.length === 1 && args[0] === '--help') { await emit(stdout, { usage: USAGE }); return 0; }
     const { op, f, timeout } = options(args), time = lifetime({ timeoutMs: timeout, signal: controller.signal });
-    if (op === 'create') {
+    if (op === 'create' || op === 'expand') {
       const expected = parse(await privateFile(f.get('--expect'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes);
       const bytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time);
-      result = await createSourceWorkspace(f.get('--output'), bytes, expected, { check: time.check, signal: controller.signal, timeoutMs: time.remaining() });
+      const local = { check: time.check, signal: controller.signal, timeoutMs: time.remaining() };
+      result = op === 'create' ? await createSourceWorkspace(f.get('--output'), bytes, expected, local)
+        : await expandSourceWorkspace(f.get('--workspace'), f.get('--sha256'), bytes, expected, f.get('--output'), local);
     } else if (op === 'capture') {
       const selection = parse(await privateFile(f.get('--paths'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes);
       result = await captureWorkspaceChanges(f.get('--workspace'), f.get('--sha256'), selection, f.get('--output'),

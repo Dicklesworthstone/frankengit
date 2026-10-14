@@ -6,6 +6,50 @@ never modifies the original. This supports discovering additional inputs while
 an editor or agent already has changes in progress; it is not branch refresh,
 rebase, a complete checkout, a process sandbox or native TreeFS execution.
 
+## Command-line workflow
+
+Obtain the additional selected-source package separately at the original pinned
+commit, using the existing source acquisition workflow. The additional expectation
+must name exactly the files being admitted; it may overlap already selected paths.
+Pause local editors before taking the copy, then run:
+
+```bash
+node scripts/fg_source_workspace.mjs expand \
+  --workspace /private/session/original \
+  --sha256 "$ORIGINAL_WORKSPACE_SHA256" \
+  --package /private/session/additional-source.json \
+  --expect /private/session/independent-additional-expectation.json \
+  --output /private/session/expanded
+```
+
+Retain the returned NEW `workspace_sha256`. Continue editing `expanded/files/`.
+The original workspace and old hash remain valid and are never overwritten. Both
+package inputs and all output parents obey the same private POSIX rules as create.
+The command accepts only these arguments plus `--timeout-ms`; it has no token,
+network, force, automatic discovery, merge or retry option.
+
+```bash
+node scripts/fg_source_workspace.mjs status \
+  --workspace /private/session/expanded --sha256 "$EXPANDED_WORKSPACE_SHA256"
+node scripts/fg_source_workspace.mjs capture \
+  --workspace /private/session/expanded --sha256 "$EXPANDED_WORKSPACE_SHA256" \
+  --paths /private/session/explicit-changed-paths.json \
+  --output /private/session/new-capture
+```
+
+Capture still requires explicit paths and explicit binary/compact profiles.
+Review the resulting draft and use its new hash with `prepare-packed`,
+`inspect-packed` and `stage-packed` from `PACK_VERIFIED_SOURCE_FLOW.md`. Those
+commands recheck the combined source, whole-tree effects and actual packed
+objects. They do not inherit prior review consent. Publication and original-key
+recovery remain separate existing commands, with the unchanged journal format.
+Additional expansions can use the newly created workspace and its new pin.
+
+Exit 0 reports a completed expanded workspace. Exit 2 is refusal; exit 3 is a
+cancellation without claimed output; exit 4 retains a completed or uncertain
+output identity. A lost result on stdout does not erase a successfully written
+workspace. The manifest pins immutable source, not subsequent editor activity.
+
 ## Library consumer
 
 ```js
@@ -86,6 +130,10 @@ local publication (1..300000 ms, default 30000). Current default creation bytes 
 manifest hashes remain unchanged.
 
 Run `bash scripts/verify_source_expansion.sh`. Tests use complete production
-modules and actual private POSIX files in both native hash domains. They do not
+modules, actual private POSIX files and CLI processes in both native hash domains.
+The integration tests run expansion through binary multi-hunk capture, packed
+preparation/inspection/staging, and original-key lost-response recovery after
+external files are removed. HTTP/TLS peers are native-schema fixtures with
+test-only Git-generated objects, not a running Rust fg server. These tests do not
 establish native Rust TreeFS, authority/admission/CAS, complete repository closure,
 physical power-loss durability, semantic compatibility or hostile-local isolation.
