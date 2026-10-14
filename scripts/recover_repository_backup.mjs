@@ -4,12 +4,15 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BACKUP_LIMITS, backupError } from './lib/repository-backup-io.mjs';
 import { MAX_REPAIR_REPLICAS } from './lib/repository-backup-chunks.mjs';
+import { MAX_BACKUP_APPROVALS } from './lib/repository-backup-checkpoints.mjs';
 import { backupDecimal } from './lib/repository-backup-approval.mjs';
 import { MAX_RECOVERY_ACQUISITION_BYTES, repositoryBackupRecoveryOptions, recoverRepositoryBackup } from './lib/repository-backup-recovery.mjs';
 
 export const RECOVERY_USAGE = `Usage: node scripts/recover_repository_backup.mjs verify|restore [OPTIONS]
   --cache-directory DIRECTORY      Existing owner-private acquired-byte cache
-  --approval FILE --trust-key FILE Original local approval and independent Ed25519 key
+  --approval FILE                 One original local approval (singleton mode)
+  --candidate APPROVAL_FILE        Repeat for 1..64 explicit checkpoint candidates
+  --trust-key FILE                 Independent Ed25519 public key for all approvals
   --witness DIRECTORY              Existing independently retained checkpoint witness
   --fg ABSOLUTE_PATH --trusted-local --verification-instance N
   --tenant-id HEX --repository-id HEX --incarnation-id HEX --object-format sha1|sha256
@@ -27,6 +30,17 @@ Restore additionally requires:
   --resume                        Resume the exact original native restore intent
   --checkpoint APPROVAL_SHA256 TRUSTED_KEY_ID
                                   Required with --resume; optional fresh equality pin
+
+Use --approval for one checkpoint, or --candidate to begin each candidate group.
+In grouped mode, following --sources, --ca-file, --repair-catalog and repeated
+--repair-replica options belong to that candidate until the next --candidate.
+All other options are global; singleton acquisition options cannot be mixed in.
+A candidate without acquisition flags is cache-only. Every approval authenticates
+before the highest unique signed checkpoint is selected; only that candidate's
+payload or URL file is read. Lower or alternate candidate plans are never tried
+on failure. Equal highest statements use caller order unless the exact original
+checkpoint pin selects its matching serialization. Pins never override a higher
+checkpoint. This selects the supplied/retained set, not an unknown global latest.
 
 Run native signed preflight after revalidating cached or downloaded bytes. Restore
 is explicit and never automatically retried. --resume requires the original
@@ -51,17 +65,30 @@ const POLICY = { '--tenant-id': 'tenant_id', '--repository-id': 'repository_id',
   '--object-format': 'object_format', '--minimum-head-generation': 'minimum_head_generation' };
 const fail = code => { throw backupError(code); };
 export function recoveryArguments(args) {
-  if (!Array.isArray(args) || !args.length || args.length > 240
+  if (!Array.isArray(args) || !args.length || args.length > 1024
     || args.some(v => typeof v !== 'string' || v.length > 8192 || v.includes('\0'))
     || args.reduce((size, v) => size + Buffer.byteLength(v), 0) > 384 * 1024) fail('backup_recovery_argument_limit');
-  const result = { operation: args[0], policy: {} }, seen = new Set(); let progress = false;
+  const result = { operation: args[0], policy: {} }, seen = new Set();
+  let progress = false, candidate = null, candidateSeen = new Set();
   const next = index => { if (!args[index] || args[index].startsWith('--')) fail('backup_missing_option_value'); return args[index]; };
   for (let at = 1; at < args.length; at++) {
     const flag = args[at];
+    if (flag === '--candidate') {
+      result.candidates ??= [];
+      if (result.candidates.length === MAX_BACKUP_APPROVALS) fail('backup_candidate_limit');
+      candidate = { approval: next(++at) }; result.candidates.push(candidate); candidateSeen = new Set();
+      continue;
+    }
+    const grouped = ['--sources', '--ca-file', '--repair-catalog', '--repair-replica'].includes(flag);
+    const target = grouped && candidate ? candidate : result;
     if (flag === '--repair-replica') {
-      result.repairReplicas ??= [];
-      if (result.repairReplicas.length === MAX_REPAIR_REPLICAS) fail('backup_chunk_replica_limit');
-      result.repairReplicas.push(next(++at)); continue;
+      target.repairReplicas ??= [];
+      if (target.repairReplicas.length === MAX_REPAIR_REPLICAS) fail('backup_chunk_replica_limit');
+      target.repairReplicas.push(next(++at)); continue;
+    }
+    if (grouped && candidate) {
+      if (candidateSeen.has(flag)) fail('backup_duplicate_option'); candidateSeen.add(flag);
+      candidate[FIELDS[flag]] = next(++at); continue;
     }
     if (seen.has(flag)) fail('backup_duplicate_option'); seen.add(flag);
     if (flag === '--trusted-local') { result.trustedLocal = true; continue; }
