@@ -21,13 +21,15 @@ class Element {
 }
 const controls = ['submit-search','refresh','cancel','mode','max-steps','regex-help','query-help','snapshot','token','query','prefixes',
   'reference','format','connection','search-form','disconnect','case','max-bytes','index-work','index-payload','index-help','max-matches',
-  'max-file-bytes','prefix-encoding','encoding','results','file','status'];
+  'max-file-bytes','prefix-encoding','encoding','results','file','status','symbol-controls','symbol-help','symbol-match','symbol-kind',
+  'initial-controls','initial-help','initial-symbol-name','initial-symbol-policy','initial-result-bytes','index-source-mode','index-source-help'];
 function document() {
   const doc = { downloads: [], getElementById(id) { return this.elements.get(id) ?? null; }, createElement(tag) { return new Element(tag, this); } };
   doc.elements = new Map(controls.map(id => [id, new Element('div', doc)])); doc.defaultView = new Element('window', doc);
   const values = { token, reference: 'refs/heads/main', format: 'sha1', mode: 'indexed-content', case: 'exact', encoding: 'utf8', query: 'BETA\nALPHA\nbeta\n',
     prefixes: '', 'prefix-encoding': 'utf8', 'max-matches': '1', 'max-file-bytes': '8388608', 'max-bytes': '67108864', 'max-steps': '67108864',
-    'index-work': '16777216', 'index-payload': '33554432' };
+    'index-work': '16777216', 'index-payload': '33554432', 'symbol-match': 'exact', 'symbol-kind': 'all',
+    'initial-symbol-name': '', 'initial-symbol-policy': 'optional', 'initial-result-bytes': '33554432', 'index-source-mode': 'exact' };
   for (const [id, value] of Object.entries(values)) doc.getElementById(id).value = value;
   return doc;
 }
@@ -163,5 +165,5 @@ test('HTML controls and source-gated import graph match the mounted module witho
     const source = await readFile(new URL(name, base), 'utf8');
     for (const m of source.matchAll(/from '\.\/(.*?)'/g)) await walk(m[1]);
   }
-  await walk('search-view.mjs'); assert.equal(visited.size, 5);
+  await walk('search-view.mjs'); assert.equal(visited.size, 6);
 });

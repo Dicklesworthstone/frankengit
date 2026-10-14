@@ -148,7 +148,7 @@ test('required or checkpointed symbol refusals clear results but keep exact sour
   assert.equal(h.calls.length, 2); assert.equal(h.calls[1].fields.get('minimum_symbol_number'), '4');
   assert.equal(h.calls[1].fields.get('symbol_policy'), 'required');
   assert.equal(h.d.get('snapshot').textContent, before); assert.equal(h.d.get('results').children.length, 0);
-  assert.match(h.d.get('status').textContent, /exact source snapshot/);
+  assert.match(h.d.get('status').textContent, /exact (?:symbol )?source snapshot/);
   assert.ok(!h.d.get('status').textContent.includes('complete'));
 });
 

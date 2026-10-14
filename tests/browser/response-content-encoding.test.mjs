@@ -13,7 +13,7 @@ const codings = [
   ['gzip', gzipSync],
   ['deflate', deflateSync],
   ['br', brotliCompressSync],
-  ['gzip, br', bytes => brotliCompressSync(gzipSync(bytes))],
+  ['gzip, br', bytes => gzipSync(brotliCompressSync(bytes))],
 ];
 async function fixture(t, handler) {
   const requests = [];

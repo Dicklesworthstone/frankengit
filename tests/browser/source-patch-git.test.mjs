@@ -14,6 +14,7 @@ const edit = (path, before, after, beforeMode = 0o100644, afterMode = 0o100644) 
 const environment = root => ({ PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' });
 for (const algorithm of ['sha1', 'sha256']) test(`installed Git applies exact browser changes in ${algorithm} repositories`, async t => {
   const root = mkdtempSync(join(tmpdir(), 'fg-browser-patch-'));
+  const priorUmask = process.umask(0o022);
   try {
     const git = (args, input) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.filemode=true', ...args], { cwd: root, env: environment(root), input, stdio: ['pipe', 'pipe', 'pipe'] });
     t.diagnostic(git(['--version']).toString().trim()); git(['init', '-q', `--object-format=${algorithm}`]);
@@ -41,5 +42,5 @@ for (const algorithm of ['sha1', 'sha256']) test(`installed Git applies exact br
       else { assert.deepEqual(new Uint8Array(readFileSync(file(e))), e.before.bytes); assert.equal(statSync(file(e)).mode & 0o777, e.before.mode & 0o777); }
     }
     assert.throws(() => git(['apply', '--index', '--reverse', '-'], patch.bytes), 'wrong-base application refuses');
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally { process.umask(priorUmask); rmSync(root, { recursive: true, force: true }); }
 });

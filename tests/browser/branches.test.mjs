@@ -194,9 +194,11 @@ test('branches transport is isolated from source content, initial commits, PRs a
   await transport.connect(token);
   for (const path of ['pulls', 'source/prepare', 'source/initial/apply', 'source/tree', 'issues', 'source/branches/force', 'source/refs?force=true', 'https://evil.invalid/source/refs']) await assert.rejects(transport.request(path));
   assert.equal(calls, 0);
-  for (const path of ['source/refs', 'source/branches/create', 'source/branches/rename', 'outcomes']) await transport.request(path, { method: 'POST' }); assert.equal(calls, 4);
+  await transport.request('source/refs', { method: 'POST' });
+  for (const path of ['source/branches/create', 'source/branches/rename']) await transport.request(path, { method: 'POST', body: '', key: 'k', read: false });
+  await transport.request('outcomes', { method: 'POST', key: 'k', read: false }); assert.equal(calls, 4);
   for (const suffix of ['/ui/pulls/', '/ui/source/', '/ui/initial/']) {
     const other = new Transport({ href: href.replace('/ui/branches/', suffix), pageSuffix: suffix, cryptoImpl: webcrypto, fetchImpl: async () => { throw new Error('unexpected network'); } });
-    await other.connect(token); await assert.rejects(other.request('source/branches/create'), /Invalid API route/);
+    await other.connect(token); await assert.rejects(other.request('source/branches/create', { method: 'POST', body: '', key: 'k', read: false }), /Invalid API route/);
   }
 });

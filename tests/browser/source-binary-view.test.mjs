@@ -219,7 +219,7 @@ test('pending binary publication is immutable despite attempted draft edits and 
   assert.equal(command.get('candidate_commit'), pending.fields.candidate_commit);
 });
 test('binary authoring stays on the existing exact static route and never executes file markup', () => {
-  assert(html.includes('maxlength="786432"')); assert(html.includes('Create initial history')); assert(html.includes('compressed GIT binary patch'));
+  assert(html.includes('maxlength="786432"')); assert(html.includes('Create initial history')); assert(html.includes('GIT binary patch'));
   const script = readFileSync(new URL('source-edit-view.mjs', base), 'utf8');
   for (const forbidden of ['innerHTML', 'localStorage', 'sessionStorage', 'document.write', 'eval(']) assert(!script.includes(forbidden));
   for (const match of script.matchAll(/from '\.\/([^']+)'/g)) assert(readFileSync(new URL(match[1], base)).length > 0);

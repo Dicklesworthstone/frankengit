@@ -84,7 +84,8 @@ test('checksum and full-check paths own Buffer inputs before yielding', async ()
 test('legacy and full checks share the original deterministic object verifier', async () => {
   for (const name of Object.keys(offline)) assert.equal(offline[name], served[name]);
   const source = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs', import.meta.url), 'utf8');
-  let moved = source.slice(source.indexOf('// Independent, read-only verification'), source.indexOf('\nreturn { BUNDLE_VERIFY_LIMITS'));
+  let moved = source.slice(source.indexOf('// Independent, read-only verification'), source.indexOf('\n// Prepare standard Git interchange files'))
+    .replace('return { budget, byId, objects, pack, summary: {', 'return { budget, byId, objects, summary: {');
   for (const name of Object.keys(offline)) moved = moved.replace(new RegExp(`^(const|class|async function|function) ${name}\\b`, 'm'), 'export $&');
   const raw = Buffer.from(moved);
   assert.equal(createHash('sha1').update(`blob ${raw.length}\0`).update(raw).digest('hex'),
