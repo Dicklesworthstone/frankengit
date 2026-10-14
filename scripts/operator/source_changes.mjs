@@ -9,6 +9,12 @@ import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-
 
 export { SOURCE_PACKAGE_BYTES };
 export const CHANGES_SCHEMA = 'frankengit-source-changes-v1';
+export const BINARY_CHANGE_PROFILE = 'binary-safe-v1';
+// A recorded request choice, never inferred from an extension, contents or mode.
+export function sourceByteProfile(value) {
+  if (value !== BINARY_CHANGE_PROFILE) fail('source_changes_byte_profile');
+  return value;
+}
 export const CHANGES_INPUT_BYTES = 10 * 1024 * 1024;
 export const CHANGE_LIMITS = Object.freeze({ files: 32, fileBytes: EDIT_LIMITS.fileBytes,
   totalBytes: EDIT_LIMITS.totalBytes, patchBytes: 1024 * 1024, splices: 4096 });
@@ -58,7 +64,8 @@ function encoded(row, stem, charge) {
   return charge(Buffer.from(value, 'utf8').toString('hex'));
 }
 function changes(value, bound) {
-  fields(value, ['schema', 'changes']);
+  fields(value, ['schema', 'byte_profile', 'changes'], ['schema', 'changes']);
+  const profile = Object.hasOwn(value, 'byte_profile') ? sourceByteProfile(value.byte_profile) : null;
   if (value.schema !== CHANGES_SCHEMA || !Array.isArray(value.changes) || !value.changes.length ||
       value.changes.length > bound.files) fail('source_changes_inventory');
   let paths = 0, bytes = 0, spliceCount = 0;
@@ -131,7 +138,7 @@ function changes(value, bound) {
   const touched = [...new Set([...writes, ...sources.map(row => row.from_path_hex)])];
   for (const path of touched) if (touched.some(other => other !== path &&
       path.startsWith(`${other}2f`))) fail('source_changes_paths');
-  return { schema: CHANGES_SCHEMA, changes: owned };
+  return { schema: CHANGES_SCHEMA, ...(profile === null ? {} : { byte_profile: profile }), changes: owned };
 }
 // Every splice addresses the ORIGINAL file, never an earlier splice's output.
 // Preflight all extents and projected sizes before allocating any after-image.
@@ -180,6 +187,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   check();
   const { packageBytes: source, expected: selected, changes: owned, limits: bound } =
     ownSourceChangeInputs(packageBytes, expected, input, options.limits);
+  const allowBinary = owned.byte_profile === BINARY_CHANGE_PROFILE;
   const packageHash = sha256(source), expectedHash = sha256(canonical(selected)), changesHash = sha256(canonical(owned));
   const loaded = await readSourcePackage(source, selected, webcrypto, check); check();
   const created = owned.changes.filter(row => ['create', 'copy', 'rename'].includes(row.operation)).map(row => row.path_hex);
@@ -202,7 +210,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
     if (!file) fail('source_changes_unselected_path');
     if (file.sourceBytes > bound.fileBytes) fail('source_changes_file_budget');
     const before = Buffer.from(bodies.get(file.blob), 'hex');
-    if (before.includes(0)) fail('source_changes_binary_unsupported');
+    if (!allowBinary && before.includes(0)) fail('source_changes_binary_unsupported');
     let execution = row;
     if (row.operation === 'replace-once') {
       const needle = Buffer.from(row.before_hex, 'hex'), offset = before.indexOf(needle);
@@ -217,7 +225,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   });
   const edits = plans.flatMap(({ row, file, before, size }) => {
     check(); const bytes = afterImage(row, before, size, check), oldMode = file?.kind === 'executable' ? 0o100755 : 0o100644;
-    if (bytes?.includes(0)) fail('source_changes_binary_unsupported');
+    if (!allowBinary && bytes?.includes(0)) fail('source_changes_binary_unsupported');
     const original = before === null ? null : { mode: oldMode, bytes: new Uint8Array(before) };
     const after = bytes === null ? null : { mode: row.executable === undefined ? oldMode : row.executable ? 0o100755 : 0o100644,
       bytes: new Uint8Array(bytes) };
@@ -232,7 +240,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   if (noops.length === edits.length) fail('source_changes_no_effect');
   // A checkpointing signal adapter keeps the encoder's existing synchronous
   // loops and every digest await under the caller's one remaining-time budget.
-  const patch = await buildPatch(edits, selected.format, { crypto: webcrypto, signal: { throwIfAborted: check } }); check();
+  const patch = await buildPatch(edits, selected.format, { crypto: webcrypto, signal: { throwIfAborted: check }, allowBinary }); check();
   if (patch.bytes.length > bound.patchBytes) fail('source_changes_patch_budget');
   for (const effect of patch.paths) if (effect.old_blob !== (files.get(effect.path_hex)?.blob ?? null)) fail('source_changes_old_identity');
   const bytes = Buffer.from(patch.bytes);
@@ -247,6 +255,8 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   // Preserve byte-identical v1 drafts for existing-file operations. A creation
   // draft additionally commits to its concrete, reproducible absence witnesses.
   if (creationPreconditions !== null) manifest.creation_preconditions = creationPreconditions;
+  // Bind even a NUL-free opt-in into review consent. Do not change old manifests.
+  if (allowBinary) manifest.byte_profile = BINARY_CHANGE_PROFILE;
   const relocations = owned.changes.filter(row => row.from_path_hex !== undefined).map(row => ({
     operation: row.operation, from_path_hex: row.from_path_hex, path_hex: row.path_hex,
     source_blob: files.get(row.from_path_hex).blob, source_mode: files.get(row.from_path_hex).kind === 'executable' ? 0o100755 : 0o100644,

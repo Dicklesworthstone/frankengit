@@ -31,18 +31,18 @@ export function exactText(bytes) {
 }
 function mode(value) { if (![0o100644, 0o100755].includes(value)) fail('Only regular and executable files can be edited.'); return value; }
 function equal(left, right) { return left.length === right.length && left.every((b, i) => b === right[i]); }
-function checkSide(side) {
+function checkSide(side, allowBinary) {
   if (side === null) return;
   if (!side || Object.keys(side).some(k => !['mode', 'bytes'].includes(k))) fail('Invalid file side.');
   mode(side.mode);
-  if (!(side.bytes instanceof Uint8Array) || side.bytes.length > EDIT_LIMITS.fileBytes || side.bytes.includes(0)) fail('File is binary or exceeds 1 MiB.');
+  if (!(side.bytes instanceof Uint8Array) || side.bytes.length > EDIT_LIMITS.fileBytes || (!allowBinary && side.bytes.includes(0))) fail('File exceeds 1 MiB or contains NUL outside the binary-safe profile.');
 }
-function capture(edits) {
+function capture(edits, allowBinary) {
   if (!Array.isArray(edits) || !edits.length || edits.length > EDIT_LIMITS.files) fail('Select 1 through 64 explicit file changes.');
   let total = 0; const paths = new Set();
   for (const edit of edits) {
     if (!edit || Object.keys(edit).some(k => !['path_hex', 'before', 'after'].includes(k))) fail('Unknown edit field.');
-    pathBytes(edit.path_hex); checkSide(edit.before); checkSide(edit.after);
+    pathBytes(edit.path_hex); checkSide(edit.before, allowBinary); checkSide(edit.after, allowBinary);
     if (edit.before === null && edit.after === null) fail('An edit must have a present side.');
     if (paths.has(edit.path_hex)) fail('Duplicate edit path.'); paths.add(edit.path_hex);
     total += (edit.before?.bytes.length ?? 0) + (edit.after?.bytes.length ?? 0);
@@ -54,7 +54,7 @@ function capture(edits) {
   }
   // Own all caller bytes before the first digest await. Subsequent UI edits
   // cannot change the patch, blob expectations or frozen candidate inputs.
-  const clone = side => side === null ? null : { mode: side.mode, bytes: side.bytes.slice() };
+  const clone = side => side === null ? null : { mode: side.mode, bytes: new Uint8Array(side.bytes) };
   return edits.map(e => ({ path_hex: e.path_hex, before: clone(e.before), after: clone(e.after) }))
     .filter(e => !e.before || !e.after || e.before.mode !== e.after.mode || !equal(e.before.bytes, e.after.bytes))
     .sort((a, b) => a.path_hex < b.path_hex ? -1 : 1);
@@ -78,9 +78,12 @@ function lines(bytes) {
   if (start < bytes.length) out.push(bytes.subarray(start));
   return out;
 }
-export async function buildPatch(edits, algorithm, { crypto = globalThis.crypto, signal } = {}) {
+// Binary-safe callers still use byte-exact counted hunks, NOT a new compressed
+// Git-binary-patch codec. Text consumers retain their original NUL refusal.
+export async function buildPatch(edits, algorithm, { crypto = globalThis.crypto, signal, allowBinary = false } = {}) {
   if (!['sha1', 'sha256'].includes(algorithm)) fail('Choose an explicit Git hash domain.');
-  signal?.throwIfAborted(); const owned = capture(edits);
+  if (typeof allowBinary !== 'boolean') fail('Choose an explicit binary-safe boolean.');
+  signal?.throwIfAborted(); const owned = capture(edits, allowBinary);
   if (!owned.length) fail('No file changes to prepare.');
   let size = 0, lineCount = 0; const chunks = [], manifest = [];
   const put = bytes => {
