@@ -91,6 +91,7 @@ export function recoveryErrorReport(error) {
     native_exit_code: error.native_exit_code ?? null, completed_result: error.completed_result ?? null,
     witness: error.witness ?? null, witness_lock_retained: error.witness_lock_retained ?? false,
     witness_cleanup_error: error.witness_cleanup_error ?? null,
+    witness_publication_state: error.witness_publication_state ?? null,
     verification_scratch: error.verification_scratch ?? null, approval_scratch: error.approval_scratch ?? null,
     approval_record: error.approval_record ?? null, cleanup_error: error.cleanup_error ?? null,
     recovery_cleanup_error: error.recovery_cleanup_error ?? null, download_state: error.download_state ?? null,

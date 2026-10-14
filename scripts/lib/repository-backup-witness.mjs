@@ -125,46 +125,64 @@ export async function withRepositoryBackupWitness(directory, trustKey, expected,
   const path = join(await realpath(dirname(requested)), basename(requested));
   const key = await readBackupControl(keyPath, BACKUP_LIMITS.keyBytes, live);
   const root = await ownedDirectory(path), lockPath = join(path, LOCK), statePath = join(path, STATE);
-  let lock, lockIdentity, original, observations = [], retained, trusted, problem, result, closed = false, poisoned = false;
+  let lock, lockIdentity, original, observations = [], retained, trusted, problem, result, closing = false, closed = false, poisoned = false;
   const view = () => Object.freeze({ directory: path, minimum_head_generation: retained?.minimum_head_generation ?? null,
     highest_observed_generation: observations[0]?.statement.head_generation ?? null, conflicting_statements: observations.length === 2,
     state_sha256: original ? hash(original) : null, newest_checkpoint_verified: false });
   const current = () => { if (closed || poisoned) fail('backup_witness_not_live'); live.check(); };
   async function persist(next, nextPolicy = retained) {
-    current(); await root.check();
-    if (!(await readState(statePath, live)).equals(original)) fail('backup_witness_changed');
-    const bytes = encode({ type: TYPE, policy: nextPolicy, trusted_key_id: trusted, observations: next.map(o => o.encoded) });
-    if (bytes.length > MAX_STATE) fail('backup_witness_state_limit');
-    const temp = join(path, `.witness-${randomBytes(16).toString('hex')}.tmp`);
-    let file, identity, published = false;
+    let temp, file, identity, published = false, failure;
+    let publication = 'not_published';
     try {
+      // The next authenticated observation/floor is already a recovery
+      // obligation. ANY failure to retain it must keep the durable lease:
+      // reopening old disk state must not forget known newer or conflicting data.
+      current(); await root.check();
+      if (!(await readState(statePath, live)).equals(original)) fail('backup_witness_changed');
+      const bytes = encode({ type: TYPE, policy: nextPolicy, trusted_key_id: trusted, observations: next.map(o => o.encoded) });
+      if (bytes.length > MAX_STATE) fail('backup_witness_state_limit');
+      temp = join(path, `.witness-${randomBytes(16).toString('hex')}.tmp`);
       file = await open(temp, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       identity = await file.stat({ bigint: true });
       await file.writeFile(bytes); await file.sync();
       if (!(await readState(temp, live)).equals(bytes)) fail('backup_witness_readback');
       current(); await root.check();
       if (!(await readState(statePath, live)).equals(original)) fail('backup_witness_changed');
+      publication = 'publication_unknown';
       await rename(temp, statePath); published = true;
+      publication = 'visible_completion_incomplete';
       // Once visible, never roll back even when sync, readback or cancellation fails.
       original = bytes; observations = next; retained = nextPolicy;
       await root.handle.sync(); await root.check();
       if (!(await readState(statePath, live)).equals(bytes)) fail('backup_witness_readback');
-    } catch (error) {
-      poisoned = true; error.witness_publication_state = published ? 'visible_completion_incomplete' : 'not_published'; throw error;
+    } catch (caught) {
+      failure = caught instanceof Error ? caught : backupError('backup_witness_persistence_failed');
+      poisoned = true; failure.witness_publication_state = publication;
     } finally {
+      let cleanup;
       try {
-        if (identity && !published) {
+        // An ambiguous rename may have consumed the temporary name. Preserve
+        // both names for inspection rather than guessing ownership or rollback.
+        if (identity && !published && publication === 'not_published') {
           await root.check(); const named = await lstat(temp, { bigint: true });
           if (!named.isFile() || !same(named, identity)) fail('backup_witness_temporary_changed');
           await unlink(temp); await root.handle.sync();
         }
-      } finally { await file?.close(); }
+      } catch (error) { cleanup = error; }
+      try { await file?.close(); } catch (error) { cleanup ??= error; }
+      if (cleanup) {
+        poisoned = true;
+        if (failure) failure.witness_cleanup_error = cleanup.code ?? 'backup_witness_cleanup_failed';
+        else { failure = cleanup; failure.witness_publication_state = publication; }
+      }
     }
+    if (failure) throw failure;
   }
   let observing = false, pending = null;
   const witness = Object.freeze({
     snapshot: view,
     async observe(input) {
+      if (closing) fail('backup_witness_not_live');
       current();
       if (observing) fail('backup_witness_concurrent_observation');
       if (!(input instanceof Uint8Array) || input.buffer instanceof SharedArrayBuffer || input.length < 1 || input.length > BACKUP_LIMITS.envelopeBytes) fail('backup_approval_byte_limit');
@@ -184,6 +202,7 @@ export async function withRepositoryBackupWitness(directory, trustKey, expected,
       return pending;
     },
     require(statement) {
+      if (closing) fail('backup_witness_not_live');
       current();
       if (observing) fail('backup_witness_concurrent_observation');
       if (!observations.length || BigInt(statement.head_generation) < BigInt(observations[0].statement.head_generation)
@@ -208,12 +227,22 @@ export async function withRepositoryBackupWitness(directory, trustKey, expected,
     problem = caught instanceof Error ? caught : backupError('backup_witness_callback_failed');
     problem.witness = view();
   } finally {
+    // Stop accepting new work, but let an already owned observation finish its
+    // authenticated persistence before closing the lifetime or releasing its lease.
+    closing = true;
+    try { await pending; } catch (error) {
+      if (!problem) {
+        problem = error;
+        if (result !== undefined) { problem.completed_result = result; problem.state = result?.state ?? 'selection_complete'; }
+      }
+      problem.witness = view();
+    }
     closed = true;
-    // Quiesce any unawaited observation before releasing the cross-process lease.
-    try { await pending; } catch (error) { problem ??= error; problem.witness = view(); }
     try {
       if (lockIdentity) {
-        if (problem?.code === 'native_import_containment_failed' || problem?.code === 'native_process_containment_failed') {
+        if (poisoned || problem?.code === 'native_import_containment_failed' || problem?.code === 'native_process_containment_failed') {
+          problem ??= backupError('backup_witness_persistence_failed');
+          problem.witness = view();
           problem.witness_lock_retained = true;
         } else {
           await root.check(); const named = await lstat(lockPath, { bigint: true });
