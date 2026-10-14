@@ -264,9 +264,19 @@ fn execute(node: &OneNode, command: &Command) -> Result<String, NodeWorkspaceRef
         }
     }
 }
-fn main() -> ExitCode {
+#[must_use]
+pub fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(40).collect();
-    let command = match parse(&args) {
+    run_os_cli(&args)
+}
+#[must_use]
+pub fn run_cli(args: &[String]) -> ExitCode {
+    let args: Vec<OsString> = args.iter().take(40).map(OsString::from).collect();
+    run_os_cli(&args)
+}
+#[must_use]
+pub fn run_os_cli(args: &[OsString]) -> ExitCode {
+    let command = match parse(args) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");

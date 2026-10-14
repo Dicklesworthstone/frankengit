@@ -46,18 +46,79 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    run_subcommand(&arguments)
+}
+
+fn run_subcommand(arguments: &[String]) -> ExitCode {
     if arguments
         .first()
-        .is_some_and(|argument| argument == "backup")
+        .is_some_and(|argument| matches!(argument.as_str(), "backup" | "repository-backup"))
     {
+        if arguments
+            .first()
+            .is_some_and(|argument| argument == "backup")
+            && arguments.get(1).is_some_and(|sub| sub == "authority")
+        {
+            return fgit_node::source_retrieval::authority_backup::run_cli(&arguments[2..]);
+        }
+        let slice = if arguments
+            .first()
+            .is_some_and(|argument| argument == "backup")
+            && arguments.get(1).is_some_and(|sub| sub == "repository")
+        {
+            &arguments[2..]
+        } else {
+            &arguments[1..]
+        };
         use fgit_node::source_retrieval::backup;
-        return match backup::run(&arguments[1..], &mut std::io::stdout().lock()) {
+        return match backup::run(slice, &mut std::io::stdout().lock()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{}", backup::error_json(&error));
                 ExitCode::from(2)
             }
         };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "authority-backup")
+    {
+        return fgit_node::source_retrieval::authority_backup::run_cli(&arguments[1..]);
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "index")
+    {
+        match arguments.get(1).map(String::as_str) {
+            Some("maintain") => {
+                return fgit_node::source_retrieval::index_maintain::run_cli(&arguments[2..]);
+            }
+            Some("scope") => {
+                return fgit_node::source_retrieval::index_scope::run_cli(&arguments[2..]);
+            }
+            Some("symbols") => {
+                return fgit_node::source_retrieval::symbol_index::run_cli(&arguments[2..]);
+            }
+            _ => return fgit_node::source_retrieval::index_cli::run_cli(&arguments[1..]),
+        }
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "index-maintain")
+    {
+        return fgit_node::source_retrieval::index_maintain::run_cli(&arguments[1..]);
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "index-scope")
+    {
+        return fgit_node::source_retrieval::index_scope::run_cli(&arguments[1..]);
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "symbol-index")
+    {
+        return fgit_node::source_retrieval::symbol_index::run_cli(&arguments[1..]);
     }
     if arguments
         .first()
@@ -540,5 +601,76 @@ fn main() -> ExitCode {
             eprintln!("fg: {error}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod operator_subcommand_dispatch_tests {
+    use super::run_subcommand;
+    use std::process::ExitCode;
+
+    fn vec_args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn index_scope_help_dispatches_to_index_scope_cli() {
+        assert_eq!(
+            run_subcommand(&vec_args(&["index-scope", "--help"])),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["index", "scope", "--help"])),
+            ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn operator_subcommands_dispatch_with_specific_exit_codes() {
+        // `authority-backup` and `backup`/`repository-backup` return ExitCode::from(2) on invalid arguments.
+        assert_eq!(
+            run_subcommand(&vec_args(&["authority-backup"])),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["backup", "authority"])),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["repository-backup"])),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["backup", "repository"])),
+            ExitCode::from(2)
+        );
+        assert_eq!(run_subcommand(&vec_args(&["backup"])), ExitCode::from(2));
+        // `index`, `index-maintain`, `index-scope`, and `symbol-index` return ExitCode::FAILURE (1)
+        // on usage errors instead of falling through to `fgit_cli::run` (which returns ExitCode::from(2)).
+        assert_eq!(run_subcommand(&vec_args(&["index"])), ExitCode::FAILURE);
+        assert_eq!(
+            run_subcommand(&vec_args(&["index-maintain"])),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["index", "maintain"])),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["index-scope"])),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["index", "scope"])),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["symbol-index"])),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["index", "symbols"])),
+            ExitCode::FAILURE
+        );
     }
 }

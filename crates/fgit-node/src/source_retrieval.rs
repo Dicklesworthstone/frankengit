@@ -476,3 +476,23 @@ pub mod backup;
 
 /// Read-only lexical reuse with separately retained current-source evidence.
 pub mod current_index;
+
+/// Trusted-local portable authority metadata export and restore CLI entrypoint.
+#[path = "bin/fg-authority-backup.rs"]
+pub mod authority_backup;
+
+/// Trusted-local lexical source index build, refresh, recover, and query CLI entrypoint.
+#[path = "bin/fg-index.rs"]
+pub mod index_cli;
+
+/// Bounded foreground lexical/symbol index maintenance worker CLI entrypoint.
+#[path = "bin/fg-index-maintain.rs"]
+pub mod index_maintain;
+
+/// Explicit scoped lexical index build, refresh, search, and recover CLI entrypoint.
+#[path = "bin/fg-index-scope.rs"]
+pub mod index_scope;
+
+/// Trusted-local symbol index build, refresh, recover, and query CLI entrypoint.
+#[path = "bin/fg-symbol-index.rs"]
+pub mod symbol_index;

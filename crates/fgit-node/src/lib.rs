@@ -14,6 +14,8 @@
 //! node lifecycle transitions. Authority operations themselves remain async:
 //! no synchronous request-path adapter is introduced around the async engine.
 
+extern crate self as fgit_node;
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;

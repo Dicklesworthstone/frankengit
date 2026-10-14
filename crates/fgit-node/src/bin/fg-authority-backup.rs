@@ -78,9 +78,14 @@ struct Options {
     resume: bool,
 }
 
-fn main() -> ExitCode {
+#[must_use]
+pub fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    match run(&args, &mut std::io::stdout().lock()) {
+    run_cli(&args)
+}
+#[must_use]
+pub fn run_cli(args: &[String]) -> ExitCode {
+    match run(args, &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!(

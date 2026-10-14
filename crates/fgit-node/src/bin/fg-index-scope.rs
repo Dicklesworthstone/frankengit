@@ -200,14 +200,24 @@ fn run(options: &Options) -> io::Result<(String, bool)> {
         ))),
     }
 }
-fn main() -> ExitCode {
+#[must_use]
+pub fn main() -> ExitCode {
     // Bound collection before retaining arbitrarily many command arguments.
     let args: Vec<OsString> = std::env::args_os().skip(1).take(701).collect();
+    run_os_cli(&args)
+}
+#[must_use]
+pub fn run_cli(args: &[String]) -> ExitCode {
+    let args: Vec<OsString> = args.iter().take(701).map(OsString::from).collect();
+    run_os_cli(&args)
+}
+#[must_use]
+pub fn run_os_cli(args: &[OsString]) -> ExitCode {
     if args.len() == 1 && args[0] == "--help" {
         println!("{}", options::USAGE);
         return ExitCode::SUCCESS;
     }
-    let result = options::parse(&args).and_then(|options| run(&options));
+    let result = options::parse(args).and_then(|options| run(&options));
     match result {
         Ok((json, resolved)) => {
             let mut stdout = io::stdout().lock();

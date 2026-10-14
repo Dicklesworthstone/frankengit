@@ -231,9 +231,19 @@ fn execute(node: &OneNode, options: &Options) -> Result<String, Failure> {
         }
     }
 }
-fn main() -> ExitCode {
+#[must_use]
+pub fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(9).collect();
-    let options = match parse(&args) {
+    run_os_cli(&args)
+}
+#[must_use]
+pub fn run_cli(args: &[String]) -> ExitCode {
+    let args: Vec<OsString> = args.iter().take(9).map(OsString::from).collect();
+    run_os_cli(&args)
+}
+#[must_use]
+pub fn run_os_cli(args: &[OsString]) -> ExitCode {
+    let options = match parse(args) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{e}");
