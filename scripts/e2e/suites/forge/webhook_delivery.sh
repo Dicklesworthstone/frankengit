@@ -19,6 +19,7 @@ fge_context bead frankengit-fg046-webhooks-qs6
 fge_context evidence_class E1
 fge_context forge_unit_tests crates/fgit-forge/src/webhook/tests.rs
 fge_context node_delivery_tests crates/fgit-node/src/webhook/tests.rs
+fge_context cli_manual_delivery_tests crates/fgit-cli/src/webhook_commands/delivery/manual/tests.rs
 
 fge_phase setup
 work="$(fge_tempdir fg046_webhook)"
@@ -27,6 +28,7 @@ mkdir -p "$repo_dir"
 
 tenant_id="00000000000000000000000000000001"
 repo_id="00000000000000000000000000000002"
+principal_id="00000000000000000000000000000003"
 valid_secret="0123456789abcdef0123456789abcdef"
 rotated_secret="fedcba9876543210fedcba9876543210"
 
@@ -38,6 +40,13 @@ else
     cargo build --locked -p fgit-cli --bin fg
   FG_BIN="$fg_target_dir/debug/fg"
 fi
+
+# Initialize canonical repository and admit a committed issue so the canonical outbox has a real delivery entry.
+fge_run_ok fg-init "$FG_BIN" init "$repo_dir" "$tenant_id" "$repo_id"
+fge_run_ok fg-issue-open "$FG_BIN" issue open "$repo_dir" "$tenant_id" "$repo_id" 1 \
+  --trusted-local --principal "$principal_id" \
+  --idempotency-key "fg046-e2e-issue-1" --expected-version 0 \
+  --title "Deliver this committed issue" --body "Not a placeholder payload"
 
 fge_phase action
 
@@ -54,6 +63,13 @@ fge_capture node-delivery-tests \
   cargo test --locked -p fgit-node --lib webhook -- --nocapture || true
 node_test_exit=$FGE_LAST_EXIT
 node_test_output=$(<"$FGE_LAST_STDOUT_FILE")
+
+# 2b. Run fgit-cli manual delivery & dead-letter replay receiver integration tests
+fge_capture cli-manual-delivery-tests \
+  env CARGO_TARGET_DIR="$fg_target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
+  cargo test --locked -p fgit-cli --bin fg webhook_commands::delivery::manual -- --nocapture || true
+cli_manual_test_exit=$FGE_LAST_EXIT
+cli_manual_test_output=$(<"$FGE_LAST_STDOUT_FILE")
 
 # 3. CLI: SSRF rejection of cloud metadata address (169.254.169.254)
 fge_capture cli-ssrf-metadata \
@@ -87,17 +103,42 @@ fge_capture cli-rotate-secret \
 rotate_exit=$FGE_LAST_EXIT
 rotate_output=$(<"$FGE_LAST_STDOUT_FILE")
 
-# 8. CLI: Receiver-down drill (target port 18999 has no listener)
+# 7b. CLI: Read canonical outbox to select delivery_id and destination
+fge_capture cli-outbox \
+  "$FG_BIN" webhook outbox "$repo_dir" "$tenant_id" "$repo_id" --trusted-local || true
+outbox_exit=$FGE_LAST_EXIT
+outbox_output=$(<"$FGE_LAST_STDOUT_FILE")
+delivery_id="${outbox_output#*\"delivery_id\":\"}"
+delivery_id="${delivery_id%%\"*}"
+destination="${outbox_output#*\"destination\":\"}"
+destination="${destination%%\"*}"
+
+# 8. CLI: Manual attempt bounds and receiver-down drill (target port 18999 has no listener)
+# Refusal twins: attempt 0 and attempt 17 are refused before opening storage (exit 2)
+fge_capture cli-deliver-attempt0 \
+  "$FG_BIN" webhook deliver "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
+  --id 1 --delivery-id "$delivery_id" --destination "$destination" \
+  --at-least-once --attempt 0 --permissive-for-tests || true
+att0_exit=$FGE_LAST_EXIT
+
+fge_capture cli-deliver-attempt17 \
+  "$FG_BIN" webhook deliver "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
+  --id 1 --delivery-id "$delivery_id" --destination "$destination" \
+  --at-least-once --attempt 17 --permissive-for-tests || true
+att17_exit=$FGE_LAST_EXIT
+
 # Attempt 1: TransientFailure (exit 1)
 fge_capture cli-deliver-down-attempt1 \
   "$FG_BIN" webhook deliver "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
-  --id 1 --delivery-id "deliv-down-test" --attempt 1 --permissive-for-tests || true
+  --id 1 --delivery-id "$delivery_id" --destination "$destination" \
+  --at-least-once --attempt 1 --permissive-for-tests || true
 down_att1_exit=$FGE_LAST_EXIT
 
 # Attempt 5: Exhaustion -> PermanentRejection -> DeadLetter (exit 2)
 fge_capture cli-deliver-down-attempt5 \
   "$FG_BIN" webhook deliver "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
-  --id 1 --delivery-id "deliv-down-test" --attempt 5 --permissive-for-tests || true
+  --id 1 --delivery-id "$delivery_id" --destination "$destination" \
+  --at-least-once --attempt 5 --permissive-for-tests || true
 down_att5_exit=$FGE_LAST_EXIT
 
 # 9. CLI: Dead-letter queue listing
@@ -106,14 +147,21 @@ fge_capture cli-dead-letter-list \
 dl_list_exit=$FGE_LAST_EXIT
 dl_list_output=$(<"$FGE_LAST_STDOUT_FILE")
 
-# 10. CLI: Dead-letter replay
+# 10. CLI: Dead-letter replay refuses reset ordinal (--attempt 1) and advances cumulative ordinal to 6
+fge_capture cli-dead-letter-replay-reset-refused \
+  "$FG_BIN" webhook dead-letter replay "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
+  --id 1 --delivery-id "$delivery_id" --destination "$destination" \
+  --at-least-once --attempt 1 --permissive-for-tests || true
+dl_replay_reset_exit=$FGE_LAST_EXIT
+
 fge_capture cli-dead-letter-replay \
   "$FG_BIN" webhook dead-letter replay "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
-  --delivery-id "deliv-down-test" || true
+  --id 1 --delivery-id "$delivery_id" --destination "$destination" \
+  --at-least-once --permissive-for-tests || true
 dl_replay_exit=$FGE_LAST_EXIT
 dl_replay_output=$(<"$FGE_LAST_STDOUT_FILE")
 
-# 11. CLI: Dead-letter list after replay is empty
+# 11. CLI: Dead-letter list after replay retains the diagnostic with cumulative attempt 6
 fge_capture cli-dead-letter-list-after \
   "$FG_BIN" webhook dead-letter list "$repo_dir" "$tenant_id" "$repo_id" --trusted-local || true
 dl_after_exit=$FGE_LAST_EXIT
@@ -141,8 +189,8 @@ fge_assert_contains FG-046-E2E-006 "$node_test_output" \
   'test webhook::tests::webhook_delivery_successful_acknowledgement_and_signature_verification ... ok' \
   'Webhook HTTP delivery verifies signature and delivery headers on mock receiver'
 fge_assert_contains FG-046-E2E-007 "$node_test_output" \
-  'test webhook::tests::webhook_duplicate_delivery_reports_duplicate_suppressed ... ok' \
-  'Duplicate delivery with same delivery ID reports DuplicateSuppressed'
+  'test webhook::tests::webhook_successful_retry_does_not_fabricate_duplicate_suppression ... ok' \
+  'Retry ordinal on HTTP 200 OK proves acceptance without fabricating duplicate suppression'
 fge_assert_contains FG-046-E2E-008 "$node_test_output" \
   'test webhook::tests::webhook_receiver_down_drill_retries_and_exhausts_to_dead_letter ... ok' \
   'Receiver-down drill retries to exhaustion and logs dead-letter entry'
@@ -150,7 +198,7 @@ fge_assert_contains FG-046-E2E-009 "$node_test_output" \
   'test webhook::tests::webhook_store_persists_registrations_and_dead_letters ... ok' \
   'WebhookStore persists registrations and dead-letter log across reopening'
 
-# Assertions for CLI commands
+# Assertions for CLI commands and manual/replay integration
 fge_assert_exit FG-046-E2E-010 2 "$ssrf_meta_exit" \
   'fg webhook register refuses cloud metadata target'
 fge_assert_exit FG-046-E2E-011 2 "$ssrf_priv_exit" \
@@ -181,17 +229,31 @@ fge_assert_exit FG-046-E2E-019 2 "$down_att5_exit" \
 fge_assert_exit FG-046-E2E-020 0 "$dl_list_exit" \
   'fg webhook dead-letter list succeeds'
 fge_assert_contains FG-046-E2E-021 "$dl_list_output" \
-  'deliv-down-test' \
-  'Dead-letter list contains the terminal failure delivery ID'
+  "\"delivery_id\":\"$delivery_id\"" \
+  'Dead-letter list contains the canonical terminal failure delivery ID'
 
-fge_assert_exit FG-046-E2E-022 0 "$dl_replay_exit" \
-  'fg webhook dead-letter replay succeeds'
-fge_assert_contains FG-046-E2E-023 "$dl_replay_output" \
-  '"status":"replayed"' \
-  'Dead-letter replay confirmation emitted'
+fge_assert_exit FG-046-E2E-022 0 "$cli_manual_test_exit" \
+  'fgit-cli manual delivery and dead-letter replay receiver tests passed'
+fge_assert_contains FG-046-E2E-023 "$cli_manual_test_output" \
+  'test webhook_commands::delivery::manual::tests::dead_letter_replay_contacts_receiver_and_preserves_the_diagnostic ... ok' \
+  'Dead-letter replay contacts live receiver at cumulative attempt 6 and retains diagnostic'
 
 fge_assert_exit FG-046-E2E-024 0 "$dl_after_exit" \
   'fg webhook dead-letter list after replay succeeds'
 fge_assert_contains FG-046-E2E-025 "$dl_after_output" \
-  '"count":0' \
-  'Dead-letter queue is empty after replaying entry'
+  '"attempts":6' \
+  'Dead-letter queue retains diagnostic entry with cumulative attempt 6 after replay'
+fge_assert_exit FG-046-E2E-026 0 "$outbox_exit" \
+  'fg webhook outbox lists canonical committed forge delivery'
+fge_assert_exit FG-046-E2E-027 2 "$att0_exit" \
+  'fg webhook deliver refuses attempt 0 before opening storage'
+fge_assert_exit FG-046-E2E-028 2 "$att17_exit" \
+  'fg webhook deliver refuses attempt 17 before opening storage'
+fge_assert_exit FG-046-E2E-029 2 "$dl_replay_reset_exit" \
+  'fg webhook dead-letter replay refuses reset attempt ordinal 1 after attempt 5'
+fge_assert_exit FG-046-E2E-030 2 "$dl_replay_exit" \
+  'fg webhook dead-letter replay against down receiver returns PermanentRejection (exit 2) at attempt 6'
+fge_assert_contains FG-046-E2E-031 "$dl_replay_output" \
+  '"replay":true' \
+  'fg webhook dead-letter replay emits manual-at-least-once observation at cumulative attempt 6'
+

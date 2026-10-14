@@ -23,6 +23,7 @@ fn secret() -> WebhookSecret {
 struct Fixture {
     root: PathBuf,
     options: Options,
+    clock: AtomicU64,
 }
 impl Fixture {
     fn new(format: GitHashAlgorithm) -> Self {
@@ -66,6 +67,7 @@ impl Fixture {
                 poll: Duration::from_millis(100),
                 permissive: true,
             },
+            clock: AtomicU64::new(10_000),
         }
     }
     fn register(&self, url: &str, filter: WebhookEventFilter) -> WebhookRegistration {
@@ -77,8 +79,8 @@ impl Fixture {
             active: true,
             retry_schedule: WebhookRetrySchedule {
                 max_attempts: 3,
-                initial_delay: Duration::ZERO,
-                max_delay: Duration::ZERO,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
             },
         };
         self.store().register(registration.clone()).unwrap();
@@ -89,7 +91,8 @@ impl Fixture {
     }
     fn run(&self) -> (u8, String) {
         let mut output = Vec::new();
-        let code = execute(&self.options, &|| Ok(false), &|| Ok(10_000), &mut output).unwrap();
+        let now = self.clock.fetch_add(10, Ordering::Relaxed);
+        let code = execute(&self.options, &|| Ok(false), &|| Ok(now), &mut output).unwrap();
         (code, String::from_utf8(output).unwrap())
     }
     fn add(&self, number: u64) {

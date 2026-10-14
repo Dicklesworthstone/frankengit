@@ -73,7 +73,6 @@ pub(super) fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn recovery_head_is_explicit_valid_and_independent_of_the_native_hash_domain() {
         let args = |values: &[&str]| values.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
