@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 28,
+  "total_tools": 37,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -26,14 +26,54 @@
       "rest_api_path": ""
     },
     {
-      "tool": "frankengit_code_review_prompt",
+      "tool": "frankengit_branch_create",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg branch create",
+      "rest_api_path": "POST /repos/{id}/branches"
+    },
+    {
+      "tool": "frankengit_branch_delete",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg branch delete",
+      "rest_api_path": "DELETE /repos/{id}/branches/{ref}"
+    },
+    {
+      "tool": "frankengit_branch_rename",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg branch rename",
+      "rest_api_path": "POST /repos/{id}/branches/{ref}/rename"
+    },
+    {
+      "tool": "frankengit_branch_update",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg branch update",
+      "rest_api_path": "PATCH /repos/{id}/branches/{ref}"
+    },
+    {
+      "tool": "frankengit_events",
       "version": 1,
       "owner_subsystem": "forge",
       "support_profile": "active",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
-      "cli_command": "fg pr review-prompt",
-      "rest_api_path": "GET /repos/{id}/pulls/{number}/review-prompt"
+      "cli_command": "fg events",
+      "rest_api_path": "GET /repos/{id}/events"
     },
     {
       "tool": "frankengit_hidden_repair",
@@ -92,7 +132,7 @@
       "support_profile": "active",
       "read_mutation": "mutation",
       "capability": "mutate_forge_entity",
-      "cli_command": "fg issue create",
+      "cli_command": "fg issue open",
       "rest_api_path": "POST /repos/{id}/issues"
     },
     {
@@ -116,14 +156,24 @@
       "rest_api_path": "GET /repos/{id}/issues/{number}"
     },
     {
-      "tool": "frankengit_pr_summary_prompt",
+      "tool": "frankengit_protection_show",
       "version": 1,
       "owner_subsystem": "forge",
       "support_profile": "active",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
-      "cli_command": "fg pr summary-prompt",
-      "rest_api_path": "GET /repos/{id}/pulls/{number}/summary-prompt"
+      "cli_command": "fg protection show",
+      "rest_api_path": "GET /repos/{id}/protection"
+    },
+    {
+      "tool": "frankengit_pull_checks",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg pr checks",
+      "rest_api_path": "GET /repos/{id}/pulls/{number}/checks"
     },
     {
       "tool": "frankengit_pull_close",
@@ -136,6 +186,26 @@
       "rest_api_path": "POST /repos/{id}/pulls/{number}/close"
     },
     {
+      "tool": "frankengit_pull_diff",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg pr diff",
+      "rest_api_path": "GET /repos/{id}/pulls/{number}/diff"
+    },
+    {
+      "tool": "frankengit_pull_fast_forward",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg pr fast-forward",
+      "rest_api_path": "POST /repos/{id}/pulls/{number}/fast-forward"
+    },
+    {
       "tool": "frankengit_pull_list",
       "version": 1,
       "owner_subsystem": "forge",
@@ -146,24 +216,34 @@
       "rest_api_path": "GET /repos/{id}/pulls"
     },
     {
+      "tool": "frankengit_pull_merge_reviewed",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg merge apply-reviewed",
+      "rest_api_path": "POST /repos/{id}/pulls/{number}/merge"
+    },
+    {
       "tool": "frankengit_pull_open",
       "version": 1,
       "owner_subsystem": "forge",
       "support_profile": "active",
       "read_mutation": "mutation",
       "capability": "mutate_forge_entity",
-      "cli_command": "fg pr create",
+      "cli_command": "fg pr open",
       "rest_api_path": "POST /repos/{id}/pulls"
     },
     {
-      "tool": "frankengit_pull_reopen",
+      "tool": "frankengit_pull_review",
       "version": 1,
       "owner_subsystem": "forge",
       "support_profile": "active",
       "read_mutation": "mutation",
-      "capability": "mutate_forge_entity",
-      "cli_command": "fg pr reopen",
-      "rest_api_path": "POST /repos/{id}/pulls/{number}/reopen"
+      "capability": "submit_evidence",
+      "cli_command": "fg pr review",
+      "rest_api_path": "POST /repos/{id}/pulls/{number}/reviews"
     },
     {
       "tool": "frankengit_pull_show",
@@ -176,6 +256,16 @@
       "rest_api_path": "GET /repos/{id}/pulls/{number}"
     },
     {
+      "tool": "frankengit_pull_update",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg pr update",
+      "rest_api_path": "PATCH /repos/{id}/pulls/{number}"
+    },
+    {
       "tool": "frankengit_raw_sql_query",
       "version": 1,
       "owner_subsystem": "security",
@@ -184,46 +274,6 @@
       "capability": "read_derived_generation",
       "cli_command": "",
       "rest_api_path": ""
-    },
-    {
-      "tool": "frankengit_repo_info",
-      "version": 1,
-      "owner_subsystem": "authority",
-      "support_profile": "active",
-      "read_mutation": "read_only",
-      "capability": "read_canonical_object",
-      "cli_command": "fg repo info",
-      "rest_api_path": "GET /repos/{id}"
-    },
-    {
-      "tool": "frankengit_repo_manifest",
-      "version": 1,
-      "owner_subsystem": "authority",
-      "support_profile": "active",
-      "read_mutation": "read_only",
-      "capability": "read_canonical_object",
-      "cli_command": "fg repo manifest",
-      "rest_api_path": "GET /repos/{id}/manifest"
-    },
-    {
-      "tool": "frankengit_review_submit",
-      "version": 1,
-      "owner_subsystem": "forge",
-      "support_profile": "active",
-      "read_mutation": "mutation",
-      "capability": "submit_evidence",
-      "cli_command": "fg pr review",
-      "rest_api_path": "POST /repos/{id}/pulls/{number}/reviews"
-    },
-    {
-      "tool": "frankengit_reviewed_merge",
-      "version": 1,
-      "owner_subsystem": "forge",
-      "support_profile": "active",
-      "read_mutation": "mutation",
-      "capability": "prepare_publication",
-      "cli_command": "fg pr merge",
-      "rest_api_path": "POST /repos/{id}/pulls/{number}/merge"
     },
     {
       "tool": "frankengit_source_blame",
@@ -242,18 +292,28 @@
       "support_profile": "active",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
-      "cli_command": "fg cat-file",
+      "cli_command": "fg show",
       "rest_api_path": "GET /repos/{id}/blobs"
     },
     {
-      "tool": "frankengit_source_commit",
+      "tool": "frankengit_source_candidate",
       "version": 1,
       "owner_subsystem": "git-core",
       "support_profile": "active",
-      "read_mutation": "mutation",
-      "capability": "prepare_publication",
-      "cli_command": "fg push",
-      "rest_api_path": "POST /repos/{id}/commits"
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg workspace inspect",
+      "rest_api_path": "POST /repos/{id}/candidates/inspect"
+    },
+    {
+      "tool": "frankengit_source_compare",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg diff",
+      "rest_api_path": "GET /repos/{id}/compare"
     },
     {
       "tool": "frankengit_source_log",
@@ -266,13 +326,43 @@
       "rest_api_path": "GET /repos/{id}/commits"
     },
     {
+      "tool": "frankengit_source_publish",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg workspace apply",
+      "rest_api_path": "POST /repos/{id}/commits"
+    },
+    {
+      "tool": "frankengit_source_search",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg search",
+      "rest_api_path": "GET /repos/{id}/search"
+    },
+    {
+      "tool": "frankengit_source_search_batch",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg search --batch",
+      "rest_api_path": "POST /repos/{id}/search/batch"
+    },
+    {
       "tool": "frankengit_source_tree",
       "version": 1,
       "owner_subsystem": "git-core",
       "support_profile": "active",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
-      "cli_command": "fg ls-tree",
+      "cli_command": "fg tree",
       "rest_api_path": "GET /repos/{id}/trees"
     },
     {
@@ -282,7 +372,7 @@
       "support_profile": "active",
       "read_mutation": "recovery",
       "capability": "read_canonical_object",
-      "cli_command": "fg tx outcome",
+      "cli_command": "fg outcome",
       "rest_api_path": "GET /repos/{id}/transactions/outcomes/{key}"
     }
   ]

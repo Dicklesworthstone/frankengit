@@ -3,8 +3,8 @@
 //!
 //! # Deliverables (FG-096a)
 //!
-//! - Single-source MCP surface registry ([`registry::REGISTRY`]) with 28 tool,
-//!   resource, and prompt definitions.
+//! - Single-source MCP surface registry ([`registry::REGISTRY`]) with 37 tool
+//!   definitions (33 active server tools and 4 unsupported sentinels).
 //! - Canonical capability, budget, authority root, and principal contracts ([`types`]).
 //! - Strict constitutional anti-admin validation ([`validate`]).
 //! - Discoverable typed refusals for unsupported operations ([`refusal`] and [`dispatch`]).
@@ -25,4 +25,6 @@ pub use types::{
     InputAuthorityRootRequirement, McpEntityKind, McpField, McpToolEntry, PaginationRules,
     PrincipalRequirement, ReadMutationClass, SupportProfile,
 };
-pub use validate::{McpValidationError, validate_registry, validate_tool_entry};
+pub use validate::{
+    McpValidationError, validate_registry, validate_server_parity, validate_tool_entry,
+};

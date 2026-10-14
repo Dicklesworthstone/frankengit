@@ -38,6 +38,11 @@ impl NodeTools {
     // Each profile validates its own launch grants before sharing this node
     // lifecycle. This helper never registers tools or creates capabilities.
     fn open_authorized(options: Options, allow_stopped_intake: bool) -> Result<Self, String> {
+        fgit_schema::mcp::validate_server_parity(
+            &all_registered_tool_names(),
+            fgit_schema::mcp::REGISTRY,
+        )
+        .map_err(|error| error.to_string())?;
         let mut node = OneNode::open_existing(
             NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
                 .with_object_format(options.format)
@@ -102,47 +107,81 @@ impl NodeTools {
         fields
     }
 }
+
+pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
+    let mut tools = Vec::new();
+    if options.issues {
+        tools.extend(issues::tools());
+    }
+    if options.pulls {
+        tools.extend(pulls::tools());
+        tools.push(checks::tool());
+    }
+    if options.source {
+        tools.extend(source::tools());
+        tools.extend(search::tools());
+        tools.push(candidate::tool());
+    }
+    if options.writes.issues {
+        tools.extend(issue_writes::tools());
+    }
+    if options.writes.pulls {
+        tools.extend(pull_writes::tools());
+    }
+    if options.writes.source {
+        tools.extend(source_writes::tools());
+    }
+    if options.writes.reviews {
+        tools.extend(review_writes::tools());
+    }
+    if options.writes.merges {
+        tools.extend(merge_writes::tools());
+    }
+    if options.outcomes {
+        tools.extend(outcomes::tools());
+    }
+    if options.issues || options.pulls {
+        tools.push(events::tool());
+    }
+    tools.extend(review::tools(options.source, options.pulls));
+    if options.source {
+        tools.extend(history::tools());
+    }
+    tools
+}
+
+pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
+    let full_options = Options {
+        storage: std::path::PathBuf::new(),
+        tenant: fgit_types::TenantId::from_bytes([0x11; 16]),
+        repository: fgit_types::RepositoryId::from_bytes([0x22; 16]),
+        format: fgit_types::GitHashAlgorithm::Sha1,
+        incarnation: None,
+        issues: true,
+        pulls: true,
+        source: true,
+        writes: super::WriteGrants {
+            issues: true,
+            pulls: true,
+            source: true,
+            reviews: true,
+            merges: true,
+        },
+        outcomes: true,
+        principal: None,
+        max_messages: 1,
+    };
+    let mut names: Vec<&'static str> = tools_for_options(&full_options)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    names.push(protection::tool().name);
+    names
+}
+
 impl ReadTools for NodeTools {
     fn tools(&self) -> Vec<Tool> {
-        let mut tools = Vec::new();
-        if self.options.issues {
-            tools.extend(issues::tools());
-        }
-        if self.options.pulls {
-            tools.extend(pulls::tools());
-            tools.push(checks::tool());
-        }
-        if self.options.source {
-            tools.extend(source::tools());
-            tools.extend(search::tools());
-            tools.push(candidate::tool());
-        }
-        if self.options.writes.issues {
-            tools.extend(issue_writes::tools());
-        }
-        if self.options.writes.pulls {
-            tools.extend(pull_writes::tools());
-        }
-        if self.options.writes.source {
-            tools.extend(source_writes::tools());
-        }
-        if self.options.writes.reviews {
-            tools.extend(review_writes::tools());
-        }
-        if self.options.writes.merges {
-            tools.extend(merge_writes::tools());
-        }
-        if self.options.outcomes {
-            tools.extend(outcomes::tools());
-        }
-        if self.options.issues || self.options.pulls {
-            tools.push(events::tool());
-        }
-        tools.extend(review::tools(self.options.source, self.options.pulls));
-        if self.options.source {
-            tools.extend(history::tools());
-        }
-        tools
+        tools_for_options(&self.options)
     }
     fn is_mutation(&self, name: &str) -> bool {
         (self.options.writes.issues && issue_writes::is_tool(name))
@@ -372,6 +411,9 @@ fn decimal_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgit_schema::mcp::{McpValidationError, REGISTRY, SupportProfile, validate_server_parity};
+    use std::collections::BTreeSet;
+
     #[test]
     fn exact_integer_and_snapshot_arguments_cannot_be_lossily_coerced() {
         for bad in [
@@ -393,6 +435,45 @@ mod tests {
         assert!(parse_head("alg:01:aa").is_err());
         assert!(parse_head("alg:1:GG").is_err());
         assert!(unhex("../secret", 4096).is_err());
+    }
+
+    #[test]
+    fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
+        let server_names = all_registered_tool_names();
+        assert_eq!(server_names.len(), 33);
+        assert_eq!(validate_server_parity(&server_names, REGISTRY), Ok(()));
+
+        // Also verify 1-for-1 set equality with committed mcp_parity_manifest.json active entries.
+        let active_registry: BTreeSet<&'static str> = REGISTRY
+            .iter()
+            .filter(|entry| entry.support_profile == SupportProfile::Active)
+            .map(|entry| entry.name)
+            .collect();
+        let server_set: BTreeSet<&'static str> = server_names.iter().copied().collect();
+        assert_eq!(server_set, active_registry);
+
+        // Planted drift 1: server tool missing from registry fails.
+        let mut with_extra_server_tool = server_names.clone();
+        with_extra_server_tool.push("frankengit_unregistered_server_tool");
+        assert_eq!(
+            validate_server_parity(&with_extra_server_tool, REGISTRY),
+            Err(McpValidationError::ServerToolMissingFromRegistry {
+                tool: "frankengit_unregistered_server_tool",
+            })
+        );
+
+        // Planted drift 2: registry tool missing from server fails.
+        let without_source_tree: Vec<&'static str> = server_names
+            .iter()
+            .copied()
+            .filter(|&name| name != "frankengit_source_tree")
+            .collect();
+        assert_eq!(
+            validate_server_parity(&without_source_tree, REGISTRY),
+            Err(McpValidationError::RegistryToolMissingFromServer {
+                tool: "frankengit_source_tree",
+            })
+        );
     }
 }
 

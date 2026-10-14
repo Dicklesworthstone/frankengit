@@ -6,7 +6,8 @@ use fgit_schema::mcp::{
     EvidenceReceiptClass, FieldClassification, IdempotencyRequirement,
     InputAuthorityRootRequirement, McpEntityKind, McpField, McpRefusal, McpToolEntry,
     McpValidationError, PaginationRules, PrincipalRequirement, REGISTRY, ReadMutationClass,
-    SupportProfile, admit_call, discover_tools, find_tool, validate_registry, validate_tool_entry,
+    SupportProfile, admit_call, discover_tools, find_tool, validate_registry,
+    validate_server_parity, validate_tool_entry,
 };
 
 const fn valid_prototype() -> McpToolEntry {
@@ -54,7 +55,7 @@ const fn valid_prototype() -> McpToolEntry {
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 28);
+    assert_eq!(REGISTRY.len(), 37);
 
     // Verify strict alphabetical ASCII sort order
     for pair in REGISTRY.windows(2) {
@@ -371,13 +372,49 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 28"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 24"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 37"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 33"));
     assert!(mcp_tools.contents.contains("\"unsupported_count\": 4"));
 
     let mcp_parity = artifacts
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 28"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 37"));
+}
+
+#[test]
+fn test_server_parity_and_planted_drift() {
+    let active_names: Vec<&'static str> = REGISTRY
+        .iter()
+        .filter(|entry| entry.support_profile == SupportProfile::Active)
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(active_names.len(), 33);
+
+    // 1. Consistent twin passes.
+    assert_eq!(validate_server_parity(&active_names, REGISTRY), Ok(()));
+
+    // 2. Planted server tool missing from registry fails.
+    let mut with_extra_server_tool = active_names.clone();
+    with_extra_server_tool.push("frankengit_unregistered_server_tool");
+    assert_eq!(
+        validate_server_parity(&with_extra_server_tool, REGISTRY),
+        Err(McpValidationError::ServerToolMissingFromRegistry {
+            tool: "frankengit_unregistered_server_tool",
+        })
+    );
+
+    // 3. Planted active registry tool missing from server fails.
+    let missing_one_server_tool: Vec<&'static str> = active_names
+        .iter()
+        .copied()
+        .filter(|&name| name != "frankengit_events")
+        .collect();
+    assert_eq!(
+        validate_server_parity(&missing_one_server_tool, REGISTRY),
+        Err(McpValidationError::RegistryToolMissingFromServer {
+            tool: "frankengit_events",
+        })
+    );
 }

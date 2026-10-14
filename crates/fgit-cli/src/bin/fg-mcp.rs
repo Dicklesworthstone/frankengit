@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Operator-scoped read-only Model Context Protocol server.
+//! Operator-scoped Model Context Protocol server with independent read, write, and recovery grants.
 #[path = "../mcp/mod.rs"]
 mod mcp;
 fn main() -> std::process::ExitCode {

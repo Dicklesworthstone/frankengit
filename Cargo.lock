@@ -735,6 +735,7 @@ dependencies = [
  "fgit-forge",
  "fgit-identity",
  "fgit-node",
+ "fgit-schema",
  "fgit-ssh",
  "fgit-types",
 ]

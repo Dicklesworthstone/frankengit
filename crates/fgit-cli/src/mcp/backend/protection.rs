@@ -193,18 +193,29 @@ fn policy_value(policy: &ReviewProtection) -> Value {
     ])
 }
 
+pub(super) fn tool() -> Tool {
+    let mut properties = Object::new();
+    properties.insert(
+        "expected_head".into(),
+        object([
+            ("type", text("string")),
+            ("maxLength", json::number(140)),
+            (
+                "description",
+                text("Optional exact snapshot_token. A moved head refuses, never silently repins."),
+            ),
+        ]),
+    );
+    Tool {
+        name: SHOW,
+        description: "Read complete required-review protection, administrators, version and policy epoch at one authenticated head. Absent policy differs from an installed policy with no protected branches. Read-only; does not grant administration or code access.",
+        schema: mutations::input_schema(properties, &[]),
+    }
+}
+
 impl ReadTools for ProtectionTools {
     fn tools(&self) -> Vec<Tool> {
-        let mut properties = Object::new();
-        properties.insert("expected_head".into(), object([
-            ("type", text("string")), ("maxLength", json::number(140)),
-            ("description", text("Optional exact snapshot_token. A moved head refuses, never silently repins.")),
-        ]));
-        vec![Tool {
-            name: SHOW,
-            description: "Read complete required-review protection, administrators, version and policy epoch at one authenticated head. Absent policy differs from an installed policy with no protected branches. Read-only; does not grant administration or code access.",
-            schema: mutations::input_schema(properties, &[]),
-        }]
+        vec![tool()]
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
         if name != SHOW {

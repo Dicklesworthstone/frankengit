@@ -72,6 +72,12 @@ pub enum McpValidationError {
         tool: &'static str,
         field: &'static str,
     },
+    /// Server exposes a tool that is absent from the active MCP registry.
+    ServerToolMissingFromRegistry { tool: &'static str },
+    /// Active MCP registry entry is not exposed by the MCP server catalog.
+    RegistryToolMissingFromServer { tool: &'static str },
+    /// Server catalog registers the same tool name more than once.
+    DuplicateServerTool { tool: &'static str },
 }
 
 impl fmt::Display for McpValidationError {
@@ -155,6 +161,24 @@ impl fmt::Display for McpValidationError {
                 write!(
                     formatter,
                     "tool '{tool}' refuses: string field '{field}' must declare max_bytes bound"
+                )
+            }
+            Self::ServerToolMissingFromRegistry { tool } => {
+                write!(
+                    formatter,
+                    "MCP server parity drift: server tool '{tool}' is missing from active registry"
+                )
+            }
+            Self::RegistryToolMissingFromServer { tool } => {
+                write!(
+                    formatter,
+                    "MCP server parity drift: active registry tool '{tool}' is missing from server catalog"
+                )
+            }
+            Self::DuplicateServerTool { tool } => {
+                write!(
+                    formatter,
+                    "MCP server parity drift: server catalog registers '{tool}' more than once"
                 )
             }
         }
@@ -417,6 +441,40 @@ pub fn validate_registry(tools: &[McpToolEntry]) -> Result<(), McpValidationErro
             }
         }
         prev = Some(entry);
+    }
+    Ok(())
+}
+
+/// Validates 1-for-1 parity between the active tools in the MCP schema registry
+/// and the tools registered by the `fg-mcp` server catalog.
+pub fn validate_server_parity(
+    server_tools: &[&'static str],
+    registry: &[McpToolEntry],
+) -> Result<(), McpValidationError> {
+    validate_registry(registry)?;
+    let mut server_set = std::collections::BTreeSet::new();
+    for &tool in server_tools {
+        if !server_set.insert(tool) {
+            return Err(McpValidationError::DuplicateServerTool { tool });
+        }
+    }
+    let active_registry_set: std::collections::BTreeSet<&'static str> = registry
+        .iter()
+        .filter(|entry| entry.support_profile == SupportProfile::Active)
+        .map(|entry| entry.name)
+        .collect();
+
+    for &server_tool in &server_set {
+        if !active_registry_set.contains(server_tool) {
+            return Err(McpValidationError::ServerToolMissingFromRegistry { tool: server_tool });
+        }
+    }
+    for &registry_tool in &active_registry_set {
+        if !server_set.contains(registry_tool) {
+            return Err(McpValidationError::RegistryToolMissingFromServer {
+                tool: registry_tool,
+            });
+        }
     }
     Ok(())
 }
