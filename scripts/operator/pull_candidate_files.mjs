@@ -2,7 +2,7 @@
 // These files retain read observations, never approval or repository authority.
 import { constants } from 'node:fs';
 import { open, lstat, realpath, mkdir, opendir, link, unlink } from 'node:fs/promises';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { randomBytes } from 'node:crypto';
 import { validateCandidateCapture, candidateCanonical, candidateHash } from './pull_candidate_capture.mjs';
@@ -77,6 +77,15 @@ async function absent(path, check) {
   check(); return absolute;
 }
 export async function candidateDestination(path, options = {}) { return absent(path, candidateClock(options)); }
+// Package inventories are closed. Placing any output beneath the source package
+// would invalidate its next offline inspection, even if that output is valid.
+// Call with the canonical destination and package paths from the custody checks.
+export function separateCandidateDestination(destination, source) {
+  const target = resolve(destination), root = resolve(source);
+  if (target === root || target.startsWith(root.endsWith(sep) ? root : root + sep)) candidateFail('candidate_output_inside_package');
+  return target;
+}
+
 async function syncDirectory(path) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
   try { await file.sync(); } finally { await file.close(); }

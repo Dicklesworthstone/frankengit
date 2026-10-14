@@ -84,6 +84,8 @@ export async function resolutionPeer(t, options = {}) {
       const parts = []; let size = 0;
       for await (const part of req) { size += part.length; assert.ok(size < 20 * 1024 * 1024); parts.push(part); }
       const r = { url: req.url, method: req.method, headers: req.headers, body: Buffer.concat(parts) }; p.requests.push(r);
+      // Optional native-schema publication peer for complete operator integration.
+      if (options.commandHandle && await options.commandHandle(r, res, p)) return;
       assert.equal(r.headers.authorization, `Bearer ${TOKEN}`); assert.equal(r.headers['idempotency-key'], undefined);
       if (handle && await handle(r, res, p)) return;
       const path = new URL(r.url, 'http://peer.invalid').pathname;
