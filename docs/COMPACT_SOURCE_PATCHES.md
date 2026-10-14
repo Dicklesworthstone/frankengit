@@ -97,3 +97,7 @@ request before regeneration; changing local checksums cannot substitute a
 profile. Omitting the field preserves existing capture bytes and defaults.
 Add `byte_profile: "binary-safe-v1"` independently when selecting NUL-bearing
 edits. Compact encoding by itself does not enable binary input.
+
+For distant changes separated by a large unchanged middle, explicitly select
+`bounded-line-hunks-v1`; see [MULTI_HUNK_SOURCE_PATCHES.md](MULTI_HUNK_SOURCE_PATCHES.md).
+The edge-trim profile retains its earlier bytes and one-hunk behavior.

@@ -3,7 +3,7 @@
 // this adapter neither implements a second Git engine nor publishes anything.
 import { createHash, webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
-import { buildPatch, EDIT_LIMITS, pathBytes, COMPACT_PATCH_PROFILE } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
+import { buildPatch, EDIT_LIMITS, pathBytes, COMPACT_PATCH_PROFILE, MULTI_HUNK_PATCH_PROFILE } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
 import { verifyPathAbsence, deriveEditedTree } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 
@@ -16,7 +16,7 @@ export function sourceByteProfile(value) {
   return value;
 }
 export function sourcePatchProfile(value) {
-  if (value !== COMPACT_PATCH_PROFILE) fail('source_changes_patch_profile');
+  if (![COMPACT_PATCH_PROFILE, MULTI_HUNK_PATCH_PROFILE].includes(value)) fail('source_changes_patch_profile');
   return value;
 }
 export const CHANGES_INPUT_BYTES = 10 * 1024 * 1024;

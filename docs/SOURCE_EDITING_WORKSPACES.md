@@ -193,10 +193,11 @@ close FG-026 or the broader agent-execution beads.
 ### Explicit byte and patch profiles
 
 The path-selection file may include `byte_profile: "binary-safe-v1"` and/or
-`patch_profile: "trim-common-lines-v1"`. Both are closed, independent choices,
+`patch_profile: "trim-common-lines-v1"` / `"bounded-line-hunks-v1"`. Both are closed, independent choices,
 retained in the capture and checked against its saved change request on reopen.
 Omit both for unchanged text/full-file defaults. A one-line change in a large
 file can use compact encoding without raising the patch-byte ceiling; changed
 binary files require separate binary consent. The standard authoring consumer
 requires the exact draft hash produced for those choices. See
-`BINARY_SOURCE_AUTHORING.md` and `COMPACT_SOURCE_PATCHES.md`.
+`BINARY_SOURCE_AUTHORING.md`, `COMPACT_SOURCE_PATCHES.md`, and
+`MULTI_HUNK_SOURCE_PATCHES.md`.

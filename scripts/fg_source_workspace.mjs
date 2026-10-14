@@ -24,7 +24,8 @@ is run here. Status checks the original inputs and reads only originally selecte
 paths. It does not discover other local files or attest an atomic filesystem view.
 Capture requires {paths_hex:[...]} with every intended local path. Include
 byte_profile:"binary-safe-v1" in that selection to capture arbitrary file bytes.
-Use patch_profile:"trim-common-lines-v1" for compact exact patches.
+Use patch_profile:"trim-common-lines-v1" for edge trimming, or
+patch_profile:"bounded-line-hunks-v1" to separate distant edits.
 The default remains NUL-free with full-file patches. The explicitly selected profile is bound into
 the captured changes and reviewed draft. It records
 only those files as exact replacements, deletes or proved-absent creations; no

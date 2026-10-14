@@ -16,4 +16,6 @@ node --test scripts/tests/source_changes.test.mjs \
   scripts/tests/source_relocation.test.mjs \
   scripts/tests/source_verified_stage.test.mjs \
   scripts/tests/source_binary_changes.test.mjs \
-  scripts/tests/source_compact_patch.test.mjs
+  scripts/tests/source_compact_patch.test.mjs \
+  scripts/tests/source_line_hunks.test.mjs \
+  scripts/tests/source_line_hunks_pipeline.test.mjs
