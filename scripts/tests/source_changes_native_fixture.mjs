@@ -56,6 +56,14 @@ export async function nativePeer(format = 'sha1', options = {}) {
         : treeEntries(git(['write-tree']).toString().trim()).get(hexPath('src/main.rs')).oid;
       git(['update-index', '--add', '--cacheinfo', `${peer.fault === 'wrong-new-mode' ? '100755' : '100644'},${id},src/main.rs`]);
     }
+    // Planted malicious peer: the real candidate contains this additional file,
+    // but both advertised effect lists omit it. The commit/body/bundle remain
+    // mutually consistent, exercising a whole-root check rather than a typo.
+    const hidden = hexPath('unreported/payload');
+    if (peer.fault === 'unreported-addition') {
+      const id = git(['hash-object', '-w', '--stdin'], Buffer.from('unreported change\n')).toString().trim();
+      git(['update-index', '--add', '--cacheinfo', `100644,${id},unreported/payload`]);
+    }
     const tree = git(['write-tree']).toString().trim(), m = Object.fromEntries(['author', 'committer', 'timestamp', 'message'].map(k => [k, command.get(k)]));
     const body = Buffer.from(`tree ${tree}\nparent ${fixture.commit}\nauthor ${m.author} ${m.timestamp} +0000\ncommitter ${m.committer} ${m.timestamp} +0000\n\n${m.message}`);
     const commit = git(['hash-object', '-w', '-t', 'commit', '--stdin'], body).toString().trim();
@@ -63,6 +71,7 @@ export async function nativePeer(format = 'sha1', options = {}) {
     const bundle = git(['bundle', 'create', '-', '--all']);
     const before = treeEntries(fixture.tree), after = treeEntries(tree), entries = [];
     for (const path_hex of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+      if (peer.fault === 'unreported-addition' && path_hex === hidden) continue;
       const old = before.get(path_hex) ?? null, next = after.get(path_hex) ?? null;
       if (old?.oid === next?.oid && old?.mode === next?.mode) continue;
       entries.push({ path_hex, kind: old === null ? 'added' : next === null ? 'deleted' : old.mode !== next.mode ? 'mode_changed' : 'modified',

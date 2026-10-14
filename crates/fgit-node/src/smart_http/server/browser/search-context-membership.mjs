@@ -184,30 +184,123 @@ export async function verifyPathAbsence(proof, expected, paths, crypto = globalT
     check(); if (targets.has(row.parts.slice(0, n).join('2f'))) refuse('absent file/ancestor collision.');
   }
   const verified = await verifiedMembership(proof, expected, crypto, check, input); check();
+  const trees = indexedTrees(verified, check);
+  const absent = selected.map(({ pathHex, parts }) => {
+    const found = locateTarget(trees, parts, check);
+    if (found.entry !== null) refuse('requested path already exists.');
+    return { pathHex, absentPrefixHex: found.prefix, parentPathHex: found.parentPathHex, parentTree: found.parentTree };
+  });
+  check(); return { profile: ABSENCE_PROFILE, objectFormat: verified.format,
+    commit: verified.receipt.commit, rootTree: verified.receipt.rootTree,
+    pathAbsenceVerified: true, paths: absent, authorityVerified: false,
+    freshnessVerified: false, publicationAuthorized: false };
+}
+function indexedTrees(verified, check) {
   const trees = new Map();
   for (const [pathHex, tree] of verified.trees) {
     const entries = new Map();
     for (const entry of tree.rows) { check(); entries.set(entry.name_hex, entry); }
     trees.set(pathHex, { id: tree.id, entries });
   }
-  const absent = selected.map(({ pathHex, parts }) => {
-    let parentPathHex = null;
-    for (let at = 0; at < parts.length; at++) {
-      check(); const tree = trees.get(parentPathHex);
-      if (!tree) refuse('existing parent tree is not proved.');
-      const entry = tree.entries.get(parts[at]);
-      const prefix = parentPathHex === null ? parts[at] : `${parentPathHex}2f${parts[at]}`;
-      if (!entry) return { pathHex, absentPrefixHex: prefix, parentPathHex, parentTree: tree.id };
-      if (at === parts.length - 1) refuse('requested path already exists.');
-      if (entry.kind !== 'directory') refuse('existing ancestor is not a directory.');
-      parentPathHex = prefix;
-    }
-    return refuse('incomplete absence traversal.');
+  return trees;
+}
+// This traversal is shared by positive/negative edit preconditions. A missing
+// entry is distinct from missing proof of an existing directory's contents.
+function locateTarget(trees, parts, check) {
+  let parentPathHex = null;
+  for (let at = 0; at < parts.length; at++) {
+    check(); const tree = trees.get(parentPathHex);
+    if (!tree) refuse('existing parent tree is not proved.');
+    const entry = tree.entries.get(parts[at]) ?? null;
+    const prefix = parentPathHex === null ? parts[at] : `${parentPathHex}2f${parts[at]}`;
+    if (entry === null || at === parts.length - 1) return { entry, prefix, parentPathHex, parentTree: tree.id };
+    if (entry.kind !== 'directory') refuse('existing ancestor is not a directory.');
+    parentPathHex = prefix;
+  }
+  return refuse('incomplete target traversal.');
+}
+
+// A deterministic commitment to exactly the supplied regular-file effects.
+// Reuse the same verified basis, entry codec, Git ordering and digest machinery;
+// do not parse a patch, read an unrelated subtree, or accept a server diff as truth.
+export const TREE_TRANSITION_PROFILE = 'frankengit-source-tree-transition-v1';
+export const TREE_TRANSITION_LIMITS = Object.freeze({ maxTrees: 2048, maxEntries: 32768, maxTreeBytes: 8 * 1024 * 1024 });
+export async function deriveEditedTree(proof, expected, effects, crypto = globalThis.crypto, check = () => {}, input = {}) {
+  host(crypto, check); keys(input, ['membership', 'output']);
+  const metadata = membershipLimits(input.membership), output = input.output ?? {};
+  keys(output, Object.keys(TREE_TRANSITION_LIMITS));
+  const limits = Object.fromEntries(Object.entries(TREE_TRANSITION_LIMITS).map(([name, max]) =>
+    [name, integer(output[name] ?? max, name, 1, max)]));
+  const format = expected?.format;
+  if (!Array.isArray(effects) || !effects.length || effects.length > 32) refuse('select 1 through 32 exact file effects.');
+  const side = raw => {
+    if (raw === null) return null;
+    exact(raw, ['blob', 'kind']);
+    if (!['file', 'executable'].includes(raw.kind)) refuse('tree edits support only regular files.');
+    return { blob: oid(raw.blob, format), kind: raw.kind };
+  };
+  let previous = '', pathBytes = 0;
+  const owned = effects.map(raw => {
+    check(); exact(raw, ['pathHex', 'before', 'after']); const parts = path(raw.pathHex);
+    if (raw.pathHex <= previous || (pathBytes += raw.pathHex.length / 2) > 32768) refuse('effect path order, duplicates or byte limit.');
+    previous = raw.pathHex; const before = side(raw.before), after = side(raw.after);
+    if (before === null && after === null || before?.blob === after?.blob && before?.kind === after?.kind) refuse('tree effect has no change.');
+    return { pathHex: raw.pathHex, parts, before, after };
   });
-  check(); return { profile: ABSENCE_PROFILE, objectFormat: verified.format,
-    commit: verified.receipt.commit, rootTree: verified.receipt.rootTree,
-    pathAbsenceVerified: true, paths: absent, authorityVerified: false,
-    freshnessVerified: false, publicationAuthorized: false };
+  const targets = new Set(owned.map(row => row.pathHex)), dirty = new Map([[null, []]]);
+  for (const row of owned) for (let n = 1; n < row.parts.length; n++) {
+    check(); const parts = row.parts.slice(0, n), prefix = parts.join('2f');
+    if (targets.has(prefix)) refuse('effect file/ancestor collision.');
+    dirty.set(prefix, parts);
+    if (dirty.size > limits.maxTrees) refuse('rebuilt tree count exceeds its budget.');
+  }
+  // All effect primitives and bounds are owned before the basis's first await.
+  const verified = await verifiedMembership(proof, expected, crypto, check, metadata); check();
+  const original = indexedTrees(verified, check), selected = new Map(verified.receipt.files.map(row => [row.pathHex, row]));
+  for (const row of owned) {
+    check(); const found = locateTarget(original, row.parts, check);
+    if (row.before === null) {
+      if (found.entry !== null) refuse('creation target already exists.');
+    } else {
+      const file = selected.get(row.pathHex);
+      if (!file || file.blob !== row.before.blob || file.kind !== row.before.kind ||
+          !found.entry || found.entry.object_id !== row.before.blob || found.entry.kind !== row.before.kind) refuse('before effect is not the selected committed file.');
+    }
+  }
+  // Unknown dirty parents can only be new directories under a proved absent
+  // prefix: every creation traversed its ORIGINAL basis above, before any edit.
+  const levels = new Map([...dirty.keys()].map(pathHex => [pathHex, new Map(original.get(pathHex)?.entries ?? [])]));
+  for (const row of owned) {
+    check(); const parent = row.parts.length === 1 ? null : row.parts.slice(0, -1).join('2f');
+    const entries = levels.get(parent), name = row.parts.at(-1);
+    if (row.after === null) entries.delete(name);
+    else entries.set(name, entry({ name_hex: name, object_id: row.after.blob, kind: row.after.kind }, format));
+  }
+  // Rebuild bottom-up once per affected directory, preserving each untouched
+  // child OID verbatim. Empty TOUCHED directories disappear; untouched empty
+  // subtrees stay referenced. The root always has a Git tree, including empty.
+  const order = [...dirty].sort(([a, pa], [b, pb]) => pb.length - pa.length || (a === b ? 0 : a < b ? -1 : 1));
+  const rebuilt = []; let entries = 0, treeBytes = 0, afterTree = null;
+  for (const [pathHex, parts] of order) {
+    check(); const rows = [...levels.get(pathHex).values()];
+    const size = rows.reduce((n, row) => n + MODES[row.kind].length + 2 + row.bytes.length + row.object_id.length / 2, 0);
+    entries += rows.length; treeBytes += size;
+    if (entries > limits.maxEntries || treeBytes > limits.maxTreeBytes) refuse('rebuilt tree bytes or entries exceed their budget.');
+    const id = rows.length === 0 && pathHex !== null ? null : await digest('tree', encodeTree(rows, check), format, crypto, check);
+    check(); rebuilt.push({ pathHex, beforeTree: original.get(pathHex)?.id ?? null, afterTree: id, entries: rows.length, treeBytes: size });
+    if (pathHex === null) afterTree = id;
+    else {
+      const parent = parts.length === 1 ? null : parts.slice(0, -1).join('2f'), name = parts.at(-1), level = levels.get(parent);
+      if (level.has(name) && level.get(name).kind !== 'directory') refuse('rebuilt directory collides with a file.');
+      if (id === null) level.delete(name);
+      else level.set(name, entry({ name_hex: name, kind: 'directory', object_id: id }, format));
+    }
+  }
+  check(); return { profile: TREE_TRANSITION_PROFILE, objectFormat: format, commit: verified.receipt.commit,
+    beforeTree: verified.receipt.rootTree, afterTree, rewrittenTrees: rebuilt,
+    treeCount: rebuilt.length, entryCount: entries, treeBytes,
+    exactFileEffectsBound: true, unrelatedEntriesPreserved: true,
+    objectClosureVerified: false, authorityVerified: false, freshnessVerified: false, publicationAuthorized: false };
 }
 
 // Obtain only the commit and needed parent-tree pages through the existing

@@ -1,7 +1,8 @@
 // Bind an independently regenerated edit to native preparation and inspection.
 // Native Rust still owns patch application, complete candidate-object validation,
 // authorization and publication. Matching a report is not an independent proof
-// of the candidate's whole tree or pack closure.
+// of pack closure. Independently deriving the expected tree root additionally
+// excludes unreported changes under the native Git commitment.
 import { buildSourceChanges, canonical, sha256, fail } from './source_changes.mjs';
 import { editInput, captureSourceEdit, validateSourceEdit, oid } from './source_edit_candidate.mjs';
 import { clock, fields } from './source_edit_wire.mjs';
@@ -40,6 +41,9 @@ function matches(draft, candidate, pin) {
       fail('source_changes_candidate_effects');
     }
   }
+  if (!draft.tree || draft.tree.beforeTree !== m.root_tree ||
+      oid(c.preparation.root_tree, format) !== draft.tree.afterTree ||
+      oid(c.inspection.comparison.after_tree, format) !== draft.tree.afterTree) fail('source_changes_candidate_tree');
   return { type: 'source_change_candidate_binding', draft_sha256: pin,
     package_sha256: m.package_sha256, patch_sha256: m.patch_sha256,
     source_commit: m.source_commit, candidate_commit: candidate.candidate_commit,
@@ -47,6 +51,8 @@ function matches(draft, candidate, pin) {
     ...(m.creation_preconditions ? { created_path_count: m.creation_preconditions.paths.length,
       creation_absence_independently_verified: true } : {}),
     intended_effect_reports_matched: true, before_membership_independently_verified: true,
+    expected_tree: draft.tree.afterTree, tree_transition_profile: draft.tree.profile,
+    candidate_root_matches_exact_effects: true, unrelated_subtree_commitments_preserved: true,
     native_bundle_validation_observed: true, candidate_tree_independently_verified: false,
     bundle_objects_independently_verified: false, publication_authorized: false };
 }

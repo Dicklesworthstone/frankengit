@@ -4,7 +4,7 @@
 import { createHash, webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
 import { buildPatch, EDIT_LIMITS, pathBytes } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
-import { verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
+import { verifyPathAbsence, deriveEditedTree } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 
 export { SOURCE_PACKAGE_BYTES };
@@ -217,5 +217,12 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   // Preserve byte-identical v1 drafts for existing-file operations. A creation
   // draft additionally commits to its concrete, reproducible absence witnesses.
   if (creationPreconditions !== null) manifest.creation_preconditions = creationPreconditions;
-  check(); return { bytes, manifest };
+  // The source package's complete parent trees also determine the WHOLE new
+  // root. Keep this derived evidence outside the reviewed v1 manifest so old
+  // draft bytes remain stable; preparation and offline replay recompute it.
+  const fileSide = (blob, mode) => blob === null ? null : { blob, kind: mode === 0o100755 ? 'executable' : 'file' };
+  const tree = await deriveEditedTree(loaded.package.membership, selected, patch.paths.map(effect => ({
+    pathHex: effect.path_hex, before: fileSide(effect.old_blob, effect.old_mode), after: fileSide(effect.new_blob, effect.new_mode),
+  })), webcrypto, check);
+  check(); return { bytes, manifest, tree };
 }

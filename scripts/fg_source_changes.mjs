@@ -22,7 +22,8 @@ Every command accepts --timeout-ms 1..300000 (default 30000).
 Draft creates private patch.diff and manifest.json without network work. Review
 both files and retain the returned manifest hash before preparation. Preparation
 regenerates the exact draft before I/O, invokes native prepare/inspect, and checks
-all reported old/new blob identities and modes against locally intended effects.
+all reported old/new blob identities, modes and the candidate's entire root
+commitment against locally intended effects. Untouched subtree IDs are preserved.
 Native selection uses the existing source-edit schema, with only EFFECT paths;
 explicit no-op paths remain in the draft but are not native change targets.
 Inspect-candidate regenerates and checks offline; it accepts no credential.
@@ -75,7 +76,8 @@ async function saveDraft(path, draft, check) {
   if (bytes.length > 256 * 1024) fail('source_changes_manifest_limit');
   const receipt = { type: 'source_change_draft_saved', directory: path, manifest_sha256: sha256(bytes),
     patch_sha256: draft.manifest.patch_sha256, source_commit: draft.manifest.source_commit,
-    object_format: draft.manifest.object_format, effect_count: draft.manifest.effects.length,
+    object_format: draft.manifest.object_format, expected_tree: draft.tree.afterTree,
+    tree_transition_profile: draft.tree.profile, effect_count: draft.manifest.effects.length,
     no_op_count: draft.manifest.no_op_paths_hex.length, remote_mutation_attempted: false,
     ...(draft.manifest.creation_preconditions ? { created_path_count: draft.manifest.creation_preconditions.paths.length } : {}) };
   await absent(path); check(); await mkdir(path, { mode: 0o700 });

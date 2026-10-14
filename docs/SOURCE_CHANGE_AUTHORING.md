@@ -6,8 +6,9 @@ for an operator or agent to construct a unified patch by hand.
 
 The local authoring kernel imports the existing complete source-package verifier
 and exact-patch encoder. Native Rust still owns patch application, candidate
-object/graph validation, authorization, admission, and publication. No new Git
-engine, source executor, authority store, or publication route is introduced.
+object/graph validation, authorization, admission, and publication. The client also derives the exact expected root tree from verified parent trees
+and locally constructed effects. No new Git engine, source executor, authority
+store, or publication route is introduced.
 
 ## Before starting
 
@@ -144,7 +145,9 @@ This command makes no network request and requires no token. It creates
 the returned `manifest_sha256`. The manifest binds the original package hash,
 normalized expected selection and edit hashes, verified source commit/root tree,
 exact patch hash/size, old/new blob IDs and modes, explicit no-op paths, and any
-commit-bound creation preconditions.
+commit-bound creation preconditions. The returned `expected_tree` is independently
+recomputed from those inputs; the v1 manifest bytes and reviewed hash remain
+unchanged by this additional verification.
 Neither the manifest nor patch grants mutation authority.
 
 A reviewed draft is not silently changed to accommodate a moved branch, a new
@@ -200,18 +203,54 @@ roots. Plain HTTP is restricted to canonical numeric loopback. There are no
 redirects, retries, ambient credentials, or TLS-verification bypasses.
 
 Both native reports must agree with all intended old/new blob IDs and modes;
-the reported before-tree must equal the independently verified root. A
-self-consistent but different candidate is refused, not saved as a success.
+the reported before-tree must equal the independently verified root. The client
+also rebuilds the affected parent trees locally and requires the candidate
+commit's root to match the resulting **whole-tree commitment**. A self-consistent
+report cannot hide an extra file, an omitted deletion or a changed unrelated
+subtree behind the requested file list; a different root is refused before the
+candidate output directory is created.
 
 The output is the **standard** source candidate directory: `capture.json`,
 `candidate.bundle`, and `manifest.json`. The result includes the original draft
 pin and an explicit intended-effect report binding. No credential is persisted.
 
-**Limit:** checking native reports against intended effects does not independently
-prove the entire candidate tree or pack closure. Those checks remain the native
-engine's responsibility. The returned binding explicitly marks independent
-candidate-tree and bundle-object verification false. It does not prove that
-unreported tree changes are absent against a malicious native server.
+### Independent whole-root commitment
+
+`deriveEditedTree` uses the existing membership verifier, tree-entry codec, Git
+ordering and native digest implementation. It verifies the original committed
+basis, checks exact before-image identities/modes and creation absence, then
+rebuilds only affected parents bottom-up. Untouched entries and subtree IDs are
+preserved byte-for-byte by identity rather than reread or replaced. Identical
+subtrees at different paths keep separate overlays. Touched directories that
+become empty are removed; untouched explicit empty subtrees remain referenced,
+and an empty root still has the native empty-tree identity. This follows the
+native `fgit-treefs` exporter boundary; it is not another patch application engine.
+
+The resulting `frankengit-source-tree-transition-v1` receipt includes the base
+commit, before/after root IDs, ordered rewritten-directory commitments and bounded
+work counters. It is derived evidence, never repository authority. The authoring
+library returns it as `tree`; the CLI prints `expected_tree` for the offline draft
+and requires that value again during preparation and saved-candidate inspection.
+No cached success flag supplies the root and no additional source request runs.
+Existing v1 draft manifests, patch bytes, candidate files and original recovery
+keys remain unchanged. The exact original source proof and locally constructed
+file effects determine the derived root without a new consent format.
+
+A successful candidate binding reports `candidate_root_matches_exact_effects`,
+`expected_tree`, `tree_transition_profile` and
+`unrelated_subtree_commitments_preserved`. The existing native commit-body check
+binds that root to the candidate ID, parent and explicit metadata. A coherent
+candidate with an unreported change therefore fails the root comparison even
+when its reported old/new blobs and modes are all correct.
+
+**Limit:** a native hash commitment is not independent verification of every
+object body in the candidate pack or its transitive closure. Untouched subtrees
+are deliberately not expanded. Independent full-tree/object and bundle-object
+flags remain false; the new flag describes the exact root commitment, not a
+pack traversal, collision-proof stronger hash, signature, authorship or authority
+proof. Native Rust still verifies actual pack/object admission and publication.
+These observations do not establish that a dishonest authority published the
+requested root; publication and outcome recovery retain their own trust boundary.
 
 ## Re-check and publish separately
 
@@ -241,7 +280,13 @@ The defaults are hard ceilings: 32 edit paths, 1 MiB per edited before/after fil
 patch input, and a 10 MiB changes JSON envelope. The existing package remains
 bounded to 32 MiB encoded and 8 MiB full logical source. Absence verification
 shares the membership profile: at most 128 complete trees, 16,384 entries, 4 MiB
-of tree bytes, 32 creation targets and 32 KiB of target path bytes. An encoded patch may hit
+of tree bytes, 32 creation targets and 32 KiB of target path bytes. Root derivation
+separately bounds output work to 2,048 affected directories, 32,768 encoded entries
+and 8 MiB of tree bodies, while retaining the original proof limits. The 32-file,
+64-component creation maximum fits without expanding unrelated subtrees. The
+shared `deriveEditedTree` API accepts narrower `membership` and `output` bounds;
+none can raise these ceilings. Output encoding/hash work is checked before each
+new tree body is allocated, and cancellation returns no partial root. An encoded patch may hit
 its limit before either individual file does. The library accepts narrower edit
 limits; the CLI uses the fixed profile. `--timeout-ms` is 1–300,000 (30,000 default)
 across input reads, local verification, and any native preparation/inspection.
