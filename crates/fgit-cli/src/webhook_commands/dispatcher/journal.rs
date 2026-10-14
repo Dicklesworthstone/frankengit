@@ -33,7 +33,11 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 }
 
 pub(super) fn unhex(text: &str) -> Result<[u8; 32], String> {
-    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err("invalid dispatch journal digest".into());
     }
     let mut bytes = [0; 32];
@@ -45,12 +49,15 @@ pub(super) fn unhex(text: &str) -> Result<[u8; 32], String> {
 }
 
 fn decimal(text: &str) -> Result<u64, String> {
-    if text.is_empty() || text.len() > 20 || !text.bytes().all(|b| b.is_ascii_digit())
+    if text.is_empty()
+        || text.len() > 20
+        || !text.bytes().all(|b| b.is_ascii_digit())
         || (text.len() > 1 && text.starts_with('0'))
     {
         return Err("invalid dispatch journal integer".into());
     }
-    text.parse().map_err(|_| "dispatch journal integer overflow".into())
+    text.parse()
+        .map_err(|_| "dispatch journal integer overflow".into())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,8 +112,16 @@ pub(super) enum Plan {
 impl Plan {
     pub(super) const fn outcome_unknown(self) -> bool {
         match self {
-            Self::Due { outcome_unknown, .. } | Self::Sleeping { outcome_unknown, .. }
-            | Self::Settled { outcome_unknown, .. } | Self::Exhausted { outcome_unknown } => outcome_unknown,
+            Self::Due {
+                outcome_unknown, ..
+            }
+            | Self::Sleeping {
+                outcome_unknown, ..
+            }
+            | Self::Settled {
+                outcome_unknown, ..
+            }
+            | Self::Exhausted { outcome_unknown } => outcome_unknown,
         }
     }
 }
@@ -136,22 +151,38 @@ impl Journal {
     pub(super) fn plan(&self, key: AsciiSlug, payload: [u8; 32], now: u64) -> Result<Plan, String> {
         self.live(now)?;
         let Some(entry) = self.entries.get(&key) else {
-            return Ok(Plan::Due { attempt: 1, outcome_unknown: false });
+            return Ok(Plan::Due {
+                attempt: 1,
+                outcome_unknown: false,
+            });
         };
         if payload != entry.payload {
-            return Err("dispatch delivery key was reused with a different payload commitment".into());
+            return Err(
+                "dispatch delivery key was reused with a different payload commitment".into(),
+            );
         }
         let unknown = entry.uncertain || entry.state == State::InFlight;
         if matches!(entry.state, State::Accepted | State::Rejected) {
-            return Ok(Plan::Settled { state: entry.state, outcome_unknown: unknown && entry.state != State::Accepted });
+            return Ok(Plan::Settled {
+                state: entry.state,
+                outcome_unknown: unknown && entry.state != State::Accepted,
+            });
         }
         if entry.attempt >= self.max_attempts {
-            return Ok(Plan::Exhausted { outcome_unknown: unknown });
+            return Ok(Plan::Exhausted {
+                outcome_unknown: unknown,
+            });
         }
         if now < entry.next_at {
-            return Ok(Plan::Sleeping { until: entry.next_at, outcome_unknown: unknown });
+            return Ok(Plan::Sleeping {
+                until: entry.next_at,
+                outcome_unknown: unknown,
+            });
         }
-        Ok(Plan::Due { attempt: entry.attempt + 1, outcome_unknown: unknown })
+        Ok(Plan::Due {
+            attempt: entry.attempt + 1,
+            outcome_unknown: unknown,
+        })
     }
 
     pub(super) fn due_at(&self, key: AsciiSlug) -> u64 {
@@ -160,19 +191,34 @@ impl Journal {
 
     /// Returns only after the reservation is synced. Failed sync poisons this
     /// owner; it may not dispatch or reinterpret an uncertain append as absent.
-    pub(super) fn reserve(&mut self, key: AsciiSlug, payload: [u8; 32], now: u64, retry_at: u64) -> Result<u32, String> {
+    pub(super) fn reserve(
+        &mut self,
+        key: AsciiSlug,
+        payload: [u8; 32],
+        now: u64,
+        retry_at: u64,
+    ) -> Result<u32, String> {
         self.reserve_with_limit(key, payload, now, retry_at, MAX_BYTES)
     }
 
     // The production ceiling is fixed. A smaller ceiling exercises the exact
     // compaction path in tests without thousands of filesystem sync calls.
-    fn reserve_with_limit(&mut self, key: AsciiSlug, payload: [u8; 32], now: u64,
-        retry_at: u64, maximum_bytes: u64) -> Result<u32, String>
-    {
+    fn reserve_with_limit(
+        &mut self,
+        key: AsciiSlug,
+        payload: [u8; 32],
+        now: u64,
+        retry_at: u64,
+        maximum_bytes: u64,
+    ) -> Result<u32, String> {
         if maximum_bytes > MAX_BYTES || maximum_bytes < (2 * MAX_RECORD) as u64 {
             return Err("invalid dispatch journal capacity".into());
         }
-        let Plan::Due { attempt, outcome_unknown } = self.plan(key, payload, now)? else {
+        let Plan::Due {
+            attempt,
+            outcome_unknown,
+        } = self.plan(key, payload, now)?
+        else {
             return Err("dispatch attempt is settled, exhausted or not yet due".into());
         };
         // Compact BEFORE reservation, retaining every acknowledgement and
@@ -183,37 +229,75 @@ impl Journal {
         if !fits(self.bytes, 2 * MAX_RECORD, maximum_bytes) {
             return Err("dispatch checkpoint and next attempt exceed the byte budget".into());
         }
-        let entry = Entry { payload, attempt, observed_at: now, next_at: retry_at,
-            state: State::InFlight, uncertain: outcome_unknown, evidence: [0; 32] };
+        let entry = Entry {
+            payload,
+            attempt,
+            observed_at: now,
+            next_at: retry_at,
+            state: State::InFlight,
+            uncertain: outcome_unknown,
+            evidence: [0; 32],
+        };
         self.append(key, entry)?;
         Ok(attempt)
     }
 
-    pub(super) fn observe(&mut self, key: AsciiSlug, state: State, now: u64, retry_at: u64, evidence: &[u8]) -> Result<(), String> {
+    pub(super) fn observe(
+        &mut self,
+        key: AsciiSlug,
+        state: State,
+        now: u64,
+        retry_at: u64,
+        evidence: &[u8],
+    ) -> Result<(), String> {
         self.live(now)?;
-        if state == State::InFlight { return Err("observation cannot reserve another dispatch".into()); }
-        let previous = *self.entries.get(&key).ok_or("dispatch has no durable reservation")?;
+        if state == State::InFlight {
+            return Err("observation cannot reserve another dispatch".into());
+        }
+        let previous = *self
+            .entries
+            .get(&key)
+            .ok_or("dispatch has no durable reservation")?;
         let entry = Entry {
-            state, observed_at: now, next_at: retry_at,
+            state,
+            observed_at: now,
+            next_at: retry_at,
             uncertain: previous.uncertain || state == State::Unknown,
-            evidence: sha256_digest(evidence), ..previous
+            evidence: sha256_digest(evidence),
+            ..previous
         };
         self.append(key, entry)
     }
 
     fn live(&self, now: u64) -> Result<(), String> {
-        if self.poisoned { return Err("dispatch journal durability unknown; this owner cannot send again".into()); }
-        if now < self.clock_floor { return Err("dispatch clock moved backwards; retries remain fenced".into()); }
+        if self.poisoned {
+            return Err("dispatch journal durability unknown; this owner cannot send again".into());
+        }
+        if now < self.clock_floor {
+            return Err("dispatch clock moved backwards; retries remain fenced".into());
+        }
         Ok(())
     }
     fn capacity(&self, additional: usize) -> Result<(), String> {
-        if self.bytes.checked_add(additional as u64).is_none_or(|size| size > MAX_BYTES) {
+        if self
+            .bytes
+            .checked_add(additional as u64)
+            .is_none_or(|size| size > MAX_BYTES)
+        {
             Err("dispatch journal byte budget exhausted; no further reservation".into())
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
     fn validate(&self, key: AsciiSlug, next: &Entry) -> Result<(), String> {
         self.live(next.observed_at)?;
-        validate_transition(&self.entries, self.clock_floor, self.max_attempts, key, next)
+        validate_transition(
+            &self.entries,
+            self.clock_floor,
+            self.max_attempts,
+            key,
+            next,
+        )
     }
 
     /// Replace only transport history, never its meaning. The fence stays held
@@ -223,7 +307,10 @@ impl Journal {
         self.compact_with(&mut |_| Ok(()))
     }
 
-    fn compact_with(&mut self, barrier: &mut impl FnMut(checkpoint::Stage) -> Result<(), String>) -> Result<(), String> {
+    fn compact_with(
+        &mut self,
+        barrier: &mut impl FnMut(checkpoint::Stage) -> Result<(), String>,
+    ) -> Result<(), String> {
         self.live(self.clock_floor)?;
         checkpoint::replace(self, barrier)
     }
@@ -233,7 +320,9 @@ impl Journal {
         let record = format!("event\t{}", record_body(key, &entry));
         let tail = chained(self.tail, record.as_bytes());
         let line = format!("{record}\t{}\n", hex(&tail));
-        if line.len() > MAX_RECORD { return Err("dispatch record exceeds its byte ceiling".into()); }
+        if line.len() > MAX_RECORD {
+            return Err("dispatch record exceeds its byte ceiling".into());
+        }
         self.capacity(line.len())?;
         self.poisoned = true;
         checkpoint::verify_owned(self)?;
@@ -249,58 +338,104 @@ impl Journal {
 }
 
 fn fits(bytes: u64, additional: usize, maximum: u64) -> bool {
-    bytes.checked_add(additional as u64).is_some_and(|size| size <= maximum)
+    bytes
+        .checked_add(additional as u64)
+        .is_some_and(|size| size <= maximum)
 }
 
 fn record_body(key: AsciiSlug, entry: &Entry) -> String {
-    format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        key.as_str(), hex(&entry.payload), entry.attempt, entry.observed_at, entry.next_at,
-        entry.state.name(), u8::from(entry.uncertain), hex(&entry.evidence))
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        key.as_str(),
+        hex(&entry.payload),
+        entry.attempt,
+        entry.observed_at,
+        entry.next_at,
+        entry.state.name(),
+        u8::from(entry.uncertain),
+        hex(&entry.evidence)
+    )
 }
 
 fn parse_record(body: &str) -> Result<(AsciiSlug, Entry), String> {
     let fields: Vec<_> = body.split('\t').collect();
-    if fields.len() != 8 { return Err("dispatch journal field count mismatch".into()); }
-    let key = AsciiSlug::try_new("dispatch key", fields[0].as_bytes()).map_err(|e| e.to_string())?;
-    let uncertain = match fields[6] { "0" => false, "1" => true, _ => return Err("invalid dispatch uncertainty flag".into()) };
-    Ok((key, Entry {
-        payload: unhex(fields[1])?, attempt: u32::try_from(decimal(fields[2])?).map_err(|_| "dispatch attempt overflow")?,
-        observed_at: decimal(fields[3])?, next_at: decimal(fields[4])?, state: State::parse(fields[5])?,
-        uncertain, evidence: unhex(fields[7])?,
-    }))
+    if fields.len() != 8 {
+        return Err("dispatch journal field count mismatch".into());
+    }
+    let key =
+        AsciiSlug::try_new("dispatch key", fields[0].as_bytes()).map_err(|e| e.to_string())?;
+    let uncertain = match fields[6] {
+        "0" => false,
+        "1" => true,
+        _ => return Err("invalid dispatch uncertainty flag".into()),
+    };
+    Ok((
+        key,
+        Entry {
+            payload: unhex(fields[1])?,
+            attempt: u32::try_from(decimal(fields[2])?).map_err(|_| "dispatch attempt overflow")?,
+            observed_at: decimal(fields[3])?,
+            next_at: decimal(fields[4])?,
+            state: State::parse(fields[5])?,
+            uncertain,
+            evidence: unhex(fields[7])?,
+        },
+    ))
 }
 
 fn validate_saved(key: AsciiSlug, next: &Entry, max_attempts: u32) -> Result<(), String> {
-    if key.as_str().contains(['\t', '\n', '\r']) || key.len() > 256
-        || next.attempt == 0 || next.attempt > max_attempts || next.next_at < next.observed_at
+    if key.as_str().contains(['\t', '\n', '\r'])
+        || key.len() > 256
+        || next.attempt == 0
+        || next.attempt > max_attempts
+        || next.next_at < next.observed_at
         || (next.state == State::InFlight && next.evidence != [0; 32])
         || (next.state == State::Unknown && !next.uncertain)
         || (next.attempt == 1 && next.uncertain && next.state != State::Unknown)
-    { return Err("invalid dispatch journal record".into()); }
+    {
+        return Err("invalid dispatch journal record".into());
+    }
     Ok(())
 }
 
-fn validate_transition(entries: &BTreeMap<AsciiSlug, Entry>, clock_floor: u64,
-    max_attempts: u32, key: AsciiSlug, next: &Entry) -> Result<(), String>
-{
+fn validate_transition(
+    entries: &BTreeMap<AsciiSlug, Entry>,
+    clock_floor: u64,
+    max_attempts: u32,
+    key: AsciiSlug,
+    next: &Entry,
+) -> Result<(), String> {
     validate_saved(key, next, max_attempts)?;
     if next.observed_at < clock_floor {
         return Err("dispatch journal clock moved backwards".into());
     }
     let valid = match entries.get(&key) {
-        None => entries.len() < MAX_KEYS && next.attempt == 1
-            && next.state == State::InFlight && !next.uncertain,
+        None => {
+            entries.len() < MAX_KEYS
+                && next.attempt == 1
+                && next.state == State::InFlight
+                && !next.uncertain
+        }
         Some(old) if old.payload != next.payload => false,
         Some(old) if matches!(old.state, State::Accepted | State::Rejected) => false,
         Some(old) if next.state == State::InFlight => {
-            next.attempt == old.attempt + 1 && next.observed_at >= old.next_at
-                && next.uncertain == (old.uncertain || matches!(old.state, State::InFlight | State::Unknown))
+            next.attempt == old.attempt + 1
+                && next.observed_at >= old.next_at
+                && next.uncertain
+                    == (old.uncertain || matches!(old.state, State::InFlight | State::Unknown))
         }
-        Some(old) => old.state == State::InFlight && next.attempt == old.attempt
-            && next.next_at >= old.next_at
-            && next.uncertain == (old.uncertain || next.state == State::Unknown),
+        Some(old) => {
+            old.state == State::InFlight
+                && next.attempt == old.attempt
+                && next.next_at >= old.next_at
+                && next.uncertain == (old.uncertain || next.state == State::Unknown)
+        }
     };
-    if valid { Ok(()) } else { Err("dispatch journal lifecycle or payload discontinuity".into()) }
+    if valid {
+        Ok(())
+    } else {
+        Err("dispatch journal lifecycle or payload discontinuity".into())
+    }
 }
 
 fn chained(previous: [u8; 32], record: &[u8]) -> [u8; 32] {

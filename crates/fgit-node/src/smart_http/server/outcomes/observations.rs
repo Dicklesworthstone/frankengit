@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_authority::{
-    AsyncAuthorityStore, ExpectedOld, IdempotencyKey, ImmutableRead, ProposedNew, RefCommand,
-    SealAttempt, SemanticRequest, bind_idempotency_key_async, idempotency_binding_key, seal_key,
+    ExpectedOld, IdempotencyKey, ImmutableRead, ProposedNew, RefCommand, SealAttempt,
+    SemanticRequest, bind_idempotency_key_async, idempotency_binding_key, seal_key,
     seal_request_async,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryId, TenantId};

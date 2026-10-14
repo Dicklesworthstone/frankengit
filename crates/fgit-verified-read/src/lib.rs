@@ -31,8 +31,8 @@ use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membe
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder,
     RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
-    RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1, body_id,
-    RepositoryIncarnationConfigurationBodyV2_2, decode_body, encode_body,
+    RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1,
+    RepositoryIncarnationConfigurationBodyV2_2, body_id, decode_body, encode_body,
 };
 use fgit_crypto::{
     MerkleProof, MerkleRefusal, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,

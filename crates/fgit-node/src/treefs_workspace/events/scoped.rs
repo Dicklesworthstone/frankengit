@@ -1,7 +1,9 @@
 //! Disclosure projection shared by HTTP and MCP. Neither cursors nor event
 //! bytes confer permission. Callers supply independently authenticated grants.
 
-use super::{ForgeEventCursor, ForgeEventPage, ForgeEventReadRefusal, feed, workspace_request_live};
+use super::{
+    ForgeEventCursor, ForgeEventPage, ForgeEventReadRefusal, feed, workspace_request_live,
+};
 use crate::{NodeRequestContext, OneNode};
 use fgit_codec::encode_body;
 use fgit_forge::event::ForgeEventPayload;
@@ -29,19 +31,33 @@ pub struct ScopedForgeEvent {
 }
 impl ScopedForgeEvent {
     #[must_use]
-    pub const fn cursor(&self) -> (u64, u32) { self.cursor }
+    pub const fn cursor(&self) -> (u64, u32) {
+        self.cursor
+    }
     #[must_use]
-    pub const fn tx_id(&self) -> TxId { self.tx_id }
+    pub const fn tx_id(&self) -> TxId {
+        self.tx_id
+    }
     #[must_use]
-    pub const fn policy_epoch(&self) -> PolicyEpoch { self.policy_epoch }
+    pub const fn policy_epoch(&self) -> PolicyEpoch {
+        self.policy_epoch
+    }
     #[must_use]
-    pub const fn aggregate(&self) -> AggregateId { self.aggregate }
+    pub const fn aggregate(&self) -> AggregateId {
+        self.aggregate
+    }
     #[must_use]
-    pub const fn version(&self) -> AggregateVersion { self.version }
+    pub const fn version(&self) -> AggregateVersion {
+        self.version
+    }
     #[must_use]
-    pub const fn kind(&self) -> u32 { self.kind }
+    pub const fn kind(&self) -> u32 {
+        self.kind
+    }
     #[must_use]
-    pub fn frame_hex(&self) -> &str { &self.frame_hex }
+    pub fn frame_hex(&self) -> &str {
+        &self.frame_hex
+    }
 }
 
 /// A filtered page of one authenticated history, not a complete forge export.
@@ -62,43 +78,78 @@ pub struct ScopedForgeEventPage {
 }
 impl ScopedForgeEventPage {
     #[must_use]
-    pub const fn source_head(&self) -> RepositoryAuthorityHeadId { self.source_head }
+    pub const fn source_head(&self) -> RepositoryAuthorityHeadId {
+        self.source_head
+    }
     #[must_use]
-    pub fn events(&self) -> &[ScopedForgeEvent] { &self.events }
+    pub fn events(&self) -> &[ScopedForgeEvent] {
+        &self.events
+    }
     #[must_use]
-    pub const fn next_after(&self) -> Option<(u64, u32)> { self.next_after }
+    pub const fn next_after(&self) -> Option<(u64, u32)> {
+        self.next_after
+    }
     #[must_use]
-    pub const fn resume_after(&self) -> Option<(u64, u32)> { self.resume_after }
+    pub const fn resume_after(&self) -> Option<(u64, u32)> {
+        self.resume_after
+    }
     #[must_use]
-    pub const fn issues_read(&self) -> bool { self.issues_read }
+    pub const fn issues_read(&self) -> bool {
+        self.issues_read
+    }
     #[must_use]
-    pub const fn pulls_read(&self) -> bool { self.pulls_read }
+    pub const fn pulls_read(&self) -> bool {
+        self.pulls_read
+    }
 
     /// Bounded HTTP representation. MCP constructs its own Value tree directly
     /// from these same authorized fields; its hostile-input parser is not used
     /// to decode large trusted result frames or given larger request limits.
     pub fn to_json(&self) -> Result<String, ForgeEventReadRefusal> {
         let id = self.source_head.as_internal_object_id();
-        let token = format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes())?);
+        let token = format!(
+            "alg:{}:{}",
+            id.algorithm().code_point(),
+            hex(id.digest().as_bytes())?
+        );
         let mut out = format!(
             "{{\"type\":\"forge_event_page\",\"schema_version\":1,\"tenant_id\":\"{}\",\"repository_id\":\"{}\",\"repository_incarnation\":\"{}\",\"object_format\":\"{}\",\"source_head\":\"{}\",\"snapshot_token\":\"{}\",\"read_only\":true,\"disclosure_profile\":\"issues-pulls-v1\",\"issues_read\":{},\"pulls_read\":{},\"omits_other_event_families\":true,\"cursor_discloses_repository_activity\":true,\"events\":[",
-            self.tenant, self.repository, self.incarnation, self.format.as_str(),
-            self.source_head, token, self.issues_read, self.pulls_read,
+            self.tenant,
+            self.repository,
+            self.incarnation,
+            self.format.as_str(),
+            self.source_head,
+            token,
+            self.issues_read,
+            self.pulls_read,
         );
         for (index, event) in self.events.iter().enumerate() {
             let row = format!(
                 "{}{{\"cursor\":\"{}:{}\",\"repository_sequence\":\"{}\",\"event_index\":\"{}\",\"tx_id\":\"{}\",\"policy_epoch\":\"{}\",\"aggregate\":\"{}\",\"aggregate_version\":\"{}\",\"kind\":{},\"event_frame_hex\":\"{}\"}}",
-                if index == 0 { "" } else { "," }, event.cursor.0, event.cursor.1,
-                event.cursor.0, event.cursor.1, event.tx_id, event.policy_epoch.get(),
-                event.aggregate, event.version.get(), event.kind, event.frame_hex,
+                if index == 0 { "" } else { "," },
+                event.cursor.0,
+                event.cursor.1,
+                event.cursor.0,
+                event.cursor.1,
+                event.tx_id,
+                event.policy_epoch.get(),
+                event.aggregate,
+                event.version.get(),
+                event.kind,
+                event.frame_hex,
             );
             append(&mut out, &row)?;
         }
-        append(&mut out, &format!(
-            "],\"next_after\":{},\"resume_after\":{},\"has_more\":{},\"complete\":{}}}",
-            cursor_json(self.next_after), cursor_json(self.resume_after),
-            self.next_after.is_some(), self.next_after.is_none(),
-        ))?;
+        append(
+            &mut out,
+            &format!(
+                "],\"next_after\":{},\"resume_after\":{},\"has_more\":{},\"complete\":{}}}",
+                cursor_json(self.next_after),
+                cursor_json(self.resume_after),
+                self.next_after.is_some(),
+                self.next_after.is_none(),
+            ),
+        )?;
         Ok(out)
     }
 }
@@ -115,9 +166,12 @@ impl ForgeEventReadRefusal {
             Self::NoReadScope => "events_not_granted",
             Self::ResponseLimit => "event_response_limit",
             Self::Cancelled => "event_read_cancelled",
-            Self::InvalidPage | Self::Cell(_) | Self::Authority(_) | Self::Admission(_)
-                | Self::Boundary(_) | Self::RepositoryBindingMismatch =>
-                "event_read_unavailable",
+            Self::InvalidPage
+            | Self::Cell(_)
+            | Self::Authority(_)
+            | Self::Admission(_)
+            | Self::Boundary(_)
+            | Self::RepositoryBindingMismatch => "event_read_unavailable",
         }
     }
 }
@@ -129,20 +183,32 @@ impl OneNode {
     pub fn parse_forge_event_feed_cursor(
         text: &str,
     ) -> Result<Option<(u64, u32)>, ForgeEventReadRefusal> {
-        if text == "0" { return Ok(None); }
-        if text.len() > 31 { return Err(ForgeEventReadRefusal::InvalidCursor); }
-        let (sequence, index) = text.split_once(':').ok_or(ForgeEventReadRefusal::InvalidCursor)?;
+        if text == "0" {
+            return Ok(None);
+        }
+        if text.len() > 31 {
+            return Err(ForgeEventReadRefusal::InvalidCursor);
+        }
+        let (sequence, index) = text
+            .split_once(':')
+            .ok_or(ForgeEventReadRefusal::InvalidCursor)?;
         let decimal = |value: &str| -> Result<u64, ForgeEventReadRefusal> {
-            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit())
+            if value.is_empty()
+                || !value.bytes().all(|b| b.is_ascii_digit())
                 || (value.len() > 1 && value.starts_with('0'))
             {
                 return Err(ForgeEventReadRefusal::InvalidCursor);
             }
-            value.parse().map_err(|_| ForgeEventReadRefusal::InvalidCursor)
+            value
+                .parse()
+                .map_err(|_| ForgeEventReadRefusal::InvalidCursor)
         };
         let sequence = decimal(sequence)?;
-        let index = u32::try_from(decimal(index)?).map_err(|_| ForgeEventReadRefusal::InvalidCursor)?;
-        if sequence == 0 { return Err(ForgeEventReadRefusal::InvalidCursor); }
+        let index =
+            u32::try_from(decimal(index)?).map_err(|_| ForgeEventReadRefusal::InvalidCursor)?;
+        if sequence == 0 {
+            return Err(ForgeEventReadRefusal::InvalidCursor);
+        }
         Ok(Some((sequence, index)))
     }
 
@@ -162,18 +228,32 @@ impl OneNode {
         issues_read: bool,
         pulls_read: bool,
     ) -> Result<ScopedForgeEventPage, ForgeEventReadRefusal> {
-        if !issues_read && !pulls_read { return Err(ForgeEventReadRefusal::NoReadScope); }
-        if !(1..=100).contains(&limit) { return Err(ForgeEventReadRefusal::InvalidLimit); }
-        let cursor = after.map(|(sequence, index)| ForgeEventCursor::new(sequence, index)
-            .map_err(|_| ForgeEventReadRefusal::InvalidCursor)).transpose()?;
+        if !issues_read && !pulls_read {
+            return Err(ForgeEventReadRefusal::NoReadScope);
+        }
+        if !(1..=100).contains(&limit) {
+            return Err(ForgeEventReadRefusal::InvalidLimit);
+        }
+        let cursor = after
+            .map(|(sequence, index)| {
+                ForgeEventCursor::new(sequence, index)
+                    .map_err(|_| ForgeEventReadRefusal::InvalidCursor)
+            })
+            .transpose()?;
         let selected = self.event_read_basis_in(request, expected_head).await?;
         // Events and hidden-ref policy share ONE authenticated head, without
         // reconstructing source objects, refs, outbox or outcome projections.
         // A separate policy head read would introduce a disclosure TOCTOU race.
         let page = feed::read_page_at(
-            &self.authority, request.authority(), &selected.basis, cursor, limit,
+            &self.authority,
+            request.authority(),
+            &selected.basis,
+            cursor,
+            limit,
             &|| !workspace_request_live(request),
-        ).await.map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
+        )
+        .await
+        .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
         let mut result = ScopedForgeEventPage {
             tenant: self.tenant_id,
             repository: self.repository_id,
@@ -186,9 +266,14 @@ impl OneNode {
             next_after: None,
             resume_after: after,
         };
-        project(&mut result, page, after, limit,
+        project(
+            &mut result,
+            page,
+            after,
+            limit,
             &|reference| selected.hidden_refs.hides(reference),
-            &|| !workspace_request_live(request))?;
+            &|| !workspace_request_live(request),
+        )?;
         Ok(result)
     }
 }
@@ -203,7 +288,8 @@ fn permitted(
     match (&event.payload, event.aggregate) {
         (Payload::IssueChangedNative(_), AggregateId::Issue(_)) => issues,
         (Payload::PullRequestChangedNative(change), AggregateId::PullRequest(_)) => {
-            pulls && !hidden(change.data.source_ref.as_bytes())
+            pulls
+                && !hidden(change.data.source_ref.as_bytes())
                 && !hidden(change.data.target_ref.as_bytes())
         }
         (Payload::MergeCommittedNative(merge), AggregateId::PullRequest(_)) => {
@@ -216,7 +302,11 @@ fn permitted(
     }
 }
 fn stopped(cancelled: &dyn Fn() -> bool) -> Result<(), ForgeEventReadRefusal> {
-    if cancelled() { Err(ForgeEventReadRefusal::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(ForgeEventReadRefusal::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 fn position(cursor: ForgeEventCursor) -> (u64, u32) {
     (cursor.repository_sequence, cursor.event_index)
@@ -230,12 +320,16 @@ fn project(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), ForgeEventReadRefusal> {
     stopped(cancelled)?;
-    if !(1..=100).contains(&limit) || page.events.len() > usize::from(limit)
+    if !(1..=100).contains(&limit)
+        || page.events.len() > usize::from(limit)
         || page.source_head != result.source_head
         || page.events.windows(2).any(|p| p[0].cursor >= p[1].cursor)
-        || page.events.iter().any(|e| e.cursor.repository_sequence == 0
-            || after.is_some_and(|a| position(e.cursor) <= a))
-        || page.next_after.is_some_and(|next| page.events.last().map(|e| e.cursor) != Some(next))
+        || page.events.iter().any(|e| {
+            e.cursor.repository_sequence == 0 || after.is_some_and(|a| position(e.cursor) <= a)
+        })
+        || page
+            .next_after
+            .is_some_and(|next| page.events.last().map(|e| e.cursor) != Some(next))
     {
         return Err(ForgeEventReadRefusal::InvalidPage);
     }
@@ -243,39 +337,64 @@ fn project(
     let mut bytes = 0usize;
     for envelope in page.events {
         stopped(cancelled)?;
-        if permitted(&envelope.event, result.issues_read, result.pulls_read, hidden) {
+        if permitted(
+            &envelope.event,
+            result.issues_read,
+            result.pulls_read,
+            hidden,
+        ) {
             // Never encode, identify, format or return an unauthorized event.
-            let frame = encode_body(&envelope.event).map_err(|_| ForgeEventReadRefusal::InvalidPage)?;
+            let frame =
+                encode_body(&envelope.event).map_err(|_| ForgeEventReadRefusal::InvalidPage)?;
             if !charge_frame(&mut bytes, frame.len())? {
                 // Do not advance past this event: it belongs to the next page.
                 more = true;
                 break;
             }
-            result.events.try_reserve(1).map_err(|_| ForgeEventReadRefusal::ResponseLimit)?;
+            result
+                .events
+                .try_reserve(1)
+                .map_err(|_| ForgeEventReadRefusal::ResponseLimit)?;
             result.events.push(ScopedForgeEvent {
-                cursor: position(envelope.cursor), tx_id: envelope.tx_id,
-                policy_epoch: envelope.policy_epoch, aggregate: envelope.event.aggregate,
-                version: envelope.event.version, kind: envelope.event.payload.kind(),
+                cursor: position(envelope.cursor),
+                tx_id: envelope.tx_id,
+                policy_epoch: envelope.policy_epoch,
+                aggregate: envelope.event.aggregate,
+                version: envelope.event.version,
+                kind: envelope.event.payload.kind(),
                 frame_hex: hex(&frame)?,
             });
         }
         result.resume_after = Some(position(envelope.cursor));
     }
     result.next_after = if more { result.resume_after } else { None };
-    if more && result.next_after == after { return Err(ForgeEventReadRefusal::InvalidPage); }
+    if more && result.next_after == after {
+        return Err(ForgeEventReadRefusal::InvalidPage);
+    }
     stopped(cancelled)
 }
 fn charge_frame(total: &mut usize, next: usize) -> Result<bool, ForgeEventReadRefusal> {
-    if next > MAX_FRAME_BYTES { return Err(ForgeEventReadRefusal::ResponseLimit); }
-    let updated = total.checked_add(next).ok_or(ForgeEventReadRefusal::ResponseLimit)?;
-    if updated > MAX_PAGE_FRAME_BYTES { return Ok(false); }
+    if next > MAX_FRAME_BYTES {
+        return Err(ForgeEventReadRefusal::ResponseLimit);
+    }
+    let updated = total
+        .checked_add(next)
+        .ok_or(ForgeEventReadRefusal::ResponseLimit)?;
+    if updated > MAX_PAGE_FRAME_BYTES {
+        return Ok(false);
+    }
     *total = updated;
     Ok(true)
 }
 fn hex(bytes: &[u8]) -> Result<String, ForgeEventReadRefusal> {
     let mut out = String::new();
-    out.try_reserve(bytes.len().checked_mul(2).ok_or(ForgeEventReadRefusal::ResponseLimit)?)
-        .map_err(|_| ForgeEventReadRefusal::ResponseLimit)?;
+    out.try_reserve(
+        bytes
+            .len()
+            .checked_mul(2)
+            .ok_or(ForgeEventReadRefusal::ResponseLimit)?,
+    )
+    .map_err(|_| ForgeEventReadRefusal::ResponseLimit)?;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for &byte in bytes {
         out.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -284,13 +403,21 @@ fn hex(bytes: &[u8]) -> Result<String, ForgeEventReadRefusal> {
     Ok(out)
 }
 fn cursor_json(cursor: Option<(u64, u32)>) -> String {
-    cursor.map_or_else(|| "null".into(), |(sequence, index)| format!("\"{sequence}:{index}\""))
+    cursor.map_or_else(
+        || "null".into(),
+        |(sequence, index)| format!("\"{sequence}:{index}\""),
+    )
 }
 fn append(out: &mut String, bytes: &str) -> Result<(), ForgeEventReadRefusal> {
-    if out.len().checked_add(bytes.len()).is_none_or(|n| n > MAX_JSON_BYTES) {
+    if out
+        .len()
+        .checked_add(bytes.len())
+        .is_none_or(|n| n > MAX_JSON_BYTES)
+    {
         return Err(ForgeEventReadRefusal::ResponseLimit);
     }
-    out.try_reserve(bytes.len()).map_err(|_| ForgeEventReadRefusal::ResponseLimit)?;
+    out.try_reserve(bytes.len())
+        .map_err(|_| ForgeEventReadRefusal::ResponseLimit)?;
     out.push_str(bytes);
     Ok(())
 }

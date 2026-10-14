@@ -39,9 +39,15 @@ pub(in super::super) fn render(
         options,
     };
     let mut fields = output::render(
-        backend.options.repository, backend.options.format, &query, report,
+        backend.options.repository,
+        backend.options.format,
+        &query,
+        report,
     )?;
     fields.insert("completion_scope".into(), text("entire_candidate_tree"));
-    fields.insert("comparison_subject".into(), text("target_before_to_uploaded_candidate"));
+    fields.insert(
+        "comparison_subject".into(),
+        text("target_before_to_uploaded_candidate"),
+    );
     Ok(fields)
 }

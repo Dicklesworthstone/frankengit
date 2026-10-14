@@ -21,13 +21,21 @@ struct Input {
     options: ReviewOptions,
 }
 fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
-    let &(_, default, minimum, maximum) = LIMITS.iter().find(|limit| limit.0 == name)
+    let &(_, default, minimum, maximum) = LIMITS
+        .iter()
+        .find(|limit| limit.0 == name)
         .ok_or(ToolError::invalid("invalid_inspection_limit"))?;
-    let value = args.get(name).map(|value| value.unsigned()
-        .ok_or(ToolError::invalid("invalid_inspection_limit")))
-        .transpose()?.unwrap_or(default as u64);
-    let value = usize::try_from(value)
-        .map_err(|_| ToolError::invalid("invalid_inspection_limit"))?;
+    let value = args
+        .get(name)
+        .map(|value| {
+            value
+                .unsigned()
+                .ok_or(ToolError::invalid("invalid_inspection_limit"))
+        })
+        .transpose()?
+        .unwrap_or(default as u64);
+    let value =
+        usize::try_from(value).map_err(|_| ToolError::invalid("invalid_inspection_limit"))?;
     if !(minimum..=maximum).contains(&value) {
         return Err(ToolError::invalid("invalid_inspection_limit"));
     }
@@ -35,7 +43,12 @@ fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
 }
 fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     let mut allowed = SUBJECT_FIELDS.to_vec();
-    allowed.extend(["candidate_commit", "merge_base", "bundle_hex_chunks", "expected_bundle_sha256"]);
+    allowed.extend([
+        "candidate_commit",
+        "merge_base",
+        "bundle_hex_chunks",
+        "expected_bundle_sha256",
+    ]);
     allowed.extend(LIMITS.iter().map(|limit| limit.0));
     require_fields(args, &allowed)?;
     if required(args, "operation")? != INSPECT {
@@ -64,8 +77,16 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     options.limits.max_diff_work = bound(args, "max_diff_work")?;
     options.limits.max_hunks = 256;
     options.limits.max_text_files = 32;
-    options.validate().map_err(|_| ToolError::invalid("invalid_inspection_limit"))?;
-    Ok(Input { selection, candidate, bundle, digest, options })
+    options
+        .validate()
+        .map_err(|_| ToolError::invalid("invalid_inspection_limit"))?;
+    Ok(Input {
+        selection,
+        candidate,
+        bundle,
+        digest,
+        options,
+    })
 }
 
 pub(super) fn schema() -> Value {
@@ -74,19 +95,38 @@ pub(super) fn schema() -> Value {
         properties.insert(name.into(), oid_schema());
     }
     properties.insert("bundle_hex_chunks".into(), chunk_schema());
-    properties.insert("expected_bundle_sha256".into(), object([
-        ("type", text("string")), ("pattern", text("^[0-9a-f]{64}$")),
-    ]));
+    properties.insert(
+        "expected_bundle_sha256".into(),
+        object([
+            ("type", text("string")),
+            ("pattern", text("^[0-9a-f]{64}$")),
+        ]),
+    );
     for &(name, default, minimum, maximum) in LIMITS {
-        properties.insert(name.into(), object([
-            ("type", text("integer")), ("minimum", json::number(minimum as u64)),
-            ("maximum", json::number(maximum as u64)), ("default", json::number(default as u64)),
-        ]));
+        properties.insert(
+            name.into(),
+            object([
+                ("type", text("integer")),
+                ("minimum", json::number(minimum as u64)),
+                ("maximum", json::number(maximum as u64)),
+                ("default", json::number(default as u64)),
+            ]),
+        );
     }
-    reviews::candidate_schema(properties, &[
-        "operation", "number", "expected_version", "expected_source", "expected_target",
-        "policy_epoch", "candidate_commit", "merge_base", "bundle_hex_chunks",
-    ])
+    reviews::candidate_schema(
+        properties,
+        &[
+            "operation",
+            "number",
+            "expected_version",
+            "expected_source",
+            "expected_target",
+            "policy_epoch",
+            "candidate_commit",
+            "merge_base",
+            "bundle_hex_chunks",
+        ],
+    )
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
@@ -106,14 +146,24 @@ pub(super) fn call_in(
     let input = parse(args, backend.options.format)?;
     // This native API ties PR metadata, both visible parents and the uploaded
     // result to one exact head. No separate latest-PR lookup precedes it.
-    let inspected = backend.node.runtime().block_on(
-        backend.node.inspect_pull_request_bundle_in(
-            request, &input.selection.subject, input.candidate, &input.bundle,
-            &Default::default(), &input.options,
-        ),
-    ).map_err(|_| ToolError::failed("pull_candidate_inspection_failed"))?;
+    let inspected = backend
+        .node
+        .runtime()
+        .block_on(backend.node.inspect_pull_request_bundle_in(
+            request,
+            &input.selection.subject,
+            input.candidate,
+            &input.bundle,
+            &Default::default(),
+            &input.options,
+        ))
+        .map_err(|_| ToolError::failed("pull_candidate_inspection_failed"))?;
     let subject = &input.selection.subject;
-    check_selection(&input.selection, &inspected.subject, inspected.review.source_head)?;
+    check_selection(
+        &input.selection,
+        &inspected.subject,
+        inspected.review.source_head,
+    )?;
     if inspected.candidate != input.candidate
         || inspected.parents != [subject.target_tip, subject.source_tip]
         || inspected.bundle.sha256 != input.digest
@@ -126,26 +176,40 @@ pub(super) fn call_in(
         || inspected.prerequisites.is_empty()
         || inspected.prerequisites.len() > 64
         || !inspected.prerequisites.contains(&subject.target_tip)
-        || inspected.prerequisites.iter().collect::<BTreeSet<_>>().len() != inspected.prerequisites.len()
+        || inspected
+            .prerequisites
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != inspected.prerequisites.len()
     {
         return Err(invalid_report());
     }
-    for id in &inspected.prerequisites { check_oid(*id, backend.options.format)?; }
+    for id in &inspected.prerequisites {
+        check_oid(*id, backend.options.format)?;
+    }
     if inspected.candidate_commit_body.is_empty()
         || inspected.candidate_commit_body.len() > MAX_COMMIT_BYTES
     {
         return Err(ToolError::failed("candidate_commit_limit"));
     }
-    if git_object_id(backend.options.format, GitObjectKind::Commit, &inspected.candidate_commit_body)
-        != input.candidate.commit
+    if git_object_id(
+        backend.options.format,
+        GitObjectKind::Commit,
+        &inspected.candidate_commit_body,
+    ) != input.candidate.commit
     {
         return Err(invalid_report());
     }
     // Reuse the existing exact entry/span validator, retaining PR association.
     // A failed budget cannot become an empty or successfully truncated review.
     let review = super::super::super::review::render_pull_candidate(
-        backend, subject, input.candidate, input.selection.expected_head,
-        input.options, &inspected.review,
+        backend,
+        subject,
+        input.candidate,
+        input.selection.expected_head,
+        input.options,
+        &inspected.review,
     )?;
     let arguments = candidate_arguments(subject, input.candidate, &input.bundle)?;
     let mut result = binding(backend);
@@ -155,19 +219,67 @@ pub(super) fn call_in(
         ("type".into(), text("pull_candidate_inspection")),
         ("schema_version".into(), json::number(1)),
         ("operation".into(), text(INSPECT)),
-        ("snapshot_token".into(), text(head_token(inspected.review.source_head))),
-        ("candidate_commit".into(), text(raw_oid(input.candidate.commit))),
-        ("merge_base".into(), text(raw_oid(input.candidate.merge_base))),
-        ("root_tree".into(), text(raw_oid(inspected.review.comparison.after_tree))),
+        (
+            "snapshot_token".into(),
+            text(head_token(inspected.review.source_head)),
+        ),
+        (
+            "candidate_commit".into(),
+            text(raw_oid(input.candidate.commit)),
+        ),
+        (
+            "merge_base".into(),
+            text(raw_oid(input.candidate.merge_base)),
+        ),
+        (
+            "root_tree".into(),
+            text(raw_oid(inspected.review.comparison.after_tree)),
+        ),
         ("bundle_sha256".into(), text(hex(&input.digest))),
-        ("bundle_bytes".into(), text(inspected.bundle.bytes.to_string())),
-        ("pack_bytes".into(), text(inspected.bundle.pack_bytes.to_string())),
-        ("pack_objects".into(), text(inspected.bundle.pack_objects.to_string())),
-        ("expanded_bytes".into(), text(inspected.bundle.expanded_bytes.to_string())),
-        ("closure_objects".into(), text(inspected.bundle.closure_objects.to_string())),
-        ("transport_only_objects".into(), text(inspected.bundle.transport_only_objects.to_string())),
-        ("parents".into(), Value::Array(inspected.parents.iter().map(|id| text(raw_oid(*id))).collect())),
-        ("prerequisites".into(), Value::Array(inspected.prerequisites.iter().map(|id| text(raw_oid(*id))).collect())),
+        (
+            "bundle_bytes".into(),
+            text(inspected.bundle.bytes.to_string()),
+        ),
+        (
+            "pack_bytes".into(),
+            text(inspected.bundle.pack_bytes.to_string()),
+        ),
+        (
+            "pack_objects".into(),
+            text(inspected.bundle.pack_objects.to_string()),
+        ),
+        (
+            "expanded_bytes".into(),
+            text(inspected.bundle.expanded_bytes.to_string()),
+        ),
+        (
+            "closure_objects".into(),
+            text(inspected.bundle.closure_objects.to_string()),
+        ),
+        (
+            "transport_only_objects".into(),
+            text(inspected.bundle.transport_only_objects.to_string()),
+        ),
+        (
+            "parents".into(),
+            Value::Array(
+                inspected
+                    .parents
+                    .iter()
+                    .map(|id| text(raw_oid(*id)))
+                    .collect(),
+            ),
+        ),
+        (
+            "prerequisites".into(),
+            Value::Array(
+                inspected
+                    .prerequisites
+                    .iter()
+                    .map(|id| text(raw_oid(*id)))
+                    .collect(),
+            ),
+        ),
         ("review".into(), Value::Object(review)),
         ("complete".into(), Value::Bool(true)),
         ("completion_scope".into(), text("entire_candidate_tree")),
@@ -175,10 +287,15 @@ pub(super) fn call_in(
         ("merge_algorithm_verified".into(), Value::Bool(false)),
         ("candidate_arguments".into(), arguments),
         ("review_tool".into(), text(reviews::NAME)),
-        ("publication_tool".into(), text(super::super::super::merge_writes::NAME)),
+        (
+            "publication_tool".into(),
+            text(super::super::super::merge_writes::NAME),
+        ),
     ]);
     let result = Value::Object(result);
-    result.encode(MAX_TOOL_RESULT).map_err(|_| ToolError::failed("candidate_response_limit"))?;
+    result
+        .encode(MAX_TOOL_RESULT)
+        .map_err(|_| ToolError::failed("candidate_response_limit"))?;
     Ok(result)
 }
 

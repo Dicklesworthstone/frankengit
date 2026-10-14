@@ -263,9 +263,8 @@ fn compile_direct_branches<'a>(
     let names = branches
         .into_iter()
         .map(|name| {
-            std::str::from_utf8(name.as_bytes()).map_err(|_| {
-                ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
-            })
+            std::str::from_utf8(name.as_bytes())
+                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))
         })
         .collect::<Result<Vec<_>, _>>()?;
     crate::policy_bridge::compile_protected_branch_rules(names)

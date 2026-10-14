@@ -6,7 +6,10 @@ use fgit_forge::review::{ComparisonMode, ReviewOptions, SourceReview};
 fn inspection(prepared: &Object) -> Object {
     let mut args = prepared["candidate_arguments"].object().unwrap().clone();
     args.insert("operation".into(), text(INSPECT));
-    args.insert("expected_bundle_sha256".into(), prepared["bundle_sha256"].clone());
+    args.insert(
+        "expected_bundle_sha256".into(),
+        prepared["bundle_sha256"].clone(),
+    );
     args.insert("expected_head".into(), prepared["snapshot_token"].clone());
     args
 }
@@ -24,30 +27,67 @@ fn actual_target_to_uploaded_result_is_complete_pinned_and_unstaged_over_mcp() {
         let result = content(&response);
         assert_eq!(result["operation"].text(), Some(INSPECT));
         assert_eq!(result["snapshot_token"], prepared["snapshot_token"]);
-        assert_eq!(result["candidate_arguments"], prepared["candidate_arguments"]);
+        assert_eq!(
+            result["candidate_arguments"],
+            prepared["candidate_arguments"]
+        );
         assert_eq!(result["bundle_sha256"], prepared["bundle_sha256"]);
-        assert_eq!(result["candidate_commit_body_hex"], prepared["candidate_commit_body_hex"]);
+        assert_eq!(
+            result["candidate_commit_body_hex"],
+            prepared["candidate_commit_body_hex"]
+        );
         assert_eq!(result["parents"], prepared["parents"]);
-        for field in ["published", "approval_granted", "repository_changed", "merge_algorithm_verified"] {
+        for field in [
+            "published",
+            "approval_granted",
+            "repository_changed",
+            "merge_algorithm_verified",
+        ] {
             assert_eq!(result[field], Value::Bool(false), "{field}");
         }
         let review = result["review"].object().unwrap();
         assert_eq!(review["complete"], Value::Bool(true));
-        assert_eq!(review["completion_scope"].text(), Some("entire_candidate_tree"));
-        assert_eq!(review["comparison_subject"].text(), Some("target_before_to_uploaded_candidate"));
-        assert_eq!(review["requested_before"].text(), Some(f.subject.target_tip.to_string().as_str()));
+        assert_eq!(
+            review["completion_scope"].text(),
+            Some("entire_candidate_tree")
+        );
+        assert_eq!(
+            review["comparison_subject"].text(),
+            Some("target_before_to_uploaded_candidate")
+        );
+        assert_eq!(
+            review["requested_before"].text(),
+            Some(f.subject.target_tip.to_string().as_str())
+        );
         assert_eq!(review["requested_after"], result["candidate_commit"]);
-        assert_eq!(review["pull_request"].object().unwrap()["version"].text(), Some("1"));
-        let Value::Array(entries) = &review["entries"] else { unreachable!() };
+        assert_eq!(
+            review["pull_request"].object().unwrap()["version"].text(),
+            Some("1")
+        );
+        let Value::Array(entries) = &review["entries"] else {
+            unreachable!()
+        };
         assert_eq!(entries.len(), 1);
         // The source branch lacks main-only. Comparing source -> candidate would
         // show the wrong side's addition instead of the actual landed change.
-        assert_eq!(entries[0].object().unwrap()["path_hex"].text(), Some(hex(b"topic-only").as_str()));
+        assert_eq!(
+            entries[0].object().unwrap()["path_hex"].text(),
+            Some(hex(b"topic-only").as_str())
+        );
         let candidate = oid(&args, "candidate_commit", format).unwrap();
         assert!(f.backend().node.read_git_object(candidate).is_err());
         assert_eq!(f.call(NAME, &args).unwrap().object().unwrap(), result);
-        for tool in [reviews::NAME, "frankengit_pull_merge_reviewed", "frankengit_source_publish"] {
-            assert_eq!(f.call(tool, result["candidate_arguments"].object().unwrap()).unwrap_err().code, "tool_not_granted");
+        for tool in [
+            reviews::NAME,
+            "frankengit_pull_merge_reviewed",
+            "frankengit_source_publish",
+        ] {
+            assert_eq!(
+                f.call(tool, result["candidate_arguments"].object().unwrap())
+                    .unwrap_err()
+                    .code,
+                "tool_not_granted"
+            );
         }
         assert_eq!(f.head(), before);
         let options = f.options();
@@ -66,14 +106,18 @@ fn corrupt_uploads_moved_pins_and_exhausted_reviews_return_no_successful_prefix(
         let prepared = f.call(NAME, &prepare).unwrap();
         let args = inspection(prepared.object().unwrap());
         for (name, value) in [
-            ("expected_version", text("2")), ("policy_epoch", text("2")),
-            ("expected_source", text(raw_oid(f.base))), ("expected_target", text(raw_oid(f.base))),
+            ("expected_version", text("2")),
+            ("policy_epoch", text("2")),
+            ("expected_source", text(raw_oid(f.base))),
+            ("expected_target", text(raw_oid(f.base))),
             ("candidate_commit", text("ee".repeat(format.digest_len()))),
             ("merge_base", text("dd".repeat(format.digest_len()))),
             ("expected_head", text(head_token(f.genesis))),
-            ("max_output_bytes", json::number(1)), ("max_blob_bytes", json::number(1)),
+            ("max_output_bytes", json::number(1)),
+            ("max_blob_bytes", json::number(1)),
         ] {
-            let mut bad = args.clone(); bad.insert(name.into(), value);
+            let mut bad = args.clone();
+            bad.insert(name.into(), value);
             assert!(f.call(NAME, &bad).is_err(), "{name}");
             assert_eq!(f.head(), before);
         }
@@ -82,11 +126,17 @@ fn corrupt_uploads_moved_pins_and_exhausted_reviews_return_no_successful_prefix(
         *bytes.last_mut().unwrap() ^= 1;
         corrupt.remove("expected_bundle_sha256");
         corrupt.insert("bundle_hex_chunks".into(), encoded_chunks(&bytes).unwrap());
-        assert_eq!(f.call(NAME, &corrupt).unwrap_err().code, "pull_candidate_inspection_failed");
+        assert_eq!(
+            f.call(NAME, &corrupt).unwrap_err().code,
+            "pull_candidate_inspection_failed"
+        );
         bytes.truncate(bytes.len() - 4);
         corrupt.insert("bundle_hex_chunks".into(), encoded_chunks(&bytes).unwrap());
         assert!(f.call(NAME, &corrupt).is_err());
-        assert!(f.call(NAME, &args).is_ok(), "a failed inspection cannot poison the next read");
+        assert!(
+            f.call(NAME, &args).is_ok(),
+            "a failed inspection cannot poison the next read"
+        );
         assert_eq!(f.head(), before);
     }
 }
@@ -97,14 +147,22 @@ fn independent_read_grants_precede_parsing_despite_review_and_merge_write_grants
     let before = f.head();
     for (source, pulls) in [(true, false), (false, true), (false, false)] {
         let mut options = f.options();
-        options.source = source; options.pulls = pulls;
-        options.writes.reviews = true; options.writes.merges = true;
+        options.source = source;
+        options.pulls = pulls;
+        options.writes.reviews = true;
+        options.writes.merges = true;
         options.principal = Some(actor(2));
         f.reopen(options);
         let hostile = fields([("operation", text(INSPECT))]);
         assert_eq!(f.call(NAME, &hostile).unwrap_err().code, "tool_not_granted");
-        assert_eq!(call(f.backend(), &hostile).unwrap_err().code, "tool_not_granted");
-        assert_eq!(inspect::call(f.backend(), &hostile).unwrap_err().code, "tool_not_granted");
+        assert_eq!(
+            call(f.backend(), &hostile).unwrap_err().code,
+            "tool_not_granted"
+        );
+        assert_eq!(
+            inspect::call(f.backend(), &hostile).unwrap_err().code,
+            "tool_not_granted"
+        );
         assert_eq!(f.head(), before);
     }
 }
@@ -120,13 +178,27 @@ fn shared_renderer_rejects_pr_ref_commit_head_and_path_misbinding() {
         let bytes = chunks(&args, "bundle_hex_chunks").unwrap();
         let node = &f.backend().node;
         let request = node.request_context();
-        let mut report = node.runtime().block_on(node.inspect_pull_request_bundle_in(
-            &request, &subject, candidate, &bytes, &Default::default(), &ReviewOptions::default(),
-        )).unwrap().review;
+        let mut report = node
+            .runtime()
+            .block_on(node.inspect_pull_request_bundle_in(
+                &request,
+                &subject,
+                candidate,
+                &bytes,
+                &Default::default(),
+                &ReviewOptions::default(),
+            ))
+            .unwrap()
+            .review;
         let selected = f.head().0;
         let render = |report: &SourceReview, options: ReviewOptions| {
             super::super::super::super::review::render_pull_candidate(
-                f.backend(), &subject, candidate, Some(selected), options, report,
+                f.backend(),
+                &subject,
+                candidate,
+                Some(selected),
+                options,
+                report,
             )
         };
         assert!(render(&report, ReviewOptions::default()).is_ok());
@@ -151,12 +223,24 @@ fn shared_renderer_rejects_pr_ref_commit_head_and_path_misbinding() {
         let mut filtered = ReviewOptions::default();
         filtered.paths.push(b"topic-only".to_vec());
         assert!(render(&report, filtered).is_err());
-        let wrong_mode = ReviewOptions { mode: ComparisonMode::MergeBase, ..ReviewOptions::default() };
+        let wrong_mode = ReviewOptions {
+            mode: ComparisonMode::MergeBase,
+            ..ReviewOptions::default()
+        };
         assert!(render(&report, wrong_mode).is_err());
         assert!(render(&report, ReviewOptions::default()).is_ok());
         request.cancel();
-        assert!(node.runtime().block_on(node.inspect_pull_request_bundle_in(
-            &request, &subject, candidate, &bytes, &Default::default(), &ReviewOptions::default(),
-        )).is_err());
+        assert!(
+            node.runtime()
+                .block_on(node.inspect_pull_request_bundle_in(
+                    &request,
+                    &subject,
+                    candidate,
+                    &bytes,
+                    &Default::default(),
+                    &ReviewOptions::default(),
+                ))
+                .is_err()
+        );
     }
 }

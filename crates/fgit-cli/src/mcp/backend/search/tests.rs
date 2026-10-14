@@ -2,7 +2,9 @@ use super::*;
 use fgit_types::RepositoryCommitId;
 
 fn args<const N: usize>(fields: [(&str, Value); N]) -> Object {
-    let Value::Object(value) = object(fields) else { unreachable!() };
+    let Value::Object(value) = object(fields) else {
+        unreachable!()
+    };
     value
 }
 fn input() -> Object {
@@ -51,25 +53,44 @@ fn report() -> SourceSearchReport {
 }
 fn rendered(input: &Object, report: &SourceSearchReport) -> Result<Object, ToolError> {
     let (selection, query) = parse(input, GitHashAlgorithm::Sha256)?;
-    render(RepositoryId::from_bytes([2; 16]), GitHashAlgorithm::Sha256, token(), &selection, &query, report)
+    render(
+        RepositoryId::from_bytes([2; 16]),
+        GitHashAlgorithm::Sha256,
+        token(),
+        &selection,
+        &query,
+        report,
+    )
 }
 
 #[test]
 fn search_rejects_ambient_authority_coercions_and_unsupported_queries() {
     for (name, value) in [
-        ("principal", text("admin")), ("storage", text("/etc")),
-        ("repository_id", text("other")), ("regex", text(".*")),
-        ("offset", text("1")), ("reference", text("/etc/passwd")),
-        ("reference", text("HEAD")), ("needle_hex", text("")),
-        ("needle_hex", text("FF")), ("needle_hex", text("0")),
-        ("needle_hex", text("0a")), ("needle_hex", text("61".repeat(257))),
-        ("max_matches", json::number(0)), ("max_matches", json::number(101)),
-        ("max_files", json::number(20_001)), ("max_files", text("1")),
+        ("principal", text("admin")),
+        ("storage", text("/etc")),
+        ("repository_id", text("other")),
+        ("regex", text(".*")),
+        ("offset", text("1")),
+        ("reference", text("/etc/passwd")),
+        ("reference", text("HEAD")),
+        ("needle_hex", text("")),
+        ("needle_hex", text("FF")),
+        ("needle_hex", text("0")),
+        ("needle_hex", text("0a")),
+        ("needle_hex", text("61".repeat(257))),
+        ("max_matches", json::number(0)),
+        ("max_matches", json::number(101)),
+        ("max_files", json::number(20_001)),
+        ("max_files", text("1")),
         ("max_total_bytes", json::number(67_108_865)),
         ("max_file_bytes", json::number(8_388_609)),
-        ("ignore_ascii_case", text("false")), ("ignore_ascii_case", Value::Null),
+        ("ignore_ascii_case", text("false")),
+        ("ignore_ascii_case", Value::Null),
         ("path_prefixes_hex", text("737263")),
-        ("path_prefixes_hex", Value::Array(vec![text(hex(b"../secret"))])),
+        (
+            "path_prefixes_hex",
+            Value::Array(vec![text(hex(b"../secret"))]),
+        ),
         ("path_prefixes_hex", Value::Array(vec![text(hex(b"/etc"))])),
         ("path_prefixes_hex", Value::Array(vec![text("")])),
         ("path_prefixes_hex", Value::Array(vec![text("61"); 33])),
@@ -79,7 +100,10 @@ fn search_rejects_ambient_authority_coercions_and_unsupported_queries() {
     ] {
         let mut request = input();
         request.insert(name.into(), value);
-        assert!(parse(&request, GitHashAlgorithm::Sha256).is_err(), "accepted {name}");
+        assert!(
+            parse(&request, GitHashAlgorithm::Sha256).is_err(),
+            "accepted {name}"
+        );
     }
     let mut missing = input();
     missing.remove("needle_hex");
@@ -90,7 +114,10 @@ fn search_rejects_ambient_authority_coercions_and_unsupported_queries() {
 fn validated_query_preserves_bytes_and_normalizes_only_path_scope() {
     let mut request = input();
     request.insert("ignore_ascii_case".into(), Value::Bool(true));
-    request.insert("path_prefixes_hex".into(), Value::Array(vec![text("ff"), text("ff")]));
+    request.insert(
+        "path_prefixes_hex".into(),
+        Value::Array(vec![text("ff"), text("ff")]),
+    );
     request.insert("expected_commit".into(), text(oid(1).to_string()));
     request.insert("expected_head".into(), text(head_token(token())));
     let (selected, query) = parse(&request, GitHashAlgorithm::Sha256).unwrap();
@@ -105,7 +132,9 @@ fn validated_query_preserves_bytes_and_normalizes_only_path_scope() {
 #[test]
 fn binary_matches_keep_exact_bytes_and_one_based_positions() {
     let value = rendered(&input(), &report()).unwrap();
-    let Value::Array(matches) = &value["matches"] else { unreachable!() };
+    let Value::Array(matches) = &value["matches"] else {
+        unreachable!()
+    };
     let found = matches[0].object().unwrap();
     assert_eq!(found["path_hex"].text(), Some("ff"));
     assert_eq!(found["excerpt_hex"].text(), Some("00ff0a"));
@@ -139,11 +168,19 @@ fn match_limit_is_partial_and_cannot_be_disguised_as_empty_success() {
 fn report_binding_and_work_counters_fail_closed() {
     let mut observed = report();
     observed.repository = RepositoryId::from_bytes([99; 16]);
-    assert_eq!(rendered(&input(), &observed).unwrap_err().code, "repository_binding_mismatch");
+    assert_eq!(
+        rendered(&input(), &observed).unwrap_err().code,
+        "repository_binding_mismatch"
+    );
     let mut pinned = input();
     pinned.insert("expected_commit".into(), text(oid(4).to_string()));
     assert!(rendered(&pinned, &report()).is_err());
-    for (selected, read, bytes, searched) in [(0, 1, 3, 3), (2, 1, 3, 3), (1, 1, 3, 4), (20_001, 20_001, 3, 3)] {
+    for (selected, read, bytes, searched) in [
+        (0, 1, 3, 3),
+        (2, 1, 3, 3),
+        (1, 1, 3, 4),
+        (20_001, 20_001, 3, 3),
+    ] {
         let mut observed = report();
         observed.files_selected = selected;
         observed.files_read = read;
@@ -177,7 +214,10 @@ fn invalid_match_coordinates_payload_order_and_scope_are_rejected() {
     observed.matches.push(observed.matches[0].clone());
     assert!(rendered(&input(), &observed).is_err());
     let mut request = input();
-    request.insert("path_prefixes_hex".into(), Value::Array(vec![text(hex(b"src"))]));
+    request.insert(
+        "path_prefixes_hex".into(),
+        Value::Array(vec![text(hex(b"src"))]),
+    );
     let mut observed = report();
     observed.matches[0].path = b"src2/file".to_vec();
     assert!(rendered(&request, &observed).is_err());
@@ -190,7 +230,19 @@ fn retained_payload_and_encoded_response_have_independent_hard_limits() {
     let query = SourceQuery::new(&[0, 255], SearchCase::Exact, &[]).unwrap();
     let mut retained = MAX_RETAINED_BYTES;
     let observed = report();
-    assert_eq!(render_matches(&query, SearchLimits::default(), GitHashAlgorithm::Sha256, &observed.matches, SearchCompletion::Complete, &mut retained).unwrap_err().code, "resource_limit");
+    assert_eq!(
+        render_matches(
+            &query,
+            SearchLimits::default(),
+            GitHashAlgorithm::Sha256,
+            &observed.matches,
+            SearchCompletion::Complete,
+            &mut retained
+        )
+        .unwrap_err()
+        .code,
+        "resource_limit"
+    );
     let huge = args([("payload", text("a".repeat(MAX_RESULT_BYTES)))]);
     assert_eq!(bounded_result(huge).unwrap_err().code, "resource_limit");
 }
@@ -198,11 +250,26 @@ fn retained_payload_and_encoded_response_have_independent_hard_limits() {
 #[test]
 fn failures_are_sanitized_not_empty_searches() {
     for (refusal, code) in [
-        (NodeWorkspaceRefusal::RefUnavailable, "reference_unavailable"),
-        (NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::SnapshotMoved)), "snapshot_moved"),
-        (NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::CommitMoved)), "source_commit_moved"),
-        (NodeWorkspaceRefusal::SourceSearch(Box::new(SearchError::Budget("private/path"))), "resource_limit"),
-        (NodeWorkspaceRefusal::SourceSearch(Box::new(SearchError::Cancelled)), "read_cancelled"),
+        (
+            NodeWorkspaceRefusal::RefUnavailable,
+            "reference_unavailable",
+        ),
+        (
+            NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::SnapshotMoved)),
+            "snapshot_moved",
+        ),
+        (
+            NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::CommitMoved)),
+            "source_commit_moved",
+        ),
+        (
+            NodeWorkspaceRefusal::SourceSearch(Box::new(SearchError::Budget("private/path"))),
+            "resource_limit",
+        ),
+        (
+            NodeWorkspaceRefusal::SourceSearch(Box::new(SearchError::Cancelled)),
+            "read_cancelled",
+        ),
     ] {
         let error = read_error(refusal);
         assert_eq!(error.code, code);

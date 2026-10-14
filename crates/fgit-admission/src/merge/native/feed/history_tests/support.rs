@@ -1,24 +1,23 @@
 //! Non-durable model storage. Publication, commitments and readers are real;
 //! these fixtures do not claim semantic admission or filesystem durability.
 use super::super::*;
-use std::future::Future;
-use std::sync::Mutex;
 use fgit_authority::{
-    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
-    AuthorityStore, AuthorityVersionToken, CasOutcome, HeadInit, HeadKey, HeadRead,
-    HeadReadReceipt, ImmutableKey, ImmutableRead, MemoryAuthorityStore, PutOutcome,
-    StoreInstanceId, authority_head_identity, collect_cumulative_outcomes,
-    initialize_repository, outcome_index_root, publish_decisions,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore,
+    AuthorityVersionToken, CasOutcome, HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey,
+    ImmutableRead, MemoryAuthorityStore, PutOutcome, StoreInstanceId, authority_head_identity,
+    collect_cumulative_outcomes, initialize_repository, outcome_index_root, publish_decisions,
 };
 use fgit_chronicle::{PublicationPlan, ResultingRoots};
 use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryCommitRecord};
-use fgit_forge::{ExpectedVersion, ForgeEventBatch, IssueNumber};
 use fgit_forge::event::issue::{IssueAction, IssueCommand};
+use fgit_forge::{ExpectedVersion, ForgeEventBatch, IssueNumber};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, HeadGeneration,
-    PolicyEpoch, PrincipalId, PrincipalSnapshotId, RefusalRecordId, RegistryEpoch,
-    RepositoryId, RepositorySequence, TenantId,
+    CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, HeadGeneration, PolicyEpoch,
+    PrincipalId, PrincipalSnapshotId, RefusalRecordId, RegistryEpoch, RepositoryId,
+    RepositorySequence, TenantId,
 };
+use std::future::Future;
+use std::sync::Mutex;
 
 pub(super) struct Reads {
     pub(super) backend: MemoryAuthorityStore,
@@ -26,54 +25,87 @@ pub(super) struct Reads {
     fault: Mutex<Option<(ImmutableKey, bool)>>,
 }
 impl Reads {
-    pub(super) fn count(&self) -> usize { self.keys.lock().unwrap().len() }
-    pub(super) fn reset(&self) { self.keys.lock().unwrap().clear(); }
+    pub(super) fn count(&self) -> usize {
+        self.keys.lock().unwrap().len()
+    }
+    pub(super) fn reset(&self) {
+        self.keys.lock().unwrap().clear();
+    }
     pub(super) fn fault(&self, key: Option<ImmutableKey>, corrupt: bool) {
         *self.fault.lock().unwrap() = key.map(|key| (key, corrupt));
     }
 }
 impl AsyncAuthorityStore for Reads {
     type Context = ();
-    fn instance_id(&self) -> StoreInstanceId { self.backend.instance_id() }
-    fn limits(&self) -> AuthorityLimits { self.backend.limits() }
-    fn put_if_absent(&self, _: &(), key: &ImmutableKey, body: &[u8])
-        -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send
-    {
+    fn instance_id(&self) -> StoreInstanceId {
+        self.backend.instance_id()
+    }
+    fn limits(&self) -> AuthorityLimits {
+        self.backend.limits()
+    }
+    fn put_if_absent(
+        &self,
+        _: &(),
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
         let result = self.backend.put_if_absent(key, body);
         async move { result }
     }
-    fn read_immutable(&self, _: &(), key: &ImmutableKey)
-        -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send
-    {
+    fn read_immutable(
+        &self,
+        _: &(),
+        key: &ImmutableKey,
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         self.keys.lock().unwrap().push(key.clone());
         let fault = self.fault.lock().unwrap().clone();
         let result = if let Some((_, corrupt)) = fault.filter(|(target, _)| target == key) {
-            Ok(if corrupt { ImmutableRead::Present(vec![0]) } else { ImmutableRead::Absent })
-        } else { self.backend.read_immutable(key) };
+            Ok(if corrupt {
+                ImmutableRead::Present(vec![0])
+            } else {
+                ImmutableRead::Absent
+            })
+        } else {
+            self.backend.read_immutable(key)
+        };
         async move { result }
     }
-    fn initialize_head(&self, _: &(), key: &HeadKey, generation: HeadGeneration, body: &[u8])
-        -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send
-    {
+    fn initialize_head(
+        &self,
+        _: &(),
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
         let result = self.backend.initialize_head(key, generation, body);
         async move { result }
     }
-    fn read_head(&self, _: &(), key: &HeadKey)
-        -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send
-    {
+    fn read_head(
+        &self,
+        _: &(),
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         let result = self.backend.read_head(key);
         async move { result }
     }
-    fn compare_exchange_head(&self, _: &(), key: &HeadKey, expected: AuthorityVersionToken,
-        generation: HeadGeneration, body: &[u8])
-        -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send
-    {
-        let result = self.backend.compare_exchange_head(key, expected, generation, body);
+    fn compare_exchange_head(
+        &self,
+        _: &(),
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        let result = self
+            .backend
+            .compare_exchange_head(key, expected, generation, body);
         async move { result }
     }
-    fn authenticate_head_receipt(&self, _: &(), receipt: &HeadReadReceipt)
-        -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send
-    {
+    fn authenticate_head_receipt(
+        &self,
+        _: &(),
+        receipt: &HeadReadReceipt,
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         let result = self.backend.authenticate_head_receipt(receipt);
         async move { result }
     }
@@ -97,7 +129,11 @@ fn digest(n: u64) -> Digest {
 }
 macro_rules! identity {
     ($ty:ty, $n:expr) => {
-        <$ty>::from_digest(DigestAlgorithmId::try_new(0xfff1).unwrap(), CANONICAL_CODEC_VERSION, bytes($n))
+        <$ty>::from_digest(
+            DigestAlgorithmId::try_new(0xfff1).unwrap(),
+            CANONICAL_CODEC_VERSION,
+            bytes($n),
+        )
     };
 }
 
@@ -115,20 +151,32 @@ impl Fixture {
         let genesis = RepositoryAuthorityHeadBody {
             repository_id: RepositoryId::from_bytes([0xb7; 16]),
             generation: HeadGeneration::FIRST,
-            predecessor_head_id: None, decision_tail_id: None,
-            latest_decision_sequence: None, latest_committed_rcr_id: None,
+            predecessor_head_id: None,
+            decision_tail_id: None,
+            latest_decision_sequence: None,
+            latest_committed_rcr_id: None,
             latest_repository_sequence: None,
-            ref_root: digest(1), forge_position_root: digest(2),
+            ref_root: digest(1),
+            forge_position_root: digest(2),
             outcome_index_root: outcome_index_root(&[]).unwrap(),
-            retention_root: digest(3), outbox_root: digest(4), configuration_root: digest(5),
-            policy_epoch: PolicyEpoch::FIRST, format_registry_epoch: RegistryEpoch::FIRST,
+            retention_root: digest(3),
+            outbox_root: digest(4),
+            configuration_root: digest(5),
+            policy_epoch: PolicyEpoch::FIRST,
+            format_registry_epoch: RegistryEpoch::FIRST,
             last_checkpoint_id: None,
         };
         initialize_repository(&backend, &key, &genesis).unwrap();
         Self {
-            store: Reads { backend, keys: Mutex::new(Vec::new()), fault: Mutex::new(None) },
+            store: Reads {
+                backend,
+                keys: Mutex::new(Vec::new()),
+                fault: Mutex::new(None),
+            },
             basis: PublicationBasis::new(authority_head_identity(&genesis).unwrap(), genesis),
-            heads: Vec::new(), key, next: 100,
+            heads: Vec::new(),
+            key,
+            next: 100,
         }
     }
     // One length per committed RCR. An empty slice is a refusal-only batch;
@@ -141,53 +189,110 @@ impl Fixture {
         let mut plan = PublicationPlan::open(self.basis.clone()).unwrap();
         if counts.is_empty() {
             self.next += 1;
-            plan.refuse(identity!(TxId, self.next), RefusalCode::QuotaExceeded,
-                identity!(RefusalRecordId, self.next));
+            plan.refuse(
+                identity!(TxId, self.next),
+                RefusalCode::QuotaExceeded,
+                identity!(RefusalRecordId, self.next),
+            );
         }
         for &count in counts {
             self.next += 1;
-            let events = (0..count).map(|index| IssueCommand {
-                number: IssueNumber::try_new(self.next * 100 + index as u64 + 1).unwrap(),
-                expected_version: ExpectedVersion::NewStream,
-                action: IssueAction::Open {
-                    title: format!("Event {}:{index}", self.next),
-                    body: "canonical event fixture".into(), labels: Vec::new(),
-                },
-            }.proposed_event(PrincipalId::from_bytes([0xb8; 16])).unwrap()).collect();
+            let events = (0..count)
+                .map(|index| {
+                    IssueCommand {
+                        number: IssueNumber::try_new(self.next * 100 + index as u64 + 1).unwrap(),
+                        expected_version: ExpectedVersion::NewStream,
+                        action: IssueAction::Open {
+                            title: format!("Event {}:{index}", self.next),
+                            body: "canonical event fixture".into(),
+                            labels: Vec::new(),
+                        },
+                    }
+                    .proposed_event(PrincipalId::from_bytes([0xb8; 16]))
+                    .unwrap()
+                })
+                .collect();
             let batch = ForgeEventBatch { events };
             let root = storage::root(&batch).unwrap();
-            let key = storage::body_key(storage::EVENT_NAMESPACE, self.basis.body().repository_id, root).unwrap();
-            self.store.backend.put_if_absent(&key, &encode_body(&batch).unwrap()).unwrap();
+            let key = storage::body_key(
+                storage::EVENT_NAMESPACE,
+                self.basis.body().repository_id,
+                root,
+            )
+            .unwrap();
+            self.store
+                .backend
+                .put_if_absent(&key, &encode_body(&batch).unwrap())
+                .unwrap();
             plan.commit(RepositoryCommitRecord {
                 repository_id: self.basis.body().repository_id,
-                repository_sequence: RepositorySequence::FIRST, parent_rcr_id: None,
+                repository_sequence: RepositorySequence::FIRST,
+                parent_rcr_id: None,
                 tx_id: identity!(TxId, self.next),
                 principal_snapshot_id: identity!(PrincipalSnapshotId, self.next),
-                canonical_request_digest: digest(self.next), ref_delta_root: digest(self.next),
+                canonical_request_digest: digest(self.next),
+                ref_delta_root: digest(self.next),
                 resulting_ref_root: self.basis.body().ref_root,
-                object_closure_root: digest(self.next), forge_event_batch_root: root,
+                object_closure_root: digest(self.next),
+                forge_event_batch_root: root,
                 resulting_forge_position_root: self.basis.body().forge_position_root,
-                policy_epoch: self.basis.body().policy_epoch, policy_decision_root: digest(self.next),
-                invariant_evidence_root: digest(self.next), outbox_effect_root: digest(self.next),
+                policy_epoch: self.basis.body().policy_epoch,
+                policy_decision_root: digest(self.next),
+                invariant_evidence_root: digest(self.next),
+                outbox_effect_root: digest(self.next),
                 retention_delta_root: digest(self.next),
             });
         }
-        let publication = plan.seal(&CryptoBodyIdentity, ResultingRoots::carried_forward(&self.basis),
-            &witness, receipt.token()).unwrap();
-        publish_decisions(&self.store.backend, &self.key, receipt.token(), publication.batch(),
-            publication.head(), TenantId::from_bytes([0xb9; 16])).unwrap();
+        let publication = plan
+            .seal(
+                &CryptoBodyIdentity,
+                ResultingRoots::carried_forward(&self.basis),
+                &witness,
+                receipt.token(),
+            )
+            .unwrap();
+        publish_decisions(
+            &self.store.backend,
+            &self.key,
+            receipt.token(),
+            publication.batch(),
+            publication.head(),
+            TenantId::from_bytes([0xb9; 16]),
+        )
+        .unwrap();
         self.heads.push(publication.head().clone());
-        self.basis = PublicationBasis::new(authority_head_identity(publication.head()).unwrap(), publication.head().clone());
+        self.basis = PublicationBasis::new(
+            authority_head_identity(publication.head()).unwrap(),
+            publication.head().clone(),
+        );
     }
-    pub(super) fn page(&self, after: Option<ForgeEventCursor>, limit: u16)
-        -> Result<ForgeEventPage, AdmissionError>
-    {
-        ready(read_page_at(&self.store, &(), &self.basis, after, limit, &|| false))
+    pub(super) fn page(
+        &self,
+        after: Option<ForgeEventCursor>,
+        limit: u16,
+    ) -> Result<ForgeEventPage, AdmissionError> {
+        ready(read_page_at(
+            &self.store,
+            &(),
+            &self.basis,
+            after,
+            limit,
+            &|| false,
+        ))
     }
-    pub(super) fn records(&self, after: Option<ForgeEventCursor>, limits: history::Limits)
-        -> Result<Vec<Record>, AdmissionError>
-    {
-        ready(history::read_records(&self.store, &(), &self.basis, after, limits, &|| false))
+    pub(super) fn records(
+        &self,
+        after: Option<ForgeEventCursor>,
+        limits: history::Limits,
+    ) -> Result<Vec<Record>, AdmissionError> {
+        ready(history::read_records(
+            &self.store,
+            &(),
+            &self.basis,
+            after,
+            limits,
+            &|| false,
+        ))
     }
 }
 pub(super) fn cursor(sequence: u64, index: u32) -> ForgeEventCursor {

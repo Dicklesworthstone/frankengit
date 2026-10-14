@@ -17,9 +17,15 @@ struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!("fg-bundle-pins-{}-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
-            NEXT.fetch_add(1, Ordering::Relaxed)));
+        let path = std::env::temp_dir().join(format!(
+            "fg-bundle-pins-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -30,26 +36,49 @@ impl Directory {
     }
 }
 impl Drop for Directory {
-    fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
 }
 
 #[test]
 fn both_formats_emit_pinned_native_content_results_without_origin_or_signature_claims() {
-    for (encoded, digest, format, id) in [(SHA1, SHA1_DIGEST, "sha1", SHA1_ID), (SHA256, SHA256_DIGEST, "sha256", SHA256_ID)] {
+    for (encoded, digest, format, id) in [
+        (SHA1, SHA1_DIGEST, "sha1", SHA1_ID),
+        (SHA256, SHA256_DIGEST, "sha256", SHA256_ID),
+    ] {
         let directory = Directory::new();
         let path = directory.file(encoded);
         let pin = format!("refs/tags/blob={format}:{id}");
-        let options = parse(&args(&[path.to_str().unwrap(), "--expect-sha256", digest,
-            "--expect-format", format, "--expect-ref", &pin, "--exact-refs"])).unwrap();
+        let options = parse(&args(&[
+            path.to_str().unwrap(),
+            "--expect-sha256",
+            digest,
+            "--expect-format",
+            format,
+            "--expect-ref",
+            &pin,
+            "--exact-refs",
+        ]))
+        .unwrap();
         let result = execute(&options, &mut || true).unwrap();
         assert!(result.contains("\"caller_expectations_matched\":true"));
         assert!(result.contains("\"ref_set\":\"exact\""));
-        for key in ["origin_authenticated", "current_branch_verified", "signatures_verified", "repository_opened", "repository_changed"] {
+        for key in [
+            "origin_authenticated",
+            "current_branch_verified",
+            "signatures_verified",
+            "repository_opened",
+            "repository_changed",
+        ] {
             assert!(result.contains(&format!("\"{key}\":false")));
         }
         assert!(result.contains("\"object_graph_verified\":true"));
         assert!(result.ends_with("]}}"));
-        assert_eq!(std::fs::read(path).unwrap(), anchors::unhex(encoded, 4096).unwrap());
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            anchors::unhex(encoded, 4096).unwrap()
+        );
         assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 1);
     }
 }
@@ -60,7 +89,8 @@ fn unanchored_reports_keep_the_existing_shape() {
     let options = parse(&[path.to_str().unwrap().into()]).unwrap();
     assert!(options.expectations.is_none());
     let actual = execute(&options, &mut || true).unwrap();
-    let native = verify_git_bundle(&std::fs::read(path).unwrap(), &options.limits, &mut || true).unwrap();
+    let native =
+        verify_git_bundle(&std::fs::read(path).unwrap(), &options.limits, &mut || true).unwrap();
     assert_eq!(actual, report(&native).unwrap());
     assert!(!actual.contains("caller_expectations"));
 }
@@ -68,7 +98,12 @@ fn unanchored_reports_keep_the_existing_shape() {
 fn hash_only_pins_do_not_assume_a_native_algorithm_or_reference_set() {
     let directory = Directory::new();
     let path = directory.file(SHA256);
-    let options = parse(&args(&[path.to_str().unwrap(), "--expect-sha256", SHA256_DIGEST])).unwrap();
+    let options = parse(&args(&[
+        path.to_str().unwrap(),
+        "--expect-sha256",
+        SHA256_DIGEST,
+    ]))
+    .unwrap();
     let result = execute(&options, &mut || true).unwrap();
     assert!(result.contains("\"object_format\":null,\"ref_set\":null,\"references\":[]"));
 }
@@ -83,16 +118,52 @@ fn malformed_or_incomplete_pins_fail_during_parse_before_file_reads() {
         args(&["--expect-ref", &format!("refs/tags/blob={SHA1_ID}")]),
         args(&["--exact-refs"]),
         args(&["--expect-sha256", SHA1_DIGEST, "--exact-refs"]),
-        args(&["--expect-format", "sha1", "--expect-ref", "refs/tags/blob=123"]),
-        args(&["--expect-format", "sha256", "--expect-ref", &format!("refs/tags/blob={SHA1_ID}")]),
-        args(&["--expect-format", "sha1", "--expect-ref", &format!("refs/tags/blob=sha256:{SHA1_ID}")]),
+        args(&[
+            "--expect-format",
+            "sha1",
+            "--expect-ref",
+            "refs/tags/blob=123",
+        ]),
+        args(&[
+            "--expect-format",
+            "sha256",
+            "--expect-ref",
+            &format!("refs/tags/blob={SHA1_ID}"),
+        ]),
+        args(&[
+            "--expect-format",
+            "sha1",
+            "--expect-ref",
+            &format!("refs/tags/blob=sha256:{SHA1_ID}"),
+        ]),
         args(&["--expect-format", "sha1", "--expect-ref", &zero_pin]),
-        args(&["--expect-format", "sha1", "--expect-ref", &format!("HEAD={SHA1_ID}")]),
-        args(&["--expect-format", "sha1", "--expect-ref", &format!("refs/heads/../x={SHA1_ID}")]),
-        args(&["--expect-format", "sha1", "--expect-ref-hex", &format!("abc={SHA1_ID}")]),
-        args(&["--expect-format", "sha1", "--expect-ref-hex", &format!("zz={SHA1_ID}")]),
+        args(&[
+            "--expect-format",
+            "sha1",
+            "--expect-ref",
+            &format!("HEAD={SHA1_ID}"),
+        ]),
+        args(&[
+            "--expect-format",
+            "sha1",
+            "--expect-ref",
+            &format!("refs/heads/../x={SHA1_ID}"),
+        ]),
+        args(&[
+            "--expect-format",
+            "sha1",
+            "--expect-ref-hex",
+            &format!("abc={SHA1_ID}"),
+        ]),
+        args(&[
+            "--expect-format",
+            "sha1",
+            "--expect-ref-hex",
+            &format!("zz={SHA1_ID}"),
+        ]),
     ] {
-        let mut values = args(&["does-not-exist.bundle"]); values.extend(tail);
+        let mut values = args(&["does-not-exist.bundle"]);
+        values.extend(tail);
         assert!(parse(&values).is_err(), "{values:?}");
     }
 }
@@ -100,13 +171,32 @@ fn malformed_or_incomplete_pins_fail_during_parse_before_file_reads() {
 fn semantic_duplicates_are_rejected_even_across_text_and_hex_name_options() {
     let text = format!("refs/tags/blob={SHA1_ID}");
     let hex = format!("726566732f746167732f626c6f62={SHA1_ID}");
-    assert!(parse(&args(&["missing", "--expect-format", "sha1", "--expect-ref", &text, "--expect-ref-hex", &hex])).is_err());
+    assert!(
+        parse(&args(&[
+            "missing",
+            "--expect-format",
+            "sha1",
+            "--expect-ref",
+            &text,
+            "--expect-ref-hex",
+            &hex
+        ]))
+        .is_err()
+    );
     for singleton in ["--expect-sha256", "--expect-format", "--exact-refs"] {
-        let value = if singleton == "--expect-format" { "sha1" } else { SHA1_DIGEST };
+        let value = if singleton == "--expect-format" {
+            "sha1"
+        } else {
+            SHA1_DIGEST
+        };
         let mut input = args(&["missing", singleton]);
-        if singleton != "--exact-refs" { input.push(value.into()); }
+        if singleton != "--exact-refs" {
+            input.push(value.into());
+        }
         input.push(singleton.into());
-        if singleton != "--exact-refs" { input.push(value.into()); }
+        if singleton != "--exact-refs" {
+            input.push(value.into());
+        }
         assert!(parse(&input).is_err());
     }
 }
@@ -114,11 +204,31 @@ fn semantic_duplicates_are_rejected_even_across_text_and_hex_name_options() {
 fn raw_bytes_equals_signs_and_argument_order_preserve_exact_reference_pins() {
     let text = format!("refs/tags/a=b={SHA1_ID}");
     let raw = format!("726566732f746167732fff=sha1:{SHA1_ID}");
-    let options = parse(&args(&["missing", "--expect-ref-hex", &raw, "--expect-ref", &text, "--exact-refs", "--expect-format", "sha1"])).unwrap();
+    let options = parse(&args(&[
+        "missing",
+        "--expect-ref-hex",
+        &raw,
+        "--expect-ref",
+        &text,
+        "--exact-refs",
+        "--expect-format",
+        "sha1",
+    ]))
+    .unwrap();
     let expected = options.expectations.as_ref().unwrap();
     assert!(expected.exact_references());
-    assert!(expected.references().keys().any(|name| name.as_bytes() == b"refs/tags/a=b"));
-    assert!(expected.references().keys().any(|name| name.as_bytes() == b"refs/tags/\xff"));
+    assert!(
+        expected
+            .references()
+            .keys()
+            .any(|name| name.as_bytes() == b"refs/tags/a=b")
+    );
+    assert!(
+        expected
+            .references()
+            .keys()
+            .any(|name| name.as_bytes() == b"refs/tags/\xff")
+    );
 }
 #[test]
 fn many_pins_work_but_final_count_and_aggregate_budgets_are_enforced() {
@@ -127,13 +237,24 @@ fn many_pins_work_but_final_count_and_aggregate_budgets_are_enforced() {
         values.push("--expect-ref".into());
         values.push(format!("refs/tags/{number:04}={SHA1_ID}"));
     }
-    assert_eq!(parse(&values).unwrap().expectations.unwrap().references().len(), 20);
+    assert_eq!(
+        parse(&values)
+            .unwrap()
+            .expectations
+            .unwrap()
+            .references()
+            .len(),
+        20
+    );
     values.extend(args(&["--max-refs", "19"]));
     assert!(parse(&values).is_err());
     let mut oversized = args(&["missing", "--expect-format", "sha1"]);
     for number in 0..600 {
         oversized.push("--expect-ref-hex".into());
-        oversized.push(format!("{}={SHA1_ID}", lowercase_hex(format!("refs/tags/{number:04}{}", "a".repeat(2000)).as_bytes())));
+        oversized.push(format!(
+            "{}={SHA1_ID}",
+            lowercase_hex(format!("refs/tags/{number:04}{}", "a".repeat(2000)).as_bytes())
+        ));
     }
     assert!(parse(&oversized).is_err());
 }
@@ -141,26 +262,59 @@ fn many_pins_work_but_final_count_and_aggregate_budgets_are_enforced() {
 fn wrong_pins_refuse_without_a_content_report_and_matching_pins_do_not_hide_corruption() {
     let directory = Directory::new();
     let path = directory.file(SHA1);
-    let bad = parse(&args(&[path.to_str().unwrap(), "--expect-sha256", &"0".repeat(64)])).unwrap();
-    assert!(execute(&bad, &mut || true).unwrap_err().contains("expected_bundle_artifact_mismatch"));
-    let mut data = std::fs::read(&path).unwrap(); *data.last_mut().unwrap() ^= 1; std::fs::write(&path, &data).unwrap();
+    let bad = parse(&args(&[
+        path.to_str().unwrap(),
+        "--expect-sha256",
+        &"0".repeat(64),
+    ]))
+    .unwrap();
+    assert!(
+        execute(&bad, &mut || true)
+            .unwrap_err()
+            .contains("expected_bundle_artifact_mismatch")
+    );
+    let mut data = std::fs::read(&path).unwrap();
+    *data.last_mut().unwrap() ^= 1;
+    std::fs::write(&path, &data).unwrap();
     let digest = lowercase_hex(&fgit_crypto::sha256_digest(&data));
     let matching = parse(&args(&[path.to_str().unwrap(), "--expect-sha256", &digest])).unwrap();
-    assert!(execute(&matching, &mut || true).unwrap_err().contains("bundle_pack:"));
+    assert!(
+        execute(&matching, &mut || true)
+            .unwrap_err()
+            .contains("bundle_pack:")
+    );
     assert_eq!(std::fs::read(path).unwrap(), data);
 }
 #[test]
 fn cancellation_and_limits_still_apply_to_the_anchored_path() {
-    let directory = Directory::new(); let path = directory.file(SHA1);
-    let options = parse(&args(&[path.to_str().unwrap(), "--expect-sha256", SHA1_DIGEST])).unwrap();
+    let directory = Directory::new();
+    let path = directory.file(SHA1);
+    let options = parse(&args(&[
+        path.to_str().unwrap(),
+        "--expect-sha256",
+        SHA1_DIGEST,
+    ]))
+    .unwrap();
     assert!(execute(&options, &mut || false).is_err());
     let mut polls = 0;
-    assert!(execute(&options, &mut || { polls += 1; polls < 10 }).is_err());
+    assert!(
+        execute(&options, &mut || {
+            polls += 1;
+            polls < 10
+        })
+        .is_err()
+    );
     assert_eq!(std::fs::read_dir(directory.0.as_path()).unwrap().count(), 1);
 }
 #[test]
 fn dash_prefixed_paths_remain_literal_after_the_separator() {
-    let options = parse(&args(&["--expect-sha256", SHA1_DIGEST, "--", "--input.bundle"])).unwrap();
+    let options = parse(&args(&[
+        "--expect-sha256",
+        SHA1_DIGEST,
+        "--",
+        "--input.bundle",
+    ]))
+    .unwrap();
     assert_eq!(options.path, PathBuf::from("--input.bundle"));
     assert!(options.expectations.is_some());
 }

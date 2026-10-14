@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "256"]
 //! Process-death boundaries through native admission and the real file-backed
 //! authority. This is process-crash recovery, not power-loss/fsync fault proof.
 //! The decorator forwards storage operations; it contains no publication model.

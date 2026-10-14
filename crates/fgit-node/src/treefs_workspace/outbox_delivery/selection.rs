@@ -139,16 +139,23 @@ impl OneNode {
         if maximum_entries == 0 || maximum_entries > fgit_codec::MAX_OUTBOX_STATE_ENTRIES {
             return Err(ForgeDeliveryReadRefusal::InvalidLimit);
         }
-        let (source_head, state) = self.selected_forge_outbox_in(request, expected_head).await?;
+        let (source_head, state) = self
+            .selected_forge_outbox_in(request, expected_head)
+            .await?;
         if state.outbox.entries().len() > maximum_entries {
             return Err(ForgeDeliveryReadRefusal::BudgetExceeded);
         }
         let mut entries = Vec::new();
-        entries.try_reserve_exact(state.outbox.entries().len())
+        entries
+            .try_reserve_exact(state.outbox.entries().len())
             .map_err(|_| ForgeDeliveryReadRefusal::BudgetExceeded)?;
         entries.extend_from_slice(state.outbox.entries());
         checkpoint(request)?;
-        Ok(ForgeOutboxPage { source_head, entries, next_after: None })
+        Ok(ForgeOutboxPage {
+            source_head,
+            entries,
+            next_after: None,
+        })
     }
 
     /// List retained canonical deliveries in their codec-defined key order.

@@ -12,7 +12,9 @@ use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree,
 };
 use fgit_pack::full_bundle::{FullBundleInput, FullBundleLimits};
-use fgit_pack::{EntryKind, NativeChecksumVerifier, PackLimits, QuarantinedPack, read_verified_pack};
+use fgit_pack::{
+    EntryKind, NativeChecksumVerifier, PackLimits, QuarantinedPack, read_verified_pack,
+};
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
@@ -46,9 +48,13 @@ pub(super) fn envelope<'a>(
     }
     let envelope = FullBundleInput::parse(
         input,
-        FullBundleLimits { max_references: 1, ..FullBundleLimits::default() },
+        FullBundleLimits {
+            max_references: 1,
+            ..FullBundleLimits::default()
+        },
         live,
-    ).map_err(pack_error)?;
+    )
+    .map_err(pack_error)?;
     if envelope.format() != format {
         return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
     }
@@ -56,7 +62,9 @@ pub(super) fn envelope<'a>(
         return Err(invalid("one initial branch is required"));
     };
     if advertised.name() != reference || advertised.target() != &candidate {
-        return Err(invalid("initial bundle differs from independent branch/commit expectations"));
+        return Err(invalid(
+            "initial bundle differs from independent branch/commit expectations",
+        ));
     }
     Ok(envelope)
 }
@@ -68,7 +76,11 @@ struct Child {
 }
 impl Child {
     const fn kind(&self) -> GitObjectKind {
-        if self.mode == 0o40000 { GitObjectKind::Tree } else { GitObjectKind::Blob }
+        if self.mode == 0o40000 {
+            GitObjectKind::Tree
+        } else {
+            GitObjectKind::Blob
+        }
     }
 }
 
@@ -84,12 +96,17 @@ pub(super) struct VerifiedInitial {
 }
 impl VerifiedInitial {
     fn body(&self, id: GitOid, kind: GitObjectKind) -> Result<&[u8], NodeWorkspaceRefusal> {
-        let &(actual, index) = self.objects.get(&id)
+        let &(actual, index) = self
+            .objects
+            .get(&id)
             .ok_or_else(|| invalid("initial bundle dependency missing"))?;
         if actual != kind {
             return Err(invalid("initial bundle dependency has the wrong kind"));
         }
-        self.pack.entries().get(index).map(|entry| entry.inflated.as_slice())
+        self.pack
+            .entries()
+            .get(index)
+            .map(|entry| entry.inflated.as_slice())
             .ok_or_else(|| invalid("initial bundle object index invalid"))
     }
 }
@@ -125,25 +142,36 @@ pub(super) fn read_pack(
         let id = git_object_id(format, kind, &entry.inflated);
         checkpoint(live)?;
         if id.is_zero() || objects.insert(id, (kind, index)).is_some() {
-            return Err(invalid("initial bundle contains duplicate object identities"));
+            return Err(invalid(
+                "initial bundle contains duplicate object identities",
+            ));
         }
-        expanded_bytes = expanded_bytes.checked_add(entry.inflated.len())
+        expanded_bytes = expanded_bytes
+            .checked_add(entry.inflated.len())
             .filter(|n| *n <= limits.max_total_expanded_bytes)
             .ok_or_else(|| budget("initial expanded bytes"))?;
         match kind {
             GitObjectKind::Commit => {
                 if id != expected_commit || root.is_some() {
-                    return Err(invalid("initial bundle must contain only its reviewed root commit"));
+                    return Err(invalid(
+                        "initial bundle must contain only its reviewed root commit",
+                    ));
                 }
                 let ParsedObject::Commit(commit) = parse_object_body(
-                    ObjectType::Commit, &entry.inflated, AcceptanceProfile::StrictCreate, &parsing,
-                ).map_err(|_| invalid("invalid initial commit bytes"))? else {
+                    ObjectType::Commit,
+                    &entry.inflated,
+                    AcceptanceProfile::StrictCreate,
+                    &parsing,
+                )
+                .map_err(|_| invalid("invalid initial commit bytes"))?
+                else {
                     return Err(invalid("initial object is not a commit"));
                 };
                 if commit.parent_references().next().is_some() {
                     return Err(invalid("initial commit has a parent"));
                 }
-                let tree = commit.tree_reference()
+                let tree = commit
+                    .tree_reference()
                     .and_then(|bytes| std::str::from_utf8(bytes).ok())
                     .and_then(|text| GitOid::from_hex(format, text).ok())
                     .filter(|id| !id.is_zero())
@@ -155,12 +183,20 @@ pub(super) fn read_pack(
                     max_tree_entries: MAX_CLOSURE_EDGES.saturating_sub(edges).max(1),
                     ..parsing.clone()
                 };
-                let parsed = parse_tree(&entry.inflated, AcceptanceProfile::StrictCreate, &tree_limits)
-                    .map_err(|_| invalid("invalid initial tree"))?;
-                edges = edges.checked_add(parsed.len()).filter(|n| *n <= MAX_CLOSURE_EDGES)
+                let parsed = parse_tree(
+                    &entry.inflated,
+                    AcceptanceProfile::StrictCreate,
+                    &tree_limits,
+                )
+                .map_err(|_| invalid("invalid initial tree"))?;
+                edges = edges
+                    .checked_add(parsed.len())
+                    .filter(|n| *n <= MAX_CLOSURE_EDGES)
                     .ok_or_else(|| budget("initial closure edges"))?;
                 let mut children = Vec::new();
-                children.try_reserve_exact(parsed.len()).map_err(|_| budget("initial tree allocation"))?;
+                children
+                    .try_reserve_exact(parsed.len())
+                    .map_err(|_| budget("initial tree allocation"))?;
                 let mut names = BTreeSet::new();
                 for child in parsed {
                     checkpoint(live)?;
@@ -168,7 +204,11 @@ pub(super) fn read_pack(
                         b"40000" => 0o40000,
                         b"100644" => 0o100644,
                         b"100755" => 0o100755,
-                        _ => return Err(invalid("initial tree contains a non-regular file or gitlink")),
+                        _ => {
+                            return Err(invalid(
+                                "initial tree contains a non-regular file or gitlink",
+                            ));
+                        }
                     };
                     if child.name.contains(&b'/')
                         || fgit_treefs::TreePath::parse_default(&child.name).is_err()
@@ -176,9 +216,14 @@ pub(super) fn read_pack(
                     {
                         return Err(invalid("invalid or duplicate initial tree name"));
                     }
-                    let id = GitOid::from_hex(format, &fgit_crypto::lowercase_hex(&child.object_id))
-                        .map_err(|_| invalid("invalid initial tree child"))?;
-                    children.push(Child { name: child.name.to_vec(), mode, id });
+                    let id =
+                        GitOid::from_hex(format, &fgit_crypto::lowercase_hex(&child.object_id))
+                            .map_err(|_| invalid("invalid initial tree child"))?;
+                    children.push(Child {
+                        name: child.name.to_vec(),
+                        mode,
+                        id,
+                    });
                 }
                 trees.insert(id, children);
             }
@@ -187,7 +232,14 @@ pub(super) fn read_pack(
         }
     }
     let root = root.ok_or_else(|| invalid("initial root commit is missing"))?;
-    let verified = VerifiedInitial { pack, objects, trees, root, commit: expected_commit, expanded_bytes };
+    let verified = VerifiedInitial {
+        pack,
+        objects,
+        trees,
+        root,
+        commit: expected_commit,
+        expanded_bytes,
+    };
     let mut reached = BTreeSet::from([expected_commit]);
     let mut frontier = vec![(root, GitObjectKind::Tree)];
     while let Some((id, kind)) = frontier.pop() {
@@ -195,9 +247,13 @@ pub(super) fn read_pack(
         // Check every edge's required type BEFORE deduplicating traversal.
         // A visited tree cannot later satisfy a regular-file edge to the same ID.
         verified.body(id, kind)?;
-        if !reached.insert(id) { continue; }
+        if !reached.insert(id) {
+            continue;
+        }
         if let Some(children) = verified.trees.get(&id) {
-            frontier.try_reserve(children.len()).map_err(|_| budget("initial closure allocation"))?;
+            frontier
+                .try_reserve(children.len())
+                .map_err(|_| budget("initial closure allocation"))?;
             for child in children {
                 checkpoint(live)?;
                 frontier.push((child.id, child.kind()));
@@ -205,7 +261,9 @@ pub(super) fn read_pack(
         }
     }
     if reached.len() != verified.objects.len() {
-        return Err(invalid("initial bundle contains objects outside the reviewed closure"));
+        return Err(invalid(
+            "initial bundle contains objects outside the reviewed closure",
+        ));
     }
     checkpoint(live)?;
     Ok(verified)
@@ -213,12 +271,16 @@ pub(super) fn read_pack(
 
 fn copy(bytes: &[u8]) -> Result<Vec<u8>, NodeWorkspaceRefusal> {
     let mut output = Vec::new();
-    output.try_reserve_exact(bytes.len()).map_err(|_| budget("initial preview allocation"))?;
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| budget("initial preview allocation"))?;
     output.extend_from_slice(bytes);
     Ok(output)
 }
 fn charge(total: &mut usize, amount: usize, limit: usize) -> Result<(), NodeWorkspaceRefusal> {
-    *total = total.checked_add(amount).filter(|n| *n <= limit)
+    *total = total
+        .checked_add(amount)
+        .filter(|n| *n <= limit)
         .ok_or_else(|| budget("initial preview bytes"))?;
     Ok(())
 }
@@ -230,10 +292,14 @@ fn preview(
     limits: InitialInspectionLimits,
     live: &mut impl FnMut() -> bool,
 ) -> Result<InitialCommitInspection, NodeWorkspaceRefusal> {
-    limits.validate().map_err(NodeWorkspaceRefusal::InitialCommit)?;
+    limits
+        .validate()
+        .map_err(NodeWorkspaceRefusal::InitialCommit)?;
     checkpoint(live)?;
     let body = verified.body(verified.commit, GitObjectKind::Commit)?;
-    if body.len() > limits.max_commit_bytes { return Err(budget("initial commit preview bytes")); }
+    if body.len() > limits.max_commit_bytes {
+        return Err(budget("initial commit preview bytes"));
+    }
     let mut output_bytes = 0usize;
     charge(&mut output_bytes, body.len(), limits.max_output_bytes)?;
     let commit_body = copy(body)?;
@@ -243,38 +309,67 @@ fn preview(
     let mut frontier = vec![(Vec::new(), verified.root, 0usize)];
     while let Some((path, tree, depth)) = frontier.pop() {
         checkpoint(live)?;
-        directories.try_reserve(1).map_err(|_| budget("initial directory preview allocation"))?;
-        directories.push(InspectedInitialDirectory { path: copy(&path)?, tree });
-        let children = verified.trees.get(&tree).ok_or_else(|| invalid("initial tree missing"))?;
-        entries = entries.checked_add(children.len()).filter(|n| *n <= limits.max_tree_entries)
+        directories
+            .try_reserve(1)
+            .map_err(|_| budget("initial directory preview allocation"))?;
+        directories.push(InspectedInitialDirectory {
+            path: copy(&path)?,
+            tree,
+        });
+        let children = verified
+            .trees
+            .get(&tree)
+            .ok_or_else(|| invalid("initial tree missing"))?;
+        entries = entries
+            .checked_add(children.len())
+            .filter(|n| *n <= limits.max_tree_entries)
             .ok_or_else(|| budget("initial preview tree entries"))?;
         // Do not deduplicate by tree ID: every alias is a separate output path.
         for child in children {
             checkpoint(live)?;
-            if depth >= limits.max_depth { return Err(budget("initial preview depth")); }
-            let length = path.len().checked_add(usize::from(!path.is_empty()))
+            if depth >= limits.max_depth {
+                return Err(budget("initial preview depth"));
+            }
+            let length = path
+                .len()
+                .checked_add(usize::from(!path.is_empty()))
                 .and_then(|n| n.checked_add(child.name.len()))
                 .filter(|n| *n <= limits.max_path_bytes)
                 .ok_or_else(|| budget("initial preview path bytes"))?;
             charge(&mut output_bytes, length, limits.max_output_bytes)?;
             let mut child_path = Vec::new();
-            child_path.try_reserve_exact(length).map_err(|_| budget("initial path allocation"))?;
+            child_path
+                .try_reserve_exact(length)
+                .map_err(|_| budget("initial path allocation"))?;
             child_path.extend_from_slice(&path);
-            if !path.is_empty() { child_path.push(b'/'); }
+            if !path.is_empty() {
+                child_path.push(b'/');
+            }
             child_path.extend_from_slice(&child.name);
             fgit_treefs::TreePath::parse_default(&child_path)
                 .map_err(|_| invalid("invalid expanded initial path"))?;
             if child.kind() == GitObjectKind::Tree {
-                frontier.try_reserve(1).map_err(|_| budget("initial preview frontier"))?;
+                frontier
+                    .try_reserve(1)
+                    .map_err(|_| budget("initial preview frontier"))?;
                 frontier.push((child_path, child.id, depth + 1));
             } else {
-                if files.len() == limits.max_files { return Err(budget("initial preview files")); }
+                if files.len() == limits.max_files {
+                    return Err(budget("initial preview files"));
+                }
                 let content = verified.body(child.id, GitObjectKind::Blob)?;
-                if content.len() > limits.max_file_bytes { return Err(budget("initial preview file bytes")); }
+                if content.len() > limits.max_file_bytes {
+                    return Err(budget("initial preview file bytes"));
+                }
                 charge(&mut output_bytes, content.len(), limits.max_output_bytes)?;
-                files.try_reserve(1).map_err(|_| budget("initial file preview allocation"))?;
+                files
+                    .try_reserve(1)
+                    .map_err(|_| budget("initial file preview allocation"))?;
                 files.push(InspectedInitialFile {
-                    path: child_path, blob: child.id, mode: child.mode, content: copy(content)?,
+                    path: child_path,
+                    blob: child.id,
+                    mode: child.mode,
+                    content: copy(content)?,
                 });
             }
         }
@@ -288,9 +383,14 @@ fn preview(
         object_format: verified.pack.format,
         candidate_commit: verified.commit,
         root_tree: verified.root,
-        commit_body, files, directories, bundle_sha256,
-        bundle_bytes: input.len(), pack_bytes,
-        object_count: verified.objects.len(), expanded_bytes: verified.expanded_bytes,
+        commit_body,
+        files,
+        directories,
+        bundle_sha256,
+        bundle_bytes: input.len(),
+        pack_bytes,
+        object_count: verified.objects.len(),
+        expanded_bytes: verified.expanded_bytes,
     })
 }
 
@@ -311,13 +411,25 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>,
         limits: InitialInspectionLimits,
     ) -> Result<(RepositoryAuthorityHeadId, InitialCommitInspection), NodeWorkspaceRefusal> {
-        limits.validate().map_err(NodeWorkspaceRefusal::InitialCommit)?;
+        limits
+            .validate()
+            .map_err(NodeWorkspaceRefusal::InitialCommit)?;
         let mut live = || super::workspace_request_live(request);
         checkpoint(&mut live)?;
-        let envelope = envelope(input, self.object_format, reference, expected_commit, &mut live)?;
+        let envelope = envelope(
+            input,
+            self.object_format,
+            reference,
+            expected_commit,
+            &mut live,
+        )?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
-        if visibility.hides(reference.as_bytes()) { return Err(NodeWorkspaceRefusal::RefUnavailable); }
-        let selected = self.materialize_admission_in(request).await
+        if visibility.hides(reference.as_bytes()) {
+            return Err(NodeWorkspaceRefusal::RefUnavailable);
+        }
+        let selected = self
+            .materialize_admission_in(request)
+            .await
             .map_err(|e| NodeWorkspaceRefusal::Authority(Box::new(e)))?;
         checkpoint(&mut live)?;
         if selected.snapshot().hidden_refs.hides(reference.as_bytes()) {
@@ -327,13 +439,24 @@ impl OneNode {
             return Err(invalid("initial inspection snapshot moved"));
         }
         if selected.snapshot().refs.contains_key(reference) {
-            return Err(invalid("initial inspection destination branch already exists"));
+            return Err(invalid(
+                "initial inspection destination branch already exists",
+            ));
         }
         let verified = read_pack(
-            envelope.pack_bytes(), self.object_format, expected_commit,
-            &self.initial_commit_pack_limits(), &mut live,
+            envelope.pack_bytes(),
+            self.object_format,
+            expected_commit,
+            &self.initial_commit_pack_limits(),
+            &mut live,
         )?;
-        let report = preview(&verified, input, envelope.pack_bytes().len(), limits, &mut live)?;
+        let report = preview(
+            &verified,
+            input,
+            envelope.pack_bytes().len(),
+            limits,
+            &mut live,
+        )?;
         Ok((selected.basis().id(), report))
     }
 }

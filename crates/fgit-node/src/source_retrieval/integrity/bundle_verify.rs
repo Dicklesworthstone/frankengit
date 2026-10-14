@@ -7,11 +7,11 @@
 
 mod expectations;
 mod recovery;
-pub use recovery::{BundleRecoveryError, GitBundleRecovery, prepare_git_bundle_recovery};
 pub use expectations::{
     BundleExpectationError, BundleExpectations, MAX_EXPECTED_REFS, MatchedGitBundle,
     verify_git_bundle_against,
 };
+pub use recovery::{BundleRecoveryError, GitBundleRecovery, prepare_git_bundle_recovery};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -220,7 +220,10 @@ fn resolve(
             checkpoint(live)?;
             let id = git_object_id(format, kind, &body);
             checkpoint(live)?;
-            if verified.insert(id, (kind, body, offset(&objects[index]))).is_some() {
+            if verified
+                .insert(id, (kind, body, offset(&objects[index])))
+                .is_some()
+            {
                 return Err(BundleVerifyError::DuplicateObject(id));
             }
             set_id(&mut objects[index], id);
@@ -272,7 +275,9 @@ fn verify_git_bundle_with_locations(
     };
     checkpoint(&mut live)?;
     if let Some(expected) = expectations {
-        expected.validate_limits(limits).map_err(BundleVerifyError::Expectation)?;
+        expected
+            .validate_limits(limits)
+            .map_err(BundleVerifyError::Expectation)?;
     }
     let result = FullBundleInput::parse(input, limits.envelope, &mut live);
     checkpoint(&mut live)?;

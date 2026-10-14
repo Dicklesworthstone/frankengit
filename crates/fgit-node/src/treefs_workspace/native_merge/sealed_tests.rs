@@ -15,7 +15,7 @@ use fgit_admission::merge::{SealedMerge, prepare_native_merge, seal_attempt_for}
 use fgit_admission::{
     CanonicalRefState, CommitEvidence, PermittedObjectClosure, permitted_object_closure_root,
 };
-use fgit_authority::{AsyncAuthorityStore, IdempotencyKey, OutcomeLookup, PutOutcome};
+use fgit_authority::{IdempotencyKey, OutcomeLookup, PutOutcome};
 use fgit_codec::{
     CanonicalBody, CanonicalOutboxEffectState, CanonicalOutboxState, CanonicalOutboxStateEntry,
     OutboxDeliveryIdentityInput, derive_outbox_delivery_key,

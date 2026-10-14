@@ -2,9 +2,9 @@
 //! synthetic observations are not runner authentication or execution evidence.
 use super::*;
 use fgit_authority::{
-    AuthorityFailure, AuthorityLimits, AuthorityStore, AuthorityVersionToken, CasOutcome,
-    HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead,
-    MemoryAuthorityStore, PutOutcome, StoreInstanceId,
+    AuthorityFailure, AuthorityLimits, AuthorityStore, AuthorityVersionToken, CasOutcome, HeadInit,
+    HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
+    PutOutcome, StoreInstanceId,
 };
 use fgit_codec::harness::genesis_head;
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositionStateEntry};
@@ -80,7 +80,10 @@ impl AsyncAuthorityStore for Store {
         generation: fgit_types::HeadGeneration,
         body: &[u8],
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
-        std::future::ready(self.memory.compare_exchange_head(key, expected, generation, body))
+        std::future::ready(
+            self.memory
+                .compare_exchange_head(key, expected, generation, body),
+        )
     }
     fn authenticate_head_receipt(
         &self,
@@ -109,8 +112,7 @@ impl Fixture {
             actor: PrincipalId::from_bytes([7; 16]),
             record: WorkflowCheckRecord {
                 source_ref: RefName::try_new(b"refs/heads/topic").unwrap(),
-                source_commit: GitOid::from_hex(format, &"11".repeat(format.digest_len()))
-                    .unwrap(),
+                source_commit: GitOid::from_hex(format, &"11".repeat(format.digest_len())).unwrap(),
                 run_id: [4; 32],
                 attempt_id: [5; 32],
                 graph_root: [6; 32],
@@ -119,43 +121,55 @@ impl Fixture {
                 evidence: b"reference observation, not an execution attestation".to_vec(),
             },
         };
-        let batch = ForgeEventBatch::of_one(
-            check.record.proposed_event(check.actor, format).unwrap(),
-        );
+        let batch =
+            ForgeEventBatch::of_one(check.record.proposed_event(check.actor, format).unwrap());
         let event_root = run(storage::stage_body(
-            &store, &(), repository, storage::EVENT_NAMESPACE, &batch,
+            &store,
+            &(),
+            repository,
+            storage::EVENT_NAMESPACE,
+            &batch,
         ))
         .unwrap();
-        let event_key = storage::body_key(storage::EVENT_NAMESPACE, repository, event_root)
-            .unwrap();
+        let event_key =
+            storage::body_key(storage::EVENT_NAMESPACE, repository, event_root).unwrap();
         let positions = CanonicalForgePositionState::try_new(
             repository,
-            vec![ForgePositionStateEntry::try_new(
-                storage::aggregate_label(AggregateId::WorkflowCheck(check.id())).unwrap(),
-                0,
-                event_count,
-                event_root,
-            )
-            .unwrap()],
+            vec![
+                ForgePositionStateEntry::try_new(
+                    storage::aggregate_label(AggregateId::WorkflowCheck(check.id())).unwrap(),
+                    0,
+                    event_count,
+                    event_root,
+                )
+                .unwrap(),
+            ],
         )
         .unwrap();
         let mut head = genesis_head();
         head.repository_id = repository;
         head.forge_position_root = run(storage::stage_body(
-            &store, &(), repository, storage::POSITION_NAMESPACE, &positions,
+            &store,
+            &(),
+            repository,
+            storage::POSITION_NAMESPACE,
+            &positions,
         ))
         .unwrap();
         // Deliberately do NOT stage the outbox body. A workflow observation is
         // selected by its forge frontier, not by a successful outbox replay.
-        head.outbox_root = storage::root(
-            &CanonicalOutboxState::try_new(repository, Vec::new()).unwrap(),
-        )
-        .unwrap();
+        head.outbox_root =
+            storage::root(&CanonicalOutboxState::try_new(repository, Vec::new()).unwrap()).unwrap();
         let key = HeadKey::new(b"workflow-read-isolation/head".to_vec()).unwrap();
         fgit_authority::initialize_repository(&store.memory, &key, &head).unwrap();
         let basis = run(crate::read_basis_async(&store, &(), &key)).unwrap().0;
         store.reads.store(0, Ordering::Relaxed);
-        Self { store, basis, check, event_key }
+        Self {
+            store,
+            basis,
+            check,
+            event_key,
+        }
     }
     fn read<C: Fn() -> bool + Sync>(
         &self,
@@ -177,9 +191,15 @@ fn refuses<T: std::fmt::Debug>(result: Result<T, AdmissionError>, code: RefusalC
 fn selected_observation_is_readable_without_any_outbox_body_in_both_native_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = Fixture::new(format, 1);
-        assert_eq!(fixture.read(fixture.check.id(), &|| false).unwrap(), Some(fixture.check.clone()));
+        assert_eq!(
+            fixture.read(fixture.check.id(), &|| false).unwrap(),
+            Some(fixture.check.clone())
+        );
         assert_eq!(fixture.store.reads.load(Ordering::Relaxed), 2);
-        assert_eq!(fixture.read(fixture.check.id(), &|| false).unwrap(), Some(fixture.check.clone()));
+        assert_eq!(
+            fixture.read(fixture.check.id(), &|| false).unwrap(),
+            Some(fixture.check.clone())
+        );
     }
 }
 
@@ -196,23 +216,34 @@ fn an_absent_observation_needs_only_the_selected_frontier() {
 fn a_missing_selected_event_is_not_an_absent_observation() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha1, 1);
     *fixture.store.missing.lock().unwrap() = Some(fixture.event_key.clone());
-    refuses(fixture.read(fixture.check.id(), &|| false), RefusalCode::EvidenceMissing);
+    refuses(
+        fixture.read(fixture.check.id(), &|| false),
+        RefusalCode::EvidenceMissing,
+    );
 }
 
 #[test]
 fn an_immutable_observation_cannot_claim_multiple_events() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha256, 2);
-    refuses(fixture.read(fixture.check.id(), &|| false), RefusalCode::EvidenceInvalid);
+    refuses(
+        fixture.read(fixture.check.id(), &|| false),
+        RefusalCode::EvidenceInvalid,
+    );
     assert_eq!(fixture.store.reads.load(Ordering::Relaxed), 1);
 }
 
 #[test]
 fn cancellation_before_or_after_frontier_selection_does_not_read_the_event() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha1, 1);
-    refuses(fixture.read(fixture.check.id(), &|| true), RefusalCode::CancellationInProgress);
+    refuses(
+        fixture.read(fixture.check.id(), &|| true),
+        RefusalCode::CancellationInProgress,
+    );
     assert_eq!(fixture.store.reads.load(Ordering::Relaxed), 0);
     refuses(
-        fixture.read(fixture.check.id(), &|| fixture.store.reads.load(Ordering::Relaxed) != 0),
+        fixture.read(fixture.check.id(), &|| {
+            fixture.store.reads.load(Ordering::Relaxed) != 0
+        }),
         RefusalCode::CancellationInProgress,
     );
     assert_eq!(fixture.store.reads.load(Ordering::Relaxed), 1);

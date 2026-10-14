@@ -54,13 +54,16 @@ impl Tar {
         octal(&mut header[148..155], sum)?;
         header[155] = b' ';
         let padding = (BLOCK - data.len() % BLOCK) % BLOCK;
-        let end = self.bytes.len()
+        let end = self
+            .bytes
+            .len()
             .checked_add(BLOCK)
             .and_then(|size| size.checked_add(data.len()))
             .and_then(|size| size.checked_add(padding))
             .filter(|size| *size <= MAX_BYTES - 2 * BLOCK)
             .ok_or("source archive exceeds 128 MiB including tar framing")?;
-        self.bytes.try_reserve(end - self.bytes.len())
+        self.bytes
+            .try_reserve(end - self.bytes.len())
             .map_err(|_| "cannot allocate bounded source archive")?;
         self.bytes.extend_from_slice(&header);
         self.bytes.extend_from_slice(data);
@@ -69,7 +72,8 @@ impl Tar {
     }
 
     pub(super) fn finish(mut self) -> Result<Vec<u8>, String> {
-        self.bytes.try_reserve(2 * BLOCK)
+        self.bytes
+            .try_reserve(2 * BLOCK)
             .map_err(|_| "cannot allocate archive end markers")?;
         self.bytes.resize(self.bytes.len() + 2 * BLOCK, 0);
         Ok(self.bytes)
@@ -77,9 +81,13 @@ impl Tar {
 }
 
 pub(super) fn validate_component(name: &[u8]) -> Result<(), String> {
-    if name.is_empty() || name == b"." || name == b".."
+    if name.is_empty()
+        || name == b"."
+        || name == b".."
         || name.eq_ignore_ascii_case(b".git")
-        || name.iter().any(|byte| matches!(*byte, 0 | b'/' | b'\\' | b':'))
+        || name
+            .iter()
+            .any(|byte| matches!(*byte, 0 | b'/' | b'\\' | b':'))
     {
         return Err("source archive contains an unsafe path component".into());
     }
@@ -100,11 +108,15 @@ fn validate_link(target: &[u8]) -> Result<(), String> {
     // No parent components, even when a lexical normalization would appear
     // contained: another symlink can change what a preceding component means.
     // Refusing such links also prevents chained links from escaping the prefix.
-    if target.is_empty() || target.len() > 100 || target.starts_with(b"/")
+    if target.is_empty()
+        || target.len() > 100
+        || target.starts_with(b"/")
         || target.iter().any(|byte| matches!(*byte, 0 | b'\\' | b':'))
         || target.split(|byte| *byte == b'/').any(|part| part == b"..")
     {
-        return Err("ustar symlink requires at most 100 relative bytes without parent traversal".into());
+        return Err(
+            "ustar symlink requires at most 100 relative bytes without parent traversal".into(),
+        );
     }
     Ok(())
 }
@@ -116,10 +128,19 @@ fn write_name(header: &mut [u8; BLOCK], path: &[u8]) -> Result<(), String> {
     }
     // The ustar prefix ends at an actual separator. Never truncate raw names
     // or synthesize a PAX/GNU encoding with different byte semantics.
-    let split = path.iter().enumerate().rev().find_map(|(at, byte)| {
-        (*byte == b'/' && at > 0 && at <= 155 && path.len() - at - 1 <= 100
-            && at + 1 < path.len()).then_some(at)
-    }).ok_or("source path cannot be represented exactly in ustar name/prefix fields")?;
+    let split = path
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(at, byte)| {
+            (*byte == b'/'
+                && at > 0
+                && at <= 155
+                && path.len() - at - 1 <= 100
+                && at + 1 < path.len())
+            .then_some(at)
+        })
+        .ok_or("source path cannot be represented exactly in ustar name/prefix fields")?;
     let name = &path[split + 1..];
     header[..name.len()].copy_from_slice(name);
     header[345..345 + split].copy_from_slice(&path[..split]);
@@ -145,15 +166,28 @@ mod tests {
     use super::*;
 
     fn number(field: &[u8]) -> u64 {
-        u64::from_str_radix(std::str::from_utf8(field).unwrap().trim_matches(['\0', ' ']), 8).unwrap()
+        u64::from_str_radix(
+            std::str::from_utf8(field)
+                .unwrap()
+                .trim_matches(['\0', ' ']),
+            8,
+        )
+        .unwrap()
     }
 
     #[test]
     fn headers_have_real_ustar_checksums_modes_lengths_and_zero_padding() {
         let mut tar = Tar::default();
-        tar.append(b"source/bin/run", SourceEntryKind::Executable, &[0, 255, 10]).unwrap();
-        tar.append(b"source/empty", SourceEntryKind::Directory, b"").unwrap();
-        tar.append(b"source/link", SourceEntryKind::Symlink, b"bin/run").unwrap();
+        tar.append(
+            b"source/bin/run",
+            SourceEntryKind::Executable,
+            &[0, 255, 10],
+        )
+        .unwrap();
+        tar.append(b"source/empty", SourceEntryKind::Directory, b"")
+            .unwrap();
+        tar.append(b"source/link", SourceEntryKind::Symlink, b"bin/run")
+            .unwrap();
         let bytes = tar.finish().unwrap();
         // Independently generated with Python tarfile.TarInfo in USTAR_FORMAT,
         // then parsed by tarfile; this is not a regenerated implementation golden.
@@ -162,19 +196,33 @@ mod tests {
             let (offset, hex) = line.split_once(' ').unwrap();
             let offset = offset.parse::<usize>().unwrap();
             for index in 0..hex.len() / 2 {
-                expected[offset + index] = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
+                expected[offset + index] =
+                    u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
             }
         }
         assert_eq!(bytes, expected);
         assert_eq!(bytes.len(), 6 * BLOCK);
-        for (at, mode, size, flag) in [(0, 0o755, 3, b'0'), (1024, 0o755, 0, b'5'), (1536, 0o777, 0, b'2')] {
+        for (at, mode, size, flag) in [
+            (0, 0o755, 3, b'0'),
+            (1024, 0o755, 0, b'5'),
+            (1536, 0o777, 0, b'2'),
+        ] {
             let head = &bytes[at..at + BLOCK];
             assert_eq!(&head[257..265], b"ustar\000");
             assert_eq!(number(&head[100..108]), mode);
             assert_eq!(number(&head[124..136]), size);
             assert_eq!(head[156], flag);
-            let sum: u64 = head.iter().enumerate()
-                .map(|(i, byte)| if (148..156).contains(&i) { 32 } else { u64::from(*byte) }).sum();
+            let sum: u64 = head
+                .iter()
+                .enumerate()
+                .map(|(i, byte)| {
+                    if (148..156).contains(&i) {
+                        32
+                    } else {
+                        u64::from(*byte)
+                    }
+                })
+                .sum();
             assert_eq!(number(&head[148..156]), sum);
             assert_eq!(number(&head[136..148]), 0);
         }
@@ -196,21 +244,46 @@ mod tests {
         assert_eq!(&bytes[345..452], &path[..107]);
         let mut too_long = b"source/".to_vec();
         too_long.extend_from_slice(&[b'x'; 101]);
-        assert!(Tar::default().append(&too_long, SourceEntryKind::File, b"").is_err());
+        assert!(
+            Tar::default()
+                .append(&too_long, SourceEntryKind::File, b"")
+                .is_err()
+        );
     }
 
     #[test]
     fn unsafe_paths_and_links_fail_without_appending_partial_entries() {
         let mut tar = Tar::default();
-        for path in [b"/absolute".as_slice(), b"source/../escape", b"source/.Git/config", b"source//file", b"source/a\\b", b"source/C:evil", b"source/nul\0x"] {
+        for path in [
+            b"/absolute".as_slice(),
+            b"source/../escape",
+            b"source/.Git/config",
+            b"source//file",
+            b"source/a\\b",
+            b"source/C:evil",
+            b"source/nul\0x",
+        ] {
             assert!(tar.append(path, SourceEntryKind::File, b"x").is_err());
             assert!(tar.bytes.is_empty());
         }
-        for target in [b"/etc/passwd".as_slice(), b"../escape", b"child/../../escape", b"a/../file", b"C:escape", b"x\\y", b"bad\0target", b""] {
-            assert!(tar.append(b"source/link", SourceEntryKind::Symlink, target).is_err());
+        for target in [
+            b"/etc/passwd".as_slice(),
+            b"../escape",
+            b"child/../../escape",
+            b"a/../file",
+            b"C:escape",
+            b"x\\y",
+            b"bad\0target",
+            b"",
+        ] {
+            assert!(
+                tar.append(b"source/link", SourceEntryKind::Symlink, target)
+                    .is_err()
+            );
             assert!(tar.bytes.is_empty());
         }
-        tar.append(b"source/link", SourceEntryKind::Symlink, b"./safe/file").unwrap();
+        tar.append(b"source/link", SourceEntryKind::Symlink, b"./safe/file")
+            .unwrap();
         assert_eq!(tar.bytes.len(), BLOCK);
     }
 

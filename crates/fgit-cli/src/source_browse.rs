@@ -1,6 +1,6 @@
 //! Read-only source discovery and exact file bytes through the node boundary.
-mod options;
 mod archive;
+mod options;
 use super::merge_apply::preparation::{publish_new_bundle, require_absent};
 use super::publication_support::quote;
 use fgit_forge::source_browse::{
@@ -486,7 +486,10 @@ mod export_tests {
         assert_eq!(target, Some(PathBuf::from("new.bin")));
         let (tree_args, tree_target) = export_arguments(&input, false).unwrap();
         assert_eq!(tree_target, Some(PathBuf::from("new.bin")));
-        assert!(options::parse(&tree_args, false).is_err(), "tree still rejects --max-bytes");
+        assert!(
+            options::parse(&tree_args, false).is_err(),
+            "tree still rejects --max-bytes"
+        );
         input.extend(["--output".into(), "other.bin".into()]);
         assert!(export_arguments(&input, true).is_err());
     }

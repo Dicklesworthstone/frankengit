@@ -3,8 +3,7 @@
 use super::*;
 use crate::NodeConfig;
 use fgit_crypto::{GitObjectKind, git_object_id};
-use fgit_forge::preparation::{MergeMetadata, rebase::EmptyCommitPolicy};
-use fgit_forge::review::{ComparisonMode, ReviewOptions};
+use fgit_forge::preparation::rebase::EmptyCommitPolicy;
 use fgit_types::{DecisionOutcome, GitOid, HeadGeneration, PrincipalId, RepositoryId, TenantId};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,14 +44,6 @@ fn topic_ref() -> RefName {
 }
 fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0xc3; 16])
-}
-fn metadata() -> MergeMetadata {
-    MergeMetadata {
-        author: "Test <test@example.invalid>".into(),
-        committer: "Test <test@example.invalid>".into(),
-        timestamp: 2,
-        message: b"exact replay\n".to_vec(),
-    }
 }
 fn loose(
     path: &Path,
@@ -102,8 +93,6 @@ struct Fixture {
     /// are fast-forward only since 0ea24bc6).
     advanced: GitOid,
     base: GitOid,
-    target_tree: GitOid,
-    borrowed: GitOid,
 }
 fn fixture(scratch: &Scratch, format: GitHashAlgorithm, conflict: bool) -> (OneNode, Fixture) {
     let path = scratch.0.join("source");
@@ -214,8 +203,6 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm, conflict: bool) -> (OneN
             picked,
             advanced,
             base,
-            target_tree,
-            borrowed,
         },
     )
 }

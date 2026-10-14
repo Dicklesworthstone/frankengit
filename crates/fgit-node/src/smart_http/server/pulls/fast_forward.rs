@@ -23,7 +23,7 @@ use crate::{
 const MAX_COMMAND_BYTES: usize = 8 * 1024;
 
 #[derive(Debug)]
-pub(super) struct Request<'a> {
+pub(in crate::smart_http::server) struct Request<'a> {
     repository_route: &'a str,
     number: PullRequestNumber,
 }
@@ -70,7 +70,10 @@ impl<'a> Request<'a> {
             return Err(ApiError::bad("git_protocol_not_applicable"));
         }
         if query.is_some()
-            || matches!(head.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
+            || matches!(
+                head.body,
+                BodyFraming::Empty | BodyFraming::ContentLength(0)
+            )
         {
             return Err(ApiError::bad("invalid_mutation_envelope"));
         }

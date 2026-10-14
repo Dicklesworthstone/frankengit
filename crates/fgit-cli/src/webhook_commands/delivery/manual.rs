@@ -1,11 +1,9 @@
 //! An explicitly requested, single-attempt operator delivery. Generic HTTP
 //! receivers do not acquire strong idempotency by being called from the CLI.
 
-use fgit_forge::webhook::{
-    DeadLetterEntry, SsrfPolicy, WebhookId, WebhookRegistration,
-};
 #[cfg(all(test, unix))]
 use fgit_forge::webhook::WebhookEventFilter;
+use fgit_forge::webhook::{DeadLetterEntry, SsrfPolicy, WebhookId, WebhookRegistration};
 #[cfg(all(test, unix))]
 use fgit_forge::{ForgeEvent, ForgeEventPayload};
 use fgit_node::webhook::{WebhookDeliveryDestination, WebhookStore};

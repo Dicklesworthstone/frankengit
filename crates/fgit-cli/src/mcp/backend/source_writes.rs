@@ -92,7 +92,11 @@ fn schema(name: &str) -> Value {
             ),
         );
     }
-    if name == PUBLISH { initial::schema(result) } else { result }
+    if name == PUBLISH {
+        initial::schema(result)
+    } else {
+        result
+    }
 }
 #[derive(Debug)]
 struct Input {

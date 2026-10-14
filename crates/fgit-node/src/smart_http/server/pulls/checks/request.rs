@@ -7,14 +7,14 @@ use fgit_types::RepositoryAuthorityHeadId;
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::smart_http::server::pulls) struct Page {
+pub(in crate::smart_http::server) struct Page {
     pub after: Option<WorkflowCheckId>,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
 }
 
 #[derive(Debug)]
-pub(in crate::smart_http::server::pulls) struct Request<'a> {
+pub(in crate::smart_http::server) struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub page: Page,

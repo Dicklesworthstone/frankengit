@@ -292,7 +292,7 @@ fn publish(node: &OneNode, record: &WorkflowCheckRecord, key: &[u8]) -> (TxId, T
 fn actual_publication_survives_reopen_with_exact_evidence_and_no_branch_or_policy_change() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let temp = Temp::new();
-        let (mut node, config, run) = run_fixture(&temp, format, false);
+        let (node, config, run) = run_fixture(&temp, format, false);
         let record = submitted_record(&run);
         let before = materialize(&node);
         let journal_before = fs::read(run.run_directory.join("check-proposals.journal")).unwrap();
@@ -352,7 +352,7 @@ fn actual_publication_survives_reopen_with_exact_evidence_and_no_branch_or_polic
 #[test]
 fn occupied_job_and_evidence_substitution_cannot_create_a_second_delivery() {
     let temp = Temp::new();
-    let (mut node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha1, false);
+    let (node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha1, false);
     let record = submitted_record(&run);
     let first = publish(&node, &record, b"publish-once");
     assert!(matches!(first.1.outcome, DecisionOutcome::Committed { .. }));
@@ -403,7 +403,7 @@ fn occupied_job_and_evidence_substitution_cannot_create_a_second_delivery() {
 #[test]
 fn historical_retry_is_not_rewritten_when_the_current_branch_moves() {
     let temp = Temp::new();
-    let (mut node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha256, false);
+    let (node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha256, false);
     let record = submitted_record(&run);
     let first = publish(&node, &record, b"old-observation");
     let body = format!(
@@ -484,7 +484,7 @@ fn historical_retry_is_not_rewritten_when_the_current_branch_moves() {
 #[test]
 fn actual_failed_job_is_recorded_as_failure_without_a_green_conclusion() {
     let temp = Temp::new();
-    let (mut node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha1, true);
+    let (node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha1, true);
     let record = submitted_record(&run);
     assert_eq!(record.conclusion, WorkflowCheckConclusion::Failure);
     assert!(matches!(

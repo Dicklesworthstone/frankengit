@@ -75,35 +75,39 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
             let request = node.outbox_delivery_context();
             let mut saved = None;
             let mut recording_error = None;
-            let result = node
-                .runtime()
-                .block_on(node.refresh_scoped_source_index_guarded_local_in(
-                    &request,
-                    &options.reference,
-                    &options.scope,
-                    options.head,
-                    options.commit,
-                    *predecessor,
-                    *limits,
-                    *reads,
-                    &mut |candidate| {
-                        let result =
-                            output::candidate(options, incarnation, candidate, Some(*predecessor))
-                                .and_then(|json| checkpoint::record(record, json.as_bytes()));
-                        match result {
-                            Ok(()) => {
-                                saved = Some(candidate);
-                                Ok(())
+            let result =
+                node.runtime()
+                    .block_on(node.refresh_scoped_source_index_guarded_local_in(
+                        &request,
+                        &options.reference,
+                        &options.scope,
+                        options.head,
+                        options.commit,
+                        *predecessor,
+                        *limits,
+                        *reads,
+                        &mut |candidate| {
+                            let result = output::candidate(
+                                options,
+                                incarnation,
+                                candidate,
+                                Some(*predecessor),
+                            )
+                            .and_then(|json| checkpoint::record(record, json.as_bytes()));
+                            match result {
+                                Ok(()) => {
+                                    saved = Some(candidate);
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    recording_error = Some(error);
+                                    // The exact I/O error remains owned by this command.
+                                    // Any barrier error prevents native index effects.
+                                    Err(NodeWorkspaceRefusal::RefUnavailable)
+                                }
                             }
-                            Err(error) => {
-                                recording_error = Some(error);
-                                // The exact I/O error remains owned by this command.
-                                // Any barrier error prevents native index effects.
-                                Err(NodeWorkspaceRefusal::RefUnavailable)
-                            }
-                        }
-                    },
-                ));
+                        },
+                    ));
             if let Some(error) = recording_error {
                 return Err(error);
             }

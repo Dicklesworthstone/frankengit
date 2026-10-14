@@ -130,6 +130,7 @@ use fgit_wire::{
 use fsqlite_types::cx::Cx as FsqliteCx;
 
 mod loose_import;
+#[cfg(test)]
 mod merge_delivery;
 mod node_lanes;
 mod smart_http;

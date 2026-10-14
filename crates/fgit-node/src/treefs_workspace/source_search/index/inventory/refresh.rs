@@ -83,7 +83,15 @@ impl LocalSearch for Request<'_> {
         };
         match &self.reuse {
             Reuse::Whole(_) => discover(
-                base, source, capability, now, limits, cancelled, None, 0, &mut discovery,
+                base,
+                source,
+                capability,
+                now,
+                limits,
+                cancelled,
+                None,
+                0,
+                &mut discovery,
             ),
             Reuse::Scoped(reuse) => {
                 // Refuse an accidentally mismatched internal selector rather

@@ -5,7 +5,7 @@ use fgit_admission::policy_bridge::persisted::{
     PolicyFrame, PolicyStageDisposition, PolicyStoreError, PolicyStoreLimits, read_policy_async,
     stage_policy_async,
 };
-use fgit_authority::{AsyncAuthorityStore, body_key_for_id};
+use fgit_authority::body_key_for_id;
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

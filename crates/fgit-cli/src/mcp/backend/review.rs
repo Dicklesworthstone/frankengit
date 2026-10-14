@@ -352,10 +352,21 @@ pub(super) fn render_candidate(
         return Err(ToolError::invalid("full_candidate_review_required"));
     }
     let query = Query {
-        selection: ReviewSelection::References { before: reference.clone(), after: reference.clone() },
-        expected_head, expected_before: Some(base), expected_after: Some(candidate), options,
+        selection: ReviewSelection::References {
+            before: reference.clone(),
+            after: reference.clone(),
+        },
+        expected_head,
+        expected_before: Some(base),
+        expected_after: Some(candidate),
+        options,
     };
-    let mut fields = output::render(backend.options.repository, backend.options.format, &query, report)?;
+    let mut fields = output::render(
+        backend.options.repository,
+        backend.options.format,
+        &query,
+        report,
+    )?;
     fields.insert("completion_scope".into(), text("entire_candidate_tree"));
     Ok(fields)
 }

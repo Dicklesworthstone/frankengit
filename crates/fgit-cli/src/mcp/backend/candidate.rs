@@ -1,9 +1,9 @@
 //! Non-publishing source-candidate work for the explicitly sponsored local MCP
 //! profile. Repository bytes and commit metadata never select a principal.
-mod prepare;
-mod inspect;
 mod initial;
+mod inspect;
 mod inspect_initial;
+mod prepare;
 mod pull;
 
 use super::super::json::{self, Object, Value, object, text};
@@ -25,7 +25,18 @@ pub(super) fn tool() -> Tool {
         description: "Prepare an exact patch into a bounded native Git bundle (prepare_initial creates zero-parent history at an absent branch), prepare_pull_merge constructs a two-parent PR candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result; all PR operations additionally require the PR read grant, or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Initial inspection previews every file and empty directory at an absent branch. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source- or merge-write tool and an original retry key.",
         schema: object([
             ("type", text("object")),
-            ("oneOf", Value::Array(vec![prepare::schema(), inspect::schema(), initial::schema(), inspect_initial::schema(), pull::schema(), pull::inspection_schema(), pull::resolution_schema()])),
+            (
+                "oneOf",
+                Value::Array(vec![
+                    prepare::schema(),
+                    inspect::schema(),
+                    initial::schema(),
+                    inspect_initial::schema(),
+                    pull::schema(),
+                    pull::inspection_schema(),
+                    pull::resolution_schema(),
+                ]),
+            ),
         ]),
     }
 }
@@ -89,21 +100,30 @@ fn oid_schema() -> Value {
     object([
         ("type", text("string")),
         ("pattern", text("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")),
-        ("description", text("Exact nonzero native commit ID in the repository hash format.")),
+        (
+            "description",
+            text("Exact nonzero native commit ID in the repository hash format."),
+        ),
     ])
 }
 fn exactly_one(a: &str, b: &str) -> Value {
-    object([("oneOf", Value::Array(vec![
-        object([("required", Value::Array(vec![text(a)]))]),
-        object([("required", Value::Array(vec![text(b)]))]),
-    ]))])
+    object([(
+        "oneOf",
+        Value::Array(vec![
+            object([("required", Value::Array(vec![text(a)]))]),
+            object([("required", Value::Array(vec![text(b)]))]),
+        ]),
+    )])
 }
 fn input_schema(properties: Object, required: &[&str], mut constraints: Vec<Value>) -> Value {
     constraints.push(exactly_one("reference", "reference_hex"));
     object([
         ("type", text("object")),
         ("properties", Value::Object(properties)),
-        ("required", Value::Array(required.iter().map(|name| text(*name)).collect())),
+        (
+            "required",
+            Value::Array(required.iter().map(|name| text(*name)).collect()),
+        ),
         ("allOf", Value::Array(constraints)),
         ("additionalProperties", Value::Bool(false)),
     ])
@@ -119,21 +139,33 @@ fn chunks(args: &Object, name: &str) -> Result<Vec<u8>, ToolError> {
     }
     let mut size = 0_usize;
     for part in parts {
-        let value = part.text().ok_or(ToolError::invalid("invalid_candidate_chunk"))?;
-        if value.is_empty() || value.len() > CHUNK_BYTES * 2
+        let value = part
+            .text()
+            .ok_or(ToolError::invalid("invalid_candidate_chunk"))?;
+        if value.is_empty()
+            || value.len() > CHUNK_BYTES * 2
             || !value.len().is_multiple_of(2)
-            || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
             return Err(ToolError::invalid("invalid_candidate_chunk"));
         }
-        size = size.checked_add(value.len() / 2)
+        size = size
+            .checked_add(value.len() / 2)
             .filter(|size| *size <= MAX_BUNDLE_BYTES)
             .ok_or(ToolError::invalid("candidate_byte_limit"))?;
     }
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size).map_err(|_| ToolError::failed("allocation_refused"))?;
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| ToolError::failed("allocation_refused"))?;
     for part in parts {
-        bytes.extend(unhex(part.text().ok_or(ToolError::invalid("invalid_candidate_chunk"))?, CHUNK_BYTES)?);
+        bytes.extend(unhex(
+            part.text()
+                .ok_or(ToolError::invalid("invalid_candidate_chunk"))?,
+            CHUNK_BYTES,
+        )?);
     }
     Ok(bytes)
 }
@@ -141,9 +173,19 @@ fn encoded_chunks(bytes: &[u8]) -> Result<Value, ToolError> {
     if bytes.is_empty() || bytes.len() > MAX_BUNDLE_BYTES {
         return Err(ToolError::failed("candidate_bundle_limit"));
     }
-    Ok(Value::Array(bytes.chunks(CHUNK_BYTES).map(|part| text(hex(part))).collect()))
+    Ok(Value::Array(
+        bytes
+            .chunks(CHUNK_BYTES)
+            .map(|part| text(hex(part)))
+            .collect(),
+    ))
 }
-fn publication_arguments(reference: &RefName, base: GitOid, candidate: GitOid, bytes: &[u8]) -> Result<Value, ToolError> {
+fn publication_arguments(
+    reference: &RefName,
+    base: GitOid,
+    candidate: GitOid,
+    bytes: &[u8],
+) -> Result<Value, ToolError> {
     Ok(object([
         ("reference_hex", text(hex(reference.as_bytes()))),
         ("expected_base", text(raw_oid(base))),
@@ -154,18 +196,26 @@ fn publication_arguments(reference: &RefName, base: GitOid, candidate: GitOid, b
 fn binding(backend: &NodeTools) -> Object {
     let Value::Object(fields) = object([
         ("tenant_id", text(backend.options.tenant.to_string())),
-        ("repository_id", text(backend.options.repository.to_string())),
-        ("repository_incarnation", text(backend.node.repository_incarnation_id().to_string())),
+        (
+            "repository_id",
+            text(backend.options.repository.to_string()),
+        ),
+        (
+            "repository_incarnation",
+            text(backend.node.repository_incarnation_id().to_string()),
+        ),
         ("object_format", text(backend.options.format.as_str())),
         ("read_only", Value::Bool(true)),
         ("repository_changed", Value::Bool(false)),
         ("published", Value::Bool(false)),
         ("approval_granted", Value::Bool(false)),
-    ]) else { unreachable!() };
+    ]) else {
+        unreachable!()
+    };
     fields
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod tests;

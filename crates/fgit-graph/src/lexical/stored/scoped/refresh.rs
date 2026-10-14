@@ -2,9 +2,7 @@
 //! The existing refresh engine verifies every prior segment and owns token
 //! semantics. This boundary retains the scope through reuse and preparation.
 
-use super::super::{
-    LexicalRefreshStats, LexicalReuse, MAX_INDEX_DOCUMENTS, RefreshDocument,
-};
+use super::super::{LexicalRefreshStats, LexicalReuse, MAX_INDEX_DOCUMENTS, RefreshDocument};
 use super::{
     AsyncAuthorityStore, AuthorityStore, GenerationActivation, IndexError, LexicalError,
     LexicalReadLimits, LexicalScope, LexicalSource, PreparedScopedLexicalIndex,
@@ -91,7 +89,9 @@ impl<S: AuthorityStore> ScopedLexicalIndexStore<'_, S> {
     ) -> Result<ScopedLexicalReuse, IndexError> {
         check(live)?;
         self.agrees(&selection.scope)?;
-        let inner = self.inner.load_refresh_base(&selection.inner, limits, live)?;
+        let inner = self
+            .inner
+            .load_refresh_base(&selection.inner, limits, live)?;
         Ok(ScopedLexicalReuse {
             scope: self.scope.clone(),
             inner,

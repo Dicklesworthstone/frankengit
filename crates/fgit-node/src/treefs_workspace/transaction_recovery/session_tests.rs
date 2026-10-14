@@ -7,8 +7,8 @@ use fgit_admission::policy_bridge::receive_session::recovery::SessionRecovery;
 use fgit_admission::{AdmissionContext, AdmissionResult};
 use fgit_authority::key_recovery::RequestRecovery;
 use fgit_authority::{
-    AsyncAuthorityStore, ExpectedOld, IdempotencyKey, ImmutableKey, OutcomeLookup, ProposedNew,
-    RefCommand, SealAttempt, SemanticRequest, bind_idempotency_key_async, seal_request_async,
+    ExpectedOld, IdempotencyKey, ImmutableKey, OutcomeLookup, ProposedNew, RefCommand, SealAttempt,
+    SemanticRequest, bind_idempotency_key_async, seal_request_async,
 };
 use fgit_codec::{Encoder, encode_body};
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest, sha256_digest};

@@ -215,6 +215,6 @@ where
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod read_isolation;
+#[cfg(test)]
+mod tests;

@@ -5,7 +5,10 @@ use fgit_forge::{ForgeEvent, ForgeEventPayload};
 /// Filter an entire committed batch or refuse it. Removing individual events
 /// while retaining the original batch root would lie about the transmitted
 /// payload. Fine-grained fan-out needs its own canonical delivery identities.
-pub(super) fn require_subscription(filter: &WebhookEventFilter, events: &[ForgeEvent]) -> Result<(), String> {
+pub(super) fn require_subscription(
+    filter: &WebhookEventFilter,
+    events: &[ForgeEvent],
+) -> Result<(), String> {
     if events.is_empty() {
         return Err("no native forge events in selected delivery; no webhook attempted".into());
     }

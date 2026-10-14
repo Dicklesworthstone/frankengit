@@ -209,7 +209,11 @@ impl OneNode {
         }
         let mut live = || workspace_request_live(request);
         let envelope = inspection::envelope(
-            input, self.object_format, reference, expected_commit, &mut live,
+            input,
+            self.object_format,
+            reference,
+            expected_commit,
+            &mut live,
         )?;
         let semantic = SemanticRequest::build(
             RECEIVE_ADMISSION_SCHEMA,
@@ -266,7 +270,11 @@ impl OneNode {
         // Drop quarantine bytes before the independent admission validator runs.
         // Historical terminal recovery above still precedes all pack decoding.
         drop(inspection::read_pack(
-            envelope.pack_bytes(), self.object_format, expected_commit, &pack_limits, &mut live,
+            envelope.pack_bytes(),
+            self.object_format,
+            expected_commit,
+            &pack_limits,
+            &mut live,
         )?);
         self.import_full_git_bundle_durable_in(request, session, input, limits)
             .await

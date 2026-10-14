@@ -982,12 +982,7 @@ fn serve_connection(
         if events::is_route(envelope.target) {
             // The read-only adapter owns its typed response and pooled-node
             // cleanup. It never enters Git receive or takes a writer slot.
-            return events::serve(
-                profile,
-                &envelope,
-                &bytes[envelope.consumed..],
-                &mut writer,
-            );
+            return events::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer);
         }
         recovery = envelope
             .target

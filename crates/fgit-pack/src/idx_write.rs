@@ -38,37 +38,48 @@ pub fn build_pack_index_v2(
     checkpoint(deadline)?;
     let (body, trailer) = split_pack_trailer(pack, format, limits)?;
     let header = parse_pack_header(body, limits)?;
-    validate_object_count(header, u32::try_from(locations.len()).map_err(|_| {
-        PackError::IntegerOverflow { context: "recovery index count" }
-    })?)?;
+    validate_object_count(
+        header,
+        u32::try_from(locations.len()).map_err(|_| PackError::IntegerOverflow {
+            context: "recovery index count",
+        })?,
+    )?;
     let mut ordered = Vec::new();
-    ordered.try_reserve_exact(locations.len()).map_err(|_| PackError::AllocationFailed {
-        requested: locations.len(),
-    })?;
+    ordered
+        .try_reserve_exact(locations.len())
+        .map_err(|_| PackError::AllocationFailed {
+            requested: locations.len(),
+        })?;
     ordered.extend_from_slice(locations);
     ordered.sort_unstable_by_key(|row| row.1);
     checkpoint(deadline)?;
-    if ordered.first().is_some_and(|row| row.1 != 12)
-        || (ordered.is_empty() && body.len() != 12)
-    {
+    if ordered.first().is_some_and(|row| row.1 != 12) || (ordered.is_empty() && body.len() != 12) {
         return Err(PackError::TrailingPackData);
     }
     let width = format.digest_len();
     let large_count = ordered.iter().filter(|row| row.1 >= 0x8000_0000).count();
-    let size = locations.len().checked_mul(width + 8)
+    let size = locations
+        .len()
+        .checked_mul(width + 8)
         .and_then(|n| n.checked_add(1032 + width * 2))
         .and_then(|n| n.checked_add(large_count.checked_mul(8)?))
-        .ok_or(PackError::IntegerOverflow { context: "recovery index bytes" })?;
+        .ok_or(PackError::IntegerOverflow {
+            context: "recovery index bytes",
+        })?;
     limits.input(size)?;
     let table = crc_table();
     let mut rows = Vec::new();
-    rows.try_reserve_exact(ordered.len()).map_err(|_| PackError::AllocationFailed {
-        requested: ordered.len(),
-    })?;
+    rows.try_reserve_exact(ordered.len())
+        .map_err(|_| PackError::AllocationFailed {
+            requested: ordered.len(),
+        })?;
     for (i, &(id, offset)) in ordered.iter().enumerate() {
         checkpoint(deadline)?;
         if id.algorithm() != format {
-            return Err(PackError::ObjectFormatMismatch { expected: format, actual: id.algorithm() });
+            return Err(PackError::ObjectFormatMismatch {
+                expected: format,
+                actual: id.algorithm(),
+            });
         }
         if id.is_zero() {
             return Err(PackError::NativeObjectIdMismatch);
@@ -79,7 +90,9 @@ pub fn build_pack_index_v2(
         }
         let start = usize::try_from(offset).map_err(|_| PackError::InvalidOfsDelta)?;
         let end = usize::try_from(end).map_err(|_| PackError::InvalidOfsDelta)?;
-        let entry = body.get(start..end).filter(|bytes| !bytes.is_empty())
+        let entry = body
+            .get(start..end)
+            .filter(|bytes| !bytes.is_empty())
             .ok_or(PackError::InvalidOfsDelta)?;
         let mut crc = u32::MAX;
         for chunk in entry.chunks(65_536) {
@@ -88,7 +101,11 @@ pub fn build_pack_index_v2(
                 crc = table[((crc ^ u32::from(byte)) & 255) as usize] ^ (crc >> 8);
             }
         }
-        rows.push(IdxEntry { oid: id, crc32: !crc, pack_offset: offset });
+        rows.push(IdxEntry {
+            oid: id,
+            crc32: !crc,
+            pack_offset: offset,
+        });
     }
     rows.sort_unstable_by(|a, b| a.oid.as_bytes().cmp(b.oid.as_bytes()));
     checkpoint(deadline)?;
@@ -96,7 +113,9 @@ pub fn build_pack_index_v2(
         return Err(PackError::DuplicateObjectId);
     }
     let mut output = Vec::new();
-    output.try_reserve_exact(size).map_err(|_| PackError::AllocationFailed { requested: size })?;
+    output
+        .try_reserve_exact(size)
+        .map_err(|_| PackError::AllocationFailed { requested: size })?;
     output.extend_from_slice(b"\xfftOc\0\0\0\x02");
     let mut fanout = [0_u32; 256];
     for row in &rows {
@@ -122,7 +141,9 @@ pub fn build_pack_index_v2(
         let word = if row.pack_offset < 0x8000_0000 {
             u32::try_from(row.pack_offset).map_err(|_| PackError::InvalidOfsDelta)?
         } else {
-            if large_ordinal >= 0x8000_0000 { return Err(PackError::InvalidOfsDelta); }
+            if large_ordinal >= 0x8000_0000 {
+                return Err(PackError::InvalidOfsDelta);
+            }
             let word = large_ordinal | 0x8000_0000;
             large_ordinal += 1;
             word
@@ -160,7 +181,11 @@ fn crc_table() -> [u32; 256] {
     for (i, slot) in table.iter_mut().enumerate() {
         let mut value = i as u32;
         for _ in 0..8 {
-            value = if value & 1 == 0 { value >> 1 } else { (value >> 1) ^ 0xedb8_8320 };
+            value = if value & 1 == 0 {
+                value >> 1
+            } else {
+                (value >> 1) ^ 0xedb8_8320
+            };
         }
         *slot = value;
     }

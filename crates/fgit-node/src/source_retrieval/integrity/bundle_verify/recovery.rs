@@ -35,7 +35,9 @@ impl fmt::Display for BundleRecoveryError {
 }
 impl std::error::Error for BundleRecoveryError {}
 impl From<BundleVerifyError> for BundleRecoveryError {
-    fn from(error: BundleVerifyError) -> Self { Self::Verification(error) }
+    fn from(error: BundleVerifyError) -> Self {
+        Self::Verification(error)
+    }
 }
 
 /// Only native verification can construct this plan. It performs no I/O and
@@ -55,21 +57,37 @@ pub struct GitBundleRecovery<'a> {
 }
 impl GitBundleRecovery<'_> {
     #[must_use]
-    pub const fn verified(&self) -> &VerifiedGitBundle { &self.verified }
+    pub const fn verified(&self) -> &VerifiedGitBundle {
+        &self.verified
+    }
     #[must_use]
-    pub const fn pack_offset(&self) -> usize { self.pack_offset }
+    pub const fn pack_offset(&self) -> usize {
+        self.pack_offset
+    }
     #[must_use]
-    pub const fn pack(&self) -> &[u8] { self.pack }
+    pub const fn pack(&self) -> &[u8] {
+        self.pack
+    }
     #[must_use]
-    pub const fn head_ref(&self) -> &RefName { &self.head_ref }
+    pub const fn head_ref(&self) -> &RefName {
+        &self.head_ref
+    }
     #[must_use]
-    pub fn index(&self) -> &[u8] { &self.index }
+    pub fn index(&self) -> &[u8] {
+        &self.index
+    }
     #[must_use]
-    pub fn packed_refs(&self) -> &[u8] { &self.packed_refs }
+    pub fn packed_refs(&self) -> &[u8] {
+        &self.packed_refs
+    }
     #[must_use]
-    pub fn config(&self) -> &[u8] { &self.config }
+    pub fn config(&self) -> &[u8] {
+        &self.config
+    }
     #[must_use]
-    pub fn head(&self) -> &[u8] { &self.head }
+    pub fn head(&self) -> &[u8] {
+        &self.head
+    }
 }
 
 /// Validate all included objects and graph edges, check any independent pins,
@@ -86,7 +104,9 @@ pub fn prepare_git_bundle_recovery<'a>(
 ) -> Result<GitBundleRecovery<'a>, BundleRecoveryError> {
     let mut stopped = false;
     let mut live = || {
-        if !stopped && !allow_work() { stopped = true; }
+        if !stopped && !allow_work() {
+            stopped = true;
+        }
         !stopped
     };
     checkpoint(&mut live)?;
@@ -94,11 +114,16 @@ pub fn prepare_git_bundle_recovery<'a>(
         return Err(BundleRecoveryError::HeadNotBranch);
     }
     let mut locations = Vec::new();
-    let verified = verify_git_bundle_with_locations(input, limits, expected, Some(&mut locations), &mut live)?;
+    let verified =
+        verify_git_bundle_with_locations(input, limits, expected, Some(&mut locations), &mut live)?;
     if !verified.references().contains_key(head_ref) {
         return Err(BundleRecoveryError::HeadNotAdvertised);
     }
-    let names: BTreeSet<&[u8]> = verified.references().keys().map(RefName::as_bytes).collect();
+    let names: BTreeSet<&[u8]> = verified
+        .references()
+        .keys()
+        .map(RefName::as_bytes)
+        .collect();
     for name in &names {
         checkpoint(&mut live)?;
         for (at, byte) in name.iter().enumerate() {
@@ -107,12 +132,17 @@ pub fn prepare_git_bundle_recovery<'a>(
             }
         }
     }
-    let pack_offset = input.len().checked_sub(verified.pack_bytes())
+    let pack_offset = input
+        .len()
+        .checked_sub(verified.pack_bytes())
         .ok_or(BundleRecoveryError::MetadataLimit)?;
     let pack = &input[pack_offset..];
     let index = build_pack_index_v2(pack, verified.format(), &locations, &limits.pack, &mut live)
         .map_err(BundleRecoveryError::Index)?;
-    let maximum = limits.envelope.max_header_bytes.checked_add(64)
+    let maximum = limits
+        .envelope
+        .max_header_bytes
+        .checked_add(64)
         .ok_or(BundleRecoveryError::MetadataLimit)?;
     let mut packed_refs = Vec::new();
     append(&mut packed_refs, b"# pack-refs with: sorted\n", maximum)?;
@@ -121,8 +151,15 @@ pub fn prepare_git_bundle_recovery<'a>(
     for name in names {
         checkpoint(&mut live)?;
         let reference = RefName::try_new(name).map_err(|_| BundleRecoveryError::MetadataLimit)?;
-        let id = verified.references().get(&reference).ok_or(BundleRecoveryError::MetadataLimit)?;
-        append(&mut packed_refs, fgit_crypto::lowercase_hex(id.as_bytes()).as_bytes(), maximum)?;
+        let id = verified
+            .references()
+            .get(&reference)
+            .ok_or(BundleRecoveryError::MetadataLimit)?;
+        append(
+            &mut packed_refs,
+            fgit_crypto::lowercase_hex(id.as_bytes()).as_bytes(),
+            maximum,
+        )?;
         append(&mut packed_refs, b" ", maximum)?;
         append(&mut packed_refs, name, maximum)?;
         append(&mut packed_refs, b"\n", maximum)?;
@@ -138,15 +175,29 @@ pub fn prepare_git_bundle_recovery<'a>(
     let mut owned_config = Vec::new();
     append(&mut owned_config, config, maximum)?;
     checkpoint(&mut live)?;
-    Ok(GitBundleRecovery { verified, pack, pack_offset, head_ref: head_ref.clone(), index,
-        packed_refs, config: owned_config, head })
+    Ok(GitBundleRecovery {
+        verified,
+        pack,
+        pack_offset,
+        head_ref: head_ref.clone(),
+        index,
+        packed_refs,
+        config: owned_config,
+        head,
+    })
 }
 
 fn append(output: &mut Vec<u8>, bytes: &[u8], maximum: usize) -> Result<(), BundleRecoveryError> {
-    if output.len().checked_add(bytes.len()).is_none_or(|n| n > maximum) {
+    if output
+        .len()
+        .checked_add(bytes.len())
+        .is_none_or(|n| n > maximum)
+    {
         return Err(BundleRecoveryError::MetadataLimit);
     }
-    output.try_reserve(bytes.len()).map_err(|_| BundleRecoveryError::MetadataLimit)?;
+    output
+        .try_reserve(bytes.len())
+        .map_err(|_| BundleRecoveryError::MetadataLimit)?;
     output.extend_from_slice(bytes);
     Ok(())
 }

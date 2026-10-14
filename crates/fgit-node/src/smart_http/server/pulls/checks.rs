@@ -3,7 +3,7 @@
 
 mod output;
 mod request;
-pub(super) use request::Request;
+pub(in crate::smart_http::server) use request::Request;
 
 use super::super::issues::{ApiError, Reply};
 use super::super::{Profile, Status, retry_key};

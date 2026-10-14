@@ -127,7 +127,9 @@ impl OneNode {
         live(request)?;
         limits.validate(query)?;
         if query.symbols().is_none() && checkpoints.symbols.is_some() {
-            return Err(RetrievalError::Invalid("symbol checkpoint without symbol query"));
+            return Err(RetrievalError::Invalid(
+                "symbol checkpoint without symbol query",
+            ));
         }
         let count = query.channels();
         let work = |ordinal| share(limits.max_work, count, ordinal);
@@ -140,27 +142,47 @@ impl OneNode {
             max_results: limits.max_results_per_channel,
             max_work: work(ordinal),
         };
-        let RevalidatedIndexReport { current_source, index: content } = self
-            .search_source_index_revalidated_local_in(request, RevalidatedIndexRequest {
-                reference, expected_head, expected_commit,
-                generation: None, minimum: checkpoints.lexical.as_ref(),
-                query: query.content(), after: None,
-                query_limits: query_limits(0), read_limits: read_limits(0),
-            })
+        let RevalidatedIndexReport {
+            current_source,
+            index: content,
+        } = self
+            .search_source_index_revalidated_local_in(
+                request,
+                RevalidatedIndexRequest {
+                    reference,
+                    expected_head,
+                    expected_commit,
+                    generation: None,
+                    minimum: checkpoints.lexical.as_ref(),
+                    query: query.content(),
+                    after: None,
+                    query_limits: query_limits(0),
+                    read_limits: read_limits(0),
+                },
+            )
             .await
             .map_err(RetrievalError::Source)?;
         live(request)?;
         let mut result_bytes = 0;
         lexical_result_bytes(&content, &mut result_bytes, limits.max_result_bytes)?;
-        let RevalidatedIndexReport { current_source: path_source, index: path } = self
-            .search_source_index_revalidated_local_in(request, RevalidatedIndexRequest {
-                reference,
-                expected_head: Some(current_source.source_head),
-                expected_commit: Some(current_source.commit),
-                generation: Some(&content.generation), minimum: checkpoints.lexical.as_ref(),
-                query: query.path(), after: None,
-                query_limits: query_limits(1), read_limits: read_limits(1),
-            })
+        let RevalidatedIndexReport {
+            current_source: path_source,
+            index: path,
+        } = self
+            .search_source_index_revalidated_local_in(
+                request,
+                RevalidatedIndexRequest {
+                    reference,
+                    expected_head: Some(current_source.source_head),
+                    expected_commit: Some(current_source.commit),
+                    generation: Some(&content.generation),
+                    minimum: checkpoints.lexical.as_ref(),
+                    query: query.path(),
+                    after: None,
+                    query_limits: query_limits(1),
+                    read_limits: read_limits(1),
+                },
+            )
             .await
             .map_err(RetrievalError::Source)?;
         join_current(&current_source, &path_source)?;
@@ -169,28 +191,50 @@ impl OneNode {
         lexical_result_bytes(&path, &mut result_bytes, limits.max_result_bytes)?;
         let symbols = if let Some((symbol, policy)) = query.symbols() {
             let bounded = SymbolQuery::new(
-                symbol.name(), symbol.mode(), symbol.kinds(), query.content().prefixes(), work(2),
-            ).map_err(|_| RetrievalError::Invalid("symbol work limit"))?;
-            match self.search_source_symbols_index_revalidated_local_in(
-                request, reference, Some(current_source.source_head), Some(current_source.commit),
-                checkpoints.symbols.as_ref(), &bounded,
-                SearchLimits { max_matches: limits.max_results_per_channel, ..Default::default() },
-                payload(2),
-            ).await {
+                symbol.name(),
+                symbol.mode(),
+                symbol.kinds(),
+                query.content().prefixes(),
+                work(2),
+            )
+            .map_err(|_| RetrievalError::Invalid("symbol work limit"))?;
+            match self
+                .search_source_symbols_index_revalidated_local_in(
+                    request,
+                    reference,
+                    Some(current_source.source_head),
+                    Some(current_source.commit),
+                    checkpoints.symbols.as_ref(),
+                    &bounded,
+                    SearchLimits {
+                        max_matches: limits.max_results_per_channel,
+                        ..Default::default()
+                    },
+                    payload(2),
+                )
+                .await
+            {
                 Ok((symbol_current, report)) => {
                     // This compares CURRENT observations, never rewrites the
                     // symbol report's independently verified original source.
                     check_symbol_join(&current_source, &symbol_current)?;
                     for row in &report.matches {
                         live(request)?;
-                        add_result(&mut result_bytes,
-                            row.location.path.len() + row.name.len() + row.location.excerpt.len() + 96,
-                            limits.max_result_bytes)?;
+                        add_result(
+                            &mut result_bytes,
+                            row.location.path.len()
+                                + row.name.len()
+                                + row.location.excerpt.len()
+                                + 96,
+                            limits.max_result_bytes,
+                        )?;
                     }
                     SymbolChannel::Available(Box::new(report))
                 }
                 Err(error) => SymbolChannel::Unavailable(symbol_unavailable(
-                    error, policy, checkpoints.symbols.is_some(),
+                    error,
+                    policy,
+                    checkpoints.symbols.is_some(),
                 )?),
             }
         } else {
@@ -207,8 +251,15 @@ impl OneNode {
         };
         live(request)?;
         Ok(RevalidatedInitialReport {
-            vector: GenerationVector { lexical: content.generation.clone(), symbols: symbol_generation },
-            current_source, content, path, symbols, result_bytes,
+            vector: GenerationVector {
+                lexical: content.generation.clone(),
+                symbols: symbol_generation,
+            },
+            current_source,
+            content,
+            path,
+            symbols,
+            result_bytes,
         })
     }
 }

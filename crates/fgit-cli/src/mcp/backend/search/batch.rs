@@ -49,11 +49,21 @@ fn parse(
     args: &Object,
     format: GitHashAlgorithm,
 ) -> Result<(Selection, SourceQueryBatch), ToolError> {
-    require_fields(args, &[
-        "reference", "needles_hex", "path_prefixes_hex", "ignore_ascii_case",
-        "expected_head", "expected_commit", "max_matches", "max_files",
-        "max_file_bytes", "max_total_bytes",
-    ])?;
+    require_fields(
+        args,
+        &[
+            "reference",
+            "needles_hex",
+            "path_prefixes_hex",
+            "ignore_ascii_case",
+            "expected_head",
+            "expected_commit",
+            "max_matches",
+            "max_files",
+            "max_file_bytes",
+            "max_total_bytes",
+        ],
+    )?;
     let mut selection = selection(args, format)?;
     if !args.contains_key("max_matches") {
         selection.limits.max_matches = DEFAULT_MATCHES_PER_QUERY;
@@ -64,15 +74,23 @@ fn parse(
     if values.is_empty() || values.len() > MAX_BATCH_QUERIES {
         return Err(ToolError::invalid("invalid_search_query"));
     }
-    if values.len().checked_mul(selection.limits.max_matches)
+    if values
+        .len()
+        .checked_mul(selection.limits.max_matches)
         .is_none_or(|count| count > MAX_BATCH_MATCHES)
     {
         return Err(ToolError::invalid("batch_match_limit"));
     }
     let (case, prefixes) = scope(args)?;
-    let needles = values.iter().map(|value| {
-        unhex(value.text().ok_or(ToolError::invalid("expected_string"))?, 256)
-    }).collect::<Result<Vec<_>, _>>()?;
+    let needles = values
+        .iter()
+        .map(|value| {
+            unhex(
+                value.text().ok_or(ToolError::invalid("expected_string"))?,
+                256,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let queries = SourceQueryBatch::new(&needles, case, &prefixes)
         .map_err(|_| ToolError::invalid("invalid_search_query"))?;
     Ok((selection, queries))
@@ -89,8 +107,20 @@ fn render(
     if report.repository != repository {
         return Err(ToolError::failed("repository_binding_mismatch"));
     }
-    validate_coordinates(format, source_head, selection, report.source_commit, report.source_tree)?;
-    validate_work(selection.limits, report.files_selected, report.files_read, report.bytes_read, report.bytes_searched)?;
+    validate_coordinates(
+        format,
+        source_head,
+        selection,
+        report.source_commit,
+        report.source_tree,
+    )?;
+    validate_work(
+        selection.limits,
+        report.files_selected,
+        report.files_read,
+        report.bytes_read,
+        report.bytes_searched,
+    )?;
     if report.results.len() != queries.queries().len() {
         return Err(invalid_report());
     }
@@ -103,10 +133,15 @@ fn render(
             return Err(invalid_report());
         }
         let matches = render_matches(
-            query, selection.limits, format, &observed.matches,
-            observed.completion, &mut retained,
+            query,
+            selection.limits,
+            format,
+            &observed.matches,
+            observed.completion,
+            &mut retained,
         )?;
-        total_matches = total_matches.checked_add(matches.len())
+        total_matches = total_matches
+            .checked_add(matches.len())
             .filter(|count| *count <= MAX_BATCH_MATCHES)
             .ok_or_else(invalid_report)?;
         complete &= observed.completion == SearchCompletion::Complete;
@@ -115,36 +150,60 @@ fn render(
             ("needle_hex", text(hex(query.needle()))),
             ("match_count", text(matches.len().to_string())),
             ("matches", Value::Array(matches)),
-        ]) else { unreachable!() };
+        ]) else {
+            unreachable!()
+        };
         completion_fields(&mut slot, observed.completion);
         results.push(Value::Object(slot));
     }
     // Even a single complete slot means the native collector searched every
     // selected file. No complete slot can be fabricated from an early stop.
-    if report.results.iter().any(|slot| slot.completion == SearchCompletion::Complete)
+    if report
+        .results
+        .iter()
+        .any(|slot| slot.completion == SearchCompletion::Complete)
         && report.files_read != report.files_selected
     {
         return Err(invalid_report());
     }
-    let mut result = search_header(selection, queries.scope(), report.source_commit, report.source_tree);
+    let mut result = search_header(
+        selection,
+        queries.scope(),
+        report.source_commit,
+        report.source_tree,
+    );
     result.insert("profile".into(), text("literal-bytes-batch-v1"));
     result.insert("source_rcr".into(), text(report.source_rcr.to_string()));
     result.insert("query_count".into(), text(results.len().to_string()));
     result.insert("match_count".into(), text(total_matches.to_string()));
     result.insert("results".into(), Value::Array(results));
-    completion_fields(&mut result, if complete {
-        SearchCompletion::Complete
-    } else {
-        SearchCompletion::MatchLimit
-    });
+    completion_fields(
+        &mut result,
+        if complete {
+            SearchCompletion::Complete
+        } else {
+            SearchCompletion::MatchLimit
+        },
+    );
     // Native counters are shared batch totals, never summed once per needle.
-    work_fields(&mut result, report.files_selected, report.files_read, report.bytes_read, report.bytes_searched, report.non_regular_entries);
+    work_fields(
+        &mut result,
+        report.files_selected,
+        report.files_read,
+        report.bytes_read,
+        report.bytes_searched,
+        report.non_regular_entries,
+    );
     Ok(result)
 }
 
 fn input_schema() -> Value {
-    let Value::Object(mut schema) = super::input_schema() else { unreachable!() };
-    let Some(Value::Object(properties)) = schema.get_mut("properties") else { unreachable!() };
+    let Value::Object(mut schema) = super::input_schema() else {
+        unreachable!()
+    };
+    let Some(Value::Object(properties)) = schema.get_mut("properties") else {
+        unreachable!()
+    };
     properties.remove("needle_hex");
     properties.insert("needles_hex".into(), object([
         ("type", text("array")),
@@ -160,7 +219,10 @@ fn input_schema() -> Value {
         ("default", json::number(DEFAULT_MATCHES_PER_QUERY as u64)),
         ("description", text("Per-query match ceiling. The number of needles multiplied by this ceiling must not exceed 200; resource exhaustion refuses the whole batch.")),
     ]));
-    schema.insert("required".into(), Value::Array(vec![text("reference"), text("needles_hex")]));
+    schema.insert(
+        "required".into(),
+        Value::Array(vec![text("reference"), text("needles_hex")]),
+    );
     Value::Object(schema)
 }
 

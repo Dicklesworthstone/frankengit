@@ -79,7 +79,9 @@ fn number(value: &str, maximum: usize) -> Result<usize, String> {
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.is_empty()
         || args.len() > 2 * MAX_EXPECTED_REFS + 32
-        || args.iter().try_fold(0_usize, |sum, arg| sum.checked_add(arg.len()))
+        || args
+            .iter()
+            .try_fold(0_usize, |sum, arg| sum.checked_add(arg.len()))
             .is_none_or(|sum| sum > 2 * 1024 * 1024)
         || args
             .iter()
@@ -125,8 +127,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     recovery_head = Some(reference);
                 }
                 "--expect-sha256" => {
-                    expected_hash = Some(anchors::unhex(value, 32)?.try_into()
-                        .map_err(|_| "expected exactly 32 SHA-256 bytes")?);
+                    expected_hash = Some(
+                        anchors::unhex(value, 32)?
+                            .try_into()
+                            .map_err(|_| "expected exactly 32 SHA-256 bytes")?,
+                    );
                 }
                 "--expect-format" => {
                     expected_format = Some(match value.as_str() {
@@ -139,7 +144,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     if expected_refs.len() == MAX_EXPECTED_REFS {
                         return Err("too many expected references".into());
                     }
-                    expected_refs.try_reserve(1).map_err(|_| "expectation allocation refused")?;
+                    expected_refs
+                        .try_reserve(1)
+                        .map_err(|_| "expectation allocation refused")?;
                     expected_refs.push((value.as_str(), argument == "--expect-ref-hex"));
                 }
                 "--max-input-mib" => {
@@ -175,7 +182,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     // Complete validation uses final limits, independent of option order,
     // before opening the input or installing any runtime resources.
-    let expectations = anchors::assemble(expected_hash, expected_format, &expected_refs, exact_refs, &limits)?;
+    let expectations = anchors::assemble(
+        expected_hash,
+        expected_format,
+        &expected_refs,
+        exact_refs,
+        &limits,
+    )?;
     Ok(Options {
         recovery_head,
         expectations,
@@ -313,7 +326,13 @@ fn execute(options: &Options, live: &mut impl FnMut() -> bool) -> Result<String,
         live,
     )?;
     if let Some(head) = &options.recovery_head {
-        return recovery::execute(&bytes, &options.limits, options.expectations.as_ref(), head, live);
+        return recovery::execute(
+            &bytes,
+            &options.limits,
+            options.expectations.as_ref(),
+            head,
+            live,
+        );
     }
     match &options.expectations {
         Some(expected) => {

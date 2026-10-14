@@ -157,7 +157,10 @@ mod tests {
         cache.insert(b"k", b"body");
         assert_eq!(cache.get(b"k").as_deref(), Some(&b"body"[..]));
         let stats = cache.stats();
-        assert_eq!((stats.hits, stats.misses, stats.entries, stats.retained), (1, 1, 1, 4));
+        assert_eq!(
+            (stats.hits, stats.misses, stats.entries, stats.retained),
+            (1, 1, 1, 4)
+        );
     }
 
     #[test]
@@ -179,7 +182,10 @@ mod tests {
         // Touch `a`, so `b` is now the oldest.
         assert!(cache.get(b"a").is_some());
         cache.insert(b"c", b"9012");
-        assert!(cache.get(b"b").is_none(), "least recently used body evicted");
+        assert!(
+            cache.get(b"b").is_none(),
+            "least recently used body evicted"
+        );
         assert!(cache.get(b"a").is_some());
         assert!(cache.get(b"c").is_some());
         assert!(cache.stats().retained <= 10);
@@ -203,6 +209,9 @@ mod tests {
             assert!(cache.stats().retained <= 1000);
         }
         let stats = cache.stats();
-        assert!(stats.entries > 0 && stats.retained > 900, "the budget is used, not wasted: {stats:?}");
+        assert!(
+            stats.entries > 0 && stats.retained > 900,
+            "the budget is used, not wasted: {stats:?}"
+        );
     }
 }

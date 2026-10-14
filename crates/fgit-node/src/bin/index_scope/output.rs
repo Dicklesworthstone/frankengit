@@ -170,11 +170,20 @@ fn refresh_counts(out: &mut Output, stats: &LexicalRefreshStats) -> io::Result<(
     for (key, value) in [
         ("reused_documents", stats.reused_documents),
         ("rebuilt_documents", stats.rebuilt_documents),
-        ("prior_documents_not_reused", stats.prior_documents_not_reused),
+        (
+            "prior_documents_not_reused",
+            stats.prior_documents_not_reused,
+        ),
         ("reused_source_bytes", stats.reused_source_bytes),
         ("rebuilt_source_bytes", stats.rebuilt_source_bytes),
-        ("previous_payload_bytes_read", stats.previous_payload_bytes_read),
-        ("previous_generation_bytes_read", stats.previous_generation_bytes_read),
+        (
+            "previous_payload_bytes_read",
+            stats.previous_payload_bytes_read,
+        ),
+        (
+            "previous_generation_bytes_read",
+            stats.previous_generation_bytes_read,
+        ),
         ("build_work_bytes", stats.build_work_bytes),
     ] {
         out.number(key, value as u64)?;
@@ -313,7 +322,10 @@ mod tests {
         assert!(out.0.contains("\"reused_documents\":\"2\""));
         assert!(out.0.contains("\"rebuilt_documents\":\"0\""));
         assert!(out.0.contains("\"prior_documents_not_reused\":\"1\""));
-        assert!(out.0.contains(&format!("\"reused_source_bytes\":\"{}\"", usize::MAX)));
+        assert!(
+            out.0
+                .contains(&format!("\"reused_source_bytes\":\"{}\"", usize::MAX))
+        );
         assert!(out.0.contains("\"rebuilt_source_bytes\":\"0\""));
         assert!(out.0.contains("\"previous_payload_bytes_read\":\"42\""));
         assert!(out.0.contains("\"previous_generation_bytes_read\":\"17\""));

@@ -16,10 +16,9 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
             include_str!("activity-view.mjs"),
         )),
         // Serve the existing stylesheet within this independently enabled shell.
-        b"/ui/activity/browser.css" => Some((
-            "text/css; charset=utf-8",
-            include_str!("browser.css"),
-        )),
+        b"/ui/activity/browser.css" => {
+            Some(("text/css; charset=utf-8", include_str!("browser.css")))
+        }
         _ => None,
     }
 }
@@ -102,13 +101,8 @@ mod tests {
                 .unwrap();
             for issues in [false, true] {
                 for pulls in [false, true] {
-                    let result = checked_asset(
-                        b"/repo.git",
-                        issues || pulls,
-                        u64::MAX,
-                        &request,
-                        false,
-                    );
+                    let result =
+                        checked_asset(b"/repo.git", issues || pulls, u64::MAX, &request, false);
                     if issues || pulls {
                         assert!(result.unwrap().is_some());
                     } else {
@@ -154,8 +148,16 @@ mod tests {
     #[test]
     fn activity_keeps_the_existing_csp_and_ephemeral_credentials() {
         assert!(!include_str!("activity.html").contains("<script>"));
-        for script in [include_str!("activity.mjs"), include_str!("activity-view.mjs")] {
-            for forbidden in ["innerHTML", "localStorage", "sessionStorage", "document.write"] {
+        for script in [
+            include_str!("activity.mjs"),
+            include_str!("activity-view.mjs"),
+        ] {
+            for forbidden in [
+                "innerHTML",
+                "localStorage",
+                "sessionStorage",
+                "document.write",
+            ] {
                 assert!(!script.contains(forbidden));
             }
         }

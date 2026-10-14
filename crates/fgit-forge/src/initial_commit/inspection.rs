@@ -95,20 +95,64 @@ mod tests {
         let normal = InitialInspectionLimits::default();
         normal.validate().unwrap();
         for bad in [
-            InitialInspectionLimits { max_files: 0, ..normal },
-            InitialInspectionLimits { max_files: normal.max_files + 1, ..normal },
-            InitialInspectionLimits { max_tree_entries: 0, ..normal },
-            InitialInspectionLimits { max_tree_entries: normal.max_tree_entries + 1, ..normal },
-            InitialInspectionLimits { max_depth: 0, ..normal },
-            InitialInspectionLimits { max_depth: normal.max_depth + 1, ..normal },
-            InitialInspectionLimits { max_path_bytes: 0, ..normal },
-            InitialInspectionLimits { max_path_bytes: normal.max_path_bytes + 1, ..normal },
-            InitialInspectionLimits { max_file_bytes: 0, ..normal },
-            InitialInspectionLimits { max_file_bytes: normal.max_file_bytes + 1, ..normal },
-            InitialInspectionLimits { max_commit_bytes: 0, ..normal },
-            InitialInspectionLimits { max_commit_bytes: normal.max_commit_bytes + 1, ..normal },
-            InitialInspectionLimits { max_output_bytes: 0, ..normal },
-            InitialInspectionLimits { max_output_bytes: normal.max_output_bytes + 1, ..normal },
-        ] { assert!(bad.validate().is_err(), "{bad:?}"); }
+            InitialInspectionLimits {
+                max_files: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_files: normal.max_files + 1,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_tree_entries: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_tree_entries: normal.max_tree_entries + 1,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_depth: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_depth: normal.max_depth + 1,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_path_bytes: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_path_bytes: normal.max_path_bytes + 1,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_file_bytes: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_file_bytes: normal.max_file_bytes + 1,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_commit_bytes: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_commit_bytes: normal.max_commit_bytes + 1,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_output_bytes: 0,
+                ..normal
+            },
+            InitialInspectionLimits {
+                max_output_bytes: normal.max_output_bytes + 1,
+                ..normal
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
     }
 }

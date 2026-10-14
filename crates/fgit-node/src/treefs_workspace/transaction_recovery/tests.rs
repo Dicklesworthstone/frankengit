@@ -4,8 +4,8 @@ use super::*;
 use crate::NodeConfig;
 use fgit_admission::AdmissionLimits;
 use fgit_authority::{
-    AsyncAuthorityStore, IdempotencyKey, OutcomeLookup, SealAttempt, SemanticRequest,
-    admit_seal_async, bind_idempotency_key_async, idempotency_binding_key,
+    IdempotencyKey, OutcomeLookup, SealAttempt, SemanticRequest, admit_seal_async,
+    bind_idempotency_key_async, idempotency_binding_key,
 };
 use fgit_codec::encode_body;
 use fgit_crypto::{GitObjectKind, git_object_id};

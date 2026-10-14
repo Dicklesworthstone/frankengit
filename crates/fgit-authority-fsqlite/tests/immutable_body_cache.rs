@@ -87,7 +87,9 @@ impl Harness {
     }
 
     fn close(&self, mut store: FsqliteAuthorityStore) {
-        self.node.block_on(store.close(&self.cx)).expect("the store closes");
+        self.node
+            .block_on(store.close(&self.cx))
+            .expect("the store closes");
     }
 }
 
@@ -124,11 +126,22 @@ fn a_body_another_store_wrote_is_read_from_disk_once_then_from_memory() {
     let writer = harness.open(&scratch, 1);
     let reader = harness.open(&scratch, 1);
     let k = key(b"body/other");
-    assert_eq!(harness.put(&writer, &k, b"written elsewhere"), PutOutcome::Created);
+    assert_eq!(
+        harness.put(&writer, &k, b"written elsewhere"),
+        PutOutcome::Created
+    );
     assert_eq!(harness.read(&reader, &k), present(b"written elsewhere"));
-    assert_eq!(counts(reader.body_cache_stats()), (0, 1, 1), "the first read went to the engine");
+    assert_eq!(
+        counts(reader.body_cache_stats()),
+        (0, 1, 1),
+        "the first read went to the engine"
+    );
     assert_eq!(harness.read(&reader, &k), present(b"written elsewhere"));
-    assert_eq!(counts(reader.body_cache_stats()), (1, 1, 1), "the second read was a hit");
+    assert_eq!(
+        counts(reader.body_cache_stats()),
+        (1, 1, 1),
+        "the second read was a hit"
+    );
     harness.close(reader);
     harness.close(writer);
 }
@@ -141,8 +154,15 @@ fn an_absent_read_is_never_cached_so_a_later_write_is_seen() {
     let writer = harness.open(&scratch, 1);
     let k = key(b"body/late");
     assert_eq!(harness.read(&reader, &k), ImmutableRead::Absent);
-    assert_eq!(counts(reader.body_cache_stats()), (0, 1, 0), "absence retained nothing");
-    assert_eq!(harness.put(&writer, &k, b"arrived later"), PutOutcome::Created);
+    assert_eq!(
+        counts(reader.body_cache_stats()),
+        (0, 1, 0),
+        "absence retained nothing"
+    );
+    assert_eq!(
+        harness.put(&writer, &k, b"arrived later"),
+        PutOutcome::Created
+    );
     assert_eq!(harness.read(&reader, &k), present(b"arrived later"));
     harness.close(writer);
     harness.close(reader);
@@ -155,13 +175,26 @@ fn a_refused_conflicting_write_never_enters_the_cache() {
     let first = harness.open(&scratch, 1);
     let second = harness.open(&scratch, 1);
     let k = key(b"body/conflict");
-    assert_eq!(harness.put(&first, &k, b"the stored bytes"), PutOutcome::Created);
-    assert_eq!(harness.put(&second, &k, b"different bytes"), PutOutcome::Conflict);
-    assert_eq!(counts(second.body_cache_stats()).2, 0, "the refused bytes were not recorded");
+    assert_eq!(
+        harness.put(&first, &k, b"the stored bytes"),
+        PutOutcome::Created
+    );
+    assert_eq!(
+        harness.put(&second, &k, b"different bytes"),
+        PutOutcome::Conflict
+    );
+    assert_eq!(
+        counts(second.body_cache_stats()).2,
+        0,
+        "the refused bytes were not recorded"
+    );
     // The second store reads the stored bytes from the engine, not its own attempt.
     assert_eq!(harness.read(&second, &k), present(b"the stored bytes"));
     // Its twin: an identical retry is accepted and recorded.
-    assert_eq!(harness.put(&second, &k, b"the stored bytes"), PutOutcome::IdenticalRetry);
+    assert_eq!(
+        harness.put(&second, &k, b"the stored bytes"),
+        PutOutcome::IdenticalRetry
+    );
     assert_eq!(harness.read(&second, &k), present(b"the stored bytes"));
     harness.close(second);
     harness.close(first);

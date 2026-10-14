@@ -263,7 +263,9 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
                 .map(PathBuf::from)
                 .filter(|p| !p.as_os_str().is_empty())
                 .ok_or_else(|| {
-                    invalid("Build/refresh requires --candidate-file in an existing private directory.")
+                    invalid(
+                        "Build/refresh requires --candidate-file in an existing private directory.",
+                    )
                 })?;
             let mut limits = SearchLimits::default();
             limits.max_file_bytes = number(
@@ -299,7 +301,9 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
             limits.validate().map_err(failure)?;
             if op == "refresh" {
                 let predecessor = predecessor.ok_or_else(|| {
-                    invalid("Refresh requires the exact --predecessor-token; use build for genesis.")
+                    invalid(
+                        "Refresh requires the exact --predecessor-token; use build for genesis.",
+                    )
                 })?;
                 let defaults = LexicalReadLimits::default();
                 let reads = LexicalReadLimits {

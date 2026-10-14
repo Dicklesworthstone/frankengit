@@ -108,15 +108,8 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     let repository = basis.body().repository_id;
-    let records = history::read_records(
-        store,
-        cx,
-        basis,
-        after,
-        history::Limits::DEFAULT,
-        cancelled,
-    )
-    .await?;
+    let records =
+        history::read_records(store, cx, basis, after, history::Limits::DEFAULT, cancelled).await?;
     let mut cursor_seen = after.is_none();
     let mut output = Vec::with_capacity(limit);
     let mut page_bytes = 0usize;

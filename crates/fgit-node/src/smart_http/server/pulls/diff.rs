@@ -11,7 +11,7 @@ use fgit_wire::smart_http::{BodyFraming, HttpLimits, Service, head::Envelope};
 use std::io::Read;
 
 #[derive(Debug)]
-pub(super) struct Request<'a> {
+pub(in crate::smart_http::server) struct Request<'a> {
     repository_route: &'a str,
     number: PullRequestNumber,
 }
