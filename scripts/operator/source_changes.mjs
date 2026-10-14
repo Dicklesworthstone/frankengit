@@ -68,7 +68,7 @@ function changes(value, bound) {
     return hex;
   };
   const owned = value.changes.map(row => {
-    fields(row, ['path_hex', 'operation', 'content_hex', 'content_utf8', 'before_hex', 'before_utf8', 'after_hex', 'after_utf8', 'splices', 'executable'], ['path_hex', 'operation']);
+    fields(row, ['path_hex', 'operation', 'from_path_hex', 'content_hex', 'content_utf8', 'before_hex', 'before_utf8', 'after_hex', 'after_utf8', 'splices', 'executable'], ['path_hex', 'operation']);
     pathBytes(row.path_hex); paths += row.path_hex.length / 2;
     if (paths > 32768 || seen.has(row.path_hex)) fail('source_changes_paths');
     seen.add(row.path_hex);
@@ -78,6 +78,12 @@ function changes(value, bound) {
       result.executable = row.executable;
     }
     switch (row.operation) {
+      case 'copy':
+      case 'rename':
+        fields(row, ['path_hex', 'operation', 'from_path_hex', 'executable'], ['path_hex', 'operation', 'from_path_hex']);
+        pathBytes(row.from_path_hex); paths += row.from_path_hex.length / 2;
+        if (paths > 32768 || row.path_hex === row.from_path_hex) fail('source_changes_paths');
+        result.from_path_hex = row.from_path_hex; break;
       case 'create':
         fields(row, ['path_hex', 'operation', 'content_hex', 'content_utf8', 'executable'], ['path_hex', 'operation', 'executable']);
         result.content_hex = encoded(row, 'content', charge); break;
@@ -110,10 +116,21 @@ function changes(value, bound) {
     }
     return result;
   }).sort((a, b) => a.path_hex < b.path_hex ? -1 : 1);
-  // Never create a file at an ancestor of another edit, or infer that deleting
-  // an old file authorizes a directory replacement in the same edit set.
-  for (const row of owned) if (owned.some(other => other.path_hex !== row.path_hex &&
-      row.path_hex.startsWith(`${other.path_hex}2f`))) fail('source_changes_paths');
+  // Relocations read the ORIGINAL pinned source. Refuse ordering-dependent
+  // chains/swaps and source edits, rather than silently choosing a replay order.
+  // Several copies may read one source; every destination must still be unique.
+  const writes = owned.map(row => row.path_hex);
+  const sources = owned.filter(row => row.from_path_hex !== undefined);
+  for (const row of sources) if (writes.includes(row.from_path_hex)) fail('source_changes_source_conflict');
+  const removed = sources.filter(row => row.operation === 'rename').map(row => row.from_path_hex);
+  if (new Set(removed).size !== removed.length ||
+      sources.some(row => row.operation === 'copy' && removed.includes(row.from_path_hex))) fail('source_changes_source_conflict');
+  // One logical rename lowers to two disjoint native file effects, never a
+  // native rename hint. Keep the existing 32-effect authoring/proof envelope.
+  if (writes.length + removed.length > bound.files) fail('source_changes_inventory');
+  const touched = [...new Set([...writes, ...sources.map(row => row.from_path_hex)])];
+  for (const path of touched) if (touched.some(other => other !== path &&
+      path.startsWith(`${other}2f`))) fail('source_changes_paths');
   return { schema: CHANGES_SCHEMA, changes: owned };
 }
 // Every splice addresses the ORIGINAL file, never an earlier splice's output.
@@ -134,7 +151,7 @@ function projected(row, before, bound, check) {
 function afterImage(row, before, size, check) {
   if (row.operation === 'delete') return null;
   if (row.operation === 'replace' || row.operation === 'create') return Buffer.from(row.content_hex, 'hex');
-  if (row.operation === 'mode') return Buffer.from(before);
+  if (['mode', 'copy', 'rename'].includes(row.operation)) return Buffer.from(before);
   const result = Buffer.alloc(size); let old = 0, next = 0;
   for (const part of row.splices) {
     check(); const span = before.subarray(old, part.byte_offset), replacement = Buffer.from(part.after_hex, 'hex');
@@ -157,7 +174,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   const source = Buffer.from(packageBytes), selected = expectation(expected), owned = changes(input, bound);
   const packageHash = sha256(source), expectedHash = sha256(canonical(selected)), changesHash = sha256(canonical(owned));
   const loaded = await readSourcePackage(source, selected, webcrypto, check); check();
-  const created = owned.changes.filter(row => row.operation === 'create').map(row => row.path_hex);
+  const created = owned.changes.filter(row => ['create', 'copy', 'rename'].includes(row.operation)).map(row => row.path_hex);
   const creationPreconditions = created.length === 0 ? null : await verifyPathAbsence(
     loaded.package.membership, selected, created, webcrypto, check);
   check();
@@ -165,7 +182,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   const bodies = new Map(loaded.package.blobs.map(blob => [blob.oid, blob.bytesHex]));
   let retained = 0;
   const plans = owned.changes.map(row => {
-    check(); const file = files.get(row.path_hex);
+    check(); const file = files.get(row.from_path_hex ?? row.path_hex);
     if (row.operation === 'create') {
       // All creation targets were proved absent together under the independent
       // commit. Lack of a selected body alone never reaches this path.
@@ -190,12 +207,17 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
     if (retained > bound.totalBytes) fail('source_changes_retained_budget');
     return { row: execution, file, before, size };
   });
-  const edits = plans.map(({ row, file, before, size }) => {
+  const edits = plans.flatMap(({ row, file, before, size }) => {
     check(); const bytes = afterImage(row, before, size, check), oldMode = file?.kind === 'executable' ? 0o100755 : 0o100644;
     if (bytes?.includes(0)) fail('source_changes_binary_unsupported');
-    return { path_hex: row.path_hex, before: before === null ? null : { mode: oldMode, bytes: new Uint8Array(before) },
-      after: bytes === null ? null : { mode: row.executable === undefined ? oldMode : row.executable ? 0o100755 : 0o100644,
-        bytes: new Uint8Array(bytes) } };
+    const original = before === null ? null : { mode: oldMode, bytes: new Uint8Array(before) };
+    const after = bytes === null ? null : { mode: row.executable === undefined ? oldMode : row.executable ? 0o100755 : 0o100644,
+      bytes: new Uint8Array(bytes) };
+    if (row.from_path_hex !== undefined) {
+      const destination = { path_hex: row.path_hex, before: null, after };
+      return row.operation === 'rename' ? [destination, { path_hex: row.from_path_hex, before: original, after: null }] : [destination];
+    }
+    return [{ path_hex: row.path_hex, before: original, after }];
   });
   const noops = edits.filter(e => e.before !== null && e.after !== null && e.before.mode === e.after.mode &&
     Buffer.from(e.before.bytes).equals(Buffer.from(e.after.bytes))).map(e => e.path_hex);
@@ -217,6 +239,12 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   // Preserve byte-identical v1 drafts for existing-file operations. A creation
   // draft additionally commits to its concrete, reproducible absence witnesses.
   if (creationPreconditions !== null) manifest.creation_preconditions = creationPreconditions;
+  const relocations = owned.changes.filter(row => row.from_path_hex !== undefined).map(row => ({
+    operation: row.operation, from_path_hex: row.from_path_hex, path_hex: row.path_hex,
+    source_blob: files.get(row.from_path_hex).blob, source_mode: files.get(row.from_path_hex).kind === 'executable' ? 0o100755 : 0o100644,
+    destination_mode: patch.paths.find(effect => effect.path_hex === row.path_hex).new_mode,
+  }));
+  if (relocations.length) manifest.relocations = relocations;
   // The source package's complete parent trees also determine the WHOLE new
   // root. Keep this derived evidence outside the reviewed v1 manifest so old
   // draft bytes remain stable; preparation and offline replay recompute it.

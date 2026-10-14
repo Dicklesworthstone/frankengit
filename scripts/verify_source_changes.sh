@@ -12,4 +12,5 @@ node --test scripts/tests/source_changes.test.mjs \
   scripts/tests/source_creation.test.mjs \
   scripts/tests/source_creation_pipeline.test.mjs \
   scripts/tests/source_tree_transition.test.mjs \
-  scripts/tests/source_tree_binding.test.mjs
+  scripts/tests/source_tree_binding.test.mjs \
+  scripts/tests/source_relocation.test.mjs
