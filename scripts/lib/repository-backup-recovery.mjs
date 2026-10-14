@@ -9,6 +9,7 @@ import { backupDecimal, backupPolicy, inspectRepositoryBackupApproval } from './
 import { MAX_DOWNLOAD_SOURCES, downloadRepositoryBackup, repositoryBackupDownloadOptions } from './repository-backup-download.mjs';
 import { replicateRepositoryBackup, repositoryBackupReplicationCheckpoint } from './repository-backup-replication.mjs';
 import { repositoryBackupOptions, runApprovedRepositoryBackup } from './repository-backup-native.mjs';
+import { MAX_REPAIR_REPLICAS, reconstructRepositoryBackup, validateRepositoryBackupChunkOptions } from './repository-backup-chunks.mjs';
 import { withRepositoryBackupWitness } from './repository-backup-witness.mjs';
 
 const fail = code => { throw backupError(code); };
@@ -19,10 +20,11 @@ export const MAX_RECOVERY_ACQUISITION_BYTES = (MAX_DOWNLOAD_SOURCES + 3) * BACKU
 
 function separated(paths) {
   const writes = ['witness', 'cacheDirectory', 'destination', 'approvalRecord'].filter(k => paths[k] !== undefined);
-  const reads = ['fg', 'approval', 'trustKey', 'sourceFile', 'caFile'].filter(k => paths[k] !== undefined);
+  const reads = ['fg', 'approval', 'trustKey', 'sourceFile', 'caFile', 'repairCatalog']
+    .filter(k => paths[k] !== undefined).map(k => paths[k]).concat(paths.repairReplicas ?? []);
   for (let i = 0; i < writes.length; i++) {
     if (writes.slice(i + 1).some(k => overlap(paths[writes[i]], paths[k]))
-      || reads.some(k => overlap(paths[writes[i]], paths[k]))) fail('backup_recovery_separate_paths_required');
+      || reads.some(path => overlap(paths[writes[i]], path))) fail('backup_recovery_separate_paths_required');
   }
 }
 
@@ -33,7 +35,8 @@ function separated(paths) {
 export function repositoryBackupRecoveryOptions(raw) {
   const keys = ['operation', 'cacheDirectory', 'sourceFile', 'approval', 'trustKey', 'policy', 'witness',
     'fg', 'verificationInstance', 'destination', 'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal',
-    'checkpoint', 'maximumBytes', 'maximumAcquisitionBytes', 'timeoutMs', 'signal', 'onProgress', 'caFile'];
+    'checkpoint', 'maximumBytes', 'maximumAcquisitionBytes', 'timeoutMs', 'signal', 'onProgress', 'caFile',
+    'repairCatalog', 'repairReplicas'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))
     || !['verify', 'restore'].includes(raw.operation) || raw.trustedLocal !== true) fail('backup_explicit_recovery_required');
   const result = { ...raw, policy: backupPolicy(raw.policy), resume: raw.resume ?? false,
@@ -53,6 +56,19 @@ export function repositoryBackupRecoveryOptions(raw) {
   for (const k of ['cacheDirectory', 'witness', 'destination', 'approvalRecord']) {
     if (result[k] !== undefined && dirname(result[k]) === result[k]) fail('backup_recovery_separate_paths_required');
   }
+  if (raw.repairCatalog !== undefined || raw.repairReplicas !== undefined) {
+    // Explicit local-fragment acquisition is mutually exclusive with HTTPS.
+    // Snapshot the complete finite input set before observers or I/O can run.
+    if (raw.sourceFile !== undefined || raw.caFile !== undefined) fail('backup_recovery_mixed_acquisition');
+    result.repairCatalog = resolve(backupPath(raw.repairCatalog)); backupPath(result.repairCatalog);
+    if (!Array.isArray(raw.repairReplicas) || !raw.repairReplicas.length
+      || raw.repairReplicas.length > MAX_REPAIR_REPLICAS) fail('backup_chunk_replica_limit');
+    result.repairReplicas = Object.freeze(Array.from(raw.repairReplicas, path => {
+      const fixed = resolve(backupPath(path)); backupPath(fixed); return fixed;
+    }).sort());
+    if (new Set(result.repairReplicas).size !== result.repairReplicas.length
+      || result.repairReplicas.reduce((n, path) => n + Buffer.byteLength(path), 0) > 256 * 1024) fail('backup_chunk_replica_limit');
+  }
   separated(result);
   const live = backupLifetime({ maximumBytes: raw.maximumBytes, timeoutMs: raw.timeoutMs,
     signal: raw.signal, onProgress: raw.onProgress });
@@ -65,7 +81,7 @@ export function repositoryBackupRecoveryOptions(raw) {
 
 async function physicalPaths(options, live) {
   const paths = {};
-  for (const k of ['witness', 'cacheDirectory', 'destination', 'approvalRecord', 'fg', 'approval', 'trustKey', 'sourceFile', 'caFile']) {
+  for (const k of ['witness', 'cacheDirectory', 'destination', 'approvalRecord', 'fg', 'approval', 'trustKey', 'sourceFile', 'caFile', 'repairCatalog']) {
     if (options[k] === undefined) continue;
     live.check();
     try { paths[k] = await realpath(options[k]); }
@@ -74,6 +90,17 @@ async function physicalPaths(options, live) {
       // Missing capability files are allowed for offline cache reuse. Their
       // existing parent must still be separate from witness/cache/native output.
       paths[k] = join(await realpath(dirname(options[k])), basename(options[k]));
+    }
+  }
+  if (options.repairReplicas) {
+    paths.repairReplicas = [];
+    for (const path of options.repairReplicas) {
+      live.check();
+      try { paths.repairReplicas.push(await realpath(path)); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        paths.repairReplicas.push(join(await realpath(dirname(path)), basename(path)));
+      }
     }
   }
   separated(paths); live.check(); return paths;
@@ -92,8 +119,9 @@ export async function recoverRepositoryBackup(raw) {
   const live = backupLifetime({ maximumBytes: options.maximumBytes, timeoutMs: options.timeoutMs, signal: options.signal });
   if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined || constants.O_DIRECTORY === undefined) fail('backup_unsupported_filesystem');
   let phase = 'validating', checkpoint = null, candidate = null, acquisition = null, native = null, complete = null;
+  let reconstruction = null;
   const knowledge = () => Object.freeze({ phase, checkpoint, candidate, acquisition, native,
-    operation: options.operation, resume_requested: options.resume });
+    operation: options.operation, resume_requested: options.resume, ...(options.repairCatalog ? { reconstruction } : {}) });
   try {
     await physicalPaths(options, live);
     return await withRepositoryBackupWitness(options.witness, options.trustKey, options.policy,
@@ -151,12 +179,31 @@ export async function recoverRepositoryBackup(raw) {
           try { await lstat(candidate.input); cached = true; }
           catch (error) { if (error.code !== 'ENOENT') throw error; cached = false; }
           let receipt;
-          if (cached) {
+          if (!cached && options.repairCatalog) {
+            // Reserve both mandatory repair passes plus the publisher's cache
+            // authentication/readback before staging. Failed fragment probes
+            // share the remaining budget; they cannot consume publication work.
+            const size = Number(statement.artifact.bytes), publicationBudget = 2 * size;
+            if (options.maximumAcquisitionBytes < 4 * size) fail('backup_recovery_acquisition_budget');
+            const repairOptions = { replicas: options.repairReplicas, catalog: options.repairCatalog,
+              output: candidate.input, approval: options.approval, trustKey: options.trustKey, policy: options.policy,
+              checkpoint, maximumBytes: live.maximumBytes, maximumReadBytes: options.maximumAcquisitionBytes - publicationBudget,
+              timeoutMs: live.remaining(), signal: live.signal, onProgress: event => progress('reconstruction', event) };
+            validateRepositoryBackupChunkOptions(repairOptions, 'repair');
+            phase = 'reconstructing';
+            reconstruction = await reconstructRepositoryBackup(repairOptions);
+            // Preserve confirmed bytes even if publication/observers/native work
+            // fail next. Never delete the result or retry reconstruction over it.
+            phase = 'reconstructed';
+            await progress('recovery', { phase: 'reconstruction_complete', candidate });
+          }
+          if (cached || reconstruction) {
             // Existing wrong bytes/symlinks/refused permissions are fatal, not
             // permission to overwrite the cache or try a different checkpoint.
             receipt = await replicateRepositoryBackup({ candidates: [{ input: candidate.input, approval: options.approval }],
               trustKey: options.trustKey, policy: options.policy, destination: paths.cacheDirectory, checkpoint,
-              maximumBytes: live.maximumBytes, maximumTotalBytes: Math.min(options.maximumAcquisitionBytes, 4 * BACKUP_LIMITS.maximumArchiveBytes),
+              maximumBytes: live.maximumBytes, maximumTotalBytes: Math.min(options.maximumAcquisitionBytes
+                - Number(reconstruction?.streaming.payload_bytes_read ?? 0), 4 * BACKUP_LIMITS.maximumArchiveBytes),
               timeoutMs: live.remaining(), signal: live.signal, onProgress: event => progress('cache', event) });
           } else {
             if (!options.sourceFile) fail('backup_recovery_sources_required');
@@ -173,7 +220,10 @@ export async function recoverRepositoryBackup(raw) {
           }
           // Record confirmed acquisition before observers; cancellation cannot
           // turn these independently reusable bytes into a claim of rollback.
-          acquisition = Object.freeze({ mode: cached ? 'cached' : 'downloaded', receipt });
+          acquisition = Object.freeze({ mode: cached ? 'cached' : reconstruction ? 'reconstructed' : 'downloaded', receipt,
+            ...(reconstruction ? { reconstruction, streaming: Object.freeze({
+              total_payload_bytes_read: String(Number(reconstruction.streaming.payload_bytes_read) + Number(receipt.streaming.total_payload_bytes_read)),
+              total_payload_byte_budget: String(options.maximumAcquisitionBytes), maximum_read_bytes: 65536 }) } : {}) });
           if (receipt.candidate.input !== candidate.input || receipt.candidate.approval !== candidate.approval
             || receipt.checkpoint.approval_sha256 !== checkpoint.approval_sha256
             || receipt.checkpoint.trusted_key_id !== checkpoint.trusted_key_id) fail('backup_recovery_handoff_mismatch');
