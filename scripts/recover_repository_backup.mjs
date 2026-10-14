@@ -3,6 +3,7 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BACKUP_LIMITS, backupError } from './lib/repository-backup-io.mjs';
+import { MAX_REPAIR_REPLICAS } from './lib/repository-backup-chunks.mjs';
 import { backupDecimal } from './lib/repository-backup-approval.mjs';
 import { MAX_RECOVERY_ACQUISITION_BYTES, repositoryBackupRecoveryOptions, recoverRepositoryBackup } from './lib/repository-backup-recovery.mjs';
 
@@ -15,6 +16,8 @@ export const RECOVERY_USAGE = `Usage: node scripts/recover_repository_backup.mjs
   --minimum-head-generation N      Independently retained minimum generation
   --sources PRIVATE_JSON           1..16 explicit HTTPS URLs; needed only on a cache miss
   --ca-file FILE                   Independent TLS CA; needed only for remote acquisition
+  --repair-catalog FILE            Derived chunk hints for explicit local reconstruction
+  --repair-replica FILE            Repeat for 1..64 damaged/truncated local copies
   --max-archive-bytes N            Individual archive bound (default 1 GiB, max 1 TiB)
   --max-acquisition-bytes N        Cache/download/publication payload work (default 4 x archive bound)
   --timeout-secs N                 One cooperative operation lifetime, 1..3600
@@ -30,6 +33,11 @@ is explicit and never automatically retried. --resume requires the original
 checkpoint, native destination and approval record; it is not a different restore.
 A verified cache works without reading expired/missing source URLs or connecting.
 A corrupt cache refuses rather than being overwritten or silently replaced.
+Repair options select local reconstruction instead of HTTPS on a cache miss.
+Both catalog and replicas are required; --sources/--ca-file cannot be combined.
+Surviving chunks must reconstruct the ORIGINAL signed archive, then pass native
+preflight. Damaged inputs and conflicting cache files are never overwritten.
+A verified cache skips both HTTPS and repair; repair inputs may be omitted on resume.
 The witness lease spans acquisition, native work and all owned cleanup. Crashed
 witness leases are not stolen/reset. No routing or external effects are replayed.
 Exit 0: native operation completed and report delivered. Exit 1: refused/unknown.
@@ -38,18 +46,23 @@ Acquisition accounting excludes native engine reads, which retain native limits.
 `;
 const FIELDS = { '--cache-directory': 'cacheDirectory', '--sources': 'sourceFile', '--approval': 'approval',
   '--trust-key': 'trustKey', '--witness': 'witness', '--fg': 'fg', '--verification-instance': 'verificationInstance',
-  '--destination': 'destination', '--destination-instance': 'destinationInstance', '--approval-record': 'approvalRecord', '--ca-file': 'caFile' };
+  '--destination': 'destination', '--destination-instance': 'destinationInstance', '--approval-record': 'approvalRecord', '--ca-file': 'caFile', '--repair-catalog': 'repairCatalog' };
 const POLICY = { '--tenant-id': 'tenant_id', '--repository-id': 'repository_id', '--incarnation-id': 'incarnation_id',
   '--object-format': 'object_format', '--minimum-head-generation': 'minimum_head_generation' };
 const fail = code => { throw backupError(code); };
 export function recoveryArguments(args) {
-  if (!Array.isArray(args) || !args.length || args.length > 80
+  if (!Array.isArray(args) || !args.length || args.length > 240
     || args.some(v => typeof v !== 'string' || v.length > 8192 || v.includes('\0'))
-    || args.reduce((size, v) => size + Buffer.byteLength(v), 0) > 128 * 1024) fail('backup_recovery_argument_limit');
+    || args.reduce((size, v) => size + Buffer.byteLength(v), 0) > 384 * 1024) fail('backup_recovery_argument_limit');
   const result = { operation: args[0], policy: {} }, seen = new Set(); let progress = false;
   const next = index => { if (!args[index] || args[index].startsWith('--')) fail('backup_missing_option_value'); return args[index]; };
   for (let at = 1; at < args.length; at++) {
     const flag = args[at];
+    if (flag === '--repair-replica') {
+      result.repairReplicas ??= [];
+      if (result.repairReplicas.length === MAX_REPAIR_REPLICAS) fail('backup_chunk_replica_limit');
+      result.repairReplicas.push(next(++at)); continue;
+    }
     if (seen.has(flag)) fail('backup_duplicate_option'); seen.add(flag);
     if (flag === '--trusted-local') { result.trustedLocal = true; continue; }
     if (flag === '--resume') { result.resume = true; continue; }
@@ -71,7 +84,7 @@ export async function runRecoveryCommand(args, output = process.stdout, diagnost
   if (args.length === 1 && args[0] === '--help') { await write(output, RECOVERY_USAGE); return null; }
   const { options, progress } = recoveryArguments(args);
   const result = await recoverRepositoryBackup({ ...options, signal, onProgress: async event => {
-    // At most six phase markers; never emit URLs, unbounded byte progress,
+    // At most seven phase markers; never emit URLs, unbounded byte progress,
     // arbitrary native diagnostics or private capability-file contents.
     if (progress && ['recovery', 'native'].includes(event.stage)) await write(diagnostic,
       JSON.stringify({ type: 'repository_backup_recovery_progress', schema_version: 1, stage: event.stage, phase: event.phase,
@@ -96,7 +109,9 @@ export function recoveryErrorReport(error) {
     approval_record: error.approval_record ?? null, cleanup_error: error.cleanup_error ?? null,
     recovery_cleanup_error: error.recovery_cleanup_error ?? null, download_state: error.download_state ?? null,
     retained_download: error.retained_download ?? null, download_cleanup_error: error.download_cleanup_error ?? null,
-    publication_state: error.publication_state ?? null, replica: error.replica ?? null };
+    publication_state: error.publication_state ?? null, replica: error.replica ?? null,
+    reconstruction_chunk_index: error.chunk_index ?? null, reconstruction_replicas: error.replicas ?? null,
+    reconstruction_staging_path: error.staging_path ?? null };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const controller = new AbortController(), stop = () => controller.abort();
