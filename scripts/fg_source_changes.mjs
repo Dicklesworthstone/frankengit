@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { lstat, mkdir } from 'node:fs/promises';
 import { absolute, directory, readPrivate, writeNew, syncDirectory } from './operator/workflow_watch_io.mjs';
 import { buildSourceChanges, canonical, sha256, fail, SOURCE_PACKAGE_BYTES, CHANGES_INPUT_BYTES } from './operator/source_changes.mjs';
-import { prepareSourceChanges, verifySourceChangeCandidate } from './operator/source_changes_prepare.mjs';
+import { prepareSourceChanges, verifySourceChangeCandidate, stageVerifiedSourceChanges } from './operator/source_changes_prepare.mjs';
 import { saveSourceEdit, loadSourceEdit } from './operator/source_edit_publish.mjs';
 import { clock, parse } from './operator/source_edit_wire.mjs';
 
@@ -17,6 +17,10 @@ node scripts/fg_source_changes.mjs prepare --package PRIVATE_PACKAGE --expect PR
 node scripts/fg_source_changes.mjs inspect-candidate --package PRIVATE_PACKAGE --expect PRIVATE_EXPECTATION
   --changes PRIVATE_CHANGES --candidate PRIVATE_CANDIDATE_DIRECTORY --sha256 CANDIDATE_MANIFEST_HASH
   --confirm-draft-sha256 REVIEWED_DRAFT_HASH
+node scripts/fg_source_changes.mjs stage --package PRIVATE_PACKAGE --expect PRIVATE_EXPECTATION
+  --changes PRIVATE_CHANGES --selection PRIVATE_NATIVE_SELECTION --candidate PRIVATE_CANDIDATE_DIRECTORY
+  --sha256 CANDIDATE_MANIFEST_HASH --confirm-draft-sha256 REVIEWED_DRAFT_HASH
+  --principal ORIGINAL_PRINCIPAL --confirm-candidate NATIVE_COMMIT --journal ABSENT_PRIVATE_DIRECTORY
 
 Every command accepts --timeout-ms 1..300000 (default 30000).
 Draft creates private patch.diff and manifest.json without network work. Review
@@ -27,13 +31,18 @@ commitment against locally intended effects. Untouched subtree IDs are preserved
 Native selection uses the existing source-edit schema, with only EFFECT paths;
 explicit no-op paths remain in the draft but are not native change targets.
 Inspect-candidate regenerates and checks offline; it accepts no credential.
-The standard saved candidate is consumed by fg_source_edit.mjs stage/apply/recover,
-which separately requires principal/candidate consent and owns original-key recovery.
+Stage regenerates the draft and expected tree, requires the exact independent
+native target selection plus principal/candidate consent, then creates the standard
+one-shot journal WITHOUT a token or network request. Retain its request hash.
+fg_source_edit.mjs apply/recover/status consumes that journal and owns original-key
+recovery. The broader fg_source_edit.mjs stage remains available independently.
 This command never publishes repository state, invents a new base, retries,
 extracts files, runs source, or calls Git. Explicit create operations require an
 executable choice and absence proved by the package's committed parent trees.
 Missing parent evidence refuses; there is no overwrite or implicit proof fetch.
-NUL-bearing binary edits are not supported.
+Explicit copy/rename operations preserve original bytes and prove destination
+absence; see docs/SOURCE_RELOCATION.md. NUL-bearing binary edits are not supported.
+Verified staging is documented in docs/VERIFIED_SOURCE_STAGING.md.
 Exit 0: complete result; 2: refusal; 3: cancelled before local publication;
 4: a local output or result may exist; inspect its retained location and hashes.`;
 function options(args) {
@@ -44,6 +53,8 @@ function options(args) {
     draft: [[...common, '--output'], []],
     prepare: [[...common, '--selection', '--token-file', '--confirm-draft-sha256', '--output'], ['--ca-file']],
     'inspect-candidate': [[...common, '--candidate', '--sha256', '--confirm-draft-sha256'], []],
+    stage: [[...common, '--selection', '--candidate', '--sha256', '--confirm-draft-sha256',
+      '--principal', '--confirm-candidate', '--journal'], []],
   };
   if (!Object.hasOwn(profiles, op)) fail('source_changes_cli_operation');
   const [required, extra] = profiles[op], allowed = [...required, ...extra, '--timeout-ms'], f = new Map();
@@ -59,6 +70,10 @@ function options(args) {
     if (key === '--timeout-ms') continue;
     if (['--sha256', '--confirm-draft-sha256'].includes(key)) {
       if (!/^[0-9a-f]{64}$/.test(value)) fail('source_changes_confirmation');
+    } else if (key === '--principal') {
+      if (!/^[0-9a-f]{32}$/.test(value)) fail('source_changes_principal');
+    } else if (key === '--confirm-candidate') {
+      if (!/^(?:(?:sha1:)?[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})$/.test(value)) fail('source_changes_candidate_confirmation');
     } else absolute(value);
   }
   return { op, f, timeout: Number(timeout) };
@@ -115,6 +130,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     const { op, f, timeout } = options(args), time = clock({ timeoutMs: timeout, signal: stop.signal });
     if (typeof process.getuid !== 'function') fail('source_changes_posix_required');
     if (f.has('--output')) await absent(f.get('--output'));
+    if (f.has('--journal')) await absent(f.get('--journal'));
     const expected = parse(await privateFile(f.get('--expect'), 128 * 1024, time.check), 128 * 1024);
     const changes = parse(await privateFile(f.get('--changes'), CHANGES_INPUT_BYTES, time.check), CHANGES_INPUT_BYTES);
     const bytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time.check);
@@ -122,6 +138,11 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     if (op === 'draft') {
       const draft = await buildSourceChanges(bytes, expected, changes, { check: time.check, signal: stop.signal });
       result = await saveDraft(f.get('--output'), draft, time.check);
+    } else if (op === 'stage') {
+      const selection = parse(await privateFile(f.get('--selection'), 512 * 1024, time.check), 512 * 1024);
+      result = await stageVerifiedSourceChanges(f.get('--journal'), f.get('--candidate'), f.get('--sha256'),
+        bytes, expected, changes, selection, { ...local(), confirmDraftSha256: f.get('--confirm-draft-sha256'),
+          confirmCandidate: f.get('--confirm-candidate'), principal: f.get('--principal') });
     } else if (op === 'inspect-candidate') {
       const loaded = await loadSourceEdit(f.get('--candidate'), f.get('--sha256'), time.check);
       const checked = await verifySourceChangeCandidate(bytes, expected, changes, loaded.capture, loaded.bundle,

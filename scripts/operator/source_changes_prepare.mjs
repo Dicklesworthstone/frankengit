@@ -4,8 +4,10 @@
 // of pack closure. Independently deriving the expected tree root additionally
 // excludes unreported changes under the native Git commitment.
 import { buildSourceChanges, canonical, sha256, fail } from './source_changes.mjs';
-import { editInput, captureSourceEdit, validateSourceEdit, oid } from './source_edit_candidate.mjs';
+import { editInput, captureSourceEdit, validateSourceEdit, identity, oid } from './source_edit_candidate.mjs';
 import { clock, fields } from './source_edit_wire.mjs';
+import { loadSourceEdit, stageSourceApply } from './source_edit_publish.mjs';
+import { absolute, contains } from './workflow_watch_io.mjs';
 
 function lifetime(options) {
   fields(options, ['confirmDraftSha256', 'signal', 'timeoutMs', 'ca', 'maxWireBytes'], ['confirmDraftSha256']);
@@ -76,4 +78,45 @@ export async function verifySourceChangeCandidate(packageBytes, expected, change
   time.check(); confirm(draft, pin);
   const binding = matches(draft, candidate, pin); time.check();
   return { ...candidate, draft, binding };
+}
+
+// Offline handoff to the existing one-shot publication owner. The independent
+// selection binds the target endpoint, namespace, branch AND commit metadata;
+// a content commitment by itself cannot choose where the user will publish.
+export async function stageVerifiedSourceChanges(journal, candidatePath, candidateHash,
+  packageBytes, expected, changes, selection, options) {
+  fields(options, ['confirmDraftSha256', 'confirmCandidate', 'principal', 'signal', 'timeoutMs'],
+    ['confirmDraftSha256', 'confirmCandidate', 'principal']);
+  const { pin, time } = lifetime({ confirmDraftSha256: options.confirmDraftSha256,
+    signal: options.signal, timeoutMs: options.timeoutMs });
+  const request = editInput(selection), principal = identity(options.principal);
+  const confirmed = oid(options.confirmCandidate, request.scope.object_format);
+  absolute(journal); absolute(candidatePath);
+  if (contains(journal, candidatePath) || contains(candidatePath, journal)) fail('source_changes_overlapping_custody');
+  if (typeof candidateHash !== 'string' || !/^[0-9a-f]{64}$/.test(candidateHash)) fail('source_changes_confirmation');
+  // buildSourceChanges owns the package, independent expectations and all edit
+  // primitives before its first await. Neither input mutation nor saved success
+  // flags can redirect the subsequent file publication.
+  const draft = await buildSourceChanges(packageBytes, expected, changes, { signal: time.signal, check: time.check });
+  time.check(); confirm(draft, pin); requestMatches(request, draft);
+  const candidate = await loadSourceEdit(candidatePath, candidateHash, time.check);
+  if (confirmed !== candidate.candidate_commit) fail('source_changes_candidate_confirmation');
+  if (!canonical(request).equals(canonical(candidate.capture.request))) fail('source_changes_target_selection');
+  const binding = matches(draft, candidate, pin); time.check();
+  // The original candidate manifest hash is checked again by stageSourceApply.
+  // Its request commits to that exact candidate, target scope and chosen
+  // principal. Reopening an altered source path cannot substitute new bytes.
+  // Once journal creation starts, its owner drains local sync/readback even if
+  // a cancellation arrives. No timeout or lost stdout is evidence of absence.
+  const evidence = { ...binding, candidate_manifest_sha256: candidateHash,
+    independent_selection_sha256: sha256(canonical(request)), target_selection_matched: true };
+  try {
+    const staged = await stageSourceApply(journal, candidatePath, candidateHash, principal,
+      { signal: time.signal, timeoutMs: time.remaining() });
+    return { ...staged, binding: evidence, remote_mutation_attempted: false };
+  } catch (error) {
+    if (error.publication_unconfirmed) error.publication_unconfirmed = {
+      ...error.publication_unconfirmed, binding: evidence, remote_mutation_attempted: false };
+    throw error;
+  }
 }
