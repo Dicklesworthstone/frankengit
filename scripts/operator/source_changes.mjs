@@ -161,17 +161,25 @@ function afterImage(row, before, size, check) {
   }
   before.copy(result, next, old); return result;
 }
+// Synchronous, bounded ownership shared by authoring and explicit base replay.
+// This validates the input grammar, not membership or permission. Every consumer
+// must still run buildSourceChanges before using any claimed source evidence.
+export function ownSourceChangeInputs(packageBytes, expected, input, inputLimits = {}) {
+  const bound = limits(inputLimits);
+  if (!(packageBytes instanceof Uint8Array) || !packageBytes.length || packageBytes.length > SOURCE_PACKAGE_BYTES ||
+      !(packageBytes.buffer instanceof ArrayBuffer)) fail('source_changes_package');
+  return { packageBytes: Buffer.from(packageBytes), expected: expectation(expected),
+    changes: changes(input, bound), limits: bound };
+}
 export async function buildSourceChanges(packageBytes, expected, input, options = {}) {
   fields(options, ['signal', 'check', 'limits'], []);
   if (options.signal !== undefined && !(options.signal instanceof AbortSignal) ||
       options.check !== undefined && typeof options.check !== 'function') fail('source_changes_host');
   const signal = options.signal, checkpoint = options.check;
   const check = () => { signal?.throwIfAborted(); checkpoint?.(); };
-  check(); const bound = limits(options.limits);
-  if (!(packageBytes instanceof Uint8Array) || !packageBytes.length || packageBytes.length > SOURCE_PACKAGE_BYTES ||
-      !(packageBytes.buffer instanceof ArrayBuffer)) fail('source_changes_package');
-  // Own every request field, expected pin and byte before the first await.
-  const source = Buffer.from(packageBytes), selected = expectation(expected), owned = changes(input, bound);
+  check();
+  const { packageBytes: source, expected: selected, changes: owned, limits: bound } =
+    ownSourceChangeInputs(packageBytes, expected, input, options.limits);
   const packageHash = sha256(source), expectedHash = sha256(canonical(selected)), changesHash = sha256(canonical(owned));
   const loaded = await readSourcePackage(source, selected, webcrypto, check); check();
   const created = owned.changes.filter(row => ['create', 'copy', 'rename'].includes(row.operation)).map(row => row.path_hex);
