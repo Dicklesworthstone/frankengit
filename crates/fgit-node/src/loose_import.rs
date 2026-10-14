@@ -42,12 +42,12 @@ use super::{NodeRefusal, NodeRequestContext, OneNode};
 
 const MAX_IMPORT_REFS: usize = 65_536;
 const MAX_IMPORT_OBJECTS: usize = 1_000_000;
-const MAX_IMPORT_TOTAL_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_IMPORT_TOTAL_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE: usize = 64 * 1024 * 1024;
 const MAX_IMPORT_PACKS: usize = 128;
 const MAX_IMPORT_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_IMPORT_TOTAL_PACK_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_IMPORT_TOTAL_PACK_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_IMPORT_TOTAL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_PACKED_REFS_HEADER_BYTES: usize = 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;
@@ -1035,6 +1035,7 @@ fn import_pack_limits(max_object_bytes: u64) -> PackLimits {
         max_object_bytes: usize::try_from(max_object_bytes).unwrap_or(usize::MAX),
         max_total_expanded_bytes: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES)
             .unwrap_or(usize::MAX),
+        max_delta_work: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES).unwrap_or(usize::MAX),
         max_cached_bytes: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES).unwrap_or(usize::MAX),
         ..PackLimits::default()
     }

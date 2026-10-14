@@ -15,7 +15,7 @@ fg import <storage-root> <tenant-id> <repository-id> <principal-id> <key> <sourc
 ```
 
 Without an explicit timeout, the node reserves its existing bounded import
-profile (128 MiB of expanded object bodies) using the receive session's base,
+profile (512 MiB of expanded object bodies) using the receive session's base,
 per-byte rate and maximum extension. It also uses the existing receive-admission
 poll and cost calculation, rather than the ordinary Database class's flat
 15-second / 50,000-poll allowance. This is an up-front resource reservation,
@@ -44,14 +44,16 @@ command module, as it does for other extended commands.
 
 ## Limits and evidence
 
-This does not enlarge the import's 128 MiB aggregate body limit, 32 MiB default
-individual-object limit, pack/index limits or object-count limit. It does not
-claim the bead's multi-hundred-MiB acceptance, remote identity integration or a
-completed durability profile. Source validation and one head CAS remain the
-publication boundary; local object placement is not publication.
+The import profile bounds aggregate expanded object bodies and total pack input
+bytes at 512 MiB, individual objects at the node's 32 MiB default ceiling,
+individual packs/indexes at 64 MiB, and object count at 1,000,000. It does not
+claim remote identity integration or a completed multi-node durability profile.
+Source validation and one head CAS remain the publication boundary; local object
+placement is not publication.
 
 Focused tests cover strict versus scaled timeouts, custom scaling and its hard
 ceiling, finite native budgets, expiry before source I/O with unchanged head,
+multi-hundred-MiB loose import completion alongside an under-budget refusal twin,
 and option/refusal twins. These tests must be executed at the candidate revision:
 
 ```sh
