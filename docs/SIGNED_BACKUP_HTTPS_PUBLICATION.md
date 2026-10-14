@@ -90,6 +90,8 @@ or progress/error record to restrict the rerun to that original approval. The
 pin never bypasses signature, expiry, floor or content checks.
 
 SIGTERM/SIGINT drain the producer, request, response, private agent and socket.
+Client-side closure does not prove that a remote handler or storage transaction
+has quiesced: a paused receiver can defer observing closure.
 SIGKILL can leave remote work whose outcome is unknown; no rollback is attempted.
 A broken final output pipe retains `completed_result` when the upload already
 completed. The uploader does not create a persistent job journal or retained
@@ -108,7 +110,7 @@ conservative fresh-work reservation. The per-archive cap is 1 TiB and aggregate
 cap 3 TiB; the aggregate cap never enlarges the archive cap. Upload-source counts
 are conservative source bytes read for sending, not proof of network delivery.
 Approval/key reads, bounded HTTP replies, framing and one-byte EOF probes are
-separately bounded. Header bytes are capped at 16 KiB, header pairs at 64,
+separately bounded. Header bytes are capped at 16 KiB, final header pairs at 64,
 informational responses at eight, and PUT response bodies at 16 KiB. Transformed,
 partial, oversized, truncated and trailer-bearing successful replies refuse.
 
@@ -126,6 +128,7 @@ Focused executable verification:
 node --test --test-concurrency=1 \
   scripts/tests/repository-backup-upload.test.mjs \
   scripts/tests/repository-backup-upload-cli.test.mjs \
+  scripts/tests/repository-backup-upload-network.test.mjs \
   scripts/tests/repository-backup-replication.test.mjs
 ```
 
@@ -138,3 +141,8 @@ through the existing downloader, and selection of identical recovered bytes.
 Payloads remain opaque test bytes, not native fg archives. Rust, native admission,
 complete capsule/forge recovery, public-provider interoperability, hardware
 power-loss and full-workspace acceptance are not established by these tests.
+
+A fully backpressured 32 MiB PUT also exercises producer/socket drain without
+waiting for an unread remote handler. The SIGTERM peer test consumes incoming
+bytes and awaits an explicit bounded close event; an arbitrary 30 ms sleep is
+not used as evidence that remote closure has completed.

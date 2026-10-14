@@ -87,11 +87,19 @@ test('help neither reads files nor makes requests', async t => {
   assert.equal(result.code, 0); assert.match(result.stdout, /If-None-Match/); assert.equal(f.events.length, 0);
 });
 test('SIGTERM drains a held remote request without sending approval', async t => {
-  const f = await fixture(t); let running;
-  f.hook((req, res, path) => { if (path === '/archive' && req.method === 'PUT') { running.child.kill('SIGTERM'); return true; } });
+  const f = await fixture(t); let running, remoteClosed;
+  f.hook((req, res, path) => { if (path === '/archive' && req.method === 'PUT') {
+    // A paused HTTP receiver can defer observing FIN indefinitely. Consume its
+    // body while withholding the response, and await an explicit close barrier.
+    remoteClosed = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('peer did not observe close')), 2000);
+      req.socket.once('close', () => { clearTimeout(timer); resolve(); });
+    });
+    req.resume(); running.child.kill('SIGTERM'); return true;
+  } });
   running = launch(t, f.args); const result = await running.done;
   assert.equal(errorOf(result).code, 'backup_cancelled'); assert.equal(f.objects.has('/approval'), false);
-  await new Promise(r => setTimeout(r, 30)); assert.equal(f.sockets.size, 0);
+  await remoteClosed; assert.equal(f.sockets.size, 0);
 });
 test('SIGKILL after remote archive acceptance recovers by reads without another archive PUT', async t => {
   const f = await fixture(t); let running;
