@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import { buildSourceChanges, ownSourceChangeInputs, canonical, sha256, SOURCE_PACKAGE_BYTES } from '../operator/source_changes.mjs';
 import { replaySourceChanges } from '../operator/source_replay.mjs';
 import { changeFixture, hexPath, intent, replace } from './source_changes_fixture.mjs';
@@ -156,4 +157,52 @@ test('unrelated independently selected commits never acquire an ancestry claim',
 test('native hash domains cannot be crossed by explicit replay', async () => {
   const s = await setup(), other = replayPair('sha256');
   await assert.rejects(s.run(other.next), /source_replay_format_changed/);
+});
+
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: injected hash validation cannot equate unequal selected context bodies`, async () => {
+    const s = await setup(format), next = structuredClone(s.next);
+    const empty = next.expected.files.find(f => f.pathHex === hexPath('empty')).blob;
+    const bytes = Buffer.from('different unedited context');
+    next.value.blobs.find(b => b.oid === empty).bytesHex = bytes.toString('hex');
+    next.bytes = Buffer.from(JSON.stringify(next.value));
+    const original = webcrypto.subtle.digest.bind(webcrypto.subtle);
+    const framed = Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes]);
+    // Explicit host fault injection, NOT a real native-hash collision claim.
+    webcrypto.subtle.digest = async (algorithm, body) => Buffer.from(body).equals(framed)
+      ? Uint8Array.from(Buffer.from(empty, 'hex')).buffer : original(algorithm, body);
+    try {
+      assert.deepEqual((await buildSourceChanges(next.bytes, next.expected, s.changes)).bytes, s.draft.bytes);
+      await assert.rejects(s.run(next), /source_replay_read_set_changed/);
+      assert.ok((await s.run()).receipt.exact_patch_preserved);
+    } finally { webcrypto.subtle.digest = original; }
+  });
+  test(`${format}: raw paths and non-UTF8 non-NUL source retain exact before and after bytes`, async () => {
+    const path = Buffer.from([255, 47, 254, 10]), row = { path, bytes: Buffer.from([255, 13, 10]), mode: 0o100755 };
+    const old = selectSource(changeFixture(format, [row, { path: 'other', bytes: 'before' }]), [path]);
+    const next = selectSource(changeFixture(format, [row, { path: 'other', bytes: 'concurrent' }]), [path]);
+    const changes = intent([{ path_hex: hexPath(path), operation: 'replace', content_hex: 'fe0a', executable: false }]);
+    const draft = await buildSourceChanges(old.bytes, old.expected, changes);
+    const replay = await replaySourceChanges(old.bytes, old.expected, changes, next.bytes, next.expected,
+      { confirmDraftSha256: sha256(canonical(draft.manifest)) });
+    assert.deepEqual(replay.draft.bytes, draft.bytes);
+    assert.equal(replay.draft.tree.afterTree, changeFixture(format, [{ ...row, bytes: Buffer.from('fe0a', 'hex'), mode: 0o100644 }, { path: 'other', bytes: 'concurrent' }]).tree);
+  });
+}
+test('a different commit with the identical tree still requires a distinct reviewed draft', async () => {
+  const s = await setup(), next = withParent(s.old, s.old.commit);
+  const replay = await s.run(next);
+  assert.equal(replay.receipt.selected_root_tree, s.old.tree); assert.equal(replay.receipt.expected_tree, s.draft.tree.afterTree);
+  assert.notEqual(replay.receipt.draft_sha256, s.pin);
+});
+test('the full 32-path effect envelope remains usable after an independent base change', async () => {
+  const rows = Array.from({ length: 32 }, (_, i) => ({ path: `file${String(i).padStart(2, '0')}`, bytes: `before${i}` }));
+  const selected = rows.map(row => row.path), old = changeFixture('sha256', rows);
+  const next = selectSource(changeFixture('sha256', [...rows, { path: 'unselected', bytes: 'another writer' }]), selected);
+  const changes = intent(rows.map((row, i) => replace(row.path, `after${i}`)));
+  const draft = await buildSourceChanges(old.bytes, old.expected, changes);
+  const replay = await replaySourceChanges(old.bytes, old.expected, changes, next.bytes, next.expected, { confirmDraftSha256: sha256(canonical(draft.manifest)) });
+  assert.equal(replay.receipt.effect_count, 32); assert.equal(replay.receipt.selected_file_count, 32);
+  const wider = intent([...changes.changes, { operation: 'create', path_hex: hexPath('extra'), content_utf8: 'x', executable: false }]);
+  await assert.rejects(replaySourceChanges(old.bytes, old.expected, wider, next.bytes, next.expected, { confirmDraftSha256: sha256(canonical(draft.manifest)) }));
 });

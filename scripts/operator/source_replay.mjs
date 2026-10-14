@@ -17,7 +17,14 @@ const same = (a, b) => canonical(a).equals(canonical(b));
 // authoring kernel, on the SAME privately owned bytes. No second Git decoder.
 function readSet(bytes) {
   const value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
-  return value.membership.files.map(row => [row.pathHex, row.blob, row.kind]);
+  return { files: value.membership.files.map(row => [row.pathHex, row.blob, row.kind]), blobs: value.blobs };
+}
+function sameReadSet(a, b) {
+  const before = readSet(a), after = readSet(b);
+  // Compare complete selected bodies as well as native identities. Equality of
+  // native hashes alone is not a stronger byte-equality/collision assertion.
+  return same(before.files, after.files) && before.blobs.length === after.blobs.length &&
+    before.blobs.every((row, i) => row.oid === after.blobs[i].oid && row.bytesHex === after.blobs[i].bytesHex);
 }
 export async function replaySourceChanges(packageBytes, expected, changes, nextPackageBytes, nextExpected, options) {
   fields(options, ['confirmDraftSha256', 'signal', 'timeoutMs', 'limits'], ['confirmDraftSha256']);
@@ -38,7 +45,7 @@ export async function replaySourceChanges(packageBytes, expected, changes, nextP
   // A different read set requires a newly authored change, not this replay.
   if (!same(original.expected.files, next.expected.files)) fail('source_replay_read_set_changed');
   const draft = await build(next); time.check();
-  if (!same(readSet(original.packageBytes), readSet(next.packageBytes))) fail('source_replay_read_set_changed');
+  if (!sameReadSet(original.packageBytes, next.packageBytes)) fail('source_replay_read_set_changed');
   // Proving the preimages is primary. The independently regenerated patch and
   // effect/no-op equality also prevent a transform or mode default from changing
   // the reviewed intent. New creation proofs and the whole root may differ.

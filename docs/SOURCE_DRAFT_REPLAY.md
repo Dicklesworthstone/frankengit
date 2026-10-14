@@ -25,7 +25,7 @@ asynchronous digest. One monotonic deadline spans both verifications.
 
 The next commit must differ and use the same native hash domain. Its independently
 selected file set must exactly equal the original selected file set: same byte
-paths, native blob IDs and verified regular/executable modes. This includes
+paths, complete source bytes, native blob IDs and verified regular/executable modes. This includes
 unchanged context files, paths whose edits became no-ops, and read-only copy
 sources. Narrowing or widening the selection is not accepted as an equivalent
 review. A changed selected input needs a newly authored/reviewed change instead.
@@ -82,3 +82,96 @@ and cancellation. They include a changed file where naive replace-once still
 succeeds, and a changed unused executable mode where the patch remains identical;
 both are refused by the original read-set checks. This is not native Rust
 TreeFS/admission/CAS, semantic compatibility or whole-workspace evidence.
+
+
+## Private-file CLI and independently reopenable captures
+
+The executable consumer is `scripts/fg_source_replay.mjs`. Use Node 22.16.0 or
+later on POSIX. All input paths must be normalized absolute owner-private regular
+files with one link, inside real owner-owned `0700` directories. Symlink aliases,
+FIFOs and public inputs refuse. The new output directory must not already exist.
+
+```bash
+node scripts/fg_source_replay.mjs capture \
+  --package /private/original/source.json \
+  --expect /private/original/expected.json \
+  --changes /private/original/changes.json \
+  --confirm-draft-sha256 "$REVIEWED_ORIGINAL_DRAFT_SHA256" \
+  --next-package /private/next/source.json \
+  --next-expect /private/next/independent-expectation.json \
+  --output /private/new-review
+```
+
+The original inputs can come from a previously captured editing workspace; see
+`SOURCE_EDITING_WORKSPACES.md`. Acquire the next package separately and select its
+commit independently. This command does not fetch an updated branch, discover
+additional paths, inspect publication journals or select a target repository.
+There is no token, endpoint, CA, force, overwrite, merge-strategy or retry option.
+
+Capture produces private `0600` files in a create-only `0700` directory:
+`original-source.json`, `original-expected.json`, `changes.json`, `source.json`,
+`expected.json`, `original-draft.json`, `patch.diff`, `draft.json`, `replay.json`,
+and a last-written `manifest.json`. The original package bytes are retained
+verbatim; expectations and changes use the existing normalized input grammar.
+This includes both FULL selected-source packages, with all selected source bodies
+and parent-tree sibling names. A smaller patch does not make the capture public.
+
+Retain `capture_sha256` from the result independently of that directory. Keep the
+new `draft_sha256` separately from the original reviewed hash. The returned root
+is local custody, not a publication, authorization or remote durability receipt.
+
+```bash
+node scripts/fg_source_replay.mjs inspect \
+  --capture /private/new-review \
+  --sha256 "$RETAINED_CAPTURE_SHA256"
+```
+
+Inspection is offline and read-only. It checks the fixed inventory and retained
+root, reruns the complete original-review and two-base verification, regenerates
+both drafts and their exact patch, and compares every saved payload and receipt.
+Rewriting every local checksum is insufficient to make altered patches, drafts
+or success flags pass. Original input paths may be removed after capture; the
+saved directory contains everything needed for replay verification.
+
+After reviewing the new base and `draft.json`, use the existing native preparation
+flow with its **new** independently chosen target selection and **new** draft hash:
+
+```bash
+node scripts/fg_source_changes.mjs prepare \
+  --package /private/new-review/source.json \
+  --expect /private/new-review/expected.json \
+  --changes /private/new-review/changes.json \
+  --selection /private/next/native-target.json \
+  --confirm-draft-sha256 "$REVIEWED_NEW_DRAFT_SHA256" \
+  --token-file /private/next/read-token \
+  --output /private/next/candidate
+```
+
+The previous draft hash fails preparation before any HTTP request and fails
+verified staging before creating a journal. The existing candidate-root checker
+still rejects hidden unrelated changes. Follow `VERIFIED_SOURCE_STAGING.md` for
+separate candidate/principal consent, then use the unchanged `fg_source_edit.mjs`
+apply/recover/status owner. Replay does not modify or transfer responsibility
+from any previous publication journal, and it does not globally deduplicate
+separately staged journals. Unknown outcomes must first be reconciled under the
+original key; never replay a draft as a substitute for that recovery.
+
+Both CLI operations accept `--timeout-ms` 1..300000. A begun individual file write
+is drained; cancellation before the root leaves an incomplete, reserved output
+slot, never an apparent complete capture. The last root write/sync/readback is
+finalized even on a late stop. There is no automatic cleanup or reuse of partial
+slots. Exit 0 reports a complete result; 2 is refusal; 3 is cancellation before an
+output slot was claimed; 4 retains an existing or unconfirmed local output/result
+identity. Lost stdout does not erase a valid capture. This trusted-local profile
+is not confinement against hostile same-user parent replacement or a proof of
+power-loss durability.
+
+The verification command additionally exercises actual CLI capture/inspect,
+private-file corruption and link/race failures, real signal cancellation and
+blocked output, plus CLI prepare/stage/apply/recover against HTTP/TLS native-schema
+peers in both hash domains. The peers use Git only as a test oracle for actual
+patches, trees, commits and bundles; they are not a running Rust `fg` server.
+Recovered decisions keep their original key and full-width sequence with no
+second upload even after external inputs and the replay capture are removed.
+No Rust compilation, native authorization/admission/CAS, complete pack-closure,
+real-browser, semantic-compatibility or full-workspace claim follows from this lane.
