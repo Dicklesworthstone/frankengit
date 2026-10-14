@@ -5,10 +5,14 @@ import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
 import { createSourceWorkspace, inspectSourceWorkspace, lifetime, pin, fail,
   SOURCE_PACKAGE_BYTES, WORKSPACE_LIMITS } from './operator/source_workspace.mjs';
+import { captureWorkspaceChanges, inspectWorkspaceChangeCapture } from './operator/source_workspace_changes.mjs';
 import { parse } from './operator/source_edit_wire.mjs';
 const USAGE = `node scripts/fg_source_workspace.mjs create --package PRIVATE_PACKAGE
   --expect PRIVATE_INDEPENDENT_EXPECTATION --output ABSENT_DIRECTORY
 node scripts/fg_source_workspace.mjs status --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
+node scripts/fg_source_workspace.mjs capture --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
+  --paths PRIVATE_PATH_SELECTION --output ABSENT_CAPTURE_DIRECTORY
+node scripts/fg_source_workspace.mjs inspect-capture --capture PRIVATE_CAPTURE_DIRECTORY --sha256 CAPTURE_HASH
 
 All commands accept --timeout-ms 1..300000 (default 30000). Inputs and output
 parents must be real owner-private POSIX directories. Source/expected inputs are
@@ -18,15 +22,23 @@ immutable inputs and materializes only those paths below files/. Keep the return
 workspace_sha256 independently. Edit files/ with your own trusted tools; no tool
 is run here. Status checks the original inputs and reads only originally selected
 paths. It does not discover other local files or attest an atomic filesystem view.
+Capture requires {paths_hex:[...]} with every intended local path. It records
+only those files as exact replacements, deletes or proved-absent creations; no
+rename inference or directory scan occurs. Saved captures contain source.json,
+expected.json, changes.json, patch.diff and draft.json for the existing authoring
+CLI. Inspect-capture recomputes them without requiring the original workspace.
+NUL-bearing changes remain unsupported by the native exact-patch client profile.
 No overwrite, recursive scan, symlink, hardlink, credential, network, Git command,
 source execution, permission grant or repository mutation. Interrupted output
 slots are retained. Exit 0: complete; 2: refusal; 3: cancelled before output;
 4: a local output/result may exist: retain and inspect the reported root hash.`;
 function options(args) {
-  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 11 ||
+  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 13 ||
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_workspace_arguments');
   const op = args[0], required = op === 'create' ? ['--package', '--expect', '--output']
-    : op === 'status' ? ['--workspace', '--sha256'] : null;
+    : op === 'status' ? ['--workspace', '--sha256']
+    : op === 'capture' ? ['--workspace', '--sha256', '--paths', '--output']
+    : op === 'inspect-capture' ? ['--capture', '--sha256'] : null;
   if (!required) fail('source_workspace_operation');
   const f = new Map();
   for (let i = 1; i < args.length; i += 2) {
@@ -68,6 +80,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const expected = parse(await privateFile(f.get('--expect'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes);
       const bytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time);
       result = await createSourceWorkspace(f.get('--output'), bytes, expected, { check: time.check, signal: controller.signal, timeoutMs: time.remaining() });
+    } else if (op === 'capture') {
+      const selection = parse(await privateFile(f.get('--paths'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes);
+      result = await captureWorkspaceChanges(f.get('--workspace'), f.get('--sha256'), selection, f.get('--output'),
+        { check: time.check, signal: controller.signal, timeoutMs: time.remaining() });
+    } else if (op === 'inspect-capture') {
+      result = await inspectWorkspaceChangeCapture(f.get('--capture'), f.get('--sha256'), { check: time.check, timeoutMs: time.remaining() });
     } else result = await inspectSourceWorkspace(f.get('--workspace'), f.get('--sha256'), { check: time.check, timeoutMs: time.remaining() });
     await emit(stdout, result); return 0;
   } catch (error) {

@@ -53,6 +53,87 @@ unchanged, modified (including mode changes), or deleted. It does not recursivel
 scan or report files outside that selection. The baseline is never changed by
 editing, inspection or a missing local file.
 
+## Capture explicit local paths into a portable authoring draft
+
+After editing, supply an explicit path selection. For example, this selects
+`src/main.rs` and `new/file.rs` (including a possible new file):
+
+```json
+{"paths_hex":["7372632f6d61696e2e7273","6e65772f66696c652e7273"]}
+```
+
+```bash
+node scripts/fg_source_workspace.mjs capture \
+  --workspace /private/session/editing \
+  --sha256 "$RETAINED_WORKSPACE_SHA256" \
+  --paths /private/session/paths.json \
+  --output /private/session/captured-change
+```
+
+Capture verifies the immutable baseline first and reads ONLY those mutable local
+paths. It skips unchanged files, records replacements and mode changes using
+exact bytes, and records missing selected originals as deletions. New paths must
+be proved absent in the original commit before their local bodies are opened;
+omitted original source and unexamined directory contents are not proof of
+absence. A new selected file must exist locally. Physical moves can be captured
+by explicitly selecting both the old and new paths; this records deletion plus
+creation, without claiming inferred rename intent. No glob, ignore file, directory
+walk, source script or discovered filename can widen the selection.
+
+The complete existing authoring kernel builds the patch, verifies old blob
+identities, proves creations, and independently derives the entire expected root
+tree. Its 32-effect, 1 MiB file/patch and 4 MiB before/after byte limits still apply.
+Changed NUL-bearing files are refused. Unchanged binary files may remain selected
+without becoming patch effects. No-change and missing-new-file selections refuse
+without claiming an output slot. All observed files and parents are checked again
+after hashing; quiesce editors first, since this remains a non-atomic filesystem
+observation. Once captured, owned bytes—not subsequent edits—determine the draft.
+
+The create-only output contains `source.json`, `expected.json`, `paths.json`,
+`changes.json`, `patch.diff`, `draft.json`, and the last-written `manifest.json`.
+Retain the returned `capture_sha256` independently. `draft_sha256` is the exact
+existing authoring draft hash, and `expected_tree` is the independently derived
+candidate root. A capture is self-contained: later workspace deletion does not
+prevent replay. It contains the FULL original selected-source package, including
+unchanged baseline bodies and parent-tree sibling names, not just changed files.
+Keep the capture private even when its change selection is smaller.
+
+```bash
+node scripts/fg_source_workspace.mjs inspect-capture \
+  --capture /private/session/captured-change \
+  --sha256 "$RETAINED_CAPTURE_SHA256"
+```
+
+Offline inspection rechecks every fixed payload and its hash, reconstructs the
+original workspace commitment, re-verifies the source package, regenerates the
+exact patch/draft and expected tree, and checks the selected-path accounting.
+Self-consistent rewritten local hashes are not substitutes for regeneration.
+The root is a content/provenance binding, not permission, freshness or evidence
+that an authority published anything.
+
+Review `changes.json`, `patch.diff` and `draft.json`. The saved inputs work with
+the EXISTING authoring CLI, without reading live editor files again:
+
+```bash
+node scripts/fg_source_changes.mjs prepare \
+  --package /private/session/captured-change/source.json \
+  --expect /private/session/captured-change/expected.json \
+  --changes /private/session/captured-change/changes.json \
+  --selection /private/session/independent-native-target.json \
+  --token-file /private/session/read-token \
+  --confirm-draft-sha256 "$REVIEWED_DRAFT_SHA256" \
+  --output /private/session/candidate
+```
+
+Select the native endpoint, namespace, branch, base and metadata independently as
+in `SOURCE_CHANGE_AUTHORING.md`. Its `paths_hex` must name the actual effects in
+`draft.json`, not every unchanged path examined by capture. Then use the explicit
+verified staging command in `VERIFIED_SOURCE_STAGING.md` with the captured source,
+expectation and changes, and separately invoke the unchanged apply/recover owner.
+Neither create, capture, status nor inspect-capture accepts credentials or makes
+network requests. Preparation and staging do not automatically apply anything.
+Never create a new publication journal to retry an ambiguous existing one.
+
 ## Local integrity and limits
 
 The materialization is bounded to 32 files, 1 MiB per file, 8 MiB of logical
@@ -95,7 +176,12 @@ Errors do not echo source bytes or parser/OS diagnostics.
 modules against actual files and CLI child processes. It covers both Git hash
 domains, raw paths, executable/empty/binary bytes, sparse materialization,
 independent pins, corruption, link/permission refusals, racing creators, mutable
-inputs, interrupted slots and lost stdout. It does not run Rust `fg`, native
+inputs, interrupted slots and lost stdout. Capture tests additionally exercise
+actual edits, independent absence, selected-path isolation, self-contained offline
+replay, complete existing authoring CLI preparation/staging, and lost-response
+original-key recovery with no second upload. HTTP/TLS peers use native schemas
+and real test-only Git-generated candidates, not a running Rust server. The lane
+also runs all existing source-authoring regressions. It does not run Rust `fg`, native
 TreeFS, policy/CAS, hostile tools, real browsers or the full workspace. This
 external consumer advances the selected-source-to-edit workflow; it does not
 close FG-026 or the broader agent-execution beads.

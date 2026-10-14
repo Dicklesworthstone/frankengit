@@ -223,3 +223,6 @@ export async function inspectSourceWorkspace(root, expectedHash, options = {}) {
     entries, bytes_read: snapshot.bytesRead, selected_files_only: true, unselected_paths_examined: false,
     atomic_filesystem_snapshot: false, repository_changed: false, source_material_untrusted: true };
 }
+// Deterministic baseline data construction; callers must supply a freshly
+// verified package result. The returned manifest alone is never an authority.
+export { manifest as workspaceManifest };
