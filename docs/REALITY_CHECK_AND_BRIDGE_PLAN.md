@@ -1,37 +1,33 @@
-# FrankenGit reality check and bridge plan — 2026-09-27
+# FrankenGit reality check and bridge plan — 2026-10-13 (superseding 2026-09-27 / 2026-09-29 in place)
 
-FrankenGit is a real, bounded, pure-Rust Git server with an atomic forge core, and in the four days since the 2026-09-23 check its shipped transports became substantially more trustworthy:
-- SSH key exchange is confidential.
-- A stock `git push` over smart HTTP works without a nonstandard header.
-- Concurrent writers get deterministic outcomes.
-- The policy engine fails closed.
-- Main compiles at HEAD.
+FrankenGit is a real, bounded, pure-Rust Git server with an atomic forge core. Between the 2026-09-23 check and the 2026-09-29/30 verifier wave (`14ce0fa1`..`1fe12f4b`), its shipped transports and core surfaces became substantially more trustworthy:
+- SSH key exchange is confidential, and continuous `fg serve` / `fg serve-ssh` drain cleanly on `SIGTERM`/`SIGINT` (`7847acca`, `bd45641f`).
+- Stock `git push` over smart HTTP works without a nonstandard header (`03d42b79`, `16bb3cfc`), reports per-ref status (`87c7`, `b1ffbc90`), and enforces browser Origin/CSRF and non-ambient Basic auth (`0d16039e`).
+- Incremental fetches emit thin packs when requested (`frankengit-pazc`, `e0caaddb`..`f13e9e20`), and served packs use `COMPRESSED_V3` (`ac618476`, cutting XL clone-back from 297.6 s to 131 s).
+- All 13 served browser pages pass a real-Chrome read/write E2E suite against `fg serve-http` (`1fe12f4b`, `x2mv.4.46`).
+- Batch verification under D8 at `14ce0fa1` closed 10 beads and returned 17 to `rework`.
 
-It is still not a forge a team can rely on, and the gap has changed shape again, from "unverified breadth" to "**a verification loop with nobody in it**":
-- No bead has closed since 2026-09-23.
-- The tracker's verification debt stood at 34 of its hard limit of 36 at the pinned SHA. By 2026-09-28 it had reached 36, so the tracker refuses new claims.
-- The two P0 re-verification beads are blocked behind a `batch_pending` bead that only an absent verifier can close.
-- No repository lane runs a single end-to-end suite.
+Between `1fe12f4b` (2026-09-30) and `6deda35c` (2026-10-08/13), **61 more commits** landed (6 by `Jeffrey Emanuel` ending at `10e4870f` with the 64 MiB `BodyCache` in `fgit-authority-fsqlite`, and 55 by `Jeff Emanuel` across 2026-10-04..08). That stream delivered real slices — cursor-paged canonical forge events with suffix seeking (`x2mv.4.35`), a fenced webhook dispatcher (`fg webhook dispatch`), scoped lexical/symbol/byte-regex search refresh (`fg-index-scope`), fast-forward PR merge over HTTP/browser/MCP, deterministic source tar export, and native bundle recovery (`--recovery-head-hex` / `--native-fg`) — **but two structural failure modes recurred at `6deda35c`**:
+1. **Uncompiled commits broke `--all-targets` on `main` again (`0b9b1c85`, 2026-10-07):** After `25fd5d1c`/`1e9818c4` (2026-10-06) repaired the `10e4870f` `BodyCache` build break, 30 more commits (`e76a8801`..`6deda35c`) landed from a toolchain-less environment (`Rust, Cargo, rustfmt, Clippy and built native binaries are unavailable`). Commit `0b9b1c85` introduced `error[E0689]: can't call method saturating_sub on ambiguous numeric type {integer}` in `crates/fgit-node/src/source_retrieval/integrity/bundle_verify/recovery/tests.rs:109:38`, `cargo fmt --all -- --check` fails on **142 files**, `fgit-node` (`lib`) emits **19 warnings** (15 dead-code warnings in `crates/fgit-node/src/merge_delivery.rs` orphaned by `ac80fc8a` and 4 `private_interfaces` warnings in `crates/fgit-node/src/smart_http/server/pulls.rs`), and `node --test tests/browser/*.test.mjs` has **31 failures across 2,508 tests** (up from 21/1,752 at `2b7f35ac` and 29/2,096 at `f13e9e20`).
+2. **A single-verifier deadlock on `batch_pending` (`x2mv.4.56`):** All **21 `batch_pending` beads** and the **1 `in_progress` bead** (`x2mv.4.2`) in `.beads/issues.jsonl` are assigned to `IcyIbis`. Because `.beads/policy.yaml` enforces `forbid_self_close_after_in_progress: true`, `IcyIbis` cannot close any of the 21 `batch_pending` beads it touched (including P0 `x2mv.4.1`, `x2mv.4.4`, and `x2mv.4.18`), and no second verifier has run since 2026-09-29 (`closed_last_7_days = 0`).
+3. **Every 2026-09-23 library island (`61,736` `src/` lines across 10 crates) is still unlinked**, 6 standalone binaries (`fg-index*`, `fg-*-backup`) now live in `crates/fgit-node/src/bin/` outside `fg` (`x2mv.4.54`), `fg webhook dispatch` writes a local sidecar journal instead of settling canonical outbox state (`x2mv.4.55`), and `fg-mcp` drifted to **34 code tools vs 28 manifest tools** (only 16 in common).
 
-Meanwhile the toolchain-less stream continues (73 of its 77 commits declare they were not compiled or tested). Every library island the 2026-09-23 check found is still an island.
-
-This supersedes the 2026-09-23 snapshot in place. Deltas against it are marked **Δ**.
+This supersedes the 2026-09-23 and 2026-09-27/29 snapshots in place. Deltas are marked **Δ**.
 
 **Binding.**
-- Source was inspected at `2b7f35ac` (origin/main at the start of the assessment, 2026-09-27).
-- Executable evidence was produced at the same SHA, in an isolated detached worktree. The run used the repository toolchain `nightly-2026-08-31` (`rustc 1.100.0-nightly 908501772`) on Linux x86_64, a private target directory, and `RCH_CARGO_WRAPPER_BYPASS=1`.
-- The host has 64 cores. Other projects' workloads (video rendering, a Lean build) kept the load average between 190 and 245 throughout. Timing-sensitive results are labelled as such.
+- Source and executable checks for the 2026-10-13 assessment were inspected and run at `6deda35cc5906c96fade70e98a7be847a19e3307` (`HEAD` of `main`, 2026-10-13) using `nightly-2026-08-31` and private target directory `/data/frankengit-targets/rc_20261013`. Historical baselines at `2b7f35ac` (2026-09-27) and `14ce0fa1` / `1fe12f4b` (2026-09-29/30) are retained below for exact comparison.
 - This is not a security audit, universal compatibility result, benchmark claim or batch-verification certificate. Nothing in it closes, reopens or verifies a bead.
 
 **Consumer and retirement.** The repository owner, the batch orchestrator and every assignee use this document to decide what is actually done and what to build next. The observed defect classes are:
-- a vacant verification role;
-- uncompiled code on main;
-- product crates with no production caller;
-- capacity ceilings that a real team would hit;
-- evidence that runs in no lane;
-- stale public claims.
+- a single-verifier `batch_pending` deadlock (`forbid_self_close` with one verifier actor);
+- uncompiled code on main (`0b9b1c85`, 142 unformatted files);
+- product crates with no production caller (10 crates, 61,736 `src/` lines) and 6 side binaries outside `fg`;
+- competing sidecar state (`fg webhook dispatch` journal vs canonical outbox settlement);
+- capacity ceilings that a real team would hit (16,384 events/outbox entries, 1 concurrent writer);
+- stale public and manifest claims (34 vs 28 MCP tools).
 
 Replace this snapshot in place when a later revision-bound assessment supersedes it. Rows resolved by the epic `frankengit-root-doctrine-x2mv.4` and its children retire from this document. This report grants no capability credit.
+
 
 ## 1. What was examined
 
@@ -642,17 +638,24 @@ The epic `frankengit-root-doctrine-x2mv.4` gained 24 children, `.29`–`.52`, la
 | `x2mv.4.45` (new) | batch_pending | P1 | IcyIbis | Browser pages cannot call the API in a real browser: stored fetch invoked as a method (Illegal invocation) since 2026-09-18 |
 | `x2mv.4.46` (new) | open | P1 | — | Real-browser boot, connect, read and write smoke for every served page against fg serve-http |
 | `x2mv.4.47` (new) | open | P2 | — | Deterministic simulation lane: drive OneNode admission and the authority store through fgit-lab and the Asupersync lab runtime with PCT schedules and fault plans |
-| `x2mv.4.48` (new) | open | P2 | — | fg doctor parses its sample object id as SHA-1 even in a SHA-256 repository |
-| `x2mv.4.49` (new) | open | P2 | — | Guarded git-daemon receive reports per-ref refusals of a received pack as a fatal ERR packet instead of report-status ng |
-| `x2mv.4.50` (new) | open | P1 | — | CLI forge commands race a flat 15 s Database-class deadline; under load writes end ambiguous instead of completing |
+| `x2mv.4.48` (new) | batch_pending | P2 | IcyIbis | fg doctor parses its sample object id as SHA-1 even in a SHA-256 repository |
+| `x2mv.4.49` (new) | batch_pending | P2 | IcyIbis | Guarded git-daemon receive reports per-ref refusals of a received pack as a fatal ERR packet instead of report-status ng |
+| `x2mv.4.50` (new) | batch_pending | P1 | IcyIbis | CLI forge commands race a flat 15 s Database-class deadline; under load writes end ambiguous instead of completing |
 | `x2mv.4.51` (new) | open | P2 | — | Under deadline pressure, admission reports cancellation as integrity refusals (AuthorityReceiptInvalid, EvidenceInvalid, EvidenceMissing) |
 | `x2mv.4.52` (new) | open | P2 | — | Manual webhook replay of a dead letter is always refused: 49fbc0f3's attempt guard rejects attempt max_attempts+1 (ResourceBudgetExceeded) |
+| `x2mv.4.53` (new) | batch_pending | P1 | IcyIbis | Served upload paths (git://, SSH) run admission and pack materialization on the flat 15 s Database clock; large clones die under load |
+| `x2mv.4.54` (2026-10-13) | open | P2 | — | Unify the 6 standalone `fgit-node` binaries (`fg-index*`, `fg-*-backup`) into `fg` subcommands and retire the side binaries |
+| `x2mv.4.55` (2026-10-13) | open | P1 | — | Webhook dispatcher (`fg webhook dispatch`, `846a96f1`..`a6753520`) writes a local sidecar journal instead of settling canonical outbox entries |
+| `x2mv.4.56` (2026-10-13) | open | P0 | — | Break the single-verifier `batch_pending` deadlock: 21 `batch_pending` beads and 1 `in_progress` bead are all owned by `IcyIbis` under `forbid_self_close` |
 
 **Edges.** Blocking edges were added only where the work genuinely cannot proceed first:
 - `.30` is blocked by `.14` (decision D9);
 - `.24` is blocked by `.34`;
 - `.25` is blocked by `.12` and `.10`;
-- `.23` is blocked by `.32`.
+- `.23` is blocked by `.32`;
+- `FG-051` is blocked by `.54`;
+- `FG-046` and `.7` are blocked by `.55`;
+- `.29` is blocked by `.56`.
 
 All other edges are `related`. `bv` reports no cycles.
 
@@ -732,6 +735,38 @@ The owner appointed IcyIbis as batch verifier (D8). The terms: verify every batc
 - The workspace clippy lane is still red. The crates above the drained layer, fgit-node and up, are unmeasured.
 - Path-aware delta candidate order and stored-delta reuse are not built.
 - No bead IcyIbis authored has been independently verified.
+
+### Reality check at `6deda35c` (2026-10-13): post-`1fe12f4b` uncompiled stream, single-verifier deadlock, and new capability/drift audit
+
+Between `14ce0fa1` (2026-09-29) and `6deda35c` (2026-10-08/13), two distinct commit streams landed:
+1. **Claimed, SHA-evidenced verifier/implementer stream (`IcyIbis` / `Jeffrey Emanuel`, 2026-09-29..10-01 + 2026-10-06 repair):**
+   - `b1ffbc90` (`x2mv.4.31`, `x2mv.4.48`, `x2mv.4.49`, `87c7`, `mkgq`, `u0t4`): browser Origin/CSRF enforcement and non-ambient Basic auth challenge (`x-frankengit-auth`), `fg doctor` SHA-256 sample fix, `git-daemon` and Smart HTTP per-ref `report-status`, and `source_symbols_cli` / `pull_request_checks_http` test repairs.
+   - `e0caaddb`..`f13e9e20` (`frankengit-pazc`, `frankengit-3u61`): thin-pack fetch emission against client `have` commits (verified at `f13e9e20`), plus `bundle_verify` expectation fixture repair.
+   - `1fe12f4b` (`x2mv.4.46`, `xzdx`, `5f68`): real-Chrome E2E suite driving all 13 served browser pages against `fg serve-http` (`suites/browser/served_pages_smoke.sh`), worktree git revision fix (`scripts/e2e/lib.sh`), and filing `frankengit-5f68` for 29/2,096 failing `node:test` browser unit tests.
+   - `10e4870f` (2026-10-01): 64 MiB immutable `BodyCache` in `fgit-authority-fsqlite` (which broke `portable_store.rs` `E0063: missing field bodies` until repaired on 2026-10-06 by `25fd5d1c` and `1e9818c4`).
+2. **Unclaimed, toolchain-less stream (`Jeff Emanuel`, 55 commits from `0303bf21` on 2026-10-04 to `6deda35c` on 2026-10-08):**
+   - Commit messages in this series explicitly declare `Rust, Cargo, rustfmt, Clippy and built native binaries are unavailable in this environment`.
+   - After `25fd5d1c`/`1e9818c4` restored compilation on 2026-10-06 (`8,165 passed`), **30 more uncompiled commits** (`e76a8801`..`6deda35c`) landed on 2026-10-06..08 without claiming beads.
+
+**Executable evidence at `6deda35c` (2026-10-13):**
+
+| Check | Result at `6deda35c` | What it establishes |
+|---|---|---|
+| `./scripts/verify.sh docs` | **exit 0** (253 Markdown files, 460 registry rows, 0 Rust files) | Toolchain bootstrap links (`nightly-2026-08-31`) and doc/registry cross-references pass. |
+| `fgit-registry-check constitution` (local) | **exit 0** (1,811 Rust files) | No `unsafe`, forbidden dependencies, or unapproved lint attributes in first-party crates. Note: running `constitution` via remote `rch` fails because `fgit-registry-check constitution` runs `cargo metadata --locked --offline` and the remote worker cache lacks `android_system_properties v0.1.6`. |
+| `cargo fmt --all -- --check` | **exit 1: 142 unformatted files** | Up from 0 after `417c7bb8` (2026-09-28) and 62 at `2b7f35ac`; driven by the 55 uncompiled commits on 2026-10-04..08. |
+| `cargo check --workspace --bins --lib --locked` | **exit 0** (with 19 warnings in `fgit-node` lib) | Production library and binary targets compile. However, `fgit-node` (`lib`) emits 15 dead-code warnings in `crates/fgit-node/src/merge_delivery.rs` (orphaned when `ac80fc8a` switched `events/scoped.rs` to suffix seeking) and 4 `private_interfaces` warnings in `crates/fgit-node/src/smart_http/server/pulls.rs:117-120`. |
+| `cargo check --workspace --all-targets --locked --keep-going` | **exit 101: 1 error in `fgit-node` (lib test)** | **Δ `main` fails `--all-targets` compilation again:** `error[E0689]: can't call method saturating_sub on ambiguous numeric type {integer}` at `crates/fgit-node/src/source_retrieval/integrity/bundle_verify/recovery/tests.rs:109:38` (introduced by uncompiled commit `0b9b1c85` on 2026-10-07; `let mut count = 0` needs `0usize`). Also emits `#[warn(recursion_depth_exceeding_limit)]` (`Send` auto-trait overflow) in `crates/fgit-node/tests/native_merge_durable_crashes.rs:323:10` and `#[warn(const_item_mutation)]` in `crates/fgit-node/src/treefs_workspace/events/scoped/tests.rs:165:35`. |
+| `node --test tests/browser/*.test.mjs` | **2,508 tests: 2,477 pass, 31 fail, 0 skipped** | Up from 21/1,752 failures at `2b7f35ac` and 29/2,096 at `f13e9e20` (`frankengit-5f68`). `event-feed.test.mjs` and `pulls-merge-conflict-resolution.test.mjs` now pass, while 3 new files fail: `bundle-recovery-filesystem.test.mjs` (1: test 18 `failure after publication preserves the visible repository and reports published`), `response-content-encoding.test.mjs` (6: `gzip, br` chained content-encoding decoded byte limit checks), and `source-patch-git.test.mjs` (2: `git apply --check` / `git am` on patches with added/deleted files). Remaining failing files: `branches.test.mjs` (1), `pulls-view.test.mjs` (1), `search-index-view.test.mjs` (17, up from 16), `search-initial-view.test.mjs` (1), `source-binary-view.test.mjs` (1), `transfer-closure.test.mjs` (1). |
+
+**New capabilities vs. new architectural/surface drift in `0303bf21`..`6deda35c`:**
+- **Canonical forge event feed (`x2mv.4.35`, `fdb6c37d`..`ac80fc8a`, `828bd2ea`..`2e12b87f`):** Implemented across CLI (`fg events`), MCP (`frankengit_events`), HTTP (`/events`), and browser (`/ui/activity/`) with verified cursor suffix seeking in `crates/fgit-node/src/treefs_workspace/events/scoped.rs` (avoiding full admission state materialization on reads), but `x2mv.4.35` was never claimed and `ac80fc8a` left 15 dead-code warnings in `crates/fgit-node/src/merge_delivery.rs`.
+- **Webhook dispatcher (`FG-046`, `846a96f1`..`a6753520`) vs. canonical outbox settlement (`x2mv.4.55`):** Added `fg webhook dispatch`, `dispatch-migrate` (v1→v2 sidecar journal), and `dispatch-status` in `crates/fgit-cli/src/webhook_commands.rs`. However, it records delivery state only in a local filesystem sidecar journal and **never invokes `deliver_forge_outbox_in`** (`crates/fgit-node/src/treefs_workspace/outbox_delivery.rs:38`, still called only by one test at `crates/fgit-node/tests/native_merge_publication.rs:1068`). This creates a competing non-canonical delivery state machine (`AGENTS.md` §5.1) and never prunes canonical `outbox_root` entries (`MAX_OUTBOX_STATE_ENTRIES = 16,384` still bricks repository writes).
+- **Scoped search/symbol refresh (`b366bc2d`..`6deda35c`, `07536512`..`d6b2beab`, `7abd7ffe`..`4081646c`) and 6 side binaries (`x2mv.4.54`):** Added scoped lexical index checkpoints/refresh, revalidated symbol search, and byte-regex search, plus a 6th standalone binary `crates/fgit-node/src/bin/fg-index-scope.rs` alongside `fg-index`, `fg-index-maintain`, `fg-symbol-index`, `fg-authority-backup`, and `fg-repository-backup` — none of which are wired as subcommands of `fg`. Default un-revalidated search modes still serve stale results after forge writes.
+- **Native bundle recovery (`16d21a44`..`898a899a`, `x2mv.4.44`):** Added `--recovery-head-hex` to `fg bundle verify` and `--native-fg` to `scripts/ops/verify_git_bundle.mjs` and `recover_git_bundle.mjs`, but commit `0b9b1c85` broke `recovery/tests.rs:109` (`E0689`), `bundle-recovery-filesystem.test.mjs` fails test 18, and the JS pack/DEFLATE/delta decoder remains the default when `--native-fg` is omitted and remains live in `crates/fgit-node/src/web_ui/assets/bundle-verify.mjs`.
+- **MCP parity drift (`x2mv.4.17`, `fc5d4794`..`da25033f`):** 10 more `frankengit_*` tools were added to `crates/fgit-cli/src/mcp/` (candidate prepare/inspect, PR conflicts inspect/resolve, PR fast-forward, source change prepare/inspect, source patch export, initial bundle import, events), widening drift to **34 implemented tools vs 28 in `crates/fgit-schema/generated/mcp_parity_manifest.json`** (only 16 in common; 18 code-only, 12 manifest-only).
+- **Single-verifier `batch_pending` deadlock (`x2mv.4.56`):** Tracker counts at `6deda35c` (after filing `.54`–`.56`) are `635` live records (`486 closed`, `97 open`, `21 batch_pending`, `17 rework`, `8 blocked`, `5 deferred`, `1 in_progress`). All 21 `batch_pending` beads and the 1 `in_progress` bead (`x2mv.4.2`) are assigned to `IcyIbis`, which is barred by `.beads/policy.yaml` (`forbid_self_close_after_in_progress: true`) from closing its own work.
+
 
 ## 10. Evidence appendix
 
