@@ -20,7 +20,7 @@ use fgit_treefs::{
 use fgit_types::{CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryCommitId, RepositoryId};
 use std::fs::{self, File};
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -32,7 +32,12 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let workspace_plan = std::env::temp_dir().join(format!(
+        let base = if Path::new("/dev/shm").is_dir() {
+            PathBuf::from("/dev/shm")
+        } else {
+            std::env::temp_dir()
+        };
+        let workspace_plan = base.join(format!(
             "fgit-host-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -711,7 +716,7 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
     let workspace_plan = plan(manifest.clone());
     let obligations = ledger();
     let w = create(&scratch, &obligations, workspace_plan.clone(), b"lease");
-    assert!(
+    assert!(matches!(
         SparseWorkspace::reopen(
             workspace_plan.clone(),
             scratch.parent(),
@@ -719,9 +724,9 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
             reserve(&obligations, &workspace_plan),
             &capability(),
             0
-        )
-        .is_err()
-    );
+        ),
+        Err(HostRefusal::LeaseBusy)
+    ));
     drop(w);
     assert!(matches!(
         obligations.close(),
@@ -941,13 +946,13 @@ fn cleanup_excess_and_root_replacement_report_containment_without_escaped_deleti
 
 #[test]
 fn fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots() {
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest);
     for epoch in [
         "staging", "parents", "writing", "syncing", "visible", "durable",
     ] {
-        let scratch = Scratch::new();
         run_child(&scratch.0, epoch, None);
-        let (_, _, manifest) = fixture(&scratch.0, None);
-        let workspace_plan = plan(manifest);
         let obligations = ledger();
         if matches!(epoch, "staging" | "parents" | "writing" | "syncing") {
             assert!(matches!(
@@ -987,6 +992,16 @@ fn fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots()
     }
 }
 
+struct ChildReaper(std::process::Child);
+impl Drop for ChildReaper {
+    fn drop(&mut self) {
+        if let Ok(None) = self.0.try_wait() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 fn run_child(root: &Path, mode: &str, workspace: Option<&Path>) {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -995,6 +1010,7 @@ fn run_child(root: &Path, mode: &str, workspace: Option<&Path>) {
             "--exact",
             "host_subprocess_driver",
             "--nocapture",
+            "--test-threads=1",
         ])
         .env_clear()
         .env("FGIT_HOST_TEST_ROOT", root)
@@ -1005,16 +1021,16 @@ fn run_child(root: &Path, mode: &str, workspace: Option<&Path>) {
     if let Some(workspace) = workspace {
         command.env("FGIT_HOST_TEST_WORKSPACE", workspace);
     }
-    let mut child = command.spawn().unwrap();
+    let mut child = ChildReaper(command.spawn().unwrap());
     let start = Instant::now();
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = child.0.try_wait().unwrap() {
             assert_eq!(status.code(), Some(77));
             break;
         }
-        if start.elapsed() > Duration::from_secs(10) {
-            child.kill().unwrap();
-            child.wait().unwrap();
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
             panic!("bounded host subprocess exceeded deadline");
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -1022,9 +1038,272 @@ fn run_child(root: &Path, mode: &str, workspace: Option<&Path>) {
 }
 
 #[test]
+fn crash_windows_and_live_lease_reopen_pass_200_of_200_runs_under_recorded_load() {
+    let load_before = fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    let completed = Arc::new(AtomicU64::new(0));
+    let mut workers = Vec::with_capacity(8);
+    for _ in 0..8 {
+        let completed = Arc::clone(&completed);
+        workers.push(std::thread::spawn(move || {
+            for _ in 0..25 {
+                live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens();
+                fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots();
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if done == 100 {
+                    let load_mid = fs::read_to_string("/proc/loadavg").unwrap_or_default();
+                    eprintln!(
+                        "sparse_workspace_200_run_soak midpoint=100/200 loadavg={}",
+                        load_mid.trim()
+                    );
+                }
+            }
+        }));
+    }
+    let mut any_failed = false;
+    for worker in workers {
+        if worker.join().is_err() {
+            any_failed = true;
+        }
+    }
+    assert!(!any_failed, "all 200 soak iterations must pass");
+    let total = completed.load(Ordering::Relaxed);
+    let load_after = fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    assert_eq!(total, 200);
+    assert!(!load_before.trim().is_empty());
+    assert!(!load_after.trim().is_empty());
+    eprintln!(
+        "sparse_workspace_200_run_soak completed=200/200 loadavg_before={} loadavg_after={}",
+        load_before.trim(),
+        load_after.trim()
+    );
+}
+
+#[test]
+fn lease_contention_returns_typed_busy_refusal_after_bound_and_uncontended_twin_succeeds_immediately()
+ {
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest);
+    let obligations = ledger();
+    let w = create(&scratch, &obligations, workspace_plan.clone(), b"contended");
+
+    let contended_start = Instant::now();
+    let contended = SparseWorkspace::reopen(
+        workspace_plan.clone(),
+        scratch.parent(),
+        path(b"contended"),
+        reserve(&obligations, &workspace_plan),
+        &capability(),
+        0,
+    );
+    let contended_elapsed = contended_start.elapsed();
+    assert!(matches!(contended, Err(HostRefusal::LeaseBusy)));
+    assert!(
+        contended_elapsed >= Duration::from_millis(80),
+        "contended reopen returned before bounded grace elapsed: {contended_elapsed:?}"
+    );
+    assert!(
+        contended_elapsed < Duration::from_secs(5),
+        "contended reopen exceeded bounded timeout: {contended_elapsed:?}"
+    );
+
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        drop(w);
+    });
+    let transient_start = Instant::now();
+    let mut recovered = SparseWorkspace::reopen(
+        workspace_plan.clone(),
+        scratch.parent(),
+        path(b"contended"),
+        reserve(&obligations, &workspace_plan),
+        &capability(),
+        0,
+    )
+    .expect("transient contention within grace window should succeed without EWOULDBLOCK flake");
+    let transient_elapsed = transient_start.elapsed();
+    releaser.join().unwrap();
+    assert!(
+        transient_elapsed < Duration::from_secs(5),
+        "transient contention reopen took too long: {transient_elapsed:?}"
+    );
+    assert!(
+        recovered
+            .import(&capability(), 0, &|_| false)
+            .unwrap()
+            .is_empty()
+    );
+    let _ = recovered.close().unwrap();
+    assert!(matches!(
+        obligations.close(),
+        RegionCloseOutcome::ContainmentFailure(_)
+    ));
+
+    let uncontended_obligations = ledger();
+    let uncontended_start = Instant::now();
+    let uncontended = create(
+        &scratch,
+        &uncontended_obligations,
+        workspace_plan.clone(),
+        b"uncontended",
+    );
+    assert!(
+        uncontended_start.elapsed() < Duration::from_millis(200),
+        "uncontended lease acquisition should succeed without grace delay"
+    );
+    let _ = uncontended.close().unwrap();
+    quiescent(uncontended_obligations);
+}
+
+#[test]
+fn spawned_children_never_inherit_workspace_lease_lock_descriptors_under_concurrent_fork_stress() {
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest);
+    let obligations = ledger();
+    let w = create(
+        &scratch,
+        &obligations,
+        workspace_plan.clone(),
+        b"cloexec-check",
+    );
+    let workspace_dir = scratch.0.join("cloexec-check");
+
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            "host_subprocess_driver",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_clear()
+        .env("FGIT_HOST_TEST_ROOT", &scratch.0)
+        .env("FGIT_HOST_TEST_MODE", "verify_no_inherited_lease_fd")
+        .env("FGIT_HOST_TEST_WORKSPACE", &workspace_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let mut child = ChildReaper(command.spawn().unwrap());
+    let ready_marker = scratch.0.join(".child-fd-verified");
+    let release_marker = scratch.0.join(".parent-release-child");
+    let wait_start = Instant::now();
+    while !ready_marker.exists() {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            panic!("child exited prematurely with {status:?}");
+        }
+        assert!(
+            wait_start.elapsed() < Duration::from_secs(10),
+            "timed out waiting for child fd verification"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Drop the parent lease while the exec'd child process is still alive:
+    // because the lock descriptor is O_CLOEXEC, the child must not hold the flock.
+    drop(w);
+    let reopened = SparseWorkspace::reopen(
+        workspace_plan.clone(),
+        scratch.parent(),
+        path(b"cloexec-check"),
+        reserve(&obligations, &workspace_plan),
+        &capability(),
+        0,
+    )
+    .expect("reopen must succeed while exec'd child is still alive");
+
+    fs::write(&release_marker, b"release").unwrap();
+    let exit_start = Instant::now();
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(77));
+            break;
+        }
+        assert!(
+            exit_start.elapsed() < Duration::from_secs(10),
+            "timed out waiting for child exit"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = reopened.close().unwrap();
+    assert!(matches!(
+        obligations.close(),
+        RegionCloseOutcome::ContainmentFailure(_)
+    ));
+
+    // Stress concurrent fork+exec while repeatedly dropping and reopening a lease.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spawner_stop = Arc::clone(&stop);
+    let spawner_root = scratch.0.clone();
+    let spawner = std::thread::spawn(move || {
+        while !spawner_stop.load(Ordering::Relaxed) {
+            run_child(&spawner_root, "noop", None);
+        }
+    });
+
+    for _ in 0..25 {
+        let iter_obligations = ledger();
+        let active = create(
+            &scratch,
+            &iter_obligations,
+            workspace_plan.clone(),
+            b"fork-stress",
+        );
+        drop(active);
+        let recovered = SparseWorkspace::reopen(
+            workspace_plan.clone(),
+            scratch.parent(),
+            path(b"fork-stress"),
+            reserve(&iter_obligations, &workspace_plan),
+            &capability(),
+            0,
+        )
+        .expect("reopen after drop must succeed under concurrent fork+exec stress");
+        let _ = recovered.close().unwrap();
+        assert!(matches!(
+            iter_obligations.close(),
+            RegionCloseOutcome::ContainmentFailure(_)
+        ));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    spawner.join().unwrap();
+}
+
+#[test]
 #[ignore = "subprocess driver; the parent tests execute it with an exact mode and deadline"]
 fn host_subprocess_driver() {
     let mode = std::env::var("FGIT_HOST_TEST_MODE").expect("parent supplies mode");
+    if mode == "noop" {
+        std::process::exit(77);
+    }
+    if mode == "verify_no_inherited_lease_fd" {
+        let root = PathBuf::from(std::env::var_os("FGIT_HOST_TEST_ROOT").unwrap());
+        let workspace = PathBuf::from(std::env::var_os("FGIT_HOST_TEST_WORKSPACE").unwrap());
+        let target_meta = fs::metadata(&workspace).unwrap();
+        for entry in fs::read_dir("/proc/self/fd").unwrap() {
+            let Ok(entry) = entry else { continue };
+            let Ok(meta) = fs::metadata(entry.path()) else {
+                continue;
+            };
+            assert!(
+                !(meta.dev() == target_meta.dev() && meta.ino() == target_meta.ino()),
+                "spawned child inherited open workspace lease descriptor {:?}",
+                entry.path()
+            );
+        }
+        fs::write(root.join(".child-fd-verified"), b"verified").unwrap();
+        let release_marker = root.join(".parent-release-child");
+        let start = Instant::now();
+        while !release_marker.exists() {
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("child timed out waiting for parent release marker");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::process::exit(77);
+    }
     if mode == "tool" {
         let root = PathBuf::from(std::env::var_os("FGIT_HOST_TEST_WORKSPACE").unwrap());
         fs::write(root.join("src/input"), b"changed by a real process\n").unwrap();

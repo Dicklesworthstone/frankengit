@@ -65,6 +65,7 @@ pub enum HostRefusal {
     IdentityMismatch,
     ReservationMismatch,
     ResourceLimit,
+    LeaseBusy,
     UnsupportedEntry(TreePath),
     UndeclaredChange(TreePath),
     AliasedEntry(TreePath),
@@ -825,9 +826,40 @@ fn host_mode(mode: FileMode) -> Mode {
 fn sync(file: &File) -> Result<(), HostRefusal> {
     file.sync_all().map_err(|e| io_error("sync workspace", e))
 }
+/// Takes the exclusive workspace lease lock, waiting at most `LOCK_GRACE`.
+///
+/// `flock(2)` locks belong to the open file description, and a child forked by
+/// a multithreaded process shares every description until `execve` closes its
+/// `CLOEXEC` copies. Ensuring `FD_CLOEXEC` prevents leaked lock descriptors across
+/// `execve`, and retrying for a bounded grace window absorbs the brief
+/// `fork`-to-`exec` window while returning `HostRefusal::LeaseBusy` on genuine
+/// contention.
 fn lock(file: &File) -> Result<(), HostRefusal> {
-    fs::flock(file, fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|e| io_error("exclusive workspace lease", e))
+    const LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+    const LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(2);
+    let flags =
+        rustix::io::fcntl_getfd(file).map_err(|e| io_error("inspect workspace lease fd", e))?;
+    if !flags.contains(rustix::io::FdFlags::CLOEXEC) {
+        rustix::io::fcntl_setfd(file, flags | rustix::io::FdFlags::CLOEXEC)
+            .map_err(|e| io_error("set workspace lease cloexec", e))?;
+    }
+    let started = std::time::Instant::now();
+    loop {
+        match fs::flock(file, fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let io_err = std::io::Error::from(error);
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    if started.elapsed() < LOCK_GRACE {
+                        std::thread::sleep(LOCK_STEP);
+                        continue;
+                    }
+                    return Err(HostRefusal::LeaseBusy);
+                }
+                return Err(io_error("exclusive workspace lease", io_err));
+            }
+        }
+    }
 }
 fn open(root: &File, path: &[u8], flags: OFlags) -> Result<File, HostRefusal> {
     fs::openat2(
