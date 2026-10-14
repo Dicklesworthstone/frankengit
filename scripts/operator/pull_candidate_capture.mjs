@@ -9,8 +9,40 @@ import { preparationCommand, preparationReply, inspectionReply, multipart, makeB
   METADATA_LIMIT, PREPARATION_LIMIT, BUNDLE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-candidate.mjs';
 import { CandidateError, candidateFail, candidateKeys, candidateEndpoint, candidateToken, candidateJson,
   candidateRequest, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
+import { resolutionUpload, verifyResolutionResult, RESOLUTION_FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-resolution.mjs';
 export { CandidateError, candidateJson, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 export const CANDIDATE_CAPTURE_SCHEMA = 'frankengit-pull-candidate-capture-v1';
+export const RESOLVED_CAPTURE_SCHEMA = 'frankengit-pull-resolved-candidate-capture-v1';
+// Includes raw path bytes. Hex retention has its own enclosing capture limit.
+export const RESOLUTION_CHOICE_BYTES = 4 * 1024 * 1024;
+export function candidateResolutionChoices(input) {
+  if (!Array.isArray(input) || !input.length || input.length > 128) candidateFail('invalid_candidate_resolution_choices');
+  let bytes = 0;
+  const choices = Array.from(input, value => {
+    const file = value?.choice === 'file';
+    candidateKeys(value, ['path_hex', 'choice', ...(file ? ['mode', 'content_hex'] : [])]);
+    if (typeof value.path_hex !== 'string' || !value.path_hex.length || value.path_hex.length > 8192 ||
+        value.path_hex.length % 2 || !/^[0-9a-f]+$/.test(value.path_hex) ||
+        !['base', 'ours', 'theirs', 'delete', 'file'].includes(value.choice)) candidateFail('invalid_candidate_resolution_choice');
+    const result = { path_hex: value.path_hex, choice: value.choice };
+    bytes += value.path_hex.length / 2;
+    if (file) {
+      if (!['100644', '100755'].includes(value.mode) || typeof value.content_hex !== 'string' ||
+          value.content_hex.length > 2 * RESOLUTION_FILE_LIMIT || value.content_hex.length % 2 ||
+          !/^[0-9a-f]*$/.test(value.content_hex)) candidateFail('invalid_candidate_resolution_file');
+      bytes += value.content_hex.length / 2;
+      result.mode = value.mode; result.content_hex = value.content_hex;
+    }
+    if (bytes > RESOLUTION_CHOICE_BYTES) candidateFail('candidate_resolution_content_limit');
+    return result;
+  }).sort((a, b) => a.path_hex < b.path_hex ? -1 : a.path_hex > b.path_hex ? 1 : 0);
+  if (choices.some((row, i) => i && row.path_hex === choices[i - 1].path_hex)) candidateFail('duplicate_candidate_resolution_path');
+  return choices;
+}
+function resolutionFiles(choices) {
+  return choices.map(({ content_hex, ...row }) => content_hex === undefined ? row
+    : { ...row, bytes: new Uint8Array(Buffer.from(content_hex, 'hex')) });
+}
 export const candidateHash = bytes => createHash('sha256').update(bytes).digest('hex');
 export const candidateCanonical = value => `${JSON.stringify(value, null, 2).replace(
   /[\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/gu,
@@ -112,8 +144,9 @@ function retainedPreparation(metadata, bundle, status) {
 function checkPreparationShape(metadata) {
   candidateKeys(metadata, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
     'source_head', 'snapshot_token', 'profile', 'method', 'read_only', 'objects_staged', 'transaction_created', 'published',
-    'merge_authorized', 'subject', 'state', 'candidate', 'bundle', 'conflicts', ...(metadata.state === 'conflicted' ? ['merge_base'] : [])]);
-  if (metadata.state === 'clean') {
+    'merge_authorized', 'subject', 'state', 'candidate', 'bundle', 'conflicts', ...(metadata.state === 'conflicted' ? ['merge_base'] : []),
+    ...(metadata.state === 'resolved' ? ['resolution_profile', 'resolutions'] : [])]);
+  if (['clean', 'resolved'].includes(metadata.state)) {
     candidateKeys(metadata.candidate, ['merge_base', 'commit', 'tree', 'new_object_count']);
     candidateKeys(metadata.bundle, ['bytes', 'sha256']);
     integer(metadata.candidate.new_object_count, 'candidate objects', 1, 10000);
@@ -121,17 +154,34 @@ function checkPreparationShape(metadata) {
 }
 export async function validateCandidateCapture(input, suppliedBundle = null) {
   try {
-    candidateKeys(input, ['schema', 'request', 'pull', 'review_pages', 'preparation_status', 'preparation', 'inspection']);
+    const resolved = input?.schema === RESOLVED_CAPTURE_SCHEMA;
+    candidateKeys(input, ['schema', 'request', 'pull', 'review_pages', 'preparation_status', 'preparation', 'inspection',
+      ...(resolved ? ['resolution'] : [])]);
     const capture = boundedCapture(input), request = candidateInput(capture.request);
-    if (capture.schema !== CANDIDATE_CAPTURE_SCHEMA || JSON.stringify(request) !== JSON.stringify(capture.request)) candidateFail('invalid_candidate_capture');
+    if ((!resolved && capture.schema !== CANDIDATE_CAPTURE_SCHEMA) || JSON.stringify(request) !== JSON.stringify(capture.request)) candidateFail('invalid_candidate_capture');
     // Copy before the first async digest: caller edits cannot change validation.
     if (suppliedBundle !== null && (!(suppliedBundle instanceof Uint8Array) || suppliedBundle.length > BUNDLE_LIMIT)) candidateFail('candidate_bundle_limit');
     const bundle = suppliedBundle === null ? null : Buffer.from(suppliedBundle);
     const observed = discovery(request, capture.pull, capture.review_pages);
+    let resolution = null;
+    if (resolved) {
+      candidateKeys(capture.resolution, ['preparation', 'choices']);
+      if (capture.resolution.preparation?.state !== 'conflicted') candidateFail('original_candidate_conflicts_required');
+      const choices = candidateResolutionChoices(capture.resolution.choices);
+      if (JSON.stringify(choices) !== JSON.stringify(capture.resolution.choices)) candidateFail('noncanonical_candidate_resolution_choices');
+      // Revalidate the original conflict observation using the unchanged v1 path.
+      // It cannot contain another resolution or a nested chain of prior captures.
+      await validateCandidateCapture({ schema: CANDIDATE_CAPTURE_SCHEMA, request, pull: capture.pull,
+        review_pages: capture.review_pages, preparation_status: 409,
+        preparation: capture.resolution.preparation, inspection: null });
+      resolution = await resolutionUpload(capture.resolution.preparation, observed.fields, metadataFor(request),
+        resolutionFiles(choices), webcrypto, request.method);
+    }
     checkPreparationShape(capture.preparation);
     const prepared = await preparationReply(retainedPreparation(capture.preparation, bundle, capture.preparation_status), Number(request.number),
-      observed.fields, observed.binding, webcrypto, false, request.method);
+      observed.fields, observed.binding, webcrypto, resolved, request.method);
     sameHead(prepared.metadata, capture.pull, request);
+    if (resolution) verifyResolutionResult(prepared.metadata, resolution.expected);
     if (prepared.artifact === null) {
       if (bundle !== null || capture.inspection !== null) candidateFail('candidate_material_without_candidate');
     } else {
@@ -210,6 +260,65 @@ export async function capturePullCandidate(input, token, options = {}) {
     return { capture: checked.capture, bundle: checked.bundle, usage: { requests, response_bytes: wire } };
   } catch (error) {
     throw new CandidateError(error instanceof CandidateError ? error.code : 'candidate_validation_failed',
+      { phase, status: error instanceof CandidateError ? error.status : null });
+  }
+}
+
+// Resolve one retained conflict set. This is a read-side construction operation:
+// publication still requires a separate inspected-candidate command and consent.
+export async function resolvePullCandidate(input, inputChoices, token, options = {}) {
+  let phase = 'validation';
+  try {
+    candidateToken(token);
+    candidateKeys(options, ['timeoutMs', 'signal', 'ca', 'maxWireBytes'], []);
+    const timeout = integer(options.timeoutMs ?? 30000, 'resolution timeout', 1, 300000), signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) candidateFail('invalid_candidate_signal');
+    const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length > 0 && options.ca.length <= 128 * 1024
+      ? Buffer.from(options.ca) : candidateFail('invalid_candidate_ca');
+    const maxWire = integer(options.maxWireBytes ?? CANDIDATE_IO_LIMITS.wire, 'resolution response bytes', 1, CANDIDATE_IO_LIMITS.wire);
+    const deadline = performance.now() + timeout;
+    const checkpoint = () => {
+      if (signal?.aborted) candidateFail('candidate_cancelled');
+      const remaining = Math.ceil(deadline - performance.now());
+      if (remaining <= 0) candidateFail('candidate_timeout');
+      return remaining;
+    };
+    checkpoint();
+    // Detach JSON choices and the complete original view before the first await.
+    const choices = candidateResolutionChoices(inputChoices);
+    const checked = await validateCandidateCapture(input); checkpoint();
+    const original = checked.capture, request = original.request;
+    if (original.schema !== CANDIDATE_CAPTURE_SCHEMA || original.preparation.state !== 'conflicted') candidateFail('original_candidate_conflicts_required');
+    const observed = discovery(request, original.pull, original.review_pages);
+    const selected = await resolutionUpload(original.preparation, observed.fields, metadataFor(request),
+      resolutionFiles(choices), webcrypto, request.method); checkpoint();
+    let wire = 0, requests = 0;
+    const exchange = async operation => {
+      const remaining = checkpoint();
+      if (wire >= maxWire) candidateFail('candidate_wire_budget');
+      requests++;
+      const result = await candidateRequest(request.endpoint, token, operation,
+        { timeoutMs: remaining, signal, ca, maximum: Math.min(PREPARATION_LIMIT, maxWire - wire) });
+      wire += result.value.length; checkpoint(); return result;
+    };
+    phase = 'resolution';
+    const response = await exchange({ kind: 'resolve', number: Number(request.number), body: selected.bytes, type: selected.contentType });
+    const metadata = strictPreparation(response); checkPreparationShape(metadata);
+    const prepared = await preparationReply(response, Number(request.number), observed.fields, observed.binding, webcrypto, true, request.method);
+    checkpoint(); sameHead(metadata, original.pull, request); verifyResolutionResult(metadata, selected.expected);
+    phase = 'inspection';
+    const command = form(prepared.artifact.fields);
+    const upload = multipart(command, prepared.artifact.bundle, makeBoundary(command, prepared.artifact.bundle, webcrypto));
+    const inspected = await exchange({ kind: 'inspect', number: Number(request.number), body: upload.bytes, type: upload.contentType });
+    const inspection = candidateJson(inspected.value);
+    phase = 'validation';
+    const capture = { schema: RESOLVED_CAPTURE_SCHEMA, request, pull: original.pull, review_pages: original.review_pages,
+      preparation_status: response.status, preparation: metadata, inspection,
+      resolution: { preparation: original.preparation, choices } };
+    const result = await validateCandidateCapture(capture, prepared.artifact.bundle); checkpoint();
+    return { capture: result.capture, bundle: result.bundle, usage: { requests, response_bytes: wire } };
+  } catch (error) {
+    throw new CandidateError(error instanceof CandidateError ? error.code : 'candidate_resolution_failed',
       { phase, status: error instanceof CandidateError ? error.status : null });
   }
 }
