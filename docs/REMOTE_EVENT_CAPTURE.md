@@ -79,3 +79,10 @@ independent scope pins, refusal/no-retry behavior, exact byte limits, strict
 JSON, chunked/truncated responses, timeout/cancellation/socket drain, and TLS
 trust/hostname validation. They establish the consumer boundary only; Rust,
 real-binary integration and independent batch verification remain separate.
+
+## Restartable command and durable storage
+
+[The remote event archive](REMOTE_EVENT_ARCHIVE.md) connects this acquisition
+API to `scripts/fg_events.mjs init|capture|watch|inspect`. Complete pages and
+their exact resume watermarks publish together before receipt output; restart
+validates the retained chain instead of trusting a cursor-only checkpoint.
