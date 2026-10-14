@@ -12,18 +12,19 @@ import { repositoryBackupOptions, runApprovedRepositoryBackup } from './reposito
 import { MAX_REPAIR_REPLICAS, reconstructRepositoryBackup, validateRepositoryBackupChunkOptions } from './repository-backup-chunks.mjs';
 import { withRepositoryBackupWitness } from './repository-backup-witness.mjs';
 import { MAX_BACKUP_APPROVALS, selectRepositoryBackupApprovals } from './repository-backup-checkpoints.mjs';
+import { MAX_BACKUP_CANDIDATES, repositoryBackupCandidates } from './repository-backup-selection.mjs';
 
 const fail = code => { throw backupError(code); };
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const overlap = (a, b) => a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
-const ACQUISITION = ['approval', 'sourceFile', 'caFile', 'repairCatalog', 'repairReplicas'];
+const ACQUISITION = ['approval', 'sourceFile', 'caFile', 'repairCatalog', 'repairReplicas', 'localInputs'];
 export const MAX_RECOVERY_ACQUISITION_BYTES = (MAX_DOWNLOAD_SOURCES + 3) * BACKUP_LIMITS.maximumArchiveBytes;
 
 function separated(paths) {
   const writes = ['witness', 'cacheDirectory', 'destination', 'approvalRecord'].filter(k => paths[k] !== undefined);
   const reads = ['fg', 'approval', 'trustKey', 'sourceFile', 'caFile', 'repairCatalog']
-    .filter(k => paths[k] !== undefined).map(k => paths[k]).concat(paths.repairReplicas ?? [], paths.candidates?.map(row => row.approval) ?? []);
+    .filter(k => paths[k] !== undefined).map(k => paths[k]).concat(paths.repairReplicas ?? [], paths.localInputs ?? [], paths.candidates?.map(row => row.approval) ?? []);
   for (let i = 0; i < writes.length; i++) {
     if (writes.slice(i + 1).some(k => overlap(paths[writes[i]], paths[k]))
       || reads.some(path => overlap(paths[writes[i]], path))) fail('backup_recovery_separate_paths_required');
@@ -38,7 +39,7 @@ export function repositoryBackupRecoveryOptions(raw) {
   const keys = ['operation', 'cacheDirectory', 'sourceFile', 'approval', 'trustKey', 'policy', 'witness',
     'fg', 'verificationInstance', 'destination', 'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal',
     'checkpoint', 'maximumBytes', 'maximumAcquisitionBytes', 'timeoutMs', 'signal', 'onProgress', 'caFile',
-    'repairCatalog', 'repairReplicas', 'candidates'];
+    'repairCatalog', 'repairReplicas', 'candidates', 'localInputs'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))
     || !['verify', 'restore'].includes(raw.operation) || raw.trustedLocal !== true) fail('backup_explicit_recovery_required');
   if (raw.candidates !== undefined) {
@@ -80,6 +81,15 @@ export function repositoryBackupRecoveryOptions(raw) {
   for (const k of ['cacheDirectory', 'witness', 'destination', 'approvalRecord']) {
     if (result[k] !== undefined && dirname(result[k]) === result[k]) fail('backup_recovery_separate_paths_required');
   }
+  if (raw.localInputs !== undefined) {
+    if (['sourceFile', 'caFile', 'repairCatalog', 'repairReplicas'].some(k => raw[k] !== undefined)) fail('backup_recovery_mixed_acquisition');
+    if (!Array.isArray(raw.localInputs) || !raw.localInputs.length
+      || raw.localInputs.length > MAX_BACKUP_CANDIDATES) fail('backup_candidate_limit');
+    // Reuse canonical replica ordering, duplicate/path bounds and owned inputs.
+    // These files all claim the selected approval; they cannot choose a checkpoint.
+    result.localInputs = Object.freeze(repositoryBackupCandidates(Array.from(raw.localInputs,
+      input => ({ input, approval: result.approval }))).map(row => row.input));
+  }
   if (raw.repairCatalog !== undefined || raw.repairReplicas !== undefined) {
     // Explicit local-fragment acquisition is mutually exclusive with HTTPS.
     // Snapshot the complete finite input set before observers or I/O can run.
@@ -101,6 +111,23 @@ export function repositoryBackupRecoveryOptions(raw) {
   if (!Number.isSafeInteger(result.maximumAcquisitionBytes) || result.maximumAcquisitionBytes < 1
     || result.maximumAcquisitionBytes > MAX_RECOVERY_ACQUISITION_BYTES) fail('backup_recovery_acquisition_limit');
   return Object.freeze(result);
+}
+
+async function physicalLocalInput(path, live) {
+  const suffix = [];
+  for (;;) {
+    live.check();
+    try { return join(await realpath(path), ...suffix.slice().reverse()); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      // Refuse an existing but unresolved link rather than guessing its target.
+      try { await lstat(path); fail('backup_recovery_local_path_unresolved'); }
+      catch (named) { if (named.code !== 'ENOENT') throw named; }
+      const parent = dirname(path);
+      if (parent === path) throw error;
+      suffix.push(basename(path)); path = parent;
+    }
+  }
 }
 
 async function physicalPaths(options, live) {
@@ -126,6 +153,10 @@ async function physicalPaths(options, live) {
         paths.repairReplicas.push(join(await realpath(dirname(path)), basename(path)));
       }
     }
+  }
+  if (options.localInputs) {
+    paths.localInputs = [];
+    for (const path of options.localInputs) paths.localInputs.push(await physicalLocalInput(path, live));
   }
   if (options.candidates) {
     // Only approvals participate in pre-selection I/O. Losing payload/control
@@ -276,6 +307,32 @@ export async function recoverRepositoryBackup(raw) {
               maximumBytes: live.maximumBytes, maximumTotalBytes: Math.min(options.maximumAcquisitionBytes
                 - Number(reconstruction?.streaming.payload_bytes_read ?? 0), 4 * BACKUP_LIMITS.maximumArchiveBytes),
               timeoutMs: live.remaining(), signal: live.signal, onProgress: event => progress('cache', event) });
+          } else if (options.localInputs) {
+            // Authenticate at least one complete source and reserve copy/readback.
+            // The existing selector may reject damaged copies of this SAME signed
+            // artifact; it never selects a different approval or acquisition plan.
+            if (options.maximumAcquisitionBytes < 3 * Number(statement.artifact.bytes)) fail('backup_recovery_acquisition_budget');
+            try {
+              receipt = await replicateRepositoryBackup({
+                candidates: options.localInputs.map(input => ({ input, approval: options.approval })),
+                trustKey: options.trustKey, policy: options.policy, destination: paths.cacheDirectory, checkpoint,
+                maximumBytes: live.maximumBytes,
+                maximumTotalBytes: Math.min(options.maximumAcquisitionBytes, 4 * BACKUP_LIMITS.maximumArchiveBytes),
+                timeoutMs: live.remaining(), signal: live.signal, onProgress: event => {
+                  // Repeated approval intake and absent-copy metadata do no
+                  // source/destination publication. Avoid a full N-path scan
+                  // for each of N such records; payload and handoff callbacks
+                  // still recheck every declared path after external observers.
+                  if (['approval_inspected', 'replica_unavailable'].includes(event.phase)) { gate(); return; }
+                  return progress('local', event);
+                },
+              });
+            } catch (error) {
+              error.local_acquisition = Object.freeze({ inputs: options.localInputs,
+                replica_attempts: error.replica_attempts ?? null, selection: error.selection ?? null,
+                streaming: error.streaming ?? null });
+              throw error;
+            }
           } else {
             if (!options.sourceFile) fail('backup_recovery_sources_required');
             let sources;
@@ -291,7 +348,7 @@ export async function recoverRepositoryBackup(raw) {
           }
           // Record confirmed acquisition before observers; cancellation cannot
           // turn these independently reusable bytes into a claim of rollback.
-          acquisition = Object.freeze({ mode: cached ? 'cached' : reconstruction ? 'reconstructed' : 'downloaded', receipt,
+          acquisition = Object.freeze({ mode: cached ? 'cached' : reconstruction ? 'reconstructed' : options.localInputs ? 'local' : 'downloaded', receipt,
             ...(reconstruction ? { reconstruction, streaming: Object.freeze({
               total_payload_bytes_read: String(Number(reconstruction.streaming.payload_bytes_read) + Number(receipt.streaming.total_payload_bytes_read)),
               total_payload_byte_budget: String(options.maximumAcquisitionBytes), maximum_read_bytes: 65536 }) } : {}) });

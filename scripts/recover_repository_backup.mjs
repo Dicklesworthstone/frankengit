@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BACKUP_LIMITS, backupError } from './lib/repository-backup-io.mjs';
 import { MAX_REPAIR_REPLICAS } from './lib/repository-backup-chunks.mjs';
+import { MAX_BACKUP_CANDIDATES } from './lib/repository-backup-selection.mjs';
 import { MAX_BACKUP_APPROVALS } from './lib/repository-backup-checkpoints.mjs';
 import { backupDecimal } from './lib/repository-backup-approval.mjs';
 import { MAX_RECOVERY_ACQUISITION_BYTES, repositoryBackupRecoveryOptions, recoverRepositoryBackup } from './lib/repository-backup-recovery.mjs';
@@ -17,6 +18,7 @@ export const RECOVERY_USAGE = `Usage: node scripts/recover_repository_backup.mjs
   --fg ABSOLUTE_PATH --trusted-local --verification-instance N
   --tenant-id HEX --repository-id HEX --incarnation-id HEX --object-format sha1|sha256
   --minimum-head-generation N      Independently retained minimum generation
+  --input FILE                    Repeat for 1..64 local copies of the approved archive
   --sources PRIVATE_JSON           1..16 explicit HTTPS URLs; needed only on a cache miss
   --ca-file FILE                   Independent TLS CA; needed only for remote acquisition
   --repair-catalog FILE            Derived chunk hints for explicit local reconstruction
@@ -33,7 +35,7 @@ Restore additionally requires:
 
 Use --approval for one checkpoint, or --candidate to begin each candidate group.
 In grouped mode, following --sources, --ca-file, --repair-catalog and repeated
---repair-replica options belong to that candidate until the next --candidate.
+--input/--repair-replica options belong to that candidate until the next --candidate.
 All other options are global; singleton acquisition options cannot be mixed in.
 A candidate without acquisition flags is cache-only. Every approval authenticates
 before the highest unique signed checkpoint is selected; only that candidate's
@@ -47,6 +49,10 @@ is explicit and never automatically retried. --resume requires the original
 checkpoint, native destination and approval record; it is not a different restore.
 A verified cache works without reading expired/missing source URLs or connecting.
 A corrupt cache refuses rather than being overwritten or silently replaced.
+Local --input copies use the existing signed replica selector and publisher on a
+cache miss; no URL or chunk catalog is needed. Local inputs cannot mix with HTTPS
+or repair options. Missing/corrupt copies may yield only to another local copy of
+the SAME approved archive. Originals are never overwritten or removed.
 Repair options select local reconstruction instead of HTTPS on a cache miss.
 Both catalog and replicas are required; --sources/--ca-file cannot be combined.
 Surviving chunks must reconstruct the ORIGINAL signed archive, then pass native
@@ -79,8 +85,13 @@ export function recoveryArguments(args) {
       candidate = { approval: next(++at) }; result.candidates.push(candidate); candidateSeen = new Set();
       continue;
     }
-    const grouped = ['--sources', '--ca-file', '--repair-catalog', '--repair-replica'].includes(flag);
+    const grouped = ['--input', '--sources', '--ca-file', '--repair-catalog', '--repair-replica'].includes(flag);
     const target = grouped && candidate ? candidate : result;
+    if (flag === '--input') {
+      target.localInputs ??= [];
+      if (target.localInputs.length === MAX_BACKUP_CANDIDATES) fail('backup_candidate_limit');
+      target.localInputs.push(next(++at)); continue;
+    }
     if (flag === '--repair-replica') {
       target.repairReplicas ??= [];
       if (target.repairReplicas.length === MAX_REPAIR_REPLICAS) fail('backup_chunk_replica_limit');
@@ -134,6 +145,7 @@ export function recoveryErrorReport(error) {
     witness_publication_state: error.witness_publication_state ?? null,
     verification_scratch: error.verification_scratch ?? null, approval_scratch: error.approval_scratch ?? null,
     approval_record: error.approval_record ?? null, cleanup_error: error.cleanup_error ?? null,
+    local_acquisition: error.local_acquisition ?? null,
     recovery_cleanup_error: error.recovery_cleanup_error ?? null, download_state: error.download_state ?? null,
     retained_download: error.retained_download ?? null, download_cleanup_error: error.download_cleanup_error ?? null,
     publication_state: error.publication_state ?? null, replica: error.replica ?? null,
