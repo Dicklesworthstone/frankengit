@@ -177,3 +177,19 @@ test('shared encoder owns Buffer-backed binary sides before the first asynchrono
   assert.ok(Buffer.from(result.bytes).includes(Buffer.from([45, 0, 1])));
   assert.ok(Buffer.from(result.bytes).includes(Buffer.from([43, 0, 2])));
 });
+
+// Retained from the unchanged 4e9bacd6 implementation, not regenerated from the
+// new binary profile. Default callers must preserve their existing review hashes.
+for (const [format, manifestHash, patchHash] of [
+  ['sha1', '5f61584fcaed765f30444aa8c659863fcfeba8b7538da4186fc208793e249cfa', '18d13a062bf441603fc2a3f3f0515185996fe39b7a7a8e8fa15a513a92c6a7aa'],
+  ['sha256', '80909cd5156fe411f7aebf56e1d4d64e84e4aa8f0f1cb6a26586d444aaa8f9e0', '8b8ab7db22f3184e3a94fcc869ac617e1c65a94bc13ab03cc4d2403e8ca9dc97'],
+]) test(`${format}: default mixed-operation draft retains its pre-binary review and patch hashes`, async () => {
+  const f = changeFixture(format), changes = intent([
+    { path_hex: hexPath('src/main.rs'), operation: 'replace-once', before_utf8: 'old', after_utf8: 'new' },
+    { path_hex: hexPath('empty.txt'), operation: 'replace', content_utf8: '' },
+    { path_hex: hexPath('bin/run.sh'), from_path_hex: hexPath('run.sh'), operation: 'copy' },
+    { path_hex: hexPath('new/file'), operation: 'create', content_hex: '7879', executable: false },
+  ]);
+  const draft = await buildSourceChanges(f.bytes, f.expected, changes);
+  assert.equal(sha256(canonical(draft.manifest)), manifestHash); assert.equal(sha256(draft.bytes), patchHash);
+});

@@ -74,7 +74,7 @@ Supported operations:
 `replace`, `replace-once`, and `splice` may also carry `executable`. Without it,
 the original executable bit is preserved. Hex is lowercase and even-length;
 UTF-8 rejects unpaired surrogates. CRLF, byte offsets, BOMs, raw non-UTF-8 path
-names and NUL-free non-UTF-8 content are preserved. NUL-bearing binary files are
+names and NUL-free non-UTF-8 content are preserved. In the default profile, NUL-bearing binary files are
 refused by this profile rather than silently converted or delegated elsewhere.
 
 Duplicate paths, file/ancestor conflicts, unsafe paths and inapplicable fields
@@ -311,3 +311,12 @@ real candidate trees/commits/bundles in both hash domains. It is not the pinned
 Git conformance lane. HTTP native-schema peers remain explicit fixtures, not a
 running Rust fg server, authorization/admission/CAS execution, or a complete
 sandboxed agent run. This work does not close the broader agent-execution beads.
+
+## Explicit binary-safe profile
+
+Set `byte_profile: "binary-safe-v1"` in the changes JSON to use every regular-file
+operation with arbitrary bytes, including NUL. The existing default and its review
+hashes remain unchanged. This opt-in is part of the normalized request and reviewed
+draft, not a permission grant. See [BINARY_SOURCE_AUTHORING.md](BINARY_SOURCE_AUTHORING.md)
+for counted raw-byte patches, unchanged resource ceilings and tested integration
+through workspace capture, replay, preparation, staging and recovery.

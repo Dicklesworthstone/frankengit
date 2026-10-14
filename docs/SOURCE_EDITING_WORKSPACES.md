@@ -37,7 +37,7 @@ executable files `0700`; directories have mode `0700`. New/replacement files
 must remain private. The tool never runs an editor, executable file, Git hook,
 source script, build command, or Git subprocess. Arbitrary file bytes, including
 binary bytes and non-UTF-8 POSIX filenames, are preserved in the materialization;
-this does not add binary editing to the separate exact-patch authoring profile.
+binary change capture requires the explicit profile described below.
 
 ```bash
 node scripts/fg_source_workspace.mjs status \
@@ -83,8 +83,12 @@ walk, source script or discovered filename can widen the selection.
 The complete existing authoring kernel builds the patch, verifies old blob
 identities, proves creations, and independently derives the entire expected root
 tree. Its 32-effect, 1 MiB file/patch and 4 MiB before/after byte limits still apply.
-Changed NUL-bearing files are refused. Unchanged binary files may remain selected
-without becoming patch effects. No-change and missing-new-file selections refuse
+Without explicit opt-in, changed NUL-bearing files are refused. Unchanged binary
+files may remain selected without becoming patch effects. Include
+`"byte_profile":"binary-safe-v1"` beside `paths_hex` in the path selection to
+capture arbitrary regular-file bytes. This choice is copied into changes.json,
+bound into the reviewed draft and capture root, and checked again on reopening;
+see `BINARY_SOURCE_AUTHORING.md`. The default captures keep their existing bytes. No-change and missing-new-file selections refuse
 without claiming an output slot. All observed files and parents are checked again
 after hashing; quiesce editors first, since this remains a non-atomic filesystem
 observation. Once captured, owned bytes—not subsequent edits—determine the draft.
@@ -185,3 +189,14 @@ also runs all existing source-authoring regressions. It does not run Rust `fg`, 
 TreeFS, policy/CAS, hostile tools, real browsers or the full workspace. This
 external consumer advances the selected-source-to-edit workflow; it does not
 close FG-026 or the broader agent-execution beads.
+
+### Explicit byte and patch profiles
+
+The path-selection file may include `byte_profile: "binary-safe-v1"` and/or
+`patch_profile: "trim-common-lines-v1"`. Both are closed, independent choices,
+retained in the capture and checked against its saved change request on reopen.
+Omit both for unchanged text/full-file defaults. A one-line change in a large
+file can use compact encoding without raising the patch-byte ceiling; changed
+binary files require separate binary consent. The standard authoring consumer
+requires the exact draft hash produced for those choices. See
+`BINARY_SOURCE_AUTHORING.md` and `COMPACT_SOURCE_PATCHES.md`.

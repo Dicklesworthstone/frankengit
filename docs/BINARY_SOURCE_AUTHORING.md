@@ -76,3 +76,37 @@ splices, ambiguity, preserved defaults, profile-bound consent, corruption,
 caller-owned buffers, cancellation and exact finite budgets. Installed Git is a
 test-only oracle, not a production fallback or the pinned native conformance lane.
 These tests do not establish Rust fg execution or full-workspace correctness.
+
+## Ordinary local editing, capture and replay
+
+For a workspace created by `fg_source_workspace.mjs`, include the profile with
+the exact paths to capture:
+
+```json
+{"paths_hex":["696d6167652e62696e"],"byte_profile":"binary-safe-v1"}
+```
+
+The existing `capture --paths PRIVATE_JSON` and `inspect-capture` commands handle
+this selection; no new credential, network or execution option is introduced.
+Capture reads only those paths and writes complete hexadecimal after-images for
+changed files, or a deletion for a removed original. It does not inspect names
+outside the selection, infer file types or run executable contents. The selected
+profile must exactly match the saved changes profile when inspecting a capture.
+Rewriting local hashes cannot widen that consent. An unchanged binary file may
+be skipped even in the default profile; a mode-only change is still a change and
+requires binary opt-in when its verified original bytes contain NUL.
+
+`fg_source_replay.mjs` preserves this same normalized change request and profile
+across its two independently selected source packages. All original selected
+bytes and modes must still match, and the new base still requires fresh draft
+consent. Full-binary patch transport uses the unchanged preparation/inspection
+client; binary effect summaries need not disclose the bodies. Verified staging
+returns the profile as context alongside the draft hash, without altering the
+standard candidate or publication journal format.
+
+The integration tests invoke actual CLI create/capture/inspect/prepare/stage and
+lost-reply apply/recover with real files and HTTP/TLS native-schema peers. They
+remove external workspace/capture inputs before recovery and require one upload
+and the original key. They also reject an internally coherent extra-change
+candidate, profile downgrades, rewritten profile bindings, changed replay inputs
+and competing capture writers. The peers are fixtures, not a running Rust fg.

@@ -81,3 +81,19 @@ Forward and reverse Git application must reproduce independently built trees.
 HTTP peers are not a running Rust `fg` server. This lane does not establish native
 admission/authorization/CAS, semantic correctness, complete candidate pack closure
 or full-workspace correctness.
+
+## Local workspace capture
+
+The same explicit encoding is available when capturing ordinary editor changes:
+
+```json
+{"paths_hex":["7372632f6d61696e2e7273"],"patch_profile":"trim-common-lines-v1"}
+```
+
+Pass this file to `fg_source_workspace.mjs capture --paths`. The capture retains
+and checks the encoding in the path selection, saved change request, reviewed
+draft, and receipt. `inspect-capture` compares the selection with the change
+request before regeneration; changing local checksums cannot substitute a
+profile. Omitting the field preserves existing capture bytes and defaults.
+Add `byte_profile: "binary-safe-v1"` independently when selecting NUL-bearing
+edits. Compact encoding by itself does not enable binary input.

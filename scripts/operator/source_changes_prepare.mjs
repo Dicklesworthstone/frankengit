@@ -50,6 +50,8 @@ function matches(draft, candidate, pin) {
     package_sha256: m.package_sha256, patch_sha256: m.patch_sha256,
     source_commit: m.source_commit, candidate_commit: candidate.candidate_commit,
     effect_count: m.effects.length, no_op_count: m.no_op_paths_hex.length,
+    ...(m.byte_profile === undefined ? {} : { byte_profile: m.byte_profile }),
+    ...(m.patch_profile === undefined ? {} : { patch_profile: m.patch_profile }),
     ...(m.creation_preconditions ? { created_path_count: m.creation_preconditions.paths.length,
       creation_absence_independently_verified: true } : {}),
     intended_effect_reports_matched: true, before_membership_independently_verified: true,

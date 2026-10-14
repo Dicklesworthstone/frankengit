@@ -22,12 +22,16 @@ immutable inputs and materializes only those paths below files/. Keep the return
 workspace_sha256 independently. Edit files/ with your own trusted tools; no tool
 is run here. Status checks the original inputs and reads only originally selected
 paths. It does not discover other local files or attest an atomic filesystem view.
-Capture requires {paths_hex:[...]} with every intended local path. It records
+Capture requires {paths_hex:[...]} with every intended local path. Include
+byte_profile:"binary-safe-v1" in that selection to capture arbitrary file bytes.
+Use patch_profile:"trim-common-lines-v1" for compact exact patches.
+The default remains NUL-free with full-file patches. The explicitly selected profile is bound into
+the captured changes and reviewed draft. It records
 only those files as exact replacements, deletes or proved-absent creations; no
 rename inference or directory scan occurs. Saved captures contain source.json,
 expected.json, changes.json, patch.diff and draft.json for the existing authoring
 CLI. Inspect-capture recomputes them without requiring the original workspace.
-NUL-bearing changes remain unsupported by the native exact-patch client profile.
+Binary-safe capture retains the existing byte, path, line and time limits.
 No overwrite, recursive scan, symlink, hardlink, credential, network, Git command,
 source execution, permission grant or repository mutation. Interrupted output
 slots are retained. Exit 0: complete; 2: refusal; 3: cancelled before output;

@@ -36,8 +36,10 @@ Copies preserve the source. Renames lower to an exact deletion plus an exact
 creation in the same candidate, not native similarity hints or a production Git
 subprocess. An optional boolean `executable` changes the destination mode only;
 otherwise the original mode is preserved. Content is copied byte-for-byte,
-including empty files, CRLF and missing final newlines. This profile continues
-to refuse NUL-bearing binary content, symlinks, gitlinks and directory moves.
+including empty files, CRLF and missing final newlines. The default profile
+refuses NUL-bearing content; `byte_profile: "binary-safe-v1"` explicitly enables
+binary copies and renames (see `BINARY_SOURCE_AUTHORING.md`). Both profiles still
+refuse symlinks, gitlinks and directory moves.
 No content-edit fields may accompany a relocation.
 
 All relocations read the original pinned source. Several copies may share one

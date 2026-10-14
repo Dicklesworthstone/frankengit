@@ -15,6 +15,10 @@ export function sourceByteProfile(value) {
   if (value !== BINARY_CHANGE_PROFILE) fail('source_changes_byte_profile');
   return value;
 }
+export function sourcePatchProfile(value) {
+  if (value !== COMPACT_PATCH_PROFILE) fail('source_changes_patch_profile');
+  return value;
+}
 export const CHANGES_INPUT_BYTES = 10 * 1024 * 1024;
 export const CHANGE_LIMITS = Object.freeze({ files: 32, fileBytes: EDIT_LIMITS.fileBytes,
   totalBytes: EDIT_LIMITS.totalBytes, patchBytes: 1024 * 1024, splices: 4096 });
@@ -65,8 +69,7 @@ function encoded(row, stem, charge) {
 }
 function changes(value, bound) {
   fields(value, ['schema', 'byte_profile', 'patch_profile', 'changes'], ['schema', 'changes']);
-  const patchProfile = Object.hasOwn(value, 'patch_profile') ? value.patch_profile : null;
-  if (Object.hasOwn(value, 'patch_profile') && patchProfile !== COMPACT_PATCH_PROFILE) fail('source_changes_patch_profile');
+  const patchProfile = Object.hasOwn(value, 'patch_profile') ? sourcePatchProfile(value.patch_profile) : null;
   const profile = Object.hasOwn(value, 'byte_profile') ? sourceByteProfile(value.byte_profile) : null;
   if (value.schema !== CHANGES_SCHEMA || !Array.isArray(value.changes) || !value.changes.length ||
       value.changes.length > bound.files) fail('source_changes_inventory');

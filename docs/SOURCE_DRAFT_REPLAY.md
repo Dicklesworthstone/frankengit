@@ -71,8 +71,10 @@ file, 128 proved parent-tree and 4 MiB tree-byte ceilings. The two packages are
 separately owned, so encoded inputs can total 64 MiB. Each generation uses the
 existing 32-effect, 1 MiB file/patch and 4 MiB retained before/after authoring
 bounds. `limits` may narrow those edit bounds; it cannot widen them. `timeoutMs`
-is 1..300000 (default 30000); `signal` is an optional AbortSignal. Unsupported
-binary edits and source proof cases remain the shared kernel's typed refusals.
+is 1..300000 (default 30000); `signal` is an optional AbortSignal. The explicit
+`byte_profile: "binary-safe-v1"` option in the original changes is preserved by
+replay; omission retains the NUL-free default. Unsupported source proof cases
+remain the shared kernel's typed refusals.
 No partial new draft is returned on cancellation, a conflict or a hash mismatch.
 
 Run `bash scripts/verify_source_replay.sh`. The core tests use independently

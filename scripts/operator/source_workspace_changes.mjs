@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { webcrypto } from 'node:crypto';
 import { loadSourceWorkspace, readWorkspaceFiles, selectedPaths, workspaceManifest,
   lifetime, fields, pin, fail, WORKSPACE_LIMITS, SOURCE_PACKAGE_BYTES } from './source_workspace.mjs';
-import { buildSourceChanges, canonical, sha256, CHANGES_SCHEMA, CHANGES_INPUT_BYTES } from './source_changes.mjs';
+import { buildSourceChanges, canonical, sha256, CHANGES_SCHEMA, CHANGES_INPUT_BYTES, sourceByteProfile, sourcePatchProfile } from './source_changes.mjs';
 import { readSourcePackage } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
 import { verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
@@ -16,7 +16,14 @@ const LIMITS = Object.freeze({ 'source.json': SOURCE_PACKAGE_BYTES, 'expected.js
   'paths.json': WORKSPACE_LIMITS.expectedBytes, 'changes.json': CHANGES_INPUT_BYTES,
   'patch.diff': 1048576, 'draft.json': 262144 });
 export function workspaceChangeSelection(value) {
-  fields(value, ['paths_hex']); return { paths_hex: selectedPaths(value.paths_hex) };
+  fields(value, ['paths_hex', 'byte_profile', 'patch_profile'], ['paths_hex']);
+  return { paths_hex: selectedPaths(value.paths_hex), ...(Object.hasOwn(value, 'byte_profile')
+    ? { byte_profile: sourceByteProfile(value.byte_profile) } : {}), ...(Object.hasOwn(value, 'patch_profile')
+    ? { patch_profile: sourcePatchProfile(value.patch_profile) } : {}) };
+}
+// Omit defaults entirely: existing capture payloads and retained hashes stay stable.
+function profiles(value) {
+  return Object.fromEntries(['byte_profile', 'patch_profile'].filter(k => Object.hasOwn(value, k)).map(k => [k, value[k]]));
 }
 function rootManifest(workspaceHash, payloads, draft, selection, changes) {
   return { schema: SCHEMA, workspace_sha256: workspaceHash,
@@ -25,7 +32,8 @@ function rootManifest(workspaceHash, payloads, draft, selection, changes) {
     draft_sha256: sha256(payloads['draft.json']), selected_path_count: selection.paths_hex.length,
     changed_path_count: changes.changes.length, unchanged_path_count: selection.paths_hex.length - changes.changes.length,
     selected_files_only: true, unselected_paths_examined: false, atomic_filesystem_snapshot: false,
-    source_material_untrusted: true, repository_changed: false, publication_authorized: false };
+    source_material_untrusted: true, repository_changed: false, publication_authorized: false,
+    ...profiles(selection) };
 }
 function payloadSet(baseline, selection, changes, draft) {
   const payloads = { 'source.json': baseline.packageBytes, 'expected.json': canonical(baseline.expected),
@@ -47,7 +55,7 @@ export async function collectWorkspaceChanges(root, workspaceHash, inputSelectio
   if (newPaths.length) await verifyPathAbsence(pkg.membership, baseline.expected, newPaths, webcrypto, time.check);
   time.check();
   const observed = await readWorkspaceFiles(root, selection.paths_hex, { check: time.check, timeoutMs: time.remaining() });
-  const changes = { schema: CHANGES_SCHEMA, changes: [] };
+  const changes = { schema: CHANGES_SCHEMA, ...profiles(selection), changes: [] };
   for (const path of selection.paths_hex) {
     time.check(); const before = original.get(path), after = observed.files.get(path);
     if (!before && !after) fail('source_workspace_new_file_missing');
@@ -71,7 +79,8 @@ function summary(path, hash, m) {
     workspace_sha256: m.workspace_sha256, source_commit: m.source_commit, expected_tree: m.expected_tree,
     draft_sha256: m.draft_sha256, selected_path_count: m.selected_path_count, changed_path_count: m.changed_path_count,
     unchanged_path_count: m.unchanged_path_count, selected_files_only: true,
-    unselected_paths_examined: false, repository_changed: false, source_material_untrusted: true };
+    unselected_paths_examined: false, repository_changed: false, source_material_untrusted: true,
+    ...profiles(m) };
 }
 export async function captureWorkspaceChanges(root, workspaceHash, inputSelection, output, options = {}) {
   const time = lifetime(options), selection = workspaceChangeSelection(inputSelection); pin(workspaceHash);
@@ -117,7 +126,9 @@ export async function inspectWorkspaceChangeCapture(path, expectedHash, options 
   const expected = parse(payloads['expected.json'], WORKSPACE_LIMITS.expectedBytes);
   const selection = workspaceChangeSelection(parse(payloads['paths.json'], WORKSPACE_LIMITS.expectedBytes));
   const changes = parse(payloads['changes.json'], CHANGES_INPUT_BYTES);
-  fields(changes, ['schema', 'changes']);
+  fields(changes, ['schema', 'byte_profile', 'patch_profile', 'changes'], ['schema', 'changes']);
+  // The saved changes cannot broaden the profile chosen with the path list.
+  if (changes.byte_profile !== selection.byte_profile || changes.patch_profile !== selection.patch_profile) fail('source_workspace_capture_profile');
   if (changes.schema !== CHANGES_SCHEMA || !Array.isArray(changes.changes) || !changes.changes.length || changes.changes.length > selection.paths_hex.length) fail('source_workspace_capture_changes');
   const selected = new Set(selection.paths_hex); let previous = '';
   for (const change of changes.changes) {

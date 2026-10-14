@@ -41,7 +41,8 @@ extracts files, runs source, or calls Git. Explicit create operations require an
 executable choice and absence proved by the package's committed parent trees.
 Missing parent evidence refuses; there is no overwrite or implicit proof fetch.
 Explicit copy/rename operations preserve original bytes and prove destination
-absence; see docs/SOURCE_RELOCATION.md. NUL-bearing binary edits are not supported.
+absence; see docs/SOURCE_RELOCATION.md. Arbitrary bytes require the explicit
+byte_profile:"binary-safe-v1" changes field; see docs/BINARY_SOURCE_AUTHORING.md.
 Verified staging is documented in docs/VERIFIED_SOURCE_STAGING.md.
 Exit 0: complete result; 2: refusal; 3: cancelled before local publication;
 4: a local output or result may exist; inspect its retained location and hashes.`;
