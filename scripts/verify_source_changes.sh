@@ -15,4 +15,5 @@ node --test scripts/tests/source_changes.test.mjs \
   scripts/tests/source_tree_binding.test.mjs \
   scripts/tests/source_relocation.test.mjs \
   scripts/tests/source_verified_stage.test.mjs \
-  scripts/tests/source_binary_changes.test.mjs
+  scripts/tests/source_binary_changes.test.mjs \
+  scripts/tests/source_compact_patch.test.mjs

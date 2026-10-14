@@ -2,6 +2,7 @@
 // subprocess, fuzzy application, rename inference, or publication lives here.
 export const EDIT_LIMITS = Object.freeze({ files: 64, fileBytes: 1024 * 1024,
   totalBytes: 4 * 1024 * 1024, patchBytes: 8 * 1024 * 1024, lines: 160_000, pathBytes: 4096 });
+export const COMPACT_PATCH_PROFILE = 'trim-common-lines-v1';
 const utf8 = new TextEncoder();
 const fail = message => { throw new Error(message); };
 export const bytesHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
@@ -78,11 +79,67 @@ function lines(bytes) {
   if (start < bytes.length) out.push(bytes.subarray(start));
   return out;
 }
+// Trim only byte-identical COMPLETE lines, with three unchanged context lines
+// at each edge. This is not fuzzy matching, rename detection or semantic merge.
+// Two monotone scans keep work linear and avoid one array allocation per line
+// for the potentially much larger unchanged portions of a file.
+function compactHunk(before, after, put, string, check) {
+  const priorStart = (bytes, end) => {
+    const from = end - 1 - Number(bytes[end - 1] === 10);
+    return from < 0 ? 0 : bytes.lastIndexOf(10, from) + 1;
+  };
+  const nextEnd = (bytes, start) => { const lf = bytes.indexOf(10, start); return lf < 0 ? bytes.length : lf + 1; };
+  let common = 0, leading = 0;
+  for (let i = 0; i < Math.min(before.length, after.length) && before[i] === after[i]; i++) {
+    if (i % 4096 === 0) check();
+    if (before[i] === 10) { common = i + 1; leading++; }
+  }
+  let oldEnd = before.length, newEnd = after.length, trailing = 0;
+  while (oldEnd > common && newEnd > common) {
+    check(); const oldStart = priorStart(before, oldEnd), newStart = priorStart(after, newEnd);
+    if (oldStart < common || newStart < common || oldEnd - oldStart !== newEnd - newStart) break;
+    let same = true;
+    for (let i = 0; i < oldEnd - oldStart; i++) {
+      if (i % 4096 === 0) check();
+      if (before[oldStart + i] !== after[newStart + i]) { same = false; break; }
+    }
+    if (!same) break;
+    oldEnd = oldStart; newEnd = newStart; trailing++;
+  }
+  const prefixCount = Math.min(3, leading), suffixCount = Math.min(3, trailing);
+  let start = common, oldStop = oldEnd, newStop = newEnd;
+  for (let n = 0; n < prefixCount; n++) start = priorStart(before, start);
+  for (let n = 0; n < suffixCount; n++) { oldStop = nextEnd(before, oldStop); newStop = nextEnd(after, newStop); }
+  const count = (bytes, from, to) => {
+    let result = Number(to > from && bytes[to - 1] !== 10);
+    for (let i = from; i < to; i++) { if (i % 4096 === 0) check(); if (bytes[i] === 10) result++; }
+    return result;
+  };
+  const oldCount = count(before, start, oldStop), newCount = count(after, start, newStop), first = leading - prefixCount;
+  string(`@@ -${first + Number(oldCount !== 0)},${oldCount} +${first + Number(newCount !== 0)},${newCount} @@\n`);
+  const span = (prefix, bytes, from, to) => {
+    let at = from;
+    for (let i = from; i <= to; i++) {
+      if (i % 4096 === 0) check();
+      if (i < to ? bytes[i] !== 10 : at === i) continue;
+      const end = i < to ? i + 1 : i;
+      put(Uint8Array.of(prefix)); put(bytes.subarray(at, end));
+      if (bytes[end - 1] !== 10) string('\n\\ No newline at end of file\n');
+      at = end;
+    }
+  };
+  span(32, before, start, common);
+  span(45, before, common, oldEnd);
+  span(43, after, common, newEnd);
+  span(32, before, oldEnd, oldStop);
+  check();
+}
 // Binary-safe callers still use byte-exact counted hunks, NOT a new compressed
 // Git-binary-patch codec. Text consumers retain their original NUL refusal.
-export async function buildPatch(edits, algorithm, { crypto = globalThis.crypto, signal, allowBinary = false } = {}) {
+export async function buildPatch(edits, algorithm, { crypto = globalThis.crypto, signal, allowBinary = false, patchProfile = null } = {}) {
   if (!['sha1', 'sha256'].includes(algorithm)) fail('Choose an explicit Git hash domain.');
   if (typeof allowBinary !== 'boolean') fail('Choose an explicit binary-safe boolean.');
+  if (patchProfile !== null && patchProfile !== COMPACT_PATCH_PROFILE) fail('Unsupported patch profile.');
   signal?.throwIfAborted(); const owned = capture(edits, allowBinary);
   if (!owned.length) fail('No file changes to prepare.');
   let size = 0, lineCount = 0; const chunks = [], manifest = [];
@@ -107,14 +164,18 @@ export async function buildPatch(edits, algorithm, { crypto = globalThis.crypto,
     else if (before.mode !== after.mode) string(`old mode ${before.mode.toString(8)}\nnew mode ${after.mode.toString(8)}\n`);
     const zeros = '0'.repeat(algorithm === 'sha1' ? 40 : 64);
     string(`index ${oldId ?? zeros}..${newId ?? zeros}${before && after && before.mode === after.mode ? ` ${before.mode.toString(8)}` : ''}\n`);
-    const oldLines = lines(before?.bytes ?? new Uint8Array()), newLines = lines(after?.bytes ?? new Uint8Array());
-    const changed = oldId !== newId && (oldLines.length || newLines.length);
+    const oldBytes = before?.bytes ?? new Uint8Array(), newBytes = after?.bytes ?? new Uint8Array();
+    const changed = oldId !== newId && (oldBytes.length || newBytes.length);
     if (changed) {
       string(`--- ${before ? oldPath : '/dev/null'}\n+++ ${after ? newPath : '/dev/null'}\n`);
-      string(`@@ -${oldLines.length ? 1 : 0},${oldLines.length} +${newLines.length ? 1 : 0},${newLines.length} @@\n`);
-      for (const [prefix, rows] of [[45, oldLines], [43, newLines]]) for (const line of rows) {
-        signal?.throwIfAborted(); put(Uint8Array.of(prefix)); put(line);
-        if (line.at(-1) !== 10) string('\n\\ No newline at end of file\n');
+      if (patchProfile === COMPACT_PATCH_PROFILE) compactHunk(oldBytes, newBytes, put, string, () => signal?.throwIfAborted());
+      else {
+        const oldLines = lines(oldBytes), newLines = lines(newBytes);
+        string(`@@ -${oldLines.length ? 1 : 0},${oldLines.length} +${newLines.length ? 1 : 0},${newLines.length} @@\n`);
+        for (const [prefix, rows] of [[45, oldLines], [43, newLines]]) for (const line of rows) {
+          signal?.throwIfAborted(); put(Uint8Array.of(prefix)); put(line);
+          if (line.at(-1) !== 10) string('\n\\ No newline at end of file\n');
+        }
       }
     }
     manifest.push({ path_hex, old_blob: oldId, new_blob: newId, old_mode: before?.mode ?? null, new_mode: after?.mode ?? null, hunks: changed ? 1 : 0 });

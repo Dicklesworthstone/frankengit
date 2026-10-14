@@ -3,7 +3,7 @@
 // this adapter neither implements a second Git engine nor publishes anything.
 import { createHash, webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
-import { buildPatch, EDIT_LIMITS, pathBytes } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
+import { buildPatch, EDIT_LIMITS, pathBytes, COMPACT_PATCH_PROFILE } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
 import { verifyPathAbsence, deriveEditedTree } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 
@@ -64,7 +64,9 @@ function encoded(row, stem, charge) {
   return charge(Buffer.from(value, 'utf8').toString('hex'));
 }
 function changes(value, bound) {
-  fields(value, ['schema', 'byte_profile', 'changes'], ['schema', 'changes']);
+  fields(value, ['schema', 'byte_profile', 'patch_profile', 'changes'], ['schema', 'changes']);
+  const patchProfile = Object.hasOwn(value, 'patch_profile') ? value.patch_profile : null;
+  if (Object.hasOwn(value, 'patch_profile') && patchProfile !== COMPACT_PATCH_PROFILE) fail('source_changes_patch_profile');
   const profile = Object.hasOwn(value, 'byte_profile') ? sourceByteProfile(value.byte_profile) : null;
   if (value.schema !== CHANGES_SCHEMA || !Array.isArray(value.changes) || !value.changes.length ||
       value.changes.length > bound.files) fail('source_changes_inventory');
@@ -138,7 +140,8 @@ function changes(value, bound) {
   const touched = [...new Set([...writes, ...sources.map(row => row.from_path_hex)])];
   for (const path of touched) if (touched.some(other => other !== path &&
       path.startsWith(`${other}2f`))) fail('source_changes_paths');
-  return { schema: CHANGES_SCHEMA, ...(profile === null ? {} : { byte_profile: profile }), changes: owned };
+  return { schema: CHANGES_SCHEMA, ...(profile === null ? {} : { byte_profile: profile }),
+    ...(patchProfile === null ? {} : { patch_profile: patchProfile }), changes: owned };
 }
 // Every splice addresses the ORIGINAL file, never an earlier splice's output.
 // Preflight all extents and projected sizes before allocating any after-image.
@@ -240,7 +243,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   if (noops.length === edits.length) fail('source_changes_no_effect');
   // A checkpointing signal adapter keeps the encoder's existing synchronous
   // loops and every digest await under the caller's one remaining-time budget.
-  const patch = await buildPatch(edits, selected.format, { crypto: webcrypto, signal: { throwIfAborted: check }, allowBinary }); check();
+  const patch = await buildPatch(edits, selected.format, { crypto: webcrypto, signal: { throwIfAborted: check }, allowBinary, patchProfile: owned.patch_profile ?? null }); check();
   if (patch.bytes.length > bound.patchBytes) fail('source_changes_patch_budget');
   for (const effect of patch.paths) if (effect.old_blob !== (files.get(effect.path_hex)?.blob ?? null)) fail('source_changes_old_identity');
   const bytes = Buffer.from(patch.bytes);
@@ -257,6 +260,7 @@ export async function buildSourceChanges(packageBytes, expected, input, options 
   if (creationPreconditions !== null) manifest.creation_preconditions = creationPreconditions;
   // Bind even a NUL-free opt-in into review consent. Do not change old manifests.
   if (allowBinary) manifest.byte_profile = BINARY_CHANGE_PROFILE;
+  if (owned.patch_profile !== undefined) manifest.patch_profile = owned.patch_profile;
   const relocations = owned.changes.filter(row => row.from_path_hex !== undefined).map(row => ({
     operation: row.operation, from_path_hex: row.from_path_hex, path_hex: row.path_hex,
     source_blob: files.get(row.from_path_hex).blob, source_mode: files.get(row.from_path_hex).kind === 'executable' ? 0o100755 : 0o100644,
