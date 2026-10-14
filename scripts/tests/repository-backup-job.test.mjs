@@ -229,6 +229,26 @@ test('alias of job folder cannot become a destination', async t => {
   await assert.rejects(f.seal({ destinations: [join(alias, 'jobs')] }), code('backup_job_separate_path_required')); await emptyTargets(f);
 });
 
+test('seal refuses a source whose parent alias resolves inside a destination', async t => {
+  const f = await jobFixture(t), alias = join(f.root, 'source-alias');
+  const nested = join(f.destinations[0], 'source');
+  await writeFile(nested, DATA, { mode: 0o600 }); await symlink(f.destinations[0], alias);
+  await assert.rejects(f.seal({ candidates: [{ input: join(alias, 'source'), approval: f.source.approval }] }),
+    code('backup_job_separate_path_required'));
+  assert.deepEqual(await readFile(nested), DATA);
+});
+
+test('run rechecks physical source separation after a parent alias is retargeted', async t => {
+  const f = await jobFixture(t), external = join(f.root, 'external'), alias = join(f.root, 'source-alias');
+  await mkdir(external, { mode: 0o700 }); await writeFile(join(external, 'source'), DATA, { mode: 0o600 });
+  await symlink(external, alias);
+  const job = await f.seal({ candidates: [{ input: join(alias, 'source'), approval: f.source.approval }] });
+  await unlink(alias); await symlink(f.destinations[0], alias);
+  await writeFile(join(f.destinations[0], 'source'), DATA, { mode: 0o600 });
+  await assert.rejects(f.run(job.intent), code('backup_job_separate_path_required'));
+  assert.deepEqual(await readdir(f.destinations[1]), []);
+});
+
 test('manifest path substitutions are rejected before writes', async t => {
   const f = await jobFixture(t), job = await f.seal();
   const modified = await rewriteIntent(job.intent, value => { value.destinations[0].path += '/..'; });

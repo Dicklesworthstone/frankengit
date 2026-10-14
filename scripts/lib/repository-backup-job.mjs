@@ -84,6 +84,20 @@ async function requireKeyApart(trustKey, directories, live) {
   for (const path of directories) requireSeparate(path, [key]);
   live.check();
 }
+async function requireExistingSourcesApart(sources, directories, trustKey, witnessDirectory, live) {
+  live.check();
+  const protectedPaths = [...directories, await realpath(trustKey), ...(witnessDirectory ? [witnessDirectory] : [])];
+  for (const source of sources) {
+    live.check(); let physical;
+    try { physical = await realpath(source); }
+    catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+      throw error;
+    }
+    for (const path of protectedPaths) requireSeparate(physical, [path]);
+  }
+  live.check();
+}
 function controlPaths(owner, checkpoint) { return join(owner.path, approvalName(checkpoint)); }
 function checkedWitness(manifest, witness) {
   const directory = witness?.snapshot().directory ?? null;
@@ -145,6 +159,10 @@ export async function sealRepositoryBackupJob(raw, witness = null) {
     const statement = verified.authentication.statement;
     const sources = [...new Set(selected.report.candidates.filter(row => row.statement_sha256 === selected.report.selected.statement_sha256)
       .map(row => row.input))].sort();
+    // Lexical separation is insufficient when a parent component is a symlink.
+    // Existing source bytes must remain outside every writable recovery custody
+    // domain. Missing optional sources stay admissible for later restart.
+    await requireExistingSourcesApart(sources, owned.map(o => o.path), options.trustKey, witnessDirectory, live);
     const destinations = owned.slice(1).map(o => o.saved).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     const candidates = new Set([...sources, ...destinations.map(row => join(row.path, archiveName(statement)))]);
     if (candidates.size > MAX_BACKUP_CANDIDATES) fail('backup_job_source_limit');
@@ -249,6 +267,9 @@ export async function runRepositoryBackupJob(raw, witness = null) {
     }
     await requireKeyApart(trustKey, owned.map(o => o.path), live);
     if (witnessDirectory) await requireKeyApart(trustKey, [witnessDirectory], live);
+    // Re-resolve surviving original sources on every restart. A safe source
+    // parent at seal time may have been redirected before this invocation.
+    await requireExistingSourcesApart(manifest.sources, owned.map(o => o.path), trustKey, witnessDirectory, live);
     const gate = async () => {
       live.check(); verified.checkCurrent(); if (witness) witness.require(statement);
       for (const o of owned) await o.check();
