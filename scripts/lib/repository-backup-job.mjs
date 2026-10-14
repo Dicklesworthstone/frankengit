@@ -98,6 +98,22 @@ async function requireExistingSourcesApart(sources, directories, trustKey, witne
   }
   live.check();
 }
+async function requireExistingCandidatesApart(candidates, directories, trustKey, witnessDirectory, live) {
+  live.check();
+  const protectedPaths = [...directories, await realpath(trustKey), ...(witnessDirectory ? [witnessDirectory] : [])];
+  for (const row of candidates) {
+    for (const candidate of [row.input, row.approval]) {
+      live.check(); let physical;
+      try { physical = await realpath(candidate); }
+      catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      for (const path of protectedPaths) requireSeparate(physical, [path]);
+    }
+  }
+  live.check();
+}
 function controlPaths(owner, checkpoint) { return join(owner.path, approvalName(checkpoint)); }
 function checkedWitness(manifest, witness) {
   const directory = witness?.snapshot().directory ?? null;
@@ -134,6 +150,10 @@ export async function sealRepositoryBackupJob(raw, witness = null) {
       if (witnessDirectory) requireSeparate(target.path, [witnessDirectory]);
     }
     await requireKeyApart(options.trustKey, [...owned.map(o => o.path), ...(witnessDirectory ? [witnessDirectory] : [])], live);
+    // Candidate controls are independent trust inputs, not material owned by
+    // writable recovery custody. Resolve every existing input/approval before
+    // authentication or payload reads so parent aliases cannot hide overlap.
+    await requireExistingCandidatesApart(options.candidates, owned.map(o => o.path), options.trustKey, witnessDirectory, live);
     const gate = async () => { live.check(); selected?.checkCurrent(); for (const o of owned) await o.check(); };
     selected = await selectRepositoryBackup(options.candidates, options.trustKey, options.policy, {
       maximumBytes: live.maximumBytes,
@@ -144,9 +164,14 @@ export async function sealRepositoryBackupJob(raw, witness = null) {
     const checkpoint = selected.report.checkpoint;
     if (options.checkpoint && JSON.stringify(options.checkpoint) !== JSON.stringify(checkpoint)) fail('backup_replication_checkpoint_mismatch');
     const selectedPaths = [selected.report.selected.input, selected.report.selected.approval];
+    const protectedSelected = [...owned.map(o => o.path), await realpath(options.trustKey),
+      ...(witnessDirectory ? [witnessDirectory] : [])];
+    // Re-resolve the chosen pair after selection observers. A candidate parent
+    // can be redirected while authentication is running; the approval is opened
+    // again below and must still be physically independent at that handoff.
     for (const path of selectedPaths) {
-      const physical = await realpath(path); requireSeparate(owner.path, [physical]);
-      if (witnessDirectory) requireSeparate(witnessDirectory, [physical]);
+      const physical = await realpath(path);
+      for (const protectedPath of protectedSelected) requireSeparate(physical, [protectedPath]);
     }
     const envelope = await readBackupControl(selected.report.selected.approval, BACKUP_LIMITS.envelopeBytes, live);
     if (hash(envelope) !== checkpoint.approval_sha256) fail('backup_replica_approval_changed');

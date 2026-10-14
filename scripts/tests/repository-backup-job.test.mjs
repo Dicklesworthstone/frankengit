@@ -229,6 +229,34 @@ test('alias of job folder cannot become a destination', async t => {
   await assert.rejects(f.seal({ destinations: [join(alias, 'jobs')] }), code('backup_job_separate_path_required')); await emptyTargets(f);
 });
 
+test('seal refuses a candidate approval whose parent alias resolves inside a destination', async t => {
+  const f = await jobFixture(t), alias = join(f.root, 'approval-alias');
+  const nested = join(f.destinations[0], 'source.approval');
+  await writeFile(nested, await readFile(f.source.approval), { mode: 0o600 });
+  await symlink(f.destinations[0], alias);
+  await assert.rejects(f.seal({ candidates: [{ input: f.source.input, approval: join(alias, 'source.approval') }] }),
+    code('backup_job_separate_path_required'));
+  assert.deepEqual(await readFile(nested), await readFile(f.source.approval));
+  await emptyTargets(f);
+});
+
+test('selected approval is rechecked after an observer retargets its parent alias', async t => {
+  const f = await jobFixture(t), external = join(f.root, 'approval-external'), alias = join(f.root, 'approval-alias');
+  await mkdir(external, { mode: 0o700 });
+  await writeFile(join(external, 'source.approval'), await readFile(f.source.approval), { mode: 0o600 });
+  await writeFile(join(f.destinations[0], 'source.approval'), await readFile(f.source.approval), { mode: 0o600 });
+  await symlink(external, alias); let moved = false;
+  await assert.rejects(f.seal({
+    candidates: [{ input: f.source.input, approval: join(alias, 'source.approval') }],
+    async onProgress(event) {
+      if (!moved && event.phase === 'approval_inspected') {
+        moved = true; await unlink(alias); await symlink(f.destinations[0], alias);
+      }
+    },
+  }), code('backup_job_separate_path_required'));
+  assert(moved); await emptyTargets(f);
+});
+
 test('seal refuses a source whose parent alias resolves inside a destination', async t => {
   const f = await jobFixture(t), alias = join(f.root, 'source-alias');
   const nested = join(f.destinations[0], 'source');
