@@ -89,9 +89,9 @@ fn local_record() -> WorkflowCheckRecord {
 }
 
 #[test]
-fn lowering_uses_one_exact_completed_job_and_never_promotes_local_success() {
+fn lowering_uses_one_exact_completed_job_and_promotes_only_verified_success() {
     let record = local_record();
-    assert_eq!(record.conclusion, WorkflowCheckConclusion::ActionRequired);
+    assert_eq!(record.conclusion, WorkflowCheckConclusion::Success);
     assert_eq!(record.job, "first");
     validate_record(
         &record,
@@ -132,11 +132,11 @@ fn every_claimed_coordinate_and_scope_is_checked_against_the_retained_frame() {
 }
 
 #[test]
-fn reported_negative_states_remain_distinct_and_skips_are_not_green() {
+fn reported_states_remain_distinct_and_skips_are_not_green() {
     for (outcome, expected) in [
         (
             JobOutcome::Succeeded,
-            WorkflowCheckConclusion::ActionRequired,
+            WorkflowCheckConclusion::Success,
         ),
         (JobOutcome::Skipped, WorkflowCheckConclusion::ActionRequired),
         (JobOutcome::Failed, WorkflowCheckConclusion::Failure),

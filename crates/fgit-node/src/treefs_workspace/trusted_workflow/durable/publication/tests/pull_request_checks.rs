@@ -188,7 +188,7 @@ fn canonical_check_pages_preserve_publishers_order_visibility_and_reopen() {
             assert_eq!(check.attempt_id, record.attempt_id);
             assert_eq!(check.graph_root, record.graph_root);
             assert_eq!(check.job, record.job);
-            assert_eq!(check.conclusion, WorkflowCheckConclusion::ActionRequired);
+            assert_eq!(check.conclusion, WorkflowCheckConclusion::Success);
             assert_eq!(
                 check.evidence_sha256,
                 fgit_crypto::sha256_digest(&record.evidence)

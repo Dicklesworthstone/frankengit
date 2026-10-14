@@ -33,8 +33,8 @@ Retain the original journal ID and any minimum pin independently of storage.
 The selected branch must currently name the job's actual executed commit.
 
 This records an authenticated local operator's observation and its forge delivery
-obligation in one canonical decision. Local success remains action_required;
-these observations cannot satisfy required successful checks. The command does
+obligation in one canonical decision. Verified succeeded jobs publish success; skipped jobs remain action_required.
+Publication still does not itself grant merge permission. The command does
 not run scripts, change refs, acknowledge the journal, or remove saved history.
 It needs no final report and can publish a completed job from an interrupted run.
 
@@ -443,7 +443,8 @@ fn receipt(
     let record = &observation.record;
     let conclusion = match record.conclusion {
         WorkflowCheckConclusion::ActionRequired => "action_required",
-        WorkflowCheckConclusion::Failure => "failure",
+        WorkflowCheckConclusion::Success => "success",
+        WorkflowCheckConclusion::Failure => "failure"
         WorkflowCheckConclusion::Cancelled => "cancelled",
         WorkflowCheckConclusion::TimedOut => "timed_out",
     };

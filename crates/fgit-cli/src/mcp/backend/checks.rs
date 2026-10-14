@@ -197,7 +197,8 @@ fn row(row: &WorkflowCheckSummary) -> Value {
             "conclusion",
             text(match row.conclusion {
                 WorkflowCheckConclusion::ActionRequired => "action_required",
-                WorkflowCheckConclusion::Failure => "failure",
+                WorkflowCheckConclusion::Success => "success",
+                WorkflowCheckConclusion::Failure => "failure"
                 WorkflowCheckConclusion::Cancelled => "cancelled",
                 WorkflowCheckConclusion::TimedOut => "timed_out",
             }),

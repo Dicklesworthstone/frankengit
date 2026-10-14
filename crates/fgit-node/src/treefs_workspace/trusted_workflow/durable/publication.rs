@@ -1,6 +1,6 @@
 //! Publish verified local observations through the existing canonical forge path.
-//! The authenticated principal REPORTS a result; it is not a sandbox attestation
-//! and cannot satisfy a required successful check. No journal is acknowledged here.
+//! A successful conclusion is admitted only after the trusted-workflow evidence
+//! verifier replays the exact retained job observation. No journal is acknowledged here.
 use std::cell::Cell;
 use std::future::Future;
 
@@ -77,7 +77,8 @@ impl OneNode {
 
     /// Record one authenticated local publisher's immutable job observation and
     /// enqueue its forge delivery in the SAME repository transaction. Exact bytes
-    /// enter the original seal; no ref is changed and no green check is granted.
+    /// enter the original seal; no ref is changed. Verified succeeded jobs may
+    /// carry `Success`; skipped jobs remain `ActionRequired`.
     ///
     /// A historical terminal outcome is resolved before current source/policy
     /// checks. New decisions validate typed evidence and its exact run, attempt,
@@ -315,7 +316,8 @@ fn bytes32(value: Commitment) -> Result<[u8; 32], RefusalCode> {
 }
 const fn conclusion(value: JobOutcome) -> WorkflowCheckConclusion {
     match value {
-        JobOutcome::Succeeded | JobOutcome::Skipped => WorkflowCheckConclusion::ActionRequired,
+        JobOutcome::Succeeded => WorkflowCheckConclusion::Success,
+        JobOutcome::Skipped => WorkflowCheckConclusion::ActionRequired,
         JobOutcome::Failed | JobOutcome::Refused | JobOutcome::OutputLimit => {
             WorkflowCheckConclusion::Failure
         }
