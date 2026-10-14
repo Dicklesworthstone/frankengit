@@ -22,6 +22,15 @@ node scripts/fg_source_changes.mjs stage --package PRIVATE_PACKAGE --expect PRIV
   --sha256 CANDIDATE_MANIFEST_HASH --confirm-draft-sha256 REVIEWED_DRAFT_HASH
   --principal ORIGINAL_PRINCIPAL --confirm-candidate NATIVE_COMMIT --journal ABSENT_PRIVATE_DIRECTORY
 
+Strict packed-candidate variants (same required arguments as their counterparts):
+  prepare-packed       prepare AND decode/check every expected candidate object
+  inspect-packed       inspect-candidate AND repeat independent pack verification
+  stage-packed         stage ONLY after independent verification of that exact pack
+These commands refuse unsupported/corrupt packs; they never fall back to the older
+report-only checks. Pack verification does not prove untouched base closure,
+repository authority, current branch freshness, signatures or publication.
+See docs/PACK_VERIFIED_SOURCE_FLOW.md for the exact bounded transport profile.
+
 Every command accepts --timeout-ms 1..300000 (default 30000).
 Draft creates private patch.diff and manifest.json without network work. Review
 both files and retain the returned manifest hash before preparation. Preparation
@@ -49,7 +58,9 @@ Exit 0: complete result; 2: refusal; 3: cancelled before local publication;
 function options(args) {
   if (!Array.isArray(args) || args.length > 23 || args.length % 2 !== 1 ||
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_changes_cli_arguments');
-  const op = args[0], common = ['--package', '--expect', '--changes'];
+  const strict = { 'prepare-packed': 'prepare', 'inspect-packed': 'inspect-candidate', 'stage-packed': 'stage' };
+  const packed = Object.hasOwn(strict, args[0]), op = packed ? strict[args[0]] : args[0];
+  const common = ['--package', '--expect', '--changes'];
   const profiles = {
     draft: [[...common, '--output'], []],
     prepare: [[...common, '--selection', '--token-file', '--confirm-draft-sha256', '--output'], ['--ca-file']],
@@ -77,7 +88,7 @@ function options(args) {
       if (!/^(?:(?:sha1:)?[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})$/.test(value)) fail('source_changes_candidate_confirmation');
     } else absolute(value);
   }
-  return { op, f, timeout: Number(timeout) };
+  return { op, packed, f, timeout: Number(timeout) };
 }
 async function absent(path) {
   await directory(dirname(absolute(path)));
@@ -128,8 +139,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
   let result;
   try {
     if (args.length === 1 && args[0] === '--help') { await emit(stdout, { usage: USAGE }); return 0; }
-    const { op, f, timeout } = options(args), time = clock({ timeoutMs: timeout, signal: stop.signal });
+    const { op, packed, f, timeout } = options(args), time = clock({ timeoutMs: timeout, signal: stop.signal });
     if (typeof process.getuid !== 'function') fail('source_changes_posix_required');
+    // Only explicitly selected packed operations load the decoder. Legacy
+    // commands retain their startup cost, grammar and report-only boundaries.
+    const packFlow = packed ? await import('./operator/source_candidate_pack_flow.mjs') : null;
+    time.check();
     if (f.has('--output')) await absent(f.get('--output'));
     if (f.has('--journal')) await absent(f.get('--journal'));
     const expected = parse(await privateFile(f.get('--expect'), 128 * 1024, time.check), 128 * 1024);
@@ -141,15 +156,22 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       result = await saveDraft(f.get('--output'), draft, time.check);
     } else if (op === 'stage') {
       const selection = parse(await privateFile(f.get('--selection'), 512 * 1024, time.check), 512 * 1024);
-      result = await stageVerifiedSourceChanges(f.get('--journal'), f.get('--candidate'), f.get('--sha256'),
+      result = await (packed ? packFlow.stagePackedSourceChanges : stageVerifiedSourceChanges)(f.get('--journal'), f.get('--candidate'), f.get('--sha256'),
         bytes, expected, changes, selection, { ...local(), confirmDraftSha256: f.get('--confirm-draft-sha256'),
           confirmCandidate: f.get('--confirm-candidate'), principal: f.get('--principal') });
     } else if (op === 'inspect-candidate') {
-      const loaded = await loadSourceEdit(f.get('--candidate'), f.get('--sha256'), time.check);
-      const checked = await verifySourceChangeCandidate(bytes, expected, changes, loaded.capture, loaded.bundle,
-        { ...local(), confirmDraftSha256: f.get('--confirm-draft-sha256') }); time.check();
+      let checked;
+      if (packed) checked = await packFlow.inspectPackedSourceChanges(f.get('--candidate'), f.get('--sha256'),
+        bytes, expected, changes, { ...local(), confirmDraftSha256: f.get('--confirm-draft-sha256') });
+      else {
+        const loaded = await loadSourceEdit(f.get('--candidate'), f.get('--sha256'), time.check);
+        checked = await verifySourceChangeCandidate(bytes, expected, changes, loaded.capture, loaded.bundle,
+          { ...local(), confirmDraftSha256: f.get('--confirm-draft-sha256') });
+      }
+      time.check();
       result = { type: 'source_change_candidate_inspection', directory: f.get('--candidate'),
-        manifest_sha256: f.get('--sha256'), binding: checked.binding, read_only: true, remote_mutation_attempted: false };
+        manifest_sha256: f.get('--sha256'), binding: checked.binding, read_only: true, remote_mutation_attempted: false,
+        ...(packed ? { pack_verification: checked.pack_verification } : {}) };
     } else {
       const selection = parse(await privateFile(f.get('--selection'), 512 * 1024, time.check), 512 * 1024);
       const tokenBytes = await privateFile(f.get('--token-file'), 66, time.check); let token;
@@ -158,14 +180,15 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
         token = tokenBytes.subarray(0, 64).toString('ascii');
       } finally { tokenBytes.fill(0); }
       const ca = f.has('--ca-file') ? await privateFile(f.get('--ca-file'), 131072, time.check) : undefined;
-      const checked = await prepareSourceChanges(bytes, expected, changes, selection, token,
+      const checked = await (packed ? packFlow.preparePackedSourceChanges : prepareSourceChanges)(bytes, expected, changes, selection, token,
         { ...local(), ca, confirmDraftSha256: f.get('--confirm-draft-sha256') }); time.check();
       result = { ...await saveSourceEdit(f.get('--output'), checked.capture, checked.bundle, local()),
-        binding: checked.binding, read_metrics: checked.metrics, remote_mutation_attempted: false };
+        binding: checked.binding, read_metrics: checked.metrics, remote_mutation_attempted: false,
+        ...(packed ? { pack_verification: checked.pack_verification } : {}) };
     }
     await emit(stdout, { ...result, stop_requested: stop.signal.aborted }); return 0;
   } catch (error) {
-    const code = typeof error.code === 'string' && /^source_(?:changes|edit)_[a-z0-9_]{1,80}$/.test(error.code)
+    const code = typeof error.code === 'string' && /^source_(?:changes|edit|pack)_[a-z0-9_]{1,80}$/.test(error.code)
       ? error.code : 'source_changes_cli_refused';
     try { await emit(stderr, { type: 'source_changes_error', code, remote_mutation_attempted: false,
       ...(result ? { retained_result: result } : error.publication_unconfirmed ? { publication_unconfirmed: error.publication_unconfirmed } : {}) }); }
