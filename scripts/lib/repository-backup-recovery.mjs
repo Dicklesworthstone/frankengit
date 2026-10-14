@@ -11,17 +11,19 @@ import { replicateRepositoryBackup, repositoryBackupReplicationCheckpoint } from
 import { repositoryBackupOptions, runApprovedRepositoryBackup } from './repository-backup-native.mjs';
 import { MAX_REPAIR_REPLICAS, reconstructRepositoryBackup, validateRepositoryBackupChunkOptions } from './repository-backup-chunks.mjs';
 import { withRepositoryBackupWitness } from './repository-backup-witness.mjs';
+import { MAX_BACKUP_APPROVALS, selectRepositoryBackupApprovals } from './repository-backup-checkpoints.mjs';
 
 const fail = code => { throw backupError(code); };
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const overlap = (a, b) => a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
+const ACQUISITION = ['approval', 'sourceFile', 'caFile', 'repairCatalog', 'repairReplicas'];
 export const MAX_RECOVERY_ACQUISITION_BYTES = (MAX_DOWNLOAD_SOURCES + 3) * BACKUP_LIMITS.maximumArchiveBytes;
 
 function separated(paths) {
   const writes = ['witness', 'cacheDirectory', 'destination', 'approvalRecord'].filter(k => paths[k] !== undefined);
   const reads = ['fg', 'approval', 'trustKey', 'sourceFile', 'caFile', 'repairCatalog']
-    .filter(k => paths[k] !== undefined).map(k => paths[k]).concat(paths.repairReplicas ?? []);
+    .filter(k => paths[k] !== undefined).map(k => paths[k]).concat(paths.repairReplicas ?? [], paths.candidates?.map(row => row.approval) ?? []);
   for (let i = 0; i < writes.length; i++) {
     if (writes.slice(i + 1).some(k => overlap(paths[writes[i]], paths[k]))
       || reads.some(path => overlap(paths[writes[i]], path))) fail('backup_recovery_separate_paths_required');
@@ -36,9 +38,31 @@ export function repositoryBackupRecoveryOptions(raw) {
   const keys = ['operation', 'cacheDirectory', 'sourceFile', 'approval', 'trustKey', 'policy', 'witness',
     'fg', 'verificationInstance', 'destination', 'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal',
     'checkpoint', 'maximumBytes', 'maximumAcquisitionBytes', 'timeoutMs', 'signal', 'onProgress', 'caFile',
-    'repairCatalog', 'repairReplicas'];
+    'repairCatalog', 'repairReplicas', 'candidates'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))
     || !['verify', 'restore'].includes(raw.operation) || raw.trustedLocal !== true) fail('backup_explicit_recovery_required');
+  if (raw.candidates !== undefined) {
+    if (ACQUISITION.some(k => raw[k] !== undefined)) fail('backup_recovery_mixed_candidates');
+    if (!Array.isArray(raw.candidates) || !raw.candidates.length || raw.candidates.length > MAX_BACKUP_APPROVALS) fail('backup_candidate_limit');
+    const { candidates, ...common } = raw;
+    // Reuse the complete singleton grammar on REAL candidate paths. No dummy
+    // native inputs and no deferred validation of a losing candidate's options.
+    let normalized, pathBytes = 0;
+    const fixed = Object.freeze(Array.from(candidates, candidate => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+        || Object.keys(candidate).some(k => !ACQUISITION.includes(k))) fail('backup_recovery_invalid_candidate');
+      const valid = repositoryBackupRecoveryOptions({ ...common, ...candidate });
+      normalized ??= valid;
+      const row = Object.fromEntries(ACQUISITION.filter(k => valid[k] !== undefined).map(k => [k, valid[k]]));
+      for (const value of Object.values(row)) {
+        for (const path of Array.isArray(value) ? value : [value]) pathBytes += Buffer.byteLength(path);
+      }
+      if (pathBytes > 256 * 1024) fail('backup_candidate_path_limit');
+      return Object.freeze(row);
+    }));
+    const result = Object.fromEntries(Object.entries(normalized).filter(([k]) => !ACQUISITION.includes(k)));
+    return Object.freeze({ ...result, candidates: fixed });
+  }
   const result = { ...raw, policy: backupPolicy(raw.policy), resume: raw.resume ?? false,
     checkpoint: repositoryBackupReplicationCheckpoint(raw.checkpoint) };
   if (typeof result.resume !== 'boolean') fail('backup_invalid_options');
@@ -103,6 +127,14 @@ async function physicalPaths(options, live) {
       }
     }
   }
+  if (options.candidates) {
+    // Only approvals participate in pre-selection I/O. Losing payload/control
+    // paths may be unavailable, including their parents, without blocking a winner.
+    paths.candidates = [];
+    for (const row of options.candidates) {
+      live.check(); paths.candidates.push({ approval: await realpath(row.approval) });
+    }
+  }
   separated(paths); live.check(); return paths;
 }
 function privateDirectory(stat) {
@@ -115,28 +147,62 @@ function privateDirectory(stat) {
  * listing, remote re-selection, automatic native retry or alternate engine.
  */
 export async function recoverRepositoryBackup(raw) {
-  const options = repositoryBackupRecoveryOptions(raw);
+  let options = repositoryBackupRecoveryOptions(raw);
   const live = backupLifetime({ maximumBytes: options.maximumBytes, timeoutMs: options.timeoutMs, signal: options.signal });
   if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined || constants.O_DIRECTORY === undefined) fail('backup_unsupported_filesystem');
   let phase = 'validating', checkpoint = null, candidate = null, acquisition = null, native = null, complete = null;
-  let reconstruction = null;
+  let reconstruction = null, checkpointSelection = null;
   const knowledge = () => Object.freeze({ phase, checkpoint, candidate, acquisition, native,
-    operation: options.operation, resume_requested: options.resume, ...(options.repairCatalog ? { reconstruction } : {}) });
+    operation: options.operation, resume_requested: options.resume, ...(options.repairCatalog ? { reconstruction } : {}),
+    ...(checkpointSelection ? { checkpoint_selection: checkpointSelection } : {}) });
   try {
-    await physicalPaths(options, live);
+    const initialPaths = await physicalPaths(options, live);
     return await withRepositoryBackupWitness(options.witness, options.trustKey, options.policy,
       { maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal }, async witness => {
         phase = 'authenticating';
-        const envelope = await readBackupControl(options.approval, BACKUP_LIMITS.envelopeBytes, live);
-        const key = await readBackupControl(options.trustKey, BACKUP_LIMITS.keyBytes, live);
-        const inspected = await inspectRepositoryBackupApproval(envelope, key, options.policy, {
-          maximumBytes: BACKUP_LIMITS.maximumArchiveBytes, timeoutMs: live.remaining(), signal: live.signal,
-        });
-        // Signed higher/conflicting evidence survives later size, expiry, I/O and
-        // native failures. Neither a cache hit nor a supplied resume pin bypasses it.
-        await witness.observe(envelope);
+        let inspected;
+        if (options.candidates) {
+          const selection = await selectRepositoryBackupApprovals(options.candidates.map(row => row.approval),
+            options.trustKey, options.policy, { maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal,
+              async onProgress(event) {
+                await options.onProgress(Object.freeze({ stage: 'selection', ...event }));
+                const current = await physicalPaths(options, live);
+                for (const k of ['witness', 'cacheDirectory', 'destination', 'approvalRecord', 'fg']) {
+                  if (current[k] !== initialPaths[k]) fail('backup_recovery_path_changed');
+                }
+                live.check();
+              },
+            }, witness);
+          checkpointSelection = selection.report;
+          let index = selection.report.selected_index;
+          if (options.checkpoint) {
+            // Equality pins may disambiguate byte serializations ONLY within the
+            // highest identical statement set. They cannot override newer evidence.
+            index = selection.report.highest_indices.find(i =>
+              selection.inspected[i].observation.approval_sha256 === options.checkpoint.approval_sha256);
+            if (index === undefined || options.checkpoint.trusted_key_id !== selection.report.checkpoint.trusted_key_id) {
+              fail('backup_recovery_checkpoint_mismatch');
+            }
+          }
+          const selected = selection.inspected[index]; inspected = selected.verified;
+          checkpoint = Object.freeze({ approval_sha256: selected.observation.approval_sha256,
+            trusted_key_id: selection.report.checkpoint.trusted_key_id });
+          checkpointSelection = Object.freeze({ ...selection.report, selected: selected.observation, selected_index: index,
+            checkpoint, original_checkpoint_pin_enforced: Boolean(options.checkpoint) });
+          const { candidates, ...common } = options;
+          options = Object.freeze({ ...common, ...candidates[index] });
+        } else {
+          const envelope = await readBackupControl(options.approval, BACKUP_LIMITS.envelopeBytes, live);
+          const key = await readBackupControl(options.trustKey, BACKUP_LIMITS.keyBytes, live);
+          inspected = await inspectRepositoryBackupApproval(envelope, key, options.policy, {
+            maximumBytes: BACKUP_LIMITS.maximumArchiveBytes, timeoutMs: live.remaining(), signal: live.signal,
+          });
+          // Signed higher/conflicting evidence survives later size, expiry, I/O
+          // and native failures. A cache hit or resume pin never bypasses it.
+          await witness.observe(envelope);
+          checkpoint = Object.freeze({ approval_sha256: digest(envelope), trusted_key_id: inspected.checkpoint.trusted_key_id });
+        }
         const statement = inspected.checkpoint.statement;
-        checkpoint = Object.freeze({ approval_sha256: digest(envelope), trusted_key_id: inspected.checkpoint.trusted_key_id });
         witness.require(statement);
         if (options.checkpoint && (options.checkpoint.approval_sha256 !== checkpoint.approval_sha256
           || options.checkpoint.trusted_key_id !== checkpoint.trusted_key_id)) fail('backup_recovery_checkpoint_mismatch');
@@ -236,6 +302,7 @@ export async function recoverRepositoryBackup(raw) {
           phase = 'complete';
           complete = Object.freeze({ type: `remote_repository_backup_${options.operation}`, schema_version: 1, state: 'complete',
             checkpoint, candidate, acquisition, native, recovery_witness: witness.snapshot(),
+            ...(checkpointSelection ? { checkpoint_selection: checkpointSelection } : {}),
             highest_retained_generation_enforced: true, complete_capsule_restored: false, external_effects_replayed: false });
           return complete;
         } catch (error) { problem = error; throw error; }
