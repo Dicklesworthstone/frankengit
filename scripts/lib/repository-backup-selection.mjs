@@ -3,11 +3,10 @@
 // Only byte-identical signed checkpoint statements may share replica failover.
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import { BACKUP_LIMITS, backupError, backupPath, backupLifetime, exact,
-  readBackupControl, hashRepositoryBackup } from './repository-backup-io.mjs';
-import { backupPolicy, inspectRepositoryBackupApproval } from './repository-backup-approval.mjs';
+import { BACKUP_LIMITS, backupError, backupPath, backupLifetime, exact, hashRepositoryBackup } from './repository-backup-io.mjs';
+import { MAX_BACKUP_APPROVALS, selectRepositoryBackupApprovals } from './repository-backup-checkpoints.mjs';
 
-export const MAX_BACKUP_CANDIDATES = 64;
+export const MAX_BACKUP_CANDIDATES = MAX_BACKUP_APPROVALS;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const fail = code => { throw backupError(code); };
@@ -140,42 +139,18 @@ async function evaluateRepositoryBackups(candidates, trustKey, expected, options
   const payloadBudget = maximumReplicaBytes ?? live.maximumBytes;
   if (!Number.isSafeInteger(payloadBudget) || payloadBudget < 1
     || payloadBudget > BACKUP_LIMITS.maximumArchiveBytes * MAX_BACKUP_CANDIDATES) fail('backup_invalid_options');
-  const policy = backupPolicy(expected), keyPath = resolve(backupPath(trustKey));
-  const fixed = options.now; // Capture a testing clock, never learn time from input.
-  const key = await readBackupControl(keyPath, BACKUP_LIMITS.keyBytes, live);
+  const checkpointSelection = await selectRepositoryBackupApprovals(rows.map(row => row.approval), trustKey, expected, {
+    ...lifetimeOptions, maximumBytes: live.maximumBytes, timeoutMs: live.remaining(),
+  }, witness);
   live.check();
-  let winner = null, maximum = 0n;
-  const inspected = [], observations = [];
-  for (const row of rows) {
-    live.check();
-    const encoded = await readBackupControl(row.approval, BACKUP_LIMITS.envelopeBytes, live);
-    const verified = await inspectRepositoryBackupApproval(encoded, key, policy, {
-      // All signed generations remain visible even when their artifacts exceed
-      // this invocation's narrower I/O budget. That budget gates the winner.
-      maximumBytes: BACKUP_LIMITS.maximumArchiveBytes, timeoutMs: live.remaining(),
-      signal: live.signal, ...(fixed === undefined ? {} : { now: fixed }),
-    });
-    live.check();
-    // Persist authenticated observations before artifact/time checks or caller
-    // progress. A later failure must not forget a newer checkpoint on restart.
-    if (witness) await witness.observe(encoded);
-    const statement = verified.checkpoint.statement, generation = BigInt(statement.head_generation);
-    const signedBytes = JSON.stringify(statement);
-    const observation = Object.freeze({ ...row, head_generation: statement.head_generation,
-      approval_sha256: hash(encoded), statement_sha256: hash(signedBytes) });
-    observations.push(observation); inspected.push({ verified, signedBytes, observation });
-    if (generation > maximum) { maximum = generation; winner = inspected.at(-1); }
-    await live.onProgress(Object.freeze({ phase: 'approval_inspected', inspected: observations.length, total: rows.length }));
-    live.check();
-  }
-  // Duplicated replicas of the SAME signed statement are deterministic aliases.
-  // Different statements at the maximum generation require an explicit operator
-  // choice, even if their artifact bytes or approval lifetimes happen to agree.
-  const highest = inspected.filter(row => BigInt(row.observation.head_generation) === maximum);
-  if (highest.some(row => row.signedBytes !== winner.signedBytes)) fail('backup_checkpoint_ambiguous');
-  if (witness) witness.require(winner.verified.checkpoint.statement);
-  const statement = winner.verified.checkCurrent().statement; live.check();
-  if (BigInt(statement.artifact.bytes) > BigInt(live.maximumBytes)) fail('backup_selected_archive_limit');
+  // Preserve canonical input-path replica ordering, exact envelope pins and each
+  // verified approval lifetime while sharing the pre-payload checkpoint gate.
+  const inspected = checkpointSelection.inspected.map((row, index) => Object.freeze({ ...row,
+    observation: Object.freeze({ ...rows[index], ...row.observation }) }));
+  const observations = inspected.map(row => row.observation);
+  let winner = inspected[checkpointSelection.report.selected_index];
+  const highest = checkpointSelection.report.highest_indices.map(index => inspected[index]);
+  const { policy, statement } = checkpointSelection.checkCurrent();
   await live.onProgress(Object.freeze({ phase: 'checkpoint_selected', head_generation: statement.head_generation }));
   live.check(); winner.verified.checkCurrent();
   // First choose the signed checkpoint, then its available byte replica. Lower
