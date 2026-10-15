@@ -60,10 +60,11 @@ export function githubRetryDelay(status, headers, attempt, nowMs = Date.now()) {
   return delay ?? (limited ? 60000 : 1000) * (2 ** attempt);
 }
 export function createGithubSource({ token = null, signal, timeoutMs = 300000,
-  maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch } = {}) {
+  maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch, maxRequests = 4096 } = {}) {
   integer(timeoutMs, 1, 300000, 'capture_timeout');
   integer(maxReadBytes, 1, 256 * 1024 * 1024, 'capture_read_limit');
   integer(maxSourceRetries, 0, SOURCE_RETRY_LIMIT, 'source_retries');
+  integer(maxRequests, 1, 4096, 'request_limit');
   if (token !== null && (typeof token !== 'string' || !/^[A-Za-z0-9_]{1,255}$/.test(token))) fail('token');
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('signal');
   if (typeof fetchImpl !== 'function') fail('fetch');
@@ -76,7 +77,8 @@ export function createGithubSource({ token = null, signal, timeoutMs = 300000,
     combined.throwIfAborted();
   };
   async function attempt(url) {
-    check(); if (++requests > 4096) fail('request_limit');
+    check(); if (requests === maxRequests) fail('request_limit');
+    requests++;
     const response = await fetchImpl(url, { method: 'GET', redirect: 'error', credentials: 'omit', cache: 'no-store',
       signal: combined, headers: { Accept: 'application/vnd.github.raw+json', 'X-GitHub-Api-Version': API_VERSION,
         'User-Agent': UA, ...(token === null ? {} : { Authorization: `Bearer ${token}` }) } });

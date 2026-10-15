@@ -180,11 +180,37 @@ function selectedIdentities(value, repository, numbers) {
   }
   return { repository: name, repositoryId, issues };
 }
+// A session owns one HTTP deadline, byte/request/retry allowance across every
+// capture. Sequential callers cannot reset limits between inventory batches.
+// An error poisons the owner: a failed batch is retried only in a new explicit
+// source session, never by continuing a damaged or cleanup-uncertain lifetime.
+export function createGithubIssueCaptureSession(options = {}) {
+  const source = createGithubSource(options); let busy = false, closed = false;
+  const close = () => { closed = true; source.close(); };
+  return Object.freeze({
+    check: source.check, statistics: source.statistics, close,
+    async capture({ repository, numbers, expectedSelection = null } = {}) {
+      if (closed) fail('capture_session_closed');
+      if (busy) fail('concurrent_capture');
+      githubRepository(repository); numbers = selectedNumbers(numbers);
+      const expected = selectedIdentities(expectedSelection, repository, numbers);
+      busy = true;
+      try { return await captureFromSource(repository, numbers, expected, source); }
+      catch (error) { close(); throw error; }
+      finally { busy = false; }
+    },
+  });
+}
 export async function captureGithubIssues({ repository, numbers, token = null, signal,
   timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch, expectedSelection = null } = {}) {
+  // Preserve validation-before-owner acquisition for the existing single batch API.
   githubRepository(repository); numbers = selectedNumbers(numbers);
-  const expected = selectedIdentities(expectedSelection, repository, numbers);
-  const source = createGithubSource({ token, signal, timeoutMs, maxReadBytes, maxSourceRetries, fetchImpl });
+  selectedIdentities(expectedSelection, repository, numbers);
+  const session = createGithubIssueCaptureSession({ token, signal, timeoutMs, maxReadBytes, maxSourceRetries, fetchImpl });
+  try { return await session.capture({ repository, numbers, expectedSelection }); }
+  finally { session.close(); }
+}
+async function captureFromSource(repository, numbers, expected, source) {
   const { get, check } = source;
   async function pass() {
     const repo = object((await get(`/repos/${repository}`)).value);
@@ -216,11 +242,9 @@ export async function captureGithubIssues({ repository, numbers, token = null, s
     }
     return { schema: CAPTURE_SCHEMA, consistency: CONSISTENCY, source: { repository: selected, repository_id: repositoryId }, issues };
   }
-  try {
-    const first = await pass(), bytes = captureBytes(first);
-    issueImportSteps(first); // Refuse unrepresentable native text before saving a usable package.
-    const second = captureBytes(await pass()); check();
-    if (!bytes.equals(second)) fail('source_changed');
-    return { capture: first, bytes, sha256: recordDigest(bytes), ...source.statistics() };
-  } finally { source.close(); }
+  const first = await pass(), bytes = captureBytes(first);
+  issueImportSteps(first); // Refuse unrepresentable native text before saving a usable package.
+  const second = captureBytes(await pass()); check();
+  if (!bytes.equals(second)) fail('source_changed');
+  return { capture: first, bytes, sha256: recordDigest(bytes), ...source.statistics() };
 }
