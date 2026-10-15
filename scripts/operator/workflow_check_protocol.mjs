@@ -30,9 +30,19 @@ export function pin(value) {
   if (typeof value !== 'string' || !/^[1-9][0-9]{1,9}:[0-9a-f]{64}$/.test(value)) fail('Invalid native journal pin.');
   integer(Number(value.split(':')[0]), 72, 4294967296); return value;
 }
-const conclusions = Object.freeze({ succeeded: 'action_required', skipped: 'action_required', failed: 'failure',
+const conclusions = Object.freeze({ succeeded: 'success', skipped: 'action_required', failed: 'failure',
   refused: 'failure', output_limit: 'failure', cancelled: 'cancelled', timed_out: 'timed_out' });
-export function conclusion(outcome) { return conclusions[outcome] ?? fail('Unsupported native job outcome.'); }
+// Journal custody still reports ActionRequired for local success. Publication
+// derives this distinct conclusion only through the native evidence verifier.
+export function conclusion(outcome) {
+  if (typeof outcome !== 'string' || !Object.hasOwn(conclusions, outcome)) fail('Unsupported native job outcome.');
+  return conclusions[outcome];
+}
+// Custody history is deliberately not the canonical publication conclusion.
+export function journalConclusion(outcome) {
+  const value = conclusion(outcome);
+  return value === 'success' ? 'action_required' : value;
+}
 export function historyPage(reply, scope, previous = null) {
   record(reply); keys(reply.scope, ['tenant', 'repository', 'journal_id']);
   if (reply.type !== 'workflow_custody_history' || reply.schema_version !== 1 ||

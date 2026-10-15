@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { Writable } from 'node:stream';
 import { once as execute, configuration as watchConfiguration } from '../../scripts/operator/workflow_watch.mjs';
 import { configuration, once, status, serve } from '../../scripts/operator/workflow_check_publish.mjs';
-import { sha256, encode, conclusion, jobKey } from '../../scripts/operator/workflow_check_protocol.mjs';
+import { sha256, encode, conclusion, journalConclusion, jobKey } from '../../scripts/operator/workflow_check_protocol.mjs';
 import { main } from '../../scripts/fg_workflow_checks.mjs';
 
 const publisherPeer = new URL('./fixtures/workflow_check_native.mjs', import.meta.url).href;
@@ -53,7 +53,7 @@ async function fixture(t, format = 'sha1', patch = {}) {
         workflow_graph_sha256: 'c'.repeat(64), trust_domain: 'trusted-local-owner', profile: { name: 'trusted-local-foreground-v1',
           source_sha256: 'b'.repeat(64), step_timeout_nanos: run.execution.step_timeout_millis * 1000000,
           run_timeout_nanos: run.execution.run_timeout_millis * 1000000, stream_bytes: run.execution.stream_bytes, total_output_bytes: run.execution.total_output_bytes },
-        facts: [{ job: job.id, status: 'completed', conclusion: conclusion(job.outcome), evidence_sha256: sha256(encode(job)), logical_millis: 0 }] }));
+        facts: [{ job: job.id, status: 'completed', conclusion: journalConclusion(job.outcome), evidence_sha256: sha256(encode(job)), logical_millis: 0 }] }));
       await save(join(directory, 'custody.json'), { store: watch.storage_root, incarnation: watch.repository_incarnation, ref_hex: watch.ref_hex,
         conclusions: Object.fromEntries(run.execution.jobs.map(job => [job.id, conclusion(job.outcome)])), history: {
           type: 'workflow_custody_history', schema_version: 1, authoritative_check: false, execution_retried: false,
@@ -77,11 +77,11 @@ const multiple = { execution_patch: { jobs: [
   { id: 'second', outcome: 'succeeded', steps: [], failure: null },
 ] } };
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: observed execution flows into canonical check publication, never a green approval`, async t => {
+  test(`${format}: successful execution publishes a check observation, not merge approval`, async t => {
     const f = await fixture(t, format); await f.run();
     const events = [], result = await once(f.config, { onObservation: event => events.push(event) });
     assert.equal(result.publications, 1); assert.equal(result.runs[0].committed, 1);
-    assert.equal(events[0].conclusion, 'action_required'); assert.equal(events[0].authoritative_check, false);
+    assert.equal(events[0].conclusion, 'success'); assert.equal(events[0].authoritative_check, false);
     assert.equal(events[0].decision_sequence, '18446744073709551615');
     const calls = await f.lines('calls.ndjson'); assert.deepEqual(calls.map(args => args[0] === 'refs' ? 'refs' : args[1]), ['refs', 'dispatch', 'recover', 'publish']);
     const args = calls.at(-1), get = key => args[args.indexOf(key) + 1];
@@ -152,7 +152,7 @@ for (const patch of [
 
 for (const patch of [{ principal_id: '9'.repeat(32) }, { source_ref_hex: hex('refs/heads/other') }, { source_commit: `sha1:${'e'.repeat(40)}` },
   { journal_id: '9'.repeat(64) }, { batch_sha256: '9'.repeat(64) }, { fact_index: 1 }, { evidence_sha256: '9'.repeat(64) },
-  { merge_permission: true }, { authoritative_check: true }, { conclusion: 'success' }, { decision_sequence: 9007199254740992 },
+  { merge_permission: true }, { authoritative_check: true }, { conclusion: 'action_required' }, { decision_sequence: 9007199254740992 },
   { decision_sequence: '18446744073709551616' }, { node_closed: false }]) {
   test(`wrong terminal remains unresolved: ${JSON.stringify(patch)}`, async t => {
     const f = await fixture(t, 'sha1', { publication_patch: patch }); await f.run();

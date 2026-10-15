@@ -5,7 +5,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { configuration as watchConfiguration, status as watchStatus, dispatchReport } from './workflow_watch.mjs';
 import { absolute, contains, directory, executable, fail, lock, names, parseJson, readPrivate, runNative, writeNew } from './workflow_watch_io.mjs';
 import { encode, sha256, hex, record, keys, integer, text, digest, principal, oid, pin,
-  conclusion, historyPage, jobKey, validateJob, publication, validateTerminal } from './workflow_check_protocol.mjs';
+  conclusion, journalConclusion, historyPage, jobKey, validateJob, publication, validateTerminal } from './workflow_check_protocol.mjs';
+import { verifyPlannedConclusions } from './workflow_check_submission.mjs';
 import { lookupOutcome, outcomeEndpoint } from './transaction_outcome.mjs';
 import { recoveryScope, recoveryRecord, validateRecoveryRecord, recoveredTerminal, matchPublication } from './workflow_check_outcome.mjs';
 
@@ -187,7 +188,7 @@ async function completedJobs(config, intent, report, cx) {
           if (!['queued', 'in_progress', 'completed'].includes(fact.status)) fail('Unknown native workflow fact.');
           if (fact.status !== 'completed') continue;
           digest(fact.evidence_sha256);
-          if (!wanted.has(fact.job) || found.has(fact.job) || !['failure', 'cancelled', 'timed_out', 'action_required'].includes(fact.conclusion)) fail('Completed native workflow fact is duplicated or not in the executed plan.');
+          if (!wanted.has(fact.job) || found.has(fact.job) || fact.conclusion !== journalConclusion(wanted.get(fact.job).outcome)) fail('Completed native workflow fact is duplicated or not in the executed plan.');
           found.set(fact.job, { directory: directoryPath, journal_id: journal, minimum_pin: snapshot,
             batch_sha256: entry.batch_sha256, fact_index: index, job: fact.job, source_commit: intent.commit,
             run_id: entry.run_sha256, attempt_id: entry.attempt_sha256, graph_root: entry.workflow_graph_sha256,
@@ -282,6 +283,12 @@ async function sweep(config, options) {
   if (typeof observer !== 'function') fail('Invalid publication observer.');
   let calls = 0;
   const processGroup = async group => {
+    const pending = group.rows.filter(row => !row.terminal).map(row => row.job);
+    if (!pending.length) return true;
+    if (cx.signal?.aborted || calls === cx.maxPublications) return false;
+    // Check the complete pending group before the first start marker or resend.
+    // An upgraded runtime must never silently reinterpret an old sealed key.
+    await verifyPlannedConclusions(config, group.plan, pending, cx.check);
     for (const row of group.rows) {
       if (row.terminal) continue;
       if (cx.signal?.aborted || calls === cx.maxPublications) return false;
