@@ -1,5 +1,6 @@
-// Exact full-file patches for native source admission. No host worktree or Git
-// subprocess is involved; byte paths and file modes remain explicit inputs.
+// Complete file replacements for native source admission, with unchanged edge
+// lines elided from their exact byte hunks. No host worktree or Git subprocess
+// is involved; native preparation still verifies the complete intended effects.
 import { fail, keys, hex, unhex, utf8 } from './pulls-core.mjs';
 export const FILE_LIMIT = 256 * 1024;
 export const PATCH_LIMIT = 1024 * 1024;
@@ -70,6 +71,49 @@ export function normalizeEdits(edits, options = {}) {
   return normalized;
 }
 function lineCount(bytes) { return bytes.reduce((n, byte) => n + Number(byte === 10), 0) + Number(bytes.length > 0 && bytes.at(-1) !== 10); }
+// Offsets, not decoded strings: CRLF, invalid UTF-8 and a missing final LF are
+// all part of a line's identity. Allocation is bounded by the checked input.
+function indexedLines(bytes) {
+  const offsets = new Uint32Array(lineCount(bytes) + 1); let line = 1;
+  for (let i = 0; i < bytes.length; i += 1) if (bytes[i] === 10) offsets[line++] = i + 1;
+  if (offsets.at(-1) !== bytes.length) offsets[line] = bytes.length;
+  return { bytes, offsets, count: offsets.length - 1 };
+}
+function equalLine(a, ai, b, bi) {
+  const start = a.offsets[ai], other = b.offsets[bi], length = a.offsets[ai + 1] - start;
+  if (length !== b.offsets[bi + 1] - other) return false;
+  for (let i = 0; i < length; i += 1) if (a.bytes[start + i] !== b.bytes[other + i]) return false;
+  return true;
+}
+function putLines(put, prefix, lines, start, end) {
+  for (let line = start; line < end; line += 1) {
+    const bytes = lines.bytes.subarray(lines.offsets[line], lines.offsets[line + 1]);
+    put(prefix); put(bytes);
+    if (bytes.at(-1) !== 10) put('\n\\ No newline at end of file\n');
+  }
+}
+function putHunk(put, old, next) {
+  let prefix = 0, suffix = 0;
+  while (prefix < old.count && prefix < next.count && equalLine(old, prefix, next, prefix)) prefix += 1;
+  while (suffix < old.count - prefix && suffix < next.count - prefix &&
+      equalLine(old, old.count - suffix - 1, next, next.count - suffix - 1)) suffix += 1;
+  // Keep existing short-file bytes stable. Three exact context lines are enough
+  // to describe a trimmed boundary; there is no fuzzy or offset application.
+  const compact = prefix > 3 || suffix > 3;
+  const start = compact ? Math.max(0, prefix - 3) : 0;
+  const oldEnd = compact ? old.count - Math.max(0, suffix - 3) : old.count;
+  const newEnd = compact ? next.count - Math.max(0, suffix - 3) : next.count;
+  const oldCount = oldEnd - start, newCount = newEnd - start;
+  put(`@@ -${oldCount ? start + 1 : start},${oldCount} +${newCount ? start + 1 : start},${newCount} @@\n`);
+  if (!compact) {
+    putLines(put, '-', old, start, oldEnd); putLines(put, '+', next, start, newEnd);
+    return;
+  }
+  putLines(put, ' ', old, start, prefix);
+  putLines(put, '-', old, prefix, old.count - suffix);
+  putLines(put, '+', next, prefix, next.count - suffix);
+  putLines(put, ' ', old, old.count - suffix, oldEnd);
+}
 export function fullFilePatch(edits, options = {}) {
   const normalized = normalizeEdits(edits, options), parts = []; let size = 0;
   const put = value => {
@@ -85,18 +129,8 @@ export function fullFilePatch(edits, options = {}) {
     else if (before.mode !== after.mode) put(`old mode ${before.mode.toString(8)}\nnew mode ${after.mode.toString(8)}\n`);
     const old = before?.bytes ?? new Uint8Array(), next = after?.bytes ?? new Uint8Array();
     if (same(old, next)) continue; // Header-only empty creation/deletion or mode-only change.
-    const oldCount = lineCount(old), newCount = lineCount(next);
     put(`--- ${before === null ? '/dev/null' : a}\n+++ ${after === null ? '/dev/null' : b}\n`);
-    put(`@@ -${oldCount ? 1 : 0},${oldCount} +${newCount ? 1 : 0},${newCount} @@\n`);
-    for (const [prefix, bytes] of [['-', old], ['+', next]]) {
-      let start = 0;
-      for (let i = 0; i <= bytes.length; i += 1) if (bytes[i] === 10 || (i === bytes.length && start < i)) {
-        const end = i < bytes.length ? i + 1 : i;
-        put(prefix); put(bytes.subarray(start, end));
-        if (end === bytes.length && bytes.at(-1) !== 10) put('\n\\ No newline at end of file\n');
-        start = end;
-      }
-    }
+    putHunk(put, indexedLines(old), indexedLines(next));
   }
   // Avoid a variadic spread: a permitted many-line file can exceed JavaScript's
   // argument limit even while remaining inside all patch and line budgets.
