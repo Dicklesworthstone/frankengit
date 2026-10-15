@@ -241,3 +241,28 @@ test('empty, too many batches, overflow and wrong pin are never runnable session
     await assert.rejects(run({ ...f.initial, fetchImpl: () => assert.fail() })); await missing(f.initial.workdir);
   }
 });
+
+test('uncertain HTTP body cleanup retains the source owner fence', async t => {
+  const f = await fixture(t, 1);
+  const peer = githubPeer({ before: async () => new Response(new ReadableStream({ cancel() { throw new Error('planted cleanup failure'); } }), { status: 503 }) });
+  await assert.rejects(run({ ...f.initial, fetchImpl: peer.fetchImpl }), e => e.code === 'github_import_source_cleanup');
+  assert.ok((await lstat(join(f.initial.workdir, 'capture.owner'))).isDirectory());
+});
+
+test('a later capture cannot replenish a session deadline', async () => {
+  const peer = githubPeer(), session = createGithubIssueCaptureSession({ fetchImpl: peer.fetchImpl, timeoutMs: 100 });
+  try {
+    await session.capture(selection(1));
+    await new Promise(resolve => setTimeout(resolve, 120));
+    await assert.rejects(session.capture(selection(2)), { name: 'AbortError' });
+    assert.equal(peer.calls.length, 6);
+  } finally { session.close(); }
+});
+
+test('competing initial creators never replace a retained source session', async t => {
+  const f = await fixture(t, 1), a = githubPeer(), b = githubPeer();
+  const results = await Promise.allSettled([run({ ...f.initial, fetchImpl: a.fetchImpl }), run({ ...f.initial, fetchImpl: b.fetchImpl })]);
+  assert.equal(results.filter(row => row.status === 'fulfilled').length, 1);
+  assert.equal(a.calls.length + b.calls.length, 6);
+  assert.equal(results.find(row => row.status === 'fulfilled').value.complete, true);
+});

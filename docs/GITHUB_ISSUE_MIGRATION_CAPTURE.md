@@ -16,6 +16,9 @@ source credential fingerprint (or anonymous selection), number offset and
 whole-capture limits. It is synchronized last before source access. Retain the
 returned `session_sha256` separately, including from `error.capture_progress`.
 
+`operation: 'prepare'` performs the same offline session creation, without
+starting source access. It returns the original pin for a subsequent resume.
+
 `operation: 'resume'` takes only that work directory, its original `confirm`
 pin, and the same optional source `tokenFile`. It never rediscovers membership,
 changes the partition, rereads completed batches from GitHub, or replaces a
@@ -81,12 +84,85 @@ Directory or lock replacement is never cleaned as the original owner. A crash
 while writing a capture can leave a suspect file that requires diagnosis rather
 than automatic replay. A completed handoff survives subsequent output failure.
 
+## Command workflow
+
+Use Node.js 22.16 or later and a stable owner-private parent directory. First
+obtain and independently retain the inventory pin using the existing discovery
+command in [GITHUB_ISSUE_INVENTORY.md](GITHUB_ISSUE_INVENTORY.md). Quiesce source
+edits and review its membership. Example paths below must be replaced with your
+selected deployment; the source token is a GitHub read credential, not a native
+FrankenGit credential.
+
+```sh
+node scripts/capture_github_issue_migration.mjs start \
+  --workdir /srv/migration/source-captures \
+  --inventory /srv/migration/inventory.json --inventory-sha256 "$INVENTORY_SHA" \
+  --token-file /srv/operator/github-read-token --max-batches 8
+```
+
+`start` prints a `github_issue_capture_session_ready` JSON row containing the
+original `session_sha256` **before any network request**, then captures missing
+batches. Save that pin independently as `SESSION_SHA`. A broken initial output
+stops before source access; SIGKILL after network begins cannot lose the already
+emitted session reference. A final JSON row describes the captured prefix or
+complete handoff. Source budgets and the first output wait share the command's
+operation deadline. Each output write has its own additional ten-second bound;
+reporting a completed observation never starts a new acquisition.
+
+```sh
+node scripts/capture_github_issue_migration.mjs resume \
+  --workdir /srv/migration/source-captures --confirm "$SESSION_SHA" \
+  --token-file /srv/operator/github-read-token --max-batches 8
+
+node scripts/capture_github_issue_migration.mjs status \
+  --workdir /srv/migration/source-captures --confirm "$SESSION_SHA"
+```
+
+Use `prepare` instead of `start` to create only the offline source session. Do
+not run start again against an occupied directory. Run resume explicitly after
+a batch ceiling or a reconciled source error; completed captures are never
+refetched. A retained owner still blocks resume, even after SIGKILL. Status
+cannot accept new source credentials, inventory selection or network budgets.
+
+When complete, review the captured provenance and independently retain the
+returned `sources.sha256` as `SOURCES_SHA`. The complete source selection is
+validated through the same parser used by destination preparation, not a
+parallel permissive interpretation. The separate destination operation is:
+
+```sh
+node scripts/migrate_github_issues.mjs prepare \
+  --workdir /srv/migration/native-prepared \
+  --sources /srv/migration/source-captures/sources.json --sources-sha256 "$SOURCES_SHA" \
+  --url https://forge.example/repository/ \
+  --tenant 11111111111111111111111111111111 \
+  --repository 22222222222222222222222222222222 \
+  --token-file /srv/operator/native-issue-token
+```
+
+Then use the existing, independently approved native plan and its run/status
+semantics from [GITHUB_ISSUE_MIGRATION_EXECUTION.md](GITHUB_ISSUE_MIGRATION_EXECUTION.md).
+The source command does not automatically execute any destination operation.
+
+Exit 0 means complete source capture, or completion of the explicit offline
+prepare operation. Exit 3 means a captured prefix, cancellation, retained owner
+or source error after validated session progress. Exit 2 means invalid input or
+failure before validated progress. Exit 4 means a known result followed by an
+output/cleanup error, not a successful capture command. Diagnostics preserve the
+original session pin and known capture progress without printing credentials.
+All output is bounded JSON with terminal-control escaping. None of these exit
+codes describes a native transaction outcome.
+
 ## Evidence and limits
 
-The focused target is `tests/operator/github_issue_capture_migration.test.mjs`.
+The focused targets are `tests/operator/github_issue_capture_migration.test.mjs`
+and `tests/operator/github_issue_capture_command.test.mjs`. Run them through
+`bash scripts/verify_github_issue_capture.sh`.
 It uses actual source HTTP ownership, discovery/capture codecs, native issue
 command encoding and private filesystem operations, with a GitHub response-schema
-peer. It covers multi-page comments, full-width numeric aliases, byte equivalence,
+peer. The command tests run unchanged production modules in actual Node
+processes; only the GitHub HTTP response peer is injected through a test preload.
+They also drive the actual migration source-selection loader, both signals,
+closed/stalled output and the complete 128-batch boundary. It covers multi-page comments, full-width numeric aliases, byte equivalence,
 restart, bounds, corruption, source changes, credentials, cancellation, ownership
 and path replacement. It is not a live GitHub or Rust/native-server test.
 

@@ -5,6 +5,7 @@ import { lstat, mkdir, open, opendir, realpath, rmdir } from 'node:fs/promises';
 import { dirname, join, sep } from 'node:path';
 import { createGithubIssueCaptureSession, parseCapture, issueImportSteps, CAPTURE_LIMIT } from './github-issue-source.mjs';
 import { parseIssueInventory, selectIssueInventoryBatch, INVENTORY_LIMIT } from './github-issue-inventory.mjs';
+import { parseGithubIssueMigrationSources } from './github-issue-migration-sources.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, recordDigest,
   readPrivateOperatorFile, readSynchronizedOperatorRecord, saveOperatorRecord } from './forge-operator-io.mjs';
 
@@ -28,13 +29,15 @@ function pin(value) {
 }
 function options(raw) {
   const op = raw?.operation;
-  if (!['start', 'resume', 'status'].includes(op)) fail('operation');
+  if (!['prepare', 'start', 'resume', 'status'].includes(op)) fail('operation');
+  const preparing = op === 'start' || op === 'prepare';
   const common = ['operation', 'workdir', 'timeoutMs', 'signal'];
   const network = ['tokenFile', 'maxBatches', 'maxReadBytes', 'maxRequests', 'maxSourceRetries', 'fetchImpl'];
   const selection = ['inventoryFile', 'inventorySha256', 'offset', 'maxCaptureBytes', 'maxSteps'];
-  fields(raw, [...common, ...(op === 'status' ? [] : network), ...(op === 'start' ? selection : ['confirm'])],
-    ['operation', 'workdir', ...(op === 'start' ? ['inventoryFile', 'inventorySha256'] : ['confirm'])]);
+  fields(raw, [...common, ...(op === 'status' ? [] : op === 'prepare' ? ['tokenFile'] : network), ...(preparing ? selection : ['confirm'])],
+    ['operation', 'workdir', ...(preparing ? ['inventoryFile', 'inventorySha256'] : ['confirm'])]);
   const o = { operation: op, workdir: operatorPath(raw.workdir), timeoutMs: integer(raw.timeoutMs ?? 300000, 1, 300000), signal: raw.signal };
+  if (/[\x00-\x1f\x7f]/u.test(o.workdir)) fail('output_path');
   if (o.signal !== undefined && !(o.signal instanceof AbortSignal)) fail('signal');
   if (op !== 'status') {
     o.tokenFile = raw.tokenFile === undefined || raw.tokenFile === null ? null : operatorPath(raw.tokenFile);
@@ -45,7 +48,7 @@ function options(raw) {
     o.fetchImpl = raw.fetchImpl ?? globalThis.fetch;
     if (typeof o.fetchImpl !== 'function') fail('fetch');
   }
-  if (op === 'start') {
+  if (preparing) {
     o.inventoryFile = operatorPath(raw.inventoryFile); o.inventorySha256 = pin(raw.inventorySha256);
     o.offset = integer(raw.offset ?? 0, 0, Number.MAX_SAFE_INTEGER);
     o.maxCaptureBytes = integer(raw.maxCaptureBytes ?? LIMITS.captureBytes, 1, LIMITS.captureBytes);
@@ -102,6 +105,7 @@ async function initialize(o, life) {
   const credential = await token(o, root, life.check);
   const header = { schema: SCHEMA, workdir: root, inventory_sha256: o.inventorySha256,
     credential_sha256: credential.fingerprint, offset: o.offset, max_capture_bytes: o.maxCaptureBytes, max_steps: o.maxSteps };
+  if (encode(header).length > HEADER_LIMIT) fail('header_limit');
   life.check(); await mkdir(root, { mode: 0o700 }); await syncDirectory(dirname(root));
   const identity = await directory(root);
   await saveOperatorRecord(join(root, 'inventory.json'), bytes, life.check);
@@ -135,10 +139,12 @@ function account(bytes, inventory, header, batch, counts) {
   counts.bytes += bytes.length; counts.steps += steps;
 }
 function sourceSelection(selected) {
-  return { schema: 'frankengit-github-issue-migration-sources-v1',
+  const value = { schema: 'frankengit-github-issue-migration-sources-v1',
     inventory: { path: join(selected.root, 'inventory.json'), sha256: selected.header.inventory_sha256 },
     captures: selected.captures, offset: selected.header.offset,
     maxSteps: selected.header.max_steps, maxCaptureBytes: selected.header.max_capture_bytes };
+  parseGithubIssueMigrationSources(encode(value));
+  return value;
 }
 async function load(o, life) {
   life.check(); const root = o.workdir, identity = await directory(root);
@@ -197,9 +203,9 @@ export async function captureGithubIssueMigration(raw) {
   const o = options(raw), life = lifetime(o);
   let selected, session, release, result, failure, captured = 0;
   try {
-    if (o.operation === 'start') o.confirm = await initialize(o, life);
+    if (o.operation === 'start' || o.operation === 'prepare') o.confirm = await initialize(o, life);
     selected = await load(o, life);
-    if (o.operation === 'status') return summary(o, selected);
+    if (o.operation === 'status' || o.operation === 'prepare') return summary(o, selected);
     release = await owner(selected.root, selected.identity);
     // Re-read under ownership: no stale prefix can authorize recapturing a batch.
     selected = await load(o, life);
