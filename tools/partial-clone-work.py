@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='fg-partial-checkout-') as td:
     def build_oracle():
         pin=next(line.split('\t') for line in (work/'scripts/e2e/oracle/pins.tsv').read_text().splitlines() if line.startswith('git-2.54.0\t'))
         url,expected,filename=pin[4:7]; download=oracle_root/'downloads'/filename; download.parent.mkdir()
-        req=urllib.request.Request(url,headers={'User-Agent':'OpenAI File Downloader, XaiImageApiFetch/1.0'}); digest=hashlib.sha256(); count=0
+        req=urllib.request.Request(url,headers={'User-Agent':'frankengit-oracle-fetch (+https://github.com/Dicklesworthstone/frankengit)'}); digest=hashlib.sha256(); count=0
         with urllib.request.urlopen(req,timeout=60) as response,download.open('xb') as out:
             while chunk:=response.read(1024*1024):
                 count+=len(chunk); assert count<=128*1024*1024; out.write(chunk); digest.update(chunk)

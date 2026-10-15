@@ -9,7 +9,7 @@ export const ISSUE_LIMIT = 100;
 export const COMMENT_LIMIT = 2000;
 export const API_VERSION = '2026-03-10';
 const API = 'https://api.github.com';
-const UA = 'OpenAI File Downloader, XaiImageApiFetch/1.0';
+const UA = 'frankengit-issue-import (+https://github.com/Dicklesworthstone/frankengit)';
 const CONSISTENCY = 'two-equal-observations-not-atomic';
 const fail = code => { throw operatorError(`github_import_${code}`); };
 const object = v => { if (!v || typeof v !== 'object' || Array.isArray(v)) fail('invalid_object'); return v; };

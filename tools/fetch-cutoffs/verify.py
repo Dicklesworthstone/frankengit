@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='fg-cutoff-verify-') as td:
                 if result['exit']:return result
         pin=next(line.split('\t') for line in (work/'scripts/e2e/oracle/pins.tsv').read_text().splitlines() if line.startswith('git-2.54.0\t'))
         url,expected,name=pin[4:7];target=oracle_root/'downloads'/name;target.parent.mkdir()
-        digest=hashlib.sha256();size=0;req=urllib.request.Request(url,headers={'User-Agent':'OpenAI File Downloader, XaiImageApiFetch/1.0'})
+        digest=hashlib.sha256();size=0;req=urllib.request.Request(url,headers={'User-Agent':'frankengit-oracle-fetch (+https://github.com/Dicklesworthstone/frankengit)'})
         with urllib.request.urlopen(req,timeout=60) as response,target.open('xb') as out:
             while chunk:=response.read(1024*1024):
                 size+=len(chunk)
