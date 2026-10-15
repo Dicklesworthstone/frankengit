@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // GitHub is read-only. Native issue publication is a separately confirmed phase.
 import { pathToFileURL } from 'node:url';
+import { INVENTORY_OPERATIONS, INVENTORY_HELP, inventoryArguments, runGithubInventoryCommand } from './lib/github-issue-inventory-command.mjs';
 import { captureGithubIssues, parseCapture, issueImportSteps, CAPTURE_LIMIT } from './lib/github-issue-source.mjs';
 import { operatorError, operatorJson, operatorPath, privateRecordPath, absentRecord,
   readPrivateOperatorFile, saveOperatorRecord, recordDigest } from './lib/forge-operator-io.mjs';
@@ -48,13 +49,15 @@ Source authors, times, assignees, milestones, label metadata and locked status
 are attributed source data, NOT native permissions, historical events or roles.
 The GitHub credential is used only with api.github.com and is never saved.
 This Unix operator requires private files and a private existing output parent.
-`;
+
+${INVENTORY_HELP}`;
 function integer(v) {
   if (typeof v !== 'string' || !/^(0|[1-9][0-9]*)$/.test(v) || !Number.isSafeInteger(Number(v))) throw operatorError('github_import_integer');
   return Number(v);
 }
 export function importArguments(args) {
   if (!Array.isArray(args) || args.length > 230 || args.some(v => typeof v !== 'string' || v.length > 4096 || /[\0\r\n]/.test(v))) throw operatorError('github_import_arguments');
+  if (INVENTORY_OPERATIONS.includes(args[0])) return inventoryArguments(args);
   const operation = args[0], values = new Map(), issues = [];
   const destination = ['--workdir', '--url', '--tenant-id', '--repository-id', '--token-file', '--timeout-ms'];
   const allowed = operation === 'capture' ? ['--repository', '--issue', '--out', '--token-file', '--timeout-ms', '--max-read-bytes', '--source-retries']
@@ -78,6 +81,7 @@ export function importArguments(args) {
 export async function runGithubImportCommand(args, signal) {
   if (args.length === 1 && args[0] === '--help') return { text: HELP, exitCode: 0 };
   const { operation, values, issues } = importArguments(args);
+  if (INVENTORY_OPERATIONS.includes(operation)) return runGithubInventoryCommand(args, signal);
   if (['prepare', 'run', 'status'].includes(operation)) {
     const { prepareGithubIssueImport, runGithubIssueImport } = await import('./lib/github-issue-import.mjs');
     const common = { workdir: values.get('--workdir'), href: values.get('--url'), tenant: values.get('--tenant-id'),

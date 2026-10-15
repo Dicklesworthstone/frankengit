@@ -158,17 +158,42 @@ function continuation(header, repository, repositoryId, number, page) {
   }
   return next;
 }
+// An optional independently pinned discovery selection tightens source intake.
+// It supplies aliases, not authentication. Own all coordinates before any await
+// so caller mutation cannot retarget a later pass or comment request.
+function selectedIdentities(value, repository, numbers) {
+  if (value === null) return null;
+  const exact = (row, names) => {
+    object(row);
+    if (Object.keys(row).length !== names.length || names.some(k => !Object.hasOwn(row, k))) fail('selection_fields');
+  };
+  exact(value, ['source', 'issues']); exact(value.source, ['repository', 'repository_id']);
+  const name = githubRepository(value.source.repository), repositoryId = id(value.source.repository_id);
+  if (name !== repository || typeof value.source.repository_id !== 'string' ||
+      !Array.isArray(value.issues) || value.issues.length !== numbers.length) fail('selection_scope');
+  const issues = new Map(), ids = new Set();
+  for (let i = 0; i < numbers.length; i++) {
+    const row = value.issues[i]; exact(row, ['number', 'id']);
+    const identity = id(row.id);
+    if (row.number !== numbers[i] || typeof row.id !== 'string' || ids.has(identity)) fail('selection_issue');
+    issues.set(numbers[i], identity); ids.add(identity);
+  }
+  return { repository: name, repositoryId, issues };
+}
 export async function captureGithubIssues({ repository, numbers, token = null, signal,
-  timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch } = {}) {
+  timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch, expectedSelection = null } = {}) {
   githubRepository(repository); numbers = selectedNumbers(numbers);
+  const expected = selectedIdentities(expectedSelection, repository, numbers);
   const source = createGithubSource({ token, signal, timeoutMs, maxReadBytes, maxSourceRetries, fetchImpl });
   const { get, check } = source;
   async function pass() {
     const repo = object((await get(`/repos/${repository}`)).value);
     if (githubRepository(repo.full_name).toLowerCase() !== repository.toLowerCase()) fail('repository_substitution');
     const selected = repo.full_name, repositoryId = id(repo.id), issues = []; let total = 0;
+    if (expected && (selected !== expected.repository || repositoryId !== expected.repositoryId)) fail('selection_repository_changed');
     for (const number of numbers) {
       const issue = normalizeIssue((await get(`/repos/${selected}/issues/${number}`)).value, selected, number);
+      if (expected && issue.id !== expected.issues.get(number)) fail('selection_issue_changed');
       total += issue.comment_count; if (total > COMMENT_LIMIT) fail('comment_limit');
       const comments = []; let page = 1, previous = 0n;
       do {
