@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fullFilePatch, FILE_LIMIT, PATCH_LIMIT, renameEdits } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit-patch.mjs';
+import { fullFilePatch, normalizeEdits, FILE_LIMIT, PATCH_LIMIT, INPUT_LIMIT, renameEdits } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit-patch.mjs';
 
 const bytes = value => typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);
 const side = (value, mode = 0o100644) => value === null ? null : { bytes: bytes(value), mode };
@@ -134,3 +134,118 @@ for (const algorithm of ['sha1', 'sha256']) {
     assert.deepEqual(first.edits.find(e => e.path_hex === raw.path_hex).after.bytes, new Uint8Array(after));
   });
 }
+
+// Independent position-exact application: unlike Git's general patch reader,
+// this oracle cannot relocate a hunk or search for matching context elsewhere.
+function records(input) {
+  const result = [], buffer = Buffer.from(input); let start = 0;
+  while (start < buffer.length) {
+    const lf = buffer.indexOf(10, start), end = lf < 0 ? buffer.length : lf + 1;
+    result.push(buffer.subarray(start, end)); start = end;
+  }
+  return result;
+}
+function applyAtDeclaredPositions(before, patch) {
+  const source = records(before), encoded = records(patch), result = [];
+  let cursor = 0, i = encoded.findIndex(row => row.subarray(0, 3).equals(Buffer.from('@@ ')));
+  assert(i >= 0, 'a changed byte sequence must have a hunk');
+  while (i < encoded.length) {
+    const match = /^@@ -(\d+),(\d+) \+(\d+),(\d+) @@\n$/.exec(String(encoded[i++]));
+    assert(match, 'only counted exact hunks are expected');
+    const [, a, b, c, d] = match.map(Number), oldCount = b, newCount = d;
+    const oldStart = oldCount ? a - 1 : a, newStart = newCount ? c - 1 : c;
+    assert(oldStart >= cursor && oldStart <= source.length, 'old ranges must be ordered and within the original');
+    result.push(...source.slice(cursor, oldStart)); cursor = oldStart;
+    assert.equal(newStart, result.length, 'new hunk coordinate must include all earlier insertions/deletions');
+    let removed = 0, added = 0;
+    while (removed < oldCount || added < newCount) {
+      const row = encoded[i++]; assert(row, 'missing hunk row');
+      const op = row[0]; assert([32, 43, 45].includes(op), 'invalid hunk operation');
+      let value = row.subarray(1);
+      if (encoded[i]?.equals(Buffer.from('\\ No newline at end of file\n'))) {
+        assert.equal(value.at(-1), 10); value = value.subarray(0, -1); i += 1;
+      }
+      if (op !== 43) { assert.deepEqual(value, source[cursor++], 'context/deletion must match exact original bytes'); removed += 1; }
+      if (op !== 45) { result.push(value); added += 1; }
+      assert(removed <= oldCount && added <= newCount, 'hunk exceeded a declared count');
+    }
+  }
+  result.push(...source.slice(cursor));
+  return Buffer.concat(result);
+}
+function randomEdits(seed, count) {
+  let state = seed >>> 0;
+  const rand = maximum => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) % maximum; };
+  const line = i => Buffer.from(['repeat\n', '\n', '\r\n', '\0\xff\n', `unique-${i}-${rand(1000)}\r\n`, '--- a/file\n', '\\ No newline at end of file\n'][rand(7)], 'latin1');
+  const result = [];
+  for (let sample = 0; sample < count; sample += 1) {
+    const original = Array.from({ length: rand(150) }, (_, i) => line(i)), changed = original.slice();
+    for (let j = 0, n = rand(80) + 1; j < n; j += 1) {
+      const at = rand(changed.length + 1), operation = rand(3);
+      changed.splice(at, operation === 0 ? 0 : rand(4) + 1, ...(operation === 1 ? [] : [line(j)]));
+    }
+    let before = Buffer.concat(original), after = Buffer.concat(changed);
+    if (before.length && rand(3) === 0) before = before.subarray(0, -1);
+    if (after.length && rand(3) === 0) after = after.subarray(0, -1);
+    if (before.equals(after)) after = Buffer.concat([after, Buffer.from('changed\n')]);
+    result.push(edit(before, after));
+  }
+  return result;
+}
+
+test('2,000 deterministic byte-level edit scripts apply only at their declared positions', () => {
+  for (const row of randomEdits(0xf617cafe, 2000)) {
+    const patch = fullFilePatch([row], { allowBinary: true });
+    assert.deepEqual(applyAtDeclaredPositions(row.before.bytes, patch.bytes), Buffer.from(row.after.bytes));
+    assert.deepEqual(patch.edits, [row]);
+  }
+});
+
+for (const gap of [0, 1, 5, 6, 7, 8, 20]) test(`a ${gap}-line unchanged gap has nonoverlapping three-line context`, () => {
+  const before = lines(70), after = before.slice(); after[10] = 'first\n'; after[11 + gap] = 'second\n';
+  const row = edit(before.join(''), after.join('')), patch = fullFilePatch([row]);
+  assert.equal((text(patch.bytes).match(/^@@ /gm) ?? []).length, gap <= 6 ? 1 : 2);
+  assert.deepEqual(applyAtDeclaredPositions(row.before.bytes, patch.bytes), Buffer.from(row.after.bytes));
+});
+
+test('edit-distance exhaustion retains all changes rather than publishing a partial patch', () => {
+  const before = lines(250), after = before.slice();
+  for (let i = 5; i < 245; i += 2) after[i] = `replacement-${i}\n`;
+  const row = edit(before.join(''), after.join('')), patch = fullFilePatch([row]);
+  assert.equal((text(patch.bytes).match(/^@@ /gm) ?? []).length, 1, 'the exact middle is the bounded fallback');
+  assert.deepEqual(applyAtDeclaredPositions(row.before.bytes, patch.bytes), Buffer.from(row.after.bytes));
+});
+
+test('the shared work bound preserves a long repeated middle when search cannot complete', () => {
+  const before = Array.from({ length: 30000 }, (_, i) => `a${i % 2}\n`), after = before.slice();
+  for (let i = 0; i < 100; i += 1) after[i * 299] = `b${i % 2}\n`;
+  const row = edit(before.join(''), after.join('')), patch = fullFilePatch([row]);
+  assert.deepEqual(applyAtDeclaredPositions(row.before.bytes, patch.bytes), Buffer.from(row.after.bytes));
+  assert(patch.bytes.length <= PATCH_LIMIT);
+});
+
+for (const algorithm of ['sha1', 'sha256']) {
+  test(`${algorithm}: eight full-size files with distant edits fit one bounded patch`, () => {
+    const before = bytes(`${'a'.repeat(63)}\n`.repeat(FILE_LIMIT / 64)), after = before.slice();
+    after[4 * 64] = 98; after[FILE_LIMIT - 5 * 64] = 99;
+    const rows = Array.from({ length: 8 }, (_, i) => edit(before, after, `file-${i}`));
+    const patch = roundTrip(rows, algorithm);
+    assert(patch.bytes.length < 12 * 1024);
+    assert.equal((text(patch.bytes).match(/^@@ /gm) ?? []).length, 16);
+    assert.throws(() => fullFilePatch([...rows, edit('a', 'b', 'over-budget')]), /retained byte/);
+  });
+  const corpus = randomEdits(0x6175eed, 20);
+  for (const [index, row] of corpus.entries()) test(`${algorithm}: generated binary edit ${index} agrees with independent Git trees`, () => {
+    roundTrip([row], algorithm, { allowBinary: true });
+  });
+}
+
+
+test('retained-byte capacity is enforced independently of encoded bytes and input lines', () => {
+  const before = bytes('a'.repeat(FILE_LIMIT)), after = before.slice(); after[0] = 98;
+  const rows = Array.from({ length: 8 }, (_, i) => edit(before, after, `large-${i}`));
+  assert.equal(rows.reduce((n, e) => n + e.before.bytes.length + e.after.bytes.length, 0), INPUT_LIMIT);
+  assert.equal(normalizeEdits(rows).length, 8);
+  assert.throws(() => normalizeEdits([...rows, edit(null, 'x', 'over-budget')]), /retained byte/);
+  assert.throws(() => fullFilePatch(rows), /Encoded patch exceeds/);
+});
