@@ -2,6 +2,7 @@
 // and publication authority. This journal binds custody, never a second truth.
 import { join } from 'node:path';
 import { lstat } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { absolute, contains, directory, fail, lock, names, parseJson, readPrivate, writeNew } from './workflow_watch_io.mjs';
 
 const MAX_BYTES = 1024 * 1024;
@@ -17,9 +18,9 @@ function integer(value, low, high) {
 }
 function optionsFor(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options) ||
-      Object.keys(options).some(key => !['signal', 'readTimeoutMs', 'dispatchTimeoutMs', 'timeoutMs', 'maxPublications'].includes(key))) fail('Unsupported supervisor options.');
+      Object.keys(options).some(key => !['signal', 'readTimeoutMs', 'dispatchTimeoutMs', 'timeoutMs', 'maxPublications', 'concurrency'].includes(key))) fail('Unsupported supervisor options.');
   if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) fail('Invalid supervisor cancellation signal.');
-  return { signal: options.signal, readTimeoutMs: integer(options.readTimeoutMs ?? 30_000, 1, 30_000),
+  return { signal: options.signal, concurrency: integer(options.concurrency ?? 1, 1, 16), readTimeoutMs: integer(options.readTimeoutMs ?? 30_000, 1, 30_000),
     dispatchTimeoutMs: integer(options.dispatchTimeoutMs ?? 660_000, 1, 660_000),
     timeoutMs: integer(options.timeoutMs ?? 660_000, 1, 660_000), maxPublications: integer(options.maxPublications ?? 128, 1, 128) };
 }
@@ -118,45 +119,96 @@ export function createController(backend) {
     let retain = false;
     try {
       await binding(config, true);
-      const result = await work(); retain = result.containment_unknown === true;
+      const result = await work(() => { retain = true; }); retain ||= result.containment_unknown === true;
       return result;
-    } catch (error) { retain = error.containment_unknown === true; throw error; }
+    } catch (error) { retain ||= error?.containment_unknown === true; throw error; }
     finally { if (!retain) await release(); }
   }
-  async function laneOnce(lane, options) {
+  async function laneOnce(lane, options, mayAdmit, stopAdmission) {
     const row = { name: lane.name }; let stage = 'publication_before_execution';
     const publicationOptions = { signal: options.signal, timeoutMs: options.timeoutMs, maxPublications: options.maxPublications };
     try {
       // Backpressure is deliberate: do not create fresh executions while an old
       // publication is uncertain or cannot fit in this bounded publication pass.
       row.before = publication(await backend.publish(lane.publisher, publicationOptions));
-      if (row.before.pending || row.before.unknown || row.before.limit_reached || row.before.stopped || options.signal?.aborted) {
+      if (row.before.pending || row.before.unknown || row.before.limit_reached || row.before.stopped || !mayAdmit()) {
         row.blocked = true; return row;
       }
       stage = 'execution';
       row.execution = execution(await backend.execute(lane.publisher.watch, {
         signal: options.signal, readTimeoutMs: options.readTimeoutMs, dispatchTimeoutMs: options.dispatchTimeoutMs }));
-      if (options.signal?.aborted) { row.blocked = true; return row; }
+      if (!mayAdmit()) { row.blocked = true; return row; }
       stage = 'publication_after_execution';
       row.after = publication(await backend.publish(lane.publisher, publicationOptions));
       row.blocked = row.after.pending > 0 || row.after.unknown > 0 || row.after.limit_reached || row.after.stopped;
-    } catch (error) { row.error = errorObservation(error, stage); row.blocked = true; }
+    } catch (error) {
+      if (error?.containment_unknown === true) stopAdmission();
+      row.error = errorObservation(error, stage); row.blocked = true;
+    }
     return row;
   }
-  async function sweep(config, options) {
-    const lanes = []; let containmentUnknown = false;
-    for (const lane of config.lanes) {
-      if (options.signal?.aborted || containmentUnknown) {
-        lanes.push({ name: lane.name, skipped: containmentUnknown ? 'containment_unknown' : 'stopped' }); continue;
-      }
-      const row = await laneOnce(lane, options); lanes.push(row);
-      containmentUnknown ||= row.error?.containment_unknown === true;
+  async function sweep(config, options, offset = 0, quarantined = new Set()) {
+    const ordered = [...config.lanes.slice(offset), ...config.lanes.slice(0, offset)];
+    const queue = [], rows = new Map(), active = new Map(), busyStores = new Set();
+    let containmentUnknown = false;
+    const mayAdmit = () => !options.signal?.aborted && !containmentUnknown;
+    for (const lane of ordered) {
+      if (quarantined.has(lane.name)) rows.set(lane.name, { name: lane.name, skipped: 'recovery_required' });
+      else queue.push(lane);
     }
-    return aggregate(lanes, options.signal);
+    while (queue.length || active.size) {
+      while (mayAdmit() && active.size < options.concurrency) {
+        const index = queue.findIndex(lane => !busyStores.has(lane.publisher.watch.storage_root));
+        if (index < 0) break;
+        const [lane] = queue.splice(index, 1), store = lane.publisher.watch.storage_root;
+        busyStores.add(store);
+        // Reserve the store through both publication passes, not just execution.
+        // Every admitted operation is drained even if another owner becomes unsafe.
+        const task = laneOnce(lane, options, mayAdmit, () => { containmentUnknown = true; }).then(row => {
+          rows.set(lane.name, row);
+          containmentUnknown ||= row.error?.containment_unknown === true;
+        }).finally(() => { busyStores.delete(store); active.delete(lane.name); });
+        active.set(lane.name, task);
+      }
+      if (!active.size) break;
+      await Promise.race(active.values());
+    }
+    for (const lane of queue) rows.set(lane.name, { name: lane.name,
+      skipped: containmentUnknown ? 'containment_unknown' : 'stopped' });
+    return aggregate(config.lanes.map(lane => rows.get(lane.name)), options.signal);
   }
   async function once(value, options = {}) {
     const config = configuration(value), selected = optionsFor(options);
     return owned(config, () => sweep(config, selected));
+  }
+  async function serve(value, options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) fail('Invalid supervisor service options.');
+    const { intervalMs = 5_000, maxCycles = 0, onCycle, ...budgets } = options;
+    integer(intervalMs, 1, 3_600_000); integer(maxCycles, 0, 1_000_000);
+    if (onCycle !== undefined && typeof onCycle !== 'function') fail('Invalid supervisor cycle reporter.');
+    const config = configuration(value), selected = optionsFor(budgets);
+    return owned(config, async retain => {
+      const quarantined = new Set(); let cycles = 0, failed = false;
+      let last = aggregate(config.lanes.map(lane => ({ name: lane.name, skipped: 'stopped' })), selected.signal);
+      while (!selected.signal?.aborted && (!maxCycles || cycles < maxCycles)) {
+        last = await sweep(config, selected, cycles % config.lanes.length, quarantined);
+        cycles++; failed ||= last.failed;
+        // Latch unsafe custody before user reporting: a broken output pipe must
+        // never erase an owner's unresolved native containment fence.
+        if (last.containment_unknown) retain();
+        for (const row of last.lanes) {
+          if (row.error || row.before?.unknown > 0 || row.after?.unknown > 0) quarantined.add(row.name);
+        }
+        if (onCycle) await onCycle(structuredClone({ ...last, cycle: cycles }));
+        if (last.containment_unknown || quarantined.size === config.lanes.length || selected.signal?.aborted ||
+            (maxCycles && cycles === maxCycles)) break;
+        try { await sleep(intervalMs, undefined, { signal: selected.signal }); }
+        catch (error) { if (error.name !== 'AbortError' || !selected.signal?.aborted) throw error; }
+      }
+      return { ...last, type: 'workflow_supervisor_service', cycles, failed,
+        pending: last.pending || quarantined.size > 0, stopped: selected.signal?.aborted === true,
+        quarantined: [...quarantined].sort() };
+    });
   }
   async function status(value) {
     const config = configuration(value), bound = await binding(config), lanes = [];
@@ -177,7 +229,7 @@ export function createController(backend) {
     return { type: 'workflow_supervisor_status', schema_version: 1, read_only: true, bound, owner_present: owner,
       lanes, authoritative_check: false, execution_retried: false };
   }
-  return Object.freeze({ configuration, once, status,
+  return Object.freeze({ configuration, once, serve, status,
     async loadConfiguration(path) { return configuration(parseJson(await readPrivate(path, MAX_BYTES), MAX_BYTES)); } });
 }
 
