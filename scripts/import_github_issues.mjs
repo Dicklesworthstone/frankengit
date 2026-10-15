@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // GitHub is read-only. Native issue publication is a separately confirmed phase.
 import { pathToFileURL } from 'node:url';
-import { prepareGithubIssueImport, runGithubIssueImport } from './lib/github-issue-import.mjs';
 import { captureGithubIssues, parseCapture, issueImportSteps, CAPTURE_LIMIT } from './lib/github-issue-source.mjs';
 import { operatorError, operatorJson, operatorPath, privateRecordPath, absentRecord,
   readPrivateOperatorFile, saveOperatorRecord, recordDigest } from './lib/forge-operator-io.mjs';
@@ -9,7 +8,7 @@ import { operatorError, operatorJson, operatorPath, privateRecordPath, absentRec
 export const HELP = `Usage: node scripts/import_github_issues.mjs capture
   --repository OWNER/REPO --issue NUMBER [--issue NUMBER ...] --out PRIVATE_NEW_FILE
   [--token-file PRIVATE_GITHUB_TOKEN] [--timeout-ms 1..300000]
-  [--max-read-bytes 1..268435456]
+  [--max-read-bytes 1..268435456] [--source-retries 0..10]
 
 Usage: node scripts/import_github_issues.mjs inspect --capture PRIVATE_FILE [--offset NUMBER]
 
@@ -39,6 +38,11 @@ in two equal observations. It is NOT an atomic GitHub snapshot. Quiesce source
 edits during migration. Pull requests are refused, not converted into issues.
 The 1 MiB package supports up to 100 issues and 2000 comments. Fields exceeding
 native issue limits are refused rather than truncated. No attachment is fetched.
+Source reads do not retry by default. --source-retries opts into a single
+bounded retry allowance across both observations for rate limits and transient
+502/503/504 replies, within the same byte, request and timeout limits. Server
+retry delays are never shortened to fit that deadline. Native writes do not
+inherit this policy and still require their original explicit retry custody.
 Inspect prints the complete exact native command proposal without sending it.
 Source authors, times, assignees, milestones, label metadata and locked status
 are attributed source data, NOT native permissions, historical events or roles.
@@ -53,7 +57,7 @@ export function importArguments(args) {
   if (!Array.isArray(args) || args.length > 230 || args.some(v => typeof v !== 'string' || v.length > 4096 || /[\0\r\n]/.test(v))) throw operatorError('github_import_arguments');
   const operation = args[0], values = new Map(), issues = [];
   const destination = ['--workdir', '--url', '--tenant-id', '--repository-id', '--token-file', '--timeout-ms'];
-  const allowed = operation === 'capture' ? ['--repository', '--issue', '--out', '--token-file', '--timeout-ms', '--max-read-bytes']
+  const allowed = operation === 'capture' ? ['--repository', '--issue', '--out', '--token-file', '--timeout-ms', '--max-read-bytes', '--source-retries']
     : operation === 'inspect' ? ['--capture', '--offset']
     : operation === 'prepare' ? [...destination, '--capture', '--offset']
     : ['run', 'status'].includes(operation) ? [...destination, '--confirm', '--max-mutations', ...(operation === 'run' ? ['--retry-unresolved'] : [])] : [];
@@ -68,12 +72,14 @@ export function importArguments(args) {
     : operation === 'inspect' ? ['--capture']
     : ['--workdir', '--url', '--tenant-id', '--repository-id', '--token-file', operation === 'prepare' ? '--capture' : '--confirm'];
   if (required.some(k => !values.has(k)) || (operation === 'capture' && !issues.length)) throw operatorError('github_import_required_option');
+  if (values.has('--source-retries') && integer(values.get('--source-retries')) > 10) throw operatorError('github_import_source_retries');
   return { operation, values, issues };
 }
 export async function runGithubImportCommand(args, signal) {
   if (args.length === 1 && args[0] === '--help') return { text: HELP, exitCode: 0 };
   const { operation, values, issues } = importArguments(args);
   if (['prepare', 'run', 'status'].includes(operation)) {
+    const { prepareGithubIssueImport, runGithubIssueImport } = await import('./lib/github-issue-import.mjs');
     const common = { workdir: values.get('--workdir'), href: values.get('--url'), tenant: values.get('--tenant-id'),
       repository: values.get('--repository-id'), tokenFile: values.get('--token-file'), signal,
       timeoutMs: integer(values.get('--timeout-ms') ?? '300000') };
@@ -103,12 +109,12 @@ export async function runGithubImportCommand(args, signal) {
       token = new TextDecoder('utf-8', { fatal: true }).decode(tokenBytes).replace(/\n$/, '');
     }
     const result = await captureGithubIssues({ repository: values.get('--repository'), numbers: issues, token,
-      signal: combined, timeoutMs, maxReadBytes: integer(values.get('--max-read-bytes') ?? String(64 * 1024 * 1024)) });
+      signal: combined, timeoutMs, maxSourceRetries: integer(values.get('--source-retries') ?? '0'), maxReadBytes: integer(values.get('--max-read-bytes') ?? String(64 * 1024 * 1024)) });
     check(); const saved = await saveOperatorRecord(out, result.bytes, check);
     return { text: operatorJson({ type: 'github_issue_capture', path: saved.path, sha256: saved.sha256,
       source: result.capture.source, issues: result.capture.issues.length,
       comments: result.capture.issues.reduce((n, issue) => n + issue.comments.length, 0),
-      requests: result.requests, read_bytes: result.read_bytes, atomic_source_snapshot: false, mutation_submitted: false }), exitCode: 0 };
+      requests: result.requests, read_bytes: result.read_bytes, source_retries: result.source_retries, atomic_source_snapshot: false, mutation_submitted: false }), exitCode: 0 };
   } finally { tokenBytes?.fill(0); clearTimeout(timer); stop.abort(); }
 }
 async function main() {

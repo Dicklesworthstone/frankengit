@@ -2,30 +2,19 @@
 // issue commands. Imported actors are attribution, never local principals.
 import { mutationRequest, natural } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { recordDigest, operatorError } from './forge-operator-io.mjs';
+import { createGithubSource, githubIdentity as id, githubRepository, GITHUB_API as API } from './github-source-http.mjs';
+export { API_VERSION, githubRepository } from './github-source-http.mjs';
 
 export const CAPTURE_SCHEMA = 'frankengit-github-issue-capture-v1';
 export const CAPTURE_LIMIT = 1024 * 1024;
 export const ISSUE_LIMIT = 100;
 export const COMMENT_LIMIT = 2000;
-export const API_VERSION = '2026-03-10';
-const API = 'https://api.github.com';
-const UA = 'frankengit-issue-import (+https://github.com/Dicklesworthstone/frankengit)';
 const CONSISTENCY = 'two-equal-observations-not-atomic';
 const fail = code => { throw operatorError(`github_import_${code}`); };
 const object = v => { if (!v || typeof v !== 'object' || Array.isArray(v)) fail('invalid_object'); return v; };
 function text(v, max, name, single = false) {
   if (typeof v !== 'string' || v.length > max || Buffer.byteLength(v) > max || /[\0\uD800-\uDFFF]/u.test(v) ||
       (single && (!v.trim() || /[\u0000-\u001f\u007f-\u009f]/u.test(v)))) fail(`invalid_${name}`);
-  return v;
-}
-export function githubRepository(v) {
-  if (typeof v !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(v) ||
-      ['.', '..'].includes(v.split('/')[1])) fail('repository');
-  return v;
-}
-function id(v) {
-  if (typeof v === 'number') { natural(v, 'GitHub ID', 1); v = String(v); }
-  if (typeof v !== 'string' || !/^[1-9][0-9]{0,19}$/.test(v) || BigInt(v) > 18446744073709551615n) fail('identity');
   return v;
 }
 function actor(v) {
@@ -151,17 +140,6 @@ export function issueImportSteps(value, offset = 0) {
   if (encode(steps).length > CAPTURE_LIMIT) fail('native_plan_bytes');
   return steps;
 }
-// Do not round GitHub numeric aliases through IEEE-754. This profile requires
-// Node's JSON reviver source context; all other numeric fields are safe integers.
-function githubJson(bytes) {
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
-    if (typeof value !== 'number') return value;
-    const raw = context?.source;
-    if (typeof raw !== 'string' || !/^(0|[1-9][0-9]*)$/.test(raw)) fail('numeric_wire_value');
-    if (key === 'id') return id(raw);
-    return natural(value, 'GitHub integer');
-  });
-}
 function continuation(header, repository, repositoryId, number, page) {
   if (!header) return false;
   if (header.length > 8192) fail('pagination');
@@ -181,44 +159,10 @@ function continuation(header, repository, repositoryId, number, page) {
   return next;
 }
 export async function captureGithubIssues({ repository, numbers, token = null, signal,
-  timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, fetchImpl = globalThis.fetch } = {}) {
+  timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch } = {}) {
   githubRepository(repository); numbers = selectedNumbers(numbers);
-  natural(timeoutMs, 'capture timeout', 1, 300000); natural(maxReadBytes, 'capture read limit', 1, 256 * 1024 * 1024);
-  if (token !== null && (typeof token !== 'string' || !/^[A-Za-z0-9_]{1,255}$/.test(token))) fail('token');
-  if (signal !== undefined && !(signal instanceof AbortSignal)) fail('signal');
-  const stop = new AbortController(), combined = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
-  const timer = setTimeout(() => stop.abort(), timeoutMs);
-  const check = () => combined.throwIfAborted();
-  let readBytes = 0, requests = 0;
-  async function get(path) {
-    check(); if (++requests > 4096) fail('request_limit');
-    const url = `${API}${path}`;
-    const response = await fetchImpl(url, { method: 'GET', redirect: 'error', credentials: 'omit', cache: 'no-store',
-      signal: combined, headers: { Accept: 'application/vnd.github.raw+json', 'X-GitHub-Api-Version': API_VERSION,
-        'User-Agent': UA, ...(token === null ? {} : { Authorization: `Bearer ${token}` }) } });
-    let reader;
-    const cancel = () => { void (reader ?? response.body)?.cancel().catch(() => {}); };
-    try {
-      check();
-      if (response.redirected || (response.url && response.url !== url)) fail('redirect');
-      if (response.status !== 200) {
-        const error = operatorError('github_import_source_http'); error.status = response.status;
-        const after = response.headers.get('Retry-After');
-        if (after && /^[0-9]{1,10}$/.test(after)) error.retry_after_seconds = after;
-        throw error;
-      }
-      if (!/^application\/(?:json|vnd\.github(?:\.raw)?\+json)(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '') || !response.body) fail('json_media');
-      reader = response.body.getReader(); combined.addEventListener('abort', cancel, { once: true });
-      const chunks = []; let bytes = 0;
-      for (;;) {
-        check(); const next = await reader.read(); check(); if (next.done) break;
-        bytes += next.value.byteLength; readBytes += next.value.byteLength;
-        if (bytes > 8 * 1024 * 1024 || readBytes > maxReadBytes) fail('read_bytes');
-        chunks.push(next.value);
-      }
-      return { value: githubJson(Buffer.concat(chunks, bytes)), link: response.headers.get('Link') };
-    } finally { combined.removeEventListener('abort', cancel); cancel(); reader?.releaseLock(); }
-  }
+  const source = createGithubSource({ token, signal, timeoutMs, maxReadBytes, maxSourceRetries, fetchImpl });
+  const { get, check } = source;
   async function pass() {
     const repo = object((await get(`/repos/${repository}`)).value);
     if (githubRepository(repo.full_name).toLowerCase() !== repository.toLowerCase()) fail('repository_substitution');
@@ -252,6 +196,6 @@ export async function captureGithubIssues({ repository, numbers, token = null, s
     issueImportSteps(first); // Refuse unrepresentable native text before saving a usable package.
     const second = captureBytes(await pass()); check();
     if (!bytes.equals(second)) fail('source_changed');
-    return { capture: first, bytes, sha256: recordDigest(bytes), requests, read_bytes: readBytes };
-  } finally { clearTimeout(timer); stop.abort(); }
+    return { capture: first, bytes, sha256: recordDigest(bytes), ...source.statistics() };
+  } finally { source.close(); }
 }
