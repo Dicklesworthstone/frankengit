@@ -1,62 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, rename, chmod, symlink, link } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, rm, rename, chmod, symlink, link } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { scanSourceWorkspace, workspaceScanScope, selectionFromWorkspaceScan, workspaceObservations,
-  checkWorkspaceObservations, encodeWorkspaceScan as encode, workspaceScanHash as hash } from '../../scripts/operator/source_workspace_scan.mjs';
+  checkWorkspaceObservations, prepareWorkspaceScanCapture, workspaceScanCapturer, encodeWorkspaceScan as encode, workspaceScanHash as hash } from '../../scripts/operator/source_workspace_scan.mjs';
 
 const hex = s => Buffer.from(s).toString('hex'), rootScope = { roots_hex: [''] };
-const nativeHash = (type, body, format) => createHash(format).update(`${type} ${body.length}\0`).update(body).digest('hex');
-// Real native tree/commit/blob bytes in the existing package/workspace formats.
-// This builds inputs independently; these tests cover filesystem discovery and
-// pinned custody, not the shared native membership verifier or Rust admission.
-export async function fixture(t, initial = [{ path: 'src/a', body: 'old\n' }, { path: 'README', body: 'read\n' }], format = 'sha1') {
-  const parent = await mkdtemp(join(tmpdir(), 'fg-scan-')); await chmod(parent, 0o700);
-  t.after(() => rm(parent, { recursive: true, force: true }));
-  const root = join(parent, 'work'); await mkdir(root, { mode: 0o700 }); await mkdir(join(root, 'files'), { mode: 0o700 });
-  const input = initial.map(f => ({ path: Buffer.from(f.path), body: Buffer.from(f.body), executable: f.executable ?? false })).sort((a, b) => Buffer.compare(a.path, b.path));
-  const tree = new Map(), files = [], blobs = new Map();
-  for (const f of input) {
-    const id = nativeHash('blob', f.body, format), parts = f.path.toString('latin1').split('/'); let node = tree;
-    for (const part of parts.slice(0, -1)) { if (!node.has(part)) node.set(part, new Map()); node = node.get(part); }
-    node.set(parts.at(-1), { id, executable: f.executable }); blobs.set(id, f.body.toString('hex'));
-    files.push({ path_hex: f.path.toString('hex'), blob: id, executable: f.executable, bytes: f.body.length });
-    let dir = Buffer.from(`${root}/files`);
-    for (const part of parts.slice(0, -1)) { dir = Buffer.concat([dir, Buffer.from('/'), Buffer.from(part, 'latin1')]); await mkdir(dir, { recursive: true, mode: 0o700 }); }
-    await writeFile(Buffer.concat([dir, Buffer.from('/'), Buffer.from(parts.at(-1), 'latin1')]), f.body, { mode: f.executable ? 0o700 : 0o600 });
-  }
-  const trees = [];
-  function build(node, pathHex = null) {
-    const rows = [...node].sort(([a, av], [b, bv]) => Buffer.compare(Buffer.from(a + (av instanceof Map ? '/' : ''), 'latin1'), Buffer.from(b + (bv instanceof Map ? '/' : ''), 'latin1')));
-    const body = Buffer.concat(rows.map(([name, item]) => {
-      const nameHex = Buffer.from(name, 'latin1').toString('hex'), sub = item instanceof Map;
-      const id = sub ? build(item, pathHex === null ? nameHex : `${pathHex}2f${nameHex}`) : item.id;
-      return Buffer.concat([Buffer.from(`${sub ? '40000' : item.executable ? '100755' : '100644'} `), Buffer.from(name, 'latin1'), Buffer.from([0]), Buffer.from(id, 'hex')]);
-    }));
-    const id = nativeHash('tree', body, format); trees.push({ pathHex, oid: id, bodyHex: body.toString('hex') }); return id;
-  }
-  const rootTree = build(tree), body = Buffer.from(`tree ${rootTree}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nbase\n`);
-  const commit = nativeHash('commit', body, format);
-  const expected = { format, commit, files: files.map(f => ({ pathHex: f.path_hex, blob: f.blob })) };
-  const pkg = { schema: 'frankengit-selected-source-package-v1', membership: {
-    schema: 'frankengit-context-membership-proof-v1', objectFormat: format, commit: { oid: commit, bodyHex: body.toString('hex') },
-    trees: trees.sort((a, b) => a.pathHex === null ? -1 : b.pathHex === null ? 1 : a.pathHex < b.pathHex ? -1 : 1),
-    files: files.map(f => ({ pathHex: f.path_hex, blob: f.blob, kind: f.executable ? 'executable' : 'file' })),
-  }, blobs: [...blobs].sort().map(([oid, bytesHex]) => ({ oid, bytesHex })) };
-  const src = encode(pkg), exp = encode(expected), manifest = { schema: 'frankengit-selected-source-workspace-v1',
-    package_sha256: hash(src), package_bytes: src.length, expected_sha256: hash(exp), expected_bytes: exp.length,
-    object_format: format, source_commit: commit, root_tree: rootTree, files };
-  const pin = hash(encode(manifest));
-  for (const [name, bytes] of [['source.json', src], ['expected.json', exp], ['manifest.json', encode(manifest)]]) await writeFile(join(root, name), bytes, { mode: 0o600 });
-  const local = s => Buffer.concat([Buffer.from(`${root}/files/`), Buffer.from(s)]);
-  const put = async (p, body, mode = 0o600) => writeFile(local(p), body, { mode });
-  return { root, parent, pin, manifest, pkg, expected, local, put,
-    scan: (scope = rootScope, options = {}) => scanSourceWorkspace(root, pin, scope, options) };
-}
+import { fixture } from './source_workspace_scan.fixture.mjs';
 for (const format of ['sha1', 'sha256']) test(`${format}: discover modified, deleted, unselected and unchanged without mutating inputs`, async t => {
   const f = await fixture(t, undefined, format), before = await readFile(join(f.root, 'manifest.json'));
   await f.put('src/a', 'new\n'); await rm(f.local('README')); await f.put('new', Buffer.from([0, 255, 10]));
@@ -143,10 +95,10 @@ test('mid-observation cancellation closes the directory and file handles', async
 });
 test('a late content change invalidates the entire report', async t => {
   const f = await fixture(t); let changed = false, count = 0;
-  // A second complete baseline read cannot hide a file mutation during its
-  // final observation sweep: use a checkpoint near the end of the same scan.
+  // This fixture has nine recorded names. Mutate before the final two-check
+  // sweep of those names, independent of directory enumeration order.
   await f.scan(rootScope, { check: () => { count++; } }); let now = 0;
-  await assert.rejects(f.scan(rootScope, { check: () => { if (++now === count - 3) { writeFileSync(f.local('src/a'), 'late'); changed = true; } } }), /changed/);
+  await assert.rejects(f.scan(rootScope, { check: () => { if (++now === count - 20) { writeFileSync(f.local('src/a'), 'late'); changed = true; } } }), /changed/);
   assert(changed);
 });
 test('root path aliases and changed reviewed scope/pins are refused', async t => {
@@ -191,4 +143,89 @@ test('real CLI refuses invalid scope, extra flags, nonprivate inputs, and unknow
   const bad = [args.concat(['--force', 'true']), [args[0], 'capture'], args.concat(['--scope', scopePath])];
   for (const a of bad) assert.throws(() => execFileSync(process.execPath, a, { cwd: new URL('../..', import.meta.url), stdio: 'pipe' }), e => e.status === 2);
   await chmod(scopePath, 0o644); assert.throws(() => execFileSync(process.execPath, args, { cwd: new URL('../..', import.meta.url), stdio: 'pipe' }), e => e.status === 2);
+});
+for (const format of ['sha1', 'sha256']) test(`${format}: reviewed scan becomes exact guarded selection through real select CLI`, async t => {
+  const f = await fixture(t, undefined, format); await f.put('src/a', Buffer.from([255, 0, 10])); await rm(f.local('README')); await f.put('new', 'n');
+  const report = await f.scan({ ...rootScope, include_unselected: true }), scanFile = join(f.parent, 'scan.json');
+  await writeFile(scanFile, encode(report), { mode: 0o600 });
+  const profiles = { byte_profile: 'binary-safe-v1', patch_profile: 'bounded-line-hunks-v1' };
+  const wanted = await prepareWorkspaceScanCapture(f.root, f.pin, report, report.scan_sha256, profiles);
+  const bytes = execFileSync(process.execPath, ['scripts/fg_source_workspace_scan.mjs', 'select', '--workspace', f.root, '--sha256', f.pin,
+    '--scan', scanFile, '--approve-scan-sha256', report.scan_sha256, '--byte-profile', 'binary-safe-v1', '--patch-profile', 'bounded-line-hunks-v1'],
+    { cwd: new URL('../..', import.meta.url), timeout: 10000 });
+  assert.deepEqual(JSON.parse(bytes), wanted); assert.equal(wanted.observations.length, 3);
+});
+for (const [name, change] of [
+  ['content', async f => f.put('src/a', 'later')], ['mode', async f => chmod(f.local('src/a'), 0o700)],
+  ['deletion', async f => rm(f.local('src/a'))], ['additional unselected file', async f => f.put('new', 'new')],
+  ['previously unchanged file', async f => f.put('README', 'later')],
+]) test(`fresh selection rejects ${name} since review without capture effects`, async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(); await change(f);
+  let called = false; const capture = workspaceScanCapturer(async () => { called = true; });
+  await assert.rejects(capture(f.root, f.pin, r, r.scan_sha256, join(f.parent, 'out')), /stale/); assert.equal(called, false);
+});
+test('out-of-scope edits do not invalidate or broaden a reviewed selection', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan({ roots_hex: [hex('src')] });
+  await f.put('README', 'outside'); await f.put('new-outside', 'outside');
+  const selection = await prepareWorkspaceScanCapture(f.root, f.pin, r, r.scan_sha256);
+  assert.deepEqual(selection.paths_hex, [hex('src/a')]);
+});
+function captureReply(root, pin, selection, out, commit) {
+  return { type: 'source_workspace_change_capture', directory: out, workspace_sha256: pin,
+    capture_sha256: hash(encode(selection)), draft_sha256: hash(Buffer.from('kernel fixture draft')),
+    source_commit: commit, selected_path_count: selection.paths_hex.length, changed_path_count: selection.paths_hex.length,
+    unchanged_path_count: 0, selected_files_only: true, source_material_untrusted: true, repository_changed: false };
+}
+test('capture composition uses exact paths/observations/profiles and one remaining deadline', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(), out = join(f.parent, 'capture'); let calls = 0;
+  const capture = workspaceScanCapturer(async (root, pin, selection, output, options) => {
+    calls++; assert.equal(root, f.root); assert.equal(pin, f.pin); assert.equal(output, out);
+    assert.deepEqual(selection, selectionFromWorkspaceScan(r, r.scan_sha256, { patch_profile: 'bounded-line-hunks-v1' }));
+    assert(options.timeoutMs > 0 && options.timeoutMs <= 10000); options.check();
+    return captureReply(root, pin, selection, output, f.manifest.source_commit);
+  });
+  const result = await capture(f.root, f.pin, r, r.scan_sha256, out, { patch_profile: 'bounded-line-hunks-v1' }, { timeoutMs: 10000 });
+  assert.equal(calls, 1); assert.equal(result.reviewed_scan_sha256, r.scan_sha256);
+});
+test('capturer preserves native uncertainty and never retries an output operation', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(); let calls = 0;
+  const native = new Error('source_workspace_capture_readback'); native.publication_unconfirmed = { directory: join(f.parent, 'out'), capture_sha256: 'a'.repeat(64) };
+  const capture = workspaceScanCapturer(async () => { calls++; throw native; });
+  await assert.rejects(capture(f.root, f.pin, r, r.scan_sha256, native.publication_unconfirmed.directory), e => e === native);
+  assert.equal(calls, 1);
+});
+test('completed local capture remains a known result after late cancellation', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(), c = new AbortController();
+  const capture = workspaceScanCapturer(async (...args) => { c.abort(); return { ...captureReply(...args.slice(0, 4), f.manifest.source_commit), stop_requested: true }; });
+  const result = await capture(f.root, f.pin, r, r.scan_sha256, join(f.parent, 'out'), {}, { signal: c.signal });
+  assert.equal(result.capture.stop_requested, true); assert.equal(result.reviewed_scan_sha256, r.scan_sha256);
+});
+test('a mismatched successful capture reply is retained as unconfirmed, not accepted', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(), out = join(f.parent, 'out');
+  const capture = workspaceScanCapturer(async (...args) => ({ ...captureReply(...args.slice(0, 4), f.manifest.source_commit), source_commit: '0'.repeat(40) }));
+  await assert.rejects(capture(f.root, f.pin, r, r.scan_sha256, out), e => e.publication_unconfirmed?.directory === out);
+});
+test('invalid scope, changed workspace binding and overlapping outputs refuse before capture', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(); let calls = 0;
+  const capture = workspaceScanCapturer(async () => { calls++; });
+  for (const output of [f.root, join(f.root, 'nested'), f.parent]) await assert.rejects(capture(f.root, f.pin, r, r.scan_sha256, output));
+  await assert.rejects(capture(f.root, '0'.repeat(64), r, r.scan_sha256, join(f.parent, 'out')), /subject/);
+  assert.equal(calls, 0);
+});
+for (const [name, change] of [
+  ['unknown state', r => r.scan.entries[0].state = 'passed'], ['forged deletion', r => r.scan.entries[0].state = 'deleted'],
+  ['duplicate path', r => r.scan.entries.push(r.scan.entries[0])], ['extra row field', r => r.scan.entries[0].force = true],
+  ['missing digest', r => r.scan.entries[0].after.sha256 = null], ['invalid count', r => r.scan.entries[0].after.bytes = -1],
+  ['empty slot', r => { r.scan.entries[0].before = null; r.scan.entries[0].after = null; }],
+  ['authority claim', r => r.scan.native_membership_reverified = true], ['unknown root field', r => r.scan.token = 'secret'],
+  ['moved outside scope', r => r.scan.scope.roots_hex = [hex('other')]],
+]) test(`review decoding refuses ${name} even with recalculated local checksums`, async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(); change(r);
+  r.scan_sha256 = hash(encode(r.scan)); assert.throws(() => selectionFromWorkspaceScan(r, r.scan_sha256));
+});
+test('async scan preflight owns inputs; caller mutations cannot replace approved observations', async t => {
+  const f = await fixture(t); await f.put('src/a', 'reviewed'); const r = await f.scan(), original = structuredClone(r);
+  const operation = prepareWorkspaceScanCapture(f.root, f.pin, r, r.scan_sha256);
+  r.scan.scope.include_unselected = true; r.scan.entries[1].after.sha256 = '0'.repeat(64);
+  assert.deepEqual(await operation, selectionFromWorkspaceScan(original, original.scan_sha256));
 });

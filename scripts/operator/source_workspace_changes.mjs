@@ -10,16 +10,19 @@ import { readSourcePackage } from '../../crates/fgit-node/src/smart_http/server/
 import { verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
 import { parse } from './source_edit_wire.mjs';
+import { workspaceObservations, checkWorkspaceObservations } from './source_workspace_scan.mjs';
 
 const SCHEMA = 'frankengit-workspace-change-capture-v1';
 const LIMITS = Object.freeze({ 'source.json': SOURCE_PACKAGE_BYTES, 'expected.json': WORKSPACE_LIMITS.expectedBytes,
   'paths.json': WORKSPACE_LIMITS.expectedBytes, 'changes.json': CHANGES_INPUT_BYTES,
   'patch.diff': 1048576, 'draft.json': 262144 });
 export function workspaceChangeSelection(value) {
-  fields(value, ['paths_hex', 'byte_profile', 'patch_profile'], ['paths_hex']);
-  return { paths_hex: selectedPaths(value.paths_hex), ...(Object.hasOwn(value, 'byte_profile')
+  fields(value, ['paths_hex', 'byte_profile', 'patch_profile', 'observations'], ['paths_hex']);
+  const paths = selectedPaths(value.paths_hex);
+  return { paths_hex: paths, ...(Object.hasOwn(value, 'byte_profile')
     ? { byte_profile: sourceByteProfile(value.byte_profile) } : {}), ...(Object.hasOwn(value, 'patch_profile')
-    ? { patch_profile: sourcePatchProfile(value.patch_profile) } : {}) };
+    ? { patch_profile: sourcePatchProfile(value.patch_profile) } : {}), ...(Object.hasOwn(value, 'observations')
+    ? { observations: workspaceObservations(value.observations, paths) } : {}) };
 }
 // Omit defaults entirely: existing capture payloads and retained hashes stay stable.
 function profiles(value) {
@@ -55,6 +58,9 @@ export async function collectWorkspaceChanges(root, workspaceHash, inputSelectio
   if (newPaths.length) await verifyPathAbsence(pkg.membership, baseline.expected, newPaths, webcrypto, time.check);
   time.check();
   const observed = await readWorkspaceFiles(root, selection.paths_hex, { check: time.check, timeoutMs: time.remaining() });
+  // A reviewed scan freezes selected post-edit bytes/modes/absence, not just
+  // path names. Do not silently capture an editor save that happened later.
+  if (selection.observations) checkWorkspaceObservations(selection.observations, observed.files);
   const changes = { schema: CHANGES_SCHEMA, ...profiles(selection), changes: [] };
   for (const path of selection.paths_hex) {
     time.check(); const before = original.get(path), after = observed.files.get(path);
@@ -148,6 +154,20 @@ export async function inspectWorkspaceChangeCapture(path, expectedHash, options 
   if (!canonical(expected).equals(payloads['expected.json']) || !canonical(selection).equals(payloads['paths.json']) ||
       !canonical(changes).equals(payloads['changes.json']) || !canonical(draft.manifest).equals(payloads['draft.json']) ||
       !draft.bytes.equals(payloads['patch.diff']) || draft.manifest.no_op_paths_hex.length) fail('source_workspace_capture_changed');
+  if (selection.observations) {
+    // Reconstruct the selected post-edit image from verified retained source and
+    // validated changes, never from the live worktree or a caller success flag.
+    const bodies = new Map(loaded.package.blobs.map(b => [b.oid, b.bytesHex]));
+    const originals = new Map(basis.files.map(f => [f.path_hex, f]));
+    const edits = new Map(changes.changes.map(c => [c.path_hex, c]));
+    const observed = new Map(selection.paths_hex.map(path => {
+      const c = edits.get(path), f = originals.get(path);
+      return [path, c?.operation === 'delete' ? null : c
+        ? { bytes: Buffer.from(c.content_hex, 'hex'), executable: c.executable }
+        : { bytes: Buffer.from(bodies.get(f.blob), 'hex'), executable: f.executable }];
+    }));
+    checkWorkspaceObservations(selection.observations, observed);
+  }
   const recomputed = rootManifest(manifest.workspace_sha256, payloads, draft, selection, changes);
   if (!canonical(recomputed).equals(rootBytes)) fail('source_workspace_capture_changed');
   time.check(); return { ...summary(path, expectedHash, recomputed), offline_recomputed: true,

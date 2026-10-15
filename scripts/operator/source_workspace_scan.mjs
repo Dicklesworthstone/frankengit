@@ -228,23 +228,100 @@ export function checkWorkspaceObservations(observations, files) {
         actual.executable !== row.executable || hash(actual.bytes) !== row.sha256) error('source_workspace_scan_changed');
   }
 }
-export function selectionFromWorkspaceScan(report, approvedHash, profiles = {}) {
+function reviewedReport(report, approvedHash) {
   digest(approvedHash); fields(report, ['type', 'scan_sha256', 'scan']);
-  if (report.type !== 'source_workspace_scan' || report.scan_sha256 !== approvedHash ||
-      hash(encode(report.scan)) !== approvedHash || report.scan?.schema !== SCAN_SCHEMA) error('source_workspace_scan_approval');
+  const v = report.scan;
+  fields(v, ['schema', 'directory', 'workspace_sha256', 'object_format', 'source_commit', 'scope', 'entries',
+    'source_material_untrusted', 'complete_repository', 'native_membership_reverified', 'absence_verified',
+    'atomic_filesystem_snapshot', 'repository_changed', 'source_executed', 'network_attempted']);
+  normalized(v.directory); digest(v.workspace_sha256);
+  if (report.type !== 'source_workspace_scan' || report.scan_sha256 !== approvedHash || v.schema !== SCAN_SCHEMA ||
+      !['sha1', 'sha256'].includes(v.object_format) || typeof v.source_commit !== 'string' ||
+      !new RegExp(`^[0-9a-f]{${v.object_format === 'sha1' ? 40 : 64}}$`).test(v.source_commit) || /^0+$/.test(v.source_commit) ||
+      v.source_material_untrusted !== true || ['complete_repository', 'native_membership_reverified', 'absence_verified',
+        'atomic_filesystem_snapshot', 'repository_changed', 'source_executed', 'network_attempted'].some(k => v[k] !== false)) error('source_workspace_scan_approval');
+  const scope = workspaceScanScope(v.scope);
+  if (!encode(scope).equals(encode(v.scope)) || !Array.isArray(v.entries) || v.entries.length > SCAN_LIMITS.files + 32) error('source_workspace_scan_entries');
+  let previous = '', originals = 0, present = 0, pathTotal = 0;
+  for (const row of v.entries) {
+    fields(row, ['path_hex', 'state', 'before', 'after']); pathTotal += pathBytes(row.path_hex).length;
+    if (pathTotal > SCAN_LIMITS.pathsBytes + 32768 || row.path_hex <= previous ||
+        !scope.roots_hex.some(r => within(r, row.path_hex)) || scope.exclude_hex.some(e => within(e, row.path_hex))) error('source_workspace_scan_entries');
+    previous = row.path_hex;
+    for (const side of [row.before, row.after]) if (side !== null) {
+      fields(side, ['sha256', 'bytes', 'executable']); digest(side.sha256); integer(side.bytes, 0, 1048576);
+      if (typeof side.executable !== 'boolean') error('source_workspace_scan_entries');
+    }
+    if (row.before !== null && ++originals > 32 || row.after !== null && ++present > SCAN_LIMITS.files ||
+        row.before === null && row.after === null) error('source_workspace_scan_entries');
+    const state = row.before === null ? 'unselected' : row.after === null ? 'deleted'
+      : row.before.sha256 === row.after.sha256 && row.before.bytes === row.after.bytes && row.before.executable === row.after.executable ? 'unchanged' : 'modified';
+    if (row.state !== state) error('source_workspace_scan_entries');
+  }
+  // Shape and lengths are bounded before encoding or taking an owned copy.
+  const bytes = encode(v);
+  if (bytes.length > SCAN_LIMITS.reportBytes || hash(bytes) !== approvedHash) error('source_workspace_scan_approval');
+  return parse(bytes);
+}
+export function selectionFromWorkspaceScan(report, approvedHash, profiles = {}) {
+  const reviewed = reviewedReport(report, approvedHash);
   fields(profiles, ['byte_profile', 'patch_profile'], []);
   if (Object.hasOwn(profiles, 'byte_profile') && profiles.byte_profile !== 'binary-safe-v1' ||
       Object.hasOwn(profiles, 'patch_profile') && !['trim-common-lines-v1', 'bounded-line-hunks-v1'].includes(profiles.patch_profile)) error('source_workspace_scan_profile');
-  const scope = workspaceScanScope(report.scan.scope);
-  if (!Array.isArray(report.scan.entries) || report.scan.entries.length > SCAN_LIMITS.files + 32) error('source_workspace_scan_entries');
-  const selected = report.scan.entries.filter(r => r.state === 'modified' || r.state === 'deleted' || (r.state === 'unselected' && scope.include_unselected));
+  const selected = reviewed.entries.filter(r => r.state === 'modified' || r.state === 'deleted' || (r.state === 'unselected' && reviewed.scope.include_unselected));
   if (!selected.length || selected.length > 32) error('source_workspace_scan_capture_count');
-  const paths = selected.map(r => r.path_hex); let previous = '';
-  for (const p of paths) { pathBytes(p); if (p <= previous || !scope.roots_hex.some(r => within(r, p)) || scope.exclude_hex.some(e => within(e, p))) error('source_workspace_scan_entries'); previous = p; }
+  const paths = selected.map(r => r.path_hex);
   if (paths.some(p => paths.some(q => p !== q && within(p, q)))) error('source_workspace_scan_entries');
   return { paths_hex: paths, ...profiles, observations: workspaceObservations(selected.map(r => ({ path_hex: r.path_hex,
     sha256: r.after?.sha256 ?? null, bytes: r.after?.bytes ?? 0, executable: r.after?.executable ?? null })), paths) };
 }
+// Re-scan the same explicit scope without silently changing the reviewed intent.
+// After this, capture checks the selected bytes again; files created later are
+// not automatically added to the approved path set.
+export async function prepareWorkspaceScanCapture(root, workspaceHash, report, approvedHash, profiles = {}, options = {}) {
+  const { check, limits } = life(options), end = performance.now() + (options.timeoutMs ?? 30000);
+  const reviewed = reviewedReport(report, approvedHash), selection = selectionFromWorkspaceScan(report, approvedHash, profiles);
+  if (reviewed.directory !== root || reviewed.workspace_sha256 !== workspaceHash) error('source_workspace_scan_subject');
+  const current = await scanSourceWorkspace(root, workspaceHash, reviewed.scope,
+    { check, signal: options.signal, limits, timeoutMs: Math.max(1, Math.ceil(end - performance.now())) });
+  check();
+  if (current.scan_sha256 !== approvedHash) error('source_workspace_scan_stale');
+  return selection;
+}
+// The injected boundary makes composition testable without replacing the native
+// authoring kernel in production. The CLI always uses the default implementation.
+export function workspaceScanCapturer(capture) {
+  if (typeof capture !== 'function') error('source_workspace_scan_capture_boundary');
+  return async (root, workspaceHash, report, approvedHash, output, profiles = {}, options = {}) => {
+    normalized(root); normalized(output);
+    if (root === output || output.startsWith(`${root}/`) || root.startsWith(`${output}/`)) error('source_workspace_overlapping_output');
+    const { check } = life(options), end = performance.now() + (options.timeoutMs ?? 30000);
+    const reviewed = reviewedReport(report, approvedHash), owned = { type: 'source_workspace_scan', scan_sha256: approvedHash, scan: reviewed };
+    const remaining = () => { check(); return Math.max(1, Math.ceil(end - performance.now())); };
+    const selection = await prepareWorkspaceScanCapture(root, workspaceHash, owned, approvedHash, profiles,
+      { ...options, check, timeoutMs: remaining() });
+    check();
+    const result = await capture(root, workspaceHash, selection, output,
+      { check, signal: options.signal, timeoutMs: remaining() });
+    // Once the capture root exists, late cancellation is not proof of absence.
+    if (!result || result.type !== 'source_workspace_change_capture' || result.directory !== output ||
+        result.workspace_sha256 !== workspaceHash || result.source_commit !== reviewed.source_commit ||
+        result.selected_path_count !== selection.paths_hex.length || result.changed_path_count !== selection.paths_hex.length ||
+        result.unchanged_path_count !== 0 || result.repository_changed !== false || result.selected_files_only !== true ||
+        result.source_material_untrusted !== true || typeof result.capture_sha256 !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(result.capture_sha256) || typeof result.draft_sha256 !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(result.draft_sha256)) {
+      const e = new Error('source_workspace_scan_capture_reply'); e.code = e.message;
+      e.publication_unconfirmed = { directory: output, workspace_sha256: workspaceHash, reviewed_scan_sha256: approvedHash };
+      throw e;
+    }
+    return { type: 'source_workspace_scan_capture', directory: output, workspace_sha256: workspaceHash,
+      reviewed_scan_sha256: approvedHash, discovery_scope: reviewed.scope, capture: result,
+      repository_changed: false, source_executed: false, network_attempted: false };
+  };
+}
+export const captureWorkspaceScan = workspaceScanCapturer(async (...args) =>
+  (await import('./source_workspace_changes.mjs')).captureWorkspaceChanges(...args));
 export { encode as encodeWorkspaceScan, hash as workspaceScanHash };
 // Small owner-private control files; never use this as an unbounded JSON loader.
 export async function readWorkspaceScanInput(path, options = {}) {
