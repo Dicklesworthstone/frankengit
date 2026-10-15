@@ -211,7 +211,7 @@ fn render_check(row: &WorkflowCheckSummary) -> String {
     let conclusion = match row.conclusion {
         WorkflowCheckConclusion::ActionRequired => "action_required",
         WorkflowCheckConclusion::Success => "success",
-        WorkflowCheckConclusion::Failure => "failure"
+        WorkflowCheckConclusion::Failure => "failure",
         WorkflowCheckConclusion::Cancelled => "cancelled",
         WorkflowCheckConclusion::TimedOut => "timed_out",
     };

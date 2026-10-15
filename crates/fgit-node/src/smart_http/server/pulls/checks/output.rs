@@ -40,7 +40,7 @@ const fn conclusion(value: WorkflowCheckConclusion) -> &'static str {
     match value {
         WorkflowCheckConclusion::ActionRequired => "action_required",
         WorkflowCheckConclusion::Success => "success",
-        WorkflowCheckConclusion::Failure => "failure"
+        WorkflowCheckConclusion::Failure => "failure",
         WorkflowCheckConclusion::Cancelled => "cancelled",
         WorkflowCheckConclusion::TimedOut => "timed_out",
     }
