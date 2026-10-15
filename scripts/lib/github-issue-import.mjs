@@ -18,12 +18,13 @@ const exact = (value, names) => value && typeof value === 'object' && !Array.isA
   Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
 function options(raw, preparing) {
   const allowed = ['workdir', 'href', 'tenant', 'repository', 'tokenFile', 'timeoutMs', 'signal', 'onProgress',
-    ...(preparing ? ['captureFile', 'offset'] : ['operation', 'confirm', 'retryUnresolved', 'maxMutations'])];
+    ...(preparing ? ['captureFile', 'offset', 'maxRequestBytes'] : ['operation', 'confirm', 'retryUnresolved', 'maxMutations'])];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !allowed.includes(k))) fail('destination_options');
   const o = issueConnectionOptions({ ...raw, timeoutMs: raw.timeoutMs ?? 300000 });
   o.workdir = operatorPath(raw.workdir);
   if (preparing) {
     o.captureFile = operatorPath(raw.captureFile); o.offset = natural(raw.offset ?? 0, 'number offset');
+    o.maxRequestBytes = natural(raw.maxRequestBytes ?? RECORD_BYTES_LIMIT, 'request byte limit', 1, RECORD_BYTES_LIMIT);
   } else {
     if (!['run', 'status'].includes(o.operation) || !hash(o.confirm)) fail('confirmation_required');
     o.retryUnresolved = raw.retryUnresolved ?? false;
@@ -97,7 +98,7 @@ export async function prepareGithubIssueImport(raw) {
         const record = encode({ schema: 'frankengit-issue-operator-v1', href: o.href,
           tenant: o.tenant, repository: o.repository, receipt });
         requestBytes += record.length;
-        if (requestBytes > RECORD_BYTES_LIMIT) fail('request_byte_limit');
+        if (requestBytes > o.maxRequestBytes) fail('request_byte_limit');
         const saved = await saveOperatorRecord(join(workdir, `step-${String(index).padStart(6, '0')}.request.json`), record, life.check);
         requests.push(saved.sha256);
       } finally { client.disconnect(); }
@@ -139,6 +140,24 @@ async function load(o, check) {
   }
   if (total !== m.request_bytes) fail('request_byte_count');
   return selected;
+}
+// Shared offline preflight for a complete prepared batch. It validates the same
+// immutable custody as run/status, but performs no outcome query or mutation.
+// Synchronization is intentional: a submitting consumer establishes its own
+// readback barriers. The result is local validation, not a canonical outcome.
+export async function inspectPreparedGithubIssueImport(raw) {
+  const allowed = ['workdir', 'href', 'tenant', 'repository', 'tokenFile', 'timeoutMs', 'signal', 'confirm'];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !allowed.includes(k))) fail('inspection_options');
+  const o = options({ ...raw, operation: 'status' }, false), life = lifetime(o);
+  try {
+    const selected = await load(o, life.check), m = selected.manifest;
+    life.check();
+    return { type: 'github_issue_import_verified', plan_sha256: selected.digest,
+      source: selected.capture.source, source_sha256: m.source_sha256, offset: m.offset,
+      issues: selected.capture.issues.map(({ number, id }) => ({ number, id })),
+      steps: selected.steps.length, request_bytes: m.request_bytes,
+      network_accessed: false, mutation_submitted: false };
+  } finally { life.close(); }
 }
 async function senderLock(root, digest) {
   const path = join(root, 'sender.lock');
