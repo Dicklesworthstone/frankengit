@@ -1,0 +1,44 @@
+name: One-shot checkpoint source blob transfer
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/checkpoint-blob-transfer.yml]
+permissions:
+  contents: write
+jobs:
+  transfer:
+    if: github.repository == 'Dicklesworthstone/frankengit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Upload only the exact previously tested source blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import base64, hashlib, json, os, urllib.request
+          repo = 'Dicklesworthstone/frankengit'
+          before = 'a2518bea64a28a1f5780d0a1b9b41786ab972ff6'
+          after = '1407ba1cc329bed7b20ca9233b7da2089ae4b5e2'
+          def api(path, body=None):
+              request = urllib.request.Request('https://api.github.com/repos/' + repo + path,
+                  data=None if body is None else json.dumps(body).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json',
+                           'User-Agent': 'frankengit-checkpoint-blob-transfer'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          def identity(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          source = api('/git/blobs/' + before)
+          assert source['encoding'] == 'base64'
+          content = base64.b64decode(source['content'])
+          assert identity(content) == before
+          needle = b'        AdmissionMaterializationRefusal::CanonicalRoot(code) => code,'
+          assert content.count(needle) == 1
+          content = content.replace(needle, b'        AdmissionMaterializationRefusal::CheckpointTransition(_) => RefusalCode::EvidenceInvalid,\n' + needle)
+          assert identity(content) == after
+          result = api('/git/blobs', {'encoding': 'base64', 'content': base64.b64encode(content).decode()})
+          assert result['sha'] == after
+          print('Uploaded exact tested blob ' + after + '; no branch, commit, ref or source file was modified by this job.')
