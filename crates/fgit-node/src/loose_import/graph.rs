@@ -41,8 +41,8 @@ impl Default for Limits {
 
 /// Private proof: no partially validated map can reach the staging loop.
 #[derive(Debug)]
-pub(super) struct ValidatedImport {
-    pub(super) objects: BTreeMap<GitOid, LooseObject>,
+pub(super) struct ValidatedImport<T = LooseObject> {
+    pub(super) objects: BTreeMap<GitOid, T>,
     pub(super) total_bytes: u64,
 }
 
@@ -84,14 +84,38 @@ pub(super) fn validate_controlled(
     )
 }
 
+#[cfg(test)]
 pub(super) fn validate_typed_controlled(
     roots: impl IntoIterator<Item = (GitOid, Option<ObjectType>)>,
     format: GitHashAlgorithm,
     parse_limits: &ParseLimits,
     limits: Limits,
-    mut load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
     control: &ImportControl<'_>,
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
+    validate_typed_with_custody(
+        roots,
+        format,
+        parse_limits,
+        limits,
+        load,
+        |_, object| Ok(object),
+        control,
+    )
+}
+
+/// The one graph validator owns identity, type, completeness and resource checks.
+/// Custody may retain bytes in memory (the test oracle) or in an owned private
+/// spool (production). No custody handle is a publication capability.
+pub(super) fn validate_typed_with_custody<T>(
+    roots: impl IntoIterator<Item = (GitOid, Option<ObjectType>)>,
+    format: GitHashAlgorithm,
+    parse_limits: &ParseLimits,
+    limits: Limits,
+    mut load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    mut retain: impl FnMut(GitOid, LooseObject) -> Result<T, LooseGitImportRefusal>,
+    control: &ImportControl<'_>,
+) -> Result<ValidatedImport<T>, LooseGitImportRefusal> {
     control.checkpoint()?;
     let maximum = Limits::default();
     if limits.bytes > maximum.bytes {
@@ -107,7 +131,8 @@ pub(super) fn validate_typed_controlled(
     }
     let mut required = BTreeMap::new();
     let mut pending = BTreeSet::new();
-    let mut objects = BTreeMap::<GitOid, LooseObject>::new();
+    let mut objects = BTreeMap::<GitOid, T>::new();
+    let mut kinds = BTreeMap::<GitOid, ObjectType>::new();
     for (root, kind) in roots {
         control.checkpoint()?;
         enqueue(
@@ -156,7 +181,8 @@ pub(super) fn validate_typed_controlled(
                 )));
             }
             control.checkpoint()?;
-            objects.insert(identity, object);
+            kinds.insert(identity, object.object_type);
+            objects.insert(identity, retain(identity, object)?);
             continue;
         }
         let parsed = parse_object_body(
@@ -193,14 +219,15 @@ pub(super) fn validate_typed_controlled(
         })?;
         // Discard parsed copies before retaining the exact original body.
         drop(parsed);
-        objects.insert(identity, object);
+        kinds.insert(identity, object.object_type);
+        objects.insert(identity, retain(identity, object)?);
         for (child, kind) in edges {
             control.checkpoint()?;
             // Even a previously read root or child must satisfy this new edge.
             // In particular, a root's unconstrained kind cannot hide a later
             // commit/tree/tag requirement.
-            if let Some(known) = objects.get(&child) {
-                require_kind(child, kind, known.object_type)?;
+            if let Some(known) = kinds.get(&child) {
+                require_kind(child, kind, *known)?;
             }
             enqueue(
                 child,

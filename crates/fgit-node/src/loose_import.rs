@@ -13,6 +13,7 @@
 mod cancellation_tests;
 mod control;
 pub mod graph;
+mod spool;
 
 pub use control::checkpoint_request;
 use control::{ImportControl, ReadFailure};
@@ -556,7 +557,9 @@ impl OneNode {
         )?;
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs, control)?;
         let head_target = read_head_target(&git_directory, control)?;
-        let validated = graph::validate_typed_controlled(
+        let mut spool =
+            spool::Spool::create(self.storage_root(), graph::Limits::default().bytes, control)?;
+        let validated = graph::validate_typed_with_custody(
             refs.iter().map(|(name, id)| {
                 (
                     *id,
@@ -576,12 +579,13 @@ impl OneNode {
                     control,
                 )
             },
+            |identity, object| spool.retain(identity, object, control),
             control,
         )?;
         let refs = CanonicalRefState::new_with_head_target(refs, head_target)
             .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?;
-        // Release pack decoding caches before placement. The bounded proof owns
-        // the exact bytes verified above; no mutable source file is reread.
+        // Release pack decoding caches before placement. The proof retains only
+        // bounded spool handles; no mutable source file is reread.
         drop(packed);
         let mut closure = BTreeSet::new();
         for identity in validated.objects.keys() {
@@ -591,8 +595,9 @@ impl OneNode {
         let total_object_bytes = validated.total_bytes;
         // All required local edges and object bodies have now verified. Only
         // placement failures or cancellation can leave verified, noncanonical objects.
-        for (identity, object) in validated.objects {
+        for (identity, entry) in validated.objects {
             control.checkpoint()?;
+            let object = spool.read(identity, entry, control)?;
             let stored = self
                 .put_git_object(object.object_type, object.body)
                 .map_err(|error| LooseGitImportRefusal::Node(Box::new(error)))?;
@@ -604,6 +609,7 @@ impl OneNode {
             }
         }
 
+        spool.finish()?;
         control.checkpoint()?;
         Ok(StagedLooseGitImport {
             refs,
