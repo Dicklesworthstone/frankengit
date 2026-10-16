@@ -134,7 +134,7 @@ function manifest(value) {
   }
   return value;
 }
-async function validateFiles(root, m, life, identity, sealed) {
+async function validateFiles(root, m, life, identity, sealed, collect) {
   const expectedNames = new Set(m.pages.map((_, i) => pageName(i)));
   if (sealed) expectedNames.add('archive.json');
   const dir = await opendir(root); let count = 0;
@@ -149,7 +149,9 @@ async function validateFiles(root, m, life, identity, sealed) {
     const raw = await readPrivateOperatorFile(join(root, pageName(index)), L.pageBytes, () => life.check());
     bytes += raw.length;
     if (raw.length !== row[3] || recordDigest(raw) !== row[2] || bytes > m.data_bytes) fail('page_commitment');
-    walk.accept(canonical(raw));
+    const reply = canonical(raw);
+    walk.accept(reply);
+    collect?.(reply);
   }
   if (walk.next !== null || walk.issues !== m.issue_count || walk.events !== m.event_count || bytes !== m.data_bytes) fail('incomplete');
   await directory(root, identity); life.check();
@@ -158,7 +160,7 @@ async function validateFiles(root, m, life, identity, sealed) {
     source_head: m.source_head, issues: walk.issues, events: walk.events, pages: m.pages.length,
     data_bytes: bytes, complete: true, canonical_backup: false, mutation_submitted: false };
 }
-export async function inspectIssueArchive(raw) {
+async function readArchive(raw, includeRecords) {
   keys(raw, ['workdir', 'confirm', 'timeoutMs', 'signal'], ['workdir', 'confirm']);
   const root = operatorPath(raw.workdir), expected = digest(raw.confirm), life = lifetime(raw);
   try {
@@ -167,9 +169,27 @@ export async function inspectIssueArchive(raw) {
     if (recordDigest(bytes) !== expected) fail('pin_mismatch');
     const m = manifest(canonical(bytes));
     if (m.data_bytes + bytes.length > L.bytes) fail('archive_limit');
-    return { ...await validateFiles(root, m, life, identity, true), network_accessed: false, local_read_only: true };
+    const records = [], byNumber = new Map();
+    // Private collector only. A caller cannot observe a successful prefix or run
+    // effects from pages that have not passed the COMPLETE archive traversal.
+    const collect = includeRecords ? reply => {
+      if (reply.type === 'issue_page') for (const row of reply.issues) {
+        const record = { snapshot: stateView(row), comments: [] };
+        records.push(record); byNumber.set(row.number, record);
+      } else for (const event of reply.events) if (event.action.name === 'comment') {
+        byNumber.get(reply.issue.number).comments.push({ version: event.version,
+          actor: event.actor, body: event.action.body });
+      }
+    } : undefined;
+    const archive = { ...await validateFiles(root, m, life, identity, true, collect),
+      network_accessed: false, local_read_only: true };
+    return includeRecords ? { archive, records } : archive;
   } finally { life.close(); }
 }
+export function inspectIssueArchive(raw) { return readArchive(raw, false); }
+// A bounded, owned data view for migration consumers. Original principals remain
+// source attribution. This does not restore native history or grant any write.
+export function readIssueArchive(raw) { return readArchive(raw, true); }
 // Byte/request accounting occurs before the shipped client decodes the reply.
 // Only constructed read URLs reach this adapter; no redirect, retry or mutation.
 function transport(o, life, stats) {
