@@ -93,7 +93,10 @@ export async function preparePullImport(raw) {
     try { await lstat(o.workdir); importFail('workdir_exists'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     const source = await readPullImportSource({ workdir: o.archiveDir, confirm: o.archiveConfirm,
       maxBytes: o.selection.max_source_bytes, timeoutMs: life.timeout, signal: life.signal });
-    const compiled = compilePullImport(source, o.selection); life.check();
+    // New preparation rejects a statically impossible shared-ref basis. Loading
+    // already sealed v1 requests still reconstructs their original commands,
+    // even when that newer preparation check would refuse a replacement plan.
+    const compiled = compilePullImport(source, o.selection, { validateDestinationBasis: true }); life.check();
     const token = await readPullToken(o.tokenFile), fingerprint = pullTokenFingerprint(token);
     // Compile and validate the whole population before generating a request key.
     // All keys/receipts and their total size are checked before creating any slot.

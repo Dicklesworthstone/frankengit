@@ -21,10 +21,15 @@ export function row(number, format = 'sha1', state = 'open') {
       target_tip_before: data.target_tip, base_tip: oid('c'), merge_commit: oid('d') } };
 }
 export async function importFixture(t, { format = 'sha1', rows = [row(1, format), row(9, format, 'closed')],
-  comments = 2, reviews = 1, modify = null, drop = null, refuse = null, mutate = null } = {}) {
+  comments = 2, reviews = 1, modify = null, drop = null, refuse = null, mutate = null, beforeDestination = null, tokens = [TOKEN], destinationRefs = null } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'fg-native-pull-import-')); await chmod(root, 0o700);
   const tokenFile = join(root, 'token'); await writeFile(tokenFile, TOKEN + '\n', { mode: 0o600 });
   const scope = { ...DST, object_format: format }, requests = [], outcomes = new Map(), pulls = new Map(), sockets = new Set();
+  const refs = new Map(destinationRefs ?? []);
+  if (destinationRefs === null) for (const r of rows) if (r.data) for (const side of ['source', 'target']) {
+    const name = r.data[`${side}_ref`];
+    if (name !== null && !refs.has(name)) refs.set(name, r.data[`${side}_tip`].split(':').at(-1));
+  }
   let sequence = 0;
   const common = () => ({ schema_version: 1, ...SRC, object_format: format, source_head: 'source-head-1', snapshot_token: HEAD });
   const send = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json' });
@@ -47,7 +52,7 @@ export async function importFixture(t, { format = 'sha1', rows = [row(1, format)
       const chunks = []; for await (const chunk of req) chunks.push(chunk); const body = Buffer.concat(chunks).toString();
       const request = { path: url.pathname, method: req.method, key: req.headers['idempotency-key'], body, head: query.get('expected_head') };
       requests.push(request);
-      if (req.headers.authorization !== `Bearer ${TOKEN}`) { send(res, 401, {}); return; }
+      if (!tokens.some(token => req.headers.authorization === `Bearer ${token}`)) { send(res, 401, {}); return; }
       if (parts[1] === 'source') {
         if (req.method !== 'GET' || request.key || body) throw new Error('source is read only');
         const n = Number(parts[5]), selected = rows.find(r => r.number === n), kind = parts[6] ?? (parts[5] ? 'show' : 'list');
@@ -78,6 +83,7 @@ export async function importFixture(t, { format = 'sha1', rows = [row(1, format)
         modify?.(reply, kind); send(res, 200, reply); return;
       }
       if (parts[1] !== 'dest' || req.method !== 'POST' || !request.key) throw new Error('unexpected destination request');
+      if (await beforeDestination?.({ request, req, res }) === false) return;
       if (parts[4] === 'outcomes') { if (body) throw new Error('outcome body'); const result = outcome(request.key);
         if (await mutate?.(request, res, result) === false) return; send(res, 200, result); return; }
       const number = parts[5], action = parts[6] === 'comments' ? 'comment' : parts[6], f = Object.fromEntries(new URLSearchParams(body));
@@ -86,13 +92,14 @@ export async function importFixture(t, { format = 'sha1', rows = [row(1, format)
       if (receipt && receipt.body_sha256 !== hash(body)) throw new Error('changed original key body');
       if (!receipt) {
         const previous = pulls.get(number);
-        const bad = refuse?.({ number, action, f }) || (action === 'open' ? Boolean(previous) || f.expected_version !== '0'
+        const moved = action === 'open' && (refs.get(f.source_ref) !== f.source_tip || refs.get(f.target_ref) !== f.target_tip);
+        const bad = moved || refuse?.({ number, action, f }) || (action === 'open' ? Boolean(previous) || f.expected_version !== '0'
           : !previous || (action === 'comment' ? f.expected_version !== String(previous.comments.length) : f.expected_version !== String(previous.version)));
         const seq = String(++sequence), committed = !bad;
         receipt = { type: action === 'comment' ? 'pull_request_comment_publication' : 'pull_request_publication',
           schema_version: 1, ...scope, number, action, tx_id: `tx-${seq}`, outcome: committed ? 'committed' : 'refused',
           decision_sequence: seq, repository_commit_id: committed ? `rcr-${seq}` : null,
-          refusal_record_id: committed ? null : `refusal-${seq}`, refusal_code: committed ? null : 'ExpectedVersionMismatch',
+          refusal_record_id: committed ? null : `refusal-${seq}`, refusal_code: committed ? null : moved ? 'TargetRefMoved' : 'ExpectedVersionMismatch',
           refusal_code_point: committed ? null : 42, delivery_acknowledged: null, expected_version: f.expected_version,
           ...(action === 'comment' ? { comment_version: committed ? String(BigInt(f.expected_version) + 1n) : null, refs_changed: false } : {}) };
         if (committed) {
@@ -115,6 +122,6 @@ export async function importFixture(t, { format = 'sha1', rows = [row(1, format)
   const archived = await exportPullArchive({ workdir: archiveDir, href: base + '/source/ui/pulls/', tenant: SRC.tenant_id,
     repository: SRC.repository_id, tokenFile, pageSize: 1 });
   const selection = { endpoint: base + '/dest', scope, number_start: '100' };
-  return { root, tokenFile, scope, requests, outcomes, pulls, rows, archiveDir, archiveConfirm: archived.archive_sha256,
+  return { root, tokenFile, scope, requests, outcomes, pulls, refs, rows, archiveDir, archiveConfirm: archived.archive_sha256,
     workdir, selection, prepare: { workdir, archiveDir, archiveConfirm: archived.archive_sha256, selection, tokenFile } };
 }

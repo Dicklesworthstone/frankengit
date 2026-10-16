@@ -118,3 +118,40 @@ test('competing preparers cannot overwrite an established migration', async t =>
 test('empty archive prepares a complete zero-operation plan', async t => {
   const f = await importFixture(t, { rows: [] }); const p = await preparePullImport(f.prepare); assert.equal(p.steps, 0); assert.deepEqual(p.mapping, []);
 });
+
+test('historical PRs with different bases need explicit per-PR destination branches', async t => {
+  const later = row(9, 'sha1', 'closed'); later.data.target_tip = 'sha1:' + 'c'.repeat(40);
+  const f = await importFixture(t, { rows: [row(1), later] }); const before = f.requests.length;
+  await assert.rejects(preparePullImport(f.prepare), /destination_ref_tip_conflict/);
+  assert.equal(f.requests.length, before); assert(!(await readdir(f.root)).includes('migration'));
+  const target_ref = 'refs/heads/import/pr-9/base';
+  const p = await preparePullImport({ ...f.prepare, selection: { ...f.selection,
+    pull_ref_map: [{ source_number: '9', source_ref: later.data.source_ref, target_ref }] } });
+  // Provision the separately selected immutable base in the response peer. The
+  // importer itself must not move or create refs, even to make a PR open pass.
+  f.refs.set(target_ref, 'c'.repeat(40)); const beforeRefs = Array.from(f.refs);
+  const life = lifetime({}); t.after(() => life.close()); const loaded = await loadPullImport(f.workdir, p.plan_sha256, life);
+  for (const intent of loaded.intents) assert.equal((await submitPull(intent, TOKEN, { confirmKey: intent.key })).outcome.state, 'committed');
+  assert.equal(f.pulls.get('101').fields.target_ref, target_ref); assert.equal(f.pulls.get('101').fields.target_tip, 'c'.repeat(40));
+  assert.equal(f.pulls.get('101').state, 'closed'); assert.deepEqual(Array.from(f.refs), beforeRefs);
+});
+for (const mapping of [
+  [{ source_number: '99', source_ref: 'refs/heads/topic', target_ref: 'refs/heads/main' }],
+  [{ source_number: '1', source_ref: 'refs/heads/topic', target_ref: 'refs/heads/main' }, { source_number: '1', source_ref: 'refs/heads/other', target_ref: 'refs/heads/main' }],
+  [{ source_number: '1', source_ref: 'refs/heads/topic', target_ref: 'refs/heads/main', target_tip: 'd'.repeat(40) }],
+]) test('per-PR mappings refuse unused, duplicate or tip-changing selections', async t => {
+  const f = await importFixture(t); await assert.rejects(preparePullImport({ ...f.prepare, selection: { ...f.selection, pull_ref_map: mapping } }));
+  assert(!(await readdir(f.root)).includes('migration'));
+});
+
+test('new basis preflight does not reinterpret retained v1 command compilation', async t => {
+  const later = row(9, 'sha1', 'closed'); later.data.target_tip = 'sha1:' + 'c'.repeat(40);
+  const f = await importFixture(t, { rows: [row(1), later] });
+  const source = await readPullImportSource({ workdir: f.archiveDir, confirm: f.archiveConfirm });
+  const retained = compilePullImport(source, f.selection);
+  assert(!Object.hasOwn(retained.selection, 'pull_ref_map'));
+  const laterOpen = retained.steps.find(s => s.source_number === 9 && s.action === 'open');
+  assert.equal(laterOpen.fields.target_ref, 'refs/heads/main'); assert.equal(laterOpen.fields.target_tip, 'c'.repeat(40));
+  assert.throws(() => compilePullImport(source, retained.selection, { validateDestinationBasis: true }), /destination_ref_tip_conflict/);
+  assert.deepEqual(compilePullImport(source, retained.selection).steps, retained.steps);
+});

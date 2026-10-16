@@ -13,7 +13,7 @@ const bounded = (n, max) => {
 };
 export function pullImportSelection(raw) {
   const required = ['endpoint', 'scope', 'number_start'];
-  pullFields(raw, [...required, 'merged', 'ref_map', 'max_steps', 'max_source_bytes', 'max_request_bytes'], required);
+  pullFields(raw, [...required, 'merged', 'ref_map', 'pull_ref_map', 'max_steps', 'max_source_bytes', 'max_request_bytes'], required);
   const endpoint = outcomeEndpoint(raw.endpoint), scope = pullScope(raw.scope);
   const number_start = pullU64(raw.number_start, 1n), merged = raw.merged ?? 'refuse', refs = raw.ref_map ?? [];
   if (!['refuse', 'as-closed'].includes(merged) || !Array.isArray(refs) || refs.length > 8192) importFail('selection');
@@ -24,7 +24,21 @@ export function pullImportSelection(raw) {
     seen.add(item.source_hex); ref_map.push({ source_hex: item.source_hex, destination: branch(item.destination) });
   }
   ref_map.sort((a, b) => a.source_hex < b.source_hex ? -1 : a.source_hex > b.source_hex ? 1 : 0);
-  return { endpoint, scope, number_start, merged, ref_map,
+  let pull_ref_map;
+  if (raw.pull_ref_map !== undefined) {
+    if (!Array.isArray(raw.pull_ref_map) || raw.pull_ref_map.length > 4096) importFail('pull_ref_mapping');
+    const numbers = new Set();
+    pull_ref_map = raw.pull_ref_map.map(item => {
+      pullFields(item, ['source_number', 'source_ref', 'target_ref']);
+      const source_number = pullU64(item.source_number, 1n);
+      if (numbers.has(source_number)) importFail('pull_ref_mapping');
+      numbers.add(source_number);
+      return { source_number, source_ref: branch(item.source_ref), target_ref: branch(item.target_ref) };
+    }).sort((a, b) => BigInt(a.source_number) < BigInt(b.source_number) ? -1 : 1);
+  }
+  // Omit the new optional field for legacy selections so existing manifests,
+  // step commitments and original keys continue to validate unchanged.
+  return { endpoint, scope, number_start, merged, ref_map, ...(pull_ref_map === undefined ? {} : { pull_ref_map }),
     max_steps: bounded(raw.max_steps ?? PULL_IMPORT_LIMITS.steps, PULL_IMPORT_LIMITS.steps),
     max_source_bytes: bounded(raw.max_source_bytes ?? PULL_IMPORT_LIMITS.sourceBytes, PULL_IMPORT_LIMITS.sourceBytes),
     max_request_bytes: bounded(raw.max_request_bytes ?? PULL_IMPORT_LIMITS.requestBytes, PULL_IMPORT_LIMITS.requestBytes) };
@@ -40,21 +54,24 @@ function chunks(text) {
   } while (start < bytes.length);
   return result;
 }
-export function compilePullImport(source, rawSelection) {
+export function compilePullImport(source, rawSelection, { validateDestinationBasis = false } = {}) {
   const s = pullImportSelection(rawSelection), m = source.manifest;
   if (m.object_format !== s.scope.object_format) importFail('hash_domain_change');
   if (m.tenant_id === s.scope.tenant_id && m.repository_id === s.scope.repository_id &&
       m.repository_incarnation === s.scope.repository_incarnation) importFail('same_repository');
   if (source.bytes > s.max_source_bytes) importFail('source_limit');
   const refs = new Map(s.ref_map.map(r => [r.source_hex, r.destination])), used = new Set(), destinations = new Map();
+  const perPull = new Map((s.pull_ref_map ?? []).map(r => [r.source_number, r])), usedPulls = new Set();
   const steps = [], mapping = []; let encodedBytes = 0;
-  function ref(data, side) {
+  function ref(data, side, override) {
     const bytes = data[`${side}_ref_hex`];
-    const value = refs.has(bytes) ? (used.add(bytes), refs.get(bytes)) : data[`${side}_ref`];
+    const value = override ? override[`${side}_ref`] : refs.has(bytes) ? (used.add(bytes), refs.get(bytes)) : data[`${side}_ref`];
     if (value === null) importFail('byte_only_ref_needs_mapping');
     branch(value);
-    if (destinations.has(value) && destinations.get(value) !== bytes) importFail('ref_mapping_alias');
-    destinations.set(value, bytes); return value;
+    const tip = oid(data[`${side}_tip`], s.scope.object_format), previous = destinations.get(value);
+    if (previous && previous.bytes !== bytes) importFail('ref_mapping_alias');
+    if (validateDestinationBasis && previous && previous.tip !== tip) importFail('destination_ref_tip_conflict');
+    destinations.set(value, { bytes, tip }); return value;
   }
   function add(sourceNumber, number, action, fields) {
     if (steps.length >= s.max_steps) importFail('step_limit');
@@ -68,7 +85,8 @@ export function compilePullImport(source, rawSelection) {
     pullU64(target, 1n);
     if (!data || row.merge_only) importFail('merge_only_metadata_unavailable');
     if (row.state === 'merged' && s.merged !== 'as-closed') importFail('merged_requires_closed_consent');
-    const fields = { source_ref: ref(data, 'source'), target_ref: ref(data, 'target'),
+    const override = perPull.get(String(row.number)); if (override) usedPulls.add(String(row.number));
+    const fields = { source_ref: ref(data, 'source', override), target_ref: ref(data, 'target', override),
       source_tip: oid(data.source_tip, s.scope.object_format), target_tip: oid(data.target_tip, s.scope.object_format),
       title: data.title, body: data.body };
     mapping.push({ source: row.number, destination: target, source_state: row.state,
@@ -98,5 +116,6 @@ export function compilePullImport(source, rawSelection) {
     if (row.state !== 'open') add(row.number, target, 'close', { expected_version: '1', ...fields });
   }
   if (used.size !== refs.size) importFail('unused_ref_mapping');
+  if (usedPulls.size !== perPull.size) importFail('unused_pull_ref_mapping');
   return { selection: s, steps, mapping, encodedBytes };
 }
