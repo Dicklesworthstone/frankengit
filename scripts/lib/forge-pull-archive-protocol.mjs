@@ -102,3 +102,12 @@ export async function createPullArchiveBackend({ href, token, timeoutMs, signal,
   return { close, list: args => read('list', null, args), show: (number, head) => read('show', number, { head }),
     reviews: (number, args) => read('reviews', number, args), comments: (number, args) => read('comments', number, args) };
 }
+
+export function readPullArchivePage(backend, request, pageSize, head) {
+  const { kind, number, cursor } = request, args = { after:cursor, limit:pageSize, head };
+  if (kind === 'list') return backend.list(args);
+  if (kind === 'show') return backend.show(number,head);
+  if (kind === 'reviews') return backend.reviews(number,args);
+  if (kind === 'comments') return backend.comments(number,args);
+  fail('page_kind');
+}
