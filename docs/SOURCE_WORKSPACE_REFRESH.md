@@ -41,7 +41,7 @@ created. A different source package, commit, local content, mode or deletion
 requires a new preview. The new directory must be absent and disjoint from the
 original. The original workspace is never overwritten or removed.
 
-## Exact reconciliation, not a text merge
+## Default exact reconciliation, not a text merge
 
 - A locally unchanged file takes the selected source version.
 - A selected source file unchanged from the old baseline keeps the local edit
@@ -51,7 +51,11 @@ original. The original workspace is never overwritten or removed.
   and source chmod, or local chmod and source content change, can coexist.
 - Differing content changes on both sides, or local deletion against a changed
   source file, are conflicts. No hunk merge, fuzzy application or rename inference
-  is performed. Binary/empty/raw-byte files use the same byte-equality rules.
+  is performed by default. Binary/empty/raw-byte files use the same byte-equality rules.
+
+For explicitly opted-in disjoint line merging inside a file, see
+[SOURCE_WORKSPACE_TEXT_MERGE.md](SOURCE_WORKSPACE_TEXT_MERGE.md). The default
+profile and its approval hashes remain unchanged.
 
 The existing source verifier owns native commit/tree/blob validation. The refresh
 adapter does not implement another Git decoder or use Git as a production helper.

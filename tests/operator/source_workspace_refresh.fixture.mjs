@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 export const canonical = value => Buffer.from(`${JSON.stringify(value)}\n`);
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+export { WORKSPACE_TEXT_MERGE_PROFILE } from '../../scripts/operator/source_workspace_merge.mjs';
 export const SOURCE_PACKAGE_BYTES = 32 * 1024 * 1024;
 export const hooks = { verify: null };
 export function pathBytes(hex) {
@@ -67,8 +68,8 @@ export async function loadWorkspaceModule() {
   // Rewrite specifiers only; do not extract functions or modify any function body.
   code = code.replace(/from '([^']+)'/g, (match, specifier) => {
     if (specifier.startsWith('node:')) return match;
-    return `from '${specifier === './workflow_watch_io.mjs'
-      ? new URL('../../scripts/operator/workflow_watch_io.mjs', import.meta.url).href : import.meta.url}'`;
+    return `from '${['./workflow_watch_io.mjs', './source_workspace_merge.mjs'].includes(specifier)
+      ? new URL(specifier, url).href : import.meta.url}'`;
   });
   return import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 }

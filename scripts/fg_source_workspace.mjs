@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
 import { createSourceWorkspace, expandSourceWorkspace, inspectSourceWorkspace, previewSourceWorkspaceRefresh, refreshSourceWorkspace, lifetime, pin, fail,
-  SOURCE_PACKAGE_BYTES, WORKSPACE_LIMITS } from './operator/source_workspace.mjs';
+  SOURCE_PACKAGE_BYTES, WORKSPACE_LIMITS, WORKSPACE_TEXT_MERGE_PROFILE } from './operator/source_workspace.mjs';
 import { captureWorkspaceChanges, inspectWorkspaceChangeCapture } from './operator/source_workspace_changes.mjs';
 import { parse } from './operator/source_edit_wire.mjs';
 const USAGE = `node scripts/fg_source_workspace.mjs create --package PRIVATE_PACKAGE
@@ -39,6 +39,12 @@ For conflicts, both refresh commands accept --resolutions PRIVATE_CHOICES. The
 closed file format binds the original conflict plan_sha256 and per-path local
 or selected choices. Preview those choices, then approve the NEW plan hash.
 No implicit force, partial publication or stale-choice replay is supported.
+Both refresh commands accept --merge-profile bounded-line-merge-v1 to combine
+disjoint textual edits inside a file. The default remains whole-file comparison.
+The profile and deterministic work witness enter the reviewed plan; keep the
+same profile on refresh. Overlap, binary input or exhausted bounds remain
+explicit conflicts, never partial merges or silent choices. No Git equivalence
+or semantic correctness is claimed. See docs/SOURCE_WORKSPACE_TEXT_MERGE.md.
 Edit files/ with your own trusted tools; no tool
 is run here. Status checks the original inputs and reads only originally selected
 paths. It does not discover other local files or attest an atomic filesystem view.
@@ -58,7 +64,7 @@ source execution, permission grant or repository mutation. Interrupted output
 slots are retained. Exit 0: complete; 1: refresh preview has conflicts; 2: refusal; 3: cancelled before output;
 4: a local output/result may exist: retain and inspect the reported root hash.`;
 function options(args) {
-  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 17 ||
+  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 19 ||
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_workspace_arguments');
   const op = args[0], required = op === 'create' ? ['--package', '--expect', '--output']
     : op === 'expand' ? ['--workspace', '--sha256', '--package', '--expect', '--output']
@@ -71,9 +77,10 @@ function options(args) {
   const f = new Map();
   for (let i = 1; i < args.length; i += 2) {
     const key = args[i], value = args[i + 1];
-    if (![...required, '--timeout-ms', ...(['refresh-preview', 'refresh'].includes(op) ? ['--resolutions'] : [])].includes(key) || f.has(key) || !value || value.startsWith('--')) fail('source_workspace_option');
+    if (![...required, '--timeout-ms', ...(['refresh-preview', 'refresh'].includes(op) ? ['--resolutions', '--merge-profile'] : [])].includes(key) || f.has(key) || !value || value.startsWith('--')) fail('source_workspace_option');
     f.set(key, value);
-    if (key === '--sha256' || key === '--approve-refresh-sha256') pin(value); else if (key !== '--timeout-ms') absolute(value);
+    if (key === '--sha256' || key === '--approve-refresh-sha256') pin(value); else if (key === '--merge-profile') { if (value !== WORKSPACE_TEXT_MERGE_PROFILE) fail('source_workspace_refresh_merge_profile'); }
+    else if (key !== '--timeout-ms') absolute(value);
   }
   if (required.some(k => !f.has(k))) fail('source_workspace_option');
   const timeout = f.get('--timeout-ms') ?? '30000';
@@ -110,7 +117,8 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const resolutions = f.has('--resolutions')
         ? parse(await privateFile(f.get('--resolutions'), WORKSPACE_LIMITS.manifestBytes, time), WORKSPACE_LIMITS.manifestBytes) : undefined;
       const local = { check: time.check, signal: controller.signal, timeoutMs: time.remaining(),
-        ...(resolutions === undefined ? {} : { resolutions }) };
+        ...(resolutions === undefined ? {} : { resolutions }),
+        ...(f.has('--merge-profile') ? { mergeProfile: f.get('--merge-profile') } : {}) };
       result = op === 'create' ? await createSourceWorkspace(f.get('--output'), bytes, expected, local)
         : op === 'expand' ? await expandSourceWorkspace(f.get('--workspace'), f.get('--sha256'), bytes, expected, f.get('--output'), local)
         : op === 'refresh-preview' ? await previewSourceWorkspaceRefresh(f.get('--workspace'), f.get('--sha256'), bytes, expected, local)

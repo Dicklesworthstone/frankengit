@@ -11,6 +11,8 @@ import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } f
 import { canonical, sha256 } from './source_changes.mjs';
 import { parse } from './source_edit_wire.mjs';
 import { ownSelectedSourceInput, mergeSelectedSourcePackages } from './source_package_union.mjs';
+import { createWorkspaceTextMerger, WORKSPACE_TEXT_MERGE_PROFILE } from './source_workspace_merge.mjs';
+export { WORKSPACE_TEXT_MERGE_PROFILE };
 
 export const WORKSPACE_SCHEMA = 'frankengit-selected-source-workspace-v1';
 export const WORKSPACE_LIMITS = Object.freeze({ files: 32, fileBytes: 1048576,
@@ -214,7 +216,8 @@ function reconcileRefreshFile(before, local, selected) {
   const executable = local.executable === before.executable ? selected.executable : local.executable;
   return { disposition: 'combined', file: { bytes, executable } };
 }
-async function prepareWorkspaceRefresh(root, workspaceHash, next, time) {
+async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile) {
+  const textMerger = mergeProfile === null ? null : createWorkspaceTextMerger({ check: time.check });
   absolute(root); pin(workspaceHash);
   const rootIdentity = await privateDirectory(root); time.check();
   const baseline = await loadSourceWorkspace(root, workspaceHash, { check: time.check, timeoutMs: time.remaining() });
@@ -236,7 +239,14 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time) {
     if (oldFile.path_hex !== path || newFile.path_hex !== path) fail('source_workspace_refresh_selection');
     const before = { bytes: Buffer.from(oldBodies.get(oldFile.blob), 'hex'), executable: oldFile.executable };
     const selected = { bytes: Buffer.from(nextBodies.get(newFile.blob), 'hex'), executable: newFile.executable };
-    const local = snapshot.files.get(path), result = reconcileRefreshFile(before, local, selected);
+    const local = snapshot.files.get(path); let result = reconcileRefreshFile(before, local, selected);
+    if (textMerger && result.conflict === 'content_changed_both') {
+      const { bytes, ...diagnostic } = textMerger.merge(before.bytes, local.bytes, selected.bytes);
+      result = diagnostic.status === 'merged'
+        ? { disposition: 'text_merged', file: { bytes,
+          executable: local.executable === before.executable ? selected.executable : local.executable }, text_merge: diagnostic }
+        : { ...result, text_merge: diagnostic };
+    }
     if (result.disposition === 'conflict') { conflicts++; conflicting.set(path, { local, selected }); }
     else {
       resultBytes += result.file?.bytes.length ?? 0;
@@ -244,7 +254,8 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time) {
       carried.set(path, result.file);
     }
     entries.push({ path_hex: path, disposition: result.disposition, conflict: result.conflict ?? null,
-      before: refreshImage(before), local: refreshImage(local), selected: refreshImage(selected), result: refreshImage(result.file) });
+      before: refreshImage(before), local: refreshImage(local), selected: refreshImage(selected), result: refreshImage(result.file),
+      ...(result.text_merge ? { text_merge: result.text_merge } : {}) });
     time.check();
   }
   const plan = { type: 'source_workspace_refresh_plan', schema_version: 1,
@@ -255,7 +266,8 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time) {
     entries, conflict_count: conflicts, ready: conflicts === 0, result_bytes: resultBytes,
     selected_files_only: true, unselected_local_files_copied: false, original_workspace_changed: false,
     ancestry_verified: false, semantic_compatibility_verified: false, authority_verified: false,
-    freshness_verified: false, repository_changed: false, source_material_untrusted: true };
+    freshness_verified: false, repository_changed: false, source_material_untrusted: true,
+    ...(textMerger ? { merge_profile: mergeProfile, text_merge: textMerger.witness() } : {}) };
   const encoded = canonical(plan);
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
   const recheck = async () => {
@@ -274,9 +286,11 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time) {
 // They name the original conflict plan and never grant publication authority.
 export const WORKSPACE_REFRESH_RESOLUTIONS = 'frankengit-workspace-refresh-resolutions-v1';
 function refreshOptions(options) {
-  fields(options, ['signal', 'timeoutMs', 'check', 'resolutions'], []);
-  const { resolutions, ...operation } = options, time = lifetime(operation);
-  if (resolutions === undefined) return { time, resolutions: null };
+  fields(options, ['signal', 'timeoutMs', 'check', 'resolutions', 'mergeProfile'], []);
+  const { resolutions, mergeProfile: selectedProfile, ...operation } = options, time = lifetime(operation);
+  if (Object.hasOwn(options, 'mergeProfile') && selectedProfile !== WORKSPACE_TEXT_MERGE_PROFILE) fail('source_workspace_refresh_merge_profile');
+  const mergeProfile = selectedProfile ?? null;
+  if (resolutions === undefined) return { time, resolutions: null, mergeProfile };
   fields(resolutions, ['schema', 'plan_sha256', 'choices']);
   if (resolutions.schema !== WORKSPACE_REFRESH_RESOLUTIONS) fail('source_workspace_refresh_resolutions');
   const originalHash = pin(resolutions.plan_sha256);
@@ -288,7 +302,7 @@ function refreshOptions(options) {
   });
   selectedPaths(choices.map(row => row.path_hex));
   choices.sort((a, b) => a.path_hex < b.path_hex ? -1 : 1);
-  return { time, resolutions: { schema: WORKSPACE_REFRESH_RESOLUTIONS, plan_sha256: originalHash, choices } };
+  return { time, mergeProfile, resolutions: { schema: WORKSPACE_REFRESH_RESOLUTIONS, plan_sha256: originalHash, choices } };
 }
 function resolveWorkspaceRefresh(prepared, resolutions, time) {
   if (resolutions === null) return prepared;
@@ -317,19 +331,19 @@ function resolveWorkspaceRefresh(prepared, resolutions, time) {
   return { ...prepared, plan, refresh_sha256: sha256(encoded) };
 }
 export async function previewSourceWorkspaceRefresh(root, workspaceHash, nextBytes, nextExpected, options = {}) {
-  const { time, resolutions } = refreshOptions(options);
+  const { time, resolutions, mergeProfile } = refreshOptions(options);
   // Own both bytes and independent expectations before the first await.
   const next = ownSelectedSourceInput(nextBytes, nextExpected);
-  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time), resolutions, time);
+  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile), resolutions, time);
   return { ...prepared.plan, refresh_sha256: prepared.refresh_sha256 };
 }
 export async function refreshSourceWorkspace(root, workspaceHash, nextBytes, nextExpected, output, approvedRefreshHash, options = {}) {
-  const { time, resolutions } = refreshOptions(options); absolute(root); absolute(output); pin(workspaceHash); pin(approvedRefreshHash);
+  const { time, resolutions, mergeProfile } = refreshOptions(options); absolute(root); absolute(output); pin(workspaceHash); pin(approvedRefreshHash);
   if (contains(root, output) || contains(output, root)) fail('source_workspace_overlapping_output');
   const next = ownSelectedSourceInput(nextBytes, nextExpected);
   await directory(dirname(output)); time.check();
   try { await lstat(output); fail('source_workspace_output_exists'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time), resolutions, time);
+  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile), resolutions, time);
   if (prepared.refresh_sha256 !== approvedRefreshHash) fail('source_workspace_refresh_review_changed');
   if (!prepared.plan.ready) fail('source_workspace_refresh_conflict');
   // The SAME root-last publisher owns creation, expansion and refresh. All
