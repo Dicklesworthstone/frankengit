@@ -3,7 +3,7 @@
 import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
-import { createSourceWorkspace, expandSourceWorkspace, inspectSourceWorkspace, lifetime, pin, fail,
+import { createSourceWorkspace, expandSourceWorkspace, inspectSourceWorkspace, previewSourceWorkspaceRefresh, refreshSourceWorkspace, lifetime, pin, fail,
   SOURCE_PACKAGE_BYTES, WORKSPACE_LIMITS } from './operator/source_workspace.mjs';
 import { captureWorkspaceChanges, inspectWorkspaceChangeCapture } from './operator/source_workspace_changes.mjs';
 import { parse } from './operator/source_edit_wire.mjs';
@@ -11,6 +11,11 @@ const USAGE = `node scripts/fg_source_workspace.mjs create --package PRIVATE_PAC
   --expect PRIVATE_INDEPENDENT_EXPECTATION --output ABSENT_DIRECTORY
 node scripts/fg_source_workspace.mjs expand --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
   --package PRIVATE_ADDITIONAL_PACKAGE --expect PRIVATE_ADDITIONAL_EXPECTATION --output ABSENT_DIRECTORY
+node scripts/fg_source_workspace.mjs refresh-preview --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
+  --package PRIVATE_NEXT_PACKAGE --expect PRIVATE_NEXT_EXPECTATION
+node scripts/fg_source_workspace.mjs refresh --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
+  --package PRIVATE_NEXT_PACKAGE --expect PRIVATE_NEXT_EXPECTATION
+  --approve-refresh-sha256 REVIEWED_PLAN_HASH --output ABSENT_DIRECTORY
 node scripts/fg_source_workspace.mjs status --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
 node scripts/fg_source_workspace.mjs capture --workspace PRIVATE_DIRECTORY --sha256 RETAINED_ROOT_HASH
   --paths PRIVATE_PATH_SELECTION --output ABSENT_CAPTURE_DIRECTORY
@@ -25,6 +30,15 @@ workspace_sha256 independently. Expand verifies additional source at the SAME co
 preserves originally selected edits/deletions/modes and creates a new workspace.
 It never changes the original or copies unselected local files. Occupied newly
 selected paths refuse. Keep the NEW workspace hash; this is not a branch refresh.
+Refresh previews the SAME selected paths at another independently chosen commit.
+Unchanged files update; local edits/deletions carry only without content conflicts.
+Refresh requires the reviewed plan hash, refuses unresolved overlaps, and creates
+a NEW workspace without changing the original. No unselected files are copied.
+No ancestry, freshness or semantic compatibility is established.
+For conflicts, both refresh commands accept --resolutions PRIVATE_CHOICES. The
+closed file format binds the original conflict plan_sha256 and per-path local
+or selected choices. Preview those choices, then approve the NEW plan hash.
+No implicit force, partial publication or stale-choice replay is supported.
 Edit files/ with your own trusted tools; no tool
 is run here. Status checks the original inputs and reads only originally selected
 paths. It does not discover other local files or attest an atomic filesystem view.
@@ -41,13 +55,15 @@ CLI. Inspect-capture recomputes them without requiring the original workspace.
 Binary-safe capture retains the existing byte, path, line and time limits.
 No overwrite, recursive scan, symlink, hardlink, credential, network, Git command,
 source execution, permission grant or repository mutation. Interrupted output
-slots are retained. Exit 0: complete; 2: refusal; 3: cancelled before output;
+slots are retained. Exit 0: complete; 1: refresh preview has conflicts; 2: refusal; 3: cancelled before output;
 4: a local output/result may exist: retain and inspect the reported root hash.`;
 function options(args) {
-  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 13 ||
+  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 17 ||
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_workspace_arguments');
   const op = args[0], required = op === 'create' ? ['--package', '--expect', '--output']
     : op === 'expand' ? ['--workspace', '--sha256', '--package', '--expect', '--output']
+    : op === 'refresh-preview' ? ['--workspace', '--sha256', '--package', '--expect']
+    : op === 'refresh' ? ['--workspace', '--sha256', '--package', '--expect', '--approve-refresh-sha256', '--output']
     : op === 'status' ? ['--workspace', '--sha256']
     : op === 'capture' ? ['--workspace', '--sha256', '--paths', '--output']
     : op === 'inspect-capture' ? ['--capture', '--sha256'] : null;
@@ -55,9 +71,9 @@ function options(args) {
   const f = new Map();
   for (let i = 1; i < args.length; i += 2) {
     const key = args[i], value = args[i + 1];
-    if (![...required, '--timeout-ms'].includes(key) || f.has(key) || !value || value.startsWith('--')) fail('source_workspace_option');
+    if (![...required, '--timeout-ms', ...(['refresh-preview', 'refresh'].includes(op) ? ['--resolutions'] : [])].includes(key) || f.has(key) || !value || value.startsWith('--')) fail('source_workspace_option');
     f.set(key, value);
-    if (key === '--sha256') pin(value); else if (key !== '--timeout-ms') absolute(value);
+    if (key === '--sha256' || key === '--approve-refresh-sha256') pin(value); else if (key !== '--timeout-ms') absolute(value);
   }
   if (required.some(k => !f.has(k))) fail('source_workspace_option');
   const timeout = f.get('--timeout-ms') ?? '30000';
@@ -88,12 +104,17 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
   try {
     if (args.length === 1 && args[0] === '--help') { await emit(stdout, { usage: USAGE }); return 0; }
     const { op, f, timeout } = options(args), time = lifetime({ timeoutMs: timeout, signal: controller.signal });
-    if (op === 'create' || op === 'expand') {
+    if (['create', 'expand', 'refresh-preview', 'refresh'].includes(op)) {
       const expected = parse(await privateFile(f.get('--expect'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes);
       const bytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time);
-      const local = { check: time.check, signal: controller.signal, timeoutMs: time.remaining() };
+      const resolutions = f.has('--resolutions')
+        ? parse(await privateFile(f.get('--resolutions'), WORKSPACE_LIMITS.manifestBytes, time), WORKSPACE_LIMITS.manifestBytes) : undefined;
+      const local = { check: time.check, signal: controller.signal, timeoutMs: time.remaining(),
+        ...(resolutions === undefined ? {} : { resolutions }) };
       result = op === 'create' ? await createSourceWorkspace(f.get('--output'), bytes, expected, local)
-        : await expandSourceWorkspace(f.get('--workspace'), f.get('--sha256'), bytes, expected, f.get('--output'), local);
+        : op === 'expand' ? await expandSourceWorkspace(f.get('--workspace'), f.get('--sha256'), bytes, expected, f.get('--output'), local)
+        : op === 'refresh-preview' ? await previewSourceWorkspaceRefresh(f.get('--workspace'), f.get('--sha256'), bytes, expected, local)
+        : await refreshSourceWorkspace(f.get('--workspace'), f.get('--sha256'), bytes, expected, f.get('--output'), f.get('--approve-refresh-sha256'), local);
     } else if (op === 'capture') {
       const selection = parse(await privateFile(f.get('--paths'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes);
       result = await captureWorkspaceChanges(f.get('--workspace'), f.get('--sha256'), selection, f.get('--output'),
@@ -101,7 +122,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     } else if (op === 'inspect-capture') {
       result = await inspectWorkspaceChangeCapture(f.get('--capture'), f.get('--sha256'), { check: time.check, timeoutMs: time.remaining() });
     } else result = await inspectSourceWorkspace(f.get('--workspace'), f.get('--sha256'), { check: time.check, timeoutMs: time.remaining() });
-    await emit(stdout, result); return 0;
+    await emit(stdout, result); return op === 'refresh-preview' && !result.ready ? 1 : 0;
   } catch (error) {
     const retained = result ?? error.publication_unconfirmed;
     try { await emit(stderr, { type: 'source_workspace_error', code: /^source_[a-z0-9_]{1,90}$/.test(error.code ?? '') ? error.code : 'source_workspace_refused',

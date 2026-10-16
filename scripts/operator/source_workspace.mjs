@@ -100,14 +100,15 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
   const loaded = await readSourcePackage(bytes, expected, webcrypto, time.check); time.check();
   return publishWorkspace(root, bytes, expected, loaded, time);
 }
-// One root-last owner for both initial materialization and expansion. Overrides
+// One root-last owner for initial materialization, expansion and refresh. Overrides
 // are private owned snapshots from the predecessor, never caller-minted source.
-async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null) {
+async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null, refresh = null) {
   const value = manifest(bytes, expected, loaded.verified), encoded = canonical(value);
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
   const hash = sha256(encoded), answer = { ...receipt(root, hash, value), ...(expansion ? {
     type: 'source_workspace_expanded', expansion, original_workspace_changed: false,
-  } : {}) };
+  } : {}), ...(refresh ? { type: 'source_workspace_refreshed', refresh_sha256: sha256(canonical(refresh)),
+    original_workspace_changed: false } : {}) };
   const bodies = new Map(loaded.package.blobs.map(b => [b.oid, b.bytesHex])), outputs = new Map();
   let total = 0;
   for (const f of value.files) {
@@ -126,6 +127,12 @@ async function publishWorkspace(root, bytes, expected, loaded, time, carried = n
     await directory(root); await syncDirectory(dirname(root)); time.check();
     await writeNew(join(root, 'source.json'), bytes);
     await writeNew(join(root, 'expected.json'), canonical(expected)); time.check();
+    if (refresh) {
+      const refreshBytes = canonical(refresh);
+      await writeNew(join(root, 'refresh.json'), refreshBytes);
+      if (!refreshBytes.equals(await readPrivate(join(root, 'refresh.json'), WORKSPACE_LIMITS.manifestBytes))) fail('source_workspace_readback');
+      time.check();
+    }
     const dirs = new Set([null]);
     for (const file of value.files) {
       const raw = Buffer.from(file.path_hex, 'hex');
@@ -185,6 +192,150 @@ export async function expandSourceWorkspace(root, workspaceHash, additionalBytes
     preserved_deletions: [...carried.values()].filter(f => f === null).length,
     unselected_local_files_copied: false, atomic_filesystem_snapshot: false };
   return publishWorkspace(output, merged.packageBytes, merged.expected, loaded, time, carried, snapshot.recheck, expansion);
+}
+// A refresh deliberately selects another independently pinned commit. Only the
+// existing selected paths move; it is not a pull, ancestry proof or Git rebase.
+// Whole-file byte equality resolves content. Mode and content are independent,
+// so a content edit can survive an upstream chmod (and the converse).
+function refreshImage(file) {
+  return file === null ? null : { sha256: sha256(file.bytes), bytes: file.bytes.length, executable: file.executable };
+}
+function equalRefreshFile(a, b) {
+  return a === null || b === null ? a === b : a.executable === b.executable && a.bytes.equals(b.bytes);
+}
+function reconcileRefreshFile(before, local, selected) {
+  if (equalRefreshFile(local, before)) return { disposition: equalRefreshFile(selected, before) ? 'unchanged' : 'updated', file: selected };
+  if (equalRefreshFile(local, selected)) return { disposition: 'converged', file: selected };
+  if (equalRefreshFile(selected, before)) return { disposition: 'carried', file: local };
+  if (local === null) return { disposition: 'conflict', conflict: 'local_delete_source_modify', file: null };
+  const bytes = local.bytes.equals(before.bytes) ? selected.bytes
+    : selected.bytes.equals(before.bytes) || local.bytes.equals(selected.bytes) ? local.bytes : null;
+  if (bytes === null) return { disposition: 'conflict', conflict: 'content_changed_both', file: null };
+  const executable = local.executable === before.executable ? selected.executable : local.executable;
+  return { disposition: 'combined', file: { bytes, executable } };
+}
+async function prepareWorkspaceRefresh(root, workspaceHash, next, time) {
+  absolute(root); pin(workspaceHash);
+  const rootIdentity = await privateDirectory(root); time.check();
+  const baseline = await loadSourceWorkspace(root, workspaceHash, { check: time.check, timeoutMs: time.remaining() });
+  if (next.expected.format !== baseline.expected.format) fail('source_workspace_refresh_format');
+  if (next.expected.commit === baseline.expected.commit) fail('source_workspace_refresh_same_commit');
+  const paths = selectedPaths(next.expected.files.map(f => f.pathHex));
+  if (paths.length !== baseline.expected.files.length || paths.some((p, i) => p !== baseline.expected.files[i].pathHex)) fail('source_workspace_refresh_selection');
+  const loaded = await readSourcePackage(next.bytes, next.expected, webcrypto, time.check); time.check();
+  // Apply the host's individual/logical source limits before decoding bodies or
+  // touching mutable files. Package limits and independent pins still apply.
+  const nextManifest = manifest(next.bytes, next.expected, loaded.verified);
+  const snapshot = await readWorkspaceFiles(root, paths, { check: time.check, timeoutMs: time.remaining() });
+  const oldBodies = new Map(JSON.parse(baseline.packageBytes.toString('utf8')).blobs.map(b => [b.oid, b.bytesHex]));
+  const nextBodies = new Map(loaded.package.blobs.map(b => [b.oid, b.bytesHex]));
+  const carried = new Map(), conflicting = new Map(), entries = []; let resultBytes = 0, conflicts = 0;
+  for (const [i, path] of paths.entries()) {
+    time.check();
+    const oldFile = baseline.manifest.files[i], newFile = nextManifest.files[i];
+    if (oldFile.path_hex !== path || newFile.path_hex !== path) fail('source_workspace_refresh_selection');
+    const before = { bytes: Buffer.from(oldBodies.get(oldFile.blob), 'hex'), executable: oldFile.executable };
+    const selected = { bytes: Buffer.from(nextBodies.get(newFile.blob), 'hex'), executable: newFile.executable };
+    const local = snapshot.files.get(path), result = reconcileRefreshFile(before, local, selected);
+    if (result.disposition === 'conflict') { conflicts++; conflicting.set(path, { local, selected }); }
+    else {
+      resultBytes += result.file?.bytes.length ?? 0;
+      if (resultBytes > WORKSPACE_LIMITS.totalBytes) fail('source_workspace_refresh_output_budget');
+      carried.set(path, result.file);
+    }
+    entries.push({ path_hex: path, disposition: result.disposition, conflict: result.conflict ?? null,
+      before: refreshImage(before), local: refreshImage(local), selected: refreshImage(selected), result: refreshImage(result.file) });
+    time.check();
+  }
+  const plan = { type: 'source_workspace_refresh_plan', schema_version: 1,
+    workspace_sha256: workspaceHash, object_format: next.expected.format,
+    original_commit: baseline.manifest.source_commit, selected_commit: nextManifest.source_commit,
+    original_root_tree: baseline.manifest.root_tree, selected_root_tree: nextManifest.root_tree,
+    selected_package_sha256: nextManifest.package_sha256, selected_expected_sha256: nextManifest.expected_sha256,
+    entries, conflict_count: conflicts, ready: conflicts === 0, result_bytes: resultBytes,
+    selected_files_only: true, unselected_local_files_copied: false, original_workspace_changed: false,
+    ancestry_verified: false, semantic_compatibility_verified: false, authority_verified: false,
+    freshness_verified: false, repository_changed: false, source_material_untrusted: true };
+  const encoded = canonical(plan);
+  if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
+  const recheck = async () => {
+    time.check();
+    if (!same(rootIdentity, await privateDirectory(root))) fail('source_workspace_changed');
+    await snapshot.recheck();
+    if (sha256(await readPrivate(join(root, 'manifest.json'), WORKSPACE_LIMITS.manifestBytes)) !== workspaceHash ||
+        !baseline.packageBytes.equals(await readPrivate(join(root, 'source.json'), SOURCE_PACKAGE_BYTES)) ||
+        !canonical(baseline.expected).equals(await readPrivate(join(root, 'expected.json'), WORKSPACE_LIMITS.expectedBytes))) fail('source_workspace_baseline_changed');
+    time.check();
+  };
+  await recheck();
+  return { plan, refresh_sha256: sha256(encoded), loaded, carried, conflicting, recheck };
+}
+// Explicit whole-file conflict choices are separate from automatic reconciliation.
+// They name the original conflict plan and never grant publication authority.
+export const WORKSPACE_REFRESH_RESOLUTIONS = 'frankengit-workspace-refresh-resolutions-v1';
+function refreshOptions(options) {
+  fields(options, ['signal', 'timeoutMs', 'check', 'resolutions'], []);
+  const { resolutions, ...operation } = options, time = lifetime(operation);
+  if (resolutions === undefined) return { time, resolutions: null };
+  fields(resolutions, ['schema', 'plan_sha256', 'choices']);
+  if (resolutions.schema !== WORKSPACE_REFRESH_RESOLUTIONS) fail('source_workspace_refresh_resolutions');
+  const originalHash = pin(resolutions.plan_sha256);
+  if (!Array.isArray(resolutions.choices) || !resolutions.choices.length || resolutions.choices.length > WORKSPACE_LIMITS.files) fail('source_workspace_refresh_resolutions');
+  const choices = resolutions.choices.map(row => {
+    fields(row, ['path_hex', 'choice']);
+    if (!['local', 'selected'].includes(row.choice)) fail('source_workspace_refresh_resolutions');
+    return { path_hex: row.path_hex, choice: row.choice };
+  });
+  selectedPaths(choices.map(row => row.path_hex));
+  choices.sort((a, b) => a.path_hex < b.path_hex ? -1 : 1);
+  return { time, resolutions: { schema: WORKSPACE_REFRESH_RESOLUTIONS, plan_sha256: originalHash, choices } };
+}
+function resolveWorkspaceRefresh(prepared, resolutions, time) {
+  if (resolutions === null) return prepared;
+  if (prepared.refresh_sha256 !== resolutions.plan_sha256) fail('source_workspace_refresh_resolution_plan_changed');
+  const plan = structuredClone(prepared.plan), byPath = new Map(plan.entries.map(entry => [entry.path_hex, entry]));
+  for (const row of resolutions.choices) {
+    time.check();
+    const conflict = prepared.conflicting.get(row.path_hex), entry = byPath.get(row.path_hex);
+    // A resolution cannot force a clean path, invent a path, or turn an omitted
+    // source selection into a file. Only recorded conflicts admit these choices.
+    if (!conflict || entry?.disposition !== 'conflict') fail('source_workspace_refresh_resolution_not_conflict');
+    const file = conflict[row.choice];
+    plan.result_bytes += file?.bytes.length ?? 0;
+    if (plan.result_bytes > WORKSPACE_LIMITS.totalBytes) fail('source_workspace_refresh_output_budget');
+    prepared.carried.set(row.path_hex, file);
+    entry.disposition = `resolved_${row.choice}`;
+    entry.result = refreshImage(file);
+    plan.conflict_count--;
+  }
+  plan.ready = plan.conflict_count === 0;
+  plan.resolution = resolutions;
+  plan.resolved_conflict_count = resolutions.choices.length;
+  const encoded = canonical(plan);
+  if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
+  time.check();
+  return { ...prepared, plan, refresh_sha256: sha256(encoded) };
+}
+export async function previewSourceWorkspaceRefresh(root, workspaceHash, nextBytes, nextExpected, options = {}) {
+  const { time, resolutions } = refreshOptions(options);
+  // Own both bytes and independent expectations before the first await.
+  const next = ownSelectedSourceInput(nextBytes, nextExpected);
+  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time), resolutions, time);
+  return { ...prepared.plan, refresh_sha256: prepared.refresh_sha256 };
+}
+export async function refreshSourceWorkspace(root, workspaceHash, nextBytes, nextExpected, output, approvedRefreshHash, options = {}) {
+  const { time, resolutions } = refreshOptions(options); absolute(root); absolute(output); pin(workspaceHash); pin(approvedRefreshHash);
+  if (contains(root, output) || contains(output, root)) fail('source_workspace_overlapping_output');
+  const next = ownSelectedSourceInput(nextBytes, nextExpected);
+  await directory(dirname(output)); time.check();
+  try { await lstat(output); fail('source_workspace_output_exists'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time), resolutions, time);
+  if (prepared.refresh_sha256 !== approvedRefreshHash) fail('source_workspace_refresh_review_changed');
+  if (!prepared.plan.ready) fail('source_workspace_refresh_conflict');
+  // The SAME root-last publisher owns creation, expansion and refresh. All
+  // copied bytes are owned observations; no mutable input is read into output.
+  return publishWorkspace(output, next.bytes, next.expected, prepared.loaded, time,
+    prepared.carried, prepared.recheck, null, prepared.plan);
 }
 export async function loadSourceWorkspace(root, expectedHash, options = {}) {
   const time = lifetime(options); absolute(root); pin(expectedHash);
