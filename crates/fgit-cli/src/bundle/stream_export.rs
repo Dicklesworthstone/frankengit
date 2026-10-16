@@ -6,8 +6,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use fgit_node::treefs_workspace::{SelectedStreamBundleExport, StreamBundleExportQuery};
 use fgit_node::{GitDaemonSessionTimeout, NodeConfig, OneNode, TerminationSignals};
+use fgit_node::{SelectedStreamBundleExport, StreamBundleExportQuery};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
 use super::quote;

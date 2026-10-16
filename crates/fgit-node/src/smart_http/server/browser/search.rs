@@ -44,8 +44,6 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
         )),
         b"/ui/search/search-view.mjs" => Some((
             "text/javascript; charset=utf-8",
-            include_str!("search-context-package.mjs"),
-            include_str!("search-context-package-view.mjs"),
             include_str!("search-view.mjs"),
         )),
         b"/ui/search/pulls-core.mjs" => Some((
@@ -121,6 +119,38 @@ pub(super) fn serve(
 mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
+    #[test]
+    fn search_view_and_context_routes_serve_distinct_exact_assets() {
+        for (name, body) in [
+            ("search-view.mjs", include_str!("search-view.mjs")),
+            (
+                "search-context-package.mjs",
+                include_str!("search-context-package.mjs"),
+            ),
+            (
+                "search-context-package-view.mjs",
+                include_str!("search-context-package-view.mjs"),
+            ),
+        ] {
+            let target = format!("/repo.git/ui/search/{name}");
+            assert_eq!(
+                asset(b"/repo.git", &target),
+                Some(("text/javascript; charset=utf-8", body))
+            );
+            let bytes = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
+            let request = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                checked_asset(b"/repo.git", true, body.len() as u64, &request, false).unwrap(),
+                Some(("text/javascript; charset=utf-8", body))
+            );
+            assert!(matches!(
+                checked_asset(b"/repo.git", true, body.len() as u64 - 1, &request, false),
+                Err(Status::TooLarge)
+            ));
+        }
+    }
     #[test]
     fn search_assets_require_exact_source_routes_and_source_enablement() {
         for suffix in [

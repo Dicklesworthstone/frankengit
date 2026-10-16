@@ -63,7 +63,7 @@ fn selection_pack_error(error: &StreamBundleExportRefusal) -> &PackError {
 fn both_formats_stream_exact_source_and_retry_without_changing_authority() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
-        let (node, base, child, _) = fixture(&root, format);
+        let (node, base, _child, _) = fixture(&root, format);
         accepted(apply(
             &node,
             &[create("refs/heads/topic", base)],
@@ -85,7 +85,8 @@ fn both_formats_stream_exact_source_and_retry_without_changing_authority() {
         );
         assert_eq!(selected.receipt().object_count(), 4);
         let (header, ids) = recover(&bytes, &query.limits);
-        assert_eq!(header.head(), Some(child));
+        assert!(before.snapshot().head_target.is_none());
+        assert_eq!(header.head(), None, "never infer HEAD from branch spelling");
         assert_eq!(header.references().len(), 2);
         assert_eq!(&ids, before.selected_closure().closure().objects());
         let (retried, repeated) = stream(&node, &Default::default(), query);
@@ -206,7 +207,7 @@ fn selection_limits_refuse_before_output_and_exact_payload_boundary_succeeds() {
     exact.limits.pack.max_index_entries =
         usize::try_from(baseline.receipt().object_count()).unwrap();
     exact.limits.max_graph_edges = 4; // child tree + parent, base tree, tree blob.
-    exact.limits.envelope.max_references = 2; // main plus HEAD.
+    exact.limits.envelope.max_references = 1; // main; canonical HEAD is not configured.
     let (selected, _) = stream(&node, &Default::default(), exact.clone());
     assert_eq!(selected.receipt(), baseline.receipt());
 
@@ -246,7 +247,7 @@ fn selection_limits_refuse_before_output_and_exact_payload_boundary_succeeds() {
     limited.limits.max_graph_edges = 1;
     limits.push(limited);
     let mut limited = exact;
-    limited.limits.envelope.max_references = 1;
+    limited.limits.envelope.max_references = 0;
     limits.push(limited);
     for query in limits {
         let result = node
@@ -337,34 +338,65 @@ fn selected_ref_names_and_exact_encoded_header_have_prewrite_byte_bounds() {
 #[test]
 fn caller_hidden_and_deleted_only_history_are_not_export_roots() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let root = Scratch::new();
-        let (node, base, child, _) = fixture(&root, format);
-        accepted(apply(
-            &node,
-            &[create("refs/heads/public", base)],
-            "stream-public",
-        ));
+        let source_root = Scratch::new();
+        let (seed, base, child, _) = fixture(&source_root, format);
+        seed.shutdown().unwrap();
+        let source = source_root.0.join("source");
+        fs::write(source.join("refs/heads/main"), format!("{base}\n")).unwrap();
+        fs::write(source.join("refs/heads/topic"), format!("{child}\n")).unwrap();
+        let target = Scratch::new();
+        let node = empty_node(&target, format);
+        let request = node.request_context();
+        let receipt = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &request,
+                &source,
+                principal(),
+                b"stream-visible-fixture",
+            ))
+            .unwrap();
+        assert!(
+            receipt.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ))
+        );
         let mut visibility = RefVisibility::default();
         visibility
-            .push_rule(b"refs/heads/main", &Default::default())
+            .push_rule(b"refs/heads/topic", &Default::default())
             .unwrap();
         let query = StreamBundleExportQuery::default();
         let (_, filtered) = stream(&node, &visibility, query.clone());
         let (header, ids) = recover(&filtered, &query.limits);
         assert_eq!(header.references().len(), 1);
-        assert_eq!(
-            header.references()[0].name(),
-            &reference("refs/heads/public")
-        );
-        assert!(header.head().is_none());
+        assert_eq!(header.references()[0].name(), &reference("refs/heads/main"));
+        assert_eq!(header.head(), None);
         assert!(ids.contains(&base));
         assert!(!ids.contains(&child));
         assert_eq!(ids.len(), 3);
+        // Keep default-branch protection intact; the deleted-only tip must
+        // belong to a non-default branch, not an illegal main deletion.
+        let before = snapshot(&node);
+        assert!(matches!(
+            apply(
+                &node,
+                &[RefCommand {
+                    name: reference("refs/heads/main"),
+                    expected_old: ExpectedOld::Exactly(base),
+                    proposed_new: ProposedNew::Delete,
+                    force: false,
+                }],
+                "stream-default-delete"
+            ),
+            Err(NodeWorkspaceRefusal::BranchOperation(_))
+        ));
+        assert_eq!(snapshot(&node).basis(), before.basis());
         accepted(apply(
             &node,
             &[RefCommand {
-                name: reference("refs/heads/main"),
-                expected_old: ExpectedOld::Exact(child),
+                name: reference("refs/heads/topic"),
+                expected_old: ExpectedOld::Exactly(child),
                 proposed_new: ProposedNew::Delete,
                 force: false,
             }],
