@@ -1,5 +1,5 @@
 //! Reserve import work before reading the source; never replenish it mid-import.
-use crate::loose_import::MAX_IMPORT_TOTAL_OBJECT_BYTES;
+use crate::loose_import::graph::MAX_REACHABLE_OBJECT_BYTES;
 use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionTimeout, GitDaemonSessionWorkScaling,
     NodeRequestContext, OneNode,
@@ -23,7 +23,7 @@ fn reserved_deadline(
     // expanded-byte ceiling, NOT an assertion about bytes already read. No
     // session, receipt, transaction identity or publication observes this local
     // accounting object. Reuse the receive formula instead of a second policy.
-    deadline.note_admitted(MAX_IMPORT_TOTAL_OBJECT_BYTES as usize);
+    deadline.note_admitted(MAX_REACHABLE_OBJECT_BYTES as usize);
     deadline
 }
 
@@ -31,7 +31,8 @@ impl OneNode {
     /// Mints the single bounded context for a local source import.
     ///
     /// The default reserves the existing import profile's maximum expanded
-    /// bytes using the node's receive work-scaling policy and session base.
+    /// bytes (512 MiB of reachable native bodies, independently of the smaller
+    /// eager pack-cache envelope) using the receive work-scaling policy and base.
     /// Poll and cost allowances use the SAME receive-admission calculation.
     /// It does not scan a mutable directory before the clock starts, change
     /// the import's byte/object limits, or mint another budget after staging.
@@ -54,7 +55,7 @@ impl OneNode {
         );
         NodeRequestContext {
             authority: self
-                .receive_admission_authority_context(MAX_IMPORT_TOTAL_OBJECT_BYTES, &deadline),
+                .receive_admission_authority_context(MAX_REACHABLE_OBJECT_BYTES, &deadline),
         }
     }
 }
@@ -76,7 +77,7 @@ mod tests {
         let scaling = GitDaemonSessionWorkScaling::DEFAULT;
         let reserved = reserved_deadline(base, scaling, None);
         let reference = GitDaemonSessionDeadline::new(base, scaling);
-        reference.note_admitted(MAX_IMPORT_TOTAL_OBJECT_BYTES as usize);
+        reference.note_admitted(MAX_REACHABLE_OBJECT_BYTES as usize);
         assert_eq!(reserved.budget(), reference.budget());
         let flat = reserved_deadline(base, GitDaemonSessionWorkScaling::FLAT, None);
         assert!(reserved.budget() > flat.budget());
@@ -139,8 +140,8 @@ mod tests {
         assert!(budget.deadline.is_some());
         assert!(budget.cost_quota.is_some());
         assert!(budget.poll_quota < u32::MAX);
-        assert!(u64::from(budget.poll_quota) >= MAX_IMPORT_TOTAL_OBJECT_BYTES / 64);
-        assert!(budget.cost_quota.unwrap() >= MAX_IMPORT_TOTAL_OBJECT_BYTES / 8);
+        assert!(u64::from(budget.poll_quota) >= MAX_REACHABLE_OBJECT_BYTES / 64);
+        assert!(budget.cost_quota.unwrap() >= MAX_REACHABLE_OBJECT_BYTES / 8);
         assert!(checkpoint_request(&live).is_ok());
 
         let tiny = GitDaemonSessionTimeout::try_new(Duration::from_nanos(1)).unwrap();

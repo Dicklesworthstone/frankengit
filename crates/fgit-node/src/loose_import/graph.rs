@@ -12,7 +12,13 @@ use fgit_pack::Deadline;
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
 
 use super::control::ImportControl;
-use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS, MAX_IMPORT_TOTAL_OBJECT_BYTES};
+use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS};
+
+/// Maximum native bytes retained by one verified reachable-source closure.
+/// This is independent of the tighter eager pack-decoder/cache envelope: a
+/// large loose source must not inherit a limit intended for hydrated packs.
+/// The import request reserves this SAME ceiling before any source I/O.
+pub(super) const MAX_REACHABLE_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Independent total edge work; repeated references and gitlinks count too.
 const MAX_IMPORT_GRAPH_EDGES: usize = 4_000_000;
@@ -28,7 +34,7 @@ impl Default for Limits {
         Self {
             objects: MAX_IMPORT_OBJECTS,
             edges: MAX_IMPORT_GRAPH_EDGES,
-            bytes: MAX_IMPORT_TOTAL_OBJECT_BYTES,
+            bytes: MAX_REACHABLE_OBJECT_BYTES,
         }
     }
 }
@@ -88,10 +94,13 @@ pub(super) fn validate_typed_controlled(
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
     control.checkpoint()?;
     let maximum = Limits::default();
-    if limits.objects > maximum.objects
-        || limits.edges > maximum.edges
-        || limits.bytes > maximum.bytes
-    {
+    if limits.bytes > maximum.bytes {
+        return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
+            limit: maximum.bytes,
+            observed: limits.bytes,
+        });
+    }
+    if limits.objects > maximum.objects || limits.edges > maximum.edges {
         return Err(LooseGitImportRefusal::ObjectLimitExceeded {
             limit: maximum.objects,
         });
@@ -369,3 +378,6 @@ fn push(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod byte_budget_tests;
