@@ -91,10 +91,49 @@ receipts are not exported. Native backup/restore keeps its separate contract.
 Stable owner-controlled POSIX parents are required; this is not a hostile same-UID
 sandbox or a hardware power-loss durability proof. Node.js 22.16 or later is used.
 
+## Command-line export and inspection
+
+The command uses the same exporter and inspector, with no alternate decoder or
+injected production backend. Supply the source's existing issues-read token in
+a private file, never on the command line. Replace the example paths and IDs.
+
+```sh
+node scripts/archive_native_issues.mjs export \
+  --url https://forge.example/project/ui/issues/ \
+  --tenant 11111111111111111111111111111111 \
+  --repository 22222222222222222222222222222222 \
+  --token-file /srv/operator/issues-read-token \
+  --workdir /srv/exports/issues-001 --page-size 10
+
+# Retain export's archive_sha256 independently as ARCHIVE_SHA.
+node scripts/archive_native_issues.mjs inspect \
+  --workdir /srv/exports/issues-001 --confirm "$ARCHIVE_SHA"
+```
+
+`--head` constrains even the first request to an already selected native token.
+`--max-requests`, `--max-issues`, `--max-events`, `--max-read-bytes`, and
+`--max-archive-bytes` lower the whole-operation bounds. `--timeout-ms` covers
+network acquisition, file writes and complete readback; it is not reset per
+page. Offline inspection accepts only the directory, original pin and optional
+timeout. It cannot accept a credential or source endpoint override.
+
+SIGTERM/SIGINT stop further reads and drain the active body. SIGKILL may leave an
+unsealed prefix; another export never overwrites it. Offline inspection of that
+prefix fails instead of executing a recovery request. A complete archive needs
+no original credential or source server to inspect after process restart.
+
+Output is one bounded JSON row with terminal-control escaping and a ten-second
+write deadline. Exit 0 means complete export or complete offline inspection;
+2 means input/inspection failure or failure before output-directory creation;
+3 means incomplete or uncertain local export; 4 means a completed result was
+known but output failed. Error output retains that completed result and its pin
+when possible. No exit code proves native backup durability or grants restore
+permission. Output errors never cause the export to run again.
+
 ## Verification
 
 ```sh
-node --test tests/operator/forge_issue_archive.test.mjs
+bash scripts/verify_native_issue_archive.sh
 ```
 
 The tests use the complete unchanged production issue client, archive code and
@@ -105,5 +144,14 @@ representable issue number, assignment/edit/reopen histories, independent pins,
 recalculated-checksum corruption, all resource bounds, competing creators,
 real cancellation/body drain and directory replacement. They do not execute
 Rust `fg`, a live deployment, the full workspace or a physical durability test.
+The command tests launch real Node processes against loopback HTTP, including
+SIGTERM, SIGINT, SIGKILL, a closed output pipe, wrong pins, invalid arguments and
+credential-free offline inspection. Capacity response peers additionally drive
+the complete production client through 4,096 issues, 65,536 events and 8,192
+pages, with complete offline readback. They test the operator's capacity bounds,
+not the native server's capacity or its performance. Large escaped bodies have
+a refusing large-page case and a permitted smaller-page twin. Deterministic
+capture and corruption during the pre-manifest readback are also covered.
+
 Related plan areas: section 24 (forge events), section 31 (interfaces), FG-049.
 The broader compatibility/import work remains partial.
