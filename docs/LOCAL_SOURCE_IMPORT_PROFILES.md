@@ -31,20 +31,30 @@ replacement context. The library exposes `import_request_context_with_byte_limit
 and `import_loose_git_directory_with_byte_limit_durable_in`; callers pass the same
 byte ceiling to both, and smaller or cancelled caller contexts are still honored.
 
-This does **not** raise independent per-object, compressed-input, pack-cache,
-index, object-count, graph-edge or ref limits. In particular, the existing
-64 MiB per-pack and 128 MiB aggregate hydrated-pack limits remain. A large loose
-source and a large single pack are different profiles. The 16 GiB ceiling is an
-operator bound, not a claim that every repository of that size was tested.
+Packed sources now use private disk custody too. Each fully verified pack
+retains offsets and native types instead of a map of resident object bodies.
+The decoder and resolver cache each retain their existing **128 MiB per-pack**
+envelopes; cumulative inflated and retained native bytes are bounded by the
+selected import profile. One reconstruction-work witness spans every pack,
+so opening another pack never renews its delta-work allowance. Every decoded
+member counts, including members not reachable from the selected refs.
 
-Quarantine uses one file and bounded offset/type metadata, not one file or
-resident body per object. On Unix the exclusive 0600 file is unlinked before
-payload writes; the owned descriptor survives until cleanup. An interruption
-between exclusive creation and unlink can leave an empty name. Other platforms
-remove the exclusive filename on normal cleanup, without claiming crash cleanup
-or isolation from a malicious local host. Scratch custody is not a backup,
-resumable import, or durability receipt. Immutable placement retains its existing
-durability protocol; disk exhaustion and damaged spool bytes fail closed.
+Independent limits remain: **64 MiB per input pack**, **128 MiB total compressed
+pack input**, 64 MiB of indexes, the existing per-object limit, and finite
+object, ref and graph-edge counts. Consequently a set of sufficiently compressed
+packs may exceed 128 MiB in total native bodies without increasing the resident
+cache allowance. A single oversized pack remains unsupported. The 16 GiB ceiling
+is an operator bound, not a tested repository-size guarantee.
+
+Quarantine uses one reachable-closure file plus at most one private file per
+loaded pack (the existing maximum is 128 packs), never one file per object.
+Packed custody closes before placement starts. On Unix each exclusive 0600 file
+is unlinked before payload writes; the owned descriptor survives until cleanup.
+An interruption between creation and unlink can leave an empty name. Other
+platforms remove exclusive filenames on normal cleanup without claiming crash
+cleanup or isolation from a malicious local host. Scratch custody is not a
+backup, resumable import or durability receipt. Disk exhaustion, damaged retained
+bytes and failed cleanup refuse rather than publishing partially verified data.
 
 ## Executable coverage
 
@@ -63,3 +73,19 @@ The binary suite pairs a 1 MiB refusal with a 4 MiB admission for the same 2 MiB
 source in SHA-1 and SHA-256, then checks larger-profile and default-profile replay
 and source-free outcome recovery. Test presence is not a completed batch gate;
 executed results remain revision-bound.
+
+## Packed-source regression campaign
+
+```sh
+FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/packed_import_profiles.sh
+FG_BIN=/path/to/fg FG_PACKED_LARGE=1 bash scripts/e2e/suites/admission/packed_import_profiles.sh
+```
+
+The default campaign constructs three native packs in each hash format and tests
+an insufficient limit, admitted refs, source removal, cold integrity and original
+key recovery. The opt-in case contains 144 MiB of blob payload in three compressed
+packs. An optional `FG_PACKED_BASELINE_BIN` records the former implementation's
+128 MiB refusal using the identical source. This script's presence is not evidence
+that it has run. The module tests independently exercise disk-custody reuse after
+source deletion, complete-pack charging, per-pack bounds, a corrupt later pack,
+and preservation of operation-wide reconstruction work.

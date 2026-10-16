@@ -11,7 +11,7 @@ use fgit_types::{GitOid, RefusalCode};
 use super::control::{IO_CHUNK_BYTES, ImportControl, interrupted};
 use super::{LooseGitImportRefusal, io_refusal};
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Entry {
     offset: u64,
     length: usize,
