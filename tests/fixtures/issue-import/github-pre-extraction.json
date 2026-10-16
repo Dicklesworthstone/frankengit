@@ -1,0 +1,55 @@
+{
+  "capture": {
+    "schema": "frankengit-github-issue-capture-v1",
+    "consistency": "two-equal-observations-not-atomic",
+    "source": {
+      "repository": "fixture/project",
+      "repository_id": "999"
+    },
+    "issues": [
+      {
+        "number": 1,
+        "id": "9007199254740993",
+        "html_url": "https://github.com/fixture/project/issues/1",
+        "title": "Legacy issue",
+        "body": "Original source body",
+        "state": "closed",
+        "state_reason": "completed",
+        "user": {
+          "id": "77",
+          "login": "fixture-author"
+        },
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "closed_at": "2026-01-01T00:00:00Z",
+        "labels": [],
+        "assignees": [],
+        "milestone": null,
+        "locked": false,
+        "comment_count": 1,
+        "comments": [
+          {
+            "id": "9007199254741003",
+            "html_url": "https://github.com/fixture/project/issues/1#issuecomment-9007199254741003",
+            "issue_url": "https://api.github.com/repos/fixture/project/issues/1",
+            "user": {
+              "id": "77",
+              "login": "fixture-author"
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "body": "Original source discussion"
+          }
+        ]
+      }
+    ]
+  },
+  "hashes": {
+    "capture.json": "cbaa7670ee4efe7e5e1c63e8348c6cd0d1c58f500e71519eb50d7974e1784c69",
+    "manifest.json": "270ff874a413bd5a4bf074f94bee6f47fcf37dc3a2b7257de3e2a19892739f3a",
+    "step-000000.request.json": "e026243469bf4c4b25c409be6f0f84f14a40d2a582b6e4d3f3cf38a791239d35",
+    "step-000001.request.json": "58fd04722bad8114440645882e531ad6cd7ae9f90e7b1de5a677dff8926ad0cc",
+    "step-000002.request.json": "897c252dcba52d1831c6acae53ee9eaf23b748fb009ba98232eab9ca18a6e212"
+  },
+  "plan_sha256": "270ff874a413bd5a4bf074f94bee6f47fcf37dc3a2b7257de3e2a19892739f3a"
+}
