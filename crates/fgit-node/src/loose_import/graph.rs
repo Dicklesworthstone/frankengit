@@ -144,6 +144,21 @@ pub(super) fn validate_typed_controlled(
                 observed: total_bytes,
             });
         }
+        // Blobs are opaque leaves. Their native identity and required kind were
+        // checked above; the parser adds only a size check and an owned copy.
+        // Preserve that exact refusal without allocating a second entire body.
+        if object.object_type == ObjectType::Blob {
+            if object.body.len() > parse_limits.max_object_bytes {
+                return Err(LooseGitImportRefusal::ObjectStructure(Box::new(
+                    fgit_git_object::ObjectError::ObjectTooLarge {
+                        limit: parse_limits.max_object_bytes,
+                    },
+                )));
+            }
+            control.checkpoint()?;
+            objects.insert(identity, object);
+            continue;
+        }
         let parsed = parse_object_body(
             object.object_type,
             &object.body,

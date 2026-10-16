@@ -139,3 +139,60 @@ fn zero_byte_limit_admits_an_empty_blob_but_not_a_nonempty_blob() {
         })
     ));
 }
+
+#[test]
+fn opaque_blob_leaf_matches_the_native_parser_at_every_body_boundary() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for length in [0_usize, 1, 16, 4096] {
+            let body: Vec<u8> = (0..length).map(|i| (i % 256) as u8).collect();
+            let id = fgit_crypto::git_object_id(format, ObjectType::Blob, &body);
+            for maximum in [0, length.saturating_sub(1), length, length + 1] {
+                let parser = ParseLimits {
+                    max_object_bytes: maximum,
+                    ..ParseLimits::default()
+                };
+                let expected = parse_object_body(
+                    ObjectType::Blob,
+                    &body,
+                    AcceptanceProfile::GitCompatibleImport,
+                    &parser,
+                );
+                let result = validate([id], format, &parser, Limits::default(), |_| {
+                    Ok(LooseObject {
+                        object_type: ObjectType::Blob,
+                        declared_size: length,
+                        body: body.clone(),
+                    })
+                });
+                match (expected, result) {
+                    (Ok(ParsedObject::Blob(parsed)), Ok(verified)) => {
+                        assert_eq!(verified.total_bytes, length as u64);
+                        assert_eq!(verified.objects[&id].body, parsed);
+                    }
+                    (
+                        Err(fgit_git_object::ObjectError::ObjectTooLarge { limit: expected }),
+                        Err(LooseGitImportRefusal::ObjectStructure(actual)),
+                    ) => {
+                        assert!(
+                            matches!(*actual, fgit_git_object::ObjectError::ObjectTooLarge { limit } if limit == expected)
+                        );
+                    }
+                    (expected, actual) => {
+                        panic!("blob parser disagreement: {expected:?}; {actual:?}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opaque_blob_leaf_still_authenticates_the_complete_native_body() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (id, mut body) = object(format, 1);
+        body.body[15] ^= 1;
+        assert!(
+            matches!(validate([id], format, &ParseLimits::default(), Limits::default(), |_| Ok(body.clone())), Err(LooseGitImportRefusal::ObjectIdentityMismatch { expected, .. }) if expected == id)
+        );
+    }
+}
