@@ -4,10 +4,12 @@ import { constants as F } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { mkdir, open, lstat, realpath, opendir } from 'node:fs/promises';
+import { rootFor, snapshot as nativeSnapshot } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
+import { PullArchiveWalk, createPullArchiveBackend } from './forge-pull-archive-protocol.mjs';
 
 export const PULL_ARCHIVE_SCHEMA = 'frankengit-pull-read-archive-v1';
 export const PULL_ARCHIVE_LIMITS = Object.freeze({ pages: 16384, pulls: 4096,
-  reviews: 65536, comments: 65536, bytes: 64 * 1024 * 1024, pageBytes: 1024 * 1024 });
+  reviews: 65536, comments: 65536, bytes: 64 * 1024 * 1024, pageBytes: 1024 * 1024, manifestBytes: 4 * 1024 * 1024 });
 const L = PULL_ARCHIVE_LIMITS;
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -15,7 +17,7 @@ const fail = reason => { const e = new Error(`pull_archive_${reason}`); e.code =
 const number = (value, min, max, name) => { if (!Number.isSafeInteger(value) || value < min || value > max) fail(name); return value; };
 const pin = value => { if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) fail('pin'); return value; };
 const id32 = value => { if (typeof value !== 'string' || !/^[0-9a-f]{32}$/.test(value)) fail('identity'); return value; };
-const snapshot = value => { if (typeof value !== 'string' || !/^alg:[1-9][0-9]{0,4}:(?:[0-9a-f]{2}){1,64}$/.test(value)) fail('snapshot'); return value; };
+const snapshot = nativeSnapshot;
 function exact(value, names) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== names.length || names.some(name => !Object.hasOwn(value, name))) fail('fields');
 }
@@ -25,6 +27,7 @@ function safePath(value) {
 }
 function location(value) {
   if (typeof value !== 'string' || value.length > 4096 || new URL(value).href !== value || !value.endsWith('/ui/pulls/')) fail('url');
+  rootFor(value);
   return value;
 }
 function sourceHead(value) {
@@ -95,62 +98,41 @@ function manifest(value) {
   return value;
 }
 
-async function productionBackend({ href, token, timeoutMs, signal }) {
-  const [{ PullClient }, core, comments] = await Promise.all([
-    import('../../crates/fgit-node/src/smart_http/server/browser/pulls.mjs'),
-    import('../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs'),
-    import('../../crates/fgit-node/src/smart_http/server/browser/pulls-comments.mjs'),
-  ]);
-  const client = new PullClient({ href, timeoutMs }); await client.connect(token);
-  signal?.addEventListener('abort', () => client.cancelReads(), { once: true });
-  return {
-    close: () => client.disconnect(),
-    list: args => client.list(args), show: (n,h) => client.show(n,h), reviews: (n,args) => client.reviews(n,args), comments: (n,args) => client.comments(n,args),
-    validate(kind, reply, ctx) {
-      if (kind === 'list') return core.listReply(reply, { after: ctx.cursor, limit: ctx.limit, head: ctx.head, scope: ctx.scope });
-      if (kind === 'show') return core.showReply(reply, ctx.number, { head: ctx.head, scope: ctx.scope });
-      if (kind === 'reviews') return core.reviewsReply(reply, ctx.number, { after: ctx.cursor, limit: ctx.limit, head: ctx.head, scope: ctx.scope });
-      return comments.commentsReply(reply, ctx.number, { after: ctx.cursor, limit: ctx.limit, head: ctx.head, scope: ctx.scope });
-    },
-  };
-}
+const productionBackend = createPullArchiveBackend;
 
-async function validateArchive(root, m, life, identity, backend, sealed = true) {
+async function validateArchive(root, m, life, identity, sealed = true) {
   const expected = new Set(m.pages.map((_, i) => pageName(i))); if (sealed) expected.add('archive.json');
   for await (const entry of await opendir(root)) { life.check(); if (!expected.delete(entry.name)) fail('unexpected_file'); }
   if (expected.size) fail('missing_file');
-  let scope = null, head = m.snapshot_token, bytes = 0, pulls = 0, reviews = 0, comments = 0;
-  const listed = new Set(), shown = new Set();
+  const walk = new PullArchiveWalk({ tenant:m.tenant_id, repository:m.repository_id, pageSize:m.page_size,
+    head:m.snapshot_token, source:m.source_head, scope:{ tenant:m.tenant_id, repository:m.repository_id,
+      incarnation:m.repository_incarnation, format:m.object_format }, limits:L });
+  let bytes = 0;
   for (const [index, desc] of m.pages.entries()) {
     life.check(); await directory(root, identity); const raw = await readPrivate(join(root, pageName(index)), L.pageBytes);
-    bytes += raw.length; if (raw.length !== desc.bytes || digest(raw) !== desc.sha256 || bytes > m.data_bytes) fail('page_commitment');
-    const reply = canonical(raw), checked = backend.validate(desc.kind, reply, { number: desc.number, cursor: desc.cursor, limit: m.page_size, head, scope });
-    if (checked.head !== null) head = checked.head; scope = checked.binding;
-    if (desc.kind === 'list') { for (const row of reply.pull_requests) { if (listed.has(row.number)) fail('duplicate_pull'); listed.add(row.number); pulls++; } }
-    else if (desc.kind === 'show') { if (!reply.found || shown.has(desc.number)) fail('show_population'); shown.add(desc.number); }
-    else if (desc.kind === 'reviews') reviews += reply.reviews.length;
-    else comments += reply.comments.length;
-    if (pulls > L.pulls || reviews > L.reviews || comments > L.comments) fail('count_limit');
-    if (reply.source_head !== null && reply.source_head !== m.source_head) fail('source_head_changed');
+    bytes += raw.length;
+    if (raw.length !== desc.bytes || digest(raw) !== desc.sha256 || bytes > m.data_bytes) fail('page_commitment');
+    walk.accept(desc, canonical(raw));
   }
-  if (listed.size !== shown.size || [...listed].some(n => !shown.has(n)) || pulls !== m.pull_count || reviews !== m.review_count || comments !== m.comment_count || bytes !== m.data_bytes || head !== m.snapshot_token) fail('incomplete');
+  const { pulls, reviews, comments } = walk.finish();
+  if (pulls !== m.pull_count || reviews !== m.review_count || comments !== m.comment_count || bytes !== m.data_bytes ||
+      bytes + encode(m).length > L.bytes) fail('incomplete');
+  life.check(); await directory(root, identity);
   return { type:'forge_pull_archive', schema_version:1, archive_sha256:digest(encode(m)), href:m.href, tenant_id:m.tenant_id,
     repository_id:m.repository_id, repository_incarnation:m.repository_incarnation, object_format:m.object_format,
     snapshot_token:m.snapshot_token, source_head:m.source_head, pulls, reviews, comments, pages:m.pages.length,
     data_bytes:bytes, complete:true, canonical_backup:false, merge_authority:false, mutation_submitted:false };
 }
 
-export async function inspectPullArchive(raw, injected = null) {
+export async function inspectPullArchive(raw) {
   exact(raw, ['workdir','confirm', ...(raw.timeoutMs === undefined ? [] : ['timeoutMs']), ...(raw.signal === undefined ? [] : ['signal'])]);
   const root = safePath(raw.workdir), expected = pin(raw.confirm), life = lifetime(raw);
-  let backend;
   try {
-    life.check(); const identity = await directory(root); const bytes = await readPrivate(join(root,'archive.json'), L.pageBytes);
+    life.check(); const identity = await directory(root);
+    const bytes = await readPrivate(join(root,'archive.json'), L.manifestBytes);
     if (digest(bytes) !== expected) fail('pin_mismatch'); const m = manifest(canonical(bytes));
-    backend = injected ?? await productionBackend({ href:m.href, token:'0'.repeat(64), timeoutMs:life.timeout, signal:life.signal }).catch(() => null);
-    if (!backend?.validate) fail('validator_unavailable');
-    return { ...(await validateArchive(root,m,life,identity,backend,true)), network_accessed:false, local_read_only:true };
-  } finally { backend?.close?.(); life.close(); }
+    return { ...(await validateArchive(root,m,life,identity,true)), network_accessed:false, local_read_only:true };
+  } finally { life.close(); }
 }
 
 export async function exportPullArchive(raw, injected = null) {
@@ -167,34 +149,31 @@ export async function exportPullArchive(raw, injected = null) {
     await directory(dirname(o.workdir)); if (await realpath(o.tokenFile) !== o.tokenFile) fail('token_alias');
     try { await lstat(o.workdir); fail('record_exists'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     const token = await readPrivate(o.tokenFile, 65); let tokenText;
-    try { tokenText = token.toString('ascii').replace(/\n$/,''); if (!/^[0-9a-f]{64}$/.test(tokenText)) fail('token'); }
+    try { tokenText = token.toString('utf8').replace(/\n$/,''); if (!/^[0-9a-f]{64}$/.test(tokenText)) fail('token'); }
     finally { token.fill(0); }
     backend = injected ?? await productionBackend({ href:o.href, token:tokenText, timeoutMs:life.timeout, signal:life.signal });
     await mkdir(o.workdir,{mode:0o700}); created=true; await syncDirectory(dirname(o.workdir)); const identity=await directory(o.workdir);
-    const pages=[]; let dataBytes=0, pulls=0,reviews=0,comments=0, head=o.head, source=null, scope=null, after=0;
-    const save = async (kind, numberValue, cursor, checked) => {
-      life.check(); const reply=checked.reply, bytes=encode(reply); if (bytes.length>L.pageBytes || ++save.count>o.maxPages) fail('page_limit');
-      dataBytes += bytes.length; if (dataBytes > o.maxArchiveBytes) fail('archive_limit');
-      if (checked.head !== null) head = checked.head; scope=checked.binding;
-      if (reply.source_head !== null) { sourceHead(reply.source_head); if (source !== null && source !== reply.source_head) fail('source_head_changed'); source=reply.source_head; }
-      await directory(o.workdir,identity); await writeNew(join(o.workdir,pageName(pages.length)),bytes); pages.push(descriptor(kind,numberValue,cursor,bytes)); return reply;
-    }; save.count=0;
-    for (;;) {
-      const list=await backend.list({after,limit:o.pageSize,head}); const reply=await save('list',null,after,list);
-      for (const row of reply.pull_requests) {
-        if (++pulls>o.maxPulls) fail('pull_limit'); const n=row.number;
-        await save('show',n,0,await backend.show(n,head));
-        let reviewer=null; do { const r=await save('reviews',n,reviewer,await backend.reviews(n,{after:reviewer,limit:o.pageSize,head})); reviews+=r.reviews.length; if(reviews>o.maxReviews) fail('review_limit'); reviewer=r.next_after; } while(reviewer!==null);
-        let commentAfter=0; do { const c=await save('comments',n,commentAfter,await backend.comments(n,{after:commentAfter,limit:o.pageSize,head,render:false})); comments+=c.comments.length; if(comments>o.maxComments) fail('comment_limit'); commentAfter=c.next_after; } while(commentAfter!==null);
-      }
-      if (reply.next_after===null) break; after=reply.next_after;
+    const pages=[]; let dataBytes=0;
+    const walk = new PullArchiveWalk({ tenant:o.tenant, repository:o.repository, pageSize:o.pageSize, head:o.head,
+      limits:{ pages:o.maxPages, pulls:o.maxPulls, reviews:o.maxReviews, comments:o.maxComments } });
+    while (walk.request !== null) {
+      life.check(); if (pages.length >= o.maxPages) fail('page_limit');
+      const request = walk.request, { kind, number:n, cursor } = request, head=walk.state.head;
+      const args = { after:cursor, limit:o.pageSize, head };
+      const checked = kind === 'list' ? await backend.list(args) : kind === 'show' ? await backend.show(n,head)
+        : kind === 'reviews' ? await backend.reviews(n,args) : await backend.comments(n,args);
+      life.check(); const bytes=encode(checked.reply);
+      if (bytes.length > L.pageBytes) fail('page_limit');
+      if (dataBytes + bytes.length > o.maxArchiveBytes) fail('archive_limit');
+      walk.accept(request,checked.reply);
+      await directory(o.workdir,identity); await writeNew(join(o.workdir,pageName(pages.length)),bytes);
+      pages.push(descriptor(kind,n,cursor,bytes)); dataBytes += bytes.length;
     }
-    if (head===null || source===null || !scope) fail('empty_identity');
-    if (scope.tenant!==o.tenant || scope.repository!==o.repository) fail('repository_mismatch');
+    const { pulls, reviews, comments, head, source, scope } = walk.finish();
     const m=manifest({schema:PULL_ARCHIVE_SCHEMA,href:o.href,tenant_id:o.tenant,repository_id:o.repository,repository_incarnation:scope.incarnation,
       object_format:scope.format,snapshot_token:head,source_head:source,page_size:o.pageSize,pull_count:pulls,review_count:reviews,comment_count:comments,data_bytes:dataBytes,pages});
-    const bytes=encode(m); rootDigest=digest(bytes); if(bytes.length>L.pageBytes || dataBytes+bytes.length>o.maxArchiveBytes) fail('archive_limit');
-    await validateArchive(o.workdir,m,life,identity,backend,false); await writeNew(join(o.workdir,'archive.json'),bytes);
+    const bytes=encode(m); rootDigest=digest(bytes); if(bytes.length>L.manifestBytes || dataBytes+bytes.length>o.maxArchiveBytes) fail('archive_limit');
+    await validateArchive(o.workdir,m,life,identity,false); life.check(); await writeNew(join(o.workdir,'archive.json'),bytes);
     return {type:'forge_pull_archive_exported',workdir:o.workdir,archive_sha256:rootDigest,pulls,reviews,comments,pages:pages.length,data_bytes:dataBytes,
       snapshot_token:head,source_head:source,complete:true,canonical_backup:false,merge_authority:false,mutation_submitted:false};
   } catch (error) { error.archive_progress={workdir:o.workdir,directory_created:created,expected_archive_sha256:rootDigest,complete:false,mutation_submitted:false}; throw error; }
