@@ -60,3 +60,16 @@ export async function runBootstrap(raw) {
       operations:count,mutation_may_have_been_submitted:count>0,complete:false};throw e;
   }finally{life.close();}
 }
+
+// Expose the complete immutable requirements for independent review. Execution
+// history is still validated, but request bodies, tokens and credentials are not
+// needed or printed. This never treats a historical terminal as current refs.
+export async function inspectBootstrap(raw) {
+  fields(raw,['workdir','confirm','timeoutMs','signal'],['workdir','confirm']);
+  raw={...raw};const life=lifetime(raw);
+  try {
+    const loaded=await loadBootstrap(raw.workdir,raw.confirm,life);
+    return { ...summary(loaded,await journal(loaded,life)), type:'branch_bootstrap_inspected',
+      selection:loaded.selection, network_accessed:false,mutation_submitted:false,local_read_only:true };
+  } finally { life.close(); }
+}
