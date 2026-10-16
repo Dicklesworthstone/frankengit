@@ -2534,6 +2534,7 @@ fn async_projection_unavailable(
                 .into_projection_unavailable(RefusalCode::EvidenceMissing);
         }
         AdmissionMaterializationRefusal::Cancelled => RefusalCode::CancellationInProgress,
+        AdmissionMaterializationRefusal::CheckpointTransition(_) => RefusalCode::EvidenceInvalid,
         AdmissionMaterializationRefusal::CanonicalRoot(code) => code,
         AdmissionMaterializationRefusal::CanonicalFrame(_) => RefusalCode::CanonicalFramingInvalid,
         AdmissionMaterializationRefusal::Resource(_)
