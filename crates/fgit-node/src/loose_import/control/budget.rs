@@ -5,10 +5,20 @@ use crate::{
     NodeRequestContext, OneNode,
 };
 
+#[cfg(test)]
 fn reserved_deadline(
     base: GitDaemonSessionTimeout,
     scaling: GitDaemonSessionWorkScaling,
     explicit: Option<GitDaemonSessionTimeout>,
+) -> GitDaemonSessionDeadline {
+    reserved_deadline_for_bytes(base, scaling, explicit, MAX_REACHABLE_OBJECT_BYTES)
+}
+
+fn reserved_deadline_for_bytes(
+    base: GitDaemonSessionTimeout,
+    scaling: GitDaemonSessionWorkScaling,
+    explicit: Option<GitDaemonSessionTimeout>,
+    maximum_bytes: u64,
 ) -> GitDaemonSessionDeadline {
     let deadline = GitDaemonSessionDeadline::new(
         explicit.unwrap_or(base),
@@ -23,7 +33,7 @@ fn reserved_deadline(
     // expanded-byte ceiling, NOT an assertion about bytes already read. No
     // session, receipt, transaction identity or publication observes this local
     // accounting object. Reuse the receive formula instead of a second policy.
-    deadline.note_admitted(MAX_REACHABLE_OBJECT_BYTES as usize);
+    deadline.note_admitted(usize::try_from(maximum_bytes).unwrap_or(usize::MAX));
     deadline
 }
 
@@ -48,14 +58,35 @@ impl OneNode {
         &self,
         timeout: Option<GitDaemonSessionTimeout>,
     ) -> NodeRequestContext {
-        let deadline = reserved_deadline(
+        self.import_context_for_bytes(timeout, MAX_REACHABLE_OBJECT_BYTES)
+    }
+
+    /// Reserve a single explicitly bounded disk-backed import before source I/O.
+    /// `maximum_bytes` must be in 1..=16 GiB and fit this platform. Pass the same
+    /// ceiling to `import_loose_git_directory_with_byte_limit_durable_in`.
+    /// An explicit timeout remains a strict ceiling, not a renewable allowance.
+    pub fn import_request_context_with_byte_limit(
+        &self,
+        timeout: Option<GitDaemonSessionTimeout>,
+        maximum_bytes: u64,
+    ) -> Result<NodeRequestContext, crate::LooseGitImportRefusal> {
+        crate::loose_import::profile::validate_limit(maximum_bytes)?;
+        Ok(self.import_context_for_bytes(timeout, maximum_bytes))
+    }
+
+    fn import_context_for_bytes(
+        &self,
+        timeout: Option<GitDaemonSessionTimeout>,
+        maximum_bytes: u64,
+    ) -> NodeRequestContext {
+        let deadline = reserved_deadline_for_bytes(
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
             timeout,
+            maximum_bytes,
         );
         NodeRequestContext {
-            authority: self
-                .receive_admission_authority_context(MAX_REACHABLE_OBJECT_BYTES, &deadline),
+            authority: self.receive_admission_authority_context(maximum_bytes, &deadline),
         }
     }
 }

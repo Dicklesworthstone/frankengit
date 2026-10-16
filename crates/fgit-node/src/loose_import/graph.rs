@@ -19,6 +19,8 @@ use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS};
 /// large loose source must not inherit a limit intended for hydrated packs.
 /// The import request reserves this SAME ceiling before any source I/O.
 pub(super) const MAX_REACHABLE_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
+/// Explicit disk-backed import ceiling, not a default memory allocation.
+pub(super) const MAX_EXPLICIT_OBJECT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// Independent total edge work; repeated references and gitlinks count too.
 const MAX_IMPORT_GRAPH_EDGES: usize = 4_000_000;
@@ -118,9 +120,9 @@ pub(super) fn validate_typed_with_custody<T>(
 ) -> Result<ValidatedImport<T>, LooseGitImportRefusal> {
     control.checkpoint()?;
     let maximum = Limits::default();
-    if limits.bytes > maximum.bytes {
+    if limits.bytes > MAX_EXPLICIT_OBJECT_BYTES {
         return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
-            limit: maximum.bytes,
+            limit: MAX_EXPLICIT_OBJECT_BYTES,
             observed: limits.bytes,
         });
     }

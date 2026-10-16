@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Real 288 MiB native source import and cold reopen. No Git subprocess, mock
+//! Real 288 MiB default and 576 MiB explicit source imports with cold reopen. No Git subprocess, mock
 //! store, fixture-only import path, or large-fixture timeout override is used.
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_node::{NodeConfig, OneNode};
@@ -15,7 +15,6 @@ use std::time::Instant;
 
 const FORMAT: GitHashAlgorithm = GitHashAlgorithm::Sha256;
 const PAYLOAD_BYTES: usize = 24 * 1024 * 1024;
-const BLOBS: u8 = 12;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Scratch(PathBuf);
 impl Scratch {
@@ -76,14 +75,13 @@ fn loose(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {
     oid
 }
 
-#[test]
-fn multi_hundred_mib_source_publishes_under_default_budget_and_survives_cold_reopen() {
+fn source_round_trip(blobs_count: u8, maximum_bytes: Option<u64>) {
     let scratch = Scratch::new();
     let root = scratch.0.join("node");
     let source = scratch.0.join("source.git");
     let mut blobs = Vec::new();
     let mut tree = Vec::new();
-    for ordinal in 0..BLOBS {
+    for ordinal in 0..blobs_count {
         let body = vec![b'a' + ordinal; PAYLOAD_BYTES];
         let oid = loose(&source, GitObjectKind::Blob, &body);
         tree.extend_from_slice(format!("100644 data{ordinal:02}\0").as_bytes());
@@ -92,7 +90,7 @@ fn multi_hundred_mib_source_publishes_under_default_budget_and_survives_cold_reo
     }
     let tree_id = loose(&source, GitObjectKind::Tree, &tree);
     let body = format!(
-        "tree {tree_id}\nauthor Large <large@example.invalid> 1 +0000\ncommitter Large <large@example.invalid> 1 +0000\n\n288 MiB source import\n"
+        "tree {tree_id}\nauthor Large <large@example.invalid> 1 +0000\ncommitter Large <large@example.invalid> 1 +0000\n\nlarge bounded source import\n"
     );
     let commit = loose(&source, GitObjectKind::Commit, body.as_bytes());
     fs::create_dir_all(source.join("refs/heads")).unwrap();
@@ -105,25 +103,41 @@ fn multi_hundred_mib_source_publishes_under_default_budget_and_survives_cold_reo
     .unwrap();
     let (mut node, _) = OneNode::init(config(&root)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
-    let request = node.import_request_context(None);
     let started = Instant::now();
-    let receipt = node
-        .runtime()
-        .block_on(node.import_loose_git_directory_durable_in(
-            &request,
-            &source,
-            PrincipalId::from_bytes([3; 16]),
-            b"large-import-default-budget",
-        ))
-        .unwrap();
+    let receipt = match maximum_bytes {
+        None => {
+            let request = node.import_request_context(None);
+            node.runtime()
+                .block_on(node.import_loose_git_directory_durable_in(
+                    &request,
+                    &source,
+                    PrincipalId::from_bytes([3; 16]),
+                    b"large-import-default-budget",
+                ))
+        }
+        Some(maximum) => {
+            let request = node
+                .import_request_context_with_byte_limit(None, maximum)
+                .unwrap();
+            node.runtime()
+                .block_on(node.import_loose_git_directory_with_byte_limit_durable_in(
+                    &request,
+                    &source,
+                    PrincipalId::from_bytes([3; 16]),
+                    b"large-import-default-budget",
+                    maximum,
+                ))
+        }
+    }
+    .unwrap();
     assert_eq!(receipt.commands.len(), 1);
     assert!(matches!(
         receipt.commands[0].terminal.outcome,
         DecisionOutcome::Committed { .. }
     ));
     eprintln!(
-        "large-import.acceptance.publish: {} native blob bytes; {} ms; default bounded profile",
-        usize::from(BLOBS) * PAYLOAD_BYTES,
+        "large-import.acceptance.publish: {} native blob bytes; {} ms; bounded byte profile {maximum_bytes:?}",
+        usize::from(blobs_count) * PAYLOAD_BYTES,
         started.elapsed().as_millis()
     );
     node.shutdown().unwrap();
@@ -143,7 +157,7 @@ fn multi_hundred_mib_source_publishes_under_default_budget_and_survives_cold_reo
     );
     assert_eq!(
         selected.selected_closure().closure().objects().len(),
-        usize::from(BLOBS) + 2
+        usize::from(blobs_count) + 2
     );
     for (oid, byte) in blobs {
         let object = reopened.read_git_object(oid).unwrap();
@@ -156,7 +170,18 @@ fn multi_hundred_mib_source_publishes_under_default_budget_and_survives_cold_reo
         body.as_bytes()
     );
     eprintln!(
-        "large-import.acceptance.reopen: all 14 exact native objects verified after source removal"
+        "large-import.acceptance.reopen: all {} exact native objects verified after source removal",
+        usize::from(blobs_count) + 2
     );
     reopened.shutdown().unwrap();
+}
+
+#[test]
+fn multi_hundred_mib_source_publishes_under_default_budget_and_survives_cold_reopen() {
+    source_round_trip(12, None);
+}
+
+#[test]
+fn larger_than_default_source_uses_explicit_disk_profile_and_survives_cold_reopen() {
+    source_round_trip(24, Some(1024 * 1024 * 1024));
 }

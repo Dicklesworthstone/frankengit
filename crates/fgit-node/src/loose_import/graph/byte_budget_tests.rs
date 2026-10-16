@@ -76,7 +76,7 @@ fn exact_byte_limit_admits_and_one_byte_less_refuses_in_both_hash_domains() {
 fn an_overlarge_profile_refuses_before_loading_and_reports_the_byte_dimension() {
     let format = GitHashAlgorithm::Sha256;
     let (id, body) = object(format, 1);
-    for limit in [MAX_REACHABLE_OBJECT_BYTES + 1, u64::MAX] {
+    for limit in [MAX_EXPLICIT_OBJECT_BYTES + 1, u64::MAX] {
         let loads = Cell::new(0);
         let result = validate(
             [id],
@@ -93,7 +93,7 @@ fn an_overlarge_profile_refuses_before_loading_and_reports_the_byte_dimension() 
         );
         assert_eq!(loads.get(), 0);
         assert!(
-            matches!(result, Err(LooseGitImportRefusal::TotalObjectBytesExceeded { limit: MAX_REACHABLE_OBJECT_BYTES, observed }) if observed == limit)
+            matches!(result, Err(LooseGitImportRefusal::TotalObjectBytesExceeded { limit: MAX_EXPLICIT_OBJECT_BYTES, observed }) if observed == limit)
         );
     }
     let verified = validate(
