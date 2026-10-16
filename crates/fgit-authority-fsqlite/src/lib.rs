@@ -141,6 +141,7 @@
 //! [`AuthorityStore`]: fgit_authority::AuthorityStore
 //! [`FsqliteAuthorityStore`]: crate::FsqliteAuthorityStore
 
+mod adaptive_retry;
 mod body_cache;
 mod classify;
 mod engine;
@@ -153,6 +154,14 @@ mod retry;
 mod schema;
 mod token;
 
+pub use crate::adaptive_retry::{
+    AdaptiveRetryConfig, AdaptiveRetryController, AdaptiveRetryEpochLog, AdaptiveRetryRefusal,
+    AdaptiveRetrySnapshot, AdaptiveRetryStep, CANDIDATE_BACKOFF_BASE_MS,
+    CANDIDATE_BACKOFF_CEILING_MS, CANDIDATE_POLICY_SLUG, DEFAULT_MAX_RETAINED_OBSERVATIONS,
+    DEFAULT_MIN_SUPPORT_OBSERVATIONS, FALLBACK_BACKOFF_BASE_MS, FALLBACK_BACKOFF_CEILING_MS,
+    FALLBACK_POLICY_SLUG, MAX_EPOCH_HISTORY, METRIC_SLUG, POPULATION_SLUG, SELECTION_SLUG,
+    SharedAdaptiveRetryController, TOOLCHAIN_FINGERPRINT_PREIMAGE, forbidden_targets,
+};
 pub use crate::body_cache::BodyCacheStats;
 pub use crate::classify::{classify_franken_error, is_retryable_engine_error};
 pub use crate::engine::portable_store::multihead::{

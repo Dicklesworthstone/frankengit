@@ -26,6 +26,7 @@ fgit-resource.workspace = true
 fgit-runtime.workspace = true
 fgit-reference.workspace = true
 fgit-ssh.workspace = true
+fgit-statistics.workspace = true
 fgit-txn.workspace = true
 fgit-types.workspace = true
 fgit-treefs.workspace = true

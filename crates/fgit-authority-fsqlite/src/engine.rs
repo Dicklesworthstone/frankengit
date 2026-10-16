@@ -52,6 +52,7 @@ use fsqlite_types::cx::{Cx, cap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::adaptive_retry::{AdaptiveRetrySnapshot, SharedAdaptiveRetryController};
 use crate::body_cache::BodyCache;
 use crate::classify::classify_franken_error;
 use crate::interpret::{
@@ -225,6 +226,8 @@ pub struct FsqliteAuthorityStore {
     limits: AuthorityLimits,
     /// Write-once bodies already read or accepted; see [`BodyCache`].
     bodies: BodyCache,
+    /// Adaptive authority-CAS retry controller (`frankengit-root-doctrine-x2mv.4.37`).
+    contention_retry: SharedAdaptiveRetryController,
 }
 
 impl FsqliteAuthorityStore {
@@ -260,6 +263,7 @@ impl FsqliteAuthorityStore {
             instance,
             limits,
             bodies: BodyCache::new(),
+            contention_retry: SharedAdaptiveRetryController::new(),
         };
         let instance = store.establish(cx, instance).await?;
         Ok(Self { instance, ..store })
