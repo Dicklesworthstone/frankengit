@@ -501,3 +501,6 @@ pub mod current_index;
 
 /// Exact-byte, read-only context assembly from joined retrieval evidence.
 pub mod context;
+
+/// Trusted-local, exact publication-state historical predicates.
+pub mod bisection;
