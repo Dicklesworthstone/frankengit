@@ -72,6 +72,25 @@ hostile runner or claim complete descendant reaping.
 processes to exercise child/grandchild cancellation, timeout, orphaned success,
 signal termination, output exhaustion, clean joined-child behavior, unrelated
 group isolation, pre-spawn cancellation and liveness-callback unwind. Existing
-workflow, condition, matrix and runner-library tests remain applicable. These
-focused tests alone do not establish persisted-node end-to-end or full-workspace
-verification.
+workflow, condition, matrix and runner-library tests remain applicable. Private
+procfs fixtures test exact entry/record limits, expired observations, missing
+leaders and zombie distinctions; separate real-child tests verify that repeated
+WNOWAIT observations retain the leader and competing reaping invalidates ownership.
+
+The discovered `scripts/e2e/suites/workflow/process_groups.sh` campaign drives a
+prebuilt `FG_BIN` against persisted SHA-1 and SHA-256 nodes. It tests joined
+children, orphaned zero-exit shells, signal termination and request-deadline
+cancellation of grandchildren. The campaign checks that later independent and
+`always()` jobs do not run after containment loss, retained reports recover
+without execution, occupied attempt IDs cannot replay, and removing the source
+directory does not invalidate durable recovery.
+
+Every terminal job observation also traverses the existing canonical publication
+path. Failed containment publishes failure, cancelled successors publish cancelled,
+and joined foreground jobs retain their normal success behavior. Graph, native
+source and evidence identities must match; exact publication retries return
+byte-identical results without changing refs or acknowledging workspace cleanup.
+These are actual binary tests, not injected runner or authority implementations.
+They do not establish hostile isolation, physical power-loss recovery, maximum-host
+scaling, or complete-workspace validation. Use the existing matrix and step-context
+suites to check their broader execution/publication paths as well.

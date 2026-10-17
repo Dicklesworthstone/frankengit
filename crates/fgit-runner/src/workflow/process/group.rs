@@ -270,3 +270,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ownership_tests.rs"]
+mod ownership_tests;
