@@ -138,20 +138,51 @@ function hasNext(header,path,repoId,number,kind,page) {
   }
   return next;
 }
-export async function captureGithubPulls(raw) {
-  const required=['repository','numbers'];
-  pullSourceFields(raw,[...required,'token','signal','timeoutMs','maxReadBytes','maxRequests','fetchImpl'],required);
-  const repository=githubRepository(raw.repository),selectedNumbers=numbers(raw.numbers);
-  const owner=createGithubSource({token:raw.token??null,signal:raw.signal,timeoutMs:raw.timeoutMs??300000,
-    maxReadBytes:raw.maxReadBytes??64*1024*1024,maxRequests:raw.maxRequests??4096,fetchImpl:raw.fetchImpl??globalThis.fetch});
-  const repoPath=`/repos/${repository}`;
-  try {
+// An inventory pins membership/aliases, not mutable metadata or a GitHub snapshot.
+// Own this selection before the first await; callers cannot change a later batch.
+function expectedSelection(raw, selectedNumbers, repository) {
+  if (raw === null) return null;
+  pullSourceFields(raw, ['source', 'pulls']);
+  pullSourceFields(raw.source, ['id', 'full_name']);
+  const selected = source(raw.source);
+  if (selected.full_name.toLowerCase() !== repository.toLowerCase() || !Array.isArray(raw.pulls) ||
+      raw.pulls.length !== selectedNumbers.length) fail('inventory_selection');
+  const seen = new Set();
+  const pulls = raw.pulls.map((row, i) => {
+    pullSourceFields(row, ['number', 'id']);
+    const number = pullSourceNumber(row.number, 1), identity = id(row.id);
+    if (number !== selectedNumbers[i] || seen.has(identity)) fail('inventory_selection');
+    seen.add(identity); return { number, id: identity };
+  });
+  return { source: selected, pulls };
+}
+const SESSION_FIELDS = ['repository', 'token', 'signal', 'timeoutMs', 'maxReadBytes', 'maxRequests', 'fetchImpl'];
+
+// One deadline and HTTP/response-byte allowance spans every batch in this owner.
+// No transport supplied by a capture file and no budget renewal between batches.
+export function createGithubPullCaptureSession(raw) {
+  pullSourceFields(raw, SESSION_FIELDS, ['repository']);
+  const repository = githubRepository(raw.repository);
+  const owner = createGithubSource({ token: raw.token ?? null, signal: raw.signal, timeoutMs: raw.timeoutMs ?? 300000,
+    maxReadBytes: raw.maxReadBytes ?? 64*1024*1024, maxRequests: raw.maxRequests ?? 4096, fetchImpl: raw.fetchImpl ?? globalThis.fetch });
+  const repoPath = `/repos/${repository}`;
+  let busy = false, closed = false;
+  const close = () => { closed = true; owner.close(); };
+  async function capture(selection, options = {}) {
+    pullSourceFields(options, ['expectedSelection'], []);
+    const selectedNumbers = numbers(selection), expected = expectedSelection(options.expectedSelection ?? null, selectedNumbers, repository);
+    if (closed) fail('capture_session_closed');
+    if (busy) fail('capture_session_busy');
+    busy = true;
+    try {
     const observe=async()=>{
       const selected=source((await owner.get(repoPath)).value);
       if(selected.full_name.toLowerCase()!==repository.toLowerCase())fail('repository_changed');
+      if(expected && !isDeepStrictEqual(selected,expected.source))fail('inventory_repository_changed');
       const root=`/repos/${selected.full_name}`,pulls=[];let count=0;
       for(const n of selectedNumbers){
         owner.check();const pull=metadata((await owner.get(`${root}/pulls/${n}`)).value,selected,n),entry={pull};
+        if(expected && pull.id!==expected.pulls.find(row=>row.number===n).id)fail('inventory_pull_changed');
         for(const kind of Object.keys(NORMALIZE)){
           const path=kind==='discussion'?`${root}/issues/${n}/comments`:`${root}/pulls/${n}/${kind==='reviews'?'reviews':'comments'}`;
           entry[kind]=[];let page=1;
@@ -174,5 +205,18 @@ export async function captureGithubPulls(raw) {
     const first=await observe(),second=await observe();owner.check();
     if(!first.bytes.equals(second.bytes))fail('source_changed');
     return {...second,sha256:recordDigest(second.bytes),statistics:owner.statistics(),atomic_snapshot:false,mutation_submitted:false};
-  } finally { owner.close(); }
+    } catch (error) { close(); throw error; }
+    finally { busy = false; }
+  }
+  return Object.freeze({ capture, check: owner.check, statistics: owner.statistics, close });
+}
+
+export async function captureGithubPulls(raw) {
+  pullSourceFields(raw, [...SESSION_FIELDS, 'numbers', 'expectedSelection'], ['repository', 'numbers']);
+  const repository = githubRepository(raw.repository), selected = numbers(raw.numbers);
+  const expected = expectedSelection(raw.expectedSelection ?? null, selected, repository);
+  const config = Object.fromEntries(SESSION_FIELDS.filter(k => Object.hasOwn(raw, k)).map(k => [k, raw[k]]));
+  const session = createGithubPullCaptureSession(config);
+  try { return await session.capture(selected, { expectedSelection: expected }); }
+  finally { session.close(); }
 }
