@@ -626,6 +626,20 @@ where
     ) -> Result<StepObservation, WorkerFailure> {
         self.inner.execute_step(index, script, limits, live)
     }
+    fn supports_step_context(&self) -> bool {
+        self.inner.supports_step_context()
+    }
+    fn execute_step_with_context(
+        &mut self,
+        index: usize,
+        script: &str,
+        context: &crate::workflow::StepContext,
+        limits: StepLimits,
+        live: &dyn Fn() -> bool,
+    ) -> Result<StepObservation, WorkerFailure> {
+        self.inner
+            .execute_step_with_context(index, script, context, limits, live)
+    }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
         let result = self.inner.finish_job(retain);
         self.scope_open = false;
