@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod bisect_command;
 mod branches;
 mod bundle;
 mod commit_replay;
@@ -47,6 +48,21 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "bisect")
+    {
+        return match bisect_command::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"bisection_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "verify-read")
