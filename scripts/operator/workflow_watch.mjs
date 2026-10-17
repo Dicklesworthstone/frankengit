@@ -196,13 +196,14 @@ function childId(batch, event, path) {
   return digest(Buffer.concat([Buffer.from('frankengit/workflow-dispatch-child/v1\0'), Buffer.from(batch, 'hex'),
     frame(Buffer.from(event)), frame(Buffer.from(path, 'hex'))])).slice(0, 32);
 }
-function executionReport(run, plan, totals) {
+function executionReport(run, plan, totals, graph) {
   const report = object(run.execution);
   if (report.schema_version !== 1 || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false ||
       report.shell !== '/bin/sh' || JSON.stringify(report.shell_flags) !== JSON.stringify(['-eu', '-c']) ||
       report.environment?.PATH !== '/usr/bin:/bin' || report.environment?.LANG !== 'C' ||
       Object.keys(report.environment).length !== 2 || !Array.isArray(report.jobs) || !report.jobs.length || report.jobs.length > 128) fail('Unsupported native execution report.');
-  bounded(report.workflow_source, 256, 'workflow commitment'); bounded(report.workflow_graph, 256, 'workflow graph');
+  bounded(report.workflow_source, 256, 'workflow commitment');
+  if (report.workflow_graph !== `alg:2:${graph}`) fail('Native execution changed the selected workflow graph.');
   number(report.run_timeout_millis, 1, plan.run_timeout_ms); number(report.step_timeout_millis, 1, report.run_timeout_millis);
   number(report.stream_bytes, 1, 2 * 1024 * 1024); number(report.total_output_bytes, 2, plan.total_output_bytes);
   const ids = new Set(); let output = 0;
@@ -211,6 +212,10 @@ function executionReport(run, plan, totals) {
     if (ids.has(job.id) || !['succeeded', 'failed', 'skipped', 'cancelled', 'timed_out', 'output_limit', 'refused'].includes(job.outcome) ||
         !Array.isArray(job.steps) || job.steps.length > 512 || ++totals.jobs > 128) fail('Invalid native job report or aggregate job bound.');
     ids.add(job.id);
+    // A skipped job did not execute, and neither successful nor skipped jobs
+    // may conceal a failed close. These are also native completion conditions.
+    if ((job.outcome === 'skipped' && (job.steps.length !== 0 || job.failure !== null)) ||
+        (job.outcome === 'succeeded' && job.failure !== null)) fail('Contradictory native job completion.');
     if (job.failure !== null) {
       object(job.failure);
       if (job.failure.workspace_retained !== false || typeof job.failure.detail !== 'string' || Buffer.byteLength(job.failure.detail) > 4096) fail('Native job containment remains unproved.');
@@ -233,8 +238,19 @@ function executionReport(run, plan, totals) {
       }
     }
   }
+  // WorkflowReport's legacy evidence bit still means EVERY job succeeded.
+  // Since 41102c6, the node's whole-run bit also permits genuinely unexecuted
+  // conditional skips. Neither encoding carries a new version: accept exactly
+  // those two meanings, never normalize saved reports or recalculate old keys.
+  // The checks above already require successful steps, no failed closes and
+  // closed workspaces for both forms; interruption cannot be a successful run.
   const succeeded = report.jobs.every(job => job.outcome === 'succeeded');
-  if (report.succeeded !== succeeded || run.succeeded !== (!run.request_interrupted && succeeded)) fail('Native execution success disagrees with completed jobs.');
+  const legacy = !run.request_interrupted && succeeded;
+  const completed = !run.request_interrupted && report.jobs.some(job => job.outcome === 'succeeded') &&
+    report.jobs.every(job => job.outcome === 'succeeded' || job.outcome === 'skipped');
+  if (report.succeeded !== succeeded || (run.succeeded !== legacy && run.succeeded !== completed)) {
+    fail('Native execution success disagrees with completed jobs.');
+  }
 }
 // Validate exact native scope and completion, not scripts, signatures or CI authority.
 export function dispatchReport(config, intent, report) {
@@ -278,7 +294,7 @@ export function dispatchReport(config, intent, report) {
         JSON.stringify(run.read_prefixes_hex) !== JSON.stringify(plan.read_prefixes_hex) || run.candidate !== null || run.merge !== null ||
         run.input_kind !== 'canonical' || run.workspaces_closed !== true || typeof run.request_interrupted !== 'boolean' || (!stopped && run.request_interrupted) ||
         ['authoritative_check', 'hostile_code_isolated', 'published'].some(key => run[key] !== false) || typeof run.succeeded !== 'boolean') fail('Native child report changed identity or did not finish cleanup.');
-    executionReport(run, plan, totals);
+    executionReport(run, plan, totals, definition.graph_sha256);
   }
   if (report.succeeded !== (!stopped && report.runs.every(run => run.succeeded))) fail('Native aggregate success disagrees with child observations.');
   return { schema: 'frankengit-workflow-watch-result-v1', intent_sha256: digest(encode(intent)),
