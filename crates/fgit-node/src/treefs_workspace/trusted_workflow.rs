@@ -2,6 +2,7 @@
 //! Never expose this local-owner operation as a remote or hostile CI endpoint.
 
 mod candidate;
+mod completion;
 mod durable;
 use candidate::WorkflowInputs;
 
@@ -105,7 +106,9 @@ pub struct TrustedWorkflowRun {
 }
 impl TrustedWorkflowRun {
     pub fn succeeded(&self) -> bool {
-        self.workspaces_closed && !self.request_interrupted && self.execution.succeeded()
+        self.workspaces_closed
+            && !self.request_interrupted
+            && completion::succeeded(&self.execution)
     }
     pub fn executed_commit(&self) -> GitOid {
         self.candidate.map_or(self.source_commit, |c| c.commit)

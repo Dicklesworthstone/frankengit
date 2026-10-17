@@ -107,6 +107,34 @@ Schema tests check independently enumerated Cartesian products, stable bytes,
 include/exclude behavior, group dependencies, collision refusals, and exact
 resource boundaries. Runner integration tests use real local shell processes
 with independent workspaces and exercise failure joins, literal values,
-cancellation, and shared output limits. These tests are not a full persisted-node
-or actual-fg-process end-to-end campaign. This patch does not complete the larger
-CI product-loop bead or the unresolved process-descendant containment work.
+cancellation, and shared output limits. The actual-binary suite lives at
+`scripts/e2e/suites/workflow/matrix_execution.sh`; set `FG_BIN` to a prebuilt native
+`fg`. It creates native SHA-1 and SHA-256 repositories, imports them, executes
+matrix workflows, inspects durable results, publishes distinct per-variant
+observations, retries exact publication identities, and recovers without the
+original source directory. No external Git engine is used by these fixtures.
+
+## Conditional completion and saved observations
+
+A trusted run can complete successfully when its actual jobs succeed and an
+optional `failure()` diagnostic is skipped. The whole-run `succeeded` field and
+CLI exit status use this completion predicate after workspace closure and request
+finalization. A failed matrix variant still blocks the ordinary dependent group;
+a successful failure diagnostic cannot erase that failure. Cancellation, timeout,
+output exhaustion, cleanup failure and retained workspaces remain non-success.
+An empty/all-skipped run does not assert a successful execution.
+
+The nested `execution.succeeded` field retains its historical, stricter meaning:
+**every job individually succeeded**, including no skipped jobs. It remains false
+for a successful run with skipped diagnostics. Keeping this legacy evidence
+summary unchanged preserves existing frame bytes, journal commitments and
+source/graph bindings. Whole-run completion does not rewrite saved per-job
+outcomes, acknowledge delivery, retry execution or grant a required-check pass.
+A skipped job still publishes `action_required`, never `success`.
+
+The native receipt verifier and canonical publication path remain unchanged.
+The matrix suite verifies exact graph/evidence identities, distinct check IDs,
+unchanged refs and byte-identical publication retries through real `fg` processes.
+This does not establish hostile-code isolation, physical power-loss behavior,
+maximum-profile throughput or complete-workspace validation, and does not close
+the larger CI product-loop bead or process-descendant containment gap.
