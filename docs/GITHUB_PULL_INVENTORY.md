@@ -111,3 +111,12 @@ The source contract is GitHub's REST documentation for
 and [pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api).
 The shared API version and transport are unchanged. The wider compatibility bead
 remains partial; this inventory does not establish canonical forge history.
+
+## Collect all batches with restartable custody
+
+For a whole inventory, use the [restartable collection workflow](GITHUB_PULL_COLLECTION.md)
+instead of manually tracking separate `capture-batch` files. It retains the pinned
+inventory, validates every completed capture/checkpoint on restart, shares one
+source request/byte budget across each invocation, and publishes a final content
+commitment only when all batches are captured. It never changes an existing
+native destination plan or claims an atomic GitHub snapshot.
