@@ -1,4 +1,4 @@
-//! Direct-child trusted execution; no namespace, network or descendant claims.
+//! Trusted execution with an owned process group; no hostile isolation claim.
 //! File-backed capture cannot hang on a descendant holding a pipe open. On a
 //! timeout, signal or cancellation the caller must retain the workspace: direct
 //! child reaping does not prove that escaped descendants relinquished access.
@@ -7,6 +7,9 @@ use super::{StepContext, StepLimits, StepObservation, StepOutcome, WorkerFailure
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
+mod group;
+use group::ProcessGroup;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -75,23 +78,28 @@ pub fn run_trusted_step_with_context(
     if !live() {
         return Ok(result);
     }
-    let mut child = Command::new("/bin/sh")
+    let child = Command::new("/bin/sh")
         .args(["-eu", "-c", script])
         .current_dir(&selected_directory)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
         .envs(context.environment())
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
         .spawn()
         .map_err(|e| WorkerFailure::new(format!("spawn trusted shell: {e}"), false))?;
+    let mut child = ProcessGroup::new(child);
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
+        match child.exited() {
+            Ok(true) => {
+                let (status, leftover) = child.complete().map_err(|error| {
+                    WorkerFailure::new(format!("process-group completion: {error}"), true)
+                })?;
                 result.exit_code = status.code();
-                result.retain_workspace = status.code().is_none();
+                result.retain_workspace = leftover || status.code().is_none();
                 result.outcome = if result.retain_workspace {
                     StepOutcome::ContainmentFailure
                 } else if !live() {
@@ -105,12 +113,11 @@ pub fn run_trusted_step_with_context(
                 };
                 break;
             }
-            Ok(None) => {}
+            Ok(false) => {}
             Err(error) => {
-                let _kill = child.kill();
-                let _reap = reap_until(&mut child, Duration::from_secs(3));
+                let cleanup = child.terminate();
                 return Err(WorkerFailure::new(
-                    format!("child status unavailable: {error}"),
+                    format!("child status unavailable: {error}; cleanup={cleanup:?}"),
                     true,
                 ));
             }
@@ -120,29 +127,22 @@ pub fn run_trusted_step_with_context(
             .and_then(|out| stderr.metadata().map(|err| (out.len(), err.len())));
         let stop = match sizes {
             Err(_) => Some(StepOutcome::ContainmentFailure),
+            _ if !live() => Some(StepOutcome::Cancelled),
+            _ if started.elapsed() >= limits.timeout => Some(StepOutcome::TimedOut),
             Ok((out, err))
                 if out > limits.stream_bytes as u64 || err > limits.stream_bytes as u64 =>
             {
                 Some(StepOutcome::OutputLimit)
             }
-            _ if !live() => Some(StepOutcome::Cancelled),
-            _ if started.elapsed() >= limits.timeout => Some(StepOutcome::TimedOut),
             _ => None,
         };
         if let Some(outcome) = stop {
-            let killed = child.kill();
-            let reaped = reap_until(&mut child, Duration::from_secs(3));
             result.retain_workspace = true;
             result.outcome = outcome;
-            match reaped {
-                Ok(status) => result.exit_code = status.code(),
-                Err(error) => {
-                    return Err(WorkerFailure::new(
-                        format!("direct child unresolved: kill={killed:?}, reap={error}"),
-                        true,
-                    ));
-                }
-            }
+            let status = child.terminate().map_err(|error| {
+                WorkerFailure::new(format!("process-group cleanup unresolved: {error}"), true)
+            })?;
+            result.exit_code = status.code();
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -159,24 +159,6 @@ pub fn run_trusted_step_with_context(
     }
     result.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(result)
-}
-fn reap_until(
-    child: &mut std::process::Child,
-    budget: Duration,
-) -> std::io::Result<std::process::ExitStatus> {
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if started.elapsed() >= budget {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "direct child did not reap",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 fn capture(file: &File, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let before = file.metadata()?.len();

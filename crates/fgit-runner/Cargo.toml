@@ -18,7 +18,7 @@ fgit-treefs.workspace = true
 fgit-types.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
 fgit-git-object.workspace = true
