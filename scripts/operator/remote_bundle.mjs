@@ -83,7 +83,8 @@ export async function prepareRemoteBundle(raw) {
     life.check(); await directory(root, identity); await writeNew(join(root, 'intent.json'), bytes);
     const loaded = await load(root, confirm, life, true, true);
     return { ...summary(loaded), native_bundle_validated: false, network_accessed: false, mutation_submitted: false };
-  } catch (e) {
+  } catch (cause) {
+    const e = cause instanceof Error ? cause : new Error('remote_bundle_interrupted');
     e.bundle_progress = { workdir: root, directory_created: created, intent_sha256: confirm, complete: false }; throw e;
   } finally { life.close(); }
 }
@@ -97,6 +98,7 @@ export async function inspectRemoteBundle(raw) {
 }
 export async function runRemoteBundle(raw) {
   fields(raw, ['workdir', 'confirm', 'operation', 'tokenFile', 'retryKey', 'timeoutMs', 'signal', 'caFile'], ['workdir', 'confirm']);
+  raw = { ...raw }; // Own caller options before asynchronous file and network work.
   const operation = raw.operation ?? 'run'; if (!['run', 'recover'].includes(operation)) fail('operation');
   if (raw.retryKey !== undefined && (typeof raw.retryKey !== 'string' || operation !== 'run')) fail('retry');
   const root = absolute(raw.workdir), confirm = pin(raw.confirm), life = lifetime(raw);
@@ -147,7 +149,8 @@ export async function runRemoteBundle(raw) {
     // journal read; this receipt owns the exact observation just retained here.
     state = { ...state, observation: observed, attempts: state.attempts + 1 };
     return { ...summary(state), network_accessed: network, mutation_submitted: dispatched, error };
-  } catch (e) {
+  } catch (cause) {
+    const e = cause instanceof Error ? cause : new Error('remote_bundle_interrupted');
     e.bundle_progress = { workdir: root, intent_sha256: confirm, selection_verified: Boolean(state),
       key: state?.request.key ?? null, network_accessed: network, mutation_submitted: dispatched, complete: false }; throw e;
   } finally { life.close(); }
