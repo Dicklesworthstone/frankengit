@@ -19,7 +19,7 @@
 
 use crate::workflow::registry;
 use crate::workflow::yaml::{Node, Span};
-use crate::workflow::{StepContext, WorkflowRefusal, context};
+use crate::workflow::{StepContext, WorkflowRefusal, context, matrix};
 
 /// Version of the canonical byte form.
 ///
@@ -29,6 +29,9 @@ pub const CANONICAL_VERSION: &str = "fgit-workflow/v1";
 
 /// Extended graph form selected only when a step has explicit process context.
 pub const CONTEXT_CANONICAL_VERSION: &str = "fgit-workflow/v2";
+
+/// Static matrix variants bind origin and all values, even unused axes.
+pub const MATRIX_CANONICAL_VERSION: &str = "fgit-workflow/v3";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,6 +119,8 @@ pub struct Job {
     pub steps: Vec<Step>,
     /// Dependency terminal-state predicate. Default is success().
     pub condition: Condition,
+    /// Origin and literal values for a static matrix variant.
+    pub matrix: Option<matrix::MatrixBinding>,
     /// Where the job came from.
     pub span: Span,
 }
@@ -159,7 +164,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if extended {
+        let version = if self.jobs.iter().any(|job| job.matrix.is_some()) {
+            MATRIX_CANONICAL_VERSION
+        } else if extended {
             CONTEXT_CANONICAL_VERSION
         } else {
             CANONICAL_VERSION
@@ -175,6 +182,21 @@ impl WorkflowGraph {
                 escape(&job.id),
                 escape(&job.runs_on)
             ));
+            if let Some(binding) = &job.matrix {
+                lines.push(format!(
+                    "matrix-origin\t{}\t{}",
+                    escape(&job.id),
+                    escape(binding.source_job())
+                ));
+                for (key, value) in binding.values() {
+                    lines.push(format!(
+                        "matrix-value\t{}\t{}\t{}",
+                        escape(&job.id),
+                        escape(key),
+                        escape(value)
+                    ));
+                }
+            }
             if job.condition != Condition::Success {
                 lines.push(format!(
                     "job-if\t{}\t{}",
@@ -341,7 +363,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
 }
 
 /// Lowers one job.
-fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> {
+pub(super) fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> {
     check_keys(
         node,
         "a job",
@@ -397,6 +419,7 @@ fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> 
 
     Ok(Job {
         id: id.to_owned(),
+        matrix: None,
         runs_on,
         needs,
         steps,
@@ -505,10 +528,7 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
             span: jobs_node.span(),
         });
     };
-    let jobs = entries
-        .iter()
-        .map(|(id, node, key_span)| lower_job(id, node, *key_span))
-        .collect::<Result<Vec<_>, _>>()?;
+    let jobs = matrix::lower_jobs(entries, span)?;
 
     Ok(WorkflowGraph {
         name,

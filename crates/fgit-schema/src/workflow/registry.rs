@@ -117,8 +117,8 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "job.strategy",
-        status: ConstructStatus::Unsupported,
-        reason: "matrix expansion multiplies jobs, and the expansion order and identifier derivation need their own bead",
+        status: ConstructStatus::Normalized,
+        reason: "bounded static matrices require explicit fail-fast: false; literal axes and include/exclude records become native jobs; other strategy forms remain refused",
     },
     Construct {
         key: "job.timeout-minutes",

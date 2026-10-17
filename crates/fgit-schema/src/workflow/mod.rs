@@ -28,6 +28,7 @@
 
 pub mod context;
 pub mod graph;
+pub mod matrix;
 pub mod registry;
 pub mod yaml;
 

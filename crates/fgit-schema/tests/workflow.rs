@@ -324,8 +324,20 @@ fn condition_and_literal_profiles_are_normalized_while_broader_constructs_still_
     }
     assert_eq!(
         registry::lookup("job.strategy").expect("registered").status,
-        ConstructStatus::Unsupported
+        ConstructStatus::Normalized
     );
+    let static_matrix = "name: matrix\non: push\njobs:\n  a:\n    runs-on: linux\n    strategy:\n      fail-fast: false\n      matrix:\n        mode:\n          - one\n          - two\n    steps:\n      - run: echo exact\n";
+    assert_eq!(
+        compile(static_matrix, &Limits::DEFAULT).unwrap().jobs.len(),
+        2
+    );
+    for invalid in [
+        static_matrix.replace("fail-fast: false", "fail-fast: true"),
+        static_matrix.replace("      fail-fast: false\n", ""),
+        static_matrix.replace("      matrix:", "      unsupported: value\n      matrix:"),
+    ] {
+        assert!(compile(&invalid, &Limits::DEFAULT).is_err());
+    }
     assert!(!ConstructStatus::Normalized.refuses());
     assert!(ConstructStatus::Unsupported.refuses());
 }
@@ -614,7 +626,9 @@ fn every_construct_the_lowerer_names_exists_in_the_registry() {
         let entry = registry::lookup(key).unwrap_or_else(|| {
             panic!("{key} is named by the lowerer but absent from the registry")
         });
-        if key == "yaml.block-scalar" {
+        // These two constructs now have accepted subsets and refused forms.
+        // Positive/negative execution twins are checked above and in workflow_matrix.
+        if matches!(key, "yaml.block-scalar" | "job.strategy") {
             assert_eq!(entry.status, ConstructStatus::Normalized);
         } else {
             assert!(
