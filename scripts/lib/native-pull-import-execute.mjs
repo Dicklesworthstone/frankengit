@@ -19,11 +19,12 @@ function options(raw) {
   return { ...raw, workdir: safePath(raw.workdir), confirm: pin(raw.confirm),
     maxOperations: number(raw.maxOperations ?? 100, 1, L.steps, 'operation_limit') };
 }
-function summary(loaded, journal, operations, dispatched, network) {
+function summary(loaded, journal, operations, dispatched, network, kind) {
   const index = journal.current, current = journal.states[index], intent = loaded.intents[index];
   const complete = index === loaded.intents.length;
-  return { type: 'native_pull_import_progress', schema_version: 1, workdir: loaded.root,
-    plan_sha256: loaded.planSha256, archive_sha256: loaded.manifest.archive_sha256,
+  return { type: `${kind}_pull_import_progress`, schema_version: 1, workdir: loaded.root,
+    plan_sha256: loaded.planSha256, ...(kind === 'native'
+      ? { archive_sha256: loaded.manifest.archive_sha256 } : { capture_sha256: loaded.manifest.capture_sha256 }),
     journal_sha256: journal.journalSha256, steps: loaded.intents.length, committed_steps: index,
     attempts: journal.attempts, journal_bytes: journal.bytes, reserved_result_bytes: journal.reserved,
     unsettled_attempts: journal.states.reduce((n, s) => n + s.unsettled, 0),
@@ -35,6 +36,12 @@ function summary(loaded, journal, operations, dispatched, network) {
     mutation_submitted: dispatched > 0, atomic_batch: false, canonical_restore: false, approvals_imported: false, refs_changed: false };
 }
 export async function executePullImport(raw) {
+  return executePreparedPullImport(raw, loadPullImport, 'native');
+}
+// Source adapters are repository code, never a field in a capture, request or
+// CLI argument. Both profiles share the original sender and reservation journal.
+export async function executePreparedPullImport(raw, loader, kind) {
+  if (typeof loader !== 'function' || !['native', 'github'].includes(kind)) importFail('source_adapter');
   const o = options(raw), life = lifetime(o), deadline = performance.now() + life.timeout;
   let loaded, journal, operations = 0, dispatched = 0, network = false, token = null, ca;
   const remaining = () => {
@@ -42,12 +49,12 @@ export async function executePullImport(raw) {
     if (timeoutMs <= 0) importFail('deadline'); return { timeoutMs, signal: life.signal, ...(ca ? { ca } : {}) };
   };
   try {
-    loaded = await loadPullImport(o.workdir, o.confirm, life, o.operation !== 'status');
+    loaded = await loader(o.workdir, o.confirm, life, o.operation !== 'status');
     journal = await readImportJournal(loaded, life, o.operation !== 'status');
     const first = loaded.intents[journal.current];
     if (o.retryKey !== undefined && (!first || first.key !== o.retryKey ||
         !journal.states[journal.current].attempts || journal.states[journal.current].outcome?.terminal)) importFail('retry_original_pending_key');
-    if (o.operation === 'status') return { ...summary(loaded, journal, 0, 0, false), local_read_only: true };
+    if (o.operation === 'status') return { ...summary(loaded, journal, 0, 0, false, kind), local_read_only: true };
     while (journal.current < loaded.intents.length && operations < o.maxOperations) {
       life.check(); const state = journal.states[journal.current];
       if (state.outcome?.state === 'refused' || (o.operation === 'recover' && state.attempts === 0)) break;
@@ -78,7 +85,7 @@ export async function executePullImport(raw) {
       journal = await readImportJournal(loaded, settle, true, journal);
       if (failure || !result.outcome.terminal || o.operation === 'recover') break;
     }
-    return summary(loaded, journal, operations, dispatched, network);
+    return summary(loaded, journal, operations, dispatched, network, kind);
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error('pull_import_interrupted');
     error.import_progress = { workdir: o.workdir, plan_sha256: o.confirm, plan_verified: Boolean(loaded),
