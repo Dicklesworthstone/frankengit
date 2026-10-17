@@ -42,6 +42,12 @@ pub(super) fn lower_command(
         ));
     }
     let step = &job.steps[0];
+    if !step.context.is_default() {
+        return Err(unsupported(
+            job,
+            "explicit step context requires the job-scoped workflow executor",
+        ));
+    }
     if step.condition == Condition::Failure {
         return Err(unsupported(
             job,
@@ -403,3 +409,26 @@ impl WorkflowCoordinator {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod step_context_tests {
+    use super::*;
+    #[test]
+    fn command_only_adapters_refuse_context_instead_of_dropping_it() {
+        let source = "name: command\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: echo exact\n";
+        let plain = fgit_schema::workflow::compile(source, &Default::default()).unwrap();
+        assert!(lower_command(&plain.jobs[0]).is_ok());
+        for extra in [
+            "        env:\n          VALUE: explicit\n",
+            "        working-directory: src\n",
+        ] {
+            let graph =
+                fgit_schema::workflow::compile(&format!("{source}{extra}"), &Default::default())
+                    .unwrap();
+            assert!(matches!(
+                lower_command(&graph.jobs[0]),
+                Err(CoordinatorRefusal::UnsupportedExecution { .. })
+            ));
+        }
+    }
+}

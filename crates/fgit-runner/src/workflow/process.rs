@@ -3,7 +3,7 @@
 //! timeout, signal or cancellation the caller must retain the workspace: direct
 //! child reaping does not prove that escaped descendants relinquished access.
 
-use super::{StepLimits, StepObservation, StepOutcome, WorkerFailure};
+use super::{StepContext, StepLimits, StepObservation, StepOutcome, WorkerFailure};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 /// `stdout` and `stderr` must be distinct, empty, private regular files opened
 /// read/write by the owner. The surrounding Asupersync request owns `live`.
 /// The script is explicitly trusted to join its children before normal exit.
-pub fn run_trusted_step(
+pub fn run_trusted_step_with_context(
     directory: &Path,
     script: &str,
+    context: &StepContext,
     limits: StepLimits,
     stdout: &File,
     stderr: &File,
@@ -70,12 +71,17 @@ pub fn run_trusted_step(
     let errors = stderr
         .try_clone()
         .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
+    let selected_directory = select_directory(directory, context)?;
+    if !live() {
+        return Ok(result);
+    }
     let mut child = Command::new("/bin/sh")
         .args(["-eu", "-c", script])
-        .current_dir(directory)
+        .current_dir(&selected_directory)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
+        .envs(context.environment())
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
@@ -181,3 +187,65 @@ fn capture(file: &File, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let after = file.metadata()?.len();
     Ok((bytes, before == after && after <= limit as u64))
 }
+
+/// Original context-free entry point, retaining its fixed clean environment.
+pub fn run_trusted_step(
+    directory: &Path,
+    script: &str,
+    limits: StepLimits,
+    stdout: &File,
+    stderr: &File,
+    live: &dyn Fn() -> bool,
+) -> Result<StepObservation, WorkerFailure> {
+    run_trusted_step_with_context(
+        directory,
+        script,
+        &StepContext::default(),
+        limits,
+        stdout,
+        stderr,
+        live,
+    )
+}
+
+/// The workspace is operator-owned trusted storage, not a hostile-filesystem
+/// sandbox. Check every selected component and reject symlinks before spawning;
+/// these checks do not claim atomic containment against concurrent host mutation.
+fn select_directory(
+    root: &Path,
+    context: &StepContext,
+) -> Result<std::path::PathBuf, WorkerFailure> {
+    let Some(relative) = context.working_directory() else {
+        return Ok(root.to_path_buf());
+    };
+    let root = root
+        .canonicalize()
+        .map_err(|e| WorkerFailure::new(format!("workspace directory unavailable: {e}"), false))?;
+    let mut selected = root.clone();
+    for component in relative.split('/') {
+        selected.push(component);
+        let metadata = std::fs::symlink_metadata(&selected).map_err(|e| {
+            WorkerFailure::new(format!("step working-directory unavailable: {e}"), false)
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorkerFailure::new(
+                "step working-directory must contain only real directories, not symlinks",
+                false,
+            ));
+        }
+    }
+    let resolved = selected.canonicalize().map_err(|e| {
+        WorkerFailure::new(format!("step working-directory unavailable: {e}"), false)
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(WorkerFailure::new(
+            "step working-directory is outside its workspace",
+            false,
+        ));
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod context_tests;

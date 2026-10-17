@@ -17,15 +17,18 @@
 //! bytes so a future change to any of these rules is a visible version bump
 //! rather than a silent reordering of everyone's goldens.
 
-use crate::workflow::WorkflowRefusal;
 use crate::workflow::registry;
 use crate::workflow::yaml::{Node, Span};
+use crate::workflow::{StepContext, WorkflowRefusal, context};
 
 /// Version of the canonical byte form.
 ///
 /// Bump this when an ordering or normalization rule changes. A golden that
 /// moves without this moving is a bug.
 pub const CANONICAL_VERSION: &str = "fgit-workflow/v1";
+
+/// Extended graph form selected only when a step has explicit process context.
+pub const CONTEXT_CANONICAL_VERSION: &str = "fgit-workflow/v2";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +97,8 @@ pub struct Step {
     pub run: String,
     /// Native terminal-state predicate. Default is success().
     pub condition: Condition,
+    /// Literal process environment and workspace-relative directory.
+    pub context: StepContext,
     /// Where the step came from.
     pub span: Span,
 }
@@ -150,7 +155,16 @@ impl WorkflowGraph {
     /// output rather than implied by it.
     #[must_use]
     pub fn canonical_bytes(&self) -> String {
-        let mut lines = vec![CANONICAL_VERSION.to_owned()];
+        let extended = self
+            .jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
+        let version = if extended {
+            CONTEXT_CANONICAL_VERSION
+        } else {
+            CANONICAL_VERSION
+        };
+        let mut lines = vec![version.to_owned()];
         lines.push(format!("name\t{}", escape(&self.name)));
         for trigger in &self.triggers {
             lines.push(format!("trigger\t{}", escape(&trigger.name)));
@@ -178,6 +192,21 @@ impl WorkflowGraph {
                     escape(step.name.as_deref().unwrap_or("")),
                     escape(&step.run)
                 ));
+                for (key, value) in step.context.environment() {
+                    lines.push(format!(
+                        "step-env\t{}\t{index}\t{}\t{}",
+                        escape(&job.id),
+                        escape(key),
+                        escape(value)
+                    ));
+                }
+                if let Some(directory) = step.context.working_directory() {
+                    lines.push(format!(
+                        "step-cwd\t{}\t{index}\t{}",
+                        escape(&job.id),
+                        escape(directory)
+                    ));
+                }
                 if step.condition != Condition::Success {
                     lines.push(format!(
                         "step-if\t{}\t{index}\t{}",
@@ -279,7 +308,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
     check_keys(
         node,
         "a step",
-        &["name", "run", "if"],
+        &["name", "run", "if", "env", "working-directory"],
         &[("uses", "step.uses"), ("with", "step.with")],
     )?;
     let Node::Mapping { .. } = node else {
@@ -307,6 +336,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
         run,
         condition: condition(node.get("if"), "step.if", node.span())?,
         span: node.span(),
+        context: context::lower(node)?,
     })
 }
 

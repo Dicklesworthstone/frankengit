@@ -126,6 +126,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "a budget belongs to the effect broker's reservation, not to a YAML field the runner may ignore",
     },
     Construct {
+        key: "step.env",
+        status: ConstructStatus::Normalized,
+        reason: "literal step-local environment sorted by name and bound into a v2 graph; no inherited values, expressions, secret imports or reserved startup and identity variables",
+    },
+    Construct {
         key: "step.if",
         status: ConstructStatus::Normalized,
         reason: "only success(), failure(), and always() are accepted; conditions observe native terminal outcomes and grant no authority",
@@ -149,6 +154,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         key: "step.with",
         status: ConstructStatus::Unsupported,
         reason: "only meaningful as arguments to step.uses, which is refused",
+    },
+    Construct {
+        key: "step.working-directory",
+        status: ConstructStatus::Normalized,
+        reason: "workspace-relative directory; leading dot slash is normalized and dot selects the root; parent traversal, absolute paths, expressions and symlink traversal refuse",
     },
     Construct {
         key: "workflow.concurrency",

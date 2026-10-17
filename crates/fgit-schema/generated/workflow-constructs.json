@@ -4,7 +4,7 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 12,
-  "count_normalized": 5,
+  "count_normalized": 7,
   "count_unsupported": 21,
   "count_ambiguous": 0,
   "constructs": [
@@ -81,6 +81,12 @@
       "reason": "a budget belongs to the effect broker's reservation, not to a YAML field the runner may ignore"
     },
     {
+      "key": "step.env",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "literal step-local environment sorted by name and bound into a v2 graph; no inherited values, expressions, secret imports or reserved startup and identity variables"
+    },
+    {
       "key": "step.if",
       "status": "normalized",
       "refuses": false,
@@ -109,6 +115,12 @@
       "status": "unsupported",
       "refuses": true,
       "reason": "only meaningful as arguments to step.uses, which is refused"
+    },
+    {
+      "key": "step.working-directory",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "workspace-relative directory; leading dot slash is normalized and dot selects the root; parent traversal, absolute paths, expressions and symlink traversal refuse"
     },
     {
       "key": "workflow.concurrency",
