@@ -118,7 +118,12 @@ impl OneNode {
         if inspected.review.source_head != head
             || inspected.review.comparison.requested_before != subject.target_tip
             || inspected.review.comparison.requested_after != candidate.commit
+            // The native bundle inspector already validates the selected
+            // parent closure and merge base. Preserve both supported candidate
+            // shapes here: squash has one target parent, not two. A valid
+            // squash is not evidence that the authenticated snapshot moved.
             || (!candidate.is_fast_forward(subject)
+                && inspected.parents != [subject.target_tip]
                 && inspected.parents != [subject.target_tip, subject.source_tip])
             || inspected.merge_base != Some(candidate.merge_base)
         {
