@@ -5,6 +5,7 @@
 //! objects, before calling it.
 
 pub mod bundle_verify;
+pub mod scrub;
 
 use std::fmt;
 use std::time::{Duration, Instant};

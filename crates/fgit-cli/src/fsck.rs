@@ -154,7 +154,7 @@ fn positive(text: &str, maximum: u64, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{field} must be in 1..={maximum}"))
 }
 
-fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
+pub(super) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     let (algorithm, digest) = text
         .strip_prefix("alg:")
         .and_then(|value| value.split_once(':'))
@@ -197,7 +197,7 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     ))
 }
 
-fn head_token(head: RepositoryAuthorityHeadId) -> String {
+pub(super) fn head_token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id();
     let digest = id
         .digest()

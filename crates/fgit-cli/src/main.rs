@@ -19,6 +19,7 @@ mod pull_request;
 mod rebase;
 mod rebase_apply;
 mod review_commands;
+mod scrub;
 mod service_stop;
 mod smart_http_server;
 mod source_browse;
@@ -168,6 +169,18 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
                 eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "scrub") {
+        return match scrub::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"scrub_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
