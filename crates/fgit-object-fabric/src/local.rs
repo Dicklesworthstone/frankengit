@@ -5,6 +5,9 @@
 //! likewise durable before the immutable per-authority-head root file links to
 //! it.  Directory scans never participate in recovery or authority.
 
+#[path = "local_bounded_read.rs"]
+mod bounded_read;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -337,21 +340,7 @@ impl LocalFilesystemFabric {
     }
 
     fn read_bounded(&self, path: &Path) -> Result<Vec<u8>, StoreRefusal> {
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(StoreRefusal::ObjectAbsent);
-            }
-            Err(error) => return Err(storage_error(StorageOperation::ReadBody, error)),
-        };
-        let offered = metadata.len();
-        if offered > self.max_stored_object_bytes {
-            return Err(StoreRefusal::StoredObjectTooLarge {
-                offered,
-                maximum: self.max_stored_object_bytes,
-            });
-        }
-        fs::read(path).map_err(|error| storage_error(StorageOperation::ReadBody, error))
+        bounded_read::read(path, self.max_stored_object_bytes)
     }
 
     fn fresh_stage(&self) -> Result<StageFile, StoreRefusal> {
