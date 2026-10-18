@@ -24,6 +24,12 @@ mod persistence;
 mod store;
 pub use store::{DeadLetterQueue, WebhookStore};
 
+#[derive(Debug)]
+enum ResolutionFailure {
+    Transient(String),
+    Refused(String),
+}
+
 impl crate::OneNode {
     /// Opens the persistent webhook store for this node.
     pub fn webhook_store(&self) -> Result<WebhookStore, String> {
@@ -128,6 +134,24 @@ impl WebhookDeliveryDestination {
         attempt: u32,
         checkpoint: &C,
     ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        self.dispatch_http_with_lookup(request, attempt, checkpoint, |host, port| {
+            (host, port).to_socket_addrs()
+        })
+    }
+
+    // Inject only the raw resolver: every caller still validates the complete
+    // answer set before signing or opening a socket.
+    fn dispatch_http_with_lookup<C, A>(
+        &self,
+        request: &DeliveryRequest<'_>,
+        attempt: u32,
+        checkpoint: &C,
+        lookup: impl FnOnce(&str, u16) -> std::io::Result<A>,
+    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode>
+    where
+        C: Fn() -> Result<(), RefusalCode> + ?Sized,
+        A: IntoIterator<Item = SocketAddr>,
+    {
         if !self.registration.active || request.destination != self.destination_slug {
             return Err(RefusalCode::PublicationPolicyRefused);
         }
@@ -179,13 +203,16 @@ impl WebhookDeliveryDestination {
         // 2. Resolve the complete bounded policy-approved answer set. A mixed
         // safe/unsafe DNS response refuses as a unit; no address is contacted.
         budget.check()?;
-        let resolved = self.resolve_safe_socket_addrs(&validated);
+        let resolved = self.resolve_safe_socket_addrs(&validated, lookup);
         // The blocking resolver cannot be interrupted here. Its elapsed time
         // is nevertheless charged; an expired attempt never opens a socket.
         budget.check()?;
         let target_addrs = match resolved {
             Ok(addrs) => addrs,
-            Err(reason) => {
+            Err(ResolutionFailure::Transient(reason)) => {
+                return self.handle_network_failure(request, attempt, reason, now_secs);
+            }
+            Err(ResolutionFailure::Refused(reason)) => {
                 self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                 return Ok((DeliveryVerdict::PermanentRejection, reason.into_bytes()));
             }
@@ -382,22 +409,40 @@ impl WebhookDeliveryDestination {
         })
     }
 
-    fn resolve_safe_socket_addrs(
+    fn resolve_safe_socket_addrs<A: IntoIterator<Item = SocketAddr>>(
         &self,
         url: &ValidatedWebhookUrl,
-    ) -> Result<Vec<SocketAddr>, String> {
+        lookup: impl FnOnce(&str, u16) -> std::io::Result<A>,
+    ) -> Result<Vec<SocketAddr>, ResolutionFailure> {
         const MAX_RESOLVED_ADDRESSES: usize = 16;
         if let Some(ip) = url.ip_literal() {
             if !self.ssrf_policy.is_safe_ip(ip) {
-                return Err("SSRF policy blocked IP literal".into());
+                return Err(ResolutionFailure::Refused(
+                    "SSRF policy blocked IP literal".into(),
+                ));
             }
             return Ok(vec![SocketAddr::new(ip, url.port())]);
         }
 
-        let addrs = (url.host(), url.port())
-            .to_socket_addrs()
-            .map_err(|e| format!("DNS resolution error for {}: {e}", url.host()))?;
+        let mut addrs = lookup(url.host(), url.port())
+            .map_err(|error| {
+                ResolutionFailure::Transient(format!(
+                    "DNS resolution error for {}: {error}",
+                    url.host()
+                ))
+            })?
+            .into_iter()
+            .peekable();
+        // Temporary resolver outages and empty answers have no receiver-visible
+        // effect. They consume this attempt's retry budget, but do not turn an
+        // otherwise valid registration into a permanent policy rejection.
+        if addrs.peek().is_none() {
+            return Err(ResolutionFailure::Transient(
+                "DNS resolution returned no addresses".into(),
+            ));
+        }
         self.validate_resolved_socket_addrs(addrs, MAX_RESOLVED_ADDRESSES)
+            .map_err(ResolutionFailure::Refused)
     }
 
     fn validate_resolved_socket_addrs(

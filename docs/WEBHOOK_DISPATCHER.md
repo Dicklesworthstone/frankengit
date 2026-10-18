@@ -109,6 +109,13 @@ backoff. Separate process invocations never reset the retry ceiling. Manual
 `deliver`/`dead-letter replay` remain explicitly separate operations and do not
 consult or modify this dispatch journal.
 
+Temporary DNS lookup errors and empty DNS answers use that same bounded retry
+path. They consume an attempt and become a terminal dead letter only when the
+retry limit is exhausted. Unsafe DNS answers, excessive answer counts, and
+destination-policy violations still refuse permanently before connecting. The
+complete answer set is validated before selecting any address; a public address
+does not make a mixed public/private answer set safe.
+
 The bounded journal admits 16,384 keys and a 16 MiB data file. Before reserving
 an attempt, the worker guarantees room for both its reservation and observation.
 When the append log reaches that bound, it writes a complete checkpoint into a

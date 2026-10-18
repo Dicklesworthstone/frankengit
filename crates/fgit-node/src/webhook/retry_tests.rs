@@ -39,18 +39,13 @@ fn request(events: &ForgeEventBatch) -> DeliveryRequest<'_> {
     }
 }
 
-fn deliver_status(
+fn serve_status(
     status: u16,
     extra_headers: &str,
-    attempt: u32,
-    max_attempts: u32,
-) -> (WebhookDeliveryDestination, DeliveryVerdict) {
+) -> (SocketAddr, std::thread::JoinHandle<(String, Vec<u8>)>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!(
-        "http://127.0.0.1:{}/hook",
-        listener.local_addr().unwrap().port()
-    );
+    let addr = listener.local_addr().unwrap();
     let response = format!(
         "HTTP/1.1 {status} Test\r\n{extra_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
     );
@@ -73,9 +68,11 @@ fn deliver_status(
             .unwrap();
         let mut reader = BufReader::new(&mut stream);
         let mut length = None;
+        let mut headers = String::new();
         loop {
             let mut line = String::new();
             assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            headers.push_str(&line);
             if line == "\r\n" {
                 break;
             }
@@ -86,12 +83,199 @@ fn deliver_status(
         let mut body = vec![0; length.unwrap()];
         reader.read_exact(&mut body).unwrap();
         stream.write_all(response.as_bytes()).unwrap();
+        (headers, body)
     });
+    (addr, server)
+}
+
+fn deliver_status(
+    status: u16,
+    extra_headers: &str,
+    attempt: u32,
+    max_attempts: u32,
+) -> (WebhookDeliveryDestination, DeliveryVerdict) {
+    let (addr, server) = serve_status(status, extra_headers);
+    let url = format!("http://{addr}/hook");
     let dest = destination(&url, max_attempts);
     let events = ForgeEventBatch { events: Vec::new() };
     let result = dest.dispatch_http(&request(&events), attempt);
     server.join().unwrap();
     (dest, result.unwrap().0)
+}
+
+#[test]
+fn dns_lookup_failures_are_typed_separately_from_policy_and_answer_bounds() {
+    let mut dest = destination("http://example.com/hook", 3);
+    dest.ssrf_policy = SsrfPolicy::STRICT;
+    for answer in [
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "resolver temporarily unavailable",
+        )),
+        Ok(Vec::<SocketAddr>::new()),
+    ] {
+        assert!(matches!(
+            dest.resolve_safe_socket_addrs(&dest.registration.url, |host, port| {
+                assert_eq!((host, port), ("example.com", 80));
+                answer
+            }),
+            Err(ResolutionFailure::Transient(_))
+        ));
+    }
+    let safe: SocketAddr = "93.184.216.34:80".parse().unwrap();
+    let unsafe_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    for (answer, expected) in [
+        (vec![safe, unsafe_addr], "rejected by SSRF policy"),
+        (vec![safe; 17], "16-address webhook bound"),
+    ] {
+        assert!(matches!(
+            dest.resolve_safe_socket_addrs(&dest.registration.url, |_, _| Ok(answer)),
+            Err(ResolutionFailure::Refused(reason)) if reason.contains(expected)
+        ));
+    }
+}
+
+#[test]
+fn dns_outages_and_empty_answers_use_the_bounded_retry_schedule() {
+    let events = ForgeEventBatch { events: Vec::new() };
+    let request = request(&events);
+    for empty in [false, true] {
+        for attempt in [1, 2, 3] {
+            let dest = destination("http://example.com/hook", 3);
+            let (verdict, detail) = dest
+                .dispatch_http_with_lookup(&request, attempt, &|| Ok(()), |_, _| {
+                    if empty {
+                        Ok(Vec::<SocketAddr>::new())
+                    } else {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "resolver temporarily unavailable",
+                        ))
+                    }
+                })
+                .unwrap();
+            let reason = String::from_utf8(detail).unwrap();
+            assert!(reason.contains(if empty {
+                "DNS resolution returned no addresses"
+            } else {
+                "DNS resolution error for example.com"
+            }));
+            assert!(dest.acknowledged.lock().unwrap().is_empty());
+            let dead = dest.dead_letters.list();
+            if attempt < 3 {
+                assert_eq!(verdict, DeliveryVerdict::TransientFailure);
+                assert!(dead.is_empty());
+            } else {
+                assert_eq!(verdict, DeliveryVerdict::PermanentRejection);
+                assert_eq!(dead.len(), 1);
+                assert_eq!(dead[0].delivery_id, request.key);
+                assert_eq!(dead[0].webhook_id, dest.registration.id);
+                assert_eq!(dead[0].payload_root, request.payload_root);
+                assert_eq!(dead[0].attempts, attempt);
+                assert_eq!(dead[0].terminal_reason, reason);
+            }
+        }
+    }
+}
+
+#[test]
+fn dns_recovery_delivers_the_original_request_without_a_dead_letter() {
+    for empty in [false, true] {
+        let (addr, server) = serve_status(200, "");
+        let dest = destination(&format!("http://example.com:{}/hook", addr.port()), 3);
+        let events = ForgeEventBatch { events: Vec::new() };
+        let request = request(&events);
+        let first = dest.dispatch_http_with_lookup(&request, 1, &|| Ok(()), |_, _| {
+            if empty {
+                Ok(Vec::<SocketAddr>::new())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "resolver temporarily unavailable",
+                ))
+            }
+        });
+        let second = dest.dispatch_http_with_lookup(&request, 2, &|| Ok(()), |host, port| {
+            assert_eq!((host, port), ("example.com", addr.port()));
+            Ok([addr])
+        });
+        let (headers, body) = server.join().unwrap();
+        assert_eq!(first.unwrap().0, DeliveryVerdict::TransientFailure);
+        assert_eq!(second.unwrap().0, DeliveryVerdict::Accepted);
+        assert_eq!(body, payload::encode(&request).unwrap().as_bytes());
+        assert!(headers.contains("X-FrankenGit-Delivery: retry-policy\r\n"));
+        assert!(headers.contains("X-FrankenGit-Attempt: 2\r\n"));
+        let signature = hex_encode(dest.registration.secrets.sign_active(&body));
+        assert!(headers.contains(&format!(
+            "X-FrankenGit-Signature-256: sha256={signature}\r\n"
+        )));
+        assert!(dest.dead_letters.list().is_empty());
+        assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Delivered));
+    }
+}
+
+#[test]
+fn unsafe_or_overbound_dns_answers_refuse_before_connect_on_every_attempt() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let local = listener.local_addr().unwrap();
+    let safe = SocketAddr::new("93.184.216.34".parse().unwrap(), local.port());
+    let events = ForgeEventBatch { events: Vec::new() };
+    for (policy, answers, expected) in [
+        (SsrfPolicy::STRICT, vec![safe, local], "rejected by SSRF policy"),
+        (
+            SsrfPolicy::PERMISSIVE_FOR_TESTS,
+            vec![local; 17],
+            "16-address webhook bound",
+        ),
+    ] {
+        for attempt in [1, 3] {
+            let mut dest = destination(&format!("http://example.com:{}/hook", local.port()), 3);
+            dest.ssrf_policy = policy;
+            let (verdict, _) = dest
+                .dispatch_http_with_lookup(&request(&events), attempt, &|| Ok(()), |_, _| {
+                    Ok(answers.clone())
+                })
+                .unwrap();
+            assert_eq!(verdict, DeliveryVerdict::PermanentRejection);
+            let dead = dest.dead_letters.list();
+            assert_eq!(dead.len(), 1);
+            assert_eq!(dead[0].attempts, attempt);
+            assert!(dead[0].terminal_reason.contains(expected));
+            assert!(dest.acknowledged.lock().unwrap().is_empty());
+        }
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn stopping_during_dns_does_not_retry_or_dead_letter_a_cancelled_attempt() {
+    let events = ForgeEventBatch { events: Vec::new() };
+    for stopped in [RefusalCode::CancellationInProgress, RefusalCode::ResourceBudgetExceeded] {
+        for attempt in [1, 3] {
+            let dest = destination("http://example.com/hook", 3);
+            let lookup_finished = std::cell::Cell::new(false);
+            let checkpoint = || if lookup_finished.get() { Err(stopped) } else { Ok(()) };
+            let result = dest.dispatch_http_with_lookup(
+                &request(&events),
+                attempt,
+                &checkpoint,
+                |_, _| {
+                    lookup_finished.set(true);
+                    Err::<Vec<SocketAddr>, _>(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "resolver temporarily unavailable",
+                    ))
+                },
+            );
+            assert_eq!(result, Err(stopped));
+            assert!(dest.dead_letters.list().is_empty());
+            assert!(dest.acknowledged.lock().unwrap().is_empty());
+        }
+    }
 }
 
 #[test]

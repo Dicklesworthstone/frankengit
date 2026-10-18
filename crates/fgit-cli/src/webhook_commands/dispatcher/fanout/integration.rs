@@ -23,6 +23,7 @@ struct Fixture {
     repository: RepositoryId,
     format: GitHashAlgorithm,
     destination: AsciiSlug,
+    clock: AtomicU64,
 }
 
 fn secret() -> WebhookSecret {
@@ -67,7 +68,7 @@ impl Fixture {
         assert_eq!(page.entries.len(), 1);
         let destination = page.entries[0].destination();
         node.shutdown().unwrap();
-        Self { root, storage, tenant, repository, format, destination }
+        Self { root, storage, tenant, repository, format, destination, clock: AtomicU64::new(10_000) }
     }
 
     fn route(&self, id: u64) -> Options {
@@ -90,7 +91,7 @@ impl Fixture {
             secrets: WebhookSecretRotation::new(secret()),
             filter: WebhookEventFilter::Wildcard, active: true,
             retry_schedule: WebhookRetrySchedule {
-                max_attempts: 3, initial_delay: Duration::ZERO, max_delay: Duration::ZERO,
+                max_attempts: 3, initial_delay: Duration::from_millis(1), max_delay: Duration::from_millis(1),
             },
         };
         WebhookStore::open(self.storage.join("webhooks")).unwrap()
@@ -100,7 +101,8 @@ impl Fixture {
 
     fn run(&self, limit: usize) -> (u8, String) {
         let mut output = Vec::new();
-        let code = execute(self.options(limit), &|| Ok(false), &|| Ok(10_000), &mut output).unwrap();
+        let now = self.clock.fetch_add(10, Ordering::Relaxed);
+        let code = execute(self.options(limit), &|| Ok(false), &|| Ok(now), &mut output).unwrap();
         (code, String::from_utf8(output).unwrap())
     }
 }

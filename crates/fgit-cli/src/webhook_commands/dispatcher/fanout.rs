@@ -285,13 +285,13 @@ mod tests {
     use super::*;
 
     fn args(extra: &[&str]) -> Vec<String> {
-        let mut args: Vec<_> = [
-            "/operator-owned/node",
-            "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
-            "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
-            "--trusted-local",
-            "--at-least-once",
-        ].into_iter().map(str::to_owned).collect();
+        let mut args = vec![
+            "/operator-owned/node".to_owned(),
+            TenantId::from_bytes([0xa1; 16]).to_string(),
+            RepositoryId::from_bytes([0xa2; 16]).to_string(),
+            "--trusted-local".to_owned(),
+            "--at-least-once".to_owned(),
+        ];
         args.extend(extra.iter().map(|arg| (*arg).to_owned()));
         args
     }
