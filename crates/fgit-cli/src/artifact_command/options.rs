@@ -1,5 +1,5 @@
 use super::USAGE;
-use fgit_object_fabric::{ArtifactIdentity, ArtifactPayloadKind, MediaType, RetentionProfile};
+use fgit_object_fabric::{ArtifactIdentity, ArtifactPayloadKind, MediaType};
 use fgit_types::{
     Digest, DigestAlgorithmId, DigestBytes, RepositoryId, RepositoryIncarnationId, TenantId,
 };
@@ -72,6 +72,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                     | "--kind"
                     | "--media-type"
                     | "--ttl-secs"
+                    | "--retain-days"
+                    | "--release-permanent"
+                    | "--legal-hold-id"
+                    | "--legal-hold-reason"
                     | "--expected-id"
                     | "--source-rcr"
                     | "--build-capsule"
@@ -83,7 +87,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         if !allowed {
             return Err(format!("unsupported {operation} option {name:?}"));
         }
-        let value = if name == "--trusted-local" {
+        let value = if matches!(name, "--trusted-local" | "--release-permanent") {
             "true"
         } else {
             let value = args
@@ -142,11 +146,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             optional("--build-capsule")?,
             optional("--check-receipt")?,
             optional("--source-rcr")?,
-            RetentionProfile::HotEphemeral {
-                ttl_seconds: fields
-                    .get("--ttl-secs")
-                    .map_or(Ok(86400), |s| decimal(s, 1, u64::MAX))?,
-            },
+            super::retention::parse(&fields)?,
         );
         if optional("--expected-id")?
             .as_ref()
@@ -176,7 +176,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         selection,
     })
 }
-fn decimal(value: &str, low: u64, high: u64) -> Result<u64, String> {
+pub(super) fn decimal(value: &str, low: u64, high: u64) -> Result<u64, String> {
     if value.is_empty()
         || value.len() > 20
         || (value.len() > 1 && value.starts_with('0'))

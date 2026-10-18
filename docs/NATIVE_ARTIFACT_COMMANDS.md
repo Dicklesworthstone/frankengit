@@ -45,11 +45,18 @@ or verify a check receipt. Its result explicitly records
 `provenance_authenticated: false` and `canonical_repository_published: false`.
 No reference, release alias, package namespace or required check is published.
 
-Put currently selects the existing `HotEphemeral` retention encoding, with
-`--ttl-secs` defaulting to 86400. TTL is immutable metadata, NOT automatic deletion.
-Inspect/export preserve other retention encodings already present in the store.
-No cache hit, retention-root authority, legal-hold enforcement or garbage
-collection is inferred from an artifact's existence.
+Select exactly one existing retention profile: `--ttl-secs` for hot ephemeral
+payloads, `--retain-days` for standard logs, `--release-permanent` for releases,
+or the pair `--legal-hold-id` and `--legal-hold-reason` for a named hold. With no
+selection, put uses the same 86400-second TTL as before. TTL and hold IDs are
+positive u64 values, days positive u32, and hold reasons contain 1..1024 UTF-8
+bytes. Ambiguous, partial or overflowing selections refuse before storage access.
+
+These are immutable identity-bound metadata, NOT automatic deletion or legal-hold
+enforcement. Changing a retention profile creates a different artifact identity;
+it never mutates a previously retained payload. Inspect/export preserve its exact
+canonical encoding. No cache-hit, retention-root authority or garbage collection
+is inferred from an artifact's existence.
 
 ## Bounds and lifecycle
 
@@ -85,3 +92,17 @@ collision retry, corruption, foreign scope, symlink/nonregular refusal,
 cancellation and completed-storage/output-failure separation using real files.
 The existing `fgit-object-fabric` artifact-storage suite remains the storage
 oracle. These checks are not hostile-filesystem or physical-power-loss evidence.
+
+The discovered `scripts/e2e/suites/object-fabric/artifact_custody.sh` suite drives
+an actual prebuilt `FG_BIN`, not a native-schema peer. It independently computes
+artifact/scope identities, checks all seven payload kinds and four retention
+encodings, exact byte ceilings, namespace isolation, copied/poisoned containers,
+no-overwrite export, concurrent exact retries, a real broken stdout pipe, and
+SIGTERM after a private stage is acquired.
+
+Its SHA-1 and SHA-256 workflows run through the real node and runner. It recovers
+an original journal-referenced evidence body, stores those exact bytes as a
+provenance artifact with the original source RCR, checks that repository refs
+are unchanged, and reopens/exports after the original source, node, run and local
+evidence paths are moved offline. This establishes byte-preserving archival,
+not independent check attestation or automatic workflow-output collection.

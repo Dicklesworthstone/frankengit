@@ -3,6 +3,7 @@
 mod execute;
 mod options;
 mod output;
+mod retention;
 #[cfg(test)]
 mod tests;
 use std::io::Write;
@@ -12,7 +13,9 @@ const USAGE: &str = "usage: fg [--timeout-secs <seconds>] artifact <put|inspect|
   --trusted-local --trust-domain <label> [--max-payload-mib <1..512>]
 put: --source <absolute-regular-file> --payload-sha256 <sha256> --payload-bytes <decimal>
   --kind <ci_artifact|build_log|release_asset|sbom|signature|provenance|git_lfs>
-  --media-type <type> [--ttl-secs <positive-u64>] [--expected-id <artifact-sha256>]
+  --media-type <type> [--expected-id <artifact-sha256>]
+  [--ttl-secs <positive-u64> | --retain-days <positive-u32> | --release-permanent
+   | --legal-hold-id <positive-u64> --legal-hold-reason <1..1024-UTF8-bytes>]
   [--source-rcr <sha256>] [--build-capsule <sha256>] [--check-receipt <sha256>]
 inspect: --id <artifact-sha256>
 export: --id <artifact-sha256> --output <absolute-new-file>
@@ -24,7 +27,8 @@ Existing export destinations are never replaced. A lost reply does not prove abs
 The root and export parent must exist with mode 0700; their ancestors and source
 must remain protected from concurrent replacement. This is not hostile isolation.
 Scope/provenance fields are operator assertions, not authorization or a check grant.
-TTL defaults to 86400 seconds: metadata only, not automatic deletion. No refs change.
+Retention defaults to 86400-second TTL: metadata only, not deletion/hold enforcement.
+No refs change.
 One cooperative deadline covers storage phases; filesystem calls/output may block.
 Default 64 MiB; maximum 512 MiB and one hour. Argument refusals create no namespace.
 Exit 0: completed; 2: refused; 3: local publication uncertain; 4: completed but output
