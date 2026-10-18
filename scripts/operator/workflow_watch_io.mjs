@@ -113,8 +113,16 @@ export function runNative(fg, args, { signal, timeoutMs = 660_000, maximum = 40 
       env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TZ: 'UTC' } }); }
     catch (error) { reject(error); return; }
     const chunks = [], diagnostics = []; let size = 0, diagnosticSize = 0, forced = false, reason = null;
-    let killTimer, closeTimer, settled = false, spawnError = null;
-    const kill = name => { if (child.pid) { try { process.kill(-child.pid, name); } catch (error) { if (error.code !== 'ESRCH') spawnError ??= error; } } };
+    let killTimer, closeTimer, settled = false, spawnError = null, exitObserved = false;
+    // Node releases the direct child's PID before emitting exit. From that point
+    // the numeric group ID is not ours to signal, even if a descendant still
+    // holds a pipe. Do not let a delayed escalation target an unrelated group.
+    const kill = name => {
+      if (!exitObserved && child.exitCode === null && child.signalCode === null && child.pid) {
+        try { process.kill(-child.pid, name); }
+        catch (error) { if (error.code !== 'ESRCH') spawnError ??= error; }
+      }
+    };
     const force = detail => {
       if (forced) return;
       forced = true; reason = detail; kill('SIGTERM');
@@ -137,6 +145,8 @@ export function runNative(fg, args, { signal, timeoutMs = 660_000, maximum = 40 
     });
     child.once('error', error => { spawnError = error; });
     child.once('exit', () => {
+      exitObserved = true;
+      clearTimeout(killTimer);
       // A descendant holding a pipe must not make drain unbounded.
       if (!closeTimer) closeTimer = setTimeout(() => force('native_pipes_not_closed'), 1000);
     });
