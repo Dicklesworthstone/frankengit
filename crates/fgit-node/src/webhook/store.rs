@@ -254,7 +254,23 @@ fn ensure_directory(root: &Path) -> Result<(), String> {
 }
 
 fn load_dead_letters(path: &Path) -> Result<Vec<DeadLetterEntry>, String> {
-    read_records(path, parse_dead_letter_line, |entry| entry.delivery_id)
+    // A canonical event may fail independently at several subscribers. The
+    // existing record already carries both identities; retain its byte format.
+    let entries = read_records(path, parse_dead_letter_line, |entry| {
+        (entry.webhook_id.0, entry.delivery_id)
+    })?;
+    let mut payloads = std::collections::BTreeMap::new();
+    for entry in &entries {
+        if let Some((root, event)) = payloads.insert(
+            entry.delivery_id,
+            (entry.payload_root, entry.event_name.as_str()),
+        ) {
+            if root != entry.payload_root || event != entry.event_name.as_str() {
+                return Err("dead-letter delivery ID has conflicting payload bindings".into());
+            }
+        }
+    }
+    Ok(entries)
 }
 
 fn checked_registration(line: &str) -> Option<WebhookRegistration> {
@@ -363,15 +379,16 @@ impl DeadLetterQueue {
 
     pub fn try_push(&self, entry: DeadLetterEntry) -> Result<(), String> {
         self.mutate(|entries| {
-            // A delivery key cannot silently acquire different replay parameters.
-            if let Some(previous) = entries
+            // Payload identity is shared by a canonical delivery ID, but each
+            // subscriber owns its endpoint and terminal diagnostic independently.
+            for previous in entries
                 .iter()
-                .find(|previous| previous.delivery_id == entry.delivery_id)
+                .filter(|previous| previous.delivery_id == entry.delivery_id)
             {
-                if previous.webhook_id != entry.webhook_id
-                    || previous.payload_root != entry.payload_root
-                    || previous.target_url != entry.target_url
+                if previous.payload_root != entry.payload_root
                     || previous.event_name != entry.event_name
+                    || (previous.webhook_id == entry.webhook_id
+                        && previous.target_url != entry.target_url)
                 {
                     return Err(
                         "dead-letter delivery key reused with different payload or destination"
@@ -379,7 +396,10 @@ impl DeadLetterQueue {
                     );
                 }
             }
-            entries.retain(|previous| previous.delivery_id != entry.delivery_id);
+            entries.retain(|previous| {
+                previous.webhook_id != entry.webhook_id
+                    || previous.delivery_id != entry.delivery_id
+            });
             entries.push(entry);
             Ok(())
         })
@@ -395,22 +415,53 @@ impl DeadLetterQueue {
         self.state.lock().unwrap().entries.clone()
     }
 
+    /// Compatibility lookup: a delivery shared by several subscribers is
+    /// ambiguous. Never choose the first subscriber by storage order.
     #[must_use]
     pub fn get(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
+        let state = self.state.lock().unwrap();
+        let mut matches = state.entries.iter().filter(|entry| entry.delivery_id == delivery_id);
+        let entry = matches.next()?;
+        matches.next().is_none().then(|| entry.clone())
+    }
+
+    /// Read one subscriber's diagnostic from this handle's snapshot.
+    #[must_use]
+    pub fn get_for(&self, webhook_id: WebhookId, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
         self.state
             .lock()
             .unwrap()
             .entries
             .iter()
-            .find(|entry| entry.delivery_id == delivery_id)
+            .find(|entry| entry.webhook_id == webhook_id && entry.delivery_id == delivery_id)
             .cloned()
     }
 
+    /// Legacy deletion requires a unique subscriber in the freshly reloaded
+    /// file, not merely in the caller's possibly stale snapshot.
     pub fn try_remove(&self, delivery_id: AsciiSlug) -> Result<Option<DeadLetterEntry>, String> {
         self.mutate(|entries| {
-            Ok(entries
-                .iter()
-                .position(|entry| entry.delivery_id == delivery_id)
+            let mut matches = entries.iter().enumerate()
+                .filter(|(_, entry)| entry.delivery_id == delivery_id)
+                .map(|(position, _)| position);
+            let position = matches.next();
+            if matches.next().is_some() {
+                return Err("AmbiguousDelivery: select a webhook ID before removing a shared delivery diagnostic".into());
+            }
+            Ok(position.map(|position| entries.remove(position)))
+        })
+    }
+
+    /// Remove only this subscriber's diagnostic. This is local diagnostic
+    /// maintenance, not a network replay or canonical obligation settlement.
+    pub fn try_remove_for(
+        &self,
+        webhook_id: WebhookId,
+        delivery_id: AsciiSlug,
+    ) -> Result<Option<DeadLetterEntry>, String> {
+        self.mutate(|entries| {
+            Ok(entries.iter()
+                .position(|entry| entry.webhook_id == webhook_id && entry.delivery_id == delivery_id)
                 .map(|position| entries.remove(position)))
         })
     }
@@ -515,6 +566,26 @@ impl WebhookStore {
     #[must_use]
     pub fn get_dead_letter(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
         self.dead_letters.get(delivery_id)
+    }
+
+    /// Subscriber-scoped replay input; the caller must still verify it against
+    /// authority-selected payload bytes and the current registered endpoint.
+    #[must_use]
+    pub fn get_dead_letter_for(
+        &self,
+        webhook_id: WebhookId,
+        delivery_id: AsciiSlug,
+    ) -> Option<DeadLetterEntry> {
+        self.dead_letters.get_for(webhook_id, delivery_id)
+    }
+
+    /// Remove a local diagnostic only; this does not contact its receiver.
+    pub fn try_remove_dead_letter_for(
+        &self,
+        webhook_id: WebhookId,
+        delivery_id: AsciiSlug,
+    ) -> Result<Option<DeadLetterEntry>, String> {
+        self.dead_letters.try_remove_for(webhook_id, delivery_id)
     }
 
     pub fn try_replay_dead_letter(
@@ -1003,3 +1074,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod subscriber_tests;

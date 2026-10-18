@@ -2,18 +2,21 @@
 //!
 //! Because canonical state is an immutable decision stream, predicates evaluated
 //! over historical positions form a well-defined discrete function `f(seq) -> Outcome`.
-//! When a predicate satisfies a declared monotonicity contract, the first decision
+//! When a predicate actually satisfies a declared monotonicity contract, the first decision
 //! sequence where the predicate transitions can be located in logarithmic `O(log N)`
-//! probes. If monotonicity is violated or undeclared, the engine refuses or executes
-//! bounded segmented search, never returning a hallucinated binary-search answer.
+//! probes. Sampled checks cannot prove monotonicity or detect every violation.
+//! Monotone results are CONDITIONAL on that caller contract. For unknown shapes,
+//! bounded linear/segmented search visits every preceding position; no gaps are
+//! treated as evidence of absence.
 //!
 //! # Invariants
 //!
 //! 1. **Deterministic Probing:** Midpoints and tie-break rules are deterministic
 //!    and platform-independent (`start + (end - start) / 2`).
-//! 2. **Monotonicity Integrity:** If a predicate declared as monotone exhibits
-//!    a non-monotone transition during probing, the search halts immediately
-//!    with a typed [`BisectionRefusal::NonMonotoneDetected`] refusal.
+//! 2. **Monotonicity Integrity:** Contradictory observed endpoints refuse with
+//!    [`BisectionRefusal::NonMonotoneDetected`]. Unobserved interior reversals
+//!    cannot be detected by logarithmic sampling; callers must supply the proof
+//!    or select exhaustive search.
 //! 3. **Audit Receipt Completeness:** Every probe, its inputs, evaluated outcomes,
 //!    and final termination status are captured in a byte-deterministic [`BisectionReceipt`].
 //! 4. **Current-Policy Disclosure:** All historical snapshot evaluations apply the
@@ -88,14 +91,16 @@ impl fmt::Display for TransitionDirection {
 /// Contract governing the search strategy and monotonicity guarantees.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum MonotonicityShape {
-    /// The predicate is guaranteed to transition at most once monotonically.
+    /// Caller-declared at-most-one-transition contract. The engine does not
+    /// prove this shape; successful answers are conditional on its truth.
     GuaranteedMonotone {
         /// Optional declared transition direction. If None, inferred from boundary probes.
         expected_direction: Option<TransitionDirection>,
     },
     /// Bounded segmented search for predicates whose shape is non-monotone or unknown.
     BoundedSegmented {
-        /// Step size between segment probes.
+        /// Maximum contiguous segment size. Every position inside a segment
+        /// is examined: an unsatisfied endpoint cannot rule out interior flips.
         segment_size: usize,
         /// Maximum total probes permitted.
         max_steps: usize,
@@ -340,7 +345,7 @@ pub struct BisectionReceipt {
     pub max_budget: usize,
     /// Chronological list of every probe evaluated.
     pub probes: Vec<ProbeRecord>,
-    /// The first decision sequence where transition occurred, if found.
+    /// Selected transition, or the first satisfied position for exhaustive search.
     pub transition_found: Option<DecisionSequence>,
     /// Terminal outcome status.
     pub termination: BisectionTermination,
@@ -501,6 +506,8 @@ pub enum BisectionRefusal {
         /// Context message.
         message: String,
     },
+    /// The caller stopped before a probe could produce a usable observation.
+    Cancelled { sequence: u64 },
     /// Search exceeded declared maximum step budget.
     BudgetExhausted {
         /// Steps evaluated before exhaustion.
@@ -522,6 +529,9 @@ pub enum BisectionRefusal {
 impl fmt::Display for BisectionRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled { sequence } => {
+                write!(formatter, "bisection cancelled at decision {sequence}")
+            }
             Self::InvalidRange { start, end } => {
                 write!(
                     formatter,
@@ -612,6 +622,28 @@ impl BisectionContext<'_> {
         sequence: DecisionSequence,
     ) -> Result<ForgeSnapshot, BisectionRefusal> {
         let target = PositionTarget::Decision(sequence);
+        if self
+            .historical_batches
+            .iter()
+            .any(|batch| batch.batch.repository_id != self.head_body.repository_id)
+        {
+            return Err(BisectionRefusal::CorruptSnapshot {
+                sequence: sequence.get(),
+                reason: "history belongs to another repository".into(),
+            });
+        }
+        if self.historical_batches.iter().any(|batch| {
+            batch.batch.first_decision_sequence <= sequence
+                && batch
+                    .batch
+                    .decisions
+                    .last()
+                    .is_some_and(|last| last.decision_sequence > sequence)
+        }) {
+            return Err(BisectionRefusal::AmbiguousRange {
+                message: format!("decision {sequence} is inside an atomic publication batch"),
+            });
+        }
         let mut snapshot = project_snapshot_from_history(
             target,
             self.head_id,
@@ -620,7 +652,25 @@ impl BisectionContext<'_> {
             self.historical_batches,
             self.base_refs,
             &self.snapshot_limits,
-        )?;
+        )
+        .map_err(|error| match error {
+            SnapshotRefusal::TargetNotFound { .. }
+            | SnapshotRefusal::TargetAheadOfAuthority { .. } => BisectionRefusal::MissingPosition {
+                sequence: sequence.get(),
+            },
+            SnapshotRefusal::ConsistencyMismatch { .. }
+            | SnapshotRefusal::Codec(_)
+            | SnapshotRefusal::Chronicle(_) => BisectionRefusal::CorruptSnapshot {
+                sequence: sequence.get(),
+                reason: error.to_string(),
+            },
+            other => BisectionRefusal::SnapshotRefusal(other),
+        })?;
+        if snapshot.effective_decision_sequence != Some(sequence) {
+            return Err(BisectionRefusal::MissingPosition {
+                sequence: sequence.get(),
+            });
+        }
 
         if let Some(policy) = self.disclosure_policy {
             snapshot = policy.filter_snapshot(snapshot).map_err(|err| match err {
@@ -645,7 +695,9 @@ pub const fn logarithmic_probe_budget(range_len: u64) -> usize {
     (bits as usize) + 2
 }
 
-/// Executes bisection over the specified range and predicate using the given context and strategy.
+/// Executes a dense decision search over caller-verified snapshot history.
+/// `GuaranteedMonotone` is an explicit caller assumption, not a proof obtained
+/// by sampling. Use bounded exhaustive search for an unknown predicate shape.
 pub fn execute_bisection<P>(
     range: BisectionRange,
     shape: MonotonicityShape,
@@ -655,294 +707,42 @@ pub fn execute_bisection<P>(
 where
     P: BisectionPredicate,
 {
-    let repo_id = context.head_body.repository_id;
-    let max_budget = match shape {
-        MonotonicityShape::GuaranteedMonotone { .. } => logarithmic_probe_budget(range.len()),
-        MonotonicityShape::BoundedSegmented { max_steps, .. } => max_steps,
-        MonotonicityShape::LinearOnly { max_steps } => max_steps,
-    };
+    execute_bisection_with_control(range, shape, predicate, context, &mut || true)
+}
 
-    let mut probes = Vec::new();
-    let mut step_index = 0;
-
-    // Helper closure to evaluate a probe at sequence `seq`
-    let mut eval_probe = |seq: DecisionSequence,
-                          probes: &mut Vec<ProbeRecord>|
-     -> Result<PredicateOutcome, BisectionRefusal> {
-        if step_index >= max_budget {
-            return Err(BisectionRefusal::BudgetExhausted {
-                steps_taken: step_index,
-                max_budget,
-            });
-        }
-        let snapshot = context.project_sequence(seq)?;
-        let outcome_res = predicate.evaluate(&snapshot).map_err(|e| {
-            BisectionRefusal::PredicateEvaluationFailed {
-                sequence: seq.get(),
-                error: e.to_string(),
-            }
-        });
-
-        match outcome_res {
-            Ok(out) => {
-                probes.push(ProbeRecord {
-                    step_index,
-                    sequence: seq,
-                    outcome: Ok(out),
-                    head_id: snapshot.effective_head_id,
-                    policy_epoch: snapshot.historical_policy_epoch,
-                    replayed_batches: snapshot.replayed_batches_count,
-                });
-                step_index += 1;
-                Ok(out)
-            }
-            Err(err) => {
-                probes.push(ProbeRecord {
-                    step_index,
-                    sequence: seq,
-                    outcome: Err(err.to_string()),
-                    head_id: snapshot.effective_head_id,
-                    policy_epoch: snapshot.historical_policy_epoch,
-                    replayed_batches: snapshot.replayed_batches_count,
-                });
-                step_index += 1;
-                Err(err)
-            }
-        }
-    };
-
-    let outcome_result = match shape {
-        MonotonicityShape::GuaranteedMonotone { expected_direction } => {
-            bisect_monotone(range, expected_direction, &mut eval_probe, &mut probes)
-        }
-        MonotonicityShape::BoundedSegmented { segment_size, .. } => {
-            bisect_segmented(range, segment_size, &mut eval_probe, &mut probes)
-        }
-        MonotonicityShape::LinearOnly { .. } => bisect_linear(range, &mut eval_probe, &mut probes),
-    };
-
-    let (transition_found, termination) = match outcome_result {
-        Ok(Some(transition)) => (
-            Some(transition),
-            BisectionTermination::Converged {
-                transition_sequence: transition,
-            },
-        ),
-        Ok(None) => {
-            let uniform = probes
-                .first()
-                .and_then(|p| p.outcome.as_ref().ok().copied())
-                .unwrap_or(PredicateOutcome::Unsatisfied);
-            (
-                None,
-                BisectionTermination::NoTransition {
-                    uniform_outcome: uniform,
-                },
-            )
-        }
-        Err(refusal) => (None, BisectionTermination::Refused { reason: refusal }),
-    };
-
-    let receipt_digest = BisectionReceipt::compute_digest(
-        repo_id,
-        &range,
-        &shape,
-        step_index,
-        transition_found,
-        &termination,
-        &probes,
-    );
-
-    BisectionReceipt {
-        repository_id: repo_id,
+/// The same search under one caller-owned cooperative cancellation boundary.
+/// Projection has its own finite replay bound; checkpoints surround each probe.
+pub fn execute_bisection_with_control<P>(
+    range: BisectionRange,
+    shape: MonotonicityShape,
+    predicate: &P,
+    context: &BisectionContext<'_>,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> BisectionReceipt
+where
+    P: BisectionPredicate,
+{
+    search::dense(
+        context.head_body.repository_id,
         range,
-        monotonicity_shape: shape,
-        steps_taken: step_index,
-        max_budget,
-        probes,
-        transition_found,
-        termination,
-        receipt_digest,
-    }
+        shape,
+        |sequence| {
+            let snapshot = context.project_sequence(sequence)?;
+            Ok(ProbeObservation {
+                head_id: snapshot.effective_head_id,
+                policy_epoch: snapshot.historical_policy_epoch,
+                replayed_batches: snapshot.replayed_batches_count,
+                outcome: predicate
+                    .evaluate(&snapshot)
+                    .map_err(|error| error.to_string()),
+            })
+        },
+        checkpoint,
+    )
 }
 
-fn bisect_monotone<F>(
-    range: BisectionRange,
-    expected_direction: Option<TransitionDirection>,
-    eval_probe: &mut F,
-    probes: &mut Vec<ProbeRecord>,
-) -> Result<Option<DecisionSequence>, BisectionRefusal>
-where
-    F: FnMut(DecisionSequence, &mut Vec<ProbeRecord>) -> Result<PredicateOutcome, BisectionRefusal>,
-{
-    let start = range.start();
-    let end = range.end();
-
-    let start_val = eval_probe(start, probes)?;
-
-    if range.is_singleton() {
-        return if start_val.is_satisfied() {
-            Ok(Some(start))
-        } else {
-            Ok(None)
-        };
-    }
-
-    let end_val = eval_probe(end, probes)?;
-
-    // Infer or check direction
-    let direction = match expected_direction {
-        Some(dir) => {
-            // Verify boundaries match expected direction
-            match dir {
-                TransitionDirection::UnsatisfiedToSatisfied => {
-                    if start_val.is_satisfied() && end_val.is_unsatisfied() {
-                        return Err(BisectionRefusal::NonMonotoneDetected {
-                            sequence: start.get(),
-                            expected: "unsatisfied".to_string(),
-                            observed: "satisfied".to_string(),
-                        });
-                    }
-                }
-                TransitionDirection::SatisfiedToUnsatisfied => {
-                    if start_val.is_unsatisfied() && end_val.is_satisfied() {
-                        return Err(BisectionRefusal::NonMonotoneDetected {
-                            sequence: start.get(),
-                            expected: "satisfied".to_string(),
-                            observed: "unsatisfied".to_string(),
-                        });
-                    }
-                }
-            }
-            dir
-        }
-        None => {
-            if start_val == end_val {
-                return if start_val.is_satisfied() {
-                    Ok(Some(start))
-                } else {
-                    Ok(None)
-                };
-            }
-            if start_val.is_unsatisfied() && end_val.is_satisfied() {
-                TransitionDirection::UnsatisfiedToSatisfied
-            } else {
-                TransitionDirection::SatisfiedToUnsatisfied
-            }
-        }
-    };
-
-    if start_val == end_val {
-        return if start_val.is_satisfied() {
-            Ok(Some(start))
-        } else {
-            Ok(None)
-        };
-    }
-
-    // Binary search over [low, high]
-    let mut low = start.get();
-    let mut high = end.get();
-
-    match direction {
-        TransitionDirection::UnsatisfiedToSatisfied => {
-            // start is Unsatisfied, end is Satisfied. Find earliest Satisfied.
-            while low + 1 < high {
-                let mid_val = low + (high - low) / 2;
-                let mid_seq = DecisionSequence::try_new(mid_val).expect("mid_val > 0");
-                let outcome = eval_probe(mid_seq, probes)?;
-                match outcome {
-                    PredicateOutcome::Satisfied => {
-                        high = mid_val;
-                    }
-                    PredicateOutcome::Unsatisfied => {
-                        low = mid_val;
-                    }
-                }
-            }
-            let first_satisfied_seq = DecisionSequence::try_new(high).expect("high > 0");
-            Ok(Some(first_satisfied_seq))
-        }
-        TransitionDirection::SatisfiedToUnsatisfied => {
-            // start is Satisfied, end is Unsatisfied. Find earliest Unsatisfied.
-            while low + 1 < high {
-                let mid_val = low + (high - low) / 2;
-                let mid_seq = DecisionSequence::try_new(mid_val).expect("mid_val > 0");
-                let outcome = eval_probe(mid_seq, probes)?;
-                match outcome {
-                    PredicateOutcome::Unsatisfied => {
-                        high = mid_val;
-                    }
-                    PredicateOutcome::Satisfied => {
-                        low = mid_val;
-                    }
-                }
-            }
-            let first_unsatisfied_seq = DecisionSequence::try_new(high).expect("high > 0");
-            Ok(Some(first_unsatisfied_seq))
-        }
-    }
-}
-
-fn bisect_segmented<F>(
-    range: BisectionRange,
-    segment_size: usize,
-    eval_probe: &mut F,
-    probes: &mut Vec<ProbeRecord>,
-) -> Result<Option<DecisionSequence>, BisectionRefusal>
-where
-    F: FnMut(DecisionSequence, &mut Vec<ProbeRecord>) -> Result<PredicateOutcome, BisectionRefusal>,
-{
-    let step = if segment_size == 0 {
-        1
-    } else {
-        segment_size as u64
-    };
-    let mut curr = range.start().get();
-    let end = range.end().get();
-
-    while curr <= end {
-        let seq = DecisionSequence::try_new(curr).expect("curr > 0");
-        let outcome = eval_probe(seq, probes)?;
-        if outcome.is_satisfied() {
-            // Found a satisfied probe. If step > 1 and curr > range.start(), linear scan the prior segment
-            if step > 1 && curr > range.start().get() {
-                let seg_start = (curr - step + 1).max(range.start().get());
-                for seg_curr in seg_start..curr {
-                    let seg_seq = DecisionSequence::try_new(seg_curr).expect("seg_curr > 0");
-                    let seg_outcome = eval_probe(seg_seq, probes)?;
-                    if seg_outcome.is_satisfied() {
-                        return Ok(Some(seg_seq));
-                    }
-                }
-            }
-            return Ok(Some(seq));
-        }
-        if curr == end {
-            break;
-        }
-        curr = (curr + step).min(end);
-    }
-    Ok(None)
-}
-
-fn bisect_linear<F>(
-    range: BisectionRange,
-    eval_probe: &mut F,
-    probes: &mut Vec<ProbeRecord>,
-) -> Result<Option<DecisionSequence>, BisectionRefusal>
-where
-    F: FnMut(DecisionSequence, &mut Vec<ProbeRecord>) -> Result<PredicateOutcome, BisectionRefusal>,
-{
-    for seq_num in range.start().get()..=range.end().get() {
-        let seq = DecisionSequence::try_new(seq_num).expect("seq_num > 0");
-        let outcome = eval_probe(seq, probes)?;
-        if outcome.is_satisfied() {
-            return Ok(Some(seq));
-        }
-    }
-    Ok(None)
-}
+mod search;
+pub use search::{ProbeObservation, search_published_positions};
 
 /// Linear oracle scanning every position in `[range.start(), range.end()]` for reference verification.
 pub fn linear_scan_oracle<P>(

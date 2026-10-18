@@ -7,12 +7,12 @@
 use std::collections::BTreeMap;
 
 use fgit_authority::AsyncAuthorityStore;
-use fgit_chronicle::{PublicationBasis, verify_pair};
+use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
 use fgit_codec::{
     CanonicalBody, CanonicalForgePositionState, CanonicalOutboxDeliveryReceipt,
-    CanonicalOutboxEffectState, CanonicalOutboxState, CanonicalOutboxStateEntry,
-    CryptoBodyIdentity, DecodeLimits, ForgePositionStateEntry, OutboxDeliveryDisposition,
-    OutboxDeliveryIdentityInput, decode_body, derive_outbox_delivery_key,
+    CanonicalOutboxEffectState, CanonicalOutboxState, CanonicalOutboxStateEntry, DecodeLimits,
+    ForgePositionStateEntry, OutboxDeliveryDisposition, OutboxDeliveryIdentityInput, decode_body,
+    derive_outbox_delivery_key,
 };
 use fgit_forge::ForgeEventBatch;
 use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey};
@@ -79,6 +79,38 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    let state = read_roots_in(store, cx, basis, cancelled).await?;
+    let repository = basis.body().repository_id;
+    for position in state.forge.entries() {
+        checkpoint(cancelled)?;
+        let events =
+            storage::read_events(store, cx, repository, position.event_batch_root()).await?;
+        validate_position_batch(position, &events)?;
+    }
+    for entry in state.outbox.entries() {
+        read_effect_in(store, cx, repository, entry, cancelled).await?;
+        checkpoint(cancelled)?;
+        let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
+        validate_payload_positions(&state.forge, &payload)?;
+    }
+    checkpoint(cancelled)?;
+    Ok(state)
+}
+
+/// Authenticate the two maps selected by one head without resolving delivery
+/// effects or unrelated frontier events. Read models must verify the event
+/// commitments and position ranges they consume. This is not a delivery or
+/// publication preflight: those callers retain the complete `read_in` check.
+pub(super) async fn read_roots_in<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    cancelled: &C,
+) -> Result<DeliveryState, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     checkpoint(cancelled)?;
     let repository = basis.body().repository_id;
     let forge = storage::load_forge_positions(store, cx, basis).await?;
@@ -108,24 +140,11 @@ where
                 .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
         }
     };
-    let state = DeliveryState { forge, outbox };
-    for position in state.forge.entries() {
-        checkpoint(cancelled)?;
-        let events =
-            storage::read_events(store, cx, repository, position.event_batch_root()).await?;
-        validate_position_batch(position, &events)?;
-    }
-    for entry in state.outbox.entries() {
-        read_effect_in(store, cx, repository, entry, cancelled).await?;
-        checkpoint(cancelled)?;
-        let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
-        validate_payload_positions(&state.forge, &payload)?;
-    }
     checkpoint(cancelled)?;
-    Ok(state)
+    Ok(DeliveryState { forge, outbox })
 }
 
-async fn verify_legacy_empty_outbox<S, C>(
+pub(super) async fn verify_legacy_empty_outbox<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,
@@ -142,30 +161,28 @@ where
     }
     let mut successor = basis.body().clone();
     let mut walked = 0;
-    while let Some(batch_id) = successor.decision_tail_id {
-        checkpoint(cancelled)?;
-        if walked >= MAX_LEGACY_BATCHES {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        walked += 1;
-        let predecessor_id = successor
-            .predecessor_head_id
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        let predecessor =
-            fgit_authority::read_authority_head_body_async(store, cx, predecessor_id).await?;
-        checkpoint(cancelled)?;
-        let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id).await?;
-        verify_pair(
-            &CryptoBodyIdentity,
-            &PublicationBasis::new(predecessor_id, predecessor.clone()),
-            &batch,
+    loop {
+        let predecessor = match read_history_step_async(
+            store,
+            cx,
             &successor,
+            &mut walked,
+            MAX_LEGACY_BATCHES,
+            cancelled,
         )
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-        if predecessor.outbox_root != selected_root || successor.outbox_root != selected_root {
+        .await
+        .map_err(storage::history_step_refusal)?
+        {
+            HistoryStep::Genesis => break,
+            HistoryStep::Checkpoint { predecessor } | HistoryStep::Decision { predecessor, .. } => {
+                predecessor
+            }
+        };
+        if predecessor.body().outbox_root != selected_root || successor.outbox_root != selected_root
+        {
             return Err(unavailable(RefusalCode::EvidenceMissing));
         }
-        successor = predecessor;
+        successor = predecessor.body().clone();
     }
     if successor.repository_id != repository
         || successor.predecessor_head_id.is_some()
@@ -462,7 +479,7 @@ where
     checkpoint(cancelled)
 }
 
-fn validate_payload_positions(
+pub(super) fn validate_payload_positions(
     forge: &CanonicalForgePositionState,
     payload: &ForgeEventBatch,
 ) -> Result<(), AdmissionError> {

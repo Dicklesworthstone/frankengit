@@ -39,6 +39,7 @@ fn append(out: &mut String, bytes: &str, maximum: usize) -> Result<(), ApiError>
 const fn conclusion(value: WorkflowCheckConclusion) -> &'static str {
     match value {
         WorkflowCheckConclusion::ActionRequired => "action_required",
+        WorkflowCheckConclusion::Success => "success",
         WorkflowCheckConclusion::Failure => "failure",
         WorkflowCheckConclusion::Cancelled => "cancelled",
         WorkflowCheckConclusion::TimedOut => "timed_out",
@@ -176,6 +177,7 @@ mod tests {
     fn every_actual_conclusion_is_explicit_and_never_inferred_success() {
         for (value, label) in [
             (WorkflowCheckConclusion::ActionRequired, "action_required"),
+            (WorkflowCheckConclusion::Success, "success"),
             (WorkflowCheckConclusion::Failure, "failure"),
             (WorkflowCheckConclusion::Cancelled, "cancelled"),
             (WorkflowCheckConclusion::TimedOut, "timed_out"),

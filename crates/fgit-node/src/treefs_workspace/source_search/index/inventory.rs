@@ -7,6 +7,7 @@ use super::super::{
     LocalSearch, SearchCompletion, SearchError, SearchLimits, SourceQuery, SourceSearchReport,
 };
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, NativeObjectIdentity};
+use fgit_graph::lexical::{LexicalOmission, LexicalOmissionReason};
 use fgit_treefs::{BaseEntry, BaseError, BaseView, ObjectSource, TreeCapability, TreePath};
 use fgit_types::{GitHashAlgorithm as Format, GitOid};
 use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ pub(super) struct Document {
 pub(super) struct Inventory {
     pub source: SourceSearchReport,
     pub documents: Vec<Document>,
+    pub omissions: Vec<LexicalOmission>,
 }
 pub(super) struct InventoryRequest(pub SourceQuery);
 
@@ -53,10 +55,14 @@ impl LocalSearch for InventoryRequest {
     fn scope(&self) -> &SourceQuery {
         &self.0
     }
+    fn maximum_blob_bytes(&self, limits: SearchLimits) -> usize {
+        limits.max_total_bytes
+    }
     fn empty(&self, source: SourceSearchReport) -> Inventory {
         Inventory {
             source,
             documents: Vec::new(),
+            omissions: Vec::new(),
         }
     }
     fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(
@@ -116,9 +122,6 @@ impl LocalSearch for InventoryRequest {
             capability
                 .charge_fetch(body.len() as u64)
                 .map_err(SearchError::Capability)?;
-            if body.len() > limits.max_file_bytes {
-                return Err(SearchError::Budget("index file bytes"));
-            }
             inventory.source.bytes_read = inventory
                 .source
                 .bytes_read
@@ -126,6 +129,16 @@ impl LocalSearch for InventoryRequest {
                 .filter(|n| *n <= limits.max_total_bytes)
                 .ok_or(SearchError::Budget("index source bytes"))?;
             inventory.source.files_read += 1;
+            if body.len() > limits.max_file_bytes {
+                inventory.omissions.push(LexicalOmission {
+                    path: path.as_bytes().to_vec(),
+                    blob: native::<A>(&blob)?,
+                    source_bytes: body.len(),
+                    reason: LexicalOmissionReason::FileBytes,
+                    limit: limits.max_file_bytes,
+                });
+                continue;
+            }
             inventory.documents.push(Document {
                 path: path.as_bytes().to_vec(),
                 blob: native::<A>(&blob)?,
@@ -135,6 +148,9 @@ impl LocalSearch for InventoryRequest {
         check(cancelled)?;
         inventory
             .documents
+            .sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        inventory
+            .omissions
             .sort_unstable_by(|a, b| a.path.cmp(&b.path));
         check(cancelled)?;
         Ok(inventory)

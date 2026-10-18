@@ -12,8 +12,8 @@ use fgit_forge::source_browse::SourceBrowseError;
 use fgit_forge::source_search::SearchCase;
 use fgit_graph::lexical::scoped::ScopedLexicalReuse;
 use fgit_graph::lexical::{
-    LexicalError, LexicalIndexStore, LexicalReadLimits, LexicalRefreshStats, LexicalReuse,
-    LexicalSource, RefreshDocument,
+    LexicalError, LexicalIndexStore, LexicalOmission, LexicalOmissionReason, LexicalReadLimits,
+    LexicalRefreshStats, LexicalReuse, LexicalSource, RefreshDocument,
 };
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
 use fgit_types::cell::{ReadMode, admits_read, admits_staging_intake};
@@ -27,6 +27,7 @@ struct Row {
 struct Inventory {
     source: SourceSearchReport,
     rows: Vec<Row>,
+    omissions: Vec<LexicalOmission>,
 }
 // Keep each reuse value opaque: scoped postings cannot be converted into a
 // whole-tree index. Both intake paths share native membership and accounting.
@@ -52,10 +53,14 @@ impl LocalSearch for Request<'_> {
     fn scope(&self) -> &SourceQuery {
         &self.scope
     }
+    fn maximum_blob_bytes(&self, limits: SearchLimits) -> usize {
+        limits.max_total_bytes
+    }
     fn empty(&self, source: SourceSearchReport) -> Inventory {
         Inventory {
             source,
             rows: Vec::new(),
+            omissions: Vec::new(),
         }
     }
     fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(
@@ -147,36 +152,48 @@ impl LocalSearch for Request<'_> {
                 .authorize_read(&path, now)
                 .map_err(SearchError::Capability)?;
             let blob = native::<A>(&oid)?;
-            let (bytes, length) =
-                if let Some(length) = self.reuse.document_bytes(path.as_bytes(), blob) {
-                    (None, length)
-                } else {
-                    let body = base
-                        .read_object(source, &oid, GitObjectKind::Blob, &grant)
-                        .map_err(|error| SearchError::Source(Box::new(error)))?;
-                    check(cancelled)?;
-                    capability
-                        .charge_fetch(body.len() as u64)
-                        .map_err(SearchError::Capability)?;
-                    result.source.files_read += 1;
-                    result.source.bytes_read = result
-                        .source
-                        .bytes_read
-                        .checked_add(body.len())
-                        .filter(|n| *n <= limits.max_total_bytes)
-                        .ok_or(SearchError::Budget("index source bytes"))?;
-                    let length = body.len();
-                    (Some(body), length)
-                };
+            let (bytes, length) = if let Some(length) = self
+                .reuse
+                .document_bytes(path.as_bytes(), blob)
+                .filter(|length| *length <= limits.max_file_bytes)
+            {
+                (None, length)
+            } else {
+                let body = base
+                    .read_object(source, &oid, GitObjectKind::Blob, &grant)
+                    .map_err(|error| SearchError::Source(Box::new(error)))?;
+                check(cancelled)?;
+                capability
+                    .charge_fetch(body.len() as u64)
+                    .map_err(SearchError::Capability)?;
+                result.source.files_read += 1;
+                result.source.bytes_read = result
+                    .source
+                    .bytes_read
+                    .checked_add(body.len())
+                    .filter(|n| *n <= limits.max_total_bytes)
+                    .ok_or(SearchError::Budget("index source bytes"))?;
+                let length = body.len();
+                (Some(body), length)
+            };
             // Source-size ceilings include reused rows, even though fetch
             // counters and capability fetch charges include only actual I/O.
-            if length > limits.max_file_bytes {
-                return Err(SearchError::Budget("index file bytes"));
-            }
             corpus_bytes = corpus_bytes
                 .checked_add(length)
                 .filter(|n| *n <= limits.max_total_bytes)
                 .ok_or(SearchError::Budget("index source bytes"))?;
+            if length > limits.max_file_bytes {
+                // A narrower profile must authenticate the current blob,
+                // never turn a predecessor posting into omission evidence.
+                result.omissions.push(LexicalOmission {
+                    path: path.as_bytes().to_vec(),
+                    blob,
+                    source_bytes: length,
+                    reason: LexicalOmissionReason::FileBytes,
+                    limit: limits.max_file_bytes,
+                });
+                continue;
+            }
             result.rows.push(Row {
                 path: path.as_bytes().to_vec(),
                 blob,
@@ -185,6 +202,9 @@ impl LocalSearch for Request<'_> {
         }
         check(cancelled)?;
         result.rows.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        result
+            .omissions
+            .sort_unstable_by(|a, b| a.path.cmp(&b.path));
         check(cancelled)?;
         Ok(result)
     }
@@ -324,7 +344,7 @@ impl OneNode {
             scope: SourceQuery::new(b"index", SearchCase::Exact, &[]).map_err(search_error)?,
             reuse: Reuse::Whole(&reuse),
         };
-        let (head, forge_position_root, inventory) = match self.object_format {
+        let (head, forge_position_root, mut inventory) = match self.object_format {
             Format::Sha1 => {
                 self.select_source_local_format::<Sha1, _>(
                     request,
@@ -367,17 +387,22 @@ impl OneNode {
                 content: row.bytes.as_deref(),
             })
             .collect();
+        let omitted_files = inventory.omissions.len();
+        let omitted_bytes: usize = inventory.omissions.iter().map(|row| row.source_bytes).sum();
+        let omissions = std::mem::take(&mut inventory.omissions);
         let (prepared, stats) = reuse
-            .prepare(
+            .prepare_with_omissions(
                 source.clone(),
                 &rows,
                 inventory.source.non_regular_entries,
+                omissions,
                 &mut request_live,
             )
             .map_err(index_error)?;
-        if stats.rebuilt_documents != inventory.source.files_read
-            || stats.rebuilt_source_bytes != inventory.source.bytes_read
-            || stats.rebuilt_documents + stats.reused_documents != inventory.source.files_selected
+        if stats.rebuilt_documents + omitted_files != inventory.source.files_read
+            || stats.rebuilt_source_bytes + omitted_bytes != inventory.source.bytes_read
+            || stats.rebuilt_documents + stats.reused_documents + omitted_files
+                != inventory.source.files_selected
         {
             return Err(index_error(LexicalError::Invalid(
                 "native refresh accounting",

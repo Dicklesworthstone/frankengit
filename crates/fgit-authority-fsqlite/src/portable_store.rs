@@ -262,6 +262,7 @@ impl FsqliteAuthorityStore {
             instance: StoreInstanceId::from_raw(0),
             limits,
             bodies: crate::body_cache::BodyCache::new(),
+            contention_retry: crate::adaptive_retry::SharedAdaptiveRetryController::new(),
         };
         let identity = async {
             live(cx)?;

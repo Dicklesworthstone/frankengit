@@ -25,6 +25,9 @@ pub use super::table::Error as TableError;
 mod reuse;
 pub use directory::{DIRECTORY_PROFILE, NameDirectory};
 pub use reuse::{RefreshStats, ReuseVerifier, VerifiedReuse};
+#[path = "index_omissions.rs"]
+mod omissions;
+pub use omissions::{OMISSION_DIRECTORY_PROFILE, OMISSION_INDEX_PROFILE, Omission, OmissionReason};
 
 pub const INDEX_PROFILE: &str = "rust-declaration-tables-v1";
 pub const MAX_PAYLOAD: usize = 1024 * 1024;
@@ -109,11 +112,14 @@ fn add(total: &mut usize, n: usize, maximum: usize, label: &'static str) -> Resu
 }
 macro_rules! frame {
     ($name:ident, $family:literal) => {
+        frame!($name, $family, 1);
+    };
+    ($name:ident, $family:literal, $major:literal) => {
         struct $name(Vec<u8>);
         impl CanonicalBody for $name {
             const DOMAIN: DomainTag = DomainTag::from_static("frankengit/generation/v1");
             const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static($family);
-            const SCHEMA_MAJOR: u16 = 1;
+            const SCHEMA_MAJOR: u16 = $major;
             const SCHEMA_MINOR: u16 = 0;
             fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
                 out.write_bytes($family, &self.0)
@@ -126,6 +132,7 @@ macro_rules! frame {
 }
 frame!(TableFrame, "source-symbol-table");
 frame!(ManifestFrame, "source-symbol-manifest");
+frame!(OmissionManifestFrame, "source-symbol-manifest", 2);
 frame!(ProfileFrame, "source-symbol-profile");
 const fn decode_limits() -> DecodeLimits {
     DecodeLimits {
@@ -195,6 +202,7 @@ pub struct Manifest {
     documents: Vec<Document>,
     unsupported: usize,
     non_regular: usize,
+    omissions: Vec<Omission>,
 }
 impl Manifest {
     #[must_use]
@@ -213,6 +221,11 @@ impl Manifest {
     pub const fn non_regular_entries(&self) -> usize {
         self.non_regular
     }
+    /// Every omitted Rust path in the complete recorded source inventory.
+    #[must_use]
+    pub fn omissions(&self) -> &[Omission] {
+        &self.omissions
+    }
     #[must_use]
     pub fn source_bytes(&self) -> usize {
         self.documents.iter().map(|d| d.source_bytes).sum()
@@ -223,7 +236,12 @@ impl Manifest {
     }
     fn validate(&self, cancelled: &dyn Fn() -> bool) -> Result<(), Error> {
         check(cancelled)?;
-        if self.documents.len() + self.unsupported > 20_000
+        if self
+            .documents
+            .len()
+            .checked_add(self.unsupported)
+            .and_then(|n| n.checked_add(self.omissions.len()))
+            .is_none_or(|n| n > 20_000)
             || self.non_regular > 50_000
             || [self.source.commit, self.source.tree]
                 .iter()
@@ -268,6 +286,26 @@ impl Manifest {
             )?;
             previous = Some(&doc.path);
         }
+        let mut previous: Option<&[u8]> = None;
+        for omission in &self.omissions {
+            check(cancelled)?;
+            omission.validate(self.source.format)?;
+            if previous.is_some_and(|path| path >= omission.path.as_slice())
+                || self
+                    .documents
+                    .binary_search_by(|doc| doc.path.cmp(&omission.path))
+                    .is_ok()
+            {
+                return Err(Error::Invalid("omission inventory"));
+            }
+            add(
+                &mut bytes,
+                omission.source_bytes,
+                64 * 1024 * 1024,
+                "source bytes",
+            )?;
+            previous = Some(&omission.path);
+        }
         Ok(())
     }
     pub fn encode(&self, cancelled: &dyn Fn() -> bool) -> Result<Payload, Error> {
@@ -296,7 +334,21 @@ impl Manifest {
                 return Err(Error::Limit("manifest bytes"));
             }
         }
-        let result = payload(&ManifestFrame(out.into_bytes()))?;
+        let result = if self.omissions.is_empty() {
+            // Complete coverage preserves exact historical v1 identities.
+            payload(&ManifestFrame(out.into_bytes()))?
+        } else {
+            out.write_bytes("omission profile", OMISSION_INDEX_PROFILE.as_bytes())?;
+            out.write_scalar(self.omissions.len() as u32);
+            for omission in &self.omissions {
+                check(cancelled)?;
+                omission.write(&mut out)?;
+                if out.len() > MAX_PAYLOAD {
+                    return Err(Error::Limit("manifest bytes"));
+                }
+            }
+            payload(&OmissionManifestFrame(out.into_bytes()))?
+        };
         let total: usize = self.documents.iter().map(|d| d.encoded_bytes).sum();
         if total + result.bytes.len() > MAX_INDEX_BYTES {
             return Err(Error::Limit("index bytes"));
@@ -310,11 +362,20 @@ impl Manifest {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         check(cancelled)?;
-        let body = decode_body::<ManifestFrame>(raw, decode_limits())?;
-        if root(&body)? != expected || encode_body(&body)? != raw {
-            return Err(Error::CommitmentMismatch);
-        }
-        let mut input = Decoder::new(&body.0, decode_limits());
+        let (bytes, partial) = if let Ok(body) = decode_body::<ManifestFrame>(raw, decode_limits())
+        {
+            if root(&body)? != expected || encode_body(&body)? != raw {
+                return Err(Error::CommitmentMismatch);
+            }
+            (body.0, false)
+        } else {
+            let body = decode_body::<OmissionManifestFrame>(raw, decode_limits())?;
+            if root(&body)? != expected || encode_body(&body)? != raw {
+                return Err(Error::CommitmentMismatch);
+            }
+            (body.0, true)
+        };
+        let mut input = Decoder::new(&bytes, decode_limits());
         let source = read_source(&mut input)?;
         if input.read_digest()? != profile_root()? {
             return Err(Error::Invalid("parser/index profile"));
@@ -342,12 +403,28 @@ impl Manifest {
                 attributes: input.read_scalar::<u32>("attributes")? as usize,
             });
         }
+        let mut omissions = Vec::new();
+        if partial {
+            if input.read_bytes("omission profile")? != OMISSION_INDEX_PROFILE.as_bytes() {
+                return Err(Error::Invalid("omission profile"));
+            }
+            let count = input.read_scalar::<u32>("omission count")? as usize;
+            if count == 0 || count > 20_000 || count > input.remaining() / 32 {
+                return Err(Error::Limit("omission count"));
+            }
+            omissions.reserve(count);
+            for _ in 0..count {
+                check(cancelled)?;
+                omissions.push(Omission::read(&mut input, source.format)?);
+            }
+        }
         input.finish()?;
         let manifest = Self {
             source,
             documents,
             unsupported,
             non_regular,
+            omissions,
         };
         if manifest.encode(cancelled)?.bytes != raw {
             return Err(Error::CommitmentMismatch);
@@ -462,7 +539,8 @@ fn decode_table(
     Ok(table)
 }
 
-/// Complete scanner inventory. It cannot be truncated by max_matches.
+/// Authenticated inventory with explicit whole-file omissions. It cannot be
+/// truncated by max_matches; shared resource exhaustion still refuses a build.
 pub struct Corpus {
     source: SourceSearchReport,
     documents: Vec<Document>,
@@ -471,6 +549,7 @@ pub struct Corpus {
     reused: usize,
     reuse_scope: Option<Source>,
     names: Vec<directory::Names>,
+    omissions: Vec<Omission>,
 }
 impl Corpus {
     #[must_use]
@@ -483,6 +562,7 @@ impl Corpus {
             reused: 0,
             reuse_scope: None,
             names: Vec::new(),
+            omissions: Vec::new(),
         }
     }
     pub fn finish(
@@ -509,12 +589,13 @@ impl Corpus {
             documents: self.documents,
             unsupported: self.unsupported,
             non_regular: self.source.non_regular_entries,
+            omissions: self.omissions,
         };
         manifest.encode(cancelled)?;
         Ok((manifest, self.tables))
     }
-    /// Add the optional accelerated layout without changing v1 table/manifest
-    /// identity or reducing its admitted corpus. Only directory-size overflow
+    /// Add the optional accelerated layout without changing table/manifest
+    /// identity or reducing its recorded corpus. Only directory-size overflow
     /// selects legacy layout; integrity, source and cancellation errors refuse.
     pub fn finish_with_directory(
         mut self,
@@ -620,12 +701,12 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
             .authorize_read(&path, now)
             .map_err(SearchError::Capability)?;
         let native = super::oid::<A>(&blob)?;
-        if let Some((prior, previous)) =
-            reuse.and_then(|prior| prior.document(&native).map(|doc| (prior, doc)))
-        {
-            if previous.source_bytes > limits.max_file_bytes {
-                return Err(Error::Limit("source file bytes"));
-            }
+        if let Some((prior, previous)) = reuse.and_then(|prior| {
+            prior
+                .document(&native)
+                .filter(|doc| doc.source_bytes <= limits.max_file_bytes)
+                .map(|doc| (prior, doc))
+        }) {
             add(
                 &mut referenced,
                 previous.source_bytes,
@@ -654,12 +735,10 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
         let bytes = base
             .read_object(source, &blob, GitObjectKind::Blob, &grant)
             .map_err(|e| SearchError::Source(Box::new(e)))?;
+        check(cancelled)?;
         capability
             .charge_fetch(bytes.len() as u64)
             .map_err(SearchError::Capability)?;
-        if bytes.len() > limits.max_file_bytes {
-            return Err(Error::Limit("source file bytes"));
-        }
         add(
             &mut referenced,
             bytes.len(),
@@ -676,14 +755,61 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
         if git_object_id(blob.algorithm(), GitObjectKind::Blob, &bytes) != blob {
             return Err(Error::CommitmentMismatch);
         }
-        let table = table::Table::build(&bytes, &mut budget, cancelled)?;
+        corpus.source.files_read += 1;
+        if bytes.len() > limits.max_file_bytes {
+            corpus.omissions.push(Omission {
+                path: path.as_bytes().to_vec(),
+                blob,
+                source_bytes: bytes.len(),
+                reason: OmissionReason::FileBytes,
+                byte_offset: None,
+                limit: Some(limits.max_file_bytes),
+            });
+            continue;
+        }
+        // Reused declarations count toward the same global scanner ceiling as
+        // freshly scanned declarations. Otherwise a late local syntax error
+        // could swallow a DeclarationLimit that a full rebuild would refuse.
+        budget.declarations = declarations;
+        let prior_declarations = declarations;
+        corpus.source.bytes_searched += bytes.len();
+        let table = match table::Table::build(&bytes, &mut budget, cancelled) {
+            Ok(table) => table,
+            Err(error) => {
+                let Some(omission) =
+                    Omission::from_table_error(path.as_bytes(), blob, bytes.len(), &error)
+                else {
+                    return Err(Error::Table(error));
+                };
+                // Discard the entire failed file, including earlier declarations.
+                // Its actual work remains charged to the shared scanner budget.
+                budget.declarations = prior_declarations;
+                corpus.omissions.push(omission);
+                continue;
+            }
+        };
+        let payload = match table_payload(blob, &table, cancelled) {
+            Ok(payload) => payload,
+            Err(Error::Limit("payload bytes")) => {
+                budget.declarations = prior_declarations;
+                corpus.omissions.push(Omission {
+                    path: path.as_bytes().to_vec(),
+                    blob,
+                    source_bytes: bytes.len(),
+                    reason: OmissionReason::TableBytes,
+                    byte_offset: None,
+                    limit: Some(MAX_PAYLOAD),
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         add(
             &mut declarations,
             table.rows().len(),
             engine::MAX_DECLARATIONS,
             "declarations",
         )?;
-        let payload = table_payload(blob, &table, cancelled)?;
         add(
             &mut encoded,
             payload.bytes.len(),
@@ -702,8 +828,6 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
             attributes: table.attributes,
         });
         corpus.tables.push(payload);
-        corpus.source.files_read += 1;
-        corpus.source.bytes_searched += bytes.len();
     }
     check(cancelled)?;
     Ok(corpus)
@@ -714,6 +838,9 @@ pub struct Report {
     pub source: Source,
     pub matches: Vec<SymbolMatch>,
     pub complete: bool,
+    /// Whether every selected Rust file was indexed; independent of match pagination.
+    pub coverage_complete: bool,
+    pub omissions: Vec<Omission>,
     pub generation: InternalObjectId,
     pub generation_number: u64,
     pub indexed_files: usize,
@@ -724,6 +851,45 @@ pub struct Report {
     pub tables_read: usize,
     pub payload_bytes_read: usize,
     pub work_units: u64,
+}
+impl Report {
+    /// Validate the bounded coverage metadata before rendering it separately
+    /// from match pagination. Returns total omitted source bytes.
+    pub fn validate_coverage(&self) -> Result<usize, Error> {
+        if self.coverage_complete != self.omissions.is_empty()
+            || self.indexed_source_bytes > 64 * 1024 * 1024
+            || self
+                .indexed_files
+                .checked_add(self.unsupported_language_files)
+                .and_then(|n| n.checked_add(self.omissions.len()))
+                .is_none_or(|n| n > 20_000)
+        {
+            return Err(Error::Invalid("reported coverage"));
+        }
+        let mut bytes = self.indexed_source_bytes;
+        let mut previous: Option<&[u8]> = None;
+        for omission in &self.omissions {
+            omission.validate(self.source.format)?;
+            if previous.is_some_and(|path| path >= omission.path.as_slice()) {
+                return Err(Error::Invalid("reported omission order"));
+            }
+            add(
+                &mut bytes,
+                omission.source_bytes,
+                64 * 1024 * 1024,
+                "source bytes",
+            )?;
+            previous = Some(&omission.path);
+        }
+        if self.matches.iter().any(|row| {
+            self.omissions
+                .binary_search_by(|entry| entry.path.cmp(&row.location.path))
+                .is_ok()
+        }) {
+            return Err(Error::Invalid("reported omitted match"));
+        }
+        Ok(bytes - self.indexed_source_bytes)
+    }
 }
 /// One shared query budget and result buffer across verified per-blob tables.
 pub struct Query {
@@ -820,6 +986,8 @@ impl Query {
             source: manifest.source.clone(),
             matches: self.matches,
             complete: !self.more,
+            coverage_complete: manifest.omissions.is_empty(),
+            omissions: manifest.omissions.clone(),
             generation,
             generation_number,
             indexed_files: manifest.documents.len(),

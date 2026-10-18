@@ -303,7 +303,7 @@ fn observation(format: GitHashAlgorithm) -> NativeWorkflowCheck {
 }
 
 #[test]
-fn receipts_preserve_exact_check_identity_and_never_grant_success() {
+fn receipts_preserve_exact_check_identity_and_render_success_without_granting_merge() {
     let incarnation = RepositoryIncarnationId::from_bytes([0xdd; 16]);
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut options = parse(&arguments()).unwrap();
@@ -311,6 +311,7 @@ fn receipts_preserve_exact_check_identity_and_never_grant_success() {
         let mut check = observation(format);
         for (conclusion, name) in [
             (WorkflowCheckConclusion::ActionRequired, "action_required"),
+            (WorkflowCheckConclusion::Success, "success"),
             (WorkflowCheckConclusion::Failure, "failure"),
             (WorkflowCheckConclusion::Cancelled, "cancelled"),
             (WorkflowCheckConclusion::TimedOut, "timed_out"),
@@ -439,6 +440,6 @@ fn help_needs_no_saved_workflow_or_repository_and_explains_conclusions() {
     );
     let help = String::from_utf8(out).unwrap();
     assert!(help.contains("fg workflow publish"));
-    assert!(help.contains("Local success remains action_required"));
+    assert!(help.contains("Verified succeeded jobs publish success"));
     assert!(help.contains("does not run scripts") || help.contains("does\nnot run scripts"));
 }

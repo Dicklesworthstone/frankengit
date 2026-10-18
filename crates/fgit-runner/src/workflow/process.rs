@@ -1,12 +1,15 @@
-//! Direct-child trusted execution; no namespace, network or descendant claims.
+//! Trusted execution with an owned process group; no hostile isolation claim.
 //! File-backed capture cannot hang on a descendant holding a pipe open. On a
 //! timeout, signal or cancellation the caller must retain the workspace: direct
 //! child reaping does not prove that escaped descendants relinquished access.
 
-use super::{StepLimits, StepObservation, StepOutcome, WorkerFailure};
+use super::{StepContext, StepLimits, StepObservation, StepOutcome, WorkerFailure};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
+mod group;
+use group::ProcessGroup;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15,9 +18,10 @@ use std::time::{Duration, Instant};
 /// `stdout` and `stderr` must be distinct, empty, private regular files opened
 /// read/write by the owner. The surrounding Asupersync request owns `live`.
 /// The script is explicitly trusted to join its children before normal exit.
-pub fn run_trusted_step(
+pub fn run_trusted_step_with_context(
     directory: &Path,
     script: &str,
+    context: &StepContext,
     limits: StepLimits,
     stdout: &File,
     stderr: &File,
@@ -70,22 +74,32 @@ pub fn run_trusted_step(
     let errors = stderr
         .try_clone()
         .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
-    let mut child = Command::new("/bin/sh")
+    let selected_directory = select_directory(directory, context)?;
+    if !live() {
+        return Ok(result);
+    }
+    let child = Command::new("/bin/sh")
         .args(["-eu", "-c", script])
-        .current_dir(directory)
+        .current_dir(&selected_directory)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
+        .envs(context.environment())
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
         .spawn()
         .map_err(|e| WorkerFailure::new(format!("spawn trusted shell: {e}"), false))?;
+    let mut child = ProcessGroup::new(child);
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
+        match child.exited() {
+            Ok(true) => {
+                let (status, leftover) = child.complete().map_err(|error| {
+                    WorkerFailure::new(format!("process-group completion: {error}"), true)
+                })?;
                 result.exit_code = status.code();
-                result.retain_workspace = status.code().is_none();
+                result.retain_workspace = leftover || status.code().is_none();
                 result.outcome = if result.retain_workspace {
                     StepOutcome::ContainmentFailure
                 } else if !live() {
@@ -99,12 +113,11 @@ pub fn run_trusted_step(
                 };
                 break;
             }
-            Ok(None) => {}
+            Ok(false) => {}
             Err(error) => {
-                let _kill = child.kill();
-                let _reap = reap_until(&mut child, Duration::from_secs(3));
+                let cleanup = child.terminate();
                 return Err(WorkerFailure::new(
-                    format!("child status unavailable: {error}"),
+                    format!("child status unavailable: {error}; cleanup={cleanup:?}"),
                     true,
                 ));
             }
@@ -114,29 +127,22 @@ pub fn run_trusted_step(
             .and_then(|out| stderr.metadata().map(|err| (out.len(), err.len())));
         let stop = match sizes {
             Err(_) => Some(StepOutcome::ContainmentFailure),
+            _ if !live() => Some(StepOutcome::Cancelled),
+            _ if started.elapsed() >= limits.timeout => Some(StepOutcome::TimedOut),
             Ok((out, err))
                 if out > limits.stream_bytes as u64 || err > limits.stream_bytes as u64 =>
             {
                 Some(StepOutcome::OutputLimit)
             }
-            _ if !live() => Some(StepOutcome::Cancelled),
-            _ if started.elapsed() >= limits.timeout => Some(StepOutcome::TimedOut),
             _ => None,
         };
         if let Some(outcome) = stop {
-            let killed = child.kill();
-            let reaped = reap_until(&mut child, Duration::from_secs(3));
             result.retain_workspace = true;
             result.outcome = outcome;
-            match reaped {
-                Ok(status) => result.exit_code = status.code(),
-                Err(error) => {
-                    return Err(WorkerFailure::new(
-                        format!("direct child unresolved: kill={killed:?}, reap={error}"),
-                        true,
-                    ));
-                }
-            }
+            let status = child.terminate().map_err(|error| {
+                WorkerFailure::new(format!("process-group cleanup unresolved: {error}"), true)
+            })?;
+            result.exit_code = status.code();
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -154,24 +160,6 @@ pub fn run_trusted_step(
     result.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(result)
 }
-fn reap_until(
-    child: &mut std::process::Child,
-    budget: Duration,
-) -> std::io::Result<std::process::ExitStatus> {
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if started.elapsed() >= budget {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "direct child did not reap",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
 fn capture(file: &File, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let before = file.metadata()?.len();
     let mut reader = file.try_clone()?;
@@ -181,3 +169,65 @@ fn capture(file: &File, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let after = file.metadata()?.len();
     Ok((bytes, before == after && after <= limit as u64))
 }
+
+/// Original context-free entry point, retaining its fixed clean environment.
+pub fn run_trusted_step(
+    directory: &Path,
+    script: &str,
+    limits: StepLimits,
+    stdout: &File,
+    stderr: &File,
+    live: &dyn Fn() -> bool,
+) -> Result<StepObservation, WorkerFailure> {
+    run_trusted_step_with_context(
+        directory,
+        script,
+        &StepContext::default(),
+        limits,
+        stdout,
+        stderr,
+        live,
+    )
+}
+
+/// The workspace is operator-owned trusted storage, not a hostile-filesystem
+/// sandbox. Check every selected component and reject symlinks before spawning;
+/// these checks do not claim atomic containment against concurrent host mutation.
+fn select_directory(
+    root: &Path,
+    context: &StepContext,
+) -> Result<std::path::PathBuf, WorkerFailure> {
+    let Some(relative) = context.working_directory() else {
+        return Ok(root.to_path_buf());
+    };
+    let root = root
+        .canonicalize()
+        .map_err(|e| WorkerFailure::new(format!("workspace directory unavailable: {e}"), false))?;
+    let mut selected = root.clone();
+    for component in relative.split('/') {
+        selected.push(component);
+        let metadata = std::fs::symlink_metadata(&selected).map_err(|e| {
+            WorkerFailure::new(format!("step working-directory unavailable: {e}"), false)
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorkerFailure::new(
+                "step working-directory must contain only real directories, not symlinks",
+                false,
+            ));
+        }
+    }
+    let resolved = selected.canonicalize().map_err(|e| {
+        WorkerFailure::new(format!("step working-directory unavailable: {e}"), false)
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(WorkerFailure::new(
+            "step working-directory is outside its workspace",
+            false,
+        ));
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod context_tests;

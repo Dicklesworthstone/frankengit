@@ -1865,6 +1865,18 @@ impl Deflater {
         matches!(self.state, DeflateState::Finished)
     }
 
+    /// Deterministic encoding work charged by this member so far.
+    ///
+    /// A multi-member owner can subtract this from one shared work allowance
+    /// before constructing its next encoder. Starting a new zlib member must
+    /// not replenish an operation's aggregate resource budget. The counter
+    /// retains successful charges after refusal; a charge rejected by the work
+    /// ceiling is not added to it.
+    #[must_use]
+    pub const fn work_units(&self) -> u64 {
+        self.work_units
+    }
+
     /// Returns immutable finalization evidence only after successful finish.
     #[must_use]
     pub const fn receipt(&self) -> Option<DeflateReceipt> {

@@ -1,10 +1,12 @@
 //! Recovery preflight through the real metadata backend and canonical graph.
 //! Only bounded authority metadata is imported; Git payloads stay in the archive.
+use super::super::approval::ApprovalFlags;
 use super::super::input::PinnedArchive;
 use super::super::profile::ProfileFlags;
 use super::{
-    ArchiveGraphMode, Options, authority_image, config, create_private, digest, emit, generation,
-    graph_from_archive, hex, quote, require_absent, sync_directory, with_node,
+    ArchiveGraphMode, Options, approval_receipt_fields, authenticate_approval, authority_image,
+    check_approval_current, config, create_private, digest, emit, generation, graph_from_archive,
+    hex, match_approval, quote, require_absent, sync_directory, with_node,
 };
 use fgit_authority::StoreInstanceId;
 use std::fs;
@@ -15,6 +17,14 @@ pub(in super::super) const USAGE: &str =
     "usage: fg backup verify <backup-file> <new-scratch-root> --trusted-local
          --expected-sha256 <64-lowercase-hex> --verification-instance <positive-integer>
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
+         [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
+          --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
+          --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
+
+Approval options are all-or-none. Signed mode authenticates the exact external
+key/namespace/floor and signed digest/size/lifetime before creating scratch.
+--expected-sha256 remains independently required. The native archive header must
+match those signed declarations; signatures do not replace native graph checks.
 
 Verify the independently pinned archive, portable authority image, exact selected
 Git inventory, required-kind graph and original payload commitments BEFORE a
@@ -29,13 +39,14 @@ are never reused or removed. There is no --resume for verification.
 
 All passes share one deadline and one open checksum-pinned archive. Default:
 1 GiB archive, 300 seconds; metadata retains its independent 64 MiB bound.
+An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 This verifies SOURCE recovery inputs, not destination disk readback, the newest
-checkpoint, signatures, external artifacts, routing or external-effect replay.
+checkpoint, a complete signed capsule, external artifacts, routing or external-effect replay.
 Exit 0: complete scoped preflight and cleanup; 2: refusal, incomplete verification,
 cleanup failure or receipt-output failure.";
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=12).contains(&args.len())
+    if !(8..=26).contains(&args.len())
         || args[0] != "verify"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -46,6 +57,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let (mut trusted, mut expected, mut instance) = (false, None, None);
     let mut profile = ProfileFlags::default();
+    let mut approval = ApprovalFlags::default();
     let mut cursor = 3;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -74,6 +86,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 instance = Some(StoreInstanceId::from_raw(number));
             }
             "--max-archive-bytes" | "--timeout-secs" => profile.set(flag, value)?,
+            _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
             _ => return Err(format!("unknown or duplicate verification option: {flag}")),
         }
     }
@@ -94,6 +107,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         instance: instance.ok_or("verification requires a --verification-instance")?,
         profile: profile.finish(),
         resume: false,
+        approval: approval.finish()?,
     })
 }
 
@@ -114,6 +128,7 @@ fn execute_with_checkpoints(
         return Err("verification cannot resume or reuse existing scratch state".into());
     }
     let deadline = options.profile.start();
+    let approval = authenticate_approval(options, deadline)?;
     require_absent(&options.output)?;
     // No directory exists until the original checksum, framing, native IDs and
     // independent payload commitments have all passed against one opened input.
@@ -123,6 +138,7 @@ fn execute_with_checkpoints(
         options.profile.transfer,
         deadline,
     )?;
+    match_approval(approval.as_ref(), &archive, deadline)?;
     if archive.header().authority.instance == options.instance.raw() {
         return Err("verification instance must differ from source; no scratch created".into());
     }
@@ -153,7 +169,7 @@ fn execute_with_checkpoints(
             },
         )?;
         checkpoint(Stage::GraphCheckedAndNodeClosed)?;
-        deadline.check()?;
+        check_approval_current(approval.as_ref(), deadline)?;
         // There is deliberately no PreparedPublication and no restore intent.
         // This command cannot publish a root or authorize a later resume.
         require_absent(&options.output.join("authority.fsqlite"))?;
@@ -188,7 +204,7 @@ fn execute_with_checkpoints(
             "\"original_payload_commitments_verified\":true,\"authority_import_verified\":true,",
             "\"git_payloads_written\":false,\"destination_authority_published\":false,",
             "\"node_closed\":true,\"scratch_removed\":true,\"destination_readback_verified\":false,",
-            "\"newest_checkpoint_verified\":false,\"signature_verified\":false,",
+            "\"newest_checkpoint_verified\":false,\"signature_verified\":{}{},",
             "\"external_artifacts_verified\":false,\"routing_published\":false}}"
         ),
         quote(&hex(&options.expected)),
@@ -204,14 +220,21 @@ fn execute_with_checkpoints(
         graph.local_edges,
         graph.external_gitlinks,
         options.instance.raw(),
+        approval.is_some(),
+        approval_receipt_fields(approval.as_ref()),
     ))
 }
 
-pub(in super::super) fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
+pub(in super::super) fn run(
+    args: &[String],
+    output: &mut impl Write,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
     if args == ["verify", "--help"] {
         return emit(output, USAGE);
     }
-    let options = parse(args)?;
+    let mut options = parse(args)?;
+    options.profile = options.profile.with_timeout_cap(timeout)?;
     let receipt = execute(&options)?;
     emit(output, &receipt).map_err(|error| {
         format!("archive verified and scratch removed; receipt output failed: {error}")

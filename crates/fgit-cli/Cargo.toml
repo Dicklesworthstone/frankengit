@@ -26,6 +26,10 @@ fgit-node.workspace = true
 fgit-schema.workspace = true
 fgit-ssh.workspace = true
 fgit-types.workspace = true
+fgit-verified-read.workspace = true
+
+[dev-dependencies]
+fgit-pack.workspace = true
 
 [lints]
 workspace = true

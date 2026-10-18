@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! Real TCP conflict discovery -> resolution -> downloaded bundle -> independent
 //! review -> coupled merge. No replacement planner, repository or authority.
-#[path = "candidate_preparation_http/support.rs"]
+#[path = "candidate_inspection_http/support.rs"]
 mod support;
 use support::*;
 
@@ -136,154 +136,181 @@ fn discovery(
 #[test]
 fn binary_resolution_survives_restart_and_only_the_reviewed_candidate_can_publish() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let root = Scratch::new();
-        let config = root.config(format);
-        let (node, data) = non_clean_fixture(&root, format, true);
-        let before = generation(&node);
-        let outbox = node
-            .runtime()
-            .block_on(node.materialize_admission())
-            .unwrap()
-            .snapshot()
-            .outbox
-            .len();
-        let path = root.0.join("credentials");
-        configure(&node, &path);
-        let server = Server::start(node, &path, 8, true, true);
-        let (base_command, base) = discovery(&server.client, &data);
-        let command = base_command.clone() + &format!("&resolution={PATH_HEX}:file:100755:file_0");
-        let original = resolve(&server.client, &command, &[("file_0", CONTENT)], false);
-        let (candidate, metadata) = extract(&original, data.clone());
-        assert_eq!(
-            candidate.binding.merge_base,
-            GitOid::from_hex(format, &base).unwrap()
-        );
-        assert!(metadata.contains("\"state\":\"resolved\""));
-        assert!(metadata.contains("\"choice\":\"file\""));
-        assert!(metadata.contains(&format!("\"result\":{{\"mode\":{},", 0o100755)));
-        assert_eq!(
-            resolve(&server.client, &command, &[("file_0", CONTENT)], true),
-            original
-        );
-        error(
-            &resolve(&server.client, &base_command, &[], false),
-            409,
-            "unresolved_conflicts",
-        );
-        let extra =
-            base_command + &format!("&resolution={PATH_HEX}:ours&resolution=636c65616e:delete");
-        error(
-            &resolve(&server.client, &extra, &[], false),
-            409,
-            "resolution_names_clean_path",
-        );
-        let wrong_base = command.replace(
-            &format!("merge_base={base}"),
-            &format!("merge_base={}", data.target_tip),
-        );
-        error(
-            &resolve(&server.client, &wrong_base, &[("file_0", CONTENT)], false),
-            409,
-            "resolution_base_mismatch",
-        );
-        assert_eq!(server.finish().accepted_sessions(), 8);
-        let node = reopen(&config);
-        assert_eq!(generation(&node), before + 1, "only PR opening published");
-        let blob = git_object_id(format, GitObjectKind::Blob, CONTENT);
-        assert!(node.read_git_object(blob).is_err());
-        assert!(node.read_git_object(candidate.binding.commit).is_err());
-        let no_attempt = LoopbackReceiveSession::authenticated(
-            FOREIGN,
-            IdempotencyKey::new(b"read-only-candidate-preparation".to_vec()).unwrap(),
-        );
-        assert!(matches!(
-            node.runtime()
-                .block_on(node.recover_transaction_in(&node.request_context(), &no_attempt))
-                .unwrap(),
-            RequestRecovery::KeyNotObserved
-        ));
-        let server = Server::start(node, &path, 8, true, true);
-        assert_eq!(
-            resolve(&server.client, &command, &[("file_0", CONTENT)], false),
-            original
-        );
-        accepted(&send(
-            &server.client,
-            "reviews/approve",
-            'b',
-            "approve-resolution",
-            &review_form(&candidate, 0),
-            Some(&candidate.bundle),
-            true,
-        ));
-        let altered = resolve(
-            &server.client,
-            &command,
-            &[("file_0", b"unreviewed bytes\n")],
-            true,
-        );
-        let (other, _) = extract(&altered, data.clone());
-        assert_ne!(other.binding.commit, candidate.binding.commit);
-        refused(&send(
-            &server.client,
-            "merge",
-            'c',
-            "different-resolution",
-            &merge_form(&other, &[REVIEWER]),
-            Some(&other.bundle),
-            false,
-        ));
-        let merge = merge_form(&candidate, &[REVIEWER]);
-        let published = send(
-            &server.client,
-            "merge",
-            'c',
-            "merge-resolution",
-            &merge,
-            Some(&candidate.bundle),
-            true,
-        );
-        accepted(&published);
-        assert_eq!(
-            send(
+        for method in ["merge-commit", "squash"] {
+            let root = Scratch::new();
+            let config = root.config(format);
+            let (node, data) = non_clean_fixture(&root, format, true);
+            let before = generation(&node);
+            let outbox = node
+                .runtime()
+                .block_on(node.materialize_admission())
+                .unwrap()
+                .snapshot()
+                .outbox
+                .len();
+            let path = root.0.join("credentials");
+            configure(&node, &path);
+            let server = Server::start(node, &path, 9, true, true);
+            let (base_command, base) = discovery(&server.client, &data);
+            let base_command = base_command + &format!("&method={method}");
+            let command = base_command.clone() + &format!("&resolution={PATH_HEX}:file:100755:file_0");
+            let original = resolve(&server.client, &command, &[("file_0", CONTENT)], false);
+            let (candidate, metadata) = extract(&original, data.clone());
+            assert_eq!(
+                candidate.binding.merge_base,
+                GitOid::from_hex(format, &base).unwrap()
+            );
+            assert!(metadata.contains("\"state\":\"resolved\""));
+            assert_eq!(text(&metadata, "method"), method);
+            assert_eq!(text(&metadata, "profile"), "path-merge-v1");
+            let inspected = inspect(&server.client, &candidate, 'd', false);
+            status(&inspected, 200);
+            let parents = if method == "squash" {
+                format!("\"parents\":[\"{}\"]", data.target_tip)
+            } else {
+                format!("\"parents\":[\"{}\",\"{}\"]", data.target_tip, data.source_tip)
+            };
+            assert!(inspected.body.contains(&parents), "{}", inspected.body);
+            assert!(inspected.body.contains("\"all_changed_paths\":true"));
+            assert!(inspected.body.contains("\"merge_authorized\":false"));
+            assert!(metadata.contains("\"choice\":\"file\""));
+            assert!(metadata.contains(&format!("\"result\":{{\"mode\":{},", 0o100755)));
+            assert_eq!(
+                resolve(&server.client, &command, &[("file_0", CONTENT)], true),
+                original
+            );
+            error(
+                &resolve(&server.client, &base_command, &[], false),
+                409,
+                "unresolved_conflicts",
+            );
+            let extra =
+                base_command + &format!("&resolution={PATH_HEX}:ours&resolution=636c65616e:delete");
+            error(
+                &resolve(&server.client, &extra, &[], false),
+                409,
+                "resolution_names_clean_path",
+            );
+            let wrong_base = command.replace(
+                &format!("merge_base={base}"),
+                &format!("merge_base={}", data.target_tip),
+            );
+            error(
+                &resolve(&server.client, &wrong_base, &[("file_0", CONTENT)], false),
+                409,
+                "resolution_base_mismatch",
+            );
+            assert_eq!(server.finish().accepted_sessions(), 9);
+            let node = reopen(&config);
+            assert_eq!(generation(&node), before + 1, "only PR opening published");
+            let blob = git_object_id(format, GitObjectKind::Blob, CONTENT);
+            assert!(node.read_git_object(blob).is_err());
+            assert!(node.read_git_object(candidate.binding.commit).is_err());
+            let no_attempt = LoopbackReceiveSession::authenticated(
+                FOREIGN,
+                IdempotencyKey::new(b"read-only-candidate-preparation".to_vec()).unwrap(),
+            );
+            assert!(matches!(
+                node.runtime()
+                    .block_on(node.recover_transaction_in(&node.request_context(), &no_attempt))
+                    .unwrap(),
+                RequestRecovery::KeyNotObserved
+            ));
+            let server = Server::start(node, &path, 8, true, true);
+            assert_eq!(
+                resolve(&server.client, &command, &[("file_0", CONTENT)], false),
+                original
+            );
+            accepted(&send(
+                &server.client,
+                "reviews/approve",
+                'b',
+                "approve-resolution",
+                &review_form(&candidate, 0),
+                Some(&candidate.bundle),
+                true,
+            ));
+            let altered = resolve(
+                &server.client,
+                &command,
+                &[("file_0", b"unreviewed bytes\n")],
+                true,
+            );
+            let (other, _) = extract(&altered, data.clone());
+            assert_ne!(other.binding.commit, candidate.binding.commit);
+            refused(&send(
+                &server.client,
+                "merge",
+                'c',
+                "different-resolution",
+                &(merge_form(&other, &[REVIEWER]) + &format!("&method={method}")),
+                Some(&other.bundle),
+                false,
+            ));
+            let merge = merge_form(&candidate, &[REVIEWER]) + &format!("&method={method}");
+            let published = send(
                 &server.client,
                 "merge",
                 'c',
                 "merge-resolution",
                 &merge,
-                None,
-                false
-            ),
-            published
-        );
-        let pr = get(&server.client, "/api/v1/pulls/1", 'a');
-        status(&pr, 200);
-        assert!(pr.body.contains("\"state\":\"merged\""));
-        error(
-            &resolve(&server.client, &command, &[("file_0", CONTENT)], false),
-            409,
-            "preparation_subject_moved",
-        );
-        server.finish();
-        let node = reopen(&config);
-        assert_eq!(
-            generation(&node),
-            before + 4,
-            "PR, vote, refused alternative, coupled merge; resolution reads never publish"
-        );
-        let selected = node
-            .runtime()
-            .block_on(node.materialize_admission())
-            .unwrap();
-        assert_eq!(
-            selected.snapshot().refs[&data.target_ref],
-            candidate.binding.commit
-        );
-        assert_eq!(selected.snapshot().refs[&data.source_ref], data.source_tip);
-        assert_eq!(selected.snapshot().outbox.len(), outbox + 3);
-        assert!(node.read_git_object(blob).is_ok());
-        assert!(node.read_git_object(candidate.binding.commit).is_ok());
-        node.shutdown().unwrap();
+                Some(&candidate.bundle),
+                true,
+            );
+            accepted(&published);
+            assert_eq!(text(&published.body, "method"), method);
+            assert_eq!(
+                send(
+                    &server.client,
+                    "merge",
+                    'c',
+                    "merge-resolution",
+                    &merge,
+                    None,
+                    false
+                ),
+                published
+            );
+            let pr = get(&server.client, "/api/v1/pulls/1", 'a');
+            status(&pr, 200);
+            assert!(pr.body.contains("\"state\":\"merged\""));
+            error(
+                &resolve(&server.client, &command, &[("file_0", CONTENT)], false),
+                409,
+                "preparation_subject_moved",
+            );
+            server.finish();
+            let node = reopen(&config);
+            assert_eq!(
+                generation(&node),
+                before + 4,
+                "PR, vote, refused alternative, coupled merge; resolution reads never publish"
+            );
+            let selected = node
+                .runtime()
+                .block_on(node.materialize_admission())
+                .unwrap();
+            assert_eq!(
+                selected.snapshot().refs[&data.target_ref],
+                candidate.binding.commit
+            );
+            assert_eq!(selected.snapshot().refs[&data.source_ref], data.source_tip);
+            assert_eq!(selected.snapshot().outbox.len(), outbox + 3);
+            assert!(node.read_git_object(blob).is_ok());
+            let stored = node.read_git_object(candidate.binding.commit).unwrap();
+            assert_eq!(git_object_id(format, GitObjectKind::Commit, stored.payload()), candidate.binding.commit);
+            let commit = std::str::from_utf8(stored.payload()).unwrap();
+            let actual_parents = commit.lines().filter_map(|line| line.strip_prefix("parent ")).collect::<Vec<_>>();
+            let target = data.target_tip.to_string();
+            let source = data.source_tip.to_string();
+            let expected_parents = if method == "squash" {
+                vec![target.as_str()]
+            } else {
+                vec![target.as_str(), source.as_str()]
+            };
+            assert_eq!(actual_parents, expected_parents);
+            node.shutdown().unwrap();
+        }
     }
 }
 

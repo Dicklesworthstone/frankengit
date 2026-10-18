@@ -24,6 +24,14 @@ page. Results contain no invented source excerpts. The page shows the queried
 index, observed index head, corpus size, excluded non-regular entries and actual
 reported index work/read counts. Those are not relabeled as live source scanning.
 
+An index can retain verified omissions for files above its per-file size limit.
+The browser displays these paths, source sizes and limits beside useful hits,
+and continues to show incomplete source coverage after the final matching page.
+Zero hits in such a result are not evidence that omitted files lack the term.
+The client validates the versioned omission inventory, shared corpus/result
+bounds and unchanged coverage across continuation and Initial channels before
+rendering it. Omission paths are rendered as text and never treated as commands.
+
 Open a result to fetch its complete file in snapshot-pinned bounded pages. Only
 regular/executable files are accepted; symlinks are not followed. Every page must
 retain the original path, blob, source snapshot, commit, root tree and mode. The

@@ -813,3 +813,6 @@ fn test_receipt_digest_binds_refusal_reason() {
         "different refusal reasons must not share a receipt digest"
     );
 }
+
+#[path = "forge_bisection/adversarial.rs"]
+mod adversarial;

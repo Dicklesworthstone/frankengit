@@ -1,4 +1,4 @@
-//! Event reads need a head and disclosure policy, not source/outbox projections.
+//! Forge reads need a head and disclosure policy, not source/outbox projections.
 //! All immutable coordinates below descend from ONE authenticated head read.
 
 use super::{ForgeEventReadRefusal, workspace_request_live};
@@ -14,9 +14,9 @@ use fgit_types::{
 };
 use fgit_wire::{WireLimits, visibility::RefVisibility};
 
-pub(super) struct EventReadBasis {
-    pub(super) basis: PublicationBasis,
-    pub(super) hidden_refs: RefVisibility,
+pub(in crate::treefs_workspace) struct EventReadBasis {
+    pub(in crate::treefs_workspace) basis: PublicationBasis,
+    pub(in crate::treefs_workspace) hidden_refs: RefVisibility,
 }
 
 #[derive(Clone, Copy)]
@@ -27,7 +27,7 @@ struct Binding {
 }
 
 impl OneNode {
-    pub(super) async fn event_read_basis_in(
+    pub(in crate::treefs_workspace) async fn event_read_basis_in(
         &self,
         request: &NodeRequestContext,
         expected_head: Option<RepositoryAuthorityHeadId>,

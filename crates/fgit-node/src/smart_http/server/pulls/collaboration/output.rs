@@ -7,6 +7,7 @@ use super::{
     request::{Command, Page},
 };
 use crate::OneNode;
+use fgit_admission::merge::native::NativeMergeMethod;
 use fgit_admission::merge::native::pull_request::reviews::ReviewPage;
 use fgit_authority::TerminalOutcome;
 use fgit_forge::event::review::{ReviewDecision, ReviewFreshness, ReviewSubject};
@@ -204,7 +205,7 @@ pub(super) fn mutation(
     tx: TxId,
     terminal: TerminalOutcome,
 ) -> String {
-    let (family, action, version, submitted, binding, reviewers) = match command {
+    let (family, action, version, submitted, binding, reviewers, method_field) = match command {
         Command::Review(command) => (
             "candidate_review_publication",
             decision(command.review.decision),
@@ -215,11 +216,13 @@ pub(super) fn mutation(
             &command.review.subject,
             command.candidate,
             "null".to_owned(),
+            String::new(),
         ),
         Command::Merge {
             subject,
             candidate,
             required,
+            method,
         } => (
             "reviewed_merge_publication",
             "merge",
@@ -234,6 +237,14 @@ pub(super) fn mutation(
                     .map(|id| quote(&id.to_string()))
                     .collect::<Vec<_>>()
                     .join(",")
+            ),
+            format!(
+                ",\"method\":{}",
+                quote(match method {
+                    NativeMergeMethod::MergeCommit => "merge-commit",
+                    NativeMergeMethod::Squash => "squash",
+                    NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
+                })
             ),
         ),
     };
@@ -260,7 +271,7 @@ pub(super) fn mutation(
     };
     format!(
         concat!(
-            "{{\"type\":{}, {},\"principal_id\":{},\"action\":{},\"review_expected_version\":{},",
+            "{{\"type\":{}, {},\"principal_id\":{},\"action\":{}{},\"review_expected_version\":{},",
             "\"subject\":{},\"merge_base\":{},\"candidate_commit\":{},\"required_reviewers\":{},",
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"refusal_code_point\":{},\"delivery_acknowledged\":null}}"
@@ -269,6 +280,7 @@ pub(super) fn mutation(
         scope(node),
         quote(&actor.to_string()),
         quote(action),
+        method_field,
         version,
         subject(submitted),
         quote(&binding.merge_base.to_string()),

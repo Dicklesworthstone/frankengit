@@ -101,7 +101,7 @@ impl OneNode {
             let manifest = data::Manifest::decode(&raw, root, &|| !workspace_request_live(request))
                 .map_err(Failure::Index)?;
             let source = manifest.source();
-            self.validate_symbol_source(source, body, reference)?;
+            self.validate_symbol_source(&manifest, body, reference)?;
             self.verify_symbol_directory_in(
                 request,
                 body,

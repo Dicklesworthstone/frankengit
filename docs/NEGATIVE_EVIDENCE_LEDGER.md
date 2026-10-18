@@ -696,3 +696,53 @@ the same fetch. The d1a45802 row made E2E-030 (fetch < clone) fail.
 **Revisit conditions:** a planner that prices distinct client bases by the
 whole object the client must store, or a harness metric for client storage
 growth.
+
+### NEG-035 — a fresh index is not a faster single ancestry query (x2mv.4.36)
+
+**Hypothesis.** Dense parent adjacency and generation pruning justify building
+a new commit-ancestry index for every single fast-forward ancestry check.
+
+**Disposition: REFUTED for the recorded cold synthetic workloads.** At
+`0f3dea1ef5f8262b01d7f36480f19a973c512ffb` (`fgit-diff` subtree
+`ddcd54e58c79f2d51816ffa06c6b6f57d3da9795`), seven samples per variant on
+100,000-commit graphs measured these p50 times, including index construction
+and teardown:
+
+| Graph / ancestry answer | Exact parent-walk baseline | Fresh index + query | Candidate/baseline |
+|---|---:|---:|---:|
+| Chain / true | 46.199 ms | 147.591 ms | 3.195× |
+| Chain / false | 10.474 ms | 112.967 ms | 10.786× |
+| Merge-heavy / true | 12.461 ms | 122.505 ms | 9.831× |
+| Merge-heavy / false | 60.963 ms | 147.418 ms | 2.418× |
+
+**Mechanism and scope.** The walk can stop early or visit only the descendant
+history. A fresh index discovers and validates the complete union closure,
+builds dense adjacency, detects cycles, and computes every generation before
+its first query. Reused-index negative queries needed only one visited commit
+and zero examined edges, but that excludes the construction cost. No persistent
+production index exists to amortize it across requests. The ancestry baseline
+validates endpoints and walked parents; this is not an equal-preparation or
+end-to-end native admission comparison. Seven shared-host samples and their
+A-A controls are descriptive evidence, not a tail-latency guarantee.
+
+**Consequence.** Native fast-forward admission retains its existing exact,
+checkpointed walk after complete native closure verification. Merge and squash
+admission share a request-owned index for two ancestry queries, without a
+performance claim for that integration. A narrower measured gain remains:
+cold all-best merge-base p50 improved from 335.261 to 151.316 ms on the chain
+and from 435.700 to 140.133 ms on the merge-heavy graph. Every benchmark answer
+matched its oracle; this row records a performance loss, not semantic drift.
+
+**Evidence.** The full
+[raw campaign](evidence/ancestry-index-2026-10-12.ndjson) retains all 168 samples,
+source/toolchain/host provenance, A-A arms, p95/p99 summaries, and the successful
+terminal denominator. [Implementation and reproduction details](COMMIT_ANCESTRY_INDEX.md)
+identify the in-memory inputs, validation scopes, exclusions, and unimplemented
+production cache/CLI evidence. CPU time and total memory were not measured.
+
+**Revisit when** an independently source-bound reusable index, an incremental
+publication-maintained index, or a lower-cost exact construction algorithm is
+available. Measure native fast-forward admission with current object
+availability, cancellation, and all existing verification work included;
+retain raw baseline/candidate/A-A samples and include cold misses as well as
+cache hits. A warm-only microbenchmark does not discharge this condition.

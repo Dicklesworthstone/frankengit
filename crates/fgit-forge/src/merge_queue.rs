@@ -33,6 +33,9 @@ use crate::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, NativeMerge};
 use crate::merge::{EffectRoots, MergedTree, RecordFrame, RefIntent, root_of};
 use crate::{ForgeRefusal, MergeSide, StaleTips};
 
+mod validation;
+use validation::invalid_queue;
+
 /// Synthetic queue reference namespace root.
 pub const QUEUE_REF_PREFIX: &[u8] = b"refs/queue/";
 
@@ -320,6 +323,7 @@ pub struct QueueBatchReceipt {
 impl QueueBatchReceipt {
     /// Computes the cryptographic digest attesting to this receipt.
     pub fn receipt_digest(&self) -> Result<Digest, ForgeRefusal> {
+        self.validate()?;
         let mut encoder = Encoder::new();
         encoder
             .write_bytes("domain", b"frankengit/merge-queue-receipt/v1")
@@ -345,6 +349,7 @@ impl QueueBatchReceipt {
         observed_target_ref: &RefName,
         observed_base_tip: GitOid,
     ) -> Result<(), ForgeRefusal> {
+        self.validate()?;
         if &self.target_ref != observed_target_ref || self.base_tip != observed_base_tip {
             return Err(ForgeRefusal::MergeStale {
                 reference: MergeSide::Target,
@@ -433,6 +438,7 @@ impl SpeculativeBatchPlan {
         candidate_tips: &BTreeMap<PullRequestNumber, GitOid>,
         observed_workspace_epoch: WorkspaceEpoch,
     ) -> Result<(), ForgeRefusal> {
+        self.validate()?;
         if observed_target_tip != self.initial_target_tip {
             return Err(ForgeRefusal::MergeStale {
                 reference: MergeSide::Target,
@@ -446,7 +452,7 @@ impl SpeculativeBatchPlan {
             let observed_candidate = candidate_tips
                 .get(&step.pull_request)
                 .copied()
-                .unwrap_or(step.candidate_tip);
+                .ok_or_else(|| invalid_queue("speculative_plan.candidate_observation"))?;
             if observed_candidate != step.candidate_tip {
                 return Err(ForgeRefusal::MergeStale {
                     reference: MergeSide::Source,
@@ -537,15 +543,7 @@ pub fn assemble_batch_landing_package(
     existing_queue_head_tip: GitOid,
     created_objects: Vec<GitOid>,
 ) -> Result<BatchLandingPackage, ForgeRefusal> {
-    if plan.steps.is_empty() {
-        return Err(ForgeRefusal::BodyUnrepresentable {
-            cause: Box::new(CodecRefusal::ValueUnrepresentable {
-                field: "speculative_plan.steps",
-                observed: 0,
-                limit: 1,
-            }),
-        });
-    }
+    plan.validate()?;
 
     let target_ref_intent = RefIntent {
         name: plan.target_ref.as_bytes().to_vec(),

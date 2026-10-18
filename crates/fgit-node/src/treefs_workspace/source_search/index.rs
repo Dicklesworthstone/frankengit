@@ -104,8 +104,9 @@ impl OneNode {
         }
     }
 
-    /// Build and activate an index of EVERY regular file in one visible ref's
-    /// verified tree. Trusted-local operator API: not a remote read permission.
+    /// Enumerate every regular file in one visible ref's verified tree and
+    /// activate its index, recording verified over-limit files as omissions.
+    /// Trusted-local operator API: not a remote read permission.
     /// No caller-supplied documents, source stamps, root keys or payloads enter.
     /// The predecessor is explicit; None requires an uninitialized index.
     ///
@@ -169,7 +170,7 @@ impl OneNode {
         let query = InventoryRequest(
             SourceQuery::new(b"index", SearchCase::Exact, &[]).map_err(search_error)?,
         );
-        let (head, forge_position_root, inventory) = match self.object_format {
+        let (head, forge_position_root, mut inventory) = match self.object_format {
             Format::Sha1 => {
                 self.select_source_local_format::<Sha1, _>(
                     request,
@@ -207,10 +208,16 @@ impl OneNode {
         let parts = segments(source.namespace, &inventory.documents, &mut request_live)
             .map_err(index_error)?;
         let excluded = inventory.source.non_regular_entries;
+        let omissions = std::mem::take(&mut inventory.omissions);
         drop(inventory); // Source file buffers are not retained during async staging.
-        let prepared =
-            PreparedLexicalIndex::new(source.clone(), parts, excluded, &mut request_live)
-                .map_err(index_error)?;
+        let prepared = PreparedLexicalIndex::with_omissions(
+            source.clone(),
+            parts,
+            excluded,
+            omissions,
+            &mut request_live,
+        )
+        .map_err(index_error)?;
         let store = LexicalIndexStore::new(&self.authority, source.namespace, reference.clone())
             .map_err(index_error)?;
         let candidate = store

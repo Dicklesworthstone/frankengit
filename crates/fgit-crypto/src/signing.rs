@@ -29,6 +29,12 @@
 //! leaves the trust decision written at the call site where a reviewer can see
 //! it.
 
+mod dsse;
+
+pub use dsse::{
+    DsseSignatureError, MAX_DSSE_PAYLOAD_BYTES, MAX_DSSE_PAYLOAD_TYPE_BYTES, verify_dsse_ed25519,
+};
+
 use core::fmt;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};

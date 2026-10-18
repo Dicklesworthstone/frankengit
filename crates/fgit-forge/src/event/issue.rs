@@ -10,6 +10,8 @@ pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_LABELS: usize = 32;
 pub const MAX_LABEL_BYTES: usize = 64;
+/// Assignment is a bounded metadata relation, never a grant of repository access.
+pub const MAX_ASSIGNEES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IssueState {
@@ -38,6 +40,14 @@ pub enum IssueAction {
     Reopen,
     Comment {
         body: String,
+    },
+    /// Add the named principals, preserving all other assignments.
+    Assign {
+        assignees: Vec<PrincipalId>,
+    },
+    /// Remove only the named principals, preserving all other assignments.
+    Unassign {
+        assignees: Vec<PrincipalId>,
     },
 }
 impl IssueAction {
@@ -75,6 +85,12 @@ impl IssueAction {
                 Ok(())
             }
             Self::Close | Self::Reopen => Ok(()),
+            Self::Assign { assignees } | Self::Unassign { assignees } => {
+                if assignees.is_empty() {
+                    return Err(invalid_native("issue.empty_assignees"));
+                }
+                validate_assignees(assignees)
+            }
         }
     }
     #[must_use]
@@ -85,6 +101,8 @@ impl IssueAction {
             Self::Close => "close",
             Self::Reopen => "reopen",
             Self::Comment { .. } => "comment",
+            Self::Assign { .. } => "assign",
+            Self::Unassign { .. } => "unassign",
         }
     }
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
@@ -95,6 +113,8 @@ impl IssueAction {
             Self::Close => 3,
             Self::Reopen => 4,
             Self::Comment { .. } => 5,
+            Self::Assign { .. } => 6,
+            Self::Unassign { .. } => 7,
         });
         match self {
             Self::Open {
@@ -119,6 +139,12 @@ impl IssueAction {
                 }
             }
             Self::Comment { body } => out.write_bytes("issue.comment", body.as_bytes())?,
+            Self::Assign { assignees } | Self::Unassign { assignees } => {
+                out.write_sequence("issue.assignees", assignees, |out, assignee| {
+                    out.write_opaque_id(assignee.as_bytes());
+                    Ok(())
+                })?;
+            }
             Self::Close | Self::Reopen => {}
         }
         Ok(())
@@ -152,6 +178,12 @@ impl IssueAction {
             4 => Self::Reopen,
             5 => Self::Comment {
                 body: text(input, "issue.comment", MAX_BODY_BYTES)?,
+            },
+            6 => Self::Assign {
+                assignees: read_assignees(input)?,
+            },
+            7 => Self::Unassign {
+                assignees: read_assignees(input)?,
             },
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
@@ -192,6 +224,34 @@ fn validate_labels(labels: &[String]) -> Result<(), CodecRefusal> {
         return Err(invalid_native("issue.labels"));
     }
     Ok(())
+}
+/// Validate a complete derived assignment set. Empty is a valid unassigned
+/// snapshot; commands separately require at least one explicit principal.
+pub fn validate_assignees(assignees: &[PrincipalId]) -> Result<(), CodecRefusal> {
+    if assignees.len() > MAX_ASSIGNEES || assignees.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(invalid_native("issue.assignees"));
+    }
+    Ok(())
+}
+fn read_assignees(input: &mut Decoder<'_>) -> Result<Vec<PrincipalId>, CodecRefusal> {
+    // Inspect the count before the generic sequence decoder reserves storage.
+    // Cloning preserves the actual decoder's nesting and consumed-byte state.
+    let declared = u64::from(input.clone().read_scalar::<u32>("issue.assignees")?);
+    let limit = input.limits().elements.min(MAX_ASSIGNEES as u64);
+    if declared > limit {
+        return Err(CodecRefusal::CountBoundExceeded {
+            field: "issue.assignees",
+            observed: declared,
+            limit,
+        });
+    }
+    let assignees = input.read_sequence("issue.assignees", |input| {
+        Ok(PrincipalId::from_bytes(
+            input.read_opaque_id("issue.assignee")?,
+        ))
+    })?;
+    validate_assignees(&assignees)?;
+    Ok(assignees)
 }
 fn text(
     input: &mut Decoder<'_>,
@@ -288,6 +348,9 @@ pub struct IssueSnapshot {
     pub title: String,
     pub body: String,
     pub labels: Vec<String>,
+    /// Sorted unique principal IDs. This relation neither authenticates the
+    /// principal nor changes membership, authorization, or notification policy.
+    pub assignees: Vec<PrincipalId>,
     pub state: IssueState,
     pub opened_by: PrincipalId,
     pub last_actor: PrincipalId,
@@ -327,6 +390,7 @@ pub fn apply_event(
             title: title.clone(),
             body: body.clone(),
             labels: labels.clone(),
+            assignees: Vec::new(),
             state: IssueState::Open,
             opened_by: change.actor,
             last_actor: change.actor,
@@ -336,6 +400,7 @@ pub fn apply_event(
     if previous.number != number || !previous.version.is_immediate_predecessor_of(event.version) {
         return Err(RefusalCode::EvidenceStale);
     }
+    validate_assignees(&previous.assignees).map_err(|_| RefusalCode::EvidenceInvalid)?;
     let mut next = previous.clone();
     match &change.action {
         IssueAction::Open { .. } => return Err(RefusalCode::ProtectedRefTransitionDenied),
@@ -362,6 +427,25 @@ pub fn apply_event(
                 .comments
                 .checked_add(1)
                 .ok_or(RefusalCode::ResourceBudgetExceeded)?;
+        }
+        IssueAction::Assign { assignees } => {
+            // Check the final cardinality before retaining the combined set.
+            let added = assignees
+                .iter()
+                .filter(|principal| previous.assignees.binary_search(principal).is_err())
+                .count();
+            if previous.assignees.len() + added > MAX_ASSIGNEES {
+                return Err(RefusalCode::ResourceBudgetExceeded);
+            }
+            for principal in assignees {
+                if let Err(index) = next.assignees.binary_search(principal) {
+                    next.assignees.insert(index, *principal);
+                }
+            }
+        }
+        IssueAction::Unassign { assignees } => {
+            next.assignees
+                .retain(|principal| assignees.binary_search(principal).is_err());
         }
     }
     next.version = event.version;
@@ -463,6 +547,7 @@ impl CompiledIssueQuery {
         validate_title(&issue.title)?;
         validate_body(&issue.body)?;
         validate_labels(&issue.labels)?;
+        validate_assignees(&issue.assignees)?;
         if issue.comments >= issue.version.get() {
             return Err(invalid_native("issue.comments"));
         }
@@ -518,6 +603,7 @@ mod query_tests {
             title: "Fix HTTP".into(),
             body: "café\nbody needle".into(),
             labels: vec!["bug".into(), "urgent".into()],
+            assignees: Vec::new(),
             state: IssueState::Open,
             opened_by: PrincipalId::from_bytes([1; 16]),
             last_actor: PrincipalId::from_bytes([2; 16]),

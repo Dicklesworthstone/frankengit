@@ -1,0 +1,91 @@
+# Local source import size profiles
+
+`fg import` uses bounded disk-backed quarantine for reachable native object
+bodies. The complete required-kind graph validates before the first fabric
+placement. Exact spool bytes are re-identified before immutable placement;
+mutable source paths are never reread after validation. Ref publication still
+uses the original sealed admission and authority-head compare-and-swap path.
+
+The default reachable-body ceiling remains **512 MiB**. A trusted local operator
+may explicitly choose a ceiling from 1 to 16,384 MiB:
+
+```sh
+fg import ./fgit-data \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222 \
+  33333333333333333333333333333333 \
+  migration-20261016 ./source.git --max-expanded-mib 1024 --json
+```
+
+The principal and idempotency key have their existing trusted-local semantics.
+The byte limit does not become part of transaction identity: equivalent source
+refs retried under another sufficient profile resolve the same terminal result.
+A smaller limit can refuse before publication and leaves canonical refs unchanged.
+An interruption during publication remains ambiguous; recover using `fg outcome`
+or the original source and key, rather than assuming rollback.
+
+The profile reserves one finite deadline/poll/cost allowance before source I/O,
+using the existing receive work-scaling policy. `--timeout-secs` is a strict
+wall-clock ceiling, not a base that the larger profile extends. No phase mints a
+replacement context. The library exposes `import_request_context_with_byte_limit`
+and `import_loose_git_directory_with_byte_limit_durable_in`; callers pass the same
+byte ceiling to both, and smaller or cancelled caller contexts are still honored.
+
+Packed sources now use private disk custody too. Each fully verified pack
+retains offsets and native types instead of a map of resident object bodies.
+The decoder and resolver cache each retain their existing **128 MiB per-pack**
+envelopes; cumulative inflated and retained native bytes are bounded by the
+selected import profile. One reconstruction-work witness spans every pack,
+so opening another pack never renews its delta-work allowance. Every decoded
+member counts, including members not reachable from the selected refs.
+
+Independent limits remain: **64 MiB per input pack**, **128 MiB total compressed
+pack input**, 64 MiB of indexes, the existing per-object limit, and finite
+object, ref and graph-edge counts. Consequently a set of sufficiently compressed
+packs may exceed 128 MiB in total native bodies without increasing the resident
+cache allowance. A single oversized pack remains unsupported. The 16 GiB ceiling
+is an operator bound, not a tested repository-size guarantee.
+
+Quarantine uses one reachable-closure file plus at most one private file per
+loaded pack (the existing maximum is 128 packs), never one file per object.
+Packed custody closes before placement starts. On Unix each exclusive 0600 file
+is unlinked before payload writes; the owned descriptor survives until cleanup.
+An interruption between creation and unlink can leave an empty name. Other
+platforms remove exclusive filenames on normal cleanup without claiming crash
+cleanup or isolation from a malicious local host. Scratch custody is not a
+backup, resumable import or durability receipt. Disk exhaustion, damaged retained
+bytes and failed cleanup refuse rather than publishing partially verified data.
+
+## Executable coverage
+
+```sh
+cargo test -p fgit-node --lib loose_import:: -- --test-threads=2
+cargo test -p fgit-cli --bin fg import_command:: -- --test-threads=2
+cargo test -p fgit-node --test large_loose_import -- --test-threads=1
+FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/import_profiles.sh
+FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/import_recovery.sh
+```
+
+The large integration target contains a 288 MiB default-profile round trip and
+an explicit-profile 576 MiB round trip. Both use real durable admission, remove
+the source directory, reopen the node, and re-verify exact native objects and refs.
+The binary suite pairs a 1 MiB refusal with a 4 MiB admission for the same 2 MiB
+source in SHA-1 and SHA-256, then checks larger-profile and default-profile replay
+and source-free outcome recovery. Test presence is not a completed batch gate;
+executed results remain revision-bound.
+
+## Packed-source regression campaign
+
+```sh
+FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/packed_import_profiles.sh
+FG_BIN=/path/to/fg FG_PACKED_LARGE=1 bash scripts/e2e/suites/admission/packed_import_profiles.sh
+```
+
+The default campaign constructs three native packs in each hash format and tests
+an insufficient limit, admitted refs, source removal, cold integrity and original
+key recovery. The opt-in case contains 144 MiB of blob payload in three compressed
+packs. An optional `FG_PACKED_BASELINE_BIN` records the former implementation's
+128 MiB refusal using the identical source. This script's presence is not evidence
+that it has run. The module tests independently exercise disk-custody reuse after
+source deletion, complete-pack charging, per-pack bounds, a corrupt later pack,
+and preservation of operation-wide reconstruction work.

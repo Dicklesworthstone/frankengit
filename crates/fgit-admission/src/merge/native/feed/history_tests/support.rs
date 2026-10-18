@@ -266,6 +266,27 @@ impl Fixture {
             publication.head().clone(),
         );
     }
+    pub(super) fn checkpoint(&mut self) -> ImmutableKey {
+        let HeadRead::Present(receipt) = self.store.backend.read_head(&self.key).unwrap() else {
+            panic!("fixture head absent")
+        };
+        let (basis, capsule_key) =
+            storage::checkpoint_test_support::stage_checkpoint(&self.store.backend, &self.basis);
+        assert!(matches!(
+            self.store
+                .backend
+                .compare_exchange_head(
+                    &self.key,
+                    receipt.token(),
+                    basis.generation(),
+                    &encode_body(basis.body()).unwrap(),
+                )
+                .unwrap(),
+            CasOutcome::Committed(_),
+        ));
+        self.basis = basis;
+        capsule_key
+    }
     pub(super) fn page(
         &self,
         after: Option<ForgeEventCursor>,

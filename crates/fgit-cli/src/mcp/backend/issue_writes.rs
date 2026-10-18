@@ -6,8 +6,9 @@ use super::mutations as common;
 use super::{NodeTools, require_fields, string};
 use fgit_forge::{
     IssueNumber,
-    event::issue::{IssueAction, IssueCommand, IssueEdit, MAX_LABELS},
+    event::issue::{IssueAction, IssueCommand, IssueEdit, MAX_ASSIGNEES, MAX_LABELS},
 };
+use fgit_types::PrincipalId;
 
 pub(super) fn is_tool(name: &str) -> bool {
     matches!(
@@ -17,6 +18,8 @@ pub(super) fn is_tool(name: &str) -> bool {
             | "frankengit_issue_close"
             | "frankengit_issue_reopen"
             | "frankengit_issue_comment"
+            | "frankengit_issue_assign"
+            | "frankengit_issue_unassign"
     )
 }
 pub(super) fn tools() -> Vec<Tool> {
@@ -26,11 +29,35 @@ pub(super) fn tools() -> Vec<Tool> {
         ("frankengit_issue_close", "Close an issue at an exact positive version. A stale version is a canonical refusal, never a latest-version retry."),
         ("frankengit_issue_reopen", "Reopen a closed issue at an exact positive version. Requires the original stable key on retry."),
         ("frankengit_issue_comment", "Append literal comment text at an exact positive issue version. Replaying the identical command and key never duplicates the comment."),
+        ("frankengit_issue_assign", "Add 1..16 principal IDs to an issue's metadata assignments at an exact version, preserving other assignees. Assignment grants no access or membership."),
+        ("frankengit_issue_unassign", "Remove only the named 1..16 principal IDs from issue metadata at an exact version. Retry the identical command and original key after an uncertain response."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }
 fn schema(name: &str) -> Value {
     let mut properties = common::base_properties();
     let mut required = vec!["number", "expected_version", "idempotency_key"];
+    if matches!(
+        name,
+        "frankengit_issue_assign" | "frankengit_issue_unassign"
+    ) {
+        properties.insert(
+            "assignees".into(),
+            object([
+                ("type", text("array")),
+                ("minItems", json::number(1)),
+                ("maxItems", json::number(MAX_ASSIGNEES as u64)),
+                ("uniqueItems", Value::Bool(true)),
+                (
+                    "items",
+                    object([
+                        ("type", text("string")),
+                        ("pattern", text("^[0-9a-f]{32}$")),
+                    ]),
+                ),
+            ]),
+        );
+        required.push("assignees");
+    }
     if matches!(name, "frankengit_issue_open" | "frankengit_issue_edit") {
         properties.insert("title".into(), common::text_schema(256));
         properties.insert(
@@ -86,6 +113,28 @@ fn labels(args: &Object) -> Result<Option<Vec<String>>, ToolError> {
     }
     Ok(Some(labels))
 }
+fn assignees(args: &Object) -> Result<Vec<PrincipalId>, ToolError> {
+    let Some(Value::Array(values)) = args.get("assignees") else {
+        return Err(ToolError::invalid("assignees_array_required"));
+    };
+    if values.is_empty() || values.len() > MAX_ASSIGNEES {
+        return Err(ToolError::invalid("invalid_assignee_count"));
+    }
+    let mut ids = values
+        .iter()
+        .map(|value| {
+            value
+                .text()
+                .and_then(|text| PrincipalId::from_hex(text).ok())
+                .ok_or(ToolError::invalid("invalid_assignee"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.sort();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ToolError::invalid("duplicate_assignee"));
+    }
+    Ok(ids)
+}
 pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError> {
     if !is_tool(name) {
         return Err(ToolError::invalid("tool_not_granted"));
@@ -100,6 +149,9 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
             "labels",
         ],
         "frankengit_issue_comment" => &["number", "expected_version", "idempotency_key", "body"],
+        "frankengit_issue_assign" | "frankengit_issue_unassign" => {
+            &["number", "expected_version", "idempotency_key", "assignees"]
+        }
         _ => &["number", "expected_version", "idempotency_key"],
     };
     require_fields(args, allowed)?;
@@ -121,6 +173,12 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
         "frankengit_issue_reopen" => IssueAction::Reopen,
         "frankengit_issue_comment" => IssueAction::Comment {
             body: common::body(args, "body")?.ok_or(ToolError::invalid("body_required"))?,
+        },
+        "frankengit_issue_assign" => IssueAction::Assign {
+            assignees: assignees(args)?,
+        },
+        "frankengit_issue_unassign" => IssueAction::Unassign {
+            assignees: assignees(args)?,
         },
         _ => return Err(ToolError::invalid("tool_not_granted")),
     };
@@ -241,5 +299,60 @@ mod tests {
         assert!(parse("frankengit_issue_edit", &args).is_err());
         args.insert("labels".into(), Value::Array(vec![Value::Null]));
         assert!(parse("frankengit_issue_edit", &args).is_err());
+    }
+    #[test]
+    fn assignment_tools_bound_and_canonicalize_metadata_without_accepting_authority() {
+        let a = text("11".repeat(16));
+        let b = text("22".repeat(16));
+        for name in ["frankengit_issue_assign", "frankengit_issue_unassign"] {
+            let mut args = base("1");
+            assert!(parse(name, &args).is_err());
+            args.insert("assignees".into(), Value::Array(vec![b.clone(), a.clone()]));
+            let command = parse(name, &args).unwrap();
+            let (IssueAction::Assign { assignees } | IssueAction::Unassign { assignees }) =
+                command.action
+            else {
+                panic!("assignment");
+            };
+            assert_eq!(
+                assignees,
+                vec![
+                    PrincipalId::from_bytes([0x11; 16]),
+                    PrincipalId::from_bytes([0x22; 16])
+                ]
+            );
+            for field in [
+                "principal",
+                "repository",
+                "storage",
+                "policy",
+                "title",
+                "body",
+                "labels",
+            ] {
+                let mut forged = args.clone();
+                forged.insert(field.into(), text("authority"));
+                assert!(parse(name, &forged).is_err());
+            }
+            for invalid in [
+                Value::Null,
+                a.clone(),
+                Value::Array(vec![]),
+                Value::Array(vec![a.clone(), a.clone()]),
+                Value::Array(vec![text("user")]),
+                Value::Array(vec![text("ABCDEF0123456789ABCDEF0123456789")]),
+            ] {
+                args.insert("assignees".into(), invalid);
+                assert!(parse(name, &args).is_err());
+            }
+            let mut maximum: Vec<_> = (1..=16u8)
+                .map(|seed| text(format!("{seed:02x}").repeat(16)))
+                .collect();
+            args.insert("assignees".into(), Value::Array(maximum.clone()));
+            assert!(parse(name, &args).is_ok());
+            maximum.push(text("ff".repeat(16)));
+            args.insert("assignees".into(), Value::Array(maximum));
+            assert!(parse(name, &args).is_err());
+        }
     }
 }

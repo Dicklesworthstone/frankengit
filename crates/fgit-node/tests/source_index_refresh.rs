@@ -276,10 +276,6 @@ fn source_and_index_resource_limits_apply_to_reused_rows_without_partial_publica
             ..Default::default()
         },
         SearchLimits {
-            max_file_bytes: 1,
-            ..Default::default()
-        },
-        SearchLimits {
             max_total_bytes: report.indexed_source_bytes - 1,
             ..Default::default()
         },

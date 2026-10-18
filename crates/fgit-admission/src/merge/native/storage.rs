@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 
 use fgit_authority::{AsyncAuthorityStore, ImmutableKey, ImmutableRead, PutOutcome};
-use fgit_chronicle::{PublicationBasis, verify_pair};
+use fgit_chronicle::{HistoryStep, HistoryStepRefusal, PublicationBasis, read_history_step_async};
 use fgit_codec::canonical_state::{
     CanonicalForgePositionState, ForgePositionStateEntry, MAX_FORGE_POSITION_STATE_ENTRIES,
 };
-use fgit_codec::{CanonicalBody, CryptoBodyIdentity, DecodeLimits, decode_body, encode_body};
+use fgit_codec::{CanonicalBody, DecodeLimits, decode_body, encode_body};
 use fgit_forge::aggregate::{AggregateHead, AggregateId, AggregateVersion};
 use fgit_forge::event::pull_request::PullRequestAction;
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload};
@@ -32,6 +32,9 @@ const POSITION_LIMITS: DecodeLimits = DecodeLimits {
     elements: MAX_FORGE_POSITION_STATE_ENTRIES as u64,
     ..DecodeLimits::DEFAULT
 };
+
+#[cfg(test)]
+pub(super) mod checkpoint_test_support;
 
 pub(super) async fn aggregate_refusal<S: AsyncAuthorityStore + ?Sized>(
     store: &S,
@@ -131,25 +134,28 @@ pub async fn load_forge_positions<S: AsyncAuthorityStore + ?Sized>(
     let mut successor = basis.body().clone();
     let mut roots = Vec::new();
     let mut walked = 0;
-    while let Some(batch_id) = successor.decision_tail_id {
-        if walked >= MAX_BOOTSTRAP_BATCHES {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        walked += 1;
-        let predecessor_id = successor
-            .predecessor_head_id
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        let predecessor =
-            fgit_authority::read_authority_head_body_async(store, cx, predecessor_id).await?;
-        let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id).await?;
-        verify_pair(
-            &CryptoBodyIdentity,
-            &PublicationBasis::new(predecessor_id, predecessor.clone()),
-            &batch,
+    loop {
+        let (predecessor, batch) = match read_history_step_async(
+            store,
+            cx,
             &successor,
+            &mut walked,
+            MAX_BOOTSTRAP_BATCHES,
+            &|| false,
         )
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-        if predecessor.forge_position_root != selected_root
+        .await
+        .map_err(history_step_refusal)?
+        {
+            HistoryStep::Genesis => break,
+            HistoryStep::Checkpoint { predecessor } => {
+                // A verified checkpoint carries the exact same roots and
+                // contributes no events. It still consumes one history step.
+                successor = predecessor.body().clone();
+                continue;
+            }
+            HistoryStep::Decision { predecessor, batch } => (predecessor, batch),
+        };
+        if predecessor.body().forge_position_root != selected_root
             || successor.forge_position_root != selected_root
         {
             return Err(unavailable(RefusalCode::EvidenceMissing));
@@ -163,7 +169,7 @@ pub async fn load_forge_positions<S: AsyncAuthorityStore + ?Sized>(
             }
             roots.push(record.forge_event_batch_root);
         }
-        successor = predecessor;
+        successor = predecessor.body().clone();
     }
     if selected_root != legacy_genesis_root(repository, b"forge-position")
         || successor.predecessor_head_id.is_some()
@@ -185,6 +191,23 @@ pub async fn load_forge_positions<S: AsyncAuthorityStore + ?Sized>(
         state = advance_positions(&state, &events, event_root)?;
     }
     Ok(state)
+}
+
+/// Preserve native store refusals while keeping history structure, resource,
+/// and cancellation failures in the admission reader's existing vocabulary.
+pub(super) fn history_step_refusal(error: HistoryStepRefusal) -> AdmissionError {
+    match error {
+        HistoryStepRefusal::Cancelled => unavailable(RefusalCode::CancellationInProgress),
+        HistoryStepRefusal::BoundExceeded { .. } => {
+            unavailable(RefusalCode::ResourceBudgetExceeded)
+        }
+        HistoryStepRefusal::Authority(error) => AdmissionError::Authority(error),
+        HistoryStepRefusal::Body(error) => AdmissionError::Outcome(error),
+        HistoryStepRefusal::CapsuleAbsent(_) => unavailable(RefusalCode::EvidenceMissing),
+        HistoryStepRefusal::UnboundHead
+        | HistoryStepRefusal::Checkpoint(_)
+        | HistoryStepRefusal::Decision(_) => unavailable(RefusalCode::EvidenceInvalid),
+    }
 }
 
 pub(super) fn advance_positions(

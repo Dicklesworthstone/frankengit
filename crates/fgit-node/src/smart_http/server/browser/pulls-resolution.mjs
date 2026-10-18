@@ -3,7 +3,7 @@
 // and returned identities before passing the actual bundle to native inspection.
 import { keys, record, integer, oid, form, utf8, hex, unhex, fail, copy, SUBJECT_FIELDS, subject, matchSubject } from './pulls-core.mjs';
 import { FORM_LIMIT } from './pulls-core.mjs';
-import { preparationCommand, joinBytes, findBytes, checkedPath } from './pulls-candidate.mjs';
+import { preparationCommand, mergeMethod, joinBytes, findBytes, checkedPath } from './pulls-candidate.mjs';
 export const RESOLUTION_FILE_LIMIT = 1024 * 1024;
 export const RESOLUTION_CONTENT_LIMIT = 16 * 1024 * 1024;
 export const RESOLUTION_UPLOAD_LIMIT = RESOLUTION_CONTENT_LIMIT + FORM_LIMIT + 64 * 1024;
@@ -54,10 +54,11 @@ async function blobId(bytes, algorithm, crypto) {
 // Deterministic part names are labels, never repository paths or local filenames.
 // All bytes are copied before the first await; subsequent editor/file mutations
 // cannot change the submitted content or its expected result hash.
-export async function resolutionUpload(report, fields, metadata, choices, crypto) {
+export async function resolutionUpload(report, fields, metadata, choices, crypto, method = 'merge-commit') {
   keys(fields, SUBJECT_FIELDS);
   const selected = subject(fields), rows = conflictRows(report, selected);
-  const command = preparationCommand(selected, metadata);
+  if (mergeMethod(report.method === undefined ? 'merge-commit' : report.method) !== mergeMethod(method)) fail('Conflict preparation method changed.');
+  const command = preparationCommand(selected, metadata, method);
   command.merge_base = oid(report.merge_base, selected.object_format);
   if (!Array.isArray(choices) || choices.length !== rows.length) fail('Choose one resolution for every conflicted path.');
   const byPath = new Map();
@@ -115,9 +116,10 @@ export async function resolutionUpload(report, fields, metadata, choices, crypto
     bytes = joinBytes(...parts); contentType = `multipart/form-data; boundary=${boundary}`;
   }
   for (const file of files) expected[file.index].result.oid = await blobId(file.bytes, selected.object_format, crypto);
-  return { bytes, contentType, expected: { fields: selected, number: report.subject.pull_request, merge_base: command.merge_base, rows: expected } };
+  return { bytes, contentType, expected: { fields: selected, number: report.subject.pull_request, method, merge_base: command.merge_base, rows: expected } };
 }
 export function verifyResolutionResult(metadata, expected) {
+  if (mergeMethod(metadata.method === undefined ? 'merge-commit' : metadata.method) !== mergeMethod(expected.method)) fail('Resolution method changed.');
   if (metadata.state !== 'resolved' || metadata.resolution_profile !== 'exact-path-resolutions-v1' ||
       !Array.isArray(metadata.resolutions) || metadata.resolutions.length !== expected.rows.length ||
       oid(metadata.candidate.merge_base, expected.fields.object_format) !== expected.merge_base) fail('Native resolution did not return the complete requested result.');
@@ -129,3 +131,4 @@ export function verifyResolutionResult(metadata, expected) {
         ![...SIDES, 'result'].every(side => sameIdentity(actual[side], wanted[side], algorithm))) fail('Native resolution changed a path, side, choice, mode or content identity.');
   }
 }
+

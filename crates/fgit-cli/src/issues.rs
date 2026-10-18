@@ -15,13 +15,14 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 const USAGE: &str = "\
-usage: fg issue <open|edit|close|reopen|comment> <storage-root> <tenant-id> <repository-id> <number>
+usage: fg issue <open|edit|close|reopen|comment|assign|unassign> <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key> --expected-version <version>
   [--object-format sha1|sha256]
   open: --expected-version 0 --title <text> (--body <text> | --body-file <file>) [--label <text> ...]
   edit: positive version; one or more of --title, --body/--body-file, --label ... or --clear-labels
   comment: positive version; --body <text> or --body-file <file>
   close/reopen: positive version; no title, body or label options
+  assign/unassign: positive version; --assignee <principal-id> ... (1..16 IDs)
 
 usage: fg issue list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--limit <1..100>] [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
@@ -49,7 +50,15 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             && arguments[1] == "--help"
             && matches!(
                 arguments[0].as_str(),
-                "open" | "edit" | "close" | "reopen" | "comment" | "list" | "show"
+                "open"
+                    | "edit"
+                    | "close"
+                    | "reopen"
+                    | "comment"
+                    | "assign"
+                    | "unassign"
+                    | "list"
+                    | "show"
             ))
     {
         return write_read(&mut std::io::stdout().lock(), USAGE).map(|()| 0);

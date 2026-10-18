@@ -17,7 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_commit_closure, validate_merge_objects, validate_workspace_objects,
+    MergeObjectLimits, validate_commit_closure, validate_fast_forward_objects,
+    validate_merge_objects, validate_squash_objects, validate_workspace_objects,
 };
 use fgit_crypto::{git_object_id, sha256_digest};
 use fgit_forge::event::NativeMerge;
@@ -129,6 +130,10 @@ impl OneNode {
 
     /// Inspect the candidate's resulting tree, NOT the source-side PR diff.
     /// Ordered parents and common-base ancestry use the production validator.
+    /// An exact source-tip candidate instead uses the native fast-forward
+    /// validator: its base must equal the target, which must occur in the
+    /// independently verified source history. This does not select a publication
+    /// method or make an ordinary source-only review sufficient for merging.
     /// This does not assert that a specific merge algorithm produced the result.
     pub async fn inspect_merge_bundle_in(
         &self,
@@ -312,7 +317,27 @@ impl OneNode {
                 ..ParseLimits::default()
             },
         };
+        // Inspection selects the validator from verified native parent bytes.
+        // This is not method inference for publication: publication must seal
+        // its method explicitly and revalidate that method's exact shape.
+        let candidate_parents = source
+            .commit(candidate)
+            .map_err(BundleInspectionRefusal::Source)?
+            .parents;
         let validation = match merge {
+            Some(coordinates) if coordinates.merge_commit == coordinates.source_tip => {
+                validate_fast_forward_objects(&source, coordinates, limits, &mut || {
+                    original.live().is_ok()
+                })
+            }
+            Some(coordinates)
+                if candidate_parents.as_slice()
+                    == std::slice::from_ref(&coordinates.target_tip_before) =>
+            {
+                validate_squash_objects(&source, coordinates, limits, &mut || {
+                    original.live().is_ok()
+                })
+            }
             Some(coordinates) => validate_merge_objects(&source, coordinates, limits, &mut || {
                 original.live().is_ok()
             }),
@@ -324,6 +349,10 @@ impl OneNode {
         };
         original.live().map_err(BundleInspectionRefusal::Source)?;
         let validation = validation.map_err(BundleInspectionRefusal::Validation)?;
+        // Report the actual native parents, not the roots that granted original
+        // object access above. A fast-forward may span several commits, so its
+        // source tip's direct parent need not be the observed target.
+        let parents = candidate_parents;
         let transport_only_objects = unpacked.check_coverage(&validation.objects)?;
         let comparison = compare_source(
             &source,

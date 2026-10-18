@@ -6,6 +6,8 @@ import { mount, readQuery } from '../../crates/fgit-node/src/smart_http/server/b
 import { initialQuery } from '../../crates/fgit-node/src/smart_http/server/browser/search-index.mjs';
 import { dom, tick } from './search-dom-fixture.mjs';
 import { clone, fixture, hex, response, fileReply, webcrypto } from './search-initial-fixtures.mjs';
+import { partialReply } from './search-symbol-omission-fixtures.mjs';
+import { partialInitial } from './search-index-omission-fixtures.mjs';
 
 function setup(f = fixture(), handler = null, combined = true) {
   const d = dom(), calls = [];
@@ -90,6 +92,35 @@ test('submitting the actual form makes one request and renders a checked generat
   assert.match(d.get('results').textContent, /successful-channel/); assert.match(d.get('snapshot').textContent, /Retained symbol checkpoint 4/);
   for (const channel of ['content', 'path', 'symbols']) assert.equal(h.hitButtons(channel).length, 2);
   assert.equal(d.get('file').children.length, 0); assert.equal(d.document.downloads.length, 0);
+});
+
+test('combined available symbols with omissions remain visibly incomplete without hiding useful hits', async () => {
+  const f = fixture({ policy: 'required' }); partialReply(f.reply.symbols.result);
+  f.reply.complete = false;
+  f.reply.retained_result_bytes += f.reply.symbols.result.omissions[0].path_hex.length / 2 + 96;
+  const h = setup(f); await h.connect(); await h.actions.search();
+  assert.equal(h.calls.length, 1);
+  assert.match(h.d.get('status').textContent, /Combined answer is incomplete/);
+  assert.match(h.section('symbols').textContent, /1 omitted Rust files/);
+  assert.match(h.section('symbols').textContent, /source coverage is incomplete/);
+  for (const channel of ['content', 'path', 'symbols']) assert.equal(h.hitButtons(channel).length, 2);
+  h.actions.disconnect();
+});
+
+test('combined lexical omissions remain visible in both channels while all available hits can still be opened', async () => {
+  const f = fixture({ policy: 'required' }); partialInitial(f.reply);
+  const h = setup(f); await h.connect(); await h.actions.search();
+  assert.equal(h.calls.length, 1); assert.match(h.d.get('status').textContent, /Combined answer is incomplete/);
+  for (const channel of ['content', 'path']) {
+    assert.match(h.section(channel).textContent, /1 omitted files/);
+    assert.match(h.section(channel).textContent, /Source coverage is incomplete/);
+    assert.match(h.section(channel).textContent, /vendor\/oversized.bin/);
+  }
+  for (const channel of ['content', 'path', 'symbols']) assert.equal(h.hitButtons(channel).length, 2);
+  await h.actions.openInitial('content', 0); assert.match(h.d.get('file').textContent, /Native blob verified/);
+  assert.equal(h.calls.length, 2); assert.equal(h.calls[1].path, 'source/blob');
+  assert.ok(!h.d.buttons('results').some(button => button.textContent === 'Next indexed page'));
+  h.actions.disconnect();
 });
 
 for (const format of ['sha1', 'sha256']) test(`${format} channel buttons verify full files and expose downloads only afterwards`, async () => {

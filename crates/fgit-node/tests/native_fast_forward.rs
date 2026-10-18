@@ -19,6 +19,8 @@ use fgit_types::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "native_fast_forward/reviews.rs"]
+mod reviews;
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
@@ -95,9 +97,18 @@ struct Fixture {
     tree: GitOid,
     target: GitOid,
     source: GitOid,
+    source_parent: GitOid,
     data: PullRequestData,
 }
 fn fixture(root: &Path, format: GitHashAlgorithm, divergent: bool) -> Fixture {
+    fixture_with_history(root, format, divergent, false)
+}
+fn fixture_with_history(
+    root: &Path,
+    format: GitHashAlgorithm,
+    divergent: bool,
+    extended: bool,
+) -> Fixture {
     let (mut node, _) = OneNode::init(config(root, format)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let path = root.join("source");
@@ -122,12 +133,37 @@ fn fixture(root: &Path, format: GitHashAlgorithm, divergent: bool) -> Fixture {
         "commit",
         &commit(tree, &[base], "target\n"),
     );
+    let branch_point = if divergent { base } else { target };
+    let source_parent = if extended {
+        loose(
+            &path,
+            format,
+            GitObjectKind::Commit,
+            "commit",
+            &commit(tree, &[branch_point], "intermediate topic commit\n"),
+        )
+    } else {
+        branch_point
+    };
+    let source_tree = if extended {
+        let blob = loose(
+            &path,
+            format,
+            GitObjectKind::Blob,
+            "blob",
+            b"reviewed source content\n",
+        );
+        let tree_body = [b"100644 file\0".as_slice(), blob.as_bytes()].concat();
+        loose(&path, format, GitObjectKind::Tree, "tree", &tree_body)
+    } else {
+        tree
+    };
     let source = loose(
         &path,
         format,
         GitObjectKind::Commit,
         "commit",
-        &commit(tree, &[if divergent { base } else { target }], "topic\n"),
+        &commit(source_tree, &[source_parent], "topic\n"),
     );
     fs::write(path.join("refs/heads/main"), format!("{target}\n")).unwrap();
     fs::write(path.join("refs/heads/topic"), format!("{source}\n")).unwrap();
@@ -175,6 +211,7 @@ fn fixture(root: &Path, format: GitHashAlgorithm, divergent: bool) -> Fixture {
         tree,
         target,
         source,
+        source_parent,
         data,
     }
 }

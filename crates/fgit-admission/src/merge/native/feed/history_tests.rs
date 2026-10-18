@@ -276,3 +276,95 @@ fn genesis_is_empty_but_no_cursor_can_name_an_event_there() {
     );
     assert_eq!(f.store.count(), 0);
 }
+
+#[test]
+fn checkpointed_genesis_is_empty_and_every_checkpoint_consumes_a_history_step() {
+    let mut f = Fixture::new();
+    f.checkpoint();
+    f.checkpoint();
+    let page = f.page(None, 1).unwrap();
+    assert!(page.events.is_empty());
+    assert_eq!(page.source_head, f.basis.id());
+    assert!(f.page(Some(cursor(1, 0)), 1).is_err());
+    assert!(
+        f.records(
+            None,
+            history::Limits {
+                batches: 1,
+                records: 1
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        f.records(
+            None,
+            history::Limits {
+                batches: 2,
+                records: 1
+            }
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn checkpointed_event_history_keeps_exact_records_and_bounded_cursor_suffixes() {
+    let mut f = Fixture::new();
+    f.append(&[2]);
+    let original = f.page(None, 100).unwrap();
+    f.checkpoint();
+    f.checkpoint();
+    f.append(&[]);
+    f.append(&[1]);
+    f.checkpoint();
+    let full = f.page(None, 100).unwrap();
+    assert_eq!(full.events.len(), 3);
+    assert_eq!(&full.events[..2], original.events.as_slice());
+    assert_eq!(full.source_head, f.basis.id());
+    assert!(full.next_after.is_none());
+    let limits = history::Limits {
+        batches: 2,
+        records: 1,
+    };
+    let suffix = f.records(Some(cursor(2, 0)), limits).unwrap();
+    assert_eq!(suffix.len(), 1);
+    assert_eq!(suffix[0].sequence, 2);
+    assert!(
+        f.records(
+            Some(cursor(2, 0)),
+            history::Limits {
+                batches: 1,
+                ..limits
+            }
+        )
+        .is_err()
+    );
+    assert!(f.page(Some(cursor(2, 0)), 1).unwrap().events.is_empty());
+}
+
+#[test]
+fn checkpoint_evidence_and_cancellation_remain_required_for_event_pages() {
+    let mut f = Fixture::new();
+    f.append(&[2]);
+    let capsule = f.checkpoint();
+    for corrupt in [false, true] {
+        f.store.fault(Some(capsule.clone()), corrupt);
+        assert!(f.page(None, 100).is_err());
+        f.store.fault(None, false);
+        assert_eq!(f.page(None, 100).unwrap().events.len(), 2);
+    }
+    f.store.reset();
+    assert!(matches!(
+        ready(read_page_at(&f.store, &(), &f.basis, None, 1, &|| f
+            .store
+            .count()
+            >= 1)),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::CancellationInProgress
+        )),
+    ));
+    assert_eq!(f.store.count(), 1, "stop before reading the capsule");
+    assert_eq!(f.page(None, 100).unwrap().events.len(), 2);
+}

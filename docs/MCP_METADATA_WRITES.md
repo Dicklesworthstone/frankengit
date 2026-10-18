@@ -4,7 +4,9 @@ This FG-096 implementation slice connects `fg-mcp` to existing canonical issue
 admission and principal-scoped transaction recovery. It is not a new mutation
 engine, metadata database, remote authentication system, or Intent Run broker.
 The repository's seal, exact-version fold, outbox and authority-head CAS remain
-the publication boundary. No dependency or canonical event encoding changes.
+the publication boundary. No dependency is added. Assignment extends the native
+issue action tags under [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas),
+preserving all earlier event bytes and identities.
 
 ## Explicit launch grants
 
@@ -31,8 +33,9 @@ text, tool argument, or annotation can widen the launch grants.
 ## Issue tools
 
 The write group exposes `frankengit_issue_open`, `frankengit_issue_edit`,
-`frankengit_issue_close`, `frankengit_issue_reopen` and
-`frankengit_issue_comment`. Each requires a positive `number`, exact
+`frankengit_issue_close`, `frankengit_issue_reopen`,
+`frankengit_issue_comment`, `frankengit_issue_assign` and
+`frankengit_issue_unassign`. Each requires a positive `number`, exact
 `expected_version`, and `idempotency_key`. Numbers and versions are canonical
 unsigned decimal **strings**, not JSON numbers or implicit latest values.
 
@@ -41,6 +44,21 @@ Other actions require a positive, nonexhausted predecessor version. Editing
 accepts one or more of `title`, `body`, and `labels`; omitted fields survive,
 `body: ""` clears the body, and `labels: []` clears labels. Commenting requires
 nonblank body text. Close/reopen accept none of those content fields.
+
+Assign/unassign require `assignees`, an array of 1–16 distinct principal IDs
+encoded as exactly 32 lowercase hexadecimal characters. IDs are sorted before
+sealing. Assignment adds only the named principals; unassignment removes only
+those named. Other assignees survive. The complete resulting set has at most
+16 IDs. Both actions work on open or closed issues and advance the issue
+version, including when the requested membership already holds. Issue list
+and show snapshots include the sorted current `assignees` array; histories
+retain each original delta. Assignment does not verify account existence or
+grant access, membership, credentials, or notification delivery. The process's
+launch-bound principal remains the actor and all launch grants remain required.
+
+```json
+{"jsonrpc":"2.0","id":"assign-attempt-1","method":"tools/call","params":{"name":"frankengit_issue_assign","arguments":{"number":"7","expected_version":"1","idempotency_key":"assign-issue-7-v2","assignees":["44444444444444444444444444444444"]}}}
+```
 
 Labels are a unique set of at most 32 strings of at most 64 UTF-8 bytes; input
 order is normalized and duplicate values are rejected. Titles retain the native

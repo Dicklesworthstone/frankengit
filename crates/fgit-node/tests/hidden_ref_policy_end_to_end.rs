@@ -88,8 +88,10 @@ use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_git_object::ParseLimits;
 use fgit_node::{
     GitDaemonSessionOutcome, GitDaemonSessionTimeout, LoopbackReceiveSession, NodeConfig, OneNode,
-    serve_git_daemon_upload_pack,
+    StreamBundleExportQuery, StreamBundleExportRefusal, serve_git_daemon_upload_pack,
 };
+use fgit_pack::full_bundle::FullBundleHeader;
+use fgit_pack::read_streamed_pack;
 use fgit_runtime::{BudgetClass, RuntimeProfile};
 use fgit_types::cell::ReadLabel;
 use fgit_types::{
@@ -815,6 +817,115 @@ fn a_stored_policy_keeps_the_hidden_name_and_object_id_out_of_a_real_ls_refs_ses
         contains(&with.served, &visible_oid),
         "the visible ref's object id must still be served"
     );
+}
+
+#[test]
+fn a_stored_policy_excludes_hidden_only_objects_from_streamed_bundles_even_if_caller_unhides() {
+    for stored in [false, true] {
+        let rules = [HIDE_RULE];
+        let (_scratch, node) = open_repository(stored.then_some(rules.as_slice()));
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&node.request_context()))
+            .expect("the authenticated source materializes");
+        assert_eq!(before.snapshot().refs.len(), 2);
+        assert_eq!(before.snapshot().hidden_refs.hides(HIDDEN_REF), stored);
+        assert!(
+            node.read_git_object(hidden_oid()).is_ok(),
+            "the hidden object is physically present"
+        );
+
+        // The caller explicitly permits this prefix after hiding it locally.
+        // That local exception may never remove a canonical stored hide rule.
+        let mut caller = RefVisibility::default();
+        caller.push_rule(HIDE_RULE, &WireLimits::default()).unwrap();
+        caller
+            .push_rule(b"!refs/private", &WireLimits::default())
+            .unwrap();
+        assert!(!caller.hides(HIDDEN_REF));
+        let request = node.request_context();
+        let query = StreamBundleExportQuery {
+            expected_head: Some(before.basis().id()),
+            ..Default::default()
+        };
+        let mut bytes = Vec::new();
+        let selected = node
+            .runtime()
+            .block_on(node.export_full_git_bundle_stream_in(
+                &request,
+                &caller,
+                query.clone(),
+                &mut bytes,
+            ))
+            .expect("the permitted source streams");
+        assert_eq!(selected.head(), before.basis().id());
+        assert_eq!(selected.generation(), before.basis().generation());
+        let mut input = Cursor::new(&bytes);
+        let header =
+            FullBundleHeader::read(&mut input, query.limits.envelope, &mut || true).unwrap();
+        let names: Vec<&[u8]> = header
+            .references()
+            .iter()
+            .map(|reference| reference.name().as_bytes())
+            .collect();
+        let expected_names = if stored {
+            vec![VISIBLE_REF]
+        } else {
+            vec![HIDDEN_REF, VISIBLE_REF]
+        };
+        assert_eq!(names, expected_names);
+        assert!(header.head().is_none());
+        let mut objects = std::collections::BTreeSet::new();
+        read_streamed_pack(
+            &mut input,
+            header.format(),
+            &query.limits.pack,
+            &mut || true,
+            |entry| -> Result<(), io::Error> {
+                let kind = fgit_pack::object_type_from_base_entry(entry.entry.header.kind).unwrap();
+                let id = git_object_id(header.format(), kind, &entry.entry.inflated);
+                assert!(objects.insert(id));
+                Ok(())
+            },
+        )
+        .expect("the native streamed reader verifies every emitted object and pack checksum");
+        let mut expected_objects = std::collections::BTreeSet::from([visible_oid()]);
+        if !stored {
+            expected_objects.insert(hidden_oid());
+        }
+        assert_eq!(objects, expected_objects);
+        assert_eq!(
+            usize::try_from(selected.receipt().object_count()).unwrap(),
+            expected_objects.len()
+        );
+        assert_eq!(
+            selected.receipt().bundle_sha256(),
+            fgit_crypto::sha256_digest(&bytes)
+        );
+        if stored {
+            caller
+                .push_rule(VISIBLE_REF, &WireLimits::default())
+                .unwrap();
+            let mut rejected_output = Vec::new();
+            let result = node
+                .runtime()
+                .block_on(node.export_full_git_bundle_stream_in(
+                    &request,
+                    &caller,
+                    query,
+                    &mut rejected_output,
+                ));
+            assert!(matches!(result, Err(StreamBundleExportRefusal::Source(_))));
+            assert!(rejected_output.is_empty());
+        }
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&node.request_context()))
+            .expect("the source remains readable");
+        assert_eq!(after.basis(), before.basis());
+        assert_eq!(after.snapshot().refs, before.snapshot().refs);
+        node.shutdown().expect("the exporting node quiesces");
+    }
 }
 
 #[test]

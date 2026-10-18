@@ -249,6 +249,8 @@ mod tests {
                 source: source(b"indexed"),
                 matches: Vec::new(),
                 complete: true,
+                coverage_complete: true,
+                omissions: Vec::new(),
                 generation: id(IdentityDomain::Generation, "test-generation", b"generation"),
                 generation_number: 7,
                 indexed_files: 0,

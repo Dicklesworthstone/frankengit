@@ -6,7 +6,7 @@ pub mod preparation;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::NativeMerge;
-use fgit_node::{NodeConfig, OneNode};
+use fgit_node::{NativeMergeMethod, NodeConfig, OneNode};
 use fgit_types::{
     DecisionOutcome, HeadGeneration, PrincipalId, RefName, RepositoryId, TenantId, TxId,
 };
@@ -17,7 +17,7 @@ use super::publication_support::{
 };
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
-const USAGE: &str = "usage: fg merge apply <storage-root> <tenant-id> <repository-id> <target-ref> <bundle-path> --trusted-local --principal <principal-id> --idempotency-key <key> --source-ref <branch> --expected-source <oid> --expected-target <oid> --merge-base <oid> --expected-commit <reviewed-oid> --pull-request <number> --expected-version <version; 0=new stream>";
+const USAGE: &str = "usage: fg merge apply <storage-root> <tenant-id> <repository-id> <target-ref> <bundle-path> --trusted-local --principal <principal-id> --idempotency-key <key> --source-ref <branch> --expected-source <oid> --expected-target <oid> --merge-base <oid> --expected-commit <reviewed-oid> --pull-request <number> --expected-version <version; 0=new stream> [--method merge-commit|squash]";
 
 struct Options {
     storage: PathBuf,
@@ -31,6 +31,7 @@ struct Options {
     version_number: u64,
     pull_request_number: u64,
     merge: NativeMerge,
+    method: NativeMergeMethod,
 }
 
 pub fn run(arguments: &[String]) -> Result<(), String> {
@@ -64,7 +65,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         node.runtime()
-            .block_on(node.apply_merge_bundle_durable_in(
+            .block_on(node.apply_merge_bundle_with_method_durable_in(
                 &request,
                 options.principal,
                 &options.key,
@@ -72,6 +73,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
                 options.version,
                 &options.merge,
                 &input,
+                options.method,
             ))
             .map_err(|error| error.to_string())
     })();
@@ -125,6 +127,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let (mut principal, mut key, mut source_ref, mut source_tip) = (None, None, None, None);
     let (mut target_tip, mut base_tip, mut candidate, mut number, mut version) =
         (None, None, None, None, None);
+    let mut method = None;
     let mut trusted = false;
     let mut cursor = 6;
     while cursor < arguments.len() {
@@ -163,6 +166,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--expected-commit" => set_once(&mut candidate, parse_oid(value)?, flag)?,
             "--pull-request" => set_once(&mut number, decimal(value, flag)?, flag)?,
             "--expected-version" => set_once(&mut version, decimal(value, flag)?, flag)?,
+            "--method" => set_once(&mut method, parse_method(value)?, flag)?,
             _ => {
                 return Err(format!(
                     "unknown merge apply option {flag}; implicit or forced merges are not supported"
@@ -188,6 +192,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             .map_err(|_| "aggregate version is exhausted")?;
         ExpectedVersion::Exactly(version)
     };
+    let method = method.unwrap_or(NativeMergeMethod::MergeCommit);
+    if method == NativeMergeMethod::Squash && version == ExpectedVersion::NewStream {
+        return Err("squash requires an existing pull request and a positive --expected-version".to_owned());
+    }
     let merge = NativeMerge {
         source_ref: source_ref.ok_or("--source-ref is required")?,
         source_tip: source_tip.ok_or("--expected-source is required")?,
@@ -204,10 +212,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         || !merge.target_ref.as_bytes().starts_with(b"refs/heads/")
         || merge.source_ref == merge.target_ref
         || merge.source_tip == merge.target_tip_before
-        || merge.merge_commit == merge.source_tip
+        || (method == NativeMergeMethod::MergeCommit && merge.merge_commit == merge.source_tip)
         || merge.merge_commit == merge.target_tip_before
     {
-        return Err("merge apply requires distinct branch refs, distinct parent tips and a new two-parent candidate".to_owned());
+        return Err("merge apply requires distinct branch refs, distinct source/target tips and a candidate that changes the target".to_owned());
     }
     Ok(Options {
         storage: arguments[1].clone().into(),
@@ -221,7 +229,24 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         version_number,
         pull_request_number: number,
         merge,
+        method,
     })
+}
+
+pub(super) fn parse_method(value: &str) -> Result<NativeMergeMethod, String> {
+    match value {
+        "merge-commit" => Ok(NativeMergeMethod::MergeCommit),
+        "squash" => Ok(NativeMergeMethod::Squash),
+        _ => Err("--method must be merge-commit or squash".to_owned()),
+    }
+}
+
+pub(super) const fn method_name(method: NativeMergeMethod) -> &'static str {
+    match method {
+        NativeMergeMethod::MergeCommit => "merge-commit",
+        NativeMergeMethod::Squash => "squash",
+        NativeMergeMethod::FastForwardOnly => "fast-forward-only",
+    }
 }
 
 fn decimal(value: &str, field: &str) -> Result<u64, String> {
@@ -286,6 +311,7 @@ fn render_receipt(
         ),
         format!("\"pull_request\":{}", options.pull_request_number),
         format!("\"expected_version\":{}", options.version_number),
+        format!("\"method\":{}", quote(method_name(options.method))),
         format!(
             "\"source_reference_hex\":\"{}\"",
             hex(&options.merge.source_ref)
@@ -414,6 +440,43 @@ mod tests {
     }
 
     #[test]
+    fn squash_is_explicit_and_requires_an_existing_pr_in_both_hash_domains() {
+        for width in [40, 64] {
+            assert_eq!(parse(&args(width)).unwrap().method, NativeMergeMethod::MergeCommit);
+            let mut squash = args(width);
+            squash.extend(["--method".into(), "squash".into()]);
+            assert!(parse(&squash).is_err());
+            replace(&mut squash, "--expected-version", "4".into());
+            assert_eq!(parse(&squash).unwrap().method, NativeMergeMethod::Squash);
+            squash.extend(["--method".into(), "squash".into()]);
+            assert!(parse(&squash).is_err());
+
+            for method in ["auto", "rebase", "fast-forward-only", "Squash", ""] {
+                let mut invalid = args(width);
+                replace(&mut invalid, "--expected-version", "4".into());
+                invalid.extend(["--method".into(), method.into()]);
+                assert!(parse(&invalid).is_err(), "{method}");
+            }
+            let mut explicit = args(width);
+            explicit.extend(["--method".into(), "merge-commit".into()]);
+            assert_eq!(parse(&explicit).unwrap().method, NativeMergeMethod::MergeCommit);
+        }
+    }
+
+    #[test]
+    fn squash_can_preserve_an_identical_single_commit_candidate() {
+        let mut selected = args(40);
+        replace(&mut selected, "--expected-version", "1".into());
+        replace(&mut selected, "--expected-commit", "a".repeat(40));
+        assert!(parse(&selected).is_err());
+        selected.extend(["--method".into(), "squash".into()]);
+        assert!(parse(&selected).is_ok());
+        // The node still proves the sole target parent from native bytes.
+        replace(&mut selected, "--expected-commit", "b".repeat(40));
+        assert!(parse(&selected).is_err());
+    }
+
+    #[test]
     fn versions_parent_domains_and_aliases_are_not_guessed() {
         for value in [
             "-1",
@@ -469,6 +532,7 @@ mod tests {
         let receipt = render_receipt(&options, tx, &terminal, Some("close\nfailed"));
         assert!(receipt.contains("\"type\":\"merge_publication\""));
         assert!(receipt.contains("\"pull_request\":17"));
+        assert!(receipt.contains("\"method\":\"merge-commit\""));
         assert!(receipt.contains("\"delivery_acknowledged\":null"));
         assert!(receipt.contains("\"published_to_repository\":true"));
         assert!(receipt.contains("\"node_closed\":false"));

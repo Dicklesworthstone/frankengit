@@ -30,15 +30,19 @@ impl Drop for Scratch {
 fn streamed_bytes_remain_private_until_build_and_readback_complete() {
     let scratch = Scratch::new();
     let destination = scratch.0.join("backup");
-    let receipt = publish_streamed(&destination, |file| {
-        file.write_all(b"whole verified bytes").unwrap();
-        assert!(!destination.exists());
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let mut read = Vec::new();
-        file.read_to_end(&mut read).unwrap();
-        assert_eq!(read, b"whole verified bytes");
-        Ok("verified")
-    })
+    let receipt = publish_streamed(
+        &destination,
+        |file| {
+            file.write_all(b"whole verified bytes").unwrap();
+            assert!(!destination.exists());
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let mut read = Vec::new();
+            file.read_to_end(&mut read).unwrap();
+            assert_eq!(read, b"whole verified bytes");
+            Ok("verified")
+        },
+        || Ok(()),
+    )
     .unwrap();
     assert_eq!(receipt, "verified");
     assert_eq!(fs::read(&destination).unwrap(), b"whole verified bytes");
@@ -48,10 +52,14 @@ fn streamed_bytes_remain_private_until_build_and_readback_complete() {
 fn failed_verification_discards_only_its_private_file_without_publication() {
     let scratch = Scratch::new();
     let destination = scratch.0.join("backup");
-    let result: Result<(), String> = publish_streamed(&destination, |file| {
-        file.write_all(b"partial or unverified").unwrap();
-        Err("source changed".into())
-    });
+    let result: Result<(), String> = publish_streamed(
+        &destination,
+        |file| {
+            file.write_all(b"partial or unverified").unwrap();
+            Err("source changed".into())
+        },
+        || Ok(()),
+    );
     assert_eq!(result.unwrap_err(), "source changed");
     assert!(!destination.exists());
     assert_eq!(scratch.entries(), 0);
@@ -61,19 +69,52 @@ fn a_racing_destination_is_never_overwritten_by_a_verified_stream() {
     let scratch = Scratch::new();
     let destination = scratch.0.join("backup");
     assert!(
-        publish_streamed(&destination, |file| {
-            file.write_all(b"our verified bytes").unwrap();
-            fs::write(&destination, b"other owner").unwrap();
-            Ok(())
-        })
+        publish_streamed(
+            &destination,
+            |file| {
+                file.write_all(b"our verified bytes").unwrap();
+                fs::write(&destination, b"other owner").unwrap();
+                Ok(())
+            },
+            || Ok(())
+        )
         .is_err()
     );
     assert_eq!(fs::read(&destination).unwrap(), b"other owner");
     assert_eq!(scratch.entries(), 1);
     assert!(
-        publish_streamed(&destination, |_| -> Result<(), String> {
-            panic!("preexisting target must refuse before build")
-        })
+        publish_streamed(
+            &destination,
+            |_| -> Result<(), String> { panic!("preexisting target must refuse before build") },
+            || Ok(())
+        )
         .is_err()
     );
+}
+
+#[test]
+fn a_deadline_after_complete_build_still_prevents_publication_and_cleans_the_attempt() {
+    let scratch = Scratch::new();
+    let destination = scratch.0.join("backup");
+    let completed = std::cell::Cell::new(false);
+    let error = publish_streamed(
+        &destination,
+        |file| {
+            file.write_all(b"complete verified body").unwrap();
+            completed.set(true);
+            Ok(())
+        },
+        || {
+            if completed.get() {
+                Err("deadline expired immediately before publication".into())
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+    assert!(completed.get());
+    assert!(error.contains("deadline expired"));
+    assert!(!destination.exists());
+    assert_eq!(scratch.entries(), 0);
 }

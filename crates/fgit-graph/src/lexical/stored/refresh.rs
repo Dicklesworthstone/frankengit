@@ -5,11 +5,12 @@
 
 use super::{
     AsyncAuthorityStore, AuthorityStore, BTreeMap, Entry, GenerationActivation, GitOid,
-    ImmutableRead, IndexError, IndexedDocument, LexicalError, LexicalIndexStore, LexicalReadLimits,
-    LexicalSegment, LexicalSelection, LexicalSource, MAX_DOCUMENTS, MAX_FILE_BYTES,
-    MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS, MAX_SEGMENT_BYTES, MAX_SEGMENTS,
-    MAX_SOURCE_BYTES, MAX_TERMS, Postings, PreparedLexicalIndex, SegmentRef, SourceDocument,
-    StoreInstanceId, Term, before_read, bounded_add, check, path_valid, payload, payload_key,
+    ImmutableRead, IndexError, IndexedDocument, LexicalError, LexicalIndexStore, LexicalOmission,
+    LexicalReadLimits, LexicalSegment, LexicalSelection, LexicalSource, MAX_DOCUMENTS,
+    MAX_FILE_BYTES, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS, MAX_SEGMENT_BYTES,
+    MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, Postings, PreparedLexicalIndex, SegmentRef,
+    SourceDocument, StoreInstanceId, Term, before_read, bounded_add, check, omissions, path_valid,
+    payload, payload_key,
 };
 
 /// A complete new inventory row. `None` explicitly requests the exact prior
@@ -53,6 +54,7 @@ pub struct LexicalReuse {
     activation: GenerationActivation,
     dictionary: Vec<Term>,
     documents: BTreeMap<Vec<u8>, SavedDocument>,
+    omissions: Vec<LexicalOmission>,
     payload_bytes: usize,
     generation_bytes: usize,
     retained_bytes: usize,
@@ -65,6 +67,7 @@ impl LexicalReuse {
             activation: selection.activation().clone(),
             dictionary: Vec::new(),
             documents: BTreeMap::new(),
+            omissions: selection.manifest.omissions.clone(),
             payload_bytes: selection.payload_bytes,
             generation_bytes: selection.generation_bytes,
             retained_bytes: 0,
@@ -109,6 +112,7 @@ impl LexicalReuse {
         if segment.namespace != self.source.namespace {
             return Err(IndexError::SourceMismatch);
         }
+        omissions::disjoint(&self.omissions, segment.documents(), live)?;
         let mut rows: Vec<_> = segment
             .documents
             .iter()
@@ -287,24 +291,48 @@ impl LexicalReuse {
         excluded: usize,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(PreparedLexicalIndex, LexicalRefreshStats), IndexError> {
+        self.prepare_with_omissions(source, rows, excluded, Vec::new(), live)
+    }
+
+    /// Rebuild from a newly verified inventory, including its current omissions.
+    /// Prior omissions are never implicitly retained or treated as reusable
+    /// postings, even when their native blob identities are unchanged.
+    pub fn prepare_with_omissions(
+        &self,
+        source: LexicalSource,
+        rows: &[RefreshDocument<'_>],
+        excluded: usize,
+        omissions: Vec<LexicalOmission>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedLexicalIndex, LexicalRefreshStats), IndexError> {
         check(live)?;
         if source.namespace != self.source.namespace || source.reference != self.source.reference {
             return Err(IndexError::SourceMismatch);
         }
-        if rows.len() > MAX_INDEX_DOCUMENTS {
-            return Err(LexicalError::Limit("indexed documents").into());
-        }
+        let omitted_bytes = omissions::validate(
+            &omissions,
+            source.namespace.object_format,
+            rows.len(),
+            0,
+            live,
+        )?;
         let mut stats = LexicalRefreshStats {
             previous_payload_bytes_read: self.payload_bytes,
             previous_generation_bytes_read: self.generation_bytes,
             ..Default::default()
         };
         let mut previous: Option<&[u8]> = None;
-        let mut total_bytes = 0;
+        let mut total_bytes = omitted_bytes;
         for &row in rows {
             check(live)?;
             if !path_valid(row.path) || previous.is_some_and(|path| path >= row.path) {
                 return Err(LexicalError::Invalid("document path order").into());
+            }
+            if omissions
+                .binary_search_by(|entry| entry.path.as_slice().cmp(row.path))
+                .is_ok()
+            {
+                return Err(LexicalError::Invalid("omission overlaps indexed document").into());
             }
             previous = Some(row.path);
             let bytes = match row.content {
@@ -371,7 +399,8 @@ impl LexicalReuse {
                 }
             }
         }
-        let prepared = PreparedLexicalIndex::new(source, parts, excluded, live)?;
+        let prepared =
+            PreparedLexicalIndex::with_omissions(source, parts, excluded, omissions, live)?;
         check(live)?;
         Ok((prepared, stats))
     }

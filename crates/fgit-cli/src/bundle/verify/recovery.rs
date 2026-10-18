@@ -5,6 +5,15 @@ use std::fmt::Write as _;
 
 const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 
+pub(super) struct Layout<'a> {
+    pub(super) pack_offset: u64,
+    pub(super) head_ref: &'a RefName,
+    pub(super) index: &'a [u8],
+    pub(super) packed_refs: &'a [u8],
+    pub(super) config: &'a [u8],
+    pub(super) head: &'a [u8],
+}
+
 pub(super) fn execute(
     bytes: &[u8],
     limits: &BundleVerifyLimits,
@@ -15,16 +24,37 @@ pub(super) fn execute(
     let plan = prepare_git_bundle_recovery(bytes, limits, expected, head, live)
         .map_err(|error| error.to_string())?;
     checkpoint(live)?;
+    format_layout(
+        plan.verified(),
+        expected,
+        Layout {
+            pack_offset: plan.pack_offset() as u64,
+            head_ref: plan.head_ref(),
+            index: plan.index(),
+            packed_refs: plan.packed_refs(),
+            config: plan.config(),
+            head: plan.head(),
+        },
+        live,
+    )
+}
+
+pub(super) fn format_layout(
+    verified: &super::VerifiedGitBundle,
+    expected: Option<&BundleExpectations>,
+    layout: Layout<'_>,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, String> {
     let mut output = match expected {
-        Some(expected) => anchors::report_matched(plan.verified(), expected)?,
-        None => report(plan.verified())?,
+        Some(expected) => anchors::report_matched(verified, expected)?,
+        None => report(verified)?,
     };
     let fields = [
-        ("head_ref_hex", plan.head_ref().as_bytes()),
-        ("index_hex", plan.index()),
-        ("packed_refs_hex", plan.packed_refs()),
-        ("config_hex", plan.config()),
-        ("head_hex", plan.head()),
+        ("head_ref_hex", layout.head_ref.as_bytes()),
+        ("index_hex", layout.index),
+        ("packed_refs_hex", layout.packed_refs),
+        ("config_hex", layout.config),
+        ("head_hex", layout.head),
     ];
     let total = fields
         .iter()
@@ -51,7 +81,7 @@ pub(super) fn execute(
     write!(
         output,
         ",\"recovery\":{{\"profile\":\"native-bare-source-layout-v1\",\"pack_offset\":{}",
-        plan.pack_offset()
+        layout.pack_offset
     )
     .map_err(|error| error.to_string())?;
     const HEX: &[u8; 16] = b"0123456789abcdef";

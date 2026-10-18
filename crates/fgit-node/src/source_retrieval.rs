@@ -190,15 +190,17 @@ impl InitialReport {
     pub const fn result_bytes(&self) -> usize {
         self.result_bytes
     }
-    /// True only if every requested channel was available and untruncated.
+    /// True only if every requested channel was available, fully covered and untruncated.
     #[must_use]
     pub fn complete(&self) -> bool {
         self.content.results.complete
             && self.path.results.complete
+            && self.content.coverage_complete
+            && self.path.coverage_complete
             && match &self.symbols {
                 SymbolChannel::NotRequested => true,
                 SymbolChannel::Unavailable(_) => false,
-                SymbolChannel::Available(report) => report.complete,
+                SymbolChannel::Available(report) => report.complete && report.coverage_complete,
             }
     }
     /// Successful-channel receipts only. An unavailable channel may have read
@@ -261,8 +263,14 @@ fn lexical_result_bytes(
     total: &mut usize,
     maximum: usize,
 ) -> Result<(), RetrievalError> {
+    report
+        .validate_coverage()
+        .map_err(|_| RetrievalError::Invalid("lexical coverage"))?;
     for hit in &report.results.hits {
         add_result(total, hit.path.len() + hit.spans.len() * 24 + 64, maximum)?;
+    }
+    for omission in &report.omissions {
+        add_result(total, omission.path.len() + 96, maximum)?;
     }
     Ok(())
 }
@@ -273,7 +281,13 @@ fn check_lexical_join(
     if content.source != path.source {
         return Err(RetrievalError::MixedSource);
     }
-    if content.generation != path.generation {
+    if content.generation != path.generation
+        || content.indexed_documents != path.indexed_documents
+        || content.indexed_source_bytes != path.indexed_source_bytes
+        || content.non_regular_entries != path.non_regular_entries
+        || content.coverage_complete != path.coverage_complete
+        || content.omissions != path.omissions
+    {
         return Err(RetrievalError::MixedGeneration);
     }
     Ok(())
@@ -417,6 +431,14 @@ impl OneNode {
                             limits.max_result_bytes,
                         )?;
                     }
+                    for omission in &report.omissions {
+                        live(request)?;
+                        add_result(
+                            &mut result_bytes,
+                            omission.path.len() + 96,
+                            limits.max_result_bytes,
+                        )?;
+                    }
                     SymbolChannel::Available(Box::new(report))
                 }
                 Err(error) => SymbolChannel::Unavailable(symbol_unavailable(
@@ -476,6 +498,12 @@ pub mod backup;
 
 /// Read-only lexical reuse with separately retained current-source evidence.
 pub mod current_index;
+
+/// Exact-byte, read-only context assembly from joined retrieval evidence.
+pub mod context;
+
+/// Trusted-local, exact publication-state historical predicates.
+pub mod bisection;
 
 /// Trusted-local portable authority metadata export and restore CLI entrypoint.
 #[path = "bin/fg-authority-backup.rs"]

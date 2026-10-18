@@ -30,6 +30,10 @@ use fgit_types::{
 use std::collections::BTreeSet;
 use std::future::Future;
 
+#[cfg(test)]
+#[path = "reviews/read_tests.rs"]
+mod read_tests;
+
 /// The owner validates native dependencies at the exact basis. Candidate
 /// approvals additionally inspect the actual bundle without staging its objects.
 pub trait ReviewProjection<S>: NativeMergeProjection<S>
@@ -339,6 +343,11 @@ async fn review_frontier<S: AsyncAuthorityStore + ?Sized>(
         position.event_batch_root(),
     )
     .await?;
+    // The selected frontier is sufficient authority for this reviewer stream.
+    // Do not depend on an outbox scan to validate its complete position range:
+    // read-only pages and named-reviewer gates deliberately load only the
+    // required immutable event bodies.
+    delivery::validate_position_batch(position, &batch)?;
     let event = batch
         .events
         .into_iter()
@@ -372,6 +381,8 @@ pub struct ReviewPage {
 
 /// Latest decisions in reviewer-ID order; never an approval count over a partial
 /// page. Source-only decisions remain distinct from exact candidate approvals.
+/// The authenticated forge map bounds reviewer enumeration; unrelated streams
+/// do not consume a separate, smaller capacity or trigger delivery replay.
 pub async fn read_page_at<S, V, C>(
     store: &S,
     cx: &S::Context,
@@ -397,13 +408,11 @@ where
     let Some(pr) = prs.pull_requests.pop().filter(|pr| pr.number == number) else {
         return Ok(None);
     };
-    let state = delivery::read_in(store, cx, basis, cancelled).await?;
-    if state.forge.entries().len() > 4096 {
-        return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-    }
+    let positions = storage::load_forge_positions(store, cx, basis).await?;
+    super::checkpoint(cancelled)?;
     let prefix = format!("review/{number}/");
     let mut reviewers = BTreeSet::new();
-    for position in state.forge.entries() {
+    for position in positions.entries() {
         super::checkpoint(cancelled)?;
         let label = position.stream();
         let Some(text) = label.as_str().strip_prefix(&prefix) else {
@@ -430,7 +439,7 @@ where
         let event = review_frontier(
             store,
             cx,
-            &state.forge,
+            &positions,
             AggregateId::PullRequestReview {
                 pull_request: number,
                 reviewer,
@@ -438,6 +447,7 @@ where
         )
         .await?
         .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+        super::checkpoint(cancelled)?;
         let version = event.version;
         let ForgeEventPayload::PullRequestReviewedNative(review) = event.payload else {
             return Err(unavailable(RefusalCode::EvidenceInvalid));

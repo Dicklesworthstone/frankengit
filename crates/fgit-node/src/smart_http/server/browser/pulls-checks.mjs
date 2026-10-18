@@ -1,5 +1,5 @@
-// Canonical publisher observations at one exact PR snapshot. This profile has
-// no successful protected-check conclusion and never grants merge permission.
+// Canonical publisher observations at one exact PR snapshot. A successful
+// trusted-workflow observation is not independent verification or merge permission.
 import { binding, fail, integer, keys, oid, pinned, principal, record, text, unhex } from './pulls-core.mjs';
 
 const BINDING_FIELDS = ['source_head', 'snapshot_token', 'pull_request_version',
@@ -7,7 +7,7 @@ const BINDING_FIELDS = ['source_head', 'snapshot_token', 'pull_request_version',
 const REPLY_FIELDS = ['schema_version', 'type', 'tenant_id', 'repository_id', 'repository_incarnation',
   'object_format', 'number', 'found', ...BINDING_FIELDS, 'after', 'limit', 'next_after',
   'complete', 'scope', 'merge_permission', 'checks'];
-const CONCLUSIONS = ['action_required', 'failure', 'cancelled', 'timed_out'];
+const CONCLUSIONS = ['action_required', 'success', 'failure', 'cancelled', 'timed_out'];
 
 export function checkId(value) {
   // Native base32hex labels contain all 256 identity bits. The final four
@@ -90,6 +90,7 @@ export function appendChecksPanel(doc, parent, { client, observed, run, current,
       item(section, 'h4', `${check.job} · ${check.conclusion}`);
       item(section, 'pre', `Check: ${check.id}\nPublisher: ${check.publisher}\nRun: ${check.run_id}\n` +
         `Attempt: ${check.attempt_id}\nWorkflow graph: ${check.graph_root}\nEvidence: ${check.evidence_sha256} · ${check.evidence_bytes} bytes`);
+      if (check.conclusion === 'success') item(section, 'p', 'The publisher reports a successful verified trusted-workflow job. This observation does not establish independent verification, satisfy protected-branch policy by itself, or grant merge permission.');
       if (check.conclusion === 'action_required') item(section, 'p', 'Independent verification is still required. This observation is not a passing required check.');
     }
     item(output, 'p', reply.complete ? 'All observations after this page cursor are shown.' : 'More observations remain at this exact snapshot.');

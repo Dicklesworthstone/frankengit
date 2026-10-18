@@ -1,3 +1,5 @@
+mod squash;
+
 use super::super::{CommitInput, ConflictKind, MergePreparation, prepare_merge};
 use super::*;
 use std::cell::Cell;

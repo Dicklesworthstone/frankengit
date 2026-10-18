@@ -1,6 +1,7 @@
 use super::*;
 use fgit_graph::lexical::{
-    LexicalHit, LexicalNamespace, LexicalReport, LexicalSource, LexicalSpan,
+    LexicalHit, LexicalNamespace, LexicalOmission, LexicalOmissionReason, LexicalReport,
+    LexicalSource, LexicalSpan,
 };
 use fgit_types::{
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId,
@@ -77,12 +78,175 @@ fn report() -> IndexedLexicalReport {
         },
         indexed_documents: 1,
         indexed_source_bytes: 6,
+        coverage_complete: true,
+        omissions: Vec::new(),
         non_regular_entries: 0,
         segments_read: 1,
         payload_bytes_read: 100,
         generation_bytes_read: 100,
     }
 }
+fn partial_report(format: GitHashAlgorithm) -> IndexedLexicalReport {
+    let mut report = report();
+    report.source.namespace.object_format = format;
+    report.source.commit =
+        fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Commit, b"commit");
+    report.source.tree =
+        fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Tree, b"tree");
+    report.results.hits[0].blob =
+        fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Blob, b"needle");
+    report.coverage_complete = false;
+    report.omissions.push(LexicalOmission {
+        path: b"vendor/oversized\xff.bin".to_vec(),
+        blob: fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Blob, &[b'x'; 128]),
+        source_bytes: 128,
+        reason: LexicalOmissionReason::FileBytes,
+        limit: 64,
+    });
+    report
+}
+
+#[test]
+fn omission_receipts_preserve_native_rows_and_whole_corpus_diagnostics() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut c = command(form().replace("sha1", format.as_str()).as_bytes(), format).unwrap();
+        let report = partial_report(format);
+        let mut covered = report.clone();
+        covered.coverage_complete = true;
+        covered.omissions.clear();
+        let mut legacy_suffix = String::from("existing v1 bytes");
+        append_omissions(&mut legacy_suffix, &covered, usize::MAX, &mut || true).unwrap();
+        assert_eq!(legacy_suffix, "existing v1 bytes");
+
+        for mode in [SourceMode::Exact, SourceMode::Revalidated] {
+            c.source_mode = mode;
+            assert_eq!(
+                rows(&c, &report, usize::MAX, &mut || true).unwrap(),
+                rows(&c, &covered, usize::MAX, &mut || true).unwrap(),
+                "coverage metadata must not alter valid result rows"
+            );
+            let mut suffix = String::new();
+            append_omissions(&mut suffix, &report, usize::MAX, &mut || true).unwrap();
+            assert!(suffix.contains("\"index_profile\":\"ascii-word-postings-omissions-v1\""));
+            assert!(suffix.contains(
+                "\"coverage_complete\":false,\"omitted_files\":1,\"omitted_source_bytes\":128"
+            ));
+            assert!(suffix.contains(&format!(
+                "\"path_hex\":\"{}\"",
+                hex(&report.omissions[0].path)
+            )));
+            assert!(suffix.contains(&format!("\"blob\":\"{}\"", report.omissions[0].blob)));
+            assert!(suffix.contains("\"reason\":\"file_bytes\",\"limit\":64"));
+            let mut no_hits = report.clone();
+            no_hits.results.hits.clear();
+            assert!(
+                rows(&c, &no_hits, usize::MAX, &mut || true)
+                    .unwrap()
+                    .is_empty()
+            );
+            let mut empty_suffix = String::new();
+            append_omissions(&mut empty_suffix, &no_hits, usize::MAX, &mut || true).unwrap();
+            assert_eq!(
+                empty_suffix, suffix,
+                "omissions do not vanish on empty matching pages"
+            );
+        }
+    }
+}
+
+#[test]
+fn indexed_renderers_refuse_inconsistent_or_understated_coverage_before_output() {
+    let c = command(form().as_bytes(), GitHashAlgorithm::Sha1).unwrap();
+    let original = partial_report(GitHashAlgorithm::Sha1);
+    for change in 0..14 {
+        let mut report = original.clone();
+        match change {
+            0 => report.coverage_complete = true,
+            1 => report.omissions.clear(),
+            2 => report.omissions[0].path = report.results.hits[0].path.clone(),
+            3 => report.omissions[0].limit = 0,
+            4 => report.omissions[0].limit = report.omissions[0].source_bytes,
+            5 => {
+                report.omissions[0].limit = 8 * 1024 * 1024 + 1;
+                report.omissions[0].source_bytes = report.omissions[0].limit + 1;
+            }
+            6 => report.omissions[0].source_bytes = usize::MAX,
+            7 => {
+                report.omissions[0].blob =
+                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap()
+            }
+            8 => report.indexed_documents = 20_000,
+            9 => report.indexed_source_bytes = 64 * 1024 * 1024,
+            10 => report.omissions.push(report.omissions[0].clone()),
+            11 => report.omissions[0].path = b"../private".to_vec(),
+            12 => report.indexed_documents = 0,
+            _ => report.indexed_source_bytes = 5,
+        }
+        let row_error = rows(&c, &report, usize::MAX, &mut || true).unwrap_err();
+        assert!(
+            matches!(row_error.status, Status::Unavailable),
+            "case {change}: {row_error:?}"
+        );
+        assert!(!row_error.outcome_unknown);
+        let mut out = String::from("already retained bytes");
+        let error = append_omissions(&mut out, &report, usize::MAX, &mut || true).unwrap_err();
+        assert!(
+            matches!(error.status, Status::Unavailable),
+            "case {change}: {error:?}"
+        );
+        assert_eq!(
+            out, "already retained bytes",
+            "invalid inventory must not be appended"
+        );
+    }
+}
+
+#[test]
+fn omission_output_has_exact_byte_boundaries_and_stops_when_cancelled_mid_inventory() {
+    let c = command(form().as_bytes(), GitHashAlgorithm::Sha1).unwrap();
+    let mut report = partial_report(GitHashAlgorithm::Sha1);
+    let mut second = report.omissions[0].clone();
+    second.path = b"vendor/z.bin".to_vec();
+    report.omissions.push(second);
+    let prefix = rows(&c, &report, usize::MAX, &mut || true).unwrap();
+    let mut expected = prefix.clone();
+    append_omissions(&mut expected, &report, usize::MAX, &mut || true).unwrap();
+    assert!(expected.contains("\"omitted_files\":2,\"omitted_source_bytes\":256"));
+    let mut exact = prefix.clone();
+    append_omissions(&mut exact, &report, expected.len(), &mut || true).unwrap();
+    assert_eq!(exact, expected);
+    let mut short = prefix.clone();
+    let error =
+        append_omissions(&mut short, &report, expected.len() - 1, &mut || true).unwrap_err();
+    assert!(matches!(error.status, Status::TooLarge));
+    assert!(short.len() < expected.len());
+
+    let mut stopped = prefix;
+    let mut checks = 0;
+    let error = append_omissions(&mut stopped, &report, usize::MAX, &mut || {
+        checks += 1;
+        checks < 2
+    })
+    .unwrap_err();
+    assert!(matches!(error.status, Status::Timeout));
+    assert!(!error.outcome_unknown);
+    assert_eq!(checks, 2, "the second omission observes cancellation");
+    assert!(stopped.contains(&hex(&report.omissions[0].path)));
+    assert!(!stopped.contains(&hex(&report.omissions[1].path)));
+    assert!(matches!(
+        rows(&c, &report, usize::MAX, &mut || false)
+            .unwrap_err()
+            .status,
+        Status::Timeout
+    ));
+    let mut live = String::new();
+    append_omissions(&mut live, &report, usize::MAX, &mut || true).unwrap();
+    assert!(
+        live.contains(&hex(&report.omissions[1].path)),
+        "live twin keeps all omissions"
+    );
+}
+
 #[test]
 fn terms_are_conjoined_normalized_and_not_interpreted_as_patterns_or_authority() {
     let c = command(

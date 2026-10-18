@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 37,
+  "total_tools": 42,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -86,6 +86,16 @@
       "rest_api_path": ""
     },
     {
+      "tool": "frankengit_issue_assign",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg issue assign",
+      "rest_api_path": "POST /repos/{id}/issues/{number}/assignees"
+    },
+    {
       "tool": "frankengit_issue_close",
       "version": 1,
       "owner_subsystem": "forge",
@@ -156,6 +166,26 @@
       "rest_api_path": "GET /repos/{id}/issues/{number}"
     },
     {
+      "tool": "frankengit_issue_unassign",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg issue unassign",
+      "rest_api_path": "DELETE /repos/{id}/issues/{number}/assignees"
+    },
+    {
+      "tool": "frankengit_protection_set",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg protection set",
+      "rest_api_path": "PUT /repos/{id}/protection"
+    },
+    {
       "tool": "frankengit_protection_show",
       "version": 1,
       "owner_subsystem": "forge",
@@ -184,6 +214,26 @@
       "capability": "mutate_forge_entity",
       "cli_command": "fg pr close",
       "rest_api_path": "POST /repos/{id}/pulls/{number}/close"
+    },
+    {
+      "tool": "frankengit_pull_comment",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg pr comment",
+      "rest_api_path": "POST /repos/{id}/pulls/{number}/comments"
+    },
+    {
+      "tool": "frankengit_pull_comments",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg pr comments",
+      "rest_api_path": "GET /repos/{id}/pulls/{number}/comments"
     },
     {
       "tool": "frankengit_pull_diff",

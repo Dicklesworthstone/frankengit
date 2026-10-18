@@ -2,9 +2,9 @@
 use super::options::{Mutation, Options, ReadOptions, expected_version, head_token};
 use crate::publication_support::quote;
 use fgit_authority::TerminalOutcome;
-use fgit_forge::event::issue::{IssueAction, IssueSnapshot, IssueState};
+use fgit_forge::event::issue::{IssueAction, IssueSnapshot, IssueState, validate_assignees};
 use fgit_forge::{AggregateId, ForgeEvent, ForgeEventPayload};
-use fgit_types::{DecisionOutcome, RepositoryAuthorityHeadId, TxId};
+use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
 fn labels(values: &[String]) -> String {
     format!(
@@ -12,6 +12,16 @@ fn labels(values: &[String]) -> String {
         values
             .iter()
             .map(|value| quote(value))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+fn assignees(values: &[PrincipalId]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|id| quote(&id.to_string()))
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -46,6 +56,13 @@ fn action(value: &IssueAction) -> String {
         }
         IssueAction::Close => "{\"name\":\"close\"}".to_owned(),
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
+        IssueAction::Assign { assignees: values } | IssueAction::Unassign { assignees: values } => {
+            format!(
+                "{{\"name\":{},\"assignees\":{}}}",
+                quote(value.name()),
+                assignees(values)
+            )
+        }
     }
 }
 pub(super) fn mutation(
@@ -110,13 +127,14 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, String> {
     }
     .validate()
     .map_err(|_| "invalid issue snapshot metadata")?;
+    validate_assignees(&value.assignees).map_err(|_| "invalid issue snapshot assignees")?;
     if value.comments >= value.version.get() {
         return Err("invalid issue comment count".to_owned());
     }
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{},\"labels\":{},",
-            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{}}}"
+            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{}}}"
         ),
         value.number.get(),
         value.version.get(),
@@ -129,7 +147,8 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, String> {
         }),
         quote(&value.opened_by.to_string()),
         quote(&value.last_actor.to_string()),
-        value.comments
+        value.comments,
+        assignees(&value.assignees)
     ))
 }
 fn header(

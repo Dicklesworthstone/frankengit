@@ -354,6 +354,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             write_slug(out, "ForgeEntityId", check.label())?;
             out.write_ref_name(source)?;
         }
+        ForgeEventKind::PullRequestCommented { conversation } => {
+            out.write_raw_byte(9);
+            write_slug(out, "ForgeEntityId", conversation.label())?;
+        }
     }
     Ok(())
 }
@@ -402,6 +406,9 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         8 => Ok(ForgeEventKind::WorkflowCheckObserved {
             check: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
             source: input.read_ref_name()?,
+        }),
+        9 => Ok(ForgeEventKind::PullRequestCommented {
+            conversation: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
         }),
         other => malformed("ForgeEventKind", u64::from(other)),
     }
@@ -2197,5 +2204,25 @@ mod tests {
             assert!(read_forge_event(&mut truncated).is_err());
         }
         assert_eq!(event.required_ref_effect(), None);
+    }
+
+    #[test]
+    fn pull_request_comment_trace_uses_its_own_tag_and_exact_conversation() {
+        let event = ForgeEventKind::PullRequestCommented {
+            conversation: ForgeEntityId::new(crate::harness::label("conversation/1")),
+        };
+        let literal = b"\x09\0\0\0\x0econversation/1";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut input).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity().label().as_str(), "conversation/1");
     }
 }

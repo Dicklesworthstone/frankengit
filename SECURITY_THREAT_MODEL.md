@@ -34,6 +34,12 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Delegation can only narrow authority.
 - Canonical policy uses one exact input root and does not consult mutable projections, wall clock, network calls, or unversioned model output.
 - Stale/replayed/confused-deputy/cross-tenant capabilities fail deterministically.
+- Native issue assignments are bounded metadata links to opaque principal IDs.
+  Naming a principal neither verifies account existence nor grants membership,
+  repository access, credentials, or notification delivery. Assignment commands
+  require the adapter's existing issue-write grant and retain the authenticated
+  actor separately. Tests assign an existing read-only principal and verify its
+  write request remains forbidden; body-supplied actor overrides are rejected.
 
 ### 1.4 Confidentiality and privacy
 
@@ -313,6 +319,14 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
   origin (an external TLS terminator's), never from request headers; native
   APIs accept only explicit Bearer credentials, never ambient Basic ones
   (frankengit-root-doctrine-x2mv.4.31).
+- review-policy HTTP administration requires both its explicit deployment
+  ceiling and independent protection scopes; ordinary code/review/merge grants
+  imply neither inspection nor replacement. Remote callers cannot bootstrap
+  ownership. Replacements recheck current canonical administrators and exact
+  version/epoch inside native admission; proposed administrators cannot authorize
+  themselves. The separate trusted-local MCP administration profile explicitly
+  identifies its principal as operator asserted. Original-key terminal recovery
+  preserves historical decisions without granting new publication authority.
 
 ### 7.5a Account takeover and interactive authentication lifecycle
 

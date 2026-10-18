@@ -16,14 +16,20 @@ use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
 use std::collections::BTreeMap;
 use std::io::Read;
 
+mod context;
+
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub repository_route: &'a str,
+    hydrate: bool,
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(repository_route) = read_route(head, "/api/v1/source/context-initial")? {
+            return Ok(Some(Self { repository_route, hydrate: true }));
+        }
         read_route(head, "/api/v1/source/search-initial")
-            .map(|route| route.map(|repository_route| Self { repository_route }))
+            .map(|route| route.map(|repository_route| Self { repository_route, hydrate: false }))
     }
 }
 
@@ -40,9 +46,13 @@ fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, Api
         .ok_or_else(|| ApiError::bad("missing_initial_field"))
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
+    command_fields(parse_form(bytes, 192)?, format)
+}
+fn command_fields(parsed: Vec<(String, String)>, format: GitHashAlgorithm) -> Result<Command, ApiError> {
+    if parsed.len() > 192 { return Err(ApiError::too_large()); }
     let mut fields = BTreeMap::new();
     let (mut terms, mut prefixes, mut kinds) = (Vec::new(), Vec::new(), Vec::new());
-    for (name, value) in parse_form(bytes, 192)? {
+    for (name, value) in parsed {
         match name.as_str() {
             "term_hex" => {
                 if terms.len() == 32 {
@@ -223,6 +233,9 @@ pub(super) fn execute(
 ) -> Result<JsonReply, ApiError> {
     if session.authenticated_session().is_none() {
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
+    }
+    if _request.hydrate {
+        return context::execute(node, session, framing, reader, http, maximum);
     }
     let command = command(&read_form(reader, framing, http)?, node.object_format)?;
     let deadline = GitDaemonSessionDeadline::new(

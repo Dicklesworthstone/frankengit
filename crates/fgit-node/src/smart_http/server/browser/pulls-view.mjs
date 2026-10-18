@@ -3,7 +3,8 @@
 import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
 import { decimal, oid, unhex, fail, showReply } from './pulls-core.mjs';
-import { RECEIPT_LIMIT, fastForwardCommand } from './pulls-actions.mjs';
+import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, protectionChanges } from './pulls-actions.mjs';
+import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
 
@@ -32,7 +33,7 @@ export function renderInspection(doc, parent, report) {
   parent.replaceChildren();
   item(doc, parent, 'h3', `Inspected candidate ${report.candidate_commit}`);
   item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
-    `Base: ${report.merge_base}\nParents (target, source): ${report.parents.join(', ')}\n` +
+    `Base: ${report.merge_base}\nNative parents: ${report.parents.join(', ')}\n` +
     `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
   return renderComparison(doc, parent, report.comparison, 'inspection');
@@ -111,30 +112,44 @@ async function fileText(input) {
   if (bytes.length > RECEIPT_LIMIT || bytes.length !== file.size) fail('Invalid receipt size.');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
-const IDS = ['connection', 'token', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number',
+const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load',
+  'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
-  'prepare', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
-  'candidate-import', 'candidate-import-file', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
-  'merge', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file'];
+  'prepare', 'candidate-method', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
+  'candidate-import', 'candidate-import-file', 'candidate-import-submit', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
+  'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
 
 export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImpl = globalThis.fetch,
   cryptoImpl = globalThis.crypto, downloadImpl = null } = {}) {
   const nodes = Object.fromEntries(IDS.map(id => { const el = doc.getElementById(id); if (!el) fail(`Missing UI element: ${id}`); return [id, el]; }));
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
+  nodes['candidate-method'].value ||= 'merge-commit';
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
-  let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null;
+  let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
   const status = message => { nodes.status.textContent = displayText(message); };
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
     el.addEventListener('click', event => { event.preventDefault(); handler(); }); parent.append(el); return el; };
   const on = (id, event, handler) => nodes[id].addEventListener(event, ev => { ev.preventDefault(); handler(); });
   function controls() {
-    const busy = Boolean(operation) || client.busy, connected = client.connected, pending = client.pending, candidate = client.candidate;
-    for (const id of ['refresh', 'new-pr', 'candidate-import-file', 'receipt-import-file']) nodes[id].disabled = !connected || busy;
+    const busy = Boolean(operation) || client.busy, recovering = client.recoveryOnly,
+      connected = client.connected && !recovering, pending = client.pending, candidate = client.candidate;
+    nodes['recovery-only'].disabled = busy;
+    nodes['original-principal'].disabled = busy || !nodes['recovery-only'].checked;
+    nodes['original-principal'].required = nodes['recovery-only'].checked;
+    nodes['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
+      ? 'RECOVERY ONLY: the selected original principal must match the authenticated outcome response. No PR reads or mutation sends are permitted. Reconnect explicitly for ordinary work.'
+      : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is submitted.';
+    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit']) nodes[id].disabled = !connected || busy;
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open' || selected.row.data.source_ref === null || selected.row.data.target_ref === null;
     nodes['reviews-load'].disabled = !connected || busy || !selected;
+    nodes['comments-load'].disabled = !connected || busy || !selected;
+    nodes['comments-limit'].disabled = !connected || busy || !selected;
+    const canComment = connected && selected && conversation?.reply.found && conversation.reply.number === selected.row.number;
+    nodes['comment-stage'].disabled = !canComment || busy || Boolean(pending);
+    nodes['comment-body'].disabled = !canComment || busy;
     if (fastForward) fastForward.button.disabled = !connected || busy || Boolean(pending) ||
       !fastForward.available || selected?.row !== fastForward.row || Boolean(selected?.stale);
     const resolving = Boolean(client.conflict);
@@ -142,24 +157,41 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
+    const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash';
+    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : squash ? 'Reviewed squash' : 'Reviewed merge';
+    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
+    nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
+    nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
+    nodes['required-reviewers'].required = !inspectedFastForward;
+    nodes['merge-method-guidance'].textContent = inspectedFastForward
+      ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
+      : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
+        : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
     for (const id of ['candidate-download', 'inspection-download']) nodes[id].disabled = !candidate || busy;
+    nodes.confirm.disabled = !connected || busy || !pending;
+    if (recovering) nodes.confirm.checked = false;
     nodes.send.disabled = !connected || busy || !pending || !nodes.confirm.checked;
-    nodes.recover.disabled = !connected || busy || !pending;
-    nodes.discard.disabled = busy || !pending || pending.sent || pending.exported;
+    nodes.recover.disabled = !client.connected || busy || !pending;
+    nodes.discard.disabled = recovering || busy || !pending || pending.sent || pending.exported;
     nodes['receipt-download'].disabled = busy || !pending;
-    nodes['receipt-import-file'].disabled ||= Boolean(pending);
+    nodes['receipt-import-file'].disabled = !client.connected || busy || Boolean(pending);
+    nodes['receipt-import-submit'].disabled = nodes['receipt-import-file'].disabled;
     nodes.pending.textContent = pending ? displayText(`Prepared ${pending.action} for PR #${pending.number}\n` +
       `Key: ${pending.key}\n${pending.body_bytes} body bytes; ${pending.bundle_bytes} bundle bytes\n` +
       `Dispatch attempted: ${pending.sent}; recovery copy exported: ${pending.exported}\n` +
       `Repository: ${pending.scope.repository}; incarnation: ${pending.scope.incarnation}\n` +
       `${JSON.stringify(pending.fields, null, 2)}\n` +
-      'Only Send/Retry dispatches these exact bytes. Edits elsewhere do not change this request. An absent outcome is not proof of failure.') : 'No prepared mutation.';
+      (recovering ? 'RECOVERY ONLY: check this original key or export the unchanged receipt. This credential cannot send or retry the command. An absent outcome is not proof of failure.'
+        : 'Only Send/Retry dispatches these exact bytes. Edits elsewhere do not change this request. An absent outcome is not proof of failure.'))
+      : recovering ? 'No retained request. Import its original recovery receipt; do not construct a replacement command.' : 'No prepared mutation.';
   }
   function clearViews() {
+    clearComments();
     selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
       'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers']) nodes[id].value = '';
+    nodes['candidate-method'].value = 'merge-commit';
     nodes.confirm.checked = false;
   }
   function disconnect() {
@@ -172,6 +204,9 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     controls();
   }
   async function run(kind, action) {
+    if (client.recoveryOnly && !['connect', 'recover', 'restore', 'export'].includes(kind)) {
+      status('Recovery-only connection cannot read, prepare, discard or resend mutations. Keep the original request; only outcome lookup is permitted.'); controls(); return;
+    }
     if (operation || client.busy) { status('An operation is still settling. Its exact request has not been replaced.'); return; }
     const id = ++generation; operation = { id, kind }; controls();
     const guard = () => { if (generation !== id) fail('Operation superseded.'); };
@@ -180,7 +215,9 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       if (generation === id) {
         if (!client.connected) { clearViews(); nodes.token.value = ''; }
         const uncertainty = client.pending?.sent || error.outcomeUnknown;
-        status(`${error.message || 'Operation unavailable.'}${uncertainty ? ' Outcome remains unknown unless a terminal decision was already shown. Keep the original request and recover or retry it unchanged.' : ''}`);
+        status(`${error.message || 'Operation unavailable.'}${uncertainty
+          ? client.recoveryOnly ? ' Outcome remains unknown. Keep the original receipt and use only its outcome lookup; do not resend with a replacement credential.'
+            : ' Outcome remains unknown unless a terminal decision was already shown. Keep the original request and recover or retry it unchanged.' : ''}`);
       }
     } finally { if (generation === id) { operation = null; controls(); } }
   }
@@ -208,7 +245,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const metadataIds = { expected_version: 'expected-version', object_format: 'object-format', source_ref: 'source-ref', target_ref: 'target-ref',
     source_tip: 'source-tip', target_tip: 'target-tip', title: 'title', body: 'body' };
   function clearProposal() {
+    clearComments();
     for (const id of ['pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
+  }
+  function clearComments(keepDraft = false) {
+    conversation = null; nodes.conversation.replaceChildren(); nodes['comment-paging'].replaceChildren();
+    nodes['comment-version'].value = '';
+    if (!keepDraft) nodes['comment-body'].value = '';
   }
   function renderSelected(result) {
     clearProposal(); fastForward = null;
@@ -307,7 +350,61 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     });
   }
   function downloadText(name, text) { download(name, text); }
+  function loadComments(after = 0, head = null, pageLimit = null) {
+    return run('read', async guard => {
+      if (!selected) fail('Select a PR first.');
+      const limit = pageLimit ?? decimal(nodes['comments-limit'].value, 'comments per page', 1);
+      if (![1, 5, 20].includes(limit)) fail('Choose 1, 5, or 20 comments per page.');
+      const number = selected.row.number, row = selected.row;
+      client.cancelReads(); clearComments(true);
+      item(doc, nodes.conversation, 'p', 'Loading conversation…');
+      try {
+        const result = await client.comments(number, { after, head, limit, render: true }); guard();
+        if (selected?.row !== row) fail('The selected PR changed.');
+        conversation = result; nodes.conversation.replaceChildren();
+        if (!result.reply.found) {
+          item(doc, nodes.conversation, 'p', 'Conversation unavailable: this PR is absent or not disclosed.');
+          status('No conversation result was inferred.'); return;
+        }
+        nodes['comment-version'].value = String(result.reply.discussion_version);
+        item(doc, nodes.conversation, 'p', `Conversation version ${result.reply.discussion_version} · snapshot ${result.head}`);
+        if (!result.reply.comments.length) item(doc, nodes.conversation, 'p', after === 0 ? 'No comments at this snapshot.' : 'No further comments at this snapshot.');
+        const renderGeneration = generation;
+        for (const comment of result.reply.comments) {
+          const section = element(doc, 'section'); nodes.conversation.append(section);
+          item(doc, section, 'h3', `Comment ${comment.version} · ${comment.actor}`);
+          section.append(markdownBody(doc, comment.body, comment.body_rendered, {
+            cryptoImpl, current: () => client.connected && generation === renderGeneration && conversation === result && selected?.row === row,
+          }).element);
+        }
+        if (result.reply.next_after !== null) button(nodes['comment-paging'], 'Next comments page', () => loadComments(result.reply.next_after, result.head, limit));
+        item(doc, nodes.conversation, 'p', result.reply.complete ? 'All comments after this cursor are shown.' : 'More comments remain at this snapshot.');
+        status('Conversation loaded. Preparing a comment uses its displayed discussion version and preserves PR metadata.');
+      } catch (error) {
+        guard(); clearComments(true);
+        item(doc, nodes.conversation, 'p', `Conversation unavailable: ${error.message || 'read failed'}. Reload explicitly before preparing a comment.`);
+        throw error;
+      }
+    });
+  }
   function renderTerminal(result) {
+    if (client.recoveryOnly) {
+      nodes.confirm.checked = false;
+      if (result.terminal) {
+        clearComments(); resolution.clear(); nodes.candidate.replaceChildren();
+        status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. ` +
+          'Recovered using the original key without reexecuting the command. External delivery acknowledgement is not established. Recovery-only mode remains active; reconnect explicitly before reading or preparing new work.');
+      } else status(`Outcome unknown (${result.state}). No request was reexecuted. Absence never proves non-commit. Keep the original receipt and check its outcome again; this credential cannot resend it.`);
+      return;
+    }
+    if (result.action === 'comment') {
+      nodes.confirm.checked = false;
+      if (result.terminal) {
+        clearComments(result.outcome !== 'committed');
+        status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. Load the latest conversation to observe the result. PR metadata and existing approvals are unchanged; external delivery is not established.`);
+      } else status(`Comment outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
+      return;
+    }
     nodes.confirm.checked = false; nodes.candidate.replaceChildren();
     if (result.terminal) {
       resolution.clear();
@@ -321,13 +418,21 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('connection', 'submit', () => {
     const token = nodes.token.value; nodes.token.value = '';
     if (operation || client.busy) { status('Settle the current operation or disconnect before changing credentials.'); return; }
+    const options = nodes['recovery-only'].checked
+      ? { recoveryOnly: true, originalPrincipal: nodes['original-principal'].value } : {};
     clearViews();
     void run('connect', async guard => {
-      await client.connect(token); guard(); status('Connected locally. Loading the PR API requires its independent read grant. Recovery receipts can also be restored.');
+      await client.connect(token, options); guard();
+      if (client.recoveryOnly) {
+        status('Connected locally for outcome recovery only. The server will authenticate the selected principal on lookup. Import the original receipt or check the retained request; nothing has been sent.');
+        return;
+      }
+      status('Connected locally. Loading the PR API requires its independent read grant. Recovery receipts can also be restored.');
       try { const result = await client.list(); guard(); renderList(result); }
       catch (error) { guard(); if (!client.connected) throw error; status(`Credential retained for recovery. PR listing was not available: ${error.message}`); }
     });
   });
+  nodes['recovery-only'].addEventListener('change', controls);
   on('disconnect', 'click', disconnect);
   on('refresh', 'click', () => loadList());
   on('select-pr', 'submit', () => run('read', async guard => {
@@ -336,8 +441,16 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     const result = await client.show(requested, null, { render: true }); guard(); renderSelected(result); status('Selected an explicitly refreshed PR snapshot.');
   }));
   on('reviews-load', 'click', () => loadReviews());
+  on('comments-load', 'click', () => loadComments());
+  on('comment-form', 'submit', () => run('stage', async guard => {
+    if (!selected || !conversation?.reply.found || conversation.reply.number !== selected.row.number) fail('Load the selected PR conversation first.');
+    await client.stageComment(selected.row.number, conversation.reply.discussion_version, nodes['comment-body'].value); guard();
+    nodes.confirm.checked = false;
+    status('Comment prepared locally. Review its exact body and discussion version below, then send it explicitly.');
+  }));
   on('new-pr', 'click', () => {
-    if (operation || !client.connected) return;
+    if (operation || !client.connected || client.recoveryOnly) return;
+    clearComments();
     invalidateCandidate(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
     nodes['expected-version'].value = '0'; nodes['object-format'].value = client.binding?.format ?? 'sha1'; nodes['metadata-action'].value = 'open';
@@ -355,7 +468,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       source_ref: data.source_ref, target_ref: data.target_ref, source_tip: data.source_tip, target_tip: data.target_tip };
     const metadata = { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value };
     nodes.candidate.replaceChildren(); resolution.clear();
-    const result = await client.prepareAndInspect(selected.row.number, fields, metadata); guard();
+    const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value); guard();
     if (result.inspection) {
       const rendered = renderInspection(doc, nodes.candidate, result.inspection);
       status(`Candidate prepared and inspected, without publication.${rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''}`);
@@ -364,7 +477,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
       if (result.metadata.state === 'conflicted') {
         resolution.show(result.metadata);
-        status('Choose every conflict explicitly below. Resolution constructs and inspects a new candidate; it does not record approval or publish.');
+        status(`Choose every conflict explicitly below. Resolution constructs and inspects a new ${result.metadata.method === 'squash' ? 'squash' : 'merge'} candidate; it does not record approval or publish.`);
       } else status('Already up to date. No candidate, transaction or approval was produced.');
     }
   }));
@@ -375,6 +488,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status(`Resolved candidate constructed and inspected. No vote or publication exists.${rendered.clipped ? ' Display clipped: download the full inspection before reviewing.' : ''}`);
   }));
   for (const id of ['metadata', 'prepare']) nodes[id].addEventListener('input', invalidateCandidate);
+  on('candidate-method', 'change', invalidateCandidate);
   on('candidate-download', 'click', () => run('export', async () => { downloadText('frankengit-candidate.json', client.exportCandidate()); status('Candidate receipt exported without credentials. Its bytes must be inspected before another reviewer can act.'); }));
   on('inspection-download', 'click', () => run('export', async () => {
     const candidate = client.candidate; if (!candidate) fail('No inspected candidate.');
@@ -390,9 +504,14 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status('Exact-candidate review prepared locally. The authenticated credential determines the reviewer, not this form.');
   }));
   on('merge', 'submit', () => run('stage', async guard => {
-    const reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
-    await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
-    status('Merge request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.');
+    if (candidateMethod(client.candidate) === 'fast-forward-only') {
+      await client.stageInspectedFastForward(); guard(); nodes.confirm.checked = false;
+      status('Fast-forward request prepared for the exact inspected source tip. Nothing sent. The node rechecks ancestry, both branch tips, the PR version and current branch protection before publication.');
+    } else {
+      const method = candidateMethod(client.candidate), reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
+      await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
+      status(`${method === 'squash' ? 'Squash' : 'Merge'} request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.`);
+    }
   }));
   nodes.confirm.addEventListener('change', controls);
   on('send', 'click', () => run('send', async guard => {
@@ -403,17 +522,252 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('discard', 'click', () => run('discard', async () => { client.discardUnsent(); nodes.confirm.checked = false; status('Never-exported, never-dispatched draft discarded.'); }));
   on('receipt-download', 'click', () => run('export', async () => {
     downloadText('frankengit-pr-recovery.json', client.exportReceipt());
-    status('Recovery receipt exported without the token. It contains private command and candidate data. Keep the original credential; this copy may be submitted elsewhere.');
+    status(client.recoveryOnly
+      ? 'Original recovery receipt exported without either token. It retains the original command, key and credential fingerprint. Keep it private; this page remains lookup-only, and the copy may still be submitted elsewhere with the original credential.'
+      : 'Recovery receipt exported without the token. It contains private command and candidate data. Keep the original credential; this copy may be submitted elsewhere.');
   }));
   on('receipt-import', 'submit', () => run('restore', async guard => {
     const serialized = await fileText(nodes['receipt-import-file']); guard(); await client.restoreReceipt(serialized); guard(); nodes.confirm.checked = false;
-    status('Exact request restored. Check its original outcome or explicitly retry the same bytes; no mutation has been sent by importing it.');
+    status(client.recoveryOnly
+      ? 'Original request restored for outcome lookup only. Its key, fingerprint and bytes are unchanged. No mutation was sent; this credential cannot resend the command.'
+      : 'Exact request restored. Check its original outcome or explicitly retry the same bytes; no mutation has been sent by importing it.');
   }));
   doc.defaultView.addEventListener('beforeunload', event => {
     if (client.pending || client.busy) { event.preventDefault(); event.returnValue = ''; }
   });
   doc.defaultView.addEventListener('pagehide', disconnect);
   status('Connect with a repository token. Credentials remain only in page memory.'); controls();
-  return { client, disconnect, loadPr, loadList, loadReviews };
+  return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
 }
-if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) mountPulls(document);
+
+// Review-protection administration has its own connection and native client.
+// A PR-read/review token is never borrowed, and a displayed policy is evidence,
+// not permission to publish. Only an explicitly confirmed saved intent is sent.
+export function mountProtection(doc, { href = doc.defaultView.location.href, fetchImpl = globalThis.fetch,
+  cryptoImpl = globalThis.crypto, downloadImpl = null } = {}) {
+  const parent = doc.getElementById('pr-collaboration');
+  if (!parent || doc.getElementById('protection-panel')) fail('Protection needs one PR shell and may only be mounted once.');
+  const client = new ProtectionClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
+  const panel = element(doc, 'details'); panel.id = 'protection-panel';
+  item(doc, panel, 'summary', 'Repository review protection — administrator');
+  item(doc, panel, 'p', 'Inspect the complete native policy, then propose a complete replacement. Omitted branches lose protection; omitted administrators lose policy administration. The node checks current authority. First installation is trusted-local only.');
+  const nodes = {}, rows = [];
+  let operation = false, generation = 0, rowNumber = 0, preview = null;
+  const named = (parent, tag, name, label = '') => {
+    const el = item(doc, parent, tag, label); el.id = `protection-${name}`; nodes[name] = el; return el;
+  };
+  const field = (parent, name, label, tag = 'input') => {
+    const wrapper = item(doc, parent, 'label', label), input = named(wrapper, tag, name);
+    if (tag === 'input') input.type = 'text';
+    input.autocomplete = 'off'; input.spellcheck = false; return input;
+  };
+  const button = (parent, name, label) => { const el = named(parent, 'button', name, label); el.type = 'button'; return el; };
+  const connection = named(panel, 'form', 'connection'); connection.autocomplete = 'off';
+  const token = field(connection, 'token', 'Independent protection bearer token'); token.type = 'password'; token.maxLength = 64;
+  const person = field(connection, 'principal', 'Intended authenticated principal ID (independently known)'); person.maxLength = 32;
+  const recoveryOnly = field(connection, 'recovery-only', 'Recovery only, including a rotated credential'); recoveryOnly.type = 'checkbox';
+  button(connection, 'connect', 'Connect protection credential').type = 'submit';
+  button(panel, 'disconnect', 'Disconnect protection credential');
+  named(panel, 'p', 'mode');
+  const statusNode = named(panel, 'p', 'status'); statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
+  button(panel, 'load', 'Load complete protection policy — read only');
+  named(panel, 'pre', 'snapshot');
+  const editor = named(panel, 'form', 'editor');
+  item(doc, editor, 'h3', 'Complete replacement');
+  const administrators = field(editor, 'administrators', 'All policy administrators, one principal ID per line', 'textarea');
+  administrators.maxLength = 32 * 33; administrators.rows = 4;
+  named(editor, 'div', 'branches');
+  button(editor, 'add-branch', 'Add protected branch');
+  const clear = field(editor, 'clear', 'Explicitly remove ALL branch protection (requires no branch rules)'); clear.type = 'checkbox';
+  button(editor, 'preview', 'Preview all changes — do not prepare or send').type = 'submit';
+  named(panel, 'pre', 'changes');
+  button(panel, 'stage', 'Prepare this exact preview — do not send');
+  named(panel, 'pre', 'pending');
+  const confirm = field(panel, 'confirm', 'I have reviewed the saved complete replacement and authorize this exact Send/Retry'); confirm.type = 'checkbox';
+  button(panel, 'send', 'Send/Retry original protection request');
+  button(panel, 'recover', 'Look up original protection outcome — do not resend');
+  button(panel, 'discard', 'Discard never-sent, never-exported draft');
+  button(panel, 'export', 'Download original protection recovery receipt');
+  item(doc, panel, 'p', 'Recovery receipts contain private policy data, but no bearer token. Save one before leaving after preparing a request. A timeout, disconnect or absent outcome never proves non-commit.');
+  parent.append(panel);
+  const status = message => { statusNode.textContent = displayText(message); };
+  const pendingView = () => {
+    const pending = client.pending;
+    if (!pending) { nodes.pending.textContent = 'No prepared protection request.'; return; }
+    const intent = pending.intent;
+    nodes.pending.textContent = displayText(`SAVED COMPLETE REPLACEMENT — edits cannot change this request\n` +
+      `Origin: ${intent.origin}\nRoute: ${intent.route}\nPrincipal: ${intent.principal}\nKey: ${intent.key}\n` +
+      `Tenant: ${intent.source.scope.tenant}\nRepository: ${intent.source.scope.repository}\nIncarnation: ${intent.source.scope.incarnation}\n` +
+      `Source head: ${intent.source.head}\nExpected version: ${intent.source.version}\nExpected epoch: ${intent.source.epoch}\n` +
+      `Dispatch attempted: ${pending.sent}; receipt exported: ${pending.exported}; clear all: ${intent.clear}\n` +
+      `Changes:\n${JSON.stringify(protectionChanges(intent.source.policy, intent.replacement), null, 2)}\n` +
+      `Complete replacement:\n${JSON.stringify(intent.replacement, null, 2)}`);
+  };
+  function controls() {
+    const busy = operation || client.busy, pending = client.pending;
+    const ordinary = client.connected && !client.recoveryOnly;
+    const editable = ordinary && !busy && !pending && Boolean(client.observed?.policy);
+    for (const input of [token, person, recoveryOnly, nodes.connect]) input.disabled = busy;
+    nodes.mode.textContent = !client.connected ? 'Disconnected. No protection credential is active.' : client.recoveryOnly
+      ? 'RECOVERY ONLY. Only the retained original outcome may be read; no policy read, replacement preparation or resend is allowed.'
+      : 'Ordinary protection connection. Connecting locally does not establish an authenticated role or grant.';
+    nodes.load.disabled = !ordinary || busy || Boolean(pending);
+    for (const input of [administrators, clear, nodes['add-branch'], nodes.preview]) input.disabled = !editable;
+    for (const row of rows) for (const input of [row.reference, row.reviewers, row.remove]) input.disabled = !editable;
+    nodes['add-branch'].disabled ||= rows.length >= 64;
+    nodes.stage.disabled = !editable || !preview;
+    confirm.disabled = !ordinary || busy || !pending;
+    if (!ordinary || !pending) confirm.checked = false;
+    nodes.send.disabled = !ordinary || busy || !pending || !confirm.checked;
+    nodes.recover.disabled = !client.connected || busy || !pending;
+    nodes.discard.disabled = !ordinary || busy || !pending || pending.sent || pending.exported;
+    nodes.export.disabled = busy || !pending;
+    pendingView();
+  }
+  function clearEditor() {
+    preview = null; rows.length = 0; nodes.branches.replaceChildren(); administrators.value = '';
+    clear.checked = false; confirm.checked = false; nodes.changes.textContent = ''; nodes.snapshot.textContent = '';
+  }
+  function changed() {
+    preview = null; nodes.changes.textContent = 'Inputs changed. Preview the complete replacement again.';
+    confirm.checked = false; controls();
+  }
+  function addRow(data = { reference_hex: '', required_reviewers: [] }) {
+    if (rows.length >= 64) fail('At most 64 branch rules can be edited.');
+    const group = element(doc, 'fieldset'); nodes.branches.append(group);
+    item(doc, group, 'legend', `Protected branch ${++rowNumber}`);
+    const refLabel = item(doc, group, 'label', 'Exact branch bytes, lowercase hexadecimal (including refs/heads/)');
+    const reference = item(doc, refLabel, 'input'); reference.type = 'text'; reference.maxLength = 2048;
+    reference.autocomplete = 'off'; reference.spellcheck = false; reference.value = data.reference_hex;
+    const readable = item(doc, group, 'pre', data.reference_hex ? `Display only: ${displayBytes(data.reference_hex)}` : 'Enter exact branch bytes.');
+    const reviewersLabel = item(doc, group, 'label', 'All required reviewer IDs for this branch, one per line');
+    const reviewers = item(doc, reviewersLabel, 'textarea'); reviewers.rows = 3; reviewers.maxLength = 32 * 33;
+    reviewers.spellcheck = false; reviewers.value = data.required_reviewers.join('\n');
+    const remove = item(doc, group, 'button', 'Remove this branch rule'); remove.type = 'button';
+    const row = { reference, reviewers, remove }; rows.push(row);
+    reference.addEventListener('input', () => {
+      readable.textContent = 'Edited exact branch bytes; inspect the complete replacement in the preview.'; changed();
+    });
+    reviewers.addEventListener('input', changed);
+    remove.addEventListener('click', event => {
+      event.preventDefault();
+      if (operation || client.busy || client.pending || !client.connected || client.recoveryOnly || !client.observed?.policy) return;
+      rows.splice(rows.indexOf(row), 1); group.remove(); changed();
+    });
+  }
+  const people = input => {
+    if (input.value.length > 32 * 33) fail('A principal list exceeds its editing limit.');
+    // Newline and comma separate IDs; principal validation never trims or
+    // repairs a malformed ID. The wire policy validator remains authoritative.
+    return input.value.split(/[\r\n,]+/u).filter(value => value !== '');
+  };
+  function draft() {
+    if (rows.some(row => row.reference.value.length > 2048)) fail('A branch byte string exceeds its editing limit.');
+    return { replacement: protectionPolicy({ administrators: people(administrators),
+      branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers) })) }), clear: clear.checked };
+  }
+  function requireDraftAccess() {
+    if (!client.connected || client.recoveryOnly || client.pending || !client.observed?.policy) fail('Load an installed policy with an ordinary protection connection and no pending request.');
+  }
+  async function run(action) {
+    if (operation || client.busy) { status('A protection operation is still settling. The original request is not replaced.'); return; }
+    const id = ++generation; operation = true; controls();
+    const guard = () => { if (id !== generation) fail('Protection view superseded.'); };
+    try { await action(guard); }
+    catch (error) {
+      if (id === generation) {
+        if (!client.connected) clearEditor();
+        status(`${error.message || 'Protection operation unavailable.'}${client.pending?.sent || error.outcomeUnknown
+          ? ' Outcome remains unknown. Keep the original receipt and key; absence or disconnect does not prove non-commit.' : ''}`);
+      }
+    } finally {
+      if (id === generation) operation = false;
+      controls();
+    }
+  }
+  function disconnect() {
+    generation++; operation = false; client.disconnect(); token.value = ''; person.value = ''; clearEditor(); controls();
+    status(client.pending ? 'Disconnected. The original request remains in memory. Export its receipt before leaving; no rollback is inferred.'
+      : 'Disconnected. Protection credentials and policy views cleared.');
+  }
+  function terminal(result) {
+    confirm.checked = false;
+    if (result.terminal) {
+      clearEditor();
+      status(`Canonical ${result.outcome}: transaction ${result.tx}, sequence ${result.sequence}, ` +
+        (result.rcr ? `record ${result.rcr}. ` : `refusal ${result.refusal}. `) +
+        'External delivery acknowledgement is not established. Reload the complete policy explicitly before preparing another replacement.');
+    } else status(`Outcome unknown (${result.state}). No command was reexecuted. Keep the original request; absence does not prove non-commit.`);
+  }
+  const on = (name, event, handler) => nodes[name].addEventListener(event, ev => { ev.preventDefault(); return handler(); });
+  on('connection', 'submit', () => {
+    const credential = token.value, principal = person.value, mode = recoveryOnly.checked; token.value = '';
+    return run(async guard => {
+      clearEditor(); await client.connect(credential, principal, { recoveryOnly: mode }); guard();
+      status(mode ? 'Connected locally for original-outcome recovery only. The server must authenticate the independently entered principal.'
+        : 'Connected locally. Load the complete native protection policy explicitly; no request has been sent.');
+    });
+  });
+  on('disconnect', 'click', disconnect);
+  on('load', 'click', () => run(async guard => {
+    if (!client.connected || client.recoveryOnly || client.pending) fail('Ordinary access with no pending request is required to reload protection.');
+    clearEditor(); const source = await client.load(); guard();
+    nodes.snapshot.textContent = displayText(`Tenant: ${source.scope.tenant}\nRepository: ${source.scope.repository}\nIncarnation: ${source.scope.incarnation}\n` +
+      `Object format: ${source.scope.format}\nSource head: ${source.head}\nPolicy version: ${source.version}\nPolicy epoch: ${source.epoch}\n` +
+      `Complete policy:\n${JSON.stringify(source.policy, null, 2)}`);
+    if (!source.policy) { status('No policy is installed. Remote bootstrap is forbidden; first installation is trusted-local only.'); return; }
+    administrators.value = source.policy.administrators.join('\n');
+    for (const row of source.policy.branches) addRow(row);
+    status(source.policy.branches.length ? 'Complete installed policy loaded. Editing and previewing do not publish.'
+      : 'Installed policy has no protected branches. Administrators still exist; this is not an uninstalled policy.');
+  }));
+  administrators.addEventListener('input', changed); clear.addEventListener('change', changed);
+  on('add-branch', 'click', () => {
+    if (operation || client.busy) return;
+    try { requireDraftAccess(); addRow(); changed(); } catch (error) { status(error.message); }
+  });
+  on('editor', 'submit', () => run(async () => {
+    requireDraftAccess(); preview = null; nodes.changes.textContent = '';
+    const proposed = draft();
+    if (proposed.clear !== (proposed.replacement.branches.length === 0)) fail('An empty branch policy needs explicit clear-all confirmation; clear-all cannot accompany branch rules.');
+    const source = client.observed;
+    preview = { ...proposed, source };
+    nodes.changes.textContent = displayText(`PREVIEW ONLY — no request prepared or sent\nExpected version: ${source.version}\nExpected epoch: ${source.epoch}\n` +
+      `Clear ALL branch protection: ${proposed.clear}\n` +
+      `All changes:\n${JSON.stringify(protectionChanges(source.policy, proposed.replacement), null, 2)}\n` +
+      `Complete replacement:\n${JSON.stringify(proposed.replacement, null, 2)}`);
+    status('Review every administrator and branch/reviewer addition and removal. Omitted entries are deleted, not preserved. Prepare explicitly to save this exact preview.');
+  }));
+  on('stage', 'click', () => run(async guard => {
+    requireDraftAccess();
+    if (!preview || JSON.stringify(draft()) !== JSON.stringify({ replacement: preview.replacement, clear: preview.clear }) ||
+        JSON.stringify(client.observed) !== JSON.stringify(preview.source)) fail('Inputs or the source policy changed. Preview again before preparing.');
+    await client.stage(preview.replacement, preview.clear); guard(); preview = null; confirm.checked = false;
+    status('Exact protection replacement prepared locally, not sent. Inspect the saved request, save its receipt, then explicitly confirm Send/Retry.');
+  }));
+  confirm.addEventListener('change', controls);
+  on('send', 'click', () => run(async guard => {
+    if (!client.connected || client.recoveryOnly || !client.pending || !confirm.checked) fail('Explicitly confirm the original request using an ordinary protection connection.');
+    confirm.checked = false; const result = await client.send(); guard(); terminal(result);
+  }));
+  on('recover', 'click', () => run(async guard => { const result = await client.recover(); guard(); terminal(result); }));
+  on('discard', 'click', () => run(async () => {
+    if (!client.connected || client.recoveryOnly) fail('Discard requires an ordinary protection connection.');
+    client.discardUnsent(); changed(); status('Never-dispatched, never-exported draft discarded. Preview the complete replacement again before preparing.');
+  }));
+  on('export', 'click', () => run(async () => {
+    download('frankengit-protection-recovery.json', client.exportReceipt());
+    status('Original recovery receipt exported without the bearer token. Keep it private and retain the original credential; the command may be submitted elsewhere.');
+  }));
+  doc.defaultView.addEventListener('beforeunload', event => {
+    if (client.pending || client.busy || operation) { event.preventDefault(); event.returnValue = ''; }
+  });
+  doc.defaultView.addEventListener('pagehide', disconnect);
+  status('Connect independently for protection administration. No protection request runs automatically.'); controls();
+  return { client, disconnect };
+}
+
+if (typeof document !== 'undefined' && document.getElementById('pr-collaboration')) {
+  mountPulls(document);
+  mountProtection(document);
+}

@@ -3,11 +3,12 @@
 //! native construction. A concurrent publication refuses the attempt instead
 //! of returning a candidate for a silently refreshed subject.
 
-use fgit_admission::{AdmissionError, ProjectionFailure};
 use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::pull_request::PullRequestAction;
 use fgit_forge::event::review::ReviewSubject;
-use fgit_forge::preparation::{MergeMetadata, MergePreparation, MergeProfile, PreparationLimits};
+use fgit_forge::preparation::{
+    MergeCommitStyle, MergeMetadata, MergePreparation, MergeProfile, PreparationLimits,
+};
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
@@ -64,6 +65,30 @@ impl OneNode {
         limits: PreparationLimits,
         profile: MergeProfile,
     ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
+        self.prepare_pull_request_bundle_with_options_in(
+            request,
+            subject,
+            visibility,
+            metadata,
+            limits,
+            profile,
+            MergeCommitStyle::TwoParent,
+        )
+        .await
+    }
+
+    /// Select commit style without weakening the exact PR subject or same-head
+    /// fence. A squash candidate remains an artifact requiring explicit review.
+    pub async fn prepare_pull_request_bundle_with_options_in(
+        &self,
+        request: &NodeRequestContext,
+        subject: &ReviewSubject,
+        visibility: &RefVisibility,
+        metadata: &MergeMetadata,
+        limits: PreparationLimits,
+        profile: MergeProfile,
+        style: MergeCommitStyle,
+    ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
         metadata
             .validate()
             .map_err(NodeWorkspaceRefusal::MergePreparation)?;
@@ -74,7 +99,7 @@ impl OneNode {
             .validate_pull_request_preparation_in(request, subject, visibility)
             .await?;
         let prepared = self
-            .prepare_merge_bundle_with_profile_in(
+            .prepare_merge_bundle_with_options_in(
                 request,
                 &subject.target_ref,
                 &subject.source_ref,
@@ -82,6 +107,7 @@ impl OneNode {
                 metadata,
                 limits,
                 profile,
+                style,
             )
             .await?;
         if prepared.source_head != head {
@@ -143,10 +169,9 @@ impl OneNode {
         )
         .await
         .map_err(|error| {
-            NodeWorkspaceRefusal::MergeValidation(ProjectionFailure::Unavailable(match error {
-                AdmissionError::AsyncProjectionUnavailable(code) => code,
-                _ => RefusalCode::EvidenceInvalid,
-            }))
+            NodeWorkspaceRefusal::MergeValidation(
+                error.into_projection_unavailable(RefusalCode::EvidenceInvalid),
+            )
         })?;
         let pr = page
             .pull_requests

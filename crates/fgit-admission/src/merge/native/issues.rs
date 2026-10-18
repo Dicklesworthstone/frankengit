@@ -183,7 +183,7 @@ where
     C: Fn() -> bool + Sync,
 {
     limit(page_limit)?;
-    let state = delivery::read_in(store, cx, basis, cancelled).await?;
+    let state = delivery::read_roots_in(store, cx, basis, cancelled).await?;
     // Select numeric page keys before retaining or folding any issue history.
     // The lookahead key determines the cursor but does not consume replay state.
     let (wanted, more) = page_numbers(&state.forge, after, page_limit, cancelled)?;
@@ -228,7 +228,7 @@ where
     C: Fn() -> bool + Sync,
 {
     limit(page_limit)?;
-    let state = delivery::read_in(store, cx, basis, cancelled).await?;
+    let state = delivery::read_roots_in(store, cx, basis, cancelled).await?;
     let mut timelines = replay_selected(
         store,
         cx,
@@ -311,6 +311,7 @@ where
         }
         let batch = storage::read_events(store, cx, repository, entry.payload_root()).await?;
         checkpoint(cancelled)?;
+        delivery::validate_payload_positions(forge, &batch)?;
         count = count
             .checked_add(batch.events.len())
             .filter(|n| *n <= MAX_SCAN_EVENTS)
@@ -389,6 +390,7 @@ where
         }
         let batch =
             storage::read_events(store, cx, repository, frontier.event_batch_root()).await?;
+        delivery::validate_position_batch(&frontier, &batch)?;
         let selected = batch
             .events
             .iter()

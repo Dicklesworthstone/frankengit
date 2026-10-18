@@ -3,10 +3,10 @@
 //! User choices replace only reproduced conflicts, never clean paths or refs.
 
 use super::{
-    BTreeMap, GitHashAlgorithm, GitObjectKind, GitOid, Graph, MergeBaseLimits, MergeBaseResult,
-    MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource, MergeSourceError, Planner,
-    PreparationError, PreparationLimits, PreparedMerge, finish_merge, git_object_id,
-    merge_bases_all,
+    BTreeMap, GitHashAlgorithm, GitObjectKind, GitOid, MergeBaseLimits, MergeBaseResult,
+    MergeCommitStyle, MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource,
+    MergeSourceError, Planner, PreparationError, PreparationLimits, PreparedMerge, finish_merge,
+    finish_merge_with_style, git_object_id, source_merge_bases,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -201,13 +201,37 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
     metadata: &MergeMetadata,
     limits: PreparationLimits,
 ) -> Result<ResolvedMerge, ResolutionError> {
+    prepare_resolved_merge_with_style(
+        source,
+        format,
+        inputs,
+        resolutions,
+        metadata,
+        limits,
+        MergeCommitStyle::TwoParent,
+    )
+}
+
+/// Resolve the exact conflict set and explicitly select the resulting commit's
+/// parent shape. Squash has only the target parent; the merge base, source tip,
+/// conflict oracle, resolution receipts and shared work budgets are unchanged.
+/// This constructs candidate bytes only and never grants publication authority.
+pub fn prepare_resolved_merge_with_style<S: MergeObjectSource>(
+    source: &S,
+    format: GitHashAlgorithm,
+    inputs: ResolutionInputs,
+    resolutions: &[ConflictResolution],
+    metadata: &MergeMetadata,
+    limits: PreparationLimits,
+    style: MergeCommitStyle,
+) -> Result<ResolvedMerge, ResolutionError> {
     inputs.validate(format)?;
     validate_resolutions(resolutions, limits)?;
     metadata.validate()?;
     source.checkpoint()?;
-    let graph = Graph { source, format };
-    let bases = merge_bases_all(
-        &graph,
+    let bases = source_merge_bases(
+        source,
+        format,
         inputs.target,
         inputs.source,
         MergeBaseLimits {
@@ -257,7 +281,20 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
         source_tree,
         resolutions,
     )?;
-    let plan = finish_merge(planner, base, inputs.target, inputs.source, tree, metadata)?;
+    let plan = match style {
+        MergeCommitStyle::TwoParent => {
+            finish_merge(planner, base, inputs.target, inputs.source, tree, metadata)?
+        }
+        MergeCommitStyle::Squash => finish_merge_with_style(
+            planner,
+            base,
+            inputs.target,
+            inputs.source,
+            tree,
+            metadata,
+            style,
+        )?,
+    };
     Ok(ResolvedMerge {
         plan,
         resolutions: receipts,

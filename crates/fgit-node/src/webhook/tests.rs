@@ -196,6 +196,43 @@ fn webhook_receiver_down_drill_retries_and_exhausts_to_dead_letter() {
 }
 
 #[test]
+fn webhook_dns_answer_set_fails_closed_on_mixed_safe_and_unsafe_addresses() {
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration("http://example.com/hook", SsrfPolicy::STRICT),
+        SsrfPolicy::STRICT,
+        DeadLetterQueue::new(),
+    );
+    let safe: SocketAddr = "93.184.216.34:80".parse().unwrap();
+    let unsafe_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let error = dest
+        .validate_resolved_socket_addrs([safe, unsafe_addr], 16)
+        .unwrap_err();
+    assert!(error.contains("rejected by SSRF policy"));
+}
+
+#[test]
+fn webhook_dns_answer_set_retains_distinct_safe_failover_targets_with_a_hard_bound() {
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration("http://example.com/hook", SsrfPolicy::STRICT),
+        SsrfPolicy::STRICT,
+        DeadLetterQueue::new(),
+    );
+    let first: SocketAddr = "93.184.216.35:80".parse().unwrap();
+    let second: SocketAddr = "93.184.216.34:80".parse().unwrap();
+    let selected = dest
+        .validate_resolved_socket_addrs([first, second, first], 4)
+        .unwrap();
+    assert_eq!(selected, vec![second, first]);
+    assert!(
+        dest.validate_resolved_socket_addrs([first, second], 1)
+            .unwrap_err()
+            .contains("1-address")
+    );
+}
+
+#[test]
 fn webhook_ssrf_blocked_target_immediately_rejects_and_dead_letters() {
     // Attempting to deliver to metadata service under strict policy
     let url = ValidatedWebhookUrl::new_unchecked_for_testing(

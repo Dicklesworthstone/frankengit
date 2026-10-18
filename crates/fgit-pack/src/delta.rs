@@ -934,6 +934,19 @@ impl ResolutionBudget {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Charges caller-owned resolution lookup or scheduling work to the same
+    /// operation-wide budget used by delta instructions. A refusal does not
+    /// reset the previously consumed budget.
+    pub fn charge_work(&mut self, amount: usize, limits: &PackLimits) -> Result<(), PackError> {
+        self.accounting.add_work(amount, limits)
+    }
+
+    /// Charges bytes retained or reconstructed outside the resolver, such as a
+    /// verified base spilled to caller-owned quarantine storage.
+    pub fn charge_expanded(&mut self, amount: usize, limits: &PackLimits) -> Result<(), PackError> {
+        self.accounting.add_expanded(amount, limits)
+    }
 }
 
 impl Accounting {
@@ -991,10 +1004,50 @@ pub fn apply_delta(
     limits: &PackLimits,
     deadline: &mut impl Deadline,
 ) -> Result<Vec<u8>, PackError> {
-    let mut accounting = Accounting::default();
-    accounting.add_expanded(base.len(), limits)?;
-    let result = apply_delta_with_accounting(base, delta, limits, &mut accounting, deadline)?;
-    accounting.add_expanded(result.len(), limits)?;
+    apply_delta_with_budget(base, delta, limits, &mut ResolutionBudget::new(), deadline)
+}
+
+/// Applies one delta under caller-owned aggregate accounting, reusing the same
+/// instruction decoder as [`apply_delta`]. The base read and reconstructed
+/// result are both charged; failed work never resets this operation's budget.
+pub fn apply_delta_with_budget(
+    base: &[u8],
+    delta: &[u8],
+    limits: &PackLimits,
+    budget: &mut ResolutionBudget,
+    deadline: &mut impl Deadline,
+) -> Result<Vec<u8>, PackError> {
+    budget.accounting.add_expanded(base.len(), limits)?;
+    let result =
+        apply_delta_with_accounting(base, delta, limits, &mut budget.accounting, deadline)?;
+    budget.accounting.add_expanded(result.len(), limits)?;
+    Ok(result)
+}
+
+/// Applies one delta whose authenticated base is already charged to this
+/// operation's expanded-byte budget. Only the new result is charged as expanded
+/// payload; reading the reused base and executing the delta remain work charged
+/// to [`PackLimits::max_delta_work`] on every call.
+///
+/// The caller must obtain `base` from its private, native-verified inventory and
+/// have charged that object's full size to this same [`ResolutionBudget`],
+/// either with [`ResolutionBudget::charge_expanded`] or by an earlier successful
+/// resolution. It must verify scratch bytes against that inventory before
+/// reuse. This function does not authenticate bytes, establish a base identity
+/// or type, or make an uncharged external base eligible for count-once
+/// accounting. Use [`apply_delta_with_budget`] when that precondition is absent.
+pub fn apply_delta_to_charged_base_with_budget(
+    base: &[u8],
+    delta: &[u8],
+    limits: &PackLimits,
+    budget: &mut ResolutionBudget,
+    deadline: &mut impl Deadline,
+) -> Result<Vec<u8>, PackError> {
+    checkpoint(deadline)?;
+    budget.accounting.add_work(base.len(), limits)?;
+    let result =
+        apply_delta_with_accounting(base, delta, limits, &mut budget.accounting, deadline)?;
+    budget.accounting.add_expanded(result.len(), limits)?;
     Ok(result)
 }
 

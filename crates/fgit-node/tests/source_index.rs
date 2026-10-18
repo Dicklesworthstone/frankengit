@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 //! Native imported Git trees, the actual OneNode object fabric, and persisted
 //! FrankenSQLite generations. No replacement index/store or external Git.
+#[path = "source_index/omissions.rs"]
+mod omissions;
 #[path = "source_http/support.rs"]
 mod support;
 use fgit_forge::source_search::SearchLimits;

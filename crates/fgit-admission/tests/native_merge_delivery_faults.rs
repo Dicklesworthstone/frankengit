@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use fgit_admission::evidence::{
     DecisionEvidenceBodies, RefusalEvidenceBodies, evidence_root, principal_snapshot_id,
 };
-use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
+use fgit_admission::merge::native::objects::{
+    MergeObjectLimits, validate_merge_objects, validate_squash_objects,
+};
 use fgit_admission::merge::native::{
     NativeMergeIntent, NativeMergeProjection, SyncNativeMergeProjection, admit_native_merge,
     admit_native_merge_async, admit_sealed_native_merge, admit_sealed_native_merge_async, delivery,
@@ -620,6 +622,19 @@ impl SyncNativeMergeProjection for Projection {
             &mut || true,
         )
     }
+    fn validate_squash(
+        &self,
+        _: &PublicationBasis,
+        _: &AuthenticatedHead,
+        intent: &NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        validate_squash_objects(
+            self.objects.as_ref(),
+            intent.merge().unwrap(),
+            MergeObjectLimits::default(),
+            &mut || true,
+        )
+    }
     fn materialize_commit(
         &self,
         basis: &PublicationBasis,
@@ -706,6 +721,21 @@ impl NativeMergeProjection<Model> for Projection {
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
         std::future::ready(validate_merge_objects(
+            self.objects.as_ref(),
+            intent.merge().unwrap(),
+            MergeObjectLimits::default(),
+            &mut || true,
+        ))
+    }
+    fn validate_squash_async<'a>(
+        &'a self,
+        _: &'a Model,
+        (): &'a (),
+        _: &'a PublicationBasis,
+        _: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        std::future::ready(validate_squash_objects(
             self.objects.as_ref(),
             intent.merge().unwrap(),
             MergeObjectLimits::default(),

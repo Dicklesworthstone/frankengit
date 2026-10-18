@@ -75,13 +75,25 @@ test('cancellation after publication completes finalization instead of claiming 
   assert.equal(result.state, 'complete'); assert.equal(result.cancellation_requested, true); assert(existsSync(join(repo, 'HEAD')));
   git(root, ['--git-dir', repo, 'fsck', '--full']);
 }));
-test('failure after publication preserves the visible repository and reports published', () => withTemp(async root => {
-  const f = fixture(), repo = join(root, 'new');
+for (const format of ['sha1', 'sha256']) test(`${format}: failure after publication drains finalization and reports published`, () => withTemp(async root => {
+  const f = fixture(format), repo = join(root, 'new'), stagedHead = join(repo, '.frankengit-source-recovery-head');
+  const observerError = new Error('simulated post-link failure');
   await assert.rejects(recoverGitBundle(f.input, repo, f.request, { onProgress({ phase }) {
-    if (phase === 'published') throw new Error('simulated post-link failure');
-  } }), error => error.state === 'published');
-  assert(existsSync(join(repo, 'HEAD'))); assert(!existsSync(join(repo, lockName)));
+    if (phase === 'published') {
+      assert.equal(readFileSync(join(repo, 'HEAD'), 'utf8'), 'ref: refs/heads/main\n');
+      assert(existsSync(stagedHead)); assert(existsSync(join(repo, lockName)));
+      throw observerError;
+    }
+  } }), error => {
+    assert(error instanceof SourceRecoveryError); assert.equal(error.state, 'published');
+    assert.equal(error.cause, observerError); assert.equal(error.lock_cleanup_error, undefined);
+    return true;
+  });
+  assert(existsSync(join(repo, 'HEAD'))); assert(!existsSync(stagedHead)); assert(!existsSync(join(repo, lockName)));
   assert.equal(git(root, ['--git-dir', repo, 'rev-parse', 'HEAD']).toString().trim(), f.tip);
+  assert.deepEqual(git(root, ['--git-dir', repo, 'show', 'HEAD:executable']), f.content);
+  assert.deepEqual(git(root, ['--git-dir', repo, 'show', 'HEAD:link']), f.link);
+  git(root, ['--git-dir', repo, 'fsck', '--strict', '--full']);
 }));
 test('post-write corruption is caught by readback before HEAD publication', () => withTemp(async root => {
   const f = fixture(), repo = join(root, 'new');

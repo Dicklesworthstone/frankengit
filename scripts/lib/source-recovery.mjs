@@ -477,6 +477,8 @@ export async function recoverGitBundle(input, destination, request, options = {}
     await verifyFile(join(target, HEAD_STAGE), head.bytes, () => {}, head.identity);
     await unlink(join(target, HEAD_STAGE)); await syncDirectory(target, rootIdentity);
     await releaseLock();
+    // Finalization cannot turn a deferred observer failure into successful
+    // completion. Report the visible publication, as the resume path does.
     if (observerError !== null) throw observerError.error;
     state = 'complete';
     return { type: 'frankengit-source-recovery-v1', state, destination: target, bare: true,

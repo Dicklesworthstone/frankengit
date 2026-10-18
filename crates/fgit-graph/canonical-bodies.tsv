@@ -2,3 +2,4 @@
 # family<TAB>canonical payload description
 graph-generation	Graph view and schema identities, authority-class tag, source RCR and forge root, builder and parser commitments, graph roots, evidence root, and optional predecessor generation.
 source-lexical-segment	Immutable posting table segment holding token postings, term dictionaries, document vectors and source offsets.
+source-lexical-manifest	One length-prefixed opaque lexical index manifest payload under the generation domain; major 1 has no omission records and major 2 carries the explicit file omissions.

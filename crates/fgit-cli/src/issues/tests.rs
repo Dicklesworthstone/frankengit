@@ -148,6 +148,76 @@ fn label_order_is_canonical_but_omitted_and_cleared_edit_fields_remain_distinct(
     args.extend(["--label", "alpha"].map(str::to_owned));
     assert!(parse(&args).is_err());
 }
+
+#[test]
+fn assignment_arguments_are_bounded_canonical_metadata_with_an_exact_version() {
+    let a = "11".repeat(16);
+    let b = "22".repeat(16);
+    for verb in ["assign", "unassign"] {
+        for format in ["sha1", "sha256"] {
+            let mut args = input(verb);
+            assert!(parse(&args).is_err(), "explicit assignee required");
+            args.extend(
+                [
+                    "--object-format",
+                    format,
+                    "--assignee",
+                    &b,
+                    "--assignee",
+                    &a,
+                ]
+                .map(str::to_owned),
+            );
+            let parsed = parse(&args).unwrap();
+            let action = &mutation(&parsed).command.action;
+            assert_eq!(action.name(), verb);
+            let (IssueAction::Assign { assignees } | IssueAction::Unassign { assignees }) = action
+            else {
+                panic!("assignment");
+            };
+            assert_eq!(
+                assignees,
+                &[
+                    PrincipalId::from_hex(&a).unwrap(),
+                    PrincipalId::from_hex(&b).unwrap()
+                ]
+            );
+            mutation(&parsed)
+                .command
+                .proposed_event(mutation(&parsed).principal)
+                .unwrap();
+            let mut duplicate = args.clone();
+            duplicate.extend(["--assignee", &a].map(str::to_owned));
+            assert!(parse(&duplicate).is_err());
+            for forbidden in ["--title", "--body", "--label", "--grant"] {
+                let mut bad = args.clone();
+                bad.extend([forbidden, "bad"].map(str::to_owned));
+                assert!(parse(&bad).is_err());
+            }
+            for invalid in ["", "user", "ABCDEF0123456789ABCDEF0123456789", "11"] {
+                let mut bad = args.clone();
+                replace(&mut bad, "--assignee", invalid);
+                assert!(parse(&bad).is_err());
+            }
+            let mut bad = args.clone();
+            replace(&mut bad, "--expected-version", "0");
+            assert!(parse(&bad).is_err());
+        }
+        let mut args = input(verb);
+        for seed in 1..=16u8 {
+            args.extend(["--assignee".into(), format!("{seed:02x}").repeat(16)]);
+        }
+        assert!(parse(&args).is_ok());
+        args.extend(["--assignee".into(), "ff".repeat(16)]);
+        assert!(parse(&args).is_err());
+    }
+    let mut open = input("open");
+    open.extend(["--assignee", &a].map(str::to_owned));
+    assert!(
+        parse(&open).is_err(),
+        "assignment is its own versioned delta"
+    );
+}
 #[test]
 fn trust_required_fields_and_inapplicable_or_duplicate_arguments_refuse() {
     for action in ["open", "edit", "close", "reopen", "comment", "list", "show"] {

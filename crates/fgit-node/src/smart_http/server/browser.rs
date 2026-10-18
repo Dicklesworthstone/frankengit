@@ -3,6 +3,7 @@
 //! independently enabled by its existing gateway profile.
 
 mod pulls;
+mod protection;
 
 mod activity;
 mod branches;
@@ -108,6 +109,9 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if protection::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
     if activity::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }

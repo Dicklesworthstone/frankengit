@@ -1,9 +1,9 @@
 //! Immutable, publisher-owned observations of trusted-local workflow jobs.
 //!
-//! These records are canonical statements that a principal reported a result,
-//! NOT independent execution attestations. There is deliberately no successful
-//! or neutral protected-check conclusion in this profile. Exact evidence bytes
-//! live inside the event, so publication cannot strand a separately stored body.
+//! These records are canonical statements backed by the trusted-workflow evidence
+//! verifier. A `Success` conclusion is emitted only after that verifier has bound
+//! the exact completed job, source commit, run/attempt and evidence bytes. Exact
+//! evidence lives inside the event, so publication cannot strand a separate body.
 
 use core::fmt;
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
@@ -75,11 +75,13 @@ impl fmt::Display for WorkflowCheckId {
     }
 }
 
-/// Successful local commands still need independent verification. None of
-/// these observations can satisfy a required successful check by themselves.
+/// Canonical terminal result of a verified trusted-workflow job. `Success` is
+/// reserved for evidence that passed the trusted-workflow verifier; callers
+/// cannot promote an arbitrary local process exit code through this enum alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkflowCheckConclusion {
     ActionRequired,
+    Success,
     Failure,
     Cancelled,
     TimedOut,
@@ -184,6 +186,7 @@ impl NativeWorkflowCheck {
             WorkflowCheckConclusion::Failure => 2,
             WorkflowCheckConclusion::Cancelled => 3,
             WorkflowCheckConclusion::TimedOut => 4,
+            WorkflowCheckConclusion::Success => 5,
         });
         out.write_bytes("workflow_check.evidence", &self.record.evidence)?;
         Ok(())
@@ -211,6 +214,7 @@ impl NativeWorkflowCheck {
             2 => WorkflowCheckConclusion::Failure,
             3 => WorkflowCheckConclusion::Cancelled,
             4 => WorkflowCheckConclusion::TimedOut,
+            5 => WorkflowCheckConclusion::Success,
             _ => return Err(super::invalid_native("workflow_check.conclusion")),
         };
         let evidence = input.read_bytes("workflow_check.evidence")?;

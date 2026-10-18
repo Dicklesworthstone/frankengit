@@ -34,6 +34,23 @@ export function checkedBundle(bytes) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length > BUNDLE_LIMIT) fail('Candidate bundle must contain 1 byte through 16 MiB.');
   return bytes;
 }
+// Shape only, for already normalized inspected coordinates. The native node
+// proves ancestry and rechecks current policy when this method is published.
+export function isFastForwardCandidate(fields) {
+  return Boolean(fields) && fields.candidate_commit === fields.source_tip &&
+    fields.merge_base === fields.target_tip && fields.source_tip !== fields.target_tip;
+}
+export function mergeMethod(value) {
+  if (!['merge-commit', 'squash'].includes(value)) fail('Choose merge-commit or squash explicitly.');
+  return value;
+}
+export function candidateMethod(artifact) {
+  if (!artifact) return null;
+  // Legacy source-tip receipts retain their fast-forward meaning. An explicitly
+  // selected squash can have identical source bytes for a one-commit topic.
+  if (Object.hasOwn(artifact, 'method')) return mergeMethod(artifact.method);
+  return isFastForwardCandidate(artifact.fields) ? 'fast-forward-only' : 'merge-commit';
+}
 export function multipart(command, bundle, boundary) {
   checkedBundle(bundle);
   if (typeof command !== 'string' || command.length > FORM_LIMIT || !/^[A-Za-z0-9-_.]{1,70}$/.test(boundary)) fail('Invalid candidate upload.');
@@ -50,7 +67,7 @@ export function makeBoundary(command, bundle, crypto) {
   }
   fail('Could not allocate a collision-free upload boundary.');
 }
-export function preparationCommand(fields, metadata) {
+export function preparationCommand(fields, metadata, method = 'merge-commit') {
   keys(fields, SUBJECT_FIELDS); keys(metadata, ['author', 'committer', 'timestamp', 'message']);
   const result = subject(fields);
   for (const name of ['author', 'committer']) {
@@ -60,6 +77,7 @@ export function preparationCommand(fields, metadata) {
   result.timestamp = integer(metadata.timestamp, 'commit timestamp');
   result.message = text(metadata.message, 64 * 1024, 'commit message');
   if (!result.message.trim()) fail('A nonempty explicit commit message is required.');
+  if (mergeMethod(method) === 'squash') result.method = method;
   form(result); return result;
 }
 function noEffects(reply) {
@@ -80,7 +98,7 @@ function entryIdentity(value, algorithm) {
   if (value === null) return;
   record(value); integer(value.mode, 'entry mode', 1, 0xffffffff); oid(value.oid, algorithm);
 }
-export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false) {
+export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit') {
   let metadata, bundle = null;
   if (/^application\/json(?:\s*;|$)/i.test(response.type)) {
     if (response.value.length > METADATA_LIMIT) fail('Preparation metadata exceeds limit.');
@@ -101,6 +119,7 @@ export async function preparationReply(response, number, expected, scope, crypto
   }
   const selected = pinned(metadata, scope); noEffects(metadata);
   if (metadata.type !== 'merge_preparation' || metadata.profile !== 'path-merge-v1' || !Array.isArray(metadata.conflicts)) fail('Unsupported merge preparation.');
+  if (mergeMethod(metadata.method === undefined ? 'merge-commit' : metadata.method) !== mergeMethod(method)) fail('Preparation method changed.');
   matchSubject(metadata.subject, expected, number, selected.binding.format, 'pull_request');
   if ((metadata.state === 'resolved') !== expectResolved) fail('Preparation and explicit resolution cannot substitute for one another.');
   if (metadata.state === 'clean' || metadata.state === 'resolved') {
@@ -109,7 +128,7 @@ export async function preparationReply(response, number, expected, scope, crypto
     const fields = { ...subject(expected), merge_base: oid(metadata.candidate.merge_base, scope.format), candidate_commit: oid(metadata.candidate.commit, scope.format) };
     oid(metadata.candidate.tree, scope.format); integer(metadata.candidate.new_object_count, 'candidate objects', 1);
     if (metadata.bundle.bytes !== bundle.length || metadata.bundle.sha256 !== await digest(bundle, crypto)) fail('Candidate bundle commitment mismatch.');
-    return { metadata, artifact: { number, scope: selected.binding, fields, bundle: bundle.slice(), sha256: metadata.bundle.sha256 } };
+    return { metadata, artifact: { number, scope: selected.binding, method, fields, bundle: bundle.slice(), sha256: metadata.bundle.sha256 } };
   }
   if (bundle || metadata.candidate !== null || metadata.bundle !== null) fail('Noncandidate response contains candidate material.');
   if (metadata.state === 'already_up_to_date') {
@@ -134,14 +153,42 @@ function span(value, bytes, total, previous) {
   if (value.byte_end - value.byte_start !== bytes.length || count !== value.line_count || !Number.isSafeInteger(value.line_start + count)) fail('Invalid hunk byte or line span.');
   return value.byte_end;
 }
+// Bind reported parents to the hash-checked commit bytes. Only native header
+// lines count: a signature continuation or commit message is not a parent.
+// Ancestry remains the native inspector's responsibility, including a target
+// that occurs earlier than the source tip's immediate parent.
+function matchCommitParents(body, parents, algorithm) {
+  const prefix = utf8.encode('parent '), width = algorithm === 'sha1' ? 40 : 64;
+  let start = 0, index = 0;
+  while (start < body.length) {
+    const newline = body.indexOf(10, start), end = newline < 0 ? body.length : newline;
+    if (end === start) break;
+    if (end - start >= prefix.length && at(body, prefix, start)) {
+      const bytes = body.subarray(start + prefix.length, end);
+      if (bytes.length !== width || index >= parents.length ||
+          oid(String.fromCharCode(...bytes).toLowerCase(), algorithm) !== oid(parents[index], algorithm)) fail('Reported parents differ from native candidate commit bytes.');
+      index += 1;
+    }
+    start = end + 1;
+  }
+  // Git-compatible imports may omit the header/message separator and the final
+  // newline. In that case every remaining line is a header, just as in the
+  // native parser; do not narrow the accepted existing source commit syntax.
+  if (index !== parents.length) fail('Reported parents differ from native candidate commit bytes.');
+}
 export async function inspectionReply(reply, artifact, crypto) {
   const selected = pinned(reply, artifact.scope); noEffects(reply);
   if (reply.type !== 'candidate_inspection' || reply.all_changed_paths !== true || reply.binary_bodies_included !== false ||
       reply.comparison_profile !== 'full-tree-direct-path-myers-v1' || reply.context_lines !== 3) fail('Unsupported or incomplete candidate inspection.');
   const fields = artifact.fields, algorithm = fields.object_format;
   matchSubject(reply.subject, fields, artifact.number, algorithm, 'pull_request');
+  const method = candidateMethod(artifact), fastForward = method === 'fast-forward-only', squash = method === 'squash';
   if (oid(reply.merge_base, algorithm) !== fields.merge_base || oid(reply.candidate_commit, algorithm) !== fields.candidate_commit ||
-      !Array.isArray(reply.parents) || reply.parents.length !== 2 || oid(reply.parents[0], algorithm) !== fields.target_tip || oid(reply.parents[1], algorithm) !== fields.source_tip) fail('Inspected candidate or parent identities changed.');
+      fields.source_tip === fields.target_tip || fields.candidate_commit === fields.target_tip ||
+      (fastForward && !isFastForwardCandidate(fields)) || !Array.isArray(reply.parents) || !reply.parents.length ||
+      (squash && (reply.parents.length !== 1 || oid(reply.parents[0], algorithm) !== fields.target_tip)) ||
+      (!fastForward && !squash && (reply.parents.length !== 2 || oid(reply.parents[0], algorithm) !== fields.target_tip ||
+        oid(reply.parents[1], algorithm) !== fields.source_tip))) fail('Inspected candidate or parent identities changed.');
   if (!Array.isArray(reply.prerequisites) || reply.prerequisites.length > 64) fail('Invalid bundle prerequisites.');
   for (const id of reply.prerequisites) oid(id, algorithm);
   record(reply.bundle);
@@ -151,6 +198,7 @@ export async function inspectionReply(reply, artifact, crypto) {
   const commit = joinBytes(utf8.encode(`commit ${commitBody.length}\0`), commitBody);
   const actual = hex(new Uint8Array(await crypto.subtle.digest(algorithm === 'sha1' ? 'SHA-1' : 'SHA-256', commit)));
   if (actual !== fields.candidate_commit) fail('Native candidate commit bytes do not match their object identity.');
+  matchCommitParents(commitBody, reply.parents, algorithm);
   const comparison = record(reply.comparison);
   if (comparison.mode !== 'direct' || oid(comparison.before, algorithm) !== fields.target_tip || oid(comparison.after, algorithm) !== fields.candidate_commit ||
       !Array.isArray(comparison.entries) || comparison.entries.length > 512 || comparison.entry_count !== comparison.entries.length) fail('Incomplete or wrong candidate comparison.');

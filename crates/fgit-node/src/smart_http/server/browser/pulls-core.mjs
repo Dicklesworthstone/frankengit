@@ -247,6 +247,7 @@ export function apiError(status) {
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+    (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
@@ -254,10 +255,18 @@ function requirePublicationEnvelope(path, method, body, key, read) {
     fail('Publication and outcome recovery require an explicit POST, recovery key and non-read lifecycle.');
   }
 }
+// Rotated credentials can inspect an original principal's outcome, never replay
+// its command in another principal's idempotency namespace. The caller must
+// select the expected original principal explicitly; absence cannot identify it.
+function recoverySelection(value) {
+  keys(value, ['key', 'principal']);
+  if (typeof value.key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(value.key)) fail('Invalid original recovery key.');
+  return Object.freeze({ key: value.key, principal: principal(value.principal) });
+}
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
@@ -266,20 +275,38 @@ export class Transport {
   }
   get connected() { return Boolean(this.#token); }
   get fingerprint() { return this.#fingerprint; }
+  get recoveryOnly() { return this.#recovery !== null; }
   get epoch() { return this.#epoch; }
   get crypto() { return this.#crypto; }
-  async connect(token, requiredFingerprint = null) {
+  async connect(token, requiredFingerprint = null, recovery = null) {
     this.disconnect(); const epoch = this.#epoch;
+    const selected = recovery === null ? null : recoverySelection(recovery);
+    if (selected && this.#search) fail('Search has no outcome recovery profile.');
     if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
-    if (requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
-    this.#fingerprint = fingerprint; this.#token = token;
+    if (!selected && requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
+    // Install the restriction before making a rotated credential visible, even
+    // to another microtask awaiting this connection. Ordinary connect is unchanged.
+    this.#recovery = selected; this.#fingerprint = fingerprint; this.#token = token;
   }
-  disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; }
+  disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; this.#recovery = null; }
+  restrictToRecovery(selection) {
+    const selected = recoverySelection(selection);
+    if (!this.connected || this.#search || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
+    if (this.#recovery && (selected.key !== this.#recovery.key || selected.principal !== this.#recovery.principal)) fail('Reconnect explicitly before selecting another recovery identity.');
+    // Receipt restoration invokes this only after verifying its original key.
+    this.#recovery = selected;
+  }
   cancelReads() { for (const c of this.#reads) c.abort(); }
   async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false, headerNames = [] } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
+    const recovery = this.#recovery;
+    if (recovery) {
+      if (path !== 'outcomes' || method !== 'POST' || body !== undefined || key !== recovery.key ||
+          read !== false || binary !== false || !Array.isArray(statuses) || statuses.length !== 1 || statuses[0] !== 200) fail('Recovery-only connection permits only the original key lookup; it cannot resend a mutation.');
+      maximum = Math.min(integer(maximum, 'recovery response limit', 1, REPLY_LIMIT), 32 * 1024);
+    }
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
@@ -315,6 +342,13 @@ export class Transport {
     if (/^pulls\/[1-9][0-9]*\/checks(?:\?|$)/.test(path) &&
         (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
          statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)) fail('PR checks are a closed read-only profile.');
+    if (/^pulls\/[1-9][0-9]*\/comments(?:\?|$)/.test(path)) {
+      const reading = method === 'GET';
+      if (binary || contentType !== 'application/x-www-form-urlencoded' ||
+          (reading ? (body !== undefined || key !== undefined || !read || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)
+            : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
+      integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
+    }
     const allowed = this.#rebase
       ? /^(?:source\/(?:tree|rebase\/(?:prepare|resolve|inspect|apply))|outcomes)$/.test(path)
       : this.#replay
@@ -324,14 +358,14 @@ export class Transport {
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
       : this.#search
-      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|blob)$/.test(path)
+      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|log|tree|blob)$/.test(path)
       : this.#branches
       ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
       : this.#initial
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|comments|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
@@ -350,12 +384,12 @@ export class Transport {
         const error = apiError(response.status);
         // Only this closed read endpoint exposes a small diagnostic code. Never
         // render server prose, accept an error as a result, or broaden statuses.
-        if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial'].includes(path) && response.status === 409
+        if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial', 'source/context-initial'].includes(path) && response.status === 409
             && /^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
           const bytes = await readBytes(response, controller.signal, 4096);
           if (epoch !== this.#epoch) fail('Connection superseded.');
           let detail; try { detail = json(bytes); } catch { /* Keep the HTTP refusal. */ }
-          const codes = path === 'source/search-initial'
+          const codes = ['source/search-initial', 'source/context-initial'].includes(path)
             ? ['source_index_uninitialized', 'source_index_stale', 'symbol_index_uninitialized', 'symbol_index_stale', 'index_checkpoint_unavailable', 'source_snapshot_mismatch', 'index_generation_mismatch']
             : path === 'source/search-symbols-index'
             ? ['symbol_index_uninitialized', 'symbol_index_stale', 'index_checkpoint_unavailable']
@@ -368,7 +402,9 @@ export class Transport {
       if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
       const bytes = await readBytes(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
-      return { status: response.status, type, value: binary ? bytes : json(bytes),
+      const value = binary ? bytes : json(bytes);
+      if (recovery && principal(record(value).principal_id) !== recovery.principal) fail('Recovery credential does not identify the selected original principal. Outcome remains unknown.');
+      return { status: response.status, type, value,
         ...(capturedHeaders.length ? { headers: Object.fromEntries(capturedHeaders.map(name => [name, response.headers.get(name)])) } : {}) };
     } catch (error) { if (epoch === this.#epoch && error.status === 401) this.disconnect(); throw error; }
     finally {

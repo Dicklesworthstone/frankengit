@@ -239,3 +239,254 @@ fn issue_identity_and_version_exhaustion_cannot_alias_a_pull_request() {
         Err(RefusalCode::EvidenceInvalid)
     );
 }
+
+#[test]
+fn assignment_tags_preserve_all_legacy_action_bytes_and_refuse_unknown_actions() {
+    let legacy = [
+        (
+            IssueAction::Open {
+                title: "A".into(),
+                body: "B".into(),
+                labels: vec!["C".into()],
+            },
+            b"\x00\x00\x00\x01\x00\x00\x00\x01A\x00\x00\x00\x01B\x00\x00\x00\x01\x00\x00\x00\x01C"
+                .as_slice(),
+        ),
+        (
+            IssueAction::Edit(IssueEdit {
+                title: Some("A".into()),
+                body: None,
+                labels: Some(vec![]),
+            }),
+            b"\x00\x00\x00\x02\x01\x00\x00\x00\x01A\x00\x01\x00\x00\x00\x00".as_slice(),
+        ),
+        (IssueAction::Close, b"\x00\x00\x00\x03".as_slice()),
+        (IssueAction::Reopen, b"\x00\x00\x00\x04".as_slice()),
+        (
+            IssueAction::Comment { body: "C".into() },
+            b"\x00\x00\x00\x05\x00\x00\x00\x01C".as_slice(),
+        ),
+    ];
+    for (action, bytes) in legacy {
+        let mut out = Encoder::new();
+        action.write(&mut out).unwrap();
+        assert_eq!(out.as_bytes(), bytes);
+        let mut input = Decoder::new(bytes, DecodeLimits::DEFAULT);
+        assert_eq!(IssueAction::read(&mut input).unwrap(), action);
+        input.finish().unwrap();
+    }
+    for (tag, action) in [
+        (
+            6,
+            IssueAction::Assign {
+                assignees: vec![actor(1)],
+            },
+        ),
+        (
+            7,
+            IssueAction::Unassign {
+                assignees: vec![actor(1)],
+            },
+        ),
+    ] {
+        let mut out = Encoder::new();
+        action.write(&mut out).unwrap();
+        let mut expected = vec![0, 0, 0, tag, 0, 0, 0, 1];
+        expected.extend_from_slice(&[1; 16]);
+        assert_eq!(out.as_bytes(), expected);
+        let first = opening().proposed_event(actor(9)).unwrap();
+        let state = apply_event(None, &first).unwrap();
+        let event = follow(&state, action);
+        let frame = encode_body(&event).unwrap();
+        assert_eq!(
+            decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap(),
+            event
+        );
+        for end in 0..frame.len() {
+            assert!(decode_body::<ForgeEvent>(&frame[..end], DecodeLimits::DEFAULT).is_err());
+        }
+    }
+    assert!(matches!(
+        IssueAction::read(&mut Decoder::new(&[0, 0, 0, 8], DecodeLimits::DEFAULT)),
+        Err(CodecRefusal::VariantUnknown {
+            field: "issue.action",
+            observed: 8,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn assignment_deltas_preserve_other_principals_and_rebuild_from_old_unassigned_history() {
+    let first = opening().proposed_event(actor(9)).unwrap();
+    let mut state = apply_event(None, &first).unwrap();
+    assert!(
+        state.assignees.is_empty(),
+        "historical issue opening has no assignment"
+    );
+    let mut history = vec![first];
+    for (action, expected) in [
+        (
+            IssueAction::Assign {
+                assignees: vec![actor(1), actor(3)],
+            },
+            vec![actor(1), actor(3)],
+        ),
+        (
+            IssueAction::Assign {
+                assignees: vec![actor(2), actor(3)],
+            },
+            vec![actor(1), actor(2), actor(3)],
+        ),
+        (
+            IssueAction::Unassign {
+                assignees: vec![actor(1), actor(4)],
+            },
+            vec![actor(2), actor(3)],
+        ),
+        (IssueAction::Close, vec![actor(2), actor(3)]),
+        (
+            IssueAction::Unassign {
+                assignees: vec![actor(2), actor(3)],
+            },
+            vec![],
+        ),
+    ] {
+        let event = follow(&state, action);
+        state = apply_event(Some(&state), &event).unwrap();
+        assert_eq!(state.assignees, expected);
+        history.push(event);
+    }
+    assert_eq!(state.opened_by, actor(9));
+    assert_eq!(state.last_actor, actor(2));
+    assert_eq!(state.comments, 0);
+    assert_eq!(state.labels, ["bug", "triage"]);
+    assert_eq!(state.state, IssueState::Closed);
+    let mut rebuilt = None;
+    for event in history {
+        let event: ForgeEvent =
+            decode_body(&encode_body(&event).unwrap(), DecodeLimits::DEFAULT).unwrap();
+        rebuilt = Some(apply_event(rebuilt.as_ref(), &event).unwrap());
+    }
+    assert_eq!(rebuilt, Some(state));
+}
+
+#[test]
+fn assignment_bounds_apply_to_commands_and_the_resulting_set_without_partial_changes() {
+    let first = opening().proposed_event(actor(9)).unwrap();
+    let empty = apply_event(None, &first).unwrap();
+    let full: Vec<_> = (1..=MAX_ASSIGNEES as u8).map(actor).collect();
+    let event = follow(
+        &empty,
+        IssueAction::Assign {
+            assignees: full.clone(),
+        },
+    );
+    let state = apply_event(Some(&empty), &event).unwrap();
+    assert_eq!(state.assignees.len(), MAX_ASSIGNEES);
+    let overflow = follow(
+        &state,
+        IssueAction::Assign {
+            assignees: vec![actor(17)],
+        },
+    );
+    assert_eq!(
+        apply_event(Some(&state), &overflow),
+        Err(RefusalCode::ResourceBudgetExceeded)
+    );
+    assert_eq!(state.assignees, full);
+    let repeated = follow(&state, IssueAction::Assign { assignees: full });
+    assert_eq!(
+        apply_event(Some(&state), &repeated).unwrap().assignees,
+        state.assignees
+    );
+    let removed = apply_event(
+        Some(&state),
+        &follow(
+            &state,
+            IssueAction::Unassign {
+                assignees: vec![actor(1)],
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        apply_event(
+            Some(&removed),
+            &follow(
+                &removed,
+                IssueAction::Assign {
+                    assignees: vec![actor(17)]
+                }
+            )
+        )
+        .unwrap()
+        .assignees
+        .len(),
+        MAX_ASSIGNEES
+    );
+    for invalid in [
+        vec![],
+        vec![actor(1), actor(1)],
+        vec![actor(2), actor(1)],
+        (1..=17).map(actor).collect(),
+    ] {
+        for action in [
+            IssueAction::Assign {
+                assignees: invalid.clone(),
+            },
+            IssueAction::Unassign {
+                assignees: invalid.clone(),
+            },
+        ] {
+            assert!(action.validate().is_err());
+        }
+    }
+    assert_eq!(
+        apply_event(Some(&state), &event),
+        Err(RefusalCode::EvidenceStale)
+    );
+    assert_eq!(apply_event(None, &event), Err(RefusalCode::EvidenceStale));
+}
+
+#[test]
+fn assignment_decoder_checks_declared_count_before_reserving_and_honors_decode_limits() {
+    for tag in [6u32, 7] {
+        for declared in [17u32, u32::MAX] {
+            let bytes = [tag.to_be_bytes(), declared.to_be_bytes()].concat();
+            assert!(matches!(
+                IssueAction::read(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)),
+                Err(CodecRefusal::CountBoundExceeded { field: "issue.assignees", observed, limit: 16 })
+                    if observed == u64::from(declared)
+            ));
+        }
+        let bytes = [
+            tag.to_be_bytes().as_slice(),
+            1u32.to_be_bytes().as_slice(),
+            &[1; 16],
+        ]
+        .concat();
+        assert!(IssueAction::read(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)).is_ok());
+        for limits in [
+            DecodeLimits {
+                elements: 0,
+                ..DecodeLimits::DEFAULT
+            },
+            DecodeLimits {
+                depth: 0,
+                ..DecodeLimits::DEFAULT
+            },
+        ] {
+            assert!(IssueAction::read(&mut Decoder::new(&bytes, limits)).is_err());
+        }
+        for count in [0u32, 2] {
+            let bytes = [
+                tag.to_be_bytes().as_slice(),
+                count.to_be_bytes().as_slice(),
+                &[1; 16],
+            ]
+            .concat();
+            assert!(IssueAction::read(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)).is_err());
+        }
+    }
+}

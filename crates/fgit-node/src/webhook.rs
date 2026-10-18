@@ -176,14 +176,15 @@ impl WebhookDeliveryDestination {
         let payload = payload::encode(request)?;
         let payload_bytes = payload.as_bytes();
 
-        // 2. Resolve a policy-approved address, then connect to that exact IP.
+        // 2. Resolve the complete bounded policy-approved answer set. A mixed
+        // safe/unsafe DNS response refuses as a unit; no address is contacted.
         budget.check()?;
-        let resolved = self.resolve_safe_socket_addr(&validated);
+        let resolved = self.resolve_safe_socket_addrs(&validated);
         // The blocking resolver cannot be interrupted here. Its elapsed time
         // is nevertheless charged; an expired attempt never opens a socket.
         budget.check()?;
-        let target_addr = match resolved {
-            Ok(addr) => addr,
+        let target_addrs = match resolved {
+            Ok(addrs) => addrs,
             Err(reason) => {
                 self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                 return Ok((DeliveryVerdict::PermanentRejection, reason.into_bytes()));
@@ -194,14 +195,39 @@ impl WebhookDeliveryDestination {
         let sig_tag = self.registration.secrets.sign_active(payload_bytes);
         let sig_hex = format!("sha256={}", hex_encode(sig_tag));
 
-        // 5. Connect and send HTTP request
-        let connected = TcpStream::connect_timeout(&target_addr, budget.check()?);
-        budget.check()?;
-        let mut stream = match connected {
-            Ok(s) => s,
-            Err(e) => {
-                let err_msg = format!("TCP connection failed: {e}");
-                return self.handle_network_failure(request, attempt, err_msg, now_secs);
+        // 5. Try alternate policy-approved addresses only while no HTTP byte
+        // has been written. Once a connection is selected, request_io owns the
+        // single POST and any write-side ambiguity; we never fail over after a
+        // possible receiver-visible effect.
+        let mut stream = None;
+        let mut failures = Vec::new();
+        for target_addr in target_addrs {
+            let connected = TcpStream::connect_timeout(&target_addr, budget.check()?);
+            budget.check()?;
+            match connected {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Err(error) => {
+                    if failures.len() < 4 {
+                        failures.push(format!("{target_addr}: {error}"));
+                    }
+                }
+            }
+        }
+        let mut stream = match stream {
+            Some(stream) => stream,
+            None => {
+                let detail = if failures.is_empty() {
+                    "TCP connection failed for all resolved webhook addresses".to_owned()
+                } else {
+                    format!(
+                        "TCP connection failed for all resolved webhook addresses: {}",
+                        failures.join("; ")
+                    )
+                };
+                return self.handle_network_failure(request, attempt, detail, now_secs);
             }
         };
 
@@ -356,24 +382,65 @@ impl WebhookDeliveryDestination {
         })
     }
 
-    fn resolve_safe_socket_addr(&self, url: &ValidatedWebhookUrl) -> Result<SocketAddr, String> {
+    fn resolve_safe_socket_addrs(
+        &self,
+        url: &ValidatedWebhookUrl,
+    ) -> Result<Vec<SocketAddr>, String> {
+        const MAX_RESOLVED_ADDRESSES: usize = 16;
         if let Some(ip) = url.ip_literal() {
             if !self.ssrf_policy.is_safe_ip(ip) {
                 return Err("SSRF policy blocked IP literal".into());
             }
-            return Ok(SocketAddr::new(ip, url.port()));
+            return Ok(vec![SocketAddr::new(ip, url.port())]);
         }
 
         let addrs = (url.host(), url.port())
             .to_socket_addrs()
             .map_err(|e| format!("DNS resolution error for {}: {e}", url.host()))?;
+        self.validate_resolved_socket_addrs(addrs, MAX_RESOLVED_ADDRESSES)
+    }
 
+    fn validate_resolved_socket_addrs(
+        &self,
+        addrs: impl IntoIterator<Item = SocketAddr>,
+        maximum: usize,
+    ) -> Result<Vec<SocketAddr>, String> {
+        if maximum == 0 {
+            return Err("resolved-address budget must be non-zero".into());
+        }
+        let mut selected = Vec::new();
+        let mut observed = 0usize;
         for addr in addrs {
-            if self.ssrf_policy.is_safe_ip(addr.ip()) {
-                return Ok(addr);
+            observed = observed
+                .checked_add(1)
+                .ok_or_else(|| "resolved-address count overflow".to_owned())?;
+            if observed > maximum {
+                return Err(format!(
+                    "DNS resolution exceeded the {maximum}-address webhook bound"
+                ));
+            }
+            // Fail closed on a mixed answer set. Selecting only the safe member
+            // would let an attacker-controlled hostname rotate between public
+            // and internal addresses while still passing registration-time URL
+            // validation.
+            if !self.ssrf_policy.is_safe_ip(addr.ip()) {
+                return Err("DNS resolution included an address rejected by SSRF policy".into());
+            }
+            if !selected.contains(&addr) {
+                selected
+                    .try_reserve(1)
+                    .map_err(|_| "cannot allocate bounded resolved-address set".to_owned())?;
+                selected.push(addr);
             }
         }
-        Err("all resolved IP addresses were rejected by SSRF policy".into())
+        if selected.is_empty() {
+            return Err("DNS resolution returned no addresses".into());
+        }
+        // DNS answer ordering is not authority. Stable ordering makes failover
+        // deterministic for a given answer set and avoids preference changes
+        // caused only by resolver iteration order.
+        selected.sort_unstable();
+        Ok(selected)
     }
 
     fn handle_network_failure(

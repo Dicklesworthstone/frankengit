@@ -107,6 +107,64 @@ fn open_issue(root: &Scratch, format: GitHashAlgorithm) {
 }
 
 #[test]
+fn fg_reports_partial_coverage_with_exit_three_and_returns_to_v1_after_rebuild() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, _) = fixture(&root, format);
+        let (_, first) = node
+            .runtime()
+            .block_on(node.build_source_index_local_in(
+                &node.outbox_delivery_context(),
+                &reference(),
+                None,
+                None,
+                None,
+                fgit_forge::source_search::SearchLimits {
+                    max_file_bytes: TEXT.len() - 1,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let before = generation(&node);
+        node.shutdown().unwrap();
+        let args = arguments(&root, format);
+        let output = invoke(&args, 3);
+        let partial = body(&output);
+        assert!(partial.contains("\"schema_version\":2"));
+        assert!(partial.contains("\"index_profile\":\"ascii-word-postings-omissions-v1\""));
+        assert!(partial.contains("\"coverage_complete\":false,\"omitted_files\":1"));
+        assert!(partial.contains("\"complete\":true,\"next_after\":null"));
+        assert!(partial.contains(&format!(
+            "\"omissions\":[{{\"path_hex\":\"{}\"",
+            hex(b"alpha.txt")
+        )));
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before);
+        node.runtime()
+            .block_on(node.refresh_source_index_local_in(
+                &node.outbox_delivery_context(),
+                &reference(),
+                None,
+                None,
+                first.generation_id,
+                Default::default(),
+                Default::default(),
+            ))
+            .unwrap();
+        node.shutdown().unwrap();
+        let output = invoke(&args, 0);
+        let complete = body(&output);
+        assert!(complete.contains("\"schema_version\":1"));
+        assert!(!complete.contains("\"omissions\""));
+        assert!(!complete.contains("\"index_profile\""));
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn fg_binary_keeps_original_index_provenance_after_authenticated_metadata_write() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();

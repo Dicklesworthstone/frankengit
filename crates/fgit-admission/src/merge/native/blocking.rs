@@ -65,6 +65,18 @@ pub trait SyncNativeMergeProjection: Sync {
         authenticated: &AuthenticatedHead,
         intent: &NativeMergeIntent,
     ) -> Result<ValidatedClosure, ProjectionFailure>;
+    /// Explicit squash support requires the same independent native validation
+    /// as its asynchronous counterpart. Legacy projections refuse this method.
+    fn validate_squash(
+        &self,
+        _basis: &PublicationBasis,
+        _authenticated: &AuthenticatedHead,
+        _intent: &NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        ))
+    }
     /// Finish staging the reference partition and its closure before returning.
     fn materialize_commit(
         &self,
@@ -328,5 +340,15 @@ where
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
         ready(self.0.validate_merge(basis, authenticated, intent))
+    }
+    fn validate_squash_async<'a>(
+        &'a self,
+        _: &'a SyncAuthorityAsAsync<'store, S>,
+        (): &'a (),
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        ready(self.0.validate_squash(basis, authenticated, intent))
     }
 }

@@ -18,6 +18,15 @@ impl Default for Profile {
     }
 }
 impl Profile {
+    pub fn with_timeout_cap(mut self, cap: Option<Duration>) -> Result<Self, String> {
+        if let Some(cap) = cap {
+            if cap.is_zero() {
+                return Err("repository backup timeout cap must be positive".into());
+            }
+            self.timeout = self.timeout.min(cap);
+        }
+        Ok(self)
+    }
     /// Runtime budgets for the node a backup command opens. The operator's
     /// `--timeout-secs` bounds its database and request contexts too; the
     /// per-context 15 s / 30 s defaults size ordinary requests and cancelled a
@@ -99,6 +108,30 @@ impl ProfileFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_global_timeout_only_narrows_the_leaf_without_renewing_other_allowances() {
+        let profile = Profile::default();
+        assert_eq!(
+            profile.with_timeout_cap(None).unwrap().timeout,
+            profile.timeout
+        );
+        assert_eq!(
+            profile
+                .with_timeout_cap(Some(Duration::from_secs(900)))
+                .unwrap()
+                .timeout,
+            Duration::from_secs(300)
+        );
+        let narrowed = profile
+            .with_timeout_cap(Some(Duration::from_nanos(1)))
+            .unwrap();
+        assert_eq!(narrowed.timeout, Duration::from_nanos(1));
+        assert_eq!(
+            narrowed.transfer.max_archive_bytes,
+            profile.transfer.max_archive_bytes
+        );
+        assert!(profile.with_timeout_cap(Some(Duration::ZERO)).is_err());
+    }
     #[test]
     fn defaults_and_explicit_limits_remain_independent() {
         let defaults = ProfileFlags::default().finish();

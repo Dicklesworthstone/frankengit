@@ -160,6 +160,9 @@ pub enum AggregateId {
     MergeQueue(QueueNumber),
     /// One immutable, publisher-owned trusted workflow job observation.
     WorkflowCheck(crate::event::workflow_check::WorkflowCheckId),
+    /// Append-only PR conversation. Discussion never advances the PR content
+    /// or reviewer streams, so an ordinary comment cannot invalidate a vote.
+    PullRequestConversation(PullRequestNumber),
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -175,6 +178,8 @@ pub(crate) const AGGREGATE_KIND_REVIEW_PROTECTION: u32 = 5;
 pub(crate) const AGGREGATE_KIND_MERGE_QUEUE: u32 = 6;
 /// Required workflow observation aggregate; earlier wire tags are unchanged.
 pub(crate) const AGGREGATE_KIND_WORKFLOW_CHECK: u32 = 7;
+/// Conversation stream; established aggregate encodings are unchanged.
+pub(crate) const AGGREGATE_KIND_PULL_REQUEST_CONVERSATION: u32 = 8;
 impl From<IssueNumber> for AggregateId {
     fn from(number: IssueNumber) -> Self {
         Self::Issue(number)
@@ -219,6 +224,7 @@ impl fmt::Display for AggregateId {
             } => write!(formatter, "review/{pull_request}/{reviewer}"),
             Self::MergeQueue(number) => write!(formatter, "queue/{number}"),
             Self::WorkflowCheck(id) => fmt::Display::fmt(id, formatter),
+            Self::PullRequestConversation(number) => write!(formatter, "conversation/{number}"),
         }
     }
 }

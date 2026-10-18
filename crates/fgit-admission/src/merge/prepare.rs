@@ -112,6 +112,12 @@ pub fn prepare_event(
             event.aggregate == fgit_forge::AggregateId::WorkflowCheck(change.id())
                 && event.version == fgit_forge::AggregateVersion::FIRST
         }
+        ForgeEventPayload::PullRequestCommentedNative(_) => {
+            matches!(
+                event.aggregate,
+                fgit_forge::AggregateId::PullRequestConversation(_)
+            )
+        }
         _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
     };
     if !aggregate_matches
@@ -139,6 +145,46 @@ pub fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::PullRequestCommentedNative(comment) => {
+            let fgit_forge::AggregateId::PullRequestConversation(number) = event.aggregate else {
+                return Err(RefusalCode::EvidenceInvalid);
+            };
+            comment
+                .validate()
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if comment.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            let expected_version = if event.version == fgit_forge::AggregateVersion::FIRST {
+                fgit_forge::ExpectedVersion::NewStream
+            } else {
+                fgit_forge::ExpectedVersion::Exactly(
+                    fgit_forge::AggregateVersion::try_new(event.version.get() - 1)
+                        .ok_or(RefusalCode::EvidenceInvalid)?,
+                )
+            };
+            let command = fgit_forge::event::pull_request_comment::PullRequestCommentCommand {
+                number,
+                expected_version,
+                body: comment.body.clone(),
+            };
+            let (expected, sealed) =
+                super::native::pull_request::comments::proposal(context, &command)
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if expected != *event || sealed != *attempt {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            (
+                ForgeEventKind::PullRequestCommented {
+                    conversation: entity,
+                },
+                Vec::new(),
+                None,
+            )
+        }
         ForgeEventPayload::WorkflowCheckObservedNative(change) => {
             // Bind the actual event, actor and inline evidence to this exact
             // original seal, not merely to a well-formed request of any kind.

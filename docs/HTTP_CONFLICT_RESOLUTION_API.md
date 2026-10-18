@@ -3,7 +3,8 @@
 `POST {REPO_URL}/api/v1/pulls/{number}/resolve` completes the remote conflict
 workflow: discover conflicts through `/prepare`, submit explicit resolutions,
 download the resulting native bundle, review that exact candidate, and publish
-it through the existing reviewed merge endpoint.
+it through the existing reviewed merge endpoint. Both merge-commit and squash
+retain their selected method throughout this workflow.
 
 Resolution is a **read-only construction operation**, not a Git push or merge.
 It does not stage objects, create a transaction or idempotency binding, cast a
@@ -46,6 +47,13 @@ source_ref, target_ref, source_tip, target_tip,
 author, committer, timestamp, message
 ```
 
+An optional `method` selects `merge-commit` (the default) or `squash`. Preserve
+the method selected during conflict preparation. Merge-commit records target
+then source as its two parents; squash records only the exact target parent.
+The conflict oracle, resulting tree and source/base checks remain the same.
+Empty, unknown or duplicate methods are rejected. Resolution uses `PathMergeV1`
+and rejects a `profile` override, including `exact-renames-v1`.
+
 It additionally requires `merge_base`, the exact lowercase native OID returned
 by conflict discovery. All hash domains must match the repository. The node
 checks the current open PR version, policy epoch, branch identities and tips,
@@ -60,8 +68,8 @@ local filenames. The closed grammar is:
 | Resolution value | Meaning |
 |---|---|
 | `<path_hex>:base` | Select the exact base entry, including its native type/mode. |
-| `<path_hex>:ours` | Select the target branch entry (first parent). |
-| `<path_hex>:theirs` | Select the source branch entry (second parent). |
+| `<path_hex>:ours` | Select the exact target branch entry. |
+| `<path_hex>:theirs` | Select the exact source branch entry, including for squash. |
 | `<path_hex>:delete` | Explicitly remove this conflicted path. |
 | `<path_hex>:file:100644:file_N` | Exact bytes of multipart part `file_N`, ordinary file mode. |
 | `<path_hex>:file:100755:file_N` | Exact bytes of multipart part `file_N`, executable file mode. |
@@ -81,10 +89,11 @@ NUL, non-UTF-8 content and exact line endings are preserved without normalizatio
 ### Side selection without binary uploads
 
 Use `application/x-www-form-urlencoded` with the required fields and repeated
-`resolution` fields. For example, append this to the exact preparation form:
+`resolution` fields. For a squash, append the following to the eleven required
+preparation fields listed above; include `method` only once and omit `profile`:
 
 ```text
-&merge_base=<exact-base-oid>&resolution=66696c65ff2e747874:ours
+&method=squash&merge_base=<exact-base-oid>&resolution=66696c65ff2e747874:ours
 ```
 
 The example path is the raw Git name `file\xff.txt`. It is not opened as a local
@@ -102,7 +111,7 @@ exactly once: missing, reused, duplicate or unused attachments fail closed.
 Example command additions for an explicit executable-file replacement:
 
 ```text
-&merge_base=<exact-base-oid>&resolution=66696c65ff2e747874:file:100755:file_0
+&method=squash&merge_base=<exact-base-oid>&resolution=66696c65ff2e747874:file:100755:file_0
 ```
 
 With the complete command saved as URL-encoded `resolve.form` and intentionally
@@ -133,6 +142,8 @@ metadata-plus-binary-bundle format as automatic preparation. The JSON retains
 ```json
 {
   "state": "resolved",
+  "profile": "path-merge-v1",
+  "method": "squash",
   "resolution_profile": "exact-path-resolutions-v1",
   "read_only": true,
   "objects_staged": false,
@@ -148,15 +159,21 @@ metadata-plus-binary-bundle format as automatic preparation. The JSON retains
 also includes the exact PR review subject, source head, candidate base/commit/
 tree, bundle length and SHA-256 transport checksum. Actual replacement bytes
 are in the Git bundle; upload filenames do not appear in the derived receipts.
+The method is explicit in every successful response and must match the actual
+candidate's parent style. Both original branch tips remain bundle prerequisites:
+a squash tree can reuse source-side objects without making source a parent.
 
 Extract the metadata and binary bundle using the client example in
 [HTTP_CANDIDATE_PREPARATION_API.md](HTTP_CANDIDATE_PREPARATION_API.md), accepting
 `state: "resolved"` as well as `clean`. Inspect the resulting artifact and submit
-that exact bundle to the existing candidate review endpoint. See
+that exact bundle to the existing candidate review endpoint. Review and
+inspection forms bind the actual candidate without a method field. Carry the
+returned `method` into the separate merge form; a squash candidate must not be
+published using the default two-parent method. See
 [HTTP_REVIEW_MERGE_API.md](HTTP_REVIEW_MERGE_API.md).
 
-Changing any resolution bytes, file mode, selected side or Git commit metadata
-can change the candidate ID. An approval of the original candidate cannot
+Changing the method, resolution bytes, file mode, selected side or Git commit
+metadata can change the candidate ID. An approval of the original candidate cannot
 approve the changed one. Required independent reviewers and mandatory branch
 protection remain checks inside the existing merge driver at publication.
 The resolver never relaxes them or turns a displayed receipt into permission.
@@ -177,7 +194,9 @@ no_conflicts_to_resolve         the exact inputs have no conflicts
 ```
 
 Bad grammar, duplicate/overlapping paths, invalid modes and missing/unused file
-parts return 400. Current permission failures are 401/403, unavailable PRs/refs
+parts return 400. Unsupported methods return 400 `unsupported_merge_method`;
+duplicate selectors, including percent-encoded duplicates, return
+`duplicate_field`. Current permission failures are 401/403, unavailable PRs/refs
 are 404, unsupported media 415, exceeded resource envelopes 413, throttling 429,
 and unavailable/corrupt native evidence 503. Cancellation remains a read error,
 not a fabricated conflict or successful empty result. No-common-ancestor and
@@ -206,10 +225,12 @@ cargo test -p fgit-node --test conflict_resolution_http \
 ```
 
 The tests use native imports, actual TCP handlers and embedded authority. They
-cover exact binary replacement, all side choices, explicit deletion, restart,
-unstaged candidates, independent review, a changed unapproved candidate, coupled
+cover both methods in both object formats, actual commit parents and inspection,
+exact binary replacement, all side choices, explicit deletion, restart, unstaged
+candidates, independent review, a changed unapproved candidate, coupled
 publication, permissions, absent mutation bindings, malformed framing, stale
-PR/policy, hidden refs, cancellation and native work limits in both object
-formats where applicable. Test presence is not evidence that they ran at this
-revision. Broader rename/driver support, cross-repository PRs, browser editing,
-retention leases and production deployment remain separate work.
+PR/policy, hidden refs, cancellation and native work limits where applicable.
+Test presence is not evidence that they ran at this revision. The PR browser
+uses this same resolver for both methods. Broader rename/driver support,
+cross-repository PRs, retention leases and production deployment remain
+separate work.

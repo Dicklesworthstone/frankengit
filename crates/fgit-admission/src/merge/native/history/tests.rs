@@ -1,6 +1,8 @@
 //! These tests exercise the production history-order and evidence decoders.
 //! They do not establish durable-store or concurrent-publication behavior.
 
+mod suffix;
+
 use core::num::NonZeroU32;
 
 use fgit_codec::encode_body;

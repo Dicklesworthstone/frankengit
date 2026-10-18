@@ -10,6 +10,7 @@ mod merge_writes;
 mod mutations;
 mod outcomes;
 pub(super) mod protection;
+mod pull_comments;
 mod pull_writes;
 mod pulls;
 mod review;
@@ -116,6 +117,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.pulls {
         tools.extend(pulls::tools());
         tools.push(checks::tool());
+        tools.push(pull_comments::read_tool());
     }
     if options.source {
         tools.extend(source::tools());
@@ -127,6 +129,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     }
     if options.writes.pulls {
         tools.extend(pull_writes::tools());
+        tools.push(pull_comments::write_tool());
     }
     if options.writes.source {
         tools.extend(source_writes::tools());
@@ -175,7 +178,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         .into_iter()
         .map(|tool| tool.name)
         .collect();
-    names.push(protection::tool().name);
+    names.extend(protection::registered_tools().map(|tool| tool.name));
     names
 }
 
@@ -186,6 +189,7 @@ impl ReadTools for NodeTools {
     fn is_mutation(&self, name: &str) -> bool {
         (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
+            || (self.options.writes.pulls && name == pull_comments::WRITE)
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
             || (self.options.writes.merges && merge_writes::is_tool(name))
@@ -208,6 +212,9 @@ impl ReadTools for NodeTools {
         if self.options.writes.pulls && pull_writes::is_tool(name) {
             return pull_writes::call(self, name, args);
         }
+        if self.options.writes.pulls && name == pull_comments::WRITE {
+            return pull_comments::append(self, args);
+        }
         if self.options.writes.source && source_writes::is_tool(name) {
             return source_writes::call(self, name, args);
         }
@@ -229,6 +236,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.pulls && name == checks::NAME {
             return checks::call(self, args);
+        }
+        if self.options.pulls && name == pull_comments::READ {
+            return pull_comments::read(self, args);
         }
         if self.options.source
             && matches!(name, "frankengit_source_tree" | "frankengit_source_blob")
@@ -440,7 +450,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 33);
+        assert_eq!(server_names.len(), 38);
         assert_eq!(validate_server_parity(&server_names, REGISTRY), Ok(()));
 
         // Also verify 1-for-1 set equality with committed mcp_parity_manifest.json active entries.

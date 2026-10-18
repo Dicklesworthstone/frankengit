@@ -12,9 +12,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const USAGE: &str = "usage: fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>\n\
-  [--expected-incarnation <id>] [--timeout-secs <positive-integer>] [--json]\n\
+  [--expected-incarnation <id>] [--timeout-secs <positive-integer>] [--max-expanded-mib <1..16384>] [--json]\n\
 Without --timeout-secs, reserve the bounded import profile using the node's receive work budget.\n\
 With --timeout-secs, use that strict ceiling for source reading, validation, staging and publication.\n\
+The default reachable-body limit is 512 MiB; --max-expanded-mib selects a bounded disk-backed profile.\n\
+Packed-source, per-object and graph-work bounds remain independent.\n\
 No timeout changes the import's byte/object limits or proves that an interrupted publication did not commit.\n\
 With --json, emit the exact atomic terminal decision and transaction ID; refusal exits 3, errors exit 2.\n\
 The original principal and key also recover the decision through fg outcome without rereading the source.\n\
@@ -30,11 +32,12 @@ struct Options {
     source: PathBuf,
     incarnation: Option<RepositoryIncarnationId>,
     timeout: Option<GitDaemonSessionTimeout>,
+    maximum_bytes: Option<u64>,
     json: bool,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(6..=11).contains(&args.len())
+    if !(6..=13).contains(&args.len())
         || args.iter().any(|value| value.len() > 4096)
         || args[0].is_empty()
         || args[5].is_empty()
@@ -50,6 +53,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         source: args[5].clone().into(),
         incarnation: None,
         timeout: None,
+        maximum_bytes: None,
         json: false,
     };
     // Reject a bad retry identity before opening storage or reading a source.
@@ -90,6 +94,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         .map_err(|e| e.to_string())?,
                 );
             }
+            "--max-expanded-mib" if options.maximum_bytes.is_none() => {
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("--max-expanded-mib requires an integer in 1..=16384".into());
+                }
+                let mib = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|mib| (1..=16384).contains(mib))
+                    .ok_or("--max-expanded-mib requires an integer in 1..=16384")?;
+                options.maximum_bytes = Some(mib * 1024 * 1024);
+            }
             _ => return Err(format!("unknown or duplicate import option {flag:?}")),
         }
     }
@@ -120,15 +135,32 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     // Mint ONCE before any source I/O. In particular, do not replace this with
     // request_context() after the expensive staging half has spent its budget.
     let incarnation = node.repository_incarnation_id();
-    let request = node.import_request_context(options.timeout);
-    let result = node
-        .runtime()
-        .block_on(node.import_loose_git_directory_durable_in(
-            &request,
-            &options.source,
-            options.principal,
-            &options.key,
-        ));
+    let result = match options.maximum_bytes {
+        None => {
+            let request = node.import_request_context(options.timeout);
+            node.runtime()
+                .block_on(node.import_loose_git_directory_durable_in(
+                    &request,
+                    &options.source,
+                    options.principal,
+                    &options.key,
+                ))
+        }
+        Some(maximum) => {
+            match node.import_request_context_with_byte_limit(options.timeout, maximum) {
+                Ok(request) => node.runtime().block_on(
+                    node.import_loose_git_directory_with_byte_limit_durable_in(
+                        &request,
+                        &options.source,
+                        options.principal,
+                        &options.key,
+                        maximum,
+                    ),
+                ),
+                Err(error) => Err(fgit_node::NodeSourceImportRefusal::Staging(Box::new(error))),
+            }
+        }
+    };
     let cleanup = node.shutdown().err().map(|e| e.to_string());
     let admission = result.map_err(|error| {
         format!(
@@ -200,3 +232,6 @@ pub fn run(args: &[String]) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod profile_tests;

@@ -7,6 +7,7 @@ use std::future::Future;
 
 use fgit_admission::merge::native::objects::{
     MergeObjectLimits, validate_fast_forward_objects, validate_merge_objects,
+    validate_squash_objects,
 };
 use fgit_admission::merge::native::{
     NativeMergeIntent, NativeMergeMethod, NativeMergeProjection, admit_native_merge_async,
@@ -34,6 +35,37 @@ use crate::{
     NodeRequestContext, OneNode, PackContextCheckpoint, VerifiedFabricPackSource,
     async_projection_unavailable, checkpoint_pack_context,
 };
+
+/// Preserve the legacy merge seal by default. A squash is an explicit PR
+/// operation, and a fast-forward has its own existing-object publication path.
+pub(in crate::treefs_workspace) fn bundle_merge_intent(
+    number: PullRequestNumber,
+    version: ExpectedVersion,
+    merge: NativeMerge,
+    method: NativeMergeMethod,
+) -> Result<NativeMergeIntent, NodeWorkspaceRefusal> {
+    let intent = match (method, version) {
+        (NativeMergeMethod::MergeCommit, version) => {
+            NativeMergeIntent::new(number, version, merge)
+        }
+        (NativeMergeMethod::Squash, ExpectedVersion::Exactly(version)) => {
+            NativeMergeIntent::squash(number, version, merge)
+        }
+        (NativeMergeMethod::Squash, ExpectedVersion::NewStream) => {
+            return Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
+                "squash requires an existing pull request and exact positive version",
+            ));
+        }
+        (NativeMergeMethod::FastForwardOnly, _) => {
+            return Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
+                "fast-forward uses the existing-object merge publication path",
+            ));
+        }
+    };
+    intent.map_err(|error| {
+        receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)))
+    })
+}
 
 impl OneNode {
     /// Native continuation of the original sealed-package node API. Preserve
@@ -107,13 +139,39 @@ impl OneNode {
         merge: &NativeMerge,
         input: &[u8],
     ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
+        self.apply_merge_bundle_with_method_durable_in(
+            request,
+            principal,
+            idempotency_key,
+            pull_request,
+            expected_version,
+            merge,
+            input,
+            NativeMergeMethod::MergeCommit,
+        )
+        .await
+    }
+
+    /// Publish an explicitly selected merge-commit or squash candidate. Squash
+    /// requires an existing PR and exactly one target parent. Both methods
+    /// authenticate source history and use the same atomic publication path.
+    pub async fn apply_merge_bundle_with_method_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        principal: PrincipalId,
+        idempotency_key: &[u8],
+        pull_request: PullRequestNumber,
+        expected_version: ExpectedVersion,
+        merge: &NativeMerge,
+        input: &[u8],
+        method: NativeMergeMethod,
+    ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
         let map_admission =
             |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
         let key = IdempotencyKey::new(idempotency_key.to_vec()).map_err(|_| {
             NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid bounded idempotency key")
         })?;
-        let intent = NativeMergeIntent::new(pull_request, expected_version, merge.clone())
-            .map_err(map_admission)?;
+        let intent = bundle_merge_intent(pull_request, expected_version, merge.clone(), method)?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,
@@ -196,8 +254,8 @@ impl OneNode {
         Ok((tx_id, terminal))
     }
 
-    /// Publish a reviewed two-parent or explicitly requested fast-forward merge,
-    /// its forge transition and pending delivery in one RCR/head CAS.
+    /// Publish a reviewed merge-commit, squash or fast-forward merge, its
+    /// forge transition and pending delivery in one RCR/head CAS.
     /// Fast-forward-only intents use existing admitted source objects, prove
     /// actual target ancestry, and enforce the same mandatory review protection.
     /// They never synthesize a commit or fall back to a different merge method.
@@ -361,6 +419,17 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn validate_squash_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        self.validate_merge_async(authority, cx, basis, authenticated, intent)
+    }
+
     fn validate_fast_forward_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -524,6 +593,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     }
                     NativeMergeMethod::FastForwardOnly => {
                         validate_fast_forward_objects(&source, merge, self.object_limits, &mut live)
+                    }
+                    NativeMergeMethod::Squash => {
+                        validate_squash_objects(&source, merge, self.object_limits, &mut live)
                     }
                 };
                 if exhaustion.get().is_some() {

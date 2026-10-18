@@ -462,6 +462,12 @@ Event aggregates, projections, APIs, and merge queue test:
 - event identity/order/schema/upcast;
 - RCR admission of exact event batches;
 - projection watermark/currentness and full rebuild;
+- native issue assignment deltas preserve unmentioned principals, canonical
+  sorted sets and legacy event bytes; malformed/duplicate IDs, exhausted set
+  bounds, stale predecessors and changed retry keys refuse without partial
+  assignment. Exercise cancellation, historical retry, retained snapshots,
+  restart, and authenticated HTTP/CLI/MCP adapters. Assigning an existing
+  read-only principal must leave its mutation permission denied;
 - PR head/base/review/check invalidation;
 - source-spanned review anchor exact/remapped/ambiguous/outdated behavior;
 - branch protection/CODEOWNERS/status/override basis;

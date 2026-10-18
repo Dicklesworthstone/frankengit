@@ -2,7 +2,7 @@
 //! Requirements are immutable request semantics, not an approval boolean supplied
 //! by the CLI. Repository-wide protected-ref policy remains a separate owner.
 use super::super::super::{
-    NativeMergeIntent, NativeMergeProjection, admit_merge_attempt_async, delivery, unavailable,
+    NativeMergeIntent, NativeMergeProjection, admit_merge_attempt_async, storage, unavailable,
 };
 use crate::merge::NativeMergeBasis;
 use crate::{
@@ -228,13 +228,41 @@ where
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)
     }
+    async fn validate_squash_async<'a>(
+        &'a self,
+        store: &'a S,
+        cx: &'a S::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        // Only an inner projection that explicitly supports squash can admit
+        // this method. The same native candidate commitment fixes its parent
+        // shape, and every current named approval must bind that exact commit.
+        let closure = self
+            .inner
+            .validate_squash_async(store, cx, basis, authenticated, intent)
+            .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        verify_at(
+            store,
+            cx,
+            basis,
+            intent,
+            self.context.principal_id,
+            self.required,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(closure)
+    }
 }
 
 fn infrastructure(error: AdmissionError) -> ProjectionFailure {
-    match error {
-        AdmissionError::AsyncProjectionUnavailable(code) => ProjectionFailure::Unavailable(code),
-        _ => ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid),
-    }
+    error.into_projection_unavailable(RefusalCode::AuthorityReceiptInvalid)
 }
 pub(crate) async fn verify_at<S, C>(
     store: &S,
@@ -313,15 +341,19 @@ where
             RefusalCode::ProtectedRefTransitionDenied,
         ));
     }
-    let state = delivery::read_in(store, cx, basis, cancelled)
+    // The exact authenticated frontier selects each named review. Replaying
+    // every unrelated delivery cannot strengthen this candidate precondition;
+    // review_frontier validates the selected batch's complete position range.
+    let positions = storage::load_forge_positions(store, cx, basis)
         .await
         .map_err(infrastructure)?;
+    super::super::checkpoint(cancelled).map_err(infrastructure)?;
     for reviewer in &required.reviewers {
         super::super::checkpoint(cancelled).map_err(infrastructure)?;
         let event = super::review_frontier(
             store,
             cx,
-            &state.forge,
+            &positions,
             AggregateId::PullRequestReview {
                 pull_request: number,
                 reviewer: *reviewer,
@@ -330,6 +362,7 @@ where
         .await
         .map_err(infrastructure)?
         .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?;
+        super::super::checkpoint(cancelled).map_err(infrastructure)?;
         let ForgeEventPayload::PullRequestReviewedNative(review) = event.payload else {
             return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
         };

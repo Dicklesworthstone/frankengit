@@ -6,7 +6,8 @@ mod tests;
 use super::{hex, quote, write_report};
 use fgit_node::source_retrieval::current_index::{
     GenerationActivation, IndexedLexicalReport, LexicalChannel, LexicalQuery, LexicalQueryLimits,
-    LexicalReadLimits, LexicalSource, PROFILE, RevalidatedIndexReport, RevalidatedIndexRequest,
+    LexicalReadLimits, LexicalSource, OMISSION_PROFILE, PROFILE, RevalidatedIndexReport,
+    RevalidatedIndexRequest,
 };
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{
@@ -46,7 +47,7 @@ current_source.snapshot_token as --expected-head, current_source.commit as
 All four pins are required. A head change between pages refuses; start a new query.
 Retain selected_generation_head as an independent minimum checkpoint when needed.
 Document IDs and generation numbers are decimal JSON strings, preserving u64 values.
-Exit 0: complete answer (including no matches); 3: result prefix with continuation;
+Exit 0: complete answer (including no matches); 3: result prefix or omitted files;
 2: argument, read, shutdown or output error. No canonical or index publication.";
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
@@ -93,11 +94,13 @@ fn finish(
     };
     let rendered = render(report.current_source(), report.index())?;
     write_report(output, &rendered)?;
-    Ok(if report.index().results.complete {
-        0
-    } else {
-        3
-    })
+    Ok(
+        if report.index().results.complete && report.index().coverage_complete {
+            0
+        } else {
+            3
+        },
+    )
 }
 
 fn head_token(head: RepositoryAuthorityHeadId) -> String {
@@ -158,6 +161,9 @@ fn byte_list(values: &[Vec<u8>]) -> String {
 // Production receives both arguments only from the node's private-constructor
 // receipt. This pure renderer does not authenticate caller-supplied snapshots.
 fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<String, String> {
+    let omitted_bytes = index
+        .validate_coverage()
+        .map_err(|error| error.to_string())?;
     let channel = match index.query.channel() {
         LexicalChannel::Content => "content",
         LexicalChannel::Path => "path",
@@ -168,7 +174,7 @@ fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<Strin
         .map_or_else(|| "null".into(), |id| quote(&id.to_string()));
     let mut out = format!(
         concat!(
-            "{{\"type\":\"source_index_search\",\"schema_version\":1,\"profile\":{},",
+            "{{\"type\":\"source_index_search\",\"schema_version\":{},\"profile\":{},",
             "\"current_source\":{},\"indexed_source\":{},\"distinct_index_provenance\":{},",
             "\"generation\":{},\"selected_generation_head\":{},\"channel\":{},",
             "\"terms_hex\":[{}],\"path_prefixes_hex\":[{}],\"complete\":{},\"next_after\":{},",
@@ -177,6 +183,7 @@ fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<Strin
             "\"work_units\":{},\"node_closed\":true,\"repository_changed\":false,",
             "\"index_changed\":false,\"hits\":["
         ),
+        if index.coverage_complete { 1 } else { 2 },
         quote(PROFILE),
         source_json(current),
         source_json(&index.source),
@@ -220,7 +227,29 @@ fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<Strin
             return Err("indexed search JSON exceeds its output budget".into());
         }
     }
-    out.push_str("]}");
+    out.push(']');
+    if !index.coverage_complete {
+        out.push_str(&format!(
+            ",\"index_profile\":{},\"coverage_complete\":false,\"omitted_files\":{},\"omitted_source_bytes\":{},\"omissions\":[",
+            quote(OMISSION_PROFILE), index.omissions.len(), omitted_bytes,
+        ));
+        for (ordinal, omission) in index.omissions.iter().enumerate() {
+            out.push_str(&format!(
+                "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"reason\":{},\"limit\":{}}}",
+                if ordinal == 0 { "" } else { "," },
+                quote(&hex(&omission.path)),
+                quote(&omission.blob.to_string()),
+                omission.source_bytes,
+                quote(omission.reason.as_str()),
+                omission.limit,
+            ));
+            if out.len() > MAX_OUTPUT_BYTES {
+                return Err("indexed search JSON exceeds its output budget".into());
+            }
+        }
+        out.push(']');
+    }
+    out.push('}');
     if out.len() > MAX_OUTPUT_BYTES {
         return Err("indexed search JSON exceeds its output budget".into());
     }

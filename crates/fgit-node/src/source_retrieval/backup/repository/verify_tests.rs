@@ -323,3 +323,37 @@ fn verification_parser_is_bounded_and_has_no_restore_or_resume_authority() {
     large[1] = "x".repeat(8193);
     assert!(parse(&large).is_err());
 }
+
+#[test]
+fn verification_accepts_only_complete_signed_policy_and_still_requires_the_pin() {
+    let base = arguments(Path::new("archive"), Path::new("scratch"), [1; 32]);
+    let flags = [
+        ("--approval", "approval.dsse.json"),
+        ("--trust-key", "trusted.pem"),
+        ("--tenant-id", "11111111111111111111111111111111"),
+        ("--repository-id", "22222222222222222222222222222222"),
+        ("--incarnation-id", "33333333333333333333333333333333"),
+        ("--object-format", "sha1"),
+        ("--minimum-head-generation", "1"),
+    ];
+    let mut complete = base.clone();
+    complete.extend(
+        flags
+            .iter()
+            .flat_map(|(flag, value)| [flag.to_string(), value.to_string()]),
+    );
+    assert!(parse(&complete).unwrap().approval.is_some());
+    for missing in 0..flags.len() {
+        let mut input = base.clone();
+        input.extend(
+            flags
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != missing)
+                .flat_map(|(_, (flag, value))| [flag.to_string(), value.to_string()]),
+        );
+        assert!(parse(&input).is_err());
+    }
+    complete.drain(4..6);
+    assert!(parse(&complete).unwrap_err().contains("--expected-sha256"));
+}

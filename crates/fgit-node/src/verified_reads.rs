@@ -9,6 +9,9 @@
 
 use core::fmt;
 
+mod blob;
+pub use blob::VerifiedBlobReadRefusal;
+
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityFailure, HeadBodyRefusal, HeadReadReceipt, OutcomeFailure,
     RepositoryIncarnationConfigurationEvidence, TerminalOutcome, authority_head_identity,

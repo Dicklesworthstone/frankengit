@@ -1272,6 +1272,16 @@ pub static UNDESCRIBED: &[UndescribedBody] = &[
                     `check_families_unique` keys a row by family and the two are distinct \
                     families that must each resolve to a reason of their own",
     },
+    UndescribedBody {
+        family: "verified-blob",
+        construct: "a body whose first field is the complete encoded frame of another canonical \
+                    body: `ref_proof` carries a whole `verified-read-envelope` frame, which \
+                    `read_payload` decodes and validates as that family. The format has no \
+                    field type meaning \"a complete encoded body of some other family appears \
+                    inline here\", the same obstacle `signed-envelope` records for its \
+                    `body_frame`; describing the field as opaque bytes would hide the nested \
+                    frame's own bounds and validation from a non-Rust client",
+    },
 ];
 
 // Every body currently admitted to this generated client-schema registry is

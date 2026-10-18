@@ -2,16 +2,16 @@
 
 `frankengit_source_candidate` supports `operation: "inspect_pull_merge"` for
 FG-096 / x2mv.4.24's sponsored local authoring workflow. It completes the
-read-only bridge from a native two-parent bundle to the existing independently
+read-only bridge from a native merge-commit or squash bundle to the existing independently
 sponsored review and merge tools. No remote IAM or autonomous approval is added.
 
 ## Exact input, not an implicit latest-PR query
 
-Take `candidate_arguments` from `prepare_pull_merge` (or supply independently
-reviewed equivalent coordinates and native bundle bytes), add
-`operation: "inspect_pull_merge"`, and optionally add the preparation result's
-`snapshot_token` as `expected_head` and `bundle_sha256` as
-`expected_bundle_sha256`. The required subject remains the exact PR `number`,
+Use `inspection_arguments` from `prepare_pull_merge` directly. It preserves the
+selected method, `operation: "inspect_pull_merge"`, the preparation result's
+`snapshot_token` as `expected_head`, and `bundle_sha256` as
+`expected_bundle_sha256`. Independently supplied equivalent coordinates and
+native bundle bytes remain supported with these optional pins. The required subject remains the exact PR `number`,
 `expected_version`, source/target references and tips, `policy_epoch`,
 `candidate_commit`, `merge_base`, and complete `bundle_hex_chunks`.
 
@@ -20,6 +20,14 @@ nonzero lowercase hex in the repository's SHA-1 or SHA-256 domain. PR versions,
 numbers and epochs are exact positive decimal strings, not JSON numbers.
 The optional transport digest is lowercase SHA-256 hex. No host path or URL is
 read. Pins are preconditions; they cannot authorize an older or hidden subject.
+
+The optional `method` asserts `merge-commit` or `squash` against the actual
+verified parent list. Merge-commit requires the ordered target/source parents;
+squash requires exactly the target parent. An explicit mismatch refuses. When
+omitted, inspection identifies these verified shapes and preserves the earlier
+source-tip fast-forward workflow. In the boundary case where a squash artifact
+has exactly the source commit's bytes, retain `method: "squash"` to select the
+reviewed squash publication template; it is never replaced by fast-forward.
 
 Both `--allow-source` AND `--allow-pulls` are required, even for direct handler
 calls with otherwise malformed inputs. Source-write, PR-write, review-write,
@@ -30,7 +38,7 @@ shares the existing candidate tool name and remains read-only in MCP discovery.
 
 The adapter calls `OneNode::inspect_pull_request_bundle_in`. The native API
 selects the exact open PR and both visible parents, verifies the uploaded pack,
-validates the ordered target/source parents and common-base ancestry, and
+validates the exact candidate parent shape and common-base ancestry, and
 compares the target-before tree with the ACTUAL uploaded candidate tree at that
 same head. It does not replace the upload with the automatically prepared merge
 or compare only the source-side PR diff. Parent-closure restrictions, native
@@ -71,11 +79,18 @@ undisclosed native diagnostics.
 ## Handoff to review and publication
 
 The returned `candidate_arguments` retains the EXACT submitted bundle and
-subject in the existing review/merge consumers' format. It contains no snapshot
+subject in the existing review consumer's format. It contains no snapshot
 pin (a review itself advances authority), no principal, no review decision, no
 reviewer list, and no idempotency key. Review the actual commit and diff, then
-supply the missing caller-owned fields to the named `review_tool` or
-`publication_tool` under their independently granted launch identities.
+supply the missing caller-owned fields to the named `review_tool` under its
+independently granted launch identity.
+
+Use `publication_arguments` with the named `publication_tool`. Reviewed
+merge-commit and squash templates carry explicit `method` and the original
+bundle. The separate legacy fast-forward template names admitted source/target
+coordinates and contains no bundle or method selector. The response's `method`
+identifies which template was produced. No inspection result supplies a durable
+key, reviewer set or authenticated sponsor.
 
 Inspection is not an approval. Review admission checks the exact current
 subject and policy, and merge publication must still satisfy the named-reviewer
@@ -89,6 +104,6 @@ Authored tests cover strict parsing/schema/transport boundaries, real persisted
 SHA-1/SHA-256 MCP prepare-to-inspect parity, actual target-side comparison,
 unstaged candidates, restart, independent grants, stale/corrupt/budget twins,
 request cancellation, and shared renderer binding failures. The implementation
-session has no Rust toolchain or built `fg`: compilation, Rust tests, Clippy and
-real-binary end-to-end execution have not been performed. No passing native gate,
-complete agent-day, or bead closure is asserted by this implementation.
+tests also cover explicit parent-shape mismatches and the identical-source
+squash boundary. Test definitions alone establish no passing Rust execution;
+run the focused suite on the pinned toolchain and record its revision and result.

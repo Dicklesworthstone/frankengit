@@ -4,6 +4,9 @@ mod branches;
 mod candidate;
 pub mod candidate_inspection;
 mod full_bundle;
+pub use full_bundle::{
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+};
 mod initial_commit;
 mod merge_prepare;
 mod native_merge;
@@ -18,6 +21,9 @@ mod publication;
 mod pull_request;
 pub use issues::IssueReadRefusal;
 pub use pull_request::{PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary};
+pub use pull_request::{
+    PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
+};
 mod session_state;
 mod sessions;
 mod source_browse;

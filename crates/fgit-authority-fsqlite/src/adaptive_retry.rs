@@ -30,16 +30,16 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_codec::encode_body;
-use fgit_crypto::{DigestHasher, Sha256Hasher};
+use fgit_crypto::{DigestAlgorithm, DigestHasher, Sha256Hasher};
 use fgit_statistics::authority::{
-    AdvisoryDecision, DecisionRefusal, ForbiddenTarget, ProposedTarget, resolve,
+    AdmissibleShape, AdvisoryDecision, DecisionRefusal, ForbiddenTarget, ProposedTarget, resolve,
 };
 use fgit_statistics::{
     AssumptionFailure, AssumptionSet, BindingRefusal, Cusum, CusumConfig, EProcess,
     EProcessAssumptionFailure, EProcessConfig, EProcessRefusal, FallbackTrigger, PolicyGate,
     PolicySelection, RegimeBinding, Scaled, SequenceWindow, StatisticalEvidenceBody,
 };
-use fgit_types::{AsciiSlug, Digest, PolicyEpoch, TypeRefusal};
+use fgit_types::{AsciiSlug, Digest, DigestBytes, PolicyEpoch, TypeRefusal};
 
 use crate::retry::BackoffPlan;
 
@@ -110,6 +110,9 @@ impl Default for AdaptiveRetryConfig {
                 slack: 1,
                 threshold: 16,
                 max_deviation: 64,
+                // The detector is rebuilt with each retention window, so its
+                // longest run is that window.
+                max_observations: DEFAULT_MAX_RETAINED_OBSERVATIONS,
             },
             min_support_observations: DEFAULT_MIN_SUPPORT_OBSERVATIONS,
             max_retained_observations: DEFAULT_MAX_RETAINED_OBSERVATIONS,
@@ -146,6 +149,9 @@ pub enum AdaptiveRetryRefusal {
     Binding(BindingRefusal),
     /// Authority boundary refused a non-admissible target.
     Decision(DecisionRefusal),
+    /// The target is admissible but is not the retry-backoff shape this
+    /// controller produces.
+    ShapeMismatch(AdmissibleShape),
     /// Policy epoch counter exhausted.
     EpochExhausted,
 }
@@ -415,10 +421,12 @@ impl AdaptiveRetryController {
         target: ProposedTarget,
     ) -> Result<AdvisoryDecision, AdaptiveRetryRefusal> {
         let (base_ticks, _) = self.active_bounds_ticks();
-        let candidate = AdvisoryDecision::RetryBackoff {
-            micros: base_ticks.saturating_mul(1_000),
-        };
-        resolve(target, candidate).map_err(AdaptiveRetryRefusal::Decision)
+        match resolve(target).map_err(AdaptiveRetryRefusal::Decision)? {
+            AdmissibleShape::RetryBackoff => Ok(AdvisoryDecision::RetryBackoff {
+                micros: base_ticks.saturating_mul(1_000),
+            }),
+            shape => Err(AdaptiveRetryRefusal::ShapeMismatch(shape)),
+        }
     }
 
     /// Feeds one whole-transaction operation outcome into the controller.
@@ -510,13 +518,7 @@ impl AdaptiveRetryController {
         self.active_selection = effective_selection;
 
         let (base_ticks, ceiling_ticks) = self.active_bounds_ticks();
-        let decision = resolve(
-            ProposedTarget::RetryBackoff,
-            AdvisoryDecision::RetryBackoff {
-                micros: base_ticks.saturating_mul(1_000),
-            },
-        )
-        .map_err(AdaptiveRetryRefusal::Decision)?;
+        let decision = self.authorize_target(ProposedTarget::RetryBackoff)?;
 
         let epoch_log = self.build_epoch_log(first_seq, last_seq, effective_selection, decision)?;
         self.current_evidence = Some(epoch_log.clone());
@@ -698,7 +700,10 @@ fn slug(literal: &'static str) -> AsciiSlug {
 fn sha256_digest(bytes: &[u8]) -> Digest {
     let mut hasher = Sha256Hasher::new();
     hasher.update(bytes);
-    Digest::from_bytes(hasher.finish())
+    Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(&hasher.finish()).expect("a SHA-256 output is 32 bytes"),
+    )
 }
 
 const fn fallback_trigger_slug(trigger: FallbackTrigger) -> &'static str {
@@ -776,7 +781,8 @@ mod tests {
                 break;
             }
         }
-        let step = alarmed_step.expect("sustained contention burst must trigger e-process/CUSUM regime alarm");
+        let step = alarmed_step
+            .expect("sustained contention burst must trigger e-process/CUSUM regime alarm");
         assert!(step.published_epoch);
         assert_eq!(step.epoch.get(), 3);
         assert_eq!(step.base_ticks, FALLBACK_BACKOFF_BASE_MS);
@@ -802,15 +808,16 @@ mod tests {
             assert_eq!(record.evidence.selection.as_str(), SELECTION_SLUG);
             assert_eq!(record.evidence.assumptions.len(), 3);
             let encoded = encode_body(&record.evidence).unwrap();
-            let decoded: StatisticalEvidenceBody = decode_body(&encoded).unwrap();
+            let decoded: StatisticalEvidenceBody =
+                decode_body(&encoded, fgit_codec::DecodeLimits::DEFAULT).unwrap();
             assert_eq!(decoded, record.evidence);
             let json = record.to_json_line();
             assert!(json.contains("\"type\":\"statistical_policy_epoch\""));
             assert!(json.contains("\"metric\":\"authority-cas-contention-backoff-ms\""));
             assert!(json.contains("\"candidate_policy_id\":\"eprocess-adaptive-cas-backoff-v1\""));
-            assert!(json.contains(
-                "\"fallback_policy_id\":\"pinned-exponential-jitter-2ms-512ms-v1\""
-            ));
+            assert!(
+                json.contains("\"fallback_policy_id\":\"pinned-exponential-jitter-2ms-512ms-v1\"")
+            );
         }
     }
 
@@ -823,7 +830,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 err,
-                AdaptiveRetryRefusal::Decision(DecisionRefusal::TargetForbidden { target })
+                AdaptiveRetryRefusal::Decision(DecisionRefusal::ForbiddenTarget { target })
             );
         }
         let ok = controller
@@ -855,7 +862,8 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, // 0..16
             2, 0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 1, 0, // 16..32
             0, 2, 0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 2, 0, 1, // 32..48
-            0, 3, 0, 2, 0, 1, 0, 2, 0, 1, 0, 2, 0, 1, 999, 888, // 48..64 (62=Permanent, 63=Indeterminate)
+            0, 3, 0, 2, 0, 1, 0, 2, 0, 1, 0, 2, 0, 1, 999,
+            888, // 48..64 (62=Permanent, 63=Indeterminate)
         ];
 
         let run_campaign = |adaptive: bool| {
@@ -905,7 +913,12 @@ mod tests {
                 outcomes.push(outcome);
             }
             loser_delays_ms.sort_unstable();
-            (outcomes, loser_delays_ms, total_attempts, controller.snapshot())
+            (
+                outcomes,
+                loser_delays_ms,
+                total_attempts,
+                controller.snapshot(),
+            )
         };
 
         let (baseline_outcomes, baseline_delays, baseline_attempts, _) = run_campaign(false);
@@ -918,7 +931,7 @@ mod tests {
         assert_eq!(baseline_delays, aa_delays);
         assert_eq!(baseline_attempts, aa_attempts);
         assert_eq!(
-             adaptive_outcomes, baseline_outcomes,
+            adaptive_outcomes, baseline_outcomes,
             "adaptive retry must produce identical terminal RetryOutcome classes to fixed policy"
         );
         assert_eq!(

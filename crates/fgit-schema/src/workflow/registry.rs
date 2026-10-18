@@ -117,13 +117,18 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "job.strategy",
-        status: ConstructStatus::Unsupported,
-        reason: "matrix expansion multiplies jobs, and the expansion order and identifier derivation need their own bead",
+        status: ConstructStatus::Normalized,
+        reason: "bounded static matrices require explicit fail-fast: false; literal axes and include/exclude records become native jobs; other strategy forms remain refused",
     },
     Construct {
         key: "job.timeout-minutes",
         status: ConstructStatus::Unsupported,
         reason: "a budget belongs to the effect broker's reservation, not to a YAML field the runner may ignore",
+    },
+    Construct {
+        key: "step.env",
+        status: ConstructStatus::Normalized,
+        reason: "literal step-local environment sorted by name and bound into a v2 graph; no inherited values, expressions, secret imports or reserved startup and identity variables",
     },
     Construct {
         key: "step.if",
@@ -149,6 +154,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         key: "step.with",
         status: ConstructStatus::Unsupported,
         reason: "only meaningful as arguments to step.uses, which is refused",
+    },
+    Construct {
+        key: "step.working-directory",
+        status: ConstructStatus::Normalized,
+        reason: "workspace-relative directory; leading dot slash is normalized and dot selects the root; parent traversal, absolute paths, expressions and symlink traversal refuse",
     },
     Construct {
         key: "workflow.concurrency",

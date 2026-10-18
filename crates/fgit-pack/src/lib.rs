@@ -18,6 +18,7 @@ mod midx;
 mod pack;
 mod reader;
 mod scan;
+mod stream;
 mod verify;
 mod writer;
 
@@ -41,7 +42,7 @@ pub use commit_graph::{
 };
 pub use delta::{
     CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ResolutionBudget,
-    ScalarResolver, apply_delta,
+    ScalarResolver, apply_delta, apply_delta_to_charged_base_with_budget, apply_delta_with_budget,
 };
 /// The bounded compression primitives shared by pack and transport envelopes.
 /// Adapters use the same admitted decoder rather than a second DEFLATE engine.
@@ -53,7 +54,7 @@ pub use idx::{
     IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum, validate_idx_entry_crc,
     validate_idx_pack_count,
 };
-pub use idx_write::build_pack_index_v2;
+pub use idx_write::{StreamPackIndexEntry, build_pack_index_v2, build_streamed_pack_index_v2};
 pub use midx::{
     MidxCompleteness, MidxLimits, MidxLocation, MidxProfile, MidxRefusal, MidxSource, MidxV1,
     MidxV1Receipt, MidxVerification,
@@ -65,6 +66,7 @@ pub use pack::{
 };
 pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
 pub use scan::{PackBoundaryScanner, ScanStatus};
+pub use stream::{StreamPackEntry, StreamPackError, StreamPackReceipt, read_streamed_pack};
 pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
 };

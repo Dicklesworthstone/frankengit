@@ -9,7 +9,7 @@
 </head>
 <body id="pr-collaboration">
 <header><a href="../">Source browser</a><h1>Pull requests</h1>
-  <p>Fast-forward an existing source tip, or inspect exact candidate bytes and record a review. Both merge paths publish through the native repository authority.</p>
+  <p>Prepare a merge commit or squash, or fast-forward an existing source tip. Inspect the exact result and record a review before publication.</p>
 </header>
 <main>
   <section aria-labelledby="connection-heading">
@@ -17,9 +17,13 @@
     <p>The same-origin APIs enforce independent Git-read, PR-read/write, review, merge, and outcome-recovery grants. No displayed approval grants merge authority.</p>
     <form id="connection" autocomplete="off">
       <label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <label class="confirmation"><input id="recovery-only" type="checkbox"> Outcome lookup only — original token rotated or revoked</label>
+      <label>Original principal ID <input id="original-principal" autocomplete="off" spellcheck="false" maxlength="32" pattern="[0-9a-f]{32}" aria-describedby="recovery-help" disabled></label>
+      <p id="recovery-help">For recovery only, enter the original 32-character lowercase hexadecimal principal ID from a trusted retained record or operator configuration. Use a current token for that same principal with its independent outcome-recovery grant. This does not change the original request or allow a resend. Changing this selection takes effect only on Connect.</p>
       <button type="submit">Connect</button><button id="disconnect" type="button">Disconnect and clear views</button>
     </form>
     <p>Use HTTPS outside loopback. The token is kept only in this page’s memory, not in cookies, URLs, or saved receipts.</p>
+    <p id="connection-mode" role="status" aria-live="polite"></p>
     <p id="status" role="status" aria-live="polite"></p>
   </section>
   <div class="columns">
@@ -29,7 +33,7 @@
       <div id="pr-list"></div><div id="list-paging"></div>
       <form id="select-pr">
         <label>PR number <input id="select-number" inputmode="numeric" pattern="[1-9][0-9]*" required></label>
-        <button type="submit">Load latest PR snapshot</button>
+        <button id="select-load" type="submit">Load latest PR snapshot</button>
       </form>
       <button id="new-pr" type="button">Compose a new PR</button>
     </section>
@@ -39,6 +43,20 @@
       <div id="reviews"></div><div id="review-paging"></div>
     </section>
   </div>
+  <section aria-labelledby="conversation-heading">
+    <h2 id="conversation-heading">Conversation</h2>
+    <p>Discuss an open, closed, or merged PR. Comments preserve the PR’s metadata and existing approvals.</p>
+    <label>Comments per page <select id="comments-limit"><option value="5">5</option><option value="1">1</option><option value="20">20</option></select></label>
+    <button id="comments-load" type="button">Load latest conversation</button>
+    <p>Choose a smaller page if long comments exceed the response limit.</p>
+    <div id="conversation"></div><div id="comment-paging"></div>
+    <form id="comment-form">
+      <label>Conversation version <input id="comment-version" readonly aria-readonly="true"></label>
+      <label>Your comment <textarea id="comment-body" rows="5" maxlength="65536" required></textarea></label>
+      <button id="comment-stage" type="submit">Prepare comment — do not send</button>
+    </form>
+    <p>Load the conversation first. Your token determines the author. Preparing a comment saves its exact body and conversation version for sending or recovery below.</p>
+  </section>
   <details>
     <summary>Open, update, close, or reopen a PR</summary>
     <p>This proposal does not change the observed PR above. Closing and reopening submit the complete explicit metadata and a positive expected version. Reopen a closed PR, not a merged one; the node enforces the lifecycle without moving refs. There is no implicit tip refresh.</p>
@@ -62,6 +80,7 @@
     <h2 id="prepare-heading">1. Prepare and inspect candidate</h2>
     <p>Uses the selected open PR’s exact version and tips. Git-read and PR-read grants are required on the same token. This operation does not stage objects, record a vote, or move a ref.</p>
     <form id="prepare">
+      <label>Merge method <select id="candidate-method"><option value="merge-commit">Merge commit (two parents)</option><option value="squash">Squash (one target parent)</option></select></label>
       <div class="fields">
         <label>Explicit policy epoch <input id="policy-epoch" inputmode="numeric" required></label>
         <label>Author <input id="author" placeholder="Name &lt;email@example.org&gt;" required></label>
@@ -73,9 +92,9 @@
     </form>
     <form id="candidate-import">
       <label>Or import a shared candidate receipt (up to 24 MiB) <input id="candidate-import-file" type="file" accept="application/json,.json" required></label>
-      <button type="submit">Reinspect imported candidate — read only</button>
+      <button id="candidate-import-submit" type="submit">Reinspect imported candidate — read only</button>
     </form>
-    <p>Browser candidate bundles are capped at 16 MiB. Conflicted preparations expose explicit per-path choices below; resolved candidates must pass native reinspection before any review.</p>
+    <p>Browser candidate bundles are capped at 16 MiB. Merge-commit and squash conflicts offer explicit per-path resolution below. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
     <button id="candidate-download" type="button">Download candidate receipt</button>
     <button id="inspection-download" type="button">Download full inspection JSON</button>
     <div id="candidate"></div>
@@ -100,9 +119,12 @@
         <button id="review-stage" type="submit">Prepare review — do not send</button>
       </form>
       <form id="merge">
-        <h3>Reviewed merge</h3>
-        <label>Required reviewer IDs, one per line <textarea id="required-reviewers" rows="5" spellcheck="false" required></textarea></label>
-        <p>Enter 1–32 distinct 32-character lowercase hexadecimal principal IDs explicitly. Displayed reviews never fill this field automatically. The opener and submitter cannot provide independent approval.</p>
+        <h3 id="merge-heading">Reviewed merge</h3>
+        <p id="merge-method-guidance">The inspected candidate determines the explicit publication method. Current branch protection applies.</p>
+        <div id="merge-reviewer-fields">
+          <label>Required reviewer IDs, one per line <textarea id="required-reviewers" rows="5" spellcheck="false" required></textarea></label>
+          <p>Enter 1–32 distinct 32-character lowercase hexadecimal principal IDs explicitly. Displayed reviews never fill this field automatically. The opener and submitter cannot provide independent approval.</p>
+        </div>
         <button id="merge-stage" type="submit">Prepare merge — do not send</button>
       </form>
     </div>
@@ -117,8 +139,8 @@
     <button id="discard" type="button">Discard never-exported, unsent draft</button>
     <p>A lost response does not prove failure. Sent or exported requests remain pending until a canonical terminal outcome is observed. No retries run automatically.</p>
     <form id="receipt-import">
-      <label>Restore a saved request using its original token <input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
-      <button type="submit">Restore exact request — do not send</button>
+      <label>Restore a saved request — original token for retry, or recovery-only connection for outcome lookup <input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
+      <button id="receipt-import-submit" type="submit">Restore exact request — do not send</button>
     </form>
     <p>Recovery copies contain private proposal and candidate bytes, but no access token. Export before leaving this page. A downloaded copy might be dispatched elsewhere, so it can no longer be treated as a disposable draft.</p>
   </section>

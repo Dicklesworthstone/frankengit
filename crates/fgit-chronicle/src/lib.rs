@@ -62,6 +62,7 @@ pub mod archive;
 pub mod assemble;
 pub mod audit;
 pub mod capsule;
+pub mod checkpoint;
 mod evidence;
 pub mod live;
 pub mod migration;
@@ -78,6 +79,10 @@ pub use audit::{batch_identity, repository_commit_identity, verify_pair};
 pub use capsule::{
     BackupProfile, CapsulePointer, RepositoryCapsuleBody, advance_pointer_root_last,
     advance_pointer_root_last_async, capsule_identity,
+};
+pub use checkpoint::{
+    CheckpointTransitionRefusal, HistoryStep, HistoryStepRefusal, read_history_step_async,
+    verify_checkpoint_successor,
 };
 pub use evidence::batch_evidence_root;
 pub use live::{

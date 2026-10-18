@@ -26,6 +26,19 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     repository::run(args, output)
 }
 
+/// Run a repository source backup with an optional caller-selected timeout cap.
+///
+/// The cap narrows the export/verify/restore leaf timeout; it cannot enlarge
+/// another limit. `None` preserves the command's existing default. The deadline
+/// is cooperative, and owned runtimes/cleanup still drain after it expires.
+pub fn run_with_timeout(
+    args: &[String],
+    output: &mut impl Write,
+    timeout: Option<Duration>,
+) -> Result<(), String> {
+    repository::run_with_timeout(args, output, timeout)
+}
+
 /// Render the same escaped failure envelope for both CLI entrypoints.
 #[must_use]
 pub fn error_json(error: &str) -> String {
@@ -173,7 +186,9 @@ fn generation(bundle: &ExportBundle) -> String {
 fn publish_streamed<T>(
     destination: &Path,
     build: impl FnOnce(&mut File) -> Result<T, String>,
+    mut live: impl FnMut() -> Result<(), String>,
 ) -> Result<T, String> {
+    live()?;
     require_absent(destination)?;
     let mut staged = None;
     for _ in 0..16 {
@@ -199,9 +214,10 @@ fn publish_streamed<T>(
         }
     }
     let (temporary, mut file) = staged.ok_or("no unused repository backup staging path")?;
-    let built = build(&mut file).and_then(|result| {
+    let built = live().and_then(|()| build(&mut file)).and_then(|result| {
         file.sync_all()
             .map_err(|error| format!("repository backup staging sync failed: {error}"))?;
+        live()?;
         Ok(result)
     });
     drop(file);
@@ -209,6 +225,9 @@ fn publish_streamed<T>(
         Ok(result) => result,
         Err(error) => return Err(remove_stage(&temporary, error)),
     };
+    if let Err(error) = live() {
+        return Err(remove_stage(&temporary, error));
+    }
     if let Err(error) = fs::hard_link(&temporary, destination) {
         return Err(remove_stage(
             &temporary,

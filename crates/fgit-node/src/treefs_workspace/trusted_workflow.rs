@@ -2,6 +2,7 @@
 //! Never expose this local-owner operation as a remote or hostile CI endpoint.
 
 mod candidate;
+mod completion;
 mod durable;
 use candidate::WorkflowInputs;
 
@@ -19,7 +20,7 @@ use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, Regio
 use fgit_runner::sparse_workspace::{HostRefusal, SparseWorkspace, SparseWorkspacePlan};
 use fgit_runner::workflow::{
     StepLimits, StepObservation, WorkerFailure, WorkflowExecutor, WorkflowJob, WorkflowLimits,
-    WorkflowPlan, WorkflowReport, run_trusted_step,
+    WorkflowPlan, WorkflowReport, run_trusted_step_with_context,
 };
 use fgit_treefs::{
     BaseView, SparseEntryKind, SparseLimits, SparseManifest, TreeCapability, TreePath, WorkspaceId,
@@ -105,7 +106,9 @@ pub struct TrustedWorkflowRun {
 }
 impl TrustedWorkflowRun {
     pub fn succeeded(&self) -> bool {
-        self.workspaces_closed && !self.request_interrupted && self.execution.succeeded()
+        self.workspaces_closed
+            && !self.request_interrupted
+            && completion::succeeded(&self.execution)
     }
     pub fn executed_commit(&self) -> GitOid {
         self.candidate.map_or(self.source_commit, |c| c.commit)
@@ -670,6 +673,25 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         limits: StepLimits,
         live: &dyn Fn() -> bool,
     ) -> Result<StepObservation, WorkerFailure> {
+        self.execute_step_with_context(
+            index,
+            script,
+            &fgit_runner::workflow::StepContext::default(),
+            limits,
+            live,
+        )
+    }
+    fn supports_step_context(&self) -> bool {
+        true
+    }
+    fn execute_step_with_context(
+        &mut self,
+        index: usize,
+        script: &str,
+        context: &fgit_runner::workflow::StepContext,
+        limits: StepLimits,
+        live: &dyn Fn() -> bool,
+    ) -> Result<StepObservation, WorkerFailure> {
         let (workspace, _) = self
             .current
             .as_ref()
@@ -691,9 +713,10 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         };
         let stdout = open("stdout")?;
         let stderr = open("stderr")?;
-        run_trusted_step(
+        run_trusted_step_with_context(
             &workspace.tool_directory(),
             script,
+            context,
             limits,
             &stdout,
             &stderr,

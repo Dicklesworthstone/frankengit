@@ -12,7 +12,15 @@ use fgit_pack::Deadline;
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
 
 use super::control::ImportControl;
-use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS, MAX_IMPORT_TOTAL_OBJECT_BYTES};
+use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS};
+
+/// Maximum native bytes retained by one verified reachable-source closure.
+/// This is independent of the tighter eager pack-decoder/cache envelope: a
+/// large loose source must not inherit a limit intended for hydrated packs.
+/// The import request reserves this SAME ceiling before any source I/O.
+pub(super) const MAX_REACHABLE_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
+/// Explicit disk-backed import ceiling, not a default memory allocation.
+pub(super) const MAX_EXPLICIT_OBJECT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// Independent total edge work; repeated references and gitlinks count too.
 const MAX_IMPORT_GRAPH_EDGES: usize = 4_000_000;
@@ -28,15 +36,15 @@ impl Default for Limits {
         Self {
             objects: MAX_IMPORT_OBJECTS,
             edges: MAX_IMPORT_GRAPH_EDGES,
-            bytes: MAX_IMPORT_TOTAL_OBJECT_BYTES,
+            bytes: MAX_REACHABLE_OBJECT_BYTES,
         }
     }
 }
 
 /// Private proof: no partially validated map can reach the staging loop.
 #[derive(Debug)]
-pub(super) struct ValidatedImport {
-    pub(super) objects: BTreeMap<GitOid, LooseObject>,
+pub(super) struct ValidatedImport<T = LooseObject> {
+    pub(super) objects: BTreeMap<GitOid, T>,
     pub(super) total_bytes: u64,
 }
 
@@ -78,27 +86,55 @@ pub(super) fn validate_controlled(
     )
 }
 
+#[cfg(test)]
 pub(super) fn validate_typed_controlled(
     roots: impl IntoIterator<Item = (GitOid, Option<ObjectType>)>,
     format: GitHashAlgorithm,
     parse_limits: &ParseLimits,
     limits: Limits,
-    mut load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
     control: &ImportControl<'_>,
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
+    validate_typed_with_custody(
+        roots,
+        format,
+        parse_limits,
+        limits,
+        load,
+        |_, object| Ok(object),
+        control,
+    )
+}
+
+/// The one graph validator owns identity, type, completeness and resource checks.
+/// Custody may retain bytes in memory (the test oracle) or in an owned private
+/// spool (production). No custody handle is a publication capability.
+pub(super) fn validate_typed_with_custody<T>(
+    roots: impl IntoIterator<Item = (GitOid, Option<ObjectType>)>,
+    format: GitHashAlgorithm,
+    parse_limits: &ParseLimits,
+    limits: Limits,
+    mut load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    mut retain: impl FnMut(GitOid, LooseObject) -> Result<T, LooseGitImportRefusal>,
+    control: &ImportControl<'_>,
+) -> Result<ValidatedImport<T>, LooseGitImportRefusal> {
     control.checkpoint()?;
     let maximum = Limits::default();
-    if limits.objects > maximum.objects
-        || limits.edges > maximum.edges
-        || limits.bytes > maximum.bytes
-    {
+    if limits.bytes > MAX_EXPLICIT_OBJECT_BYTES {
+        return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
+            limit: MAX_EXPLICIT_OBJECT_BYTES,
+            observed: limits.bytes,
+        });
+    }
+    if limits.objects > maximum.objects || limits.edges > maximum.edges {
         return Err(LooseGitImportRefusal::ObjectLimitExceeded {
             limit: maximum.objects,
         });
     }
     let mut required = BTreeMap::new();
     let mut pending = BTreeSet::new();
-    let mut objects = BTreeMap::<GitOid, LooseObject>::new();
+    let mut objects = BTreeMap::<GitOid, T>::new();
+    let mut kinds = BTreeMap::<GitOid, ObjectType>::new();
     for (root, kind) in roots {
         control.checkpoint()?;
         enqueue(
@@ -135,6 +171,22 @@ pub(super) fn validate_typed_controlled(
                 observed: total_bytes,
             });
         }
+        // Blobs are opaque leaves. Their native identity and required kind were
+        // checked above; the parser adds only a size check and an owned copy.
+        // Preserve that exact refusal without allocating a second entire body.
+        if object.object_type == ObjectType::Blob {
+            if object.body.len() > parse_limits.max_object_bytes {
+                return Err(LooseGitImportRefusal::ObjectStructure(Box::new(
+                    fgit_git_object::ObjectError::ObjectTooLarge {
+                        limit: parse_limits.max_object_bytes,
+                    },
+                )));
+            }
+            control.checkpoint()?;
+            kinds.insert(identity, object.object_type);
+            objects.insert(identity, retain(identity, object)?);
+            continue;
+        }
         let parsed = parse_object_body(
             object.object_type,
             &object.body,
@@ -169,14 +221,15 @@ pub(super) fn validate_typed_controlled(
         })?;
         // Discard parsed copies before retaining the exact original body.
         drop(parsed);
-        objects.insert(identity, object);
+        kinds.insert(identity, object.object_type);
+        objects.insert(identity, retain(identity, object)?);
         for (child, kind) in edges {
             control.checkpoint()?;
             // Even a previously read root or child must satisfy this new edge.
             // In particular, a root's unconstrained kind cannot hide a later
             // commit/tree/tag requirement.
-            if let Some(known) = objects.get(&child) {
-                require_kind(child, kind, known.object_type)?;
+            if let Some(known) = kinds.get(&child) {
+                require_kind(child, kind, *known)?;
             }
             enqueue(
                 child,
@@ -369,3 +422,6 @@ fn push(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod byte_budget_tests;

@@ -51,20 +51,33 @@ function checkedLabels(values, canonical = false) {
       (canonical && sorted.some((label, i) => label !== labels[i]))) fail('Invalid label ordering or duplicates.');
   return sorted;
 }
+function checkedAssignees(values, canonical = false) {
+  if (!Array.isArray(values) || values.length > 16 ||
+      values.some(id => typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id))) {
+    fail('Assignees must contain at most 16 canonical principal IDs.');
+  }
+  const sorted = [...values].sort();
+  if (sorted.some((id, i) => i > 0 && id === sorted[i - 1]) ||
+      (canonical && sorted.some((id, i) => id !== values[i]))) fail('Invalid assignee ordering or duplicates.');
+  return sorted;
+}
 export function issueAction(name, fields) {
   object(fields);
-  if (!['open', 'edit', 'comment', 'close', 'reopen'].includes(name)) fail('Unsupported issue action.');
-  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : [];
+  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign'].includes(name)) fail('Unsupported issue action.');
+  const assignment = name === 'assign' || name === 'unassign';
+  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees'] : [];
   if (Object.keys(fields).some(key => !allowed.includes(key))) fail('Unknown or inapplicable issue field.');
   const result = {};
   if (own(fields, 'title')) result.title = text(fields.title, 256, 'title', true);
   if (own(fields, 'body')) result.body = text(fields.body, 64 * 1024, 'body');
   if (own(fields, 'labels')) result.labels = checkedLabels(fields.labels);
+  if (own(fields, 'assignees')) result.assignees = checkedAssignees(fields.assignees);
   if (name === 'open') {
     if (!own(result, 'title') || !own(result, 'body')) fail('Opening an issue requires title and body.');
     result.labels ??= [];
   } else if (name === 'edit' && !Object.keys(result).length) fail('Select at least one field to replace.');
   else if (name === 'comment' && (!own(result, 'body') || !result.body.trim())) fail('Comment must not be empty.');
+  else if (assignment && !result.assignees?.length) fail('Name at least one principal to assign or unassign.');
   return result;
 }
 export function mutationRequest(number, version, action, fields) {
@@ -78,6 +91,7 @@ export function mutationRequest(number, version, action, fields) {
     for (const label of checked.labels) form.append('label', label);
     if (action === 'edit' && !checked.labels.length) form.append('clear_labels', 'true');
   }
+  if (checked.assignees) for (const id of checked.assignees) form.append('assignee', id);
   const body = form.toString();
   if (body.length > MAX_FORM_BYTES) fail('Encoded issue form exceeds 256 KiB.');
   return { number, expected_version: version, action, fields: checked, body };
@@ -96,6 +110,9 @@ export function issueState(row) {
   natural(row.number, 'issue number', 1); natural(row.version, 'issue version', 1);
   issueAction('open', { title: row.title, body: row.body, labels: row.labels });
   checkedLabels(row.labels, true);
+  // Older API replies predate assignment metadata. New replies always carry
+  // the complete set; a present malformed field is never replaced with empty.
+  if (own(row, 'assignees')) checkedAssignees(row.assignees, true);
   if (!['open', 'closed'].includes(row.state)) fail('Invalid issue state.');
   opaque(row.opened_by, 'opening principal'); opaque(row.last_actor, 'last principal');
   natural(row.comments, 'comment count', 0, row.version - 1);
@@ -147,6 +164,7 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
         delete fields.body_rendered;
       }
       issueAction(name, fields);
+      if (own(fields, 'assignees')) checkedAssignees(fields.assignees, true);
       if ((event.version === 1) !== (name === 'open')) fail('Invalid opening event position.');
     });
   }
@@ -366,7 +384,7 @@ export class IssueClient {
   cancelReads() {
     for (const controller of this.#readControllers) controller.abort();
   }
-  async #request(path, { method = 'GET', body, key, maximum = MAX_REPLY_BYTES, view = false, terminalReply = false } = {}) {
+  async #request(path, { method = 'GET', body, key, maximum = MAX_REPLY_BYTES, view = false, terminalReply = false, historyReply = false } = {}) {
     if (!this.#token) fail('Connect an explicitly scoped token first.');
     const epoch = this.#epoch;
     const controller = new AbortController(); this.#controllers.add(controller);
@@ -386,10 +404,13 @@ export class IssueClient {
       if (response.redirected || (response.url && new URL(response.url).origin !== this.#root.origin)) fail('API redirect refused.');
       // Native issue refusals carry a canonical terminal decision with 409.
       // Other 409 bodies (snapshot/key reuse) must still fail publication validation.
-      if (terminalReply ? ![200, 409].includes(response.status) : !response.ok) throw httpError(response.status);
+      // Only a single-issue history may carry the native 404 absence envelope.
+      // Generic 404s, lists and mutations must never become empty observations.
+      if (terminalReply ? ![200, 409].includes(response.status)
+        : historyReply ? ![200, 404].includes(response.status) : !response.ok) throw httpError(response.status);
       const result = await readJson(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
-      return terminalReply ? { reply: result, status: response.status } : result;
+      return terminalReply || historyReply ? { reply: result, status: response.status } : result;
     } catch (error) {
       if (epoch === this.#epoch && error.status === 401) this.disconnect();
       throw error;
@@ -407,9 +428,10 @@ export class IssueClient {
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
     if (render) query.set('render', 'html_safe');
-    const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true });
+    const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
     const options = { after, limit, head, binding: this.#binding };
-    const checked = number === null ? issuePage(raw, options) : issueHistory(raw, number, options);
+    const checked = number === null ? issuePage(raw, options) : issueHistory(raw.reply, number, options);
+    if (number !== null && raw.status === 404 && checked.reply.found) fail('Issue presence and HTTP status disagree.');
     this.#binding = checked.binding;
     return checked;
   }
@@ -436,11 +458,23 @@ export class IssueClient {
     const digest = await this.#crypto.subtle.digest('SHA-256', encoder.encode(message));
     return `fgui-${nonce}-${asHex(new Uint8Array(digest))}`;
   }
-  async stage(number, version, action, fields) {
+  async stage(number, version, action, fields, expectedBinding = null) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     if (this.#pending || this.#busy) fail('Resolve or discard the existing prepared change first.');
     const request = mutationRequest(number, version, action, fields);
-    const epoch = this.#epoch, fingerprint = this.#fingerprint, binding = this.binding;
+    const epoch = this.#epoch, fingerprint = this.#fingerprint;
+    let binding = this.binding;
+    if (expectedBinding !== null) {
+      // An offline intent may constrain its expected destination without a read.
+      // This is not an observed repository or a grant: it only tightens reply
+      // checks and never installs a view binding or selects a native principal.
+      object(expectedBinding);
+      if (Object.keys(expectedBinding).length !== 2 ||
+          !['tenant', 'repository'].every(key => own(expectedBinding, key) &&
+            typeof expectedBinding[key] === 'string' && /^[0-9a-f]{32}$/.test(expectedBinding[key]))) fail('Invalid expected issue repository.');
+      if (binding && (binding.tenant !== expectedBinding.tenant || binding.repository !== expectedBinding.repository)) fail('Expected issue repository differs from the observed binding.');
+      binding = clone(expectedBinding);
+    }
     this.#busy = true;
     try {
       const nonce = asHex(this.#crypto.getRandomValues(new Uint8Array(16)));

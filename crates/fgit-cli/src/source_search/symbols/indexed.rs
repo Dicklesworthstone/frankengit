@@ -30,7 +30,7 @@ query work budgets are independent. Source-byte/file limits constrain referenced
 index documents, not a source scan. Minimum generation is an ancestry floor,
 not exact selection, a retention pin, or a pagination token. Match truncation
 requires narrowing the query or increasing its bounded result limit; no --after.
-Exit 0: complete result (including no matches); 3: truncated match prefix;
+Exit 0: complete query and Rust-file coverage; 3: match limit or omitted files;
 2: argument, read, shutdown or output error. No canonical/index publication.";
 
 #[derive(Debug)]
@@ -167,7 +167,11 @@ fn finish(
     };
     let text = render(options, &current, &report)?;
     write_report(output, &text)?;
-    Ok(if report.complete { 0 } else { 3 })
+    Ok(if report.complete && report.coverage_complete {
+        0
+    } else {
+        3
+    })
 }
 
 fn token(id: &InternalObjectId) -> String {
@@ -225,9 +229,10 @@ fn render(
         .map(|path| quote(&hex(path.as_bytes())))
         .collect::<Vec<_>>()
         .join(",");
+    let omitted_bytes = report.validate_coverage().map_err(|e| e.to_string())?;
     let mut out = format!(
         concat!(
-            "{{\"type\":\"source_symbol_index_search\",\"schema_version\":1,",
+            "{{\"type\":\"source_symbol_index_search\",\"schema_version\":{},",
             "\"profile\":\"source-symbols-revalidated-v1\",\"index_profile\":{},\"declaration_profile\":{},",
             "\"current_source\":{},\"indexed_source\":{},\"distinct_index_provenance\":{},",
             "\"generation\":{{\"token\":{},\"number\":{}}},\"name_hex\":{},\"match_mode\":{},",
@@ -235,9 +240,14 @@ fn render(
             "\"match_count\":{},\"max_matches\":{},\"indexed_files\":{},\"indexed_declarations\":{},",
             "\"indexed_source_bytes\":{},\"unsupported_language_files\":{},\"non_regular_entries\":{},",
             "\"tables_read\":{},\"payload_bytes_read\":{},\"work_units\":{},\"node_closed\":true,",
-            "\"repository_changed\":false,\"index_changed\":false,\"matches\":["
+            "\"repository_changed\":false,\"index_changed\":false"
         ),
-        quote(data::INDEX_PROFILE),
+        if report.coverage_complete { 1 } else { 2 },
+        quote(if report.coverage_complete {
+            data::INDEX_PROFILE
+        } else {
+            data::OMISSION_INDEX_PROFILE
+        }),
         quote(PROFILE),
         source_json(current),
         source_json(&report.source),
@@ -265,6 +275,27 @@ fn render(
         report.payload_bytes_read,
         quote(&report.work_units.to_string()),
     );
+    if !report.coverage_complete {
+        out.push_str(&format!(
+            ",\"coverage_complete\":false,\"coverage_scope\":\"recorded-rust-files\",\"omitted_files\":{},\"omitted_source_bytes\":{},\"omissions\":[",
+            report.omissions.len(), omitted_bytes,
+        ));
+        for (index, omission) in report.omissions.iter().enumerate() {
+            out.push_str(&format!(
+                "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"reason\":{},\"byte_offset\":{},\"limit\":{}}}",
+                if index == 0 { "" } else { "," },
+                quote(&hex(&omission.path)), quote(&omission.blob.to_string()),
+                omission.source_bytes, quote(omission.reason.as_str()),
+                omission.byte_offset.map_or_else(|| "null".into(), |n| n.to_string()),
+                omission.limit.map_or_else(|| "null".into(), |n| n.to_string()),
+            ));
+            if out.len() > MAX_OUTPUT_BYTES {
+                return Err("indexed symbol JSON exceeds its output budget".into());
+            }
+        }
+        out.push(']');
+    }
+    out.push_str(",\"matches\":[");
     append_matches(&mut out, &report.matches)?;
     out.push_str("]}");
     if out.len() > MAX_OUTPUT_BYTES {

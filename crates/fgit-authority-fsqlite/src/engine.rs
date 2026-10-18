@@ -336,6 +336,15 @@ impl FsqliteAuthorityStore {
         self.instance
     }
 
+    /// The advisory contention-retry controller's current state and epoch log.
+    ///
+    /// No retry loop consults the controller yet; until one records operation
+    /// outcomes, this reports the pinned fallback policy it starts in.
+    #[must_use]
+    pub fn contention_retry_snapshot(&self) -> AdaptiveRetrySnapshot {
+        self.contention_retry.snapshot()
+    }
+
     /// The declared bounds this instance enforces.
     #[must_use]
     pub const fn limits(&self) -> AuthorityLimits {

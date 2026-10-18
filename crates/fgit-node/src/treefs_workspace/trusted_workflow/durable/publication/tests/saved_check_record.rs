@@ -85,7 +85,7 @@ fn actual_saved_job_loads_exact_publication_record_without_source_node_or_final_
             let record = load(&run, selected, &|| true).unwrap();
             assert_eq!(record, expected);
             assert_eq!(record.source_commit.algorithm(), format);
-            assert_eq!(record.conclusion, WorkflowCheckConclusion::ActionRequired);
+            assert_eq!(record.conclusion, WorkflowCheckConclusion::Success);
             assert_eq!(fs::read(&journal_path).unwrap(), journal);
             assert_eq!(fs::read(&marker_path).unwrap(), marker);
             assert_eq!(fs::read(&owner_path).unwrap(), owner);

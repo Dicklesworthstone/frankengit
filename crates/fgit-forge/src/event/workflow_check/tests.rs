@@ -32,10 +32,11 @@ fn change(event: &ForgeEvent) -> &NativeWorkflowCheck {
 }
 
 #[test]
-fn codec_roundtrips_both_native_domains_and_every_nongreen_conclusion() {
+fn codec_roundtrips_both_native_domains_and_every_conclusion() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for conclusion in [
             WorkflowCheckConclusion::ActionRequired,
+            WorkflowCheckConclusion::Success,
             WorkflowCheckConclusion::Failure,
             WorkflowCheckConclusion::Cancelled,
             WorkflowCheckConclusion::TimedOut,
@@ -211,7 +212,7 @@ fn every_truncation_and_an_unknown_conclusion_refuses_decode() {
     let mut bad = bytes.clone();
     // The conclusion precedes the length-prefixed original evidence.
     let offset = bytes.len() - change(&event).record.evidence.len() - 4 - 4;
-    bad[offset..offset + 4].copy_from_slice(&5_u32.to_be_bytes());
+    bad[offset..offset + 4].copy_from_slice(&6_u32.to_be_bytes());
     assert!(super::super::read_event(&mut Decoder::new(&bad, DecodeLimits::DEFAULT)).is_err());
     let mut framed = encode_body(&event).unwrap();
     framed.push(0);

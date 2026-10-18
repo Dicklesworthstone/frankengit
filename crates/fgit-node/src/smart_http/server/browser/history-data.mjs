@@ -163,3 +163,105 @@ export async function historicalPage(reply, selection, query, crypto, check) {
   }
   check(); return { selection, query, source, raw: reply };
 }
+
+// The existing native reference-diff endpoint owns graph traversal and comparison.
+// This consumer bounds and binds its complete report; it does not reimplement Git
+// diff, prove ancestry, grant review authority, or execute a returned patch.
+export const COMPARISON_LIMITS = Object.freeze({ max_tree_entries: 100000, max_changes: 512,
+  max_text_files: 64, max_blob_bytes: 1024 * 1024, max_output_bytes: 2 * 1024 * 1024,
+  max_hunks: 4096, max_diff_work: 1000000 });
+function comparisonFields(value, fields) {
+  record(value);
+  if (Object.keys(value).length !== fields.length || fields.some(name => !Object.hasOwn(value, name))) fail('Incomplete or unsupported comparison fields.');
+}
+export function comparisonQuery(beforeRef, options = {}) {
+  record(options);
+  if (Object.keys(options).some(name => !['mode', 'expected_before', 'path_prefixes_hex'].includes(name))) fail('Unsupported comparison option.');
+  const mode = options.mode ?? 'direct', paths = options.path_prefixes_hex ?? [];
+  if (!['direct', 'merge-base'].includes(mode) || !Array.isArray(paths) || paths.length > 64) fail('Choose a bounded direct or merge-base comparison.');
+  const prefixes = paths.map(value => bytePath(value)).sort();
+  if (new Set(prefixes).size !== prefixes.length) fail('Duplicate comparison path prefix.');
+  return { before_ref: fullRef(beforeRef), mode, expected_before: options.expected_before ?? null, path_prefixes_hex: prefixes };
+}
+const BLOB_MODES = new Set(['100644', '100755', '120000']);
+function comparisonIdentity(value, algorithm) {
+  if (value === null) return null;
+  comparisonFields(value, ['object_id', 'mode']);
+  if (!['040000', '100644', '100755', '120000', '160000'].includes(value.mode)) fail('Unsupported compared entry mode.');
+  return { object_id: oid(value.object_id, algorithm), mode: value.mode };
+}
+function comparisonSpan(span, encoded, total, previous) {
+  comparisonFields(span, ['byte_start', 'byte_end', 'line_start', 'line_count']);
+  const bytes = unhex(encoded, COMPARISON_LIMITS.max_blob_bytes);
+  integer(span.byte_start, 'hunk byte start', previous.bytes, total);
+  integer(span.byte_end, 'hunk byte end', span.byte_start, total);
+  integer(span.line_start, 'hunk line start', previous.lines, span.byte_start);
+  integer(span.line_count, 'hunk line count');
+  const count = bytes.reduce((n, byte) => n + Number(byte === 10), 0) + Number(bytes.length > 0 && bytes.at(-1) !== 10);
+  if (span.byte_end - span.byte_start !== bytes.length || count !== span.line_count ||
+      !Number.isSafeInteger(span.line_start + count) || (span.byte_start === 0 && span.line_start !== 0) ||
+      (bytes.length > 0 && span.byte_end < total && bytes.at(-1) !== 10) || bytes.includes(0)) fail('Invalid exact comparison hunk.');
+  return { bytes: span.byte_end, lines: span.line_start + count, payload: bytes.length };
+}
+export function comparisonPage(reply, selection, query, check = () => {}) {
+  check(); readOnly(reply);
+  comparisonFields(reply, ['type', 'schema_version', 'profile', 'tenant_id', 'repository_id', 'repository_incarnation',
+    'object_format', 'source_head', 'snapshot_token', 'mode', 'pull_request', 'read_only', 'transaction_created',
+    'published', 'approval_created', 'complete', 'line_origin', 'context_lines', 'before_ref_hex', 'after_ref_hex',
+    'requested_before', 'requested_after', 'compared_before', 'before_tree', 'after_tree', 'entry_count', 'path_prefixes_hex', 'entries']);
+  const scope = binding(reply, selection.scope), head = snapshot(reply.snapshot_token), algorithm = selection.object_format;
+  opaque(reply.source_head);
+  const before = oid(reply.requested_before, algorithm), after = oid(reply.requested_after, algorithm), base = oid(reply.compared_before, algorithm);
+  const beforeTree = oid(reply.before_tree, algorithm), afterTree = oid(reply.after_tree, algorithm);
+  if (reply.type !== 'source_diff' || reply.profile !== 'native-tree-review-v1' || reply.pull_request !== null ||
+      reply.approval_created !== false || reply.complete !== true || reply.line_origin !== 0 || reply.context_lines !== 3 ||
+      scope.format !== algorithm || head !== selection.head || reply.mode !== query.mode ||
+      reply.before_ref_hex !== hex(utf8.encode(query.before_ref)) || reply.after_ref_hex !== hex(utf8.encode(selection.ref)) ||
+      after !== selection.tip || (query.before_ref === selection.ref && before !== after) ||
+      (before === after && base !== before) || (query.expected_before !== null && before !== query.expected_before) ||
+      (query.mode === 'direct' && base !== before) ||
+      JSON.stringify(reply.path_prefixes_hex) !== JSON.stringify(query.path_prefixes_hex)) fail('Comparison changed its exact references, tips, snapshot or profile.');
+  if (!Array.isArray(reply.entries) || reply.entries.length > COMPARISON_LIMITS.max_changes || reply.entry_count !== reply.entries.length ||
+      (beforeTree === afterTree && reply.entries.length !== 0) || (base === after && beforeTree !== afterTree)) fail('Incomplete or contradictory comparison.');
+  let previous = '', payload = 0, hunks = 0, texts = 0;
+  const charge = amount => { payload += amount; if (payload > COMPARISON_LIMITS.max_output_bytes) fail('Comparison payload limit exceeded.'); };
+  const entries = [];
+  for (const entry of reply.entries) {
+    check(); comparisonFields(entry, ['path_hex', 'kind', 'before', 'after', 'content']); bytePath(entry.path_hex);
+    if (entry.path_hex <= previous || (query.path_prefixes_hex.length && !query.path_prefixes_hex.some(prefix =>
+      entry.path_hex === prefix || entry.path_hex.startsWith(`${prefix}2f`)))) fail('Comparison path order or filter changed.');
+    previous = entry.path_hex; charge(entry.path_hex.length / 2);
+    const a = comparisonIdentity(entry.before, algorithm), b = comparisonIdentity(entry.after, algorithm);
+    const kind = a === null && b !== null ? 'added' : a !== null && b === null ? 'deleted' : a && b
+      ? (Number.parseInt(a.mode, 8) & 0o170000) !== (Number.parseInt(b.mode, 8) & 0o170000) ? 'type_changed'
+        : a.mode !== b.mode ? 'mode_changed' : a.object_id !== b.object_id ? 'modified' : null : null;
+    if (kind === null || entry.kind !== kind) fail('Comparison change kind contradicts entry identities.');
+    const content = record(entry.content), aBlob = a !== null && BLOB_MODES.has(a.mode), bBlob = b !== null && BLOB_MODES.has(b.mode);
+    if (['identical', 'object_only'].includes(content.kind)) {
+      comparisonFields(content, ['kind']);
+      if (content.kind === 'identical' ? !aBlob || !bBlob || a.object_id !== b.object_id : aBlob || bBlob) fail('Invalid object-only comparison.');
+    } else if (['binary', 'text'].includes(content.kind)) {
+      comparisonFields(content, content.kind === 'binary' ? ['kind', 'before_bytes', 'after_bytes']
+        : ['kind', 'algorithm', 'additions', 'deletions', 'before_bytes', 'after_bytes', 'hunks']);
+      for (const field of ['before_bytes', 'after_bytes']) integer(content[field], 'compared blob bytes', 0, COMPARISON_LIMITS.max_blob_bytes);
+      if ((!aBlob && content.before_bytes !== 0) || (!bBlob && content.after_bytes !== 0) || (!aBlob && !bBlob)) fail('Blob sizes disagree with compared objects.');
+      if (content.kind === 'text') {
+        text(content.algorithm, 128, 'comparison algorithm', true);
+        integer(content.additions, 'line additions', 0, content.after_bytes); integer(content.deletions, 'line deletions', 0, content.before_bytes);
+        if (++texts > COMPARISON_LIMITS.max_text_files || !Array.isArray(content.hunks) ||
+            (hunks += content.hunks.length) > COMPARISON_LIMITS.max_hunks) fail('Comparison text or hunk limit exceeded.');
+        let old = { bytes: 0, lines: 0 }, next = { bytes: 0, lines: 0 };
+        for (const hunk of content.hunks) {
+          check(); comparisonFields(hunk, ['old', 'new', 'before_hex', 'after_hex']);
+          old = comparisonSpan(hunk.old, hunk.before_hex, content.before_bytes, old);
+          next = comparisonSpan(hunk.new, hunk.after_hex, content.after_bytes, next);
+          charge(old.payload + next.payload);
+        }
+      }
+    } else fail('Unknown comparison content is not an empty diff.');
+    entries.push({ ...entry, before: a, after: b });
+  }
+  check();
+  return { selection, query: { ...query, expected_before: before }, before, after, base,
+    beforeTree, afterTree, entries, raw: reply };
+}

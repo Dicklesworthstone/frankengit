@@ -6,9 +6,11 @@ use super::{
     publish_new_bundle, quote, render_conflict, render_entry, require_absent, set_once,
 };
 use crate::publication_support::parse_oid;
+use fgit_forge::preparation::MergeCommitStyle;
 use fgit_forge::preparation::resolution::{
     ConflictResolution, ResolutionChoice, ResolutionInputs, ResolvedMerge, validate_resolutions,
 };
+use fgit_node::NativeMergeMethod;
 use fgit_types::{GitHashAlgorithm, RepositoryAuthorityHeadId};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +18,7 @@ use std::path::{Path, PathBuf};
 pub(super) const USAGE: &str = "\
 usage: fg merge resolve <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle>
   --trusted-local --profile path-v1 --source-ref <branch>
+  [--method merge-commit|squash]
   --expected-target <oid> --expected-source <oid> --merge-base <oid>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message>
   [--ours <path> | --theirs <path> | --base <path> | --delete <path>]...
@@ -26,8 +29,9 @@ All and only actual conflicts must have one choice. Missing sides never imply de
 Empty and binary file bytes are preserved. Files must be stable regular local inputs.
 Both native hash formats are inferred from the exact tips; --object-format must agree.
 The two visible branch tips must still match, and the merge base must be uniquely best.
+Merge-commit keeps target/source parents; squash keeps only the exact target parent.
 Clean paths cannot be overridden, no user code runs, and no repository state is changed.
-Output is a new bundle plus JSON. Review with merge inspect, then separately merge apply.
+Output is a new bundle plus JSON. Inspect it, then apply with the receipt's same --method.
 Exit 0: complete candidate created after node close; exit 2: failure, not publication.";
 
 struct Input {
@@ -45,6 +49,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     require_absent(&input.options.output)?;
     load_files(&mut input)?;
     let options = &input.options;
+    let style = commit_style(options.method)?;
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
             .with_object_format(input.inputs.target.algorithm()),
@@ -55,7 +60,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         node.runtime()
-            .block_on(node.prepare_resolved_merge_bundle_in(
+            .block_on(node.prepare_resolved_merge_bundle_with_style_in(
                 &request,
                 &options.target,
                 &options.incoming,
@@ -65,6 +70,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
                 &input.resolutions,
                 &options.metadata,
                 PreparationLimits::default(),
+                style,
             ))
             .map_err(|error| error.to_string())
     })();
@@ -153,7 +159,7 @@ fn parse_input(arguments: &[String]) -> Result<Input, String> {
                 flag,
             )?,
             "--source-ref" | "--profile" | "--author" | "--committer" | "--timestamp"
-            | "--message" => {
+            | "--message" | "--method" => {
                 normal.extend([flag.into(), value.clone()]);
             }
             "--ours" | "--ours-hex" | "--theirs" | "--theirs-hex" | "--base" | "--base-hex"
@@ -226,6 +232,16 @@ fn parse_input(arguments: &[String]) -> Result<Input, String> {
         resolutions,
         files,
     })
+}
+
+fn commit_style(method: NativeMergeMethod) -> Result<MergeCommitStyle, String> {
+    match method {
+        NativeMergeMethod::MergeCommit => Ok(MergeCommitStyle::TwoParent),
+        NativeMergeMethod::Squash => Ok(MergeCommitStyle::Squash),
+        NativeMergeMethod::FastForwardOnly => {
+            Err("fast-forward cannot resolve conflicts into a new candidate".into())
+        }
+    }
 }
 
 fn unhex_path(value: &str) -> Result<Vec<u8>, String> {
@@ -310,6 +326,7 @@ fn render(
     if plan.base != input.inputs.base
         || plan.target != input.inputs.target
         || plan.source != input.inputs.source
+        || plan.style != commit_style(input.options.method)?
         || plan.commit.is_zero()
         || plan.commit.algorithm() != input.inputs.target.algorithm()
         || resolved.resolutions.len() != input.resolutions.len()
@@ -338,13 +355,14 @@ fn render(
     }
     let out = format!(
         concat!(
-            "{{\"type\":\"merge_resolution\",\"schema_version\":1,\"profile\":\"path-resolved-v1\",",
+            "{{\"type\":\"merge_resolution\",\"schema_version\":1,\"profile\":\"path-resolved-v1\",\"method\":{},",
             "\"outcome\":\"prepared\",\"published_to_repository\":false,\"node_closed\":true,\"bundle_created\":true,",
             "\"repository_id\":{},\"source_head\":{},\"object_format\":{},\"target_reference_hex\":{},\"source_reference_hex\":{},",
             "\"expected_target\":{},\"expected_source\":{},\"merge_base\":{},\"candidate_commit\":{},\"root_tree\":{},",
             "\"object_count\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"bundle_path\":{},",
             "\"resolution_count\":{},\"resolutions\":[{}]}}"
         ),
+        quote(super::super::method_name(input.options.method)),
         quote(&input.options.repository.to_string()),
         quote(&head.to_string()),
         quote(plan.commit.algorithm().as_str()),
@@ -447,6 +465,156 @@ mod tests {
             GitHashAlgorithm::Sha256
         );
     }
+    #[test]
+    fn explicit_resolution_methods_preserve_exact_inputs_in_both_hash_formats() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let mut original = args();
+            for flag in ["--expected-target", "--expected-source", "--merge-base"] {
+                let at = original.iter().position(|arg| arg == flag).unwrap();
+                let prefix = original[at + 1][..2].to_owned();
+                original[at + 1] = prefix.repeat(format.digest_len());
+            }
+            let legacy = parse_input(&original).unwrap();
+            assert_eq!(legacy.options.method, NativeMergeMethod::MergeCommit);
+            for (method, expected, style) in [
+                (
+                    "merge-commit",
+                    NativeMergeMethod::MergeCommit,
+                    MergeCommitStyle::TwoParent,
+                ),
+                (
+                    "squash",
+                    NativeMergeMethod::Squash,
+                    MergeCommitStyle::Squash,
+                ),
+            ] {
+                let mut selected = original.clone();
+                selected.extend(["--method".into(), method.into()]);
+                let parsed = parse_input(&selected).unwrap();
+                assert_eq!(parsed.options.method, expected);
+                assert_eq!(commit_style(parsed.options.method).unwrap(), style);
+                assert_eq!(parsed.inputs, legacy.inputs);
+                assert_eq!(parsed.resolutions, legacy.resolutions);
+                assert_eq!(parsed.options.target, legacy.options.target);
+                assert_eq!(parsed.options.incoming, legacy.options.incoming);
+                assert_eq!(parsed.options.metadata, legacy.options.metadata);
+                selected.extend(["--object-format".into(), format.as_str().into()]);
+                assert_eq!(parse_input(&selected).unwrap().inputs, legacy.inputs);
+            }
+        }
+    }
+
+    #[test]
+    fn resolution_refuses_inapplicable_or_duplicate_methods_before_file_intake() {
+        let mut original = args();
+        original.truncate(original.len() - 2);
+        original.extend([
+            "--file".into(),
+            "file".into(),
+            "100644".into(),
+            "not-opened.bytes".into(),
+        ]);
+        for method in ["", "Squash", "rebase", "fast-forward-only", "auto"] {
+            let mut bad = original.clone();
+            bad.extend(["--method".into(), method.into()]);
+            assert!(parse_input(&bad).is_err(), "{method}");
+        }
+        for duplicate in ["squash", "merge-commit"] {
+            let mut bad = original.clone();
+            bad.extend([
+                "--method".into(),
+                "squash".into(),
+                "--method".into(),
+                duplicate.into(),
+            ]);
+            assert!(parse_input(&bad).is_err());
+        }
+        let mut missing = original;
+        missing.push("--method".into());
+        assert!(parse_input(&missing).is_err());
+        assert!(commit_style(NativeMergeMethod::FastForwardOnly).is_err());
+    }
+
+    #[test]
+    fn receipt_refuses_a_different_parent_style_before_exposing_the_candidate() {
+        use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedPath};
+        use fgit_forge::preparation::{ConflictKind, MergeConflict, MergeEntry, PreparedMerge};
+        use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+
+        // This head is a renderer fixture, never an authority or admission token.
+        let head = RepositoryAuthorityHeadId::from_digest(
+            DigestAlgorithmId::try_new(2).unwrap(),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[0_u8; 32]).unwrap(),
+        );
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for (method, style, other) in [
+                (
+                    "merge-commit",
+                    MergeCommitStyle::TwoParent,
+                    MergeCommitStyle::Squash,
+                ),
+                (
+                    "squash",
+                    MergeCommitStyle::Squash,
+                    MergeCommitStyle::TwoParent,
+                ),
+            ] {
+                let mut arguments = args();
+                for flag in ["--expected-target", "--expected-source", "--merge-base"] {
+                    let at = arguments.iter().position(|arg| arg == flag).unwrap();
+                    arguments[at + 1] = arguments[at + 1][..2].repeat(format.digest_len());
+                }
+                arguments.extend(["--method".into(), method.into()]);
+                let input = parse_input(&arguments).unwrap();
+                let oid = |byte: &str| parse_oid(&byte.repeat(format.digest_len())).unwrap();
+                let ours = MergeEntry {
+                    name: b"file".to_vec(),
+                    mode: 0o100644,
+                    oid: oid("66"),
+                };
+                let mut resolved = ResolvedMerge {
+                    plan: PreparedMerge {
+                        style,
+                        base: input.inputs.base,
+                        target: input.inputs.target,
+                        source: input.inputs.source,
+                        tree: oid("44"),
+                        commit: oid("55"),
+                        objects: vec![],
+                    },
+                    resolutions: vec![ResolvedPath {
+                        conflict: MergeConflict {
+                            path: b"file".to_vec(),
+                            kind: ConflictKind::Content,
+                            base: Some(MergeEntry {
+                                oid: oid("77"),
+                                ..ours.clone()
+                            }),
+                            ours: Some(ours.clone()),
+                            theirs: Some(MergeEntry {
+                                oid: oid("88"),
+                                ..ours.clone()
+                            }),
+                        },
+                        choice: ResolutionKind::Ours,
+                        result: Some(ours),
+                    }],
+                };
+                let receipt = render(&input, head, &resolved, &[9; 32], 123).unwrap();
+                assert!(receipt.contains(&format!(r#""method":{}"#, quote(method))));
+                assert!(receipt.contains(&format!(
+                    r#""candidate_commit":{}"#,
+                    quote(&resolved.plan.commit.to_string())
+                )));
+                assert!(receipt.contains(r#""published_to_repository":false"#));
+                assert!(receipt.contains(r#""choice":"Ours""#));
+                resolved.plan.style = other;
+                assert!(render(&input, head, &resolved, &[9; 32], 123).is_err());
+            }
+        }
+    }
+
     #[test]
     fn raw_paths_and_file_modes_are_not_lossy_or_implicit() {
         let mut input = args();

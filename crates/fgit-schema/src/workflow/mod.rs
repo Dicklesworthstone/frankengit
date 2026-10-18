@@ -26,10 +26,13 @@
 //! silent drop"* — is therefore checkable rather than asserted, and
 //! `tests/workflow_spans.rs` checks it.
 
+pub mod context;
 pub mod graph;
+pub mod matrix;
 pub mod registry;
 pub mod yaml;
 
+pub use context::{ContextRefusal, StepContext};
 pub use graph::{Condition, Job, Step, Trigger, WorkflowGraph};
 pub use registry::{CONSTRUCTS, ConstructStatus};
 pub use yaml::{Limits, Node, Span};

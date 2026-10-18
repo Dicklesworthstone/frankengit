@@ -1,6 +1,6 @@
 # Exact pull-request candidates over MCP
 
-The trusted-local MCP profile can prepare an actual two-parent merge candidate
+The trusted-local MCP profile can prepare an actual merge-commit or squash candidate
 with `frankengit_source_candidate`, `operation: "prepare_pull_merge"`. Both
 `--allow-source` and `--allow-pulls` are required. Its static operation catalog
 states this conjunction; the handler enforces it before parsing or node work.
@@ -24,6 +24,15 @@ The latter recognizes only the native planner's unique exact-content regular-fil
 moves, not similarity heuristics, copies or directory rename inference. Neither
 profile executes hooks, attributes or external merge drivers.
 
+`method` independently selects `merge-commit` (the default) or `squash`. The
+first records the ordered target/source parents; squash records exactly the
+target parent and keeps the merged tree. Empty, unknown or duplicate methods
+are rejected. Neither choice falls back to a fast-forward. Explicit conflict
+resolution accepts the same selector while retaining the PathMergeV1 conflict
+oracle. Carry the selected method into
+[`resolve_pull_merge`](MCP_PULL_RESOLUTION.md); its exact choices do not select
+a different merge profile.
+
 The native PR selector validates the open PR, recorded version, policy epoch,
 branch pair and exact tips, and fences source construction to the same head.
 A changed PR, moved branch or different construction head refuses rather than
@@ -33,7 +42,9 @@ native result before any result is returned, not against an unrelated head read.
 Three completed outcomes are distinct:
 
 - `clean` returns a bounded complete bundle, native merge base, commit and tree,
-  ordered target/source parents, exact commit bytes, and `candidate_arguments`.
+  exact ordered parents, exact commit bytes, and three separate argument objects:
+  `candidate_arguments` for review, `inspection_arguments` for inspection, and
+  `publication_arguments` for the selected method.
 - `conflicted` returns exact raw paths, native conflict classes and base/ours/theirs
   entry identities and modes. Candidate, tree, parents, bundle and arguments are
   null. A root-level path, when present, is explicitly labelled `root_path`.
@@ -43,7 +54,9 @@ Three completed outcomes are distinct:
 Resource exhaustion, ambiguous merge bases, unsupported automatic semantics,
 missing source and cancellation are errors, not successful partial candidates.
 `complete` describes the bounded preparation result; `candidate_available` is
-separately false for conflicts and already-integrated history.
+separately false for conflicts and already-integrated history. Every preparation
+result identifies its selected `method`, including conflicts and no-op results;
+all three argument objects are null when no candidate is available.
 
 ## Separate inspection, review and publication
 
@@ -57,7 +70,22 @@ PR/version/policy/branch/tip/base/candidate coordinates and original bundle chun
 It contains no retry key, review decision, reviewer identity, required reviewer
 set, or head pin. The caller must inspect the actual artifact and independently
 choose the review/publication operation, sponsor, original key and its required
-review preconditions. No read changes a ref, imports an object, seals a request,
+review preconditions.
+
+Use `inspection_arguments` directly with `frankengit_source_candidate`. It adds
+`operation: "inspect_pull_merge"`, the selected `method`, exact returned snapshot
+and bundle digest. A squash artifact that happens to reproduce the source
+commit therefore retains its explicit squash intent during inspection.
+
+For `frankengit_pull_merge_reviewed`, use `publication_arguments` and add the
+caller-owned `idempotency_key` and nonempty `required_reviewers` list. This object
+adds the exact method to the shared candidate coordinates and original bundle.
+The publication tool defaults an omitted method to `merge-commit`; a squash
+caller must preserve `method: "squash"`. The native publication driver rechecks
+actual parent shape, current reviews and protection, and seals the method into
+retry identity. Review arguments omit method because the vote binds the commit.
+
+No read changes a ref, imports an object, seals a request,
 records a vote, or grants permission to merge. A clean automatic candidate may
 still be refused by current publication policy.
 
@@ -81,6 +109,7 @@ Tests cover strict independent coordinates, explicit metadata/profiles/bounds,
 raw byte encodings, non-candidate result integrity, template compatibility, and
 persisted SHA-1/SHA-256 protocol preparation with exact-head repetition, unchanged
 authority/object placement, conflicts, stale inputs and separate read/write grants.
-The implementation environment lacks Cargo, rustc, rustfmt and a built fg: these
-Rust tests are authored but not executed. No native passing gate, full agent-day,
-performance or bead-closure claim is made.
+The squash tests additionally carry real candidates through preparation,
+inspection, independently sponsored review, method-bound publication and restart.
+These Rust test definitions are not a passing execution claim. Run them on the
+pinned toolchain and record the actual revision and result.

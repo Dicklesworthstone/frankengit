@@ -118,7 +118,8 @@ impl OneNode {
         if inspected.review.source_head != head
             || inspected.review.comparison.requested_before != subject.target_tip
             || inspected.review.comparison.requested_after != candidate.commit
-            || inspected.parents != [subject.target_tip, subject.source_tip]
+            || (!candidate.is_fast_forward(subject)
+                && inspected.parents != [subject.target_tip, subject.source_tip])
             || inspected.merge_base != Some(candidate.merge_base)
         {
             return Err(BundleInspectionRefusal::SnapshotMoved.into());

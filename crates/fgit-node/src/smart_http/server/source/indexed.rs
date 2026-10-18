@@ -15,7 +15,7 @@ use crate::{
 };
 use fgit_graph::lexical::{
     IndexError, IndexedLexicalReport, LexicalChannel, LexicalError, LexicalQuery,
-    LexicalQueryLimits, LexicalReadLimits, LexicalSource, MAX_WORK, PROFILE,
+    LexicalQueryLimits, LexicalReadLimits, LexicalSource, MAX_WORK, OMISSION_PROFILE, PROFILE,
 };
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
 use fgit_treefs::TreePath;
@@ -411,6 +411,9 @@ fn rows(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
+    report
+        .validate_coverage()
+        .map_err(|_| ApiError::unavailable())?;
     let hits = &report.results.hits;
     if report.query != command.query
         || hits.len() > command.limits.max_results
@@ -577,7 +580,7 @@ fn render_at(
         &mut out,
         &format!(
             concat!(
-                "{{\"type\":{},\"schema_version\":1,\"profile\":{},",
+                "{{\"type\":{},\"schema_version\":{},\"profile\":{},",
                 "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},\"object_format\":{},{},",
                 "\"source_head\":{},\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"root_tree\":{},",
                 "\"index_token\":{},\"index_number\":{},\"selected_index_token\":{},\"selected_index_number\":{},",
@@ -590,6 +593,7 @@ fn render_at(
                 SourceMode::Exact => "source_search_index",
                 SourceMode::Revalidated => "source_search_index_current",
             }),
+            if report.coverage_complete { 1 } else { 2 },
             quote(match command.source_mode {
                 SourceMode::Exact => PROFILE,
                 SourceMode::Revalidated => crate::source_retrieval::current_index::PROFILE,
@@ -660,9 +664,52 @@ fn render_at(
     }
     append(&mut out, "],\"hits\":[", maximum)?;
     append(&mut out, &hits, maximum)?;
-    append(&mut out, "]}", maximum)?;
+    append(&mut out, "]", maximum)?;
+    append_omissions(&mut out, report, maximum, live)?;
+    append(&mut out, "}", maximum)?;
     check(live)?;
     Ok(out)
+}
+
+fn append_omissions(
+    out: &mut String,
+    report: &IndexedLexicalReport,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), ApiError> {
+    let omitted_bytes = report
+        .validate_coverage()
+        .map_err(|_| ApiError::unavailable())?;
+    if report.coverage_complete {
+        return Ok(());
+    }
+    append(
+        out,
+        &format!(
+            ",\"index_profile\":{},\"coverage_complete\":false,\"omitted_files\":{},\"omitted_source_bytes\":{},\"omissions\":[",
+            quote(OMISSION_PROFILE),
+            report.omissions.len(),
+            omitted_bytes,
+        ),
+        maximum,
+    )?;
+    for (ordinal, omission) in report.omissions.iter().enumerate() {
+        check(live)?;
+        append(
+            out,
+            &format!(
+                "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"reason\":{},\"limit\":{}}}",
+                if ordinal == 0 { "" } else { "," },
+                quote(&hex(&omission.path)),
+                quote(&omission.blob.to_string()),
+                omission.source_bytes,
+                quote(omission.reason.as_str()),
+                omission.limit,
+            ),
+            maximum,
+        )?;
+    }
+    append(out, "]", maximum)
 }
 
 #[cfg(test)]

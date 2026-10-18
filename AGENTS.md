@@ -481,4 +481,4 @@ Implementers do not call `br close` in this repository. Under §16.2, only the b
 
 <!-- end-bv-agent-instructions -->
 
-For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
+For any web requests you must make with curl or otherwise, identify yourself honestly: use a User-Agent that names this project, e.g. "frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)". Never borrow another product's or company's crawler or client User-Agent, and never spoof a client to get past a block.

@@ -628,6 +628,7 @@ dependencies = [
  "fgit-chronicle",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-diff",
  "fgit-forge",
  "fgit-git-object",
  "fgit-lab",
@@ -737,9 +738,11 @@ dependencies = [
  "fgit-forge",
  "fgit-identity",
  "fgit-node",
+ "fgit-pack",
  "fgit-schema",
  "fgit-ssh",
  "fgit-types",
+ "fgit-verified-read",
 ]
 
 [[package]]
@@ -1118,6 +1121,7 @@ dependencies = [
  "fgit-codec",
  "fgit-codec-verify",
  "fgit-crypto",
+ "fgit-git-object",
  "fgit-types",
 ]
 

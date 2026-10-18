@@ -158,10 +158,78 @@ fn checksum_failure_precedes_destination_creation() {
         instance: StoreInstanceId::from_raw(99),
         profile: Profile::default(),
         resume: false,
+        approval: None,
     })
     .unwrap_err();
     assert!(error.contains("checksum mismatch"));
     assert!(!output.exists());
+}
+
+#[test]
+fn complete_approval_policy_is_required_without_weakening_the_checksum_pin() {
+    let flags = [
+        ("--approval", "approval.dsse.json"),
+        ("--trust-key", "trusted-public.pem"),
+        ("--tenant-id", "11111111111111111111111111111111"),
+        ("--repository-id", "22222222222222222222222222222222"),
+        ("--incarnation-id", "33333333333333333333333333333333"),
+        ("--object-format", "sha256"),
+        ("--minimum-head-generation", "1"),
+    ];
+    let mut complete = args();
+    complete.extend(
+        flags
+            .iter()
+            .flat_map(|(flag, value)| [flag.to_string(), value.to_string()]),
+    );
+    assert!(parse(&complete).unwrap().approval.is_some());
+    for missing in 0..flags.len() {
+        let mut input = args();
+        input.extend(
+            flags
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != missing)
+                .flat_map(|(_, (flag, value))| [flag.to_string(), value.to_string()]),
+        );
+        assert!(parse(&input).is_err(), "missing {}", flags[missing].0);
+    }
+    let mut no_pin = complete.clone();
+    no_pin.drain(4..6);
+    assert!(parse(&no_pin).unwrap_err().contains("--expected-sha256"));
+    complete.extend(["--trust-key".into(), "another.pem".into()]);
+    assert!(parse(&complete).is_err());
+}
+
+#[test]
+fn a_resume_input_refusal_preserves_prior_publication_uncertainty() {
+    let scratch = Scratch::new();
+    let input = scratch.0.join("bad-input");
+    fs::write(&input, b"corrupt").unwrap();
+    let output = scratch.0.join("previous-attempt");
+    fs::create_dir(&output).unwrap();
+    let published = output.join("authority.fsqlite");
+    fs::write(&published, b"preexisting authority must remain").unwrap();
+    let error = execute(&Options {
+        input,
+        output,
+        expected: [7; 32],
+        instance: StoreInstanceId::from_raw(99),
+        profile: Profile::default(),
+        resume: true,
+        approval: None,
+    })
+    .unwrap_err();
+    assert!(
+        error.contains("prior attempt may already have published"),
+        "{error}"
+    );
+    assert!(error.contains("checksum mismatch"), "{error}");
+    assert!(!error.contains("no destination created"), "{error}");
+    assert_eq!(
+        fs::read(published).unwrap(),
+        b"preexisting authority must remain"
+    );
 }
 
 #[test]

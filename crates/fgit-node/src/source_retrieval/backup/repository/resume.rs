@@ -1,5 +1,6 @@
 //! Local restore ownership, not canonical authority or a proof of completion.
-//! The immutable intent binds the exact archive pin and destination instance.
+//! The immutable intent binds the exact archive pin and destination instance,
+//! plus the original approval/trust-policy digest when signed mode is selected.
 //! Progress is re-derived from authenticated data, never trusted from a counter.
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -12,6 +13,8 @@ const INTENT: &str = ".restore-intent";
 const LOCK: &str = ".restore-lock";
 const MAGIC: &[u8; 8] = b"FGRES001";
 const INTENT_BYTES: usize = 48;
+const SIGNED_MAGIC: &[u8; 8] = b"FGRES002";
+const SIGNED_INTENT_BYTES: usize = 80;
 
 /// Retain the OS lock through restore execution. It is advisory: repository
 /// serving and hostile same-UID filesystem mutation remain outside this profile.
@@ -22,10 +25,20 @@ pub(super) struct Intent {
     _lock: File,
 }
 impl Intent {
+    #[cfg(test)]
     pub(super) fn reserve(
         root: &Path,
         pin: [u8; 32],
         instance: StoreInstanceId,
+    ) -> Result<Self, String> {
+        Self::reserve_bound(root, pin, instance, None)
+    }
+
+    pub(super) fn reserve_bound(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
+        approval: Option<[u8; 32]>,
     ) -> Result<Self, String> {
         create_private(root)?;
         let lock = private_options()
@@ -40,7 +53,7 @@ impl Intent {
             .open(root.join(INTENT))
             .map_err(|e| e.to_string())?;
         marker
-            .write_all(&binding(pin, instance))
+            .write_all(&bound_binding(pin, instance, approval))
             .and_then(|()| marker.sync_all())
             .map_err(|e| e.to_string())?;
         drop(marker);
@@ -52,10 +65,20 @@ impl Intent {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn open(
         root: &Path,
         pin: [u8; 32],
         instance: StoreInstanceId,
+    ) -> Result<Self, String> {
+        Self::open_bound(root, pin, instance, None)
+    }
+
+    pub(super) fn open_bound(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
+        approval: Option<[u8; 32]>,
     ) -> Result<Self, String> {
         if !has_kind(root, true)? {
             return Err("resume requires an existing restore root".into());
@@ -69,12 +92,15 @@ impl Intent {
         let mut bytes = Vec::new();
         File::open(&marker)
             .map_err(|e| e.to_string())?
-            .take((INTENT_BYTES + 1) as u64)
+            .take((SIGNED_INTENT_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
-        if bytes.as_slice() != binding(pin, instance).as_slice() {
+        // Compare the exact versioned intent before opening any database,
+        // moving quarantined data or settling a publication alias. Neither
+        // omission nor addition of signed policy can reinterpret a prior run.
+        if bytes != bound_binding(pin, instance, approval) {
             return Err(
-                "resume intent does not match archive checksum and destination instance".into(),
+                "resume intent does not match archive checksum, destination instance and exact signed approval/trust policy".into(),
             );
         }
         let lock_path = root.join(LOCK);
@@ -196,6 +222,14 @@ fn binding(pin: [u8; 32], instance: StoreInstanceId) -> [u8; INTENT_BYTES] {
     bytes[..8].copy_from_slice(MAGIC);
     bytes[8..40].copy_from_slice(&pin);
     bytes[40..].copy_from_slice(&instance.raw().to_be_bytes());
+    bytes
+}
+fn bound_binding(pin: [u8; 32], instance: StoreInstanceId, approval: Option<[u8; 32]>) -> Vec<u8> {
+    let mut bytes = binding(pin, instance).to_vec();
+    if let Some(approval) = approval {
+        bytes[..8].copy_from_slice(SIGNED_MAGIC);
+        bytes.extend_from_slice(&approval);
+    }
     bytes
 }
 /// Whether two paths name the same regular file (device and inode), without

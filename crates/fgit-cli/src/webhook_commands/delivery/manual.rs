@@ -47,8 +47,8 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
 
     let previous = if replay {
         let record = store
-            .get_dead_letter(key)
-            .ok_or("delivery not present in dead letters")?;
+            .get_dead_letter_for(WebhookId(webhook_id), key)
+            .ok_or("delivery not present in this subscriber's dead letters")?;
         require_replay_binding(&record, &registration, key, request.payload_root)?;
         Some(record)
     } else {
@@ -80,7 +80,7 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     // Do not delete a diagnostic and call that a replay. Nor does a 2xx here
     // authorize canonical settlement: that is the strong worker's separate CAS
     // path. Keep the diagnostic, including after a successful manual send.
-    let diagnostic_retained = store.get_dead_letter(key).is_some();
+    let diagnostic_retained = store.get_dead_letter_for(WebhookId(webhook_id), key).is_some();
     let output = format!(
         "{{\"type\":\"webhook_delivery_observed\",\"schema_version\":1,\"mode\":\"manual-at-least-once\",\"tenant_id\":{},\"repository_id\":{},\"source_head\":{},\"snapshot_token\":{},\"webhook_id\":{},\"delivery_id\":{},\"destination\":{},\"payload_root\":{},\"attempt\":{},\"automatic_attempt_limit\":{},\"invocation_attempt_limit\":{},\"replay\":{},\"verdict\":{},\"outcome_unknown\":{},\"diagnostic_retained\":{},\"canonical_settled\":false,\"automatic_retry\":false,\"node_closed\":true,\"response_summary\":{}}}",
         quote(&options.tenant.to_string()),

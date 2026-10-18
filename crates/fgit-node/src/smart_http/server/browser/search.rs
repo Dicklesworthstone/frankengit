@@ -14,6 +14,26 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
             "text/javascript; charset=utf-8",
             include_str!("search-index.mjs"),
         )),
+        b"/ui/search/search-context.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("search-context.mjs"),
+        )),
+        b"/ui/search/search-context-verify.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("search-context-verify.mjs"),
+        )),
+        b"/ui/search/search-context-membership.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("search-context-membership.mjs"),
+        )),
+        b"/ui/search/search-context-package.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("search-context-package.mjs"),
+        )),
+        b"/ui/search/search-context-package-view.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("search-context-package-view.mjs"),
+        )),
         b"/ui/search/search-current.mjs" => Some((
             "text/javascript; charset=utf-8",
             include_str!("search-current.mjs"),
@@ -100,6 +120,38 @@ mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
     #[test]
+    fn search_view_and_context_routes_serve_distinct_exact_assets() {
+        for (name, body) in [
+            ("search-view.mjs", include_str!("search-view.mjs")),
+            (
+                "search-context-package.mjs",
+                include_str!("search-context-package.mjs"),
+            ),
+            (
+                "search-context-package-view.mjs",
+                include_str!("search-context-package-view.mjs"),
+            ),
+        ] {
+            let target = format!("/repo.git/ui/search/{name}");
+            assert_eq!(
+                asset(b"/repo.git", &target),
+                Some(("text/javascript; charset=utf-8", body))
+            );
+            let bytes = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
+            let request = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                checked_asset(b"/repo.git", true, body.len() as u64, &request, false).unwrap(),
+                Some(("text/javascript; charset=utf-8", body))
+            );
+            assert!(matches!(
+                checked_asset(b"/repo.git", true, body.len() as u64 - 1, &request, false),
+                Err(Status::TooLarge)
+            ));
+        }
+    }
+    #[test]
     fn search_assets_require_exact_source_routes_and_source_enablement() {
         for suffix in [
             "",
@@ -107,6 +159,11 @@ mod tests {
             "search-data.mjs",
             "search-index.mjs",
             "search-current.mjs",
+            "search-context.mjs",
+            "search-context-verify.mjs",
+            "search-context-membership.mjs",
+            "search-context-package.mjs",
+            "search-context-package-view.mjs",
             "search-view.mjs",
             "pulls-core.mjs",
             "search.css",
@@ -164,6 +221,11 @@ mod tests {
             include_str!("search-data.mjs"),
             include_str!("search-index.mjs"),
             include_str!("search-current.mjs"),
+            include_str!("search-context.mjs"),
+            include_str!("search-context-verify.mjs"),
+            include_str!("search-context-membership.mjs"),
+            include_str!("search-context-package.mjs"),
+            include_str!("search-context-package-view.mjs"),
             include_str!("search-view.mjs"),
         ] {
             for forbidden in [

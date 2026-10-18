@@ -21,11 +21,24 @@ class Element {
 }
 const controls = ['submit-search','refresh','cancel','mode','max-steps','regex-help','query-help','snapshot','token','query','prefixes',
   'reference','format','connection','search-form','disconnect','case','max-bytes','index-work','index-payload','index-help','max-matches',
-  'max-file-bytes','prefix-encoding','encoding','results','file','status','symbol-controls','symbol-help','symbol-match','symbol-kind',
-  'initial-controls','initial-help','initial-symbol-name','initial-symbol-policy','initial-result-bytes','index-source-mode','index-source-help'];
+  'max-file-bytes','prefix-encoding','encoding','results','file','status'];
+const template = await readFile(new URL('../../crates/fgit-node/src/smart_http/server/browser/search.html', import.meta.url), 'utf8');
 function document() {
   const doc = { downloads: [], getElementById(id) { return this.elements.get(id) ?? null; }, createElement(tag) { return new Element(tag, this); } };
-  doc.elements = new Map(controls.map(id => [id, new Element('div', doc)])); doc.defaultView = new Element('window', doc);
+  doc.elements = new Map(); doc.defaultView = new Element('window', doc);
+  // Use the shipped controls and defaults. A missing production control still
+  // returns null; the harness cannot invent one or make mount silently skip it.
+  for (const match of template.matchAll(/<(\w+)[^>]*\bid="([^"]+)"[^>]*>/g)) {
+    const element = new Element(match[1], doc); element.id = match[2];
+    element.value = match[0].match(/\bvalue="([^"]*)"/)?.[1] ?? '';
+    element.disabled = /\bdisabled\b/.test(match[0]); element.hidden = /\bhidden\b/.test(match[0]);
+    doc.elements.set(element.id, element);
+  }
+  for (const match of template.matchAll(/<select\b[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
+    const options = [...match[2].matchAll(/<option\b[^>]*>/g)];
+    const selected = options.find(option => /\bselected\b/.test(option[0])) ?? options[0];
+    doc.getElementById(match[1]).value = selected?.[0].match(/\bvalue="([^"]*)"/)?.[1] ?? '';
+  }
   const values = { token, reference: 'refs/heads/main', format: 'sha1', mode: 'indexed-content', case: 'exact', encoding: 'utf8', query: 'BETA\nALPHA\nbeta\n',
     prefixes: '', 'prefix-encoding': 'utf8', 'max-matches': '1', 'max-file-bytes': '8388608', 'max-bytes': '67108864', 'max-steps': '67108864',
     'index-work': '16777216', 'index-payload': '33554432', 'symbol-match': 'exact', 'symbol-kind': 'all',
@@ -165,5 +178,6 @@ test('HTML controls and source-gated import graph match the mounted module witho
     const source = await readFile(new URL(name, base), 'utf8');
     for (const m of source.matchAll(/from '\.\/(.*?)'/g)) await walk(m[1]);
   }
-  await walk('search-view.mjs'); assert.equal(visited.size, 6);
+  await walk('search-view.mjs');
+  assert.deepEqual([...visited].sort(), ['pulls-core.mjs', 'search-current.mjs', 'search-data.mjs', 'search-index.mjs', 'search-view.mjs', 'search.mjs'].sort());
 });

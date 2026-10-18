@@ -11,6 +11,8 @@ use fgit_types::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+#[path = "signed_tests.rs"]
+mod signed_tests;
 const TENANT: &str = "11111111111111111111111111111111";
 const REPOSITORY: &str = "22222222222222222222222222222222";
 const PAYLOAD: &[u8] = b"resume fixture content\n";
@@ -125,6 +127,7 @@ fn options(input: &Path, output: PathBuf, expected: [u8; 32]) -> Options {
         instance: StoreInstanceId::from_raw(991),
         profile: Profile::default(),
         resume: false,
+        approval: None,
     }
 }
 fn snapshot(root: &Path) -> ExportBundle {

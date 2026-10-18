@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod bisect_command;
 mod branches;
 mod bundle;
 mod commit_replay;
@@ -26,6 +27,7 @@ mod source_search;
 mod ssh_server;
 mod tags;
 mod transaction_outcome;
+mod verify_read;
 mod webhook_commands;
 mod workflow_command;
 #[cfg(target_os = "linux")]
@@ -52,6 +54,33 @@ fn main() -> ExitCode {
 fn run_subcommand(arguments: &[String]) -> ExitCode {
     if arguments
         .first()
+        .is_some_and(|argument| argument == "bisect")
+    {
+        return match bisect_command::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"bisection_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "verify-read")
+    {
+        return match verify_read::run(&arguments[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}", verify_read::error_json(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| matches!(argument.as_str(), "backup" | "repository-backup"))
     {
         if arguments
@@ -71,7 +100,11 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
             &arguments[1..]
         };
         use fgit_node::source_retrieval::backup;
-        return match backup::run(slice, &mut std::io::stdout().lock()) {
+        return match backup::run_with_timeout(
+            slice,
+            &mut std::io::stdout().lock(),
+            fgit_cli::command_timeout_override_duration(),
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{}", backup::error_json(&error));

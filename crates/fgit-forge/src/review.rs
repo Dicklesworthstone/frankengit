@@ -6,11 +6,11 @@ mod series;
 pub use series::{MAX_SERIES_COMPARISONS, compare_source_series};
 
 use crate::aggregate::{AggregateVersion, PullRequestNumber};
-use crate::preparation::{MergeObjectSource, MergeSourceError};
+use crate::preparation::{MergeObjectSource, MergeSourceError, source_merge_bases};
 use fgit_diff::{
-    CommitGraph, DiffAlgorithm, DiffError, DiffLimits, DiffOptions, Edit, MergeBaseError,
-    MergeBaseLimits, MergeBaseResult, ParentSet, RenameProfile, TreeChange, TreeDiffLimits,
-    TreeDiffOptions, TreeEntry, TreeMode, diff_trees, diff_with_cancellation, merge_bases_all,
+    DiffAlgorithm, DiffError, DiffLimits, DiffOptions, Edit, MergeBaseError, MergeBaseLimits,
+    MergeBaseResult, RenameProfile, TreeChange, TreeDiffLimits, TreeDiffOptions, TreeEntry,
+    TreeMode, diff_trees, diff_with_cancellation,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryId};
 use std::collections::BTreeMap;
@@ -227,30 +227,6 @@ impl From<MergeSourceError> for ReviewError {
     }
 }
 
-struct Graph<'a, S>(&'a S, GitHashAlgorithm);
-impl<S: MergeObjectSource> CommitGraph for Graph<'_, S> {
-    type CommitId = GitOid;
-    type Error = MergeSourceError;
-    fn parents_of(&self, id: &GitOid) -> Result<ParentSet<GitOid>, MergeSourceError> {
-        self.0.checkpoint()?;
-        if id.is_zero() || id.algorithm() != self.1 {
-            return Err(MergeSourceError::InvalidObject(*id));
-        }
-        let commit = self.0.commit(*id)?;
-        if commit.tree.is_zero()
-            || commit.tree.algorithm() != self.1
-            || commit
-                .parents
-                .iter()
-                .any(|id| id.is_zero() || id.algorithm() != self.1)
-        {
-            return Err(MergeSourceError::InvalidObject(*id));
-        }
-        self.0.checkpoint()?;
-        Ok(ParentSet::Complete(commit.parents))
-    }
-}
-
 /// Compare exact immutable commits. MergeBase compares their unique best base
 /// to `after`; Direct compares their trees without ancestry assumptions.
 /// A budget/error returns no successful partial report. Paths narrow output
@@ -272,8 +248,9 @@ pub fn compare_source<S: MergeObjectSource>(
     }
     let compared_before = match options.mode {
         ComparisonMode::Direct => before,
-        ComparisonMode::MergeBase => match merge_bases_all(
-            &Graph(source, format),
+        ComparisonMode::MergeBase => match source_merge_bases(
+            source,
+            format,
             before,
             after,
             MergeBaseLimits {

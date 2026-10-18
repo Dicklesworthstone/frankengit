@@ -1,7 +1,8 @@
-import { HistoryClient } from './history.mjs';
-import { bytePath } from './history-data.mjs';
+import { HistoryClient, HISTORICAL_FILE_LIMIT } from './history.mjs';
+import { bytePath, HISTORY_LIMITS } from './history-data.mjs';
 import { decimal, text, utf8, hex, unhex } from './pulls-core.mjs';
 const LINE_PAGE = 200, PREVIEW_BYTES = 65536;
+const COMPARE_PAGE = 25, COMPARE_HUNKS = 128, COMPARE_BYTES = 512 * 1024;
 const visible = value => String(value).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
   char => `\\u{${char.codePointAt(0).toString(16)}}`);
 export function bytePreview(encoded, maximum = PREVIEW_BYTES) {
@@ -22,9 +23,11 @@ export function mountHistory(doc, options = {}) {
   const client = options.client ?? new HistoryClient({ href: options.href ?? globalThis.location.href, fetchImpl: options.fetchImpl, cryptoImpl: options.cryptoImpl });
   const get = id => { const node = doc.getElementById(id); if (!node) throw new Error(`Missing history control ${id}`); return node; };
   const ids = ['connect', 'token', 'ref', 'format', 'open', 'disconnect', 'snapshot', 'query', 'path', 'path-kind', 'limit',
-    'log', 'first', 'end', 'blame', 'status', 'cancel', 'download', 'breadcrumbs', 'content', 'paging'];
+    'log', 'first', 'end', 'blame', 'status', 'cancel', 'download', 'breadcrumbs', 'content', 'paging',
+    'compare', 'before-ref', 'before-tip', 'compare-mode', 'compare-paths', 'compare-path-kind', 'compare-run'];
   const ui = Object.fromEntries(ids.map(id => [id, get(`history-${id}`)]));
-  let revision = 0, raw = null;
+  let revision = 0, raw = null, compared = null;
+  const downloadUrls = new Set();
   const node = (tag, value) => { const n = doc.createElement(tag); if (value !== undefined) n.textContent = visible(value); return n; };
   function button(label, action) {
     const n = node('button', label), current = revision; n.type = 'button';
@@ -34,12 +37,12 @@ export function mountHistory(doc, options = {}) {
   function sync() {
     const selected = client.selection;
     ui.snapshot.textContent = selected ? `Reference: ${visible(selected.ref)}\nFormat: ${selected.object_format}\nRepository: ${selected.scope.repository}\nIncarnation: ${selected.scope.incarnation}\nAuthority snapshot: ${selected.head}\nCurrent ref tip: ${selected.tip}` : '';
-    for (const id of ['log', 'blame']) ui[id].disabled = !selected;
+    for (const id of ['log', 'blame', 'compare-run']) ui[id].disabled = !selected;
     ui.open.disabled = !client.connected;
   }
-  function forgetInputs() { for (const id of ['token', 'ref', 'path', 'end']) ui[id].value = ''; ui.first.value = '0'; }
-  function disconnect() { revision++; client.disconnect(); clear(); forgetInputs(); sync(); ui.status.textContent = 'Disconnected. Token and displayed repository data cleared.'; }
-  function cancel() { revision++; client.cancel(); clear(); sync(); ui.status.textContent = 'Read cancelled; no repository mutation was attempted.'; }
+  function forgetInputs() { for (const id of ['token', 'ref', 'path', 'end', 'before-ref', 'before-tip', 'compare-paths']) ui[id].value = ''; ui.first.value = '0'; }
+  function disconnect() { compared = null; revision++; for (const url of downloadUrls) URL.revokeObjectURL(url); downloadUrls.clear(); client.disconnect(); clear(); forgetInputs(); sync(); ui.status.textContent = 'Disconnected. Token and displayed repository data cleared.'; }
+  function cancel() { compared = null; revision++; client.cancel(); clear(); sync(); ui.status.textContent = 'Read cancelled; no repository mutation was attempted.'; }
   async function run(work, render, keepBlame = false) {
     const current = ++revision; if (!keepBlame) client.cancel(); clear(); sync(); ui.status.textContent = 'Reading and checking one pinned repository snapshot…';
     try {
@@ -93,12 +96,20 @@ export function mountHistory(doc, options = {}) {
   function renderSource(result) {
     const { query, source } = result;
     ui.content.append(node('h2', `Historical source: ${pathLabel(query.path_hex)}`), node('p', `Historical commit: ${query.commit}`),
-      node('p', `Object: ${source.object_id}. Current ref tip remains ${result.selection.tip}.`));
-    ui.breadcrumbs.append(button('Commit root', () => historical('tree', query.commit)));
-    const parts = components(query.path_hex); let parent = null;
-    for (let i = 0; i < parts.length - (query.kind === 'blob' ? 1 : 0); i++) {
-      parent = parent === null ? parts[i] : `${parent}2f${parts[i]}`;
-      const fixed = parent; ui.breadcrumbs.append(button(bytePreview(parts[i], 4096), () => historical('tree', query.commit, fixed)));
+      node('p', `Object: ${source.object_id}. Authorized reference: ${result.selection.ref} @ ${result.selection.tip}.`));
+    if (result.comparisonSide) {
+      const retained = compared;
+      ui.breadcrumbs.append(button('Back to reference comparison', () => { if (retained) renderComparison(retained); }));
+      ui.content.append(node('p', `Compared ${result.comparisonSide} side. Authorized reference: ${result.selection.ref}. ` +
+        `${result.fullBlobVerified ? 'Complete blob bytes match the compared object ID.' : 'Partial file range; no complete-blob verification claim.'}`),
+        button('Download complete verified file bytes', () => downloadCompared(result.comparisonSide, query.path_hex)));
+    } else {
+      ui.breadcrumbs.append(button('Commit root', () => historical('tree', query.commit)));
+      const parts = components(query.path_hex); let parent = null;
+      for (let i = 0; i < parts.length - (query.kind === 'blob' ? 1 : 0); i++) {
+        parent = parent === null ? parts[i] : `${parent}2f${parts[i]}`;
+        const fixed = parent; ui.breadcrumbs.append(button(bytePreview(parts[i], 4096), () => historical('tree', query.commit, fixed)));
+      }
     }
     if (query.kind === 'tree') {
       const table = node('table');
@@ -116,18 +127,112 @@ export function mountHistory(doc, options = {}) {
         node('pre', bytePreview(source.content_hex)));
       if (result.originBytesVerified) ui.content.append(node('p', `Historical origin bytes reproduce the attributed line ${result.attribution.line} exactly.`),
         button('Open origin file from beginning', () => historical('blob', query.commit, query.path_hex)));
-      if (source.next_offset !== null) ui.paging.append(button('Next file range', () => historical('blob', query.commit, query.path_hex, { offset: source.next_offset, limit: query.limit })));
+      if (!result.comparisonSide) {
+        const download = button('Download complete historical file — verify blob', () => downloadHistorical(query.commit, query.path_hex,
+          { object_id: source.object_id, root_tree: source.root_tree, kind: source.kind, total_bytes: source.total_bytes }));
+        download.disabled = source.total_bytes > HISTORICAL_FILE_LIMIT;
+        ui.content.append(download, node('p', 'Complete historical downloads are limited to 8 MiB. All ranges share one deadline and must hash to this object before bytes are offered.'));
+      }
+      if (source.next_offset !== null) ui.paging.append(button('Next file range', () => result.comparisonSide
+        ? comparisonFile(result.comparisonSide, query.path_hex, { offset: source.next_offset, limit: query.limit })
+        : historical('blob', query.commit, query.path_hex, { offset: source.next_offset, limit: query.limit })));
+      if (result.comparisonSide && query.offset > 0) ui.paging.append(button('Previous file range', () => comparisonFile(result.comparisonSide, query.path_hex, { offset: Math.max(0, query.offset - query.limit), limit: query.limit })));
     }
     ui.status.textContent = result.originBytesVerified ? 'Exact attributed origin bytes checked at the historical commit.' : 'Historical source checked without changing the selected ref snapshot.';
   }
+  function comparisonPaths() {
+    const kind = ui['compare-path-kind'].value;
+    if (!['text', 'hex'].includes(kind)) throw new Error('Choose the comparison prefix encoding.');
+    // Keep spaces in names. Editor line separators are not repository bytes;
+    // names containing CR/LF are entered as raw hex, one encoded name per line.
+    const value = text(ui['compare-paths'].value, 65536, 'comparison prefixes');
+    const rows = value.split(/\r?\n/).filter(line => line !== '');
+    if (rows.length > 64) throw new Error('Choose at most 64 comparison prefixes.');
+    return rows.map(line => bytePath(kind === 'hex' ? line : hex(utf8.encode(text(line, 4096, 'path prefix')))));
+  }
+  function renderComparison(result, offset = 0) {
+    clear(); raw = result.raw; compared = result; ui.download.disabled = false;
+    const end = Math.min(offset + COMPARE_PAGE, result.entries.length);
+    ui.content.append(node('h2', `Reference comparison · ${result.query.mode}`),
+      node('pre', `Before: ${result.query.before_ref} @ ${result.before}\nAfter: ${result.selection.ref} @ ${result.after}\nCompared base: ${result.base}\nSnapshot: ${result.selection.head}`),
+      node('p', result.query.mode === 'merge-base'
+        ? 'Changes from the native merge base to the after tip. This is not a merge result or a mergeability test.'
+        : 'Direct tree comparison between the two recorded tips, including before-side divergence.'),
+      node('p', result.query.path_prefixes_hex.length ? `Filtered to ${result.query.path_prefixes_hex.length} explicit path prefixes; not all repository changes.` : 'All changed paths in this bounded comparison are retained.'),
+      node('p', `Showing changed paths ${offset}–${end} of ${result.entries.length} (zero-based, end exclusive). Pagination is local; no new snapshot is fetched.`),
+      node('p', 'Diff and graph identities are server-reported observations, not independent ancestry proofs or approval. Opening a complete file checks its native blob hash. Download validated response retains every path and hunk.'));
+    if (!result.entries.length) ui.content.append(node('p', 'No changed paths in this complete selected comparison. This does not grant merge permission.'));
+    let remaining = COMPARE_BYTES, shown = 0, clipped = false;
+    for (const entry of result.entries.slice(offset, end)) {
+      const section = node('article'); ui.content.append(section);
+      section.append(node('h3', `${entry.kind}: ${bytePreview(entry.path_hex, 1024)}`), node('pre', `Path bytes: ${entry.path_hex}`));
+      for (const side of ['before', 'after']) {
+        const identity = entry[side];
+        section.append(node('p', `${side}: ${identity ? `${identity.mode} ${identity.object_id}` : '(absent)'}`));
+        if (identity && ['100644', '100755', '120000'].includes(identity.mode)) {
+          section.append(button(`Open ${side} file`, () => comparisonFile(side, entry.path_hex)),
+            button(`Download ${side} verified bytes`, () => downloadCompared(side, entry.path_hex)));
+        } else if (identity) section.append(node('p', 'Directory or gitlink identity only; not followed.'));
+      }
+      const content = entry.content;
+      if (content.kind !== 'text') {
+        section.append(node('p', content.kind === 'binary' ? `Binary payload: ${content.before_bytes} → ${content.after_bytes} bytes. Bodies are not part of this diff.`
+          : content.kind === 'identical' ? 'Blob identity unchanged; inspect mode and type above.' : 'Object-only change. This is not an empty text diff.'));
+        continue;
+      }
+      section.append(node('p', `${content.algorithm}: +${content.additions} / −${content.deletions}; ${content.hunks.length} hunks.`));
+      for (const hunk of content.hunks) {
+        if (remaining === 0 || shown === COMPARE_HUNKS) { clipped = true; break; }
+        shown++;
+        section.append(node('h4', `Old bytes [${hunk.old.byte_start}, ${hunk.old.byte_end}); new bytes [${hunk.new.byte_start}, ${hunk.new.byte_end})`));
+        for (const [label, bytes] of [['Before', hunk.before_hex], ['After', hunk.after_hex]]) {
+          const count = Math.min(remaining, PREVIEW_BYTES, bytes.length / 2); remaining -= count;
+          clipped ||= count < bytes.length / 2;
+          section.append(node('p', label), node('pre', bytePreview(bytes, count) || '(empty byte span)'));
+        }
+      }
+    }
+    if (offset > 0) ui.paging.append(button('Previous changed paths', () => renderComparison(result, Math.max(0, offset - COMPARE_PAGE))));
+    if (end < result.entries.length) ui.paging.append(button('Next changed paths', () => renderComparison(result, end)));
+    if (clipped) ui.content.append(node('p', 'DISPLAY CLIPPED: download the validated response for all hunks and bytes. Every path on this page is still labelled.'));
+    ui.status.textContent = `Comparison checked at the retained snapshot. ${clipped ? 'Hunk display clipped; the saved response is complete.' : 'The displayed page does not change either ref.'}`;
+  }
+  function downloadBytes(name, bytes) {
+    if (options.downloadFile) { options.downloadFile(name, bytes.slice()); return; }
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' })); downloadUrls.add(url);
+    const link = doc.createElement('a'); link.href = url; link.download = name; doc.body.append(link);
+    try { link.click(); } finally { link.remove(); setTimeout(() => { URL.revokeObjectURL(url); downloadUrls.delete(url); }, 1000); }
+  }
+  const downloadHistorical = (commit, path, expected) => run(() => client.downloadHistorical(commit, path, expected), result => {
+    if (result.fullBlobVerified !== true) throw new Error('No verified complete historical file was produced.');
+    ui.content.append(node('h2', `Verified historical file: ${pathLabel(result.query.path_hex)}`),
+      node('p', `Commit: ${result.query.commit}. Blob: ${result.object_id}. ${result.total_bytes} bytes acquired in ${result.pages} bounded range reads.`),
+      node('p', 'The complete payload matches its native Git blob ID. No path-chain, author authentication, or current branch freshness claim.'));
+    ui.breadcrumbs.append(button('Back to historical file', () => historical('blob', result.query.commit, result.query.path_hex)));
+    downloadBytes(`frankengit-history-${result.object_id}.bin`, result.bytes);
+    ui.status.textContent = 'Complete historical file hash-checked and downloaded as inert bytes.';
+  });
+  const comparisonFile = (side, path, options = {}) => run(() => client.comparisonFile(side, path, options), renderSource);
+  const downloadCompared = (side, path) => run(() => client.comparisonFile(side, path, { offset: 0, limit: HISTORY_LIMITS.blob }), result => {
+    if (!result.fullBlobVerified) throw new Error('Complete compared file unavailable; no partial download was produced.');
+    renderSource(result);
+    // Neither source names nor executable/symlink modes become local filesystem instructions.
+    downloadBytes(`frankengit-${side}-${result.comparisonEntry[side].object_id}.bin`, unhex(result.source.content_hex, HISTORY_LIMITS.blob));
+    ui.status.textContent = 'Complete file bytes checked against the compared native blob ID and downloaded as inert bytes. No path-chain or author-authentication claim.';
+  });
+  const compare = () => { compared = null; return run(() => client.compare(ui['before-ref'].value, {
+    mode: ui['compare-mode'].value, expected_before: ui['before-tip'].value === '' ? null : ui['before-tip'].value,
+    path_prefixes_hex: comparisonPaths(),
+  }), renderComparison); };
   const log = options => run(() => client.log(options), renderLog);
   const historical = (kind, commit, path = null, options = {}) => run(() => client.historical(kind, commit, path, options), renderSource);
-  const open = () => run(() => client.open(ui.ref.value, ui.format.value), renderLog);
+  const open = () => { compared = null; return run(() => client.open(ui.ref.value, ui.format.value), renderLog); };
   ui.connect.addEventListener('submit', event => {
     event.preventDefault(); const token = ui.token.value; ui.token.value = '';
     try { client.connect(token); return open(); } catch (error) { disconnect(); ui.status.textContent = error.message; }
   });
   ui.open.addEventListener('click', open);
+  ui.compare.addEventListener('submit', event => { event.preventDefault(); return compare(); });
   ui.disconnect.addEventListener('click', disconnect); ui.cancel.addEventListener('click', cancel);
   ui.query.addEventListener('submit', event => {
     event.preventDefault(); return run(() => client.log({ path_hex: path(true), limit: decimal(ui.limit.value, 'history page size', 1) }), renderLog);
@@ -145,6 +250,6 @@ export function mountHistory(doc, options = {}) {
     }
   });
   (options.events ?? globalThis).addEventListener?.('pagehide', disconnect);
-  sync(); return { client, open, log, historical, cancel, disconnect };
+  sync(); return { client, open, log, historical, compare, comparisonFile, cancel, disconnect };
 }
 if (typeof document !== 'undefined') mountHistory(document);

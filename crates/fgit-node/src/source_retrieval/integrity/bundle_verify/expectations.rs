@@ -6,6 +6,7 @@ use std::fmt;
 
 use fgit_crypto::{DigestHasher, Sha256Hasher, lowercase_hex};
 use fgit_pack::full_bundle::FullBundleInput;
+use fgit_pack::BundleReference;
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 
 use super::{BundleVerifyError, BundleVerifyLimits, VerifiedGitBundle, checkpoint};
@@ -65,11 +66,7 @@ impl fmt::Display for BundleExpectationError {
                 "expected_reference_missing: ref_hex={}",
                 lowercase_hex(name.as_bytes())
             ),
-            Self::ChangedReference {
-                name,
-                expected,
-                actual,
-            } => write!(
+            Self::ChangedReference { name, expected, actual } => write!(
                 out,
                 "expected_reference_mismatch: ref_hex={}, expected={expected}, actual={actual}",
                 lowercase_hex(name.as_bytes())
@@ -136,25 +133,11 @@ impl BundleExpectations {
                 return Err(BundleExpectationError::DuplicateReference(name.clone()));
             }
         }
-        Ok(Self {
-            sha256,
-            format,
-            references: names,
-            exact,
-            name_bytes,
-        })
+        Ok(Self { sha256, format, references: names, exact, name_bytes })
     }
 
-    pub fn validate_limits(
-        &self,
-        limits: &BundleVerifyLimits,
-    ) -> Result<(), BundleExpectationError> {
-        if self.references.len()
-            > limits
-                .envelope
-                .max_references
-                .min(limits.graph.max_references)
-        {
+    pub fn validate_limits(&self, limits: &BundleVerifyLimits) -> Result<(), BundleExpectationError> {
+        if self.references.len() > limits.envelope.max_references.min(limits.graph.max_references) {
             return Err(BundleExpectationError::Limit("references"));
         }
         if self.name_bytes > limits.envelope.max_header_bytes {
@@ -185,37 +168,7 @@ impl BundleExpectations {
         envelope: &FullBundleInput<'_>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Option<[u8; 32]>, BundleVerifyError> {
-        let refuse = BundleVerifyError::Expectation;
-        checkpoint(live)?;
-        if let Some(expected) = self.format {
-            if envelope.format() != expected {
-                return Err(refuse(BundleExpectationError::FormatMismatch {
-                    expected,
-                    actual: envelope.format(),
-                }));
-            }
-        }
-        for (name, expected) in &self.references {
-            checkpoint(live)?;
-            let rows = envelope.references();
-            let at = rows
-                .binary_search_by(|row| row.name().cmp(name))
-                .map_err(|_| refuse(BundleExpectationError::MissingReference(name.clone())))?;
-            let actual = *rows[at].target();
-            if actual != *expected {
-                return Err(refuse(BundleExpectationError::ChangedReference {
-                    name: name.clone(),
-                    expected: *expected,
-                    actual,
-                }));
-            }
-        }
-        if self.exact && self.references.len() != envelope.references().len() {
-            return Err(refuse(BundleExpectationError::ReferenceSetMismatch {
-                expected: self.references.len(),
-                actual: envelope.references().len(),
-            }));
-        }
+        self.check_selection(envelope.format(), envelope.references(), live)?;
         let digest = match self.sha256 {
             None => None,
             Some(expected) => {
@@ -229,13 +182,51 @@ impl BundleExpectations {
                 let actual = hash.finish();
                 checkpoint(live)?;
                 if actual != expected {
-                    return Err(refuse(BundleExpectationError::ArtifactMismatch));
+                    return Err(BundleVerifyError::Expectation(BundleExpectationError::ArtifactMismatch));
                 }
                 Some(actual)
             }
         };
         checkpoint(live)?;
         Ok(digest)
+    }
+
+    pub(super) fn check_selection(
+        &self,
+        format: GitHashAlgorithm,
+        references: &[BundleReference],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), BundleVerifyError> {
+        let refuse = BundleVerifyError::Expectation;
+        checkpoint(live)?;
+        if let Some(expected) = self.format {
+            if format != expected {
+                return Err(refuse(BundleExpectationError::FormatMismatch {
+                    expected,
+                    actual: format,
+                }));
+            }
+        }
+        for (name, expected) in &self.references {
+            checkpoint(live)?;
+            let rows = references;
+            let at = rows
+                .binary_search_by(|row| row.name().cmp(name))
+                .map_err(|_| refuse(BundleExpectationError::MissingReference(name.clone())))?;
+            let actual = *rows[at].target();
+            if actual != *expected {
+                return Err(refuse(BundleExpectationError::ChangedReference {
+                    name: name.clone(), expected: *expected, actual,
+                }));
+            }
+        }
+        if self.exact && self.references.len() != references.len() {
+            return Err(refuse(BundleExpectationError::ReferenceSetMismatch {
+                expected: self.references.len(), actual: references.len(),
+            }));
+        }
+        checkpoint(live)?;
+        Ok(())
     }
 }
 
@@ -267,8 +258,5 @@ pub fn verify_git_bundle_against<'a>(
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<MatchedGitBundle<'a>, BundleVerifyError> {
     let verified = super::verify_git_bundle_inner(input, limits, Some(expectations), allow_work)?;
-    Ok(MatchedGitBundle {
-        verified,
-        expectations,
-    })
+    Ok(MatchedGitBundle { verified, expectations })
 }

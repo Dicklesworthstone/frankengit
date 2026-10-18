@@ -180,6 +180,7 @@ fn conflicts_and_up_to_date_results_cannot_smuggle_a_publishable_artifact() {
     };
     let result = render(format, &parsed, &same, None).unwrap();
     assert_eq!(result["candidate_arguments"], Value::Null);
+    assert_eq!(result["publication_arguments"], Value::Null);
     assert!(render(format, &parsed, &same, Some(b"forged bundle")).is_err());
     assert!(
         render(
@@ -243,7 +244,7 @@ fn returned_arguments_leave_room_for_real_mutation_envelopes_at_native_reference
     parsed.selection.subject.target_ref =
         RefName::try_new(format!("refs/heads/{}", "b".repeat(longest)).as_bytes()).unwrap();
     let bytes = vec![0xab; MAX_BUNDLE_BYTES];
-    let value = candidate_arguments(&parsed.selection.subject, candidate, &bytes).unwrap();
+    let value = publication_arguments(&parsed.selection.subject, candidate, &bytes, MergeCommitStyle::Squash).unwrap();
     let mut fields = value.object().unwrap().clone();
     fields.insert(
         "idempotency_key".into(),
@@ -274,4 +275,103 @@ fn returned_arguments_leave_room_for_real_mutation_envelopes_at_native_reference
     assert!(
         RefName::try_new(format!("refs/heads/{}", "a".repeat(longest + 1)).as_bytes()).is_err()
     );
+}
+
+#[test]
+fn merge_methods_are_closed_and_independent_of_tree_profiles() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let good = input(format);
+        let baseline = parse(&good, format).unwrap();
+        assert_eq!(baseline.style, MergeCommitStyle::TwoParent);
+        for (method, style) in [
+            ("merge-commit", MergeCommitStyle::TwoParent),
+            ("squash", MergeCommitStyle::Squash),
+        ] {
+            for (profile, expected_profile) in [
+                ("path-merge-v1", MergeProfile::PathMergeV1),
+                ("exact-renames-v1", MergeProfile::ExactRenamesV1),
+            ] {
+                let mut args = good.clone();
+                args.insert("method".into(), text(method));
+                args.insert("merge_profile".into(), text(profile));
+                let parsed = parse(&args, format).unwrap();
+                assert_eq!(parsed.style, style);
+                assert_eq!(parsed.profile, expected_profile);
+                assert_eq!(parsed.selection.subject, baseline.selection.subject);
+                assert_eq!(parsed.metadata, baseline.metadata);
+            }
+        }
+        for value in [
+            Value::Null, Value::Bool(true), json::number(1), text(""),
+            text("Squash"), text("fast-forward-only"), text("rebase"),
+        ] {
+            let mut args = good.clone();
+            args.insert("method".into(), value);
+            assert!(parse(&args, format).is_err());
+        }
+    }
+    let descriptor = schema();
+    let fields = descriptor.object().unwrap();
+    let method = fields["properties"].object().unwrap()["method"].object().unwrap();
+    assert_eq!(method["default"].text(), Some("merge-commit"));
+    assert_eq!(method["enum"], Value::Array(vec![text("merge-commit"), text("squash")]));
+    let Value::Array(required) = &fields["required"] else { unreachable!() };
+    assert!(!required.contains(&text("method")));
+}
+
+#[test]
+fn publication_templates_bind_method_without_contaminating_exact_review_arguments() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let parsed = parse(&input(format), format).unwrap();
+        let candidate = CandidateBinding {
+            merge_base: GitOid::from_hex(format, &"33".repeat(format.digest_len())).unwrap(),
+            commit: GitOid::from_hex(format, &"44".repeat(format.digest_len())).unwrap(),
+        };
+        let bytes = vec![0xab; MAX_BUNDLE_BYTES];
+        let review = candidate_arguments(&parsed.selection.subject, candidate, &bytes).unwrap();
+        assert!(!review.object().unwrap().contains_key("method"));
+        for style in [MergeCommitStyle::TwoParent, MergeCommitStyle::Squash] {
+            let publication = publication_arguments(&parsed.selection.subject, candidate, &bytes, style).unwrap();
+            let mut fields = publication.object().unwrap().clone();
+            assert_eq!(fields.remove("method").unwrap().text(), Some(merge_method_name(style)));
+            assert_eq!(Value::Object(fields), review);
+            publication.encode(json::MAX_INPUT - 4096).unwrap();
+        }
+    }
+}
+
+#[test]
+fn clean_rendering_rejects_a_plan_with_a_different_parent_method() {
+    use fgit_forge::preparation::{PlannedMergeObject, PreparedMerge};
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut args = input(format);
+        args.insert("method".into(), text("squash"));
+        let parsed = parse(&args, format).unwrap();
+        let tree = GitOid::from_hex(format, &"55".repeat(format.digest_len())).unwrap();
+        let base = GitOid::from_hex(format, &"33".repeat(format.digest_len())).unwrap();
+        let body = format!(
+            "tree {tree}\nparent {}\nauthor A <a@example.invalid> 1 +0000\ncommitter C <c@example.invalid> 1 +0000\n\nmerge\n",
+            parsed.selection.subject.target_tip
+        ).into_bytes();
+        let commit = git_object_id(format, GitObjectKind::Commit, &body);
+        let plan = PreparedMerge {
+            style: MergeCommitStyle::Squash,
+            base,
+            target: parsed.selection.subject.target_tip,
+            source: parsed.selection.subject.source_tip,
+            tree,
+            commit,
+            objects: vec![PlannedMergeObject { id: commit, kind: GitObjectKind::Commit, body }],
+        };
+        let outcome = MergePreparation::Clean(plan.clone());
+        let result = render(format, &parsed, &outcome, Some(b"transport bytes")).unwrap();
+        assert_eq!(result["parents"], Value::Array(vec![text(raw_oid(plan.target))]));
+        assert_eq!(
+            result["publication_arguments"].object().unwrap()["method"].text(),
+            Some("squash")
+        );
+        let mut mismatched = plan;
+        mismatched.style = MergeCommitStyle::TwoParent;
+        assert!(render(format, &parsed, &MergePreparation::Clean(mismatched), Some(b"transport bytes")).is_err());
+    }
 }

@@ -12,7 +12,7 @@ use fgit_admission::merge::NativeMergeBasis;
 use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_admission::merge::native::pull_request::reviews::gate::{self, ReviewRequirements};
 use fgit_admission::merge::native::pull_request::reviews::{self, ReviewPage, ReviewProjection};
-use fgit_admission::merge::native::{NativeMergeIntent, NativeMergeProjection};
+use fgit_admission::merge::native::{NativeMergeIntent, NativeMergeMethod, NativeMergeProjection};
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
     CommitMaterialization, ProjectionFailure, RefusalMaterialization, ValidatedClosure,
@@ -143,13 +143,13 @@ impl OneNode {
         admits_read(self.cell_state(), ReadMode::Current)
             .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
         let current = self
-            .materialize_admission_in(request)
+            .event_read_basis_in(request, None)
             .await
             .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
         let selected = snapshots::select(
             &self.authority,
             request.authority(),
-            current.basis(),
+            &current.basis,
             expected_head,
             &|| !workspace_request_live(request),
         )
@@ -158,32 +158,23 @@ impl OneNode {
             snapshots::SnapshotReadRefusal::Unavailable => ReviewReadRefusal::SnapshotMoved,
             snapshots::SnapshotReadRefusal::Admission(error) => ReviewReadRefusal::Admission(error),
         })?;
-        let historical_refs = if selected.id() == current.basis().id() {
-            None
-        } else {
-            Some(
-                crate::read_historical_ref_state_in(
-                    &self.authority,
-                    request.authority(),
-                    self.repository_id,
-                    selected.body(),
-                )
-                .await
-                .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?,
-            )
-        };
+        let ref_state = crate::read_historical_ref_state_in(
+            &self.authority,
+            request.authority(),
+            self.repository_id,
+            selected.body(),
+        )
+        .await
+        .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
         if !workspace_request_live(request) {
             return Err(ReviewReadRefusal::Admission(Box::new(
                 AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress),
             )));
         }
-        let refs = historical_refs
-            .as_ref()
-            .map_or(&current.snapshot().refs, |state| state.refs());
+        let refs = ref_state.refs();
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
             [source, target].iter().all(|name| {
-                !visibility.hides(name.as_bytes())
-                    && !current.snapshot().hidden_refs.hides(name.as_bytes())
+                !visibility.hides(name.as_bytes()) && !current.hidden_refs.hides(name.as_bytes())
             })
         };
         reviews::read_page_at(
@@ -216,6 +207,36 @@ impl OneNode {
         policy_epoch: PolicyEpoch,
         required_reviewers: &[PrincipalId],
     ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
+        self.apply_reviewed_merge_bundle_with_method_durable_in(
+            request,
+            principal,
+            key_bytes,
+            number,
+            version,
+            merge,
+            input,
+            policy_epoch,
+            required_reviewers,
+            NativeMergeMethod::MergeCommit,
+        )
+        .await
+    }
+
+    /// Publish an explicitly selected merge-commit or squash only after the
+    /// exact candidate's required reviews pass at the publication basis.
+    pub async fn apply_reviewed_merge_bundle_with_method_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        principal: PrincipalId,
+        key_bytes: &[u8],
+        number: PullRequestNumber,
+        version: ExpectedVersion,
+        merge: &NativeMerge,
+        input: &[u8],
+        policy_epoch: PolicyEpoch,
+        required_reviewers: &[PrincipalId],
+        method: NativeMergeMethod,
+    ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
         let map_error =
             |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
         if required_reviewers.len() > gate::MAX_REQUIRED_REVIEWERS {
@@ -235,7 +256,8 @@ impl OneNode {
             })?,
             object_format: self.object_format,
         };
-        let intent = NativeMergeIntent::new(number, version, merge.clone()).map_err(map_error)?;
+        let intent =
+            super::super::native_merge::bundle_merge_intent(number, version, merge.clone(), method)?;
         let attempt =
             gate::reviewed_seal_attempt(&context, &intent, &required).map_err(map_error)?;
         let tx_id = attempt
@@ -360,6 +382,17 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
     }
 }
 impl NativeMergeProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
+    fn validate_squash_async<'a>(
+        &'a self,
+        store: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        head: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        self.inner.validate_squash_async(store, cx, basis, head, intent)
+    }
+
     fn merge_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         self.inner.merge_checkpoint(cx)
     }

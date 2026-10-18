@@ -19,6 +19,7 @@ mod retrieval;
 pub(super) mod review;
 mod symbols;
 mod tags;
+mod verified_blob;
 
 use super::issues::{ApiError, Reply as JsonReply, read_form};
 use super::{Profile, Status, retry_key};
@@ -54,9 +55,13 @@ enum RequestKind<'a> {
     Replay(replay::Request<'a>),
     Rebase(rebase::Request<'a>),
     Bundle(bundles::Request<'a>),
+    VerifiedBlob(verified_blob::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = verified_blob::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::VerifiedBlob(request)));
+        }
         if let Some(request) = retrieval::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Retrieval(request)));
         }
@@ -112,6 +117,7 @@ impl<'a> Request<'a> {
             | RequestKind::Indexed(_)
             | RequestKind::Symbols(_)
             | RequestKind::Retrieval(_) => false,
+            RequestKind::VerifiedBlob(_) => false,
             RequestKind::Bundle(request) => request.is_mutation(),
             RequestKind::Rebase(request) => request.is_mutation(),
             RequestKind::Change(request) => request.is_mutation(),
@@ -137,6 +143,7 @@ impl<'a> Request<'a> {
             RequestKind::Replay(request) => request.repository_route,
             RequestKind::Bundle(request) => request.repository_route,
             RequestKind::Rebase(request) => request.repository_route,
+            RequestKind::VerifiedBlob(request) => request.repository_route,
         }
     }
 }
@@ -148,6 +155,7 @@ enum ReplyBody {
     Initial(initial::Prepared),
     Candidate(artifact::PreparedReply),
     BundleExport(bundles::Export),
+    VerifiedBlob(verified_blob::Reply),
 }
 impl Reply {
     const fn json(reply: JsonReply) -> Self {
@@ -172,6 +180,7 @@ impl Reply {
             ReplyBody::Initial(reply) => reply.send(writer, version),
             ReplyBody::Candidate(reply) => reply.send(writer, version),
             ReplyBody::BundleExport(reply) => reply.send(writer, version),
+            ReplyBody::VerifiedBlob(reply) => reply.send(writer, version),
         }
     }
 }
@@ -223,6 +232,10 @@ pub(super) fn execute(
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::VerifiedBlob(request) => {
+            return verified_blob::execute(node, request, session, maximum_response)
+                .map(|reply| Reply(ReplyBody::VerifiedBlob(reply)));
+        }
         RequestKind::Retrieval(request) => {
             return retrieval::execute(
                 node,

@@ -3,6 +3,9 @@ use fgit_crypto::{
     IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
 };
 use fgit_types::{CodecVersion, SchemaId};
+
+#[path = "index_omission_tests.rs"]
+mod omissions;
 fn source(format: Format) -> Source {
     let id = |domain, family| {
         internal_object_id(
@@ -72,6 +75,7 @@ fn canonical_tables_manifests_and_queries_roundtrip_in_both_native_formats() {
             source: source(format),
             documents: vec![a.clone(), b],
             unsupported: 2,
+            omissions: Vec::new(),
             non_regular: 1,
         };
         let payload = manifest.encode(&|| false).unwrap();
@@ -111,6 +115,7 @@ fn manifest_and_table_substitution_fail_even_with_valid_individual_codecs() {
         source: source(Format::Sha256),
         documents: vec![a],
         unsupported: 0,
+        omissions: Vec::new(),
         non_regular: 0,
     };
     let encoded = manifest.encode(&|| false).unwrap();
@@ -127,6 +132,7 @@ fn duplicate_out_of_order_non_rust_and_foreign_format_catalogs_refuse() {
         source: source(Format::Sha1),
         documents: vec![doc.clone()],
         unsupported: 0,
+        omissions: Vec::new(),
         non_regular: 0,
     };
     assert!(manifest.encode(&|| false).is_ok());
@@ -180,6 +186,7 @@ fn empty_manifest_is_authenticated_empty_not_missing_and_limits_remain_errors() 
         source: source(Format::Sha1),
         documents: vec![],
         unsupported: 2,
+        omissions: Vec::new(),
         non_regular: 1,
     };
     let payload = manifest.encode(&|| false).unwrap();
@@ -218,6 +225,7 @@ fn opaque_unicode_tables_retain_complete_blob_identity_and_source_accounting() {
             source: source(format),
             documents: vec![a, b],
             unsupported: 0,
+            omissions: Vec::new(),
             non_regular: 0,
         };
         let encoded = manifest.encode(&|| false).unwrap();
@@ -301,6 +309,7 @@ fn long_opaque_tokens_allow_zero_row_documents_without_losing_source_bytes() {
             source: source(format),
             documents: vec![doc],
             unsupported: 0,
+            omissions: Vec::new(),
             non_regular: 0,
         };
         let encoded = manifest.encode(&|| false).unwrap();

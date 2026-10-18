@@ -10,14 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_forge::preparation::{
-    MergeConflict, MergeEntry, MergeMetadata, MergePreparation, PreparationLimits,
+    MergeCommitStyle, MergeConflict, MergeEntry, MergeMetadata, MergePreparation, MergeProfile,
+    PreparationLimits,
 };
-use fgit_node::{NodeConfig, OneNode};
-use fgit_types::{HeadGeneration, RefName, RepositoryId, TenantId};
+use fgit_node::{NativeMergeMethod, NodeConfig, OneNode};
+use fgit_types::{GitHashAlgorithm, HeadGeneration, RefName, RepositoryId, TenantId};
 
 use super::super::publication_support::{quote, set_once};
 
-pub(super) const USAGE: &str = "usage: fg merge prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle> --trusted-local --profile path-v1 --source-ref <branch> --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message>";
+pub(super) const USAGE: &str = "usage: fg merge prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle> --trusted-local --profile path-v1 --source-ref <branch> --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message> [--method merge-commit|squash] [--object-format sha1|sha256]";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct Options {
@@ -28,6 +29,8 @@ struct Options {
     incoming: RefName,
     output: PathBuf,
     metadata: MergeMetadata,
+    method: NativeMergeMethod,
+    format: GitHashAlgorithm,
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), String> {
@@ -42,24 +45,31 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     }
     let options = parse(arguments)?;
     require_absent(&options.output)?;
-    let mut node = OneNode::open_existing(NodeConfig::new(
-        options.storage.clone(),
-        options.tenant,
-        options.repository,
-    ))
+    let mut node = OneNode::open_existing(
+        NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
+            .with_object_format(options.format),
+    )
     .map_err(|error| error.to_string())?;
     let result = (|| {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|error| error.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         node.runtime()
-            .block_on(node.prepare_merge_bundle_in(
+            .block_on(node.prepare_merge_bundle_with_options_in(
                 &request,
                 &options.target,
                 &options.incoming,
                 &Default::default(),
                 &options.metadata,
                 PreparationLimits::default(),
+                MergeProfile::PathMergeV1,
+                match options.method {
+                    NativeMergeMethod::Squash => MergeCommitStyle::Squash,
+                    NativeMergeMethod::MergeCommit => MergeCommitStyle::TwoParent,
+                    NativeMergeMethod::FastForwardOnly => {
+                        return Err("fast-forward does not construct a candidate".to_owned());
+                    }
+                },
             ))
             .map_err(|error| error.to_string())
     })();
@@ -81,6 +91,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     let mut fields = vec![
         "\"type\":\"merge_preparation\"".to_owned(),
         "\"profile\":\"path-v1\"".to_owned(),
+        format!("\"method\":{}", quote(super::method_name(options.method))),
         "\"published_to_repository\":false".to_owned(),
         "\"node_closed\":true".to_owned(),
         format!(
@@ -198,7 +209,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 6 || arguments[0] != "prepare" {
         return Err(USAGE.to_owned());
     }
-    if arguments.len() > 24 || arguments.iter().any(|arg| arg.len() > 64 * 1024) {
+    if arguments.len() > 28 || arguments.iter().any(|arg| arg.len() > 64 * 1024) {
         return Err("merge prepare arguments exceed the bounded profile".to_owned());
     }
     if arguments[1].is_empty() || arguments[5].is_empty() {
@@ -209,6 +220,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let repository = RepositoryId::from_hex(&arguments[3]).map_err(|error| error.to_string())?;
     let (mut incoming, mut author, mut committer, mut timestamp, mut message, mut profile) =
         (None, None, None, None, None, None);
+    let (mut method, mut format) = (None, None);
     let mut trusted = false;
     let mut cursor = 6;
     while cursor < arguments.len() {
@@ -239,6 +251,15 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     );
                 }
                 set_once(&mut profile, (), flag)?;
+            }
+            "--method" => set_once(&mut method, super::parse_method(value)?, flag)?,
+            "--object-format" => {
+                let value = match value.as_str() {
+                    "sha1" => GitHashAlgorithm::Sha1,
+                    "sha256" => GitHashAlgorithm::Sha256,
+                    _ => return Err("--object-format must be sha1 or sha256".to_owned()),
+                };
+                set_once(&mut format, value, flag)?;
             }
             "--author" => set_once(&mut author, value.clone(), flag)?,
             "--committer" => set_once(&mut committer, value.clone(), flag)?,
@@ -301,6 +322,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         incoming,
         output,
         metadata,
+        method: method.unwrap_or(NativeMergeMethod::MergeCommit),
+        format: format.unwrap_or(GitHashAlgorithm::Sha1),
     })
 }
 
@@ -449,6 +472,43 @@ mod tests {
         injection[at + 1] = "Test <test@example.invalid>\nparent bad".into();
         assert!(parse(&injection).is_err());
     }
+    #[test]
+    fn method_and_object_format_are_explicit_bounded_choices() {
+        let defaults = parse(&args()).unwrap();
+        assert_eq!(defaults.method, NativeMergeMethod::MergeCommit);
+        assert_eq!(defaults.format, GitHashAlgorithm::Sha1);
+        for (format, expected) in [
+            ("sha1", GitHashAlgorithm::Sha1),
+            ("sha256", GitHashAlgorithm::Sha256),
+        ] {
+            let mut selected = args();
+            selected.extend([
+                "--method".into(), "squash".into(),
+                "--object-format".into(), format.into(),
+            ]);
+            let parsed = parse(&selected).unwrap();
+            assert_eq!(parsed.method, NativeMergeMethod::Squash);
+            assert_eq!(parsed.format, expected);
+            for flag in ["--method", "--object-format"] {
+                let mut duplicate = selected.clone();
+                let at = duplicate.iter().position(|arg| arg == flag).unwrap();
+                duplicate.extend([flag.into(), duplicate[at + 1].clone()]);
+                assert!(parse(&duplicate).is_err());
+            }
+        }
+        for (flag, value) in [
+            ("--method", "auto"),
+            ("--method", "rebase"),
+            ("--method", "fast-forward-only"),
+            ("--object-format", "sha512"),
+            ("--object-format", "SHA256"),
+        ] {
+            let mut invalid = args();
+            invalid.extend([flag.into(), value.into()]);
+            assert!(parse(&invalid).is_err());
+        }
+    }
+
     #[test]
     fn artifact_publication_is_create_only_and_cleans_its_temporary_name() {
         let root = std::env::temp_dir().join(format!(

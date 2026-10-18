@@ -36,8 +36,12 @@ merge-base or reviewer field. The existing native fast-forward driver owns
 ancestry, exact-version/tip checks, current branch protection, canonical retry
 identity, and atomic ref/PR/outbox publication. It publishes the existing
 source commit, not a newly constructed merge commit. Divergence does not
-select another merge method. This endpoint does not bypass review protection;
-protection that this native merge method cannot satisfy remains a refusal.
+select another merge method. This endpoint enforces current mandatory review
+protection. Required reviewers can approve the exact source-tip candidate
+through the existing candidate review API, using `candidate == source_tip`
+and `merge_base == target_tip`; the node proves native ancestry before accepting
+the vote. Missing, stale, withdrawn or source-only votes remain refusals. See
+[`FAST_FORWARD_PR_MERGES.md`](FAST_FORWARD_PR_MERGES.md).
 
 ## Outcomes and retry
 

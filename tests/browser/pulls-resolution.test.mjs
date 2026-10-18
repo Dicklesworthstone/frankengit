@@ -18,7 +18,8 @@ function conflicts(algorithm = 'sha1', paths = ['a', 'b', 'c', 'd']) {
   return { f, report };
 }
 const sides = report => report.conflicts.map((row, index) => ({ path_hex: row.path_hex, choice: ['base', 'ours', 'theirs', 'delete'][index % 4] }));
-function resultFor(f, upload) { return { ...f.metadata, state: 'resolved', resolution_profile: 'exact-path-resolutions-v1', resolutions: structuredClone(upload.expected.rows) }; }
+function resultFor(f, upload) { return { ...f.metadata, ...(upload.expected.method === 'squash' ? { method: 'squash' } : {}),
+  state: 'resolved', resolution_profile: 'exact-path-resolutions-v1', resolutions: structuredClone(upload.expected.rows) }; }
 async function clientWith(sample, handler) {
   const calls = []; let client;
   client = new PullClient(options((url, init) => {
@@ -31,35 +32,58 @@ async function clientWith(sample, handler) {
   await client.prepareAndInspect(1, sample.f.selected, meta);
   return { client, calls };
 }
-for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: all side choices encode every exact conflict and retain original metadata`, async () => {
+for (const method of ['merge-commit', 'squash']) for (const algorithm of ['sha1', 'sha256']) test(`${algorithm} ${method}: all side choices encode every exact conflict and retain original metadata`, async () => {
   const { f, report } = conflicts(algorithm), choices = sides(report).reverse();
-  const upload = await resolutionUpload(report, f.selected, meta, choices, webcrypto);
+  if (method === 'squash') report.method = method;
+  const upload = await resolutionUpload(report, f.selected, meta, choices, webcrypto, method);
   assert.equal(upload.contentType, 'application/x-www-form-urlencoded');
   const form = new URLSearchParams(new TextDecoder().decode(upload.bytes));
   assert.deepEqual(form.getAll('resolution'), ['61:base', '62:ours', '63:theirs', '64:delete']);
   assert.equal(form.get('merge_base'), report.merge_base); assert.equal(form.get('timestamp'), '1');
   assert.equal(form.get('source_tip'), f.selected.source_tip); assert.equal(form.get('policy_epoch'), '1');
   assert.equal(form.get('author'), meta.author); assert.equal(form.has('principal'), false);
+  assert.equal(form.get('method'), method === 'squash' ? method : null);
+  assert.equal(upload.expected.method, method);
   verifyResolutionResult(resultFor(f, upload), upload.expected);
   assert.equal(upload.expected.rows.at(-1).result, null);
 });
-for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: binary and empty files use native blob identity and octet-stream parts`, async () => {
+for (const method of ['merge-commit', 'squash']) for (const algorithm of ['sha1', 'sha256']) test(`${algorithm} ${method}: binary and empty files use native blob identity and octet-stream parts`, async () => {
   const { f, report } = conflicts(algorithm, ['a', Buffer.from([0xff])]);
+  if (method === 'squash') report.method = method;
   const content = new Uint8Array([0, 255, 13, 10, 60, 115, 99, 114, 105, 112, 116, 62]);
   const upload = await resolutionUpload(report, f.selected, meta, [
     { path_hex: '61', choice: 'file', mode: '100755', bytes: content },
     { path_hex: 'ff', choice: 'file', mode: '100644', bytes: new Uint8Array() },
-  ], webcrypto);
+  ], webcrypto, method);
   assert.match(upload.contentType, /^multipart\/form-data; boundary=fg-resolution-/);
   const body = Buffer.from(upload.bytes), text = body.toString('latin1');
   assert.ok(body.includes(content)); assert.match(text, /name="file_0"\r\nContent-Type: application\/octet-stream/);
   assert.match(text, /name="file_1"\r\nContent-Type: application\/octet-stream/);
   assert.match(text, /resolution=ff%3Afile%3A100644%3Afile_1/); assert.equal(text.includes('filename='), false);
+  assert.equal(text.includes('&method=squash&'), method === 'squash');
   for (const [index, bytes] of [content, new Uint8Array()].entries()) {
     const expected = createHash(algorithm).update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
     assert.equal(upload.expected.rows[index].result.oid, expected);
   }
   verifyResolutionResult(resultFor(f, upload), upload.expected);
+});
+test('resolution freezes the selected method and rejects conflicting report and result methods', async () => {
+  const { f, report } = conflicts('sha256', ['a']), choices = [{ path_hex: '61', choice: 'ours' }];
+  for (const method of [undefined, 'merge-commit', null, '', 'rebase', 'fast-forward-only']) {
+    await assert.rejects(resolutionUpload({ ...report, method }, f.selected, meta, choices, webcrypto, 'squash'));
+  }
+  report.method = 'squash';
+  await assert.rejects(resolutionUpload(report, f.selected, meta, choices, webcrypto), /method changed/);
+  for (const method of [null, '', 'rebase', 'fast-forward-only']) {
+    await assert.rejects(resolutionUpload(report, f.selected, meta, choices, webcrypto, method));
+  }
+  const upload = await resolutionUpload(report, f.selected, meta, choices, webcrypto, 'squash');
+  const resolved = resultFor(f, upload);
+  verifyResolutionResult(resolved, upload.expected);
+  for (const method of [undefined, 'merge-commit', null, '', 'rebase', 'fast-forward-only']) {
+    assert.throws(() => verifyResolutionResult({ ...resolved, method }, upload.expected));
+  }
+  assert.throws(() => verifyResolutionResult(resolved, { ...upload.expected, method: 'merge-commit' }), /method changed/);
 });
 const badChoices = [
   ['missing path', rows => rows.slice(1)],
@@ -183,3 +207,4 @@ test('late resolution response cannot select a candidate after conflict invalida
   client.invalidateCandidate(); wait.resolve(new Response(sample.f.mixed(resultFor(sample.f, upload)), { headers: { 'Content-Type': sample.f.type } }));
   await assert.rejects(resolving); assert.equal(client.candidate, null); assert.equal(client.conflict, null); assert.equal(calls.length, 3);
 });
+

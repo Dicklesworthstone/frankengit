@@ -2,7 +2,7 @@
 
 The opt-in PR service now exposes native candidate review and reviewed merge
 publication. It calls the existing `admit_candidate_review_durable_in`,
-`read_reviews_in`, and `apply_reviewed_merge_bundle_durable_in` node APIs. There
+`read_reviews_in`, and `apply_reviewed_merge_bundle_with_method_durable_in` node APIs. There
 is no HTTP approval database, alternate Git engine, or ref-only merge fallback.
 
 A vote checks the actual submitted Git bundle without importing its objects.
@@ -51,7 +51,9 @@ rejects empty sets, duplicate reviewers and submitter/opener self-approval.
 Mandatory protected-branch requirements cannot be removed by submitting a
 smaller list. Only explicitly required and mandatory reviewers are enforced;
 this is not an implicit veto by every principal who has ever reviewed a PR.
-There is no remote protection-administration endpoint in this change.
+Policy administration uses the separately enabled and independently scoped
+[HTTP protection API](HTTP_PROTECTION_API.md); review and merge grants do not
+authorize changing mandatory requirements.
 
 Credential files retain their existing exact tenant/repository/incarnation
 binding and per-authentication reload. Rotation preserves identity when the
@@ -96,7 +98,16 @@ each a lowercase 32-hex-character principal ID. The set is sorted canonically;
 duplicates and the submitter are rejected. It is sealed together with the
 candidate and policy epoch. Changing the set is not an identical retry.
 
-All fields are explicit. No endpoint reads latest state to fill omitted values
+The merge command also accepts optional `method=merge-commit` (the default) or
+`method=squash`. The method is sealed into retry identity and must match the
+actual candidate: ordered target/source parents for a merge commit, exactly one
+target parent for squash. Neither choice falls back to fast-forward. Changing
+method under the same key cannot publish a second command, even if exact Git
+bytes happen to give both requests the same candidate ID. Review commands reject
+`method`; approvals remain bound to the submitted candidate commit.
+
+All subject coordinates and review requirements are explicit. No endpoint reads
+latest state to fill omitted values
 or refresh a stale command. Unknown or duplicate scalar fields, wrong hash
 domains, zero OIDs, inapplicable fields, invalid UTF-8, NUL and malformed percent
 escapes are rejected. Ref/PR/policy freshness and candidate correctness remain
@@ -106,9 +117,10 @@ checks inside the native admission engines, not assumptions made by HTTP.
 
 For approval, request-changes and an initial merge attempt, send multipart form
 data with a URL-encoded `command` part and a binary `bundle` part. Either part
-order is accepted. The command contains the fields above, not JSON. A local
-`OneNode::prepare_merge_bundle_in` result supplies the supported two-parent Git
-bundle; this HTTP extension does not expose candidate preparation itself.
+order is accepted. The command contains the fields above, not JSON. Obtain a
+candidate with the [HTTP preparation API](HTTP_CANDIDATE_PREPARATION_API.md) or
+`OneNode::prepare_merge_bundle_with_options_in`. Preserve its exact native bundle
+and use the returned method when publishing.
 
 With the exact command saved as URL-encoded bytes in `review.form`:
 
@@ -121,7 +133,7 @@ curl --fail-with-body --header @/secure/reviewer.headers \
 ```
 
 Use the same binary bundle and a separately prepared `merge.form` containing
-common fields plus the required reviewers:
+common fields plus the required reviewers and selected `method`:
 
 ```sh
 curl --fail-with-body --header @/secure/merger.headers \
@@ -158,7 +170,8 @@ lookup when only the old decision is needed.
 Review results have `type: "candidate_review_publication"`; merge results use
 `type: "reviewed_merge_publication"`. They carry the authenticated actor, exact
 subject/candidate, review predecessor or named-reviewer set, stable transaction
-ID and authenticated terminal decision. HTTP 200 means committed; HTTP 409 with
+ID and authenticated terminal decision. Merge receipts include explicit `method`.
+HTTP 200 means committed; HTTP 409 with
 `outcome: "refused"` is a canonical refusal, not a transport retry instruction.
 External delivery is not claimed: `delivery_acknowledged` remains null.
 

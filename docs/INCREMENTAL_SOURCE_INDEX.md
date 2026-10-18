@@ -4,8 +4,9 @@
 `OneNode::refresh_source_index_local_in` refresh a complete persistent lexical
 index without rereading or retokenizing unchanged source blobs. This composes
 the existing verified TreeFS inventory, immutable lexical codec and asynchronous
-generation authority. It adds no dependency, runtime, database, wire schema or
-repository mutation path. FG-032 remains open.
+generation authority. It adds no dependency, runtime, database or repository
+mutation path. Explicit file omissions use the versioned metadata described
+in `PERSISTENT_LEXICAL_INDEX.md`. FG-032 remains open.
 
 ## Operator usage
 
@@ -63,6 +64,14 @@ New, changed and renamed paths read their blobs through the verified native
 object source. A mode-only regular-file change can reuse its lexical postings,
 because that lexical profile does not index executable mode.
 
+A previously indexed file above the new per-file limit is reread, verified and
+recorded as an omission; its old postings cannot bypass the narrower limit.
+Previously omitted paths are always reread and reclassified. Restoring a limit
+therefore rebuilds newly admissible files while continuing to reuse unaffected
+postings. Indexed and omitted bytes both count toward the same source budget.
+Returned reused/rebuilt counts describe posting-bearing documents; omission
+coverage is read from the resulting index report.
+
 All present regular files enter the complete successor inventory. Old paths
 not present are removed, replaced blobs lose their former tokens, and new paths
 receive their correct path-channel tokens. This is not an old-index union.
@@ -74,7 +83,8 @@ The posting engine inverts each verified segment's posting columns once for
 per-document reuse. It retains the original first byte spans and separate path
 and content channels. Fresh rows go through the same native identity checker
 and ASCII-word tokenizer as full builds. The replacement payloads use the same
-canonical segment/catalog format, with no tombstone or migration schema.
+canonical segment format. Omission-bearing successors use v2 manifest/evidence
+catalogs; a complete successor returns to the unchanged v1 profile.
 
 Prepared successor payloads are staged before the existing exact-predecessor
 root publication. The root CAS makes the complete new generation visible at

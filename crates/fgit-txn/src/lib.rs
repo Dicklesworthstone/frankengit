@@ -593,6 +593,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_text("ForgeEntityId", check.label().as_str())?;
             out.write_ref_name(source)?;
         }
+        ForgeEventKind::PullRequestCommented { conversation } => {
+            out.write_raw_byte(9);
+            out.write_text("ForgeEntityId", conversation.label().as_str())?;
+        }
     }
     Ok(())
 }
@@ -616,6 +620,7 @@ mod tests {
     use super::*;
     include!("issue_normal_form_tests.rs");
     include!("workflow_check_normal_form_tests.rs");
+    include!("pull_request_comment_normal_form_tests.rs");
 
     use std::collections::BTreeMap;
 

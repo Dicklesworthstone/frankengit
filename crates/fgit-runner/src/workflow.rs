@@ -6,8 +6,8 @@
 //! This is not a hostile-code sandbox or an authoritative green-check issuer.
 
 use crate::Commitment;
-pub use fgit_schema::workflow::Job as WorkflowJob;
 use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
+pub use fgit_schema::workflow::{Job as WorkflowJob, StepContext};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
-pub use process::run_trusted_step;
+pub use process::{run_trusted_step, run_trusted_step_with_context};
 
 pub const TRUSTED_RUNNER_LABEL: &str = "fgit-trusted-local";
 pub const PROFILE: &str = "trusted-local-foreground-v1";
@@ -63,6 +63,7 @@ pub enum WorkflowError {
     Schema(workflow::WorkflowRefusal),
     InvalidLimits,
     InvalidScript,
+    UnsupportedStepContext,
     UnsupportedRunner(String),
     ExecutionLimit,
 }
@@ -139,6 +140,15 @@ impl WorkflowPlan {
         live: &dyn Fn() -> bool,
     ) -> Result<WorkflowReport, WorkflowError> {
         limits.validate()?;
+        if self
+            .graph
+            .jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| !step.context.is_default()))
+            && !executor.supports_step_context()
+        {
+            return Err(WorkflowError::UnsupportedStepContext);
+        }
         let started = Instant::now();
         let run_live = || live() && started.elapsed() < limits.run_timeout;
         let stopped = || {
@@ -201,8 +211,13 @@ impl WorkflowPlan {
                                     .min(limits.run_timeout.saturating_sub(started.elapsed())),
                                 stream_bytes: limits.stream_bytes.min(remaining / 2),
                             };
-                            let observed =
-                                executor.execute_step(step_index, &step.run, budget, &run_live);
+                            let observed = executor.execute_step_with_context(
+                                step_index,
+                                &step.run,
+                                &step.context,
+                                budget,
+                                &run_live,
+                            );
                             match observed {
                                 Err(failure) => {
                                     containment_lost |= failure.retain_workspace;
@@ -371,6 +386,28 @@ pub trait WorkflowExecutor {
         limits: StepLimits,
         live: &dyn Fn() -> bool,
     ) -> Result<StepObservation, WorkerFailure>;
+    /// Whether this adapter implements the complete validated process context.
+    fn supports_step_context(&self) -> bool {
+        false
+    }
+
+    /// Default adapters refuse new inputs rather than ignoring them.
+    fn execute_step_with_context(
+        &mut self,
+        index: usize,
+        script: &str,
+        context: &StepContext,
+        limits: StepLimits,
+        live: &dyn Fn() -> bool,
+    ) -> Result<StepObservation, WorkerFailure> {
+        if !context.is_default() {
+            return Err(WorkerFailure::new(
+                "executor does not support explicit step context",
+                false,
+            ));
+        }
+        self.execute_step(index, script, limits, live)
+    }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure>;
 
     /// Receives one normalized terminal observation after cleanup, or after a

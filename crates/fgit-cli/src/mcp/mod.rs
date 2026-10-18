@@ -64,7 +64,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     }
     if arguments == ["--help"] {
         eprintln!(
-            "{USAGE}\n\nSeparate policy-inspection profile: fg-mcp --protection-admin --help"
+            "{USAGE}\n\nSeparate policy-inspection profile with independent write/recovery grants: fg-mcp --protection-admin --help"
         );
         return Ok(());
     }

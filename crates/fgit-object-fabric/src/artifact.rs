@@ -22,6 +22,9 @@
 
 use std::fmt;
 
+#[cfg(target_os = "linux")]
+pub mod storage;
+
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_types::{Digest, DigestAlgorithmId, DigestBytes, SchemaFamily, SchemaId};
 

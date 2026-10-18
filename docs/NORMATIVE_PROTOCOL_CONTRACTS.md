@@ -477,6 +477,49 @@ Promotion is by verified identity and canonical retention root, never mutable di
 
 Partial clone/promisor state is a transfer/materialization optimization. Canonical retention remains complete. Probabilistic have summaries may reduce first-round bytes but cannot prove closure; final exact verification requests missing objects.
 
+### 16.4 Ref-anchored complete blob proofs
+
+The `verified-blob` schema 1.0, domain
+`frankengit/verified-blob/v1`, carries one canonical `VerifiedReadEnvelope`
+ref-membership frame, the exact repository byte path, the original commit body,
+the original tree bodies in root-to-parent order, and the complete blob body.
+It uses the canonical codec's byte strings and ordered sequence framing. It
+MUST NOT change the existing verified-read envelope's bytes or identity.
+
+The consumer supplies an independently trusted `RepositoryAuthorityHeadId`,
+ref name, and path. The verifier MUST recompute the response head identity and
+match that exact pin, authenticate the selected configuration and ref inclusion
+under that head, then verify every original Git commit/tree/blob identity in
+the repository's selected SHA-1 or SHA-256 domain. The response cannot supply
+its own trust pin. A valid old proof establishes content at the supplied head;
+it does not establish currentness, authorship, signatures, or authorization.
+
+The selected ref tip MUST be a commit with one unambiguous tree header. Each
+path component MUST select exactly one immediate child in its corresponding
+tree. Intermediate entries MUST be directories. The final entry MUST be a
+regular file, executable file, or symlink blob; symlink bytes remain data and
+MUST NOT be followed or materialized as a host symlink. Directories, gitlinks,
+partial byte ranges, missing or extra tree bodies, and mismatched native hash
+domains cannot satisfy this profile. Repository paths preserve raw bytes and
+MUST NOT be interpreted as host paths or normalized.
+
+The closed v1 limits are 4,096 path bytes, 255 bytes per component, 64
+components, 64 KiB for the nested ref proof, 16 MiB for all commit/tree bodies
+combined, 16 MiB for the complete blob, and 100,000 tree entries combined.
+The complete canonical frame is bounded to 32 MiB plus 128 KiB and MUST be
+fully consumed. Hashing checks caller cancellation at least every 64 KiB;
+bounded parsing checks it before and after. No verified bytes may be returned
+after cancellation or failed verification. Full original trees are carried,
+so Git-path witness size includes all sibling entries in traversed directories.
+
+A server MUST apply the authenticated source-read grant and canonical ref
+visibility policy before disclosure, and construct the complete proof from
+one selected authority basis. A current read with a different expected head
+MUST refuse. Whole-body legacy ref layouts MUST NOT be silently reinterpreted
+as Merkle layouts or disclosed as a fallback. Selecting an existing supported
+Merkle layout during new repository initialization is distinct from migrating
+an existing repository.
+
 ## 17. Object fabric and segmentation
 
 Canonical Git objects preserve native OIDs and exact logical bytes. Internal envelopes may add strong digest/type/length. Object-aware segments provide:
@@ -531,6 +574,73 @@ Canonical forge entities are immutable events included in RCR batches. Issues, P
 Read models, counters, notifications, web views, search, and graphs are projections. Each records source RCR/forge position and may lag. A stale projection cannot authorize mutation without canonical revalidation.
 
 Outbox delivery is at least once unless a downstream protocol proves stronger semantics. Stable delivery IDs and obligations prevent canonical event duplication. A failed webhook never rolls back an RCR.
+
+### 20.1 Native PR conversation streams
+
+Append-only PR conversation comments advance `PullRequestConversation(number)`,
+independently of PR metadata and reviewer streams. A comment cannot change a PR's
+content version, invalidate a review, move a Git ref, or change the policy epoch.
+Admission resolves the native PR at the exact publication basis and checks both
+branches against current disclosure policy; closed and merged native PRs remain
+valid conversation subjects. An absent or legacy-only PR cannot be invented by
+posting a comment. Exact discussion versions, the authenticated actor, PR number,
+and original text form the sealed command; retries never refresh these values.
+
+The canonical owner is `fgit-forge/src/event/pull_request_comment.rs`. The new
+required aggregate kind is **8** after the existing zero escape, followed by the
+positive PR number; its stream label is `conversation/N`. Required event kind
+**12** carries the exact 16-byte actor and bounded UTF-8 body. The reference trace
+and transaction normal form append marker **9**, `PullRequestCommented`, naming
+the conversation entity with no required ref effect. Existing tags and canonical
+bytes retain their meanings and identities. Earlier readers refuse unfamiliar
+required tags rather than silently treating comments as PR lifecycle or review
+events. There is no reinterpretation of historical bytes or implicit migration.
+
+Conversation projections carry the selected authority head, discussion high-water
+version and exact version cursor. Missing accepted history, conflicting events at
+one version, or resource/cancellation failure cannot become a complete empty or
+partial timeline. Source-line anchors, comment editing/deletion, thread resolution
+and comment federation are outside this append-only event type.
+
+### 20.2 Native issue assignment deltas
+
+The native issue stream uses the same aggregate version for opening, field
+edits, comments, close/reopen and assignment. Assignment is a metadata relation
+from an issue to opaque `PrincipalId` values. It does not establish that a
+principal exists, authenticate a caller, grant membership or access, change
+policy, or select a notification destination. Adapters require their existing
+repository issue-write grant; the authenticated actor remains distinct from
+the principals named in the action.
+
+The canonical owner is `fgit-forge/src/event/issue.rs`. Within the existing
+native issue event payload, required `IssueAction` tags **6** (`Assign`) and
+**7** (`Unassign`) extend tags 1–5 without changing any existing bytes. Each
+new tag is a big-endian `u32`, followed by a big-endian `u32` count and that
+many raw 16-byte principal IDs. The count is 1–16 and is checked before
+allocation. IDs must be strictly increasing in byte order; duplicates and
+noncanonical order refuse. Human-facing adapters may sort supplied IDs before
+sealing but must reject duplicates. Earlier readers refuse the unfamiliar
+required tags. New readers replay all historical issue events unchanged;
+histories without assignment events yield an empty derived assignment set.
+No historical event body or identity is rewritten.
+
+`Assign` adds only the supplied principals and preserves other assignees;
+`Unassign` removes only the supplied principals and preserves the rest. Both
+apply to open or closed issues at an exact positive predecessor version.
+Each accepted action advances the issue version even when its set operation
+leaves membership unchanged. The complete resulting set has at most 16 IDs;
+exceeding it produces `ResourceBudgetExceeded` before any partial assignment
+is published. Missing or stale issue predecessors produce `EvidenceStale`.
+Assignment does not modify title, body, labels, comment count, issue state,
+opening actor, Git refs, or policy epoch.
+
+The action, selected predecessor, issue number and authenticated actor remain
+in the ordinary sealed issue command. Exact retries recover the original
+terminal decision, including refusals; key reuse cannot replace its delta.
+The existing authority-head publication includes the issue event and outbox
+obligation atomically. Derived snapshots expose the sorted `assignees` set at
+their selected authority head, while history retains the original deltas.
+Cancellation and missing evidence cannot become partial successful snapshots.
 
 ## 21. Graph and search generations
 

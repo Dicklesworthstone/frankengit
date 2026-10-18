@@ -2,6 +2,10 @@
 import { CodeSearch } from './search.mjs';
 import { byteInput } from './search-data.mjs';
 import { sourceMode } from './search-current.mjs';
+import { mountContextControls, readContextQuery, renderSourceContext } from './search-context.mjs';
+import { mountContextVerification } from './search-context-verify.mjs';
+import { mountContextMembership } from './search-context-membership.mjs';
+import { mountContextPackage } from './search-context-package-view.mjs';
 import { decimal, fail, unhex } from './pulls-core.mjs';
 
 const indexedMode = mode => ['indexed-content', 'indexed-path'].includes(mode);
@@ -39,7 +43,7 @@ export function readQuery(document) {
   const mode = value('mode'), encoding = value('encoding');
   const raw = value('query'), prefixes = value('prefixes');
   if (mode === 'initial') return {
-    mode, termsHex: lines(raw, 32).map(line => byteInput(line, encoding, 128)),
+    ...readContextQuery(document), mode, termsHex: lines(raw, 32).map(line => byteInput(line, encoding, 128)),
     prefixesHex: prefixes === '' ? [] : lines(prefixes, 128).map(line => byteInput(line, value('prefix-encoding'), 4096)),
     symbol: value('initial-symbol-name') === '' ? null : {
       nameHex: byteInput(value('initial-symbol-name'), encoding, 128), match: value('symbol-match'),
@@ -89,19 +93,23 @@ export function mount(document, location, options = {}) {
   const get = id => document.getElementById(id);
   const element = (tag, text = '') => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (label, action) => { const el = element('button', label); el.type = 'button'; el.addEventListener('click', action); return el; };
+  const contextControls = mountContextControls(document, get('initial-controls'), () => invalidate());
+  let contextView = null, contextVerification = null, contextMembership = null, contextPackage = null;
   let work = 0, resultVersion = 0, busy = false, result = null, verified = null, downloadUrl = null, resultButtons = new Set();
   const status = message => { get('status').textContent = message; };
   function clearFile() {
     verified = null; get('file').replaceChildren();
     if (downloadUrl !== null) { urlApi.revokeObjectURL(downloadUrl); downloadUrl = null; }
   }
-  function clearResults() { resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
+  function clearResults() { contextPackage?.dispose(); contextPackage = null; contextMembership?.dispose(); contextMembership = null; contextVerification?.dispose(); contextVerification = null; contextView?.dispose(); contextView = null; resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
   function sync() {
     get('submit-search').disabled = !client.connected || busy;
     get('refresh').disabled = !client.connected || busy;
     get('cancel').disabled = !busy;
     for (const b of resultButtons) b.disabled = !client.connected || busy;
+    contextVerification?.sync(); contextMembership?.sync(); contextPackage?.sync();
     const mode = get('mode').value, regex = mode === 'regex', indexed = indexedMode(mode), symbols = mode === 'symbols', combined = mode === 'initial';
+    contextControls.sync(combined);
     const symbolEnabled = symbols || (combined && get('initial-symbol-name').value !== '');
     get('case').disabled = indexed || symbols || combined; get('max-bytes').disabled = indexed || combined;
     get('index-work').disabled = !(indexed || symbols || combined);
@@ -136,14 +144,14 @@ export function mount(document, location, options = {}) {
     if (state.indexMinimum) get('snapshot').textContent += `\nRetained index checkpoint ${state.indexMinimum.number}: ${state.indexMinimum.token}`;
   }
   function disconnect(message = 'Disconnected. Token, queries, results and source bytes discarded.') {
-    work++; busy = false; client.disconnect(); clearResults();
+    work++; busy = false; client.disconnect(); clearResults(); contextControls.reset();
     get('token').value = ''; get('query').value = ''; get('prefixes').value = ''; get('initial-symbol-name').value = ''; showPin(); sync(); status(message);
   }
   function invalidate() {
     work++; busy = false; client.discardResults(); clearResults(); sync();
     status(client.connected ? 'Query changed. Search again; the existing snapshot remains pinned.' : 'Enter a read-scoped token to begin.');
   }
-  function cancel() { work++; busy = false; client.cancel(); clearFile(); sync(); status('Read canceled. No write or retry was attempted.'); }
+  function cancel() { work++; busy = false; client.cancel(); contextVerification?.invalidate(); contextMembership?.invalidate(); contextPackage?.invalidate(); clearFile(); sync(); status('Read canceled. No write or retry was attempted.'); }
   function refresh() {
     work++; busy = false; client.refreshSnapshot(); clearResults(); showPin(); sync();
     status('Snapshot released. The next search selects current state; repository identity must still match.');
@@ -162,7 +170,7 @@ export function mount(document, location, options = {}) {
         ? get('index-source-mode')?.value === 'revalidated'
           ? 'The revalidated declaration index does not match current native source or has conflicting provenance. Ask the operator to reconcile it. No fallback or automatic retry was attempted.'
           : 'The Rust declaration index does not match this exact source snapshot. Choose Revalidate unchanged Git source explicitly for metadata-only changes, or ask the operator to refresh it. No fallback was attempted.'
-        : 'Combined retrieval requires an exact symbol source snapshot. Ask the operator to refresh the index; standalone revalidation is not a combined fallback.',
+        : 'Combined retrieval requires an exact source snapshot for symbols. Ask the operator to refresh the index; standalone revalidation is not a combined fallback.',
       source_index_uninitialized: 'No persisted source index is initialized. Ask the trusted local operator to build it. No scan or build was attempted by this page.',
       source_index_stale: 'The persisted index does not match the source selection. Release the snapshot explicitly, or ask the trusted local operator to reconcile the index. No scan fallback was attempted.',
       index_checkpoint_unavailable: 'The selected index checkpoint cannot be resolved. The operator must recover it; this page will not fall back to an older index.',
@@ -231,12 +239,33 @@ export function mount(document, location, options = {}) {
     for (const [index, group] of value.groups.entries()) region.append(renderGroup(group, index, version));
   }
   function renderInitial(value, region, version) {
+    if (value.context) {
+      contextView = renderSourceContext(document, value, { display, urlApi,
+        current: () => client.connected && !busy && version === resultVersion && result === value });
+      contextVerification = mountContextVerification(document, value, { display, urlApi,
+        current: () => client.connected && !busy && version === resultVersion && result === value,
+        verify: limits => verifySelectedContext(value, version, limits) });
+      contextMembership = mountContextMembership(document, value, { display, urlApi,
+        cryptoImpl: clientOptions.cryptoImpl ?? globalThis.crypto, timeoutMs: clientOptions.timeoutMs ?? 30000,
+        current: () => client.connected && version === resultVersion && result === value, idle: () => !busy,
+        cancelRead: () => client.cancel(),
+        acquire: (commit, limits) => client.verifyContextMembership(commit, limits),
+        run: action => runMembership(value, version, action) });
+      contextPackage = mountContextPackage(document, value, { display, urlApi,
+        cryptoImpl: clientOptions.cryptoImpl ?? globalThis.crypto, timeoutMs: clientOptions.timeoutMs ?? 30000,
+        current: () => client.connected && version === resultVersion && result === value, idle: () => !busy,
+        cancelRead: () => client.cancel(),
+        acquire: (commit, limits) => client.acquireContextPackage(commit, limits),
+        run: action => runMembership(value, version, action) });
+      contextView.element.append(contextVerification.element, contextMembership.element, contextPackage.element);
+      region.append(contextView.element); resultButtons.add(contextView.download);
+    }
     region.append(element('h2', `${value.totalHits} results across combined channels`),
       element('p', 'One native request selected one source snapshot and an exact generation vector. Channels remain separate; duplicate files across channels are not deduplicated or ranked.'),
       element('pre', `Lexical generation ${value.vector.lexical.number}: ${value.vector.lexical.token}\nSymbol generation ${value.vector.symbols ? `${value.vector.symbols.number}: ${value.vector.symbols.token}` : 'not contributed'}`),
       element('p', `${value.stats.retainedBytes}/${value.query.maxResultBytes} retained result bytes · ${value.stats.payloadBytes}/${value.query.maxPayloadBytes} successful-channel payload bytes · ${value.stats.work}/${value.query.maxWork} successful-channel work units. These counters exclude partial work from an unavailable channel.`),
       element('p', value.complete ? 'Native server reports all requested channels available and complete.'
-        : 'Combined answer is incomplete: at least one channel is unavailable or truncated. See each channel below.'),
+        : 'Combined answer is incomplete: at least one channel is unavailable, truncated or has omitted source files. See each channel below.'),
       element('p', 'This Initial response has no combined continuation. Narrow the query or increase its bounded per-channel limit. No scans, rebuilds, ranking, semantic refinement or automatic retries occur.'));
     for (const channel of ['content', 'path']) {
       const section = element('section'); section.setAttribute('aria-label', `Combined ${channel} results`);
@@ -270,9 +299,11 @@ export function mount(document, location, options = {}) {
       element('p', `${stats.declarations} indexed declarations in ${stats.files} Rust files · ${stats.unsupported} unsupported-language files · ${stats.nonRegular} non-regular entries excluded.`),
       element('p', `${stats.tables} tables / ${stats.payloadBytes} payload bytes / ${stats.work} work units. No source blobs were scanned by this query.`),
       element('p', 'Declaration classification and coverage are native-server claims, not compiler resolution. Macro expansion and cfg evaluation are not performed.'),
-      element('p', value.complete ? 'Native server reports the declaration query complete.'
+      element('p', value.complete ? (value.coverageComplete ? 'Native server reports the declaration query complete.'
+        : 'All matching declarations in the indexed Rust files are returned; source coverage is incomplete.')
         : 'Limited declaration prefix. Narrow the name, kind or path scope; this endpoint has no continuation cursor.'));
     renderSources(value, region);
+    if (!value.coverageComplete) renderOmissions(value.omissions, region, version);
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(`${hit.kind} ${hit.rawIdentifier ? 'r#' : ''}${display(unhex(hit.nameHex))} · ${display(unhex(hit.pathHex))} : ${hit.line}:${hit.column}`, () => {
@@ -284,6 +315,32 @@ export function mount(document, location, options = {}) {
       region.append(article);
     }
   }
+  function renderOmissions(omissions, region, version, lexical = false) {
+    const section = element('section'), rows = element('ul'), paging = element('nav');
+    section.setAttribute('aria-label', lexical ? 'Omitted indexed files' : 'Omitted Rust files');
+    paging.setAttribute('aria-label', 'Omitted file pages');
+    const bytes = omissions.reduce((total, entry) => total + entry.sourceBytes, 0);
+    section.append(element('h3', `${omissions.length} omitted ${lexical ? '' : 'Rust '}files · ${bytes} source bytes`),
+      element('p', lexical
+        ? 'Source coverage is incomplete. These whole files exceeded the recorded file byte limit and contributed no content or path words. Omissions cover the whole recorded corpus, independently of the words or path filter and match pagination.'
+        : 'Coverage is incomplete for the recorded Rust corpus. These whole files contributed no declarations. Omissions cover the whole recorded corpus, independently of the name or path filter and match pagination.'),
+      element('p', lexical
+        ? 'No matching indexed documents does not establish absence in omitted files. The recorded limits describe the index build, independently of this query’s file-navigation limit. Valid indexed results remain usable.'
+        : 'No matching declarations does not establish absence in omitted files. A bounded index refresh rescans them; valid results remain usable.'), rows, paging);
+    function page(at) {
+      if (version !== resultVersion || busy) return;
+      rows.replaceChildren(); paging.replaceChildren();
+      const end = Math.min(omissions.length, at + PAGE_MATCHES);
+      for (let i = at; i < end; i++) {
+        const entry = omissions[i], diagnostic = entry.offset === null ? `limit ${entry.limit} bytes` : `byte ${entry.offset}`;
+        rows.append(element('li', `${display(unhex(entry.pathHex))} · ${entry.reason.replaceAll('_', ' ')} · ${entry.sourceBytes} bytes · ${diagnostic} · native blob ${entry.blob}`));
+      }
+      if (at > 0) paging.append(button('Previous omitted files', () => page(Math.max(0, at - PAGE_MATCHES))));
+      if (end < omissions.length) paging.append(button('Next omitted files', () => page(end)));
+      paging.append(element('span', ` ${at + 1}–${end} of ${omissions.length} · local display pages; no new server request`));
+    }
+    region.append(section); page(0);
+  }
   function renderIndexed(value, region, version, openHit = openIndexed, allowNext = true) {
     const stats = value.stats;
     region.append(element('h2', `${value.hits.length} indexed documents in this page`),
@@ -291,10 +348,12 @@ export function mount(document, location, options = {}) {
       element('pre', `Queried index ${value.index.number}: ${value.index.token}\nObserved index head ${value.selectedIndex.number}: ${value.selectedIndex.token}`),
       element('p', `${stats.documents} indexed regular files · ${stats.sourceBytes} indexed source bytes · ${stats.nonRegular} non-regular entries excluded.`),
       element('p', `This page read ${stats.segments} segments / ${stats.payloadBytes} payload bytes / ${stats.generationBytes} generation bytes and used ${stats.work} native work units. This is not a live source scan.`),
-      element('p', value.complete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
+      element('p', value.complete ? (value.coverageComplete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
+        : `All matching indexed documents have been returned; ${value.seen} visited. Source coverage is incomplete.`)
         : allowNext ? `${value.seen} matching documents visited; more remain in this exact index. Fetch the next page explicitly.`
           : `${value.seen} matching documents shown; this combined channel is truncated. Narrow the query or increase its per-channel limit.`));
     renderSources(value, region);
+    if (!value.coverageComplete) renderOmissions(value.omissions, region, version, true);
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(display(unhex(hit.pathHex)), () => {
@@ -311,6 +370,12 @@ export function mount(document, location, options = {}) {
       resultButtons.add(next); region.append(next);
     }
   }
+  function indexedStatus(value) {
+    if (!value.coverageComplete) return `Indexed source coverage is incomplete: ${value.omissions.length} files omitted.${value.complete
+      ? ' Matches from indexed files are complete.' : ' More indexed documents remain; use Next indexed page.'}`;
+    return value.complete ? 'Indexed query complete according to the native server. Open a document to verify its bytes and word positions.'
+      : 'More indexed documents remain; use Next indexed page. The original generation is still pinned.';
+  }
   async function nextIndexed() {
     if (busy || result?.query.mode !== 'indexed' || result.nextAfter === null) return;
     work++; const id = work; busy = true; clearResults(); sync(); status('Reading the next page from the original source and index generation…');
@@ -318,7 +383,7 @@ export function mount(document, location, options = {}) {
       const value = await client.nextIndexed();
       if (id !== work) return;
       busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.complete ? 'Indexed query complete according to the native server.' : 'More indexed documents remain. The original generation is still pinned.');
+      status(indexedStatus(value));
     } catch (error) { errorAt(error, id); }
   }
   async function search() {
@@ -327,7 +392,9 @@ export function mount(document, location, options = {}) {
       const value = await client.search(readQuery(document));
       if (id !== work) return;
       busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable and truncated channels are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? (value.complete ? 'Indexed query complete according to the native server. Open a document to verify its bytes and word positions.' : 'More indexed documents remain; use Next indexed page.') : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
+      status(value.context ? (value.context.complete
+        ? 'Source context retrieved at one pinned snapshot. Partial excerpts are server-reported bytes, not independently verified blobs.'
+        : 'Source context is incomplete. Hydration omissions and retrieval coverage are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable channels, match truncation and omitted files are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (!value.coverageComplete ? `Declaration source coverage is incomplete: ${value.omissions.length} Rust files omitted.${value.complete ? ' Matching declarations from indexed files are complete.' : ' Matching declarations are also truncated.'}` : value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? indexedStatus(value) : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
     } catch (error) { errorAt(error, id); }
   }
   function renderFile(value) {
@@ -383,6 +450,28 @@ export function mount(document, location, options = {}) {
       region.append(element('p', `Content preview [0, ${Math.min(value.bytes.length, PREVIEW_BYTES)}). Path terms are not content matches.`),
         element('pre', display(value.bytes.subarray(0, PREVIEW_BYTES), true)));
     }
+  }
+  async function runMembership(expected, version, action) {
+    if (busy || result !== expected || version !== resultVersion) fail('The selected context changed.');
+    work++; const id = work; busy = true; clearFile(); sync();
+    const check = () => {
+      if (id !== work || version !== resultVersion || result !== expected || !client.connected) fail('Membership operation superseded.');
+    };
+    try { const answer = await action(check); check(); return answer; }
+    catch (error) { errorAt(error, id); throw error; }
+    finally { if (id === work) { busy = false; sync(); } }
+  }
+  async function verifySelectedContext(expected, version, limits) {
+    if (busy || result !== expected || version !== resultVersion) fail('The selected context changed.');
+    work++; const id = work; busy = true; clearFile(); sync();
+    status('Reading and verifying all selected context files at the original snapshot…');
+    try {
+      const receipt = await client.verifyContext(limits);
+      if (id !== work || version !== resultVersion || result !== expected) fail('Context verification superseded.');
+      busy = false; sync(); status('Complete selected context verified against its native blob identities. Repository authority and coverage remain unverified.');
+      return receipt;
+    } catch (error) { errorAt(error, id); throw error; }
+    finally { if (id === work) { busy = false; sync(); } }
   }
   async function openInitial(channel, index) {
     if (!result || result.query.mode !== 'initial' || busy) return;
