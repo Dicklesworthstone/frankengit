@@ -103,7 +103,7 @@ Neither is yet a multi-user production deployment:
 - `fg serve-http` refuses non-loopback addresses;
 - writes from the CLI and MCP carry a self-asserted principal;
 
-See the [reality snapshot](#reality-snapshot-2026-10-13). The raw
+See the [reality snapshot](#reality-snapshot-2026-10-17). The raw
 git-daemon receive lane is the composition slice the `first_push.sh` E2E suite
 exercises with a real `git` client. No command
 treats local object placement, a routing hint, or a connection-local ref map
@@ -142,116 +142,85 @@ then verifies that the authoritative tracker hash did not change. Graph scores
 remain advisory: an agent may claim a bead only when the exact ID appears in
 `br ready --unassigned --no-db --json`.
 
-### Reality snapshot: 2026-10-13
+### Reality snapshot: 2026-10-17
 
-FrankenGit has a real, bounded, pure-Rust Git node and an atomic forge core.
-Between 2026-09-23 and the 2026-09-29/30 verifier wave (`14ce0fa1`..`1fe12f4b`),
-its shipped transports and browser surfaces became substantially more
-trustworthy, and 61 more commits landed through `6deda35c` (2026-10-08/13). It
+FrankenGit has a real, bounded, pure-Rust Git node and an atomic forge core. It
 is still not a forge a team can rely on. The
 [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) binds
-this snapshot: source and executable evidence for the latest pass are taken at
-`6deda35c` (with prior baselines at `2b7f35ac` and `14ce0fa1`). Its bridge work
-is tracked under `frankengit-root-doctrine-x2mv.4`. No bridge result replaces an
-independent batch gate.
+this snapshot to source and executed evidence at `f73a3cca` (`origin/main`,
+2026-10-17) and at the landing merge that joined it with the shared checkout's
+unpushed line. Its bridge work is tracked under
+`frankengit-root-doctrine-x2mv.4`. No bridge result replaces an independent batch
+gate.
 
-- **Single-verifier deadlock and uncompiled commits on `main` (`6deda35c`).**
-  - Under decision D8, `IcyIbis` verified the 2026-09-28/29 batch at `14ce0fa1`
-    (closing 10 beads and returning 17 to `rework`). Today all **21
-    `batch_pending` beads** and the **1 `in_progress` bead** (`x2mv.4.2`) are
-    assigned to `IcyIbis`. Because `.beads/policy.yaml` sets
-    `forbid_self_close_after_in_progress: true`, `IcyIbis` cannot close its own
-    beads, and no second verifier has acted since 2026-09-29
-    (`frankengit-root-doctrine-x2mv.4.56`).
-  - After `25fd5d1c`/`1e9818c4` (2026-10-06) restored workspace compilation
-    following `10e4870f`, **30 more uncompiled commits** (`e76a8801`..`6deda35c`)
-    landed from a toolchain-less environment (`2026-10-06..08`). Commit
-    `0b9b1c85` (2026-10-07) broke `cargo check --workspace --all-targets --locked`
-    again with `E0689` in
-    `crates/fgit-node/src/source_retrieval/integrity/bundle_verify/recovery/tests.rs:109:38`,
-    left **142 files unformatted** (`cargo fmt --all -- --check`), and left 19
-    warnings in `fgit-node` (`lib`), including 15 dead-code warnings in
-    `crates/fgit-node/src/merge_delivery.rs` orphaned by `ac80fc8a`.
+- **Ten days, 249 commits, nothing verified.**
+  - 239 commits (152,198 added lines) landed on `origin/main` after `6deda35c`.
+    About 73,000 of those lines are JavaScript.
+  - 192 of the 239 messages say Rust/Cargo was not run.
+  - From 2026-10-11 (`dad1b3ff`, `dcbf4cbf`) to 2026-10-16 (`4194a463`,
+    `a3b9e94b`), 182 commits landed while `fg` did not build.
+  - Ten more commits sat unpushed in the shared checkout for four days. Three of
+    their fixes were duplicated on origin, and one of them (`da1943de`) never
+    compiled. The landing merge joins both lines and repairs them forward.
+  - No bead has closed since 2026-09-29. Verification debt is 35 of the policy's
+    hard limit of 36.
 - **Working through the `fg` binary with real clients:**
-  - raw git-daemon, SSH and smart-HTTP clone, fetch and push with stock Git,
-    over protocols v0, v1 and v2 for upload, including thin-pack fetch emission
-    (`frankengit-pazc`, `f13e9e20`), `COMPRESSED_V3` served pack planning
-    (`ac618476`), and per-ref `report-status` (`x2mv.4.49`, `87c7`);
-  - SSH key exchange with per-session entropy;
-  - stock HTTP push without extra headers, plus browser Origin/CSRF and
-    non-ambient Basic auth enforcement (`0d16039e`);
-  - continuous `fg serve`, `fg serve-ssh`, and `fg serve-http` modes that drain
-    on `SIGTERM`/`SIGINT`;
-  - deterministic outcomes for concurrent writers: one writer is admitted at a
-    time, and losers get a typed refusal;
-  - SHA-256 repositories (`fg doctor` SHA-256 sample fixed in `b1ffbc90`) and
-    `fg at` time travel;
-  - cursor-paged canonical forge event feeds over CLI (`fg events`), MCP
-    (`frankengit_events`), HTTP (`/events`), and browser (`/ui/activity/`) with
-    suffix seeking (`fdb6c37d`..`ac80fc8a`), fast-forward PR merge
-    (`3bdfc5f2`..`f1815c62`), deterministic source tar export (`ad22d89b`), and
-    native bundle verification/recovery (`fg bundle verify --recovery-head-hex`,
-    `14ce0fa1`..`898a899a`).
-
-  A permitted PR merge publishes the ref move, the PR state and the outbox entry
-  in one RCR through one head CAS. PR reopen, issues, branches, tags, safe
-  Markdown rendering (HTTP, MCP and browser), trusted-local workspaces and
-  trusted-local workflow runs also work.
+  - raw git-daemon, SSH and smart-HTTP clone, fetch and push with stock Git
+    (protocol v0/v1/v2 upload, thin packs, `COMPRESSED_V3`, per-ref
+    report-status);
+  - SHA-256 repositories, `fg at` time travel, and `fg bisect` over
+    authenticated forge history;
+  - `fg verify-read`: a ref-and-path blob proof served over loopback HTTP and
+    checked against an independently supplied head;
+  - the atomic PR merge (ref, PR state and outbox in one RCR through one head
+    CAS), squash merges, PR conversation comments, issue assignment, and
+    protection administration over MCP and HTTP;
+  - cursor-paged forge events over CLI, MCP, HTTP and browser;
+  - streaming bundle export and recovery, and a disk-spooled `fg import` up to
+    512 MiB;
+  - continuous serve modes with SIGTERM/SIGINT drain, and deterministic
+    concurrent-writer refusals;
+  - all 13 served browser pages in real Chrome.
 - **Present, but with known defects:**
-  - All 13 served browser pages pass the real-Chrome smoke suite
-    (`scripts/e2e/suites/browser/pages.sh`, `1fe12f4b` / `de463a48`), while
-    `node --test tests/browser/*.test.mjs` has **31 failing tests out of 2,508**
-    across 9 files at `6deda35c` (`frankengit-5f68`), including 6 failures on
-    `gzip, br` chained content-encoding byte limits, 17 on `search-index-view`,
-    2 on `source-patch-git`, and 1 on `bundle-recovery-filesystem`.
-  - Forge publication stops at 16,384 events, and `MAX_OUTBOX_STATE_ENTRIES =
-    16,384` remains a hard ceiling.
-  - `fg webhook dispatch` (`846a96f1`..`a6753520`) writes delivery state to a
-    local filesystem sidecar journal (`v2`) instead of calling
-    `deliver_forge_outbox_in` (`crates/fgit-node/src/treefs_workspace/outbox_delivery.rs:38`),
-    leaving canonical outbox entries unsettled and unpruned
-    (`frankengit-root-doctrine-x2mv.4.55`).
-  - Six standalone binaries (`fg-authority-backup`, `fg-repository-backup`,
-    `fg-index`, `fg-index-maintain`, `fg-index-scope`, `fg-symbol-index`) live
-    in `crates/fgit-node/src/bin/` outside the canonical `fg` CLI binary
-    (`frankengit-root-doctrine-x2mv.4.54`).
-  - Writers are serialized, one per process (`MAX_CONCURRENT_WRITERS = 1`).
-  - The policy engine fails closed. Its required-check evaluation has no
-    production caller, and a published workflow check maps `Succeeded` to
-    `ActionRequired`, so a branch that requires a check cannot be merged.
-  - Default un-revalidated search modes still serve stale index state after
-    forge writes, and no in-server index maintenance or segment GC runs in
-    `fg serve-http`.
+  - Lanes at `f73a3cca`: `verify.sh docs` fails on a broken link; the schema
+    generator refuses an undescribed `source-lexical-manifest`; rustfmt reports
+    179 files. The landing merge fixes the first two.
+  - Webhook delivery is a local sidecar journal (`"canonical_settled":false`).
+    The new fan-out extends it, and 10 of its tests fail.
+  - Squash and conflict-resolved merges fail 7 restart/recovery tests across
+    the node library, HTTP and MCP. Trusted workflow check publication fails 5
+    tests. In all, 46 of 8,959 workspace tests fail at `f73a3cca`, and the
+    product e2e lane passes 62 of 69 suites.
+  - Forge publication stops at 16,384 events, and writers are serialized (one
+    per process).
+  - Required checks never gate a merge. `evaluate_protected_ref` has no
+    production caller, and a successful trusted check is displayed "without
+    granting merge authority".
   - CLI and MCP writes carry a self-asserted principal. No transport terminates
-    TLS.
-  - `fg-mcp` implements **34** `frankengit_*` tools while
-    `crates/fgit-schema/generated/mcp_parity_manifest.json` lists **28** (only
-    16 match; 18 code-only, 12 manifest-only; `x2mv.4.17`).
-  - A native HTTP API, a stdio MCP server and a JavaScript browser shell exist.
-    They diverge from ADR-0011 and ADR-0013, pending owner decisions D1 and D2.
-    The browser and operator scripts (when `--native-fg` is omitted) still ship
-    a JavaScript Git pack/DEFLATE/delta decoder.
-- **Library-only (no production caller — 10 crates, 61,736 `src/` lines):**
-  - the agent control plane (`fgit-agent`);
-  - ATP-Git (`fgit-atp-git`);
-  - RaptorQ, repair, GC and compaction (`fgit-raptorq`, `fgit-repair`,
-    `fgit-compaction`);
-  - projections, statistics and witness refinement (`fgit-projection`,
-    `fgit-statistics`, `fgit-witness`);
-  - evidence exchange (`fgit-exchange`);
-  - the remote object-store backend (`fgit-object-store`);
-  - admission's per-core lanes and combiner;
-  - typed graph views;
-  - verified reads on a transport.
-- **Closures under review.** Several beads closed on 2026-09-22 do not meet
-  their own acceptance lines. `frankengit-root-doctrine-x2mv.4.3` requires
-  line-by-line re-verification. It remains blocked behind `x2mv.4.1` and
-  `x2mv.4.56` until a non-author verifier acts.
-- **Open scope decision.**
+    TLS, and `fg serve-http` refuses non-loopback addresses.
+  - Default search modes go stale after forge writes.
+- **A second product plane in JavaScript (237 production modules, 43,039
+  lines):**
+  - GitHub issue and PR migration exists only as Node scripts. So do most of
+    backup signing, replication, scrub and recovery, source-authoring
+    workspaces, and the workflow supervisor.
+  - Their tests run against stand-in "native-schema" peers rather than a live
+    `fg`, and no lane runs them. Their failures move with the Node version (13
+    failing tests on Node 22.22.1, 240 on 22.2.0), and no version is pinned.
+  - A hand-written JavaScript pack/DEFLATE/delta/idx engine is served by `fg`.
+    It is the default bundle verifier and recovery engine.
+  - The constitution assigns Git semantics to Rust. No ADR or registry row
+    admits this plane. Owner decisions D2 (browser) and the new D10 (operator
+    plane) are open.
+- **Library-only (no production caller): 10 crates, 61,736 `src/` lines** —
+  `fgit-agent`, `fgit-atp-git`, `fgit-raptorq`, `fgit-repair`,
+  `fgit-compaction`, `fgit-projection`, `fgit-statistics`, `fgit-witness`,
+  `fgit-exchange`, `fgit-object-store`. Admission's per-core lanes and combiner,
+  and the typed graph views, are also unused.
+- **Open scope decisions.**
   [Plan §4.2.1](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#421-unresolved-10-scope-contradiction)
-  records the unresolved merge-queue/package 1.0 scope contradiction. The
-  settled D14 licence remains `LicenseRef-MIT-OpenAI-Anthropic-Rider`, which is
-  not OSI-approved open source.
+  records the merge-queue/package 1.0 contradiction. Owner decisions D1–D11 are
+  collected in `frankengit-root-doctrine-x2mv.4.14`.
 
 
 The claims registry remains the public proof boundary. Its verified rows cover
@@ -502,7 +471,7 @@ Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
 heuristic over mutable tables. `fg at <decision>` will open a complete read-only
 forge snapshot, and bisection will generalize from commits to forge state.
-The [dated reality snapshot](#reality-snapshot-2026-09-27) above identifies the
+The [dated reality snapshot](#reality-snapshot-2026-10-17) above identifies the
 bounded implementation and its historical evidence. It records history loading,
 two-ended diff projection, consistency checks, and binary rendering as landed.
 The remaining historical projection work requires non-empty durable-history
