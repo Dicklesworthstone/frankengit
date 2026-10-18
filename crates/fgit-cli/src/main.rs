@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod artifact_command;
 mod bisect_command;
 mod branches;
 mod bundle;
@@ -52,6 +53,12 @@ fn main() -> ExitCode {
 }
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "artifact")
+    {
+        return ExitCode::from(artifact_command::run(&arguments[1..]));
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "bisect")

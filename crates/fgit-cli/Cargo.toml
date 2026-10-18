@@ -23,6 +23,7 @@ fgit-crypto.workspace = true
 fgit-forge.workspace = true
 fgit-identity.workspace = true
 fgit-node.workspace = true
+fgit-object-fabric.workspace = true
 fgit-schema.workspace = true
 fgit-ssh.workspace = true
 fgit-types.workspace = true

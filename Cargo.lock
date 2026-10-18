@@ -738,6 +738,7 @@ dependencies = [
  "fgit-forge",
  "fgit-identity",
  "fgit-node",
+ "fgit-object-fabric",
  "fgit-pack",
  "fgit-schema",
  "fgit-ssh",
