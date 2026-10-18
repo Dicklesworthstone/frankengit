@@ -1,10 +1,12 @@
-# Explicit current-source symbol-index reads
+# Current-source symbol-index reads
 
-The existing `POST /api/v1/source/search-symbols-index` endpoint accepts
+The existing `POST /api/v1/source/search-symbols-index` endpoint defaults to
 `source_mode=revalidated`. It reuses a persisted Rust declaration index after
 repository-metadata changes only when the selected native Git commit and root
-tree still match. Omitting the field, or using `source_mode=exact`, retains the
-strict source-snapshot read and its existing response format.
+tree still match. Sending `source_mode=exact` selects the strict source-snapshot
+read and its existing response format. Clients requiring the original flat
+receipt must explicitly send that field; an omitted field selects the wrapper
+described below.
 
 ```bash
 curl --fail-with-body \
@@ -40,14 +42,14 @@ the independently selected symbol generation. A client navigating from results
 must use `current_source` for current-source pins. A query's result ordering,
 case-sensitive name semantics and lack of a symbol continuation cursor do not
 change. Combined Initial retrieval remains strict; standalone lexical and
-symbol revalidation are separate explicit choices, not combined fallbacks.
+symbol revalidation use their own selected profiles, not combined fallbacks.
 
 ## Browser use
 
-On the code-search page, choose **Rust declarations (indexed)** and select
-**Revalidate unchanged Git source** under **Indexed source**. Enter an exact
-or prefix declaration name and optional kind/path filters, then submit. Strict
-mode is still the default. This requires an already-built symbol index and the
+On the code-search page, choose **Rust declarations (indexed)**. **Current Git
+source** is selected under **Indexed source** by default. Enter an exact
+or prefix declaration name and optional kind/path filters, then submit. **Exact
+index snapshot (strict)** remains available. This requires an already-built symbol index and the
 same source-read token and service enablement as strict declaration search.
 
 The client validates the complete wrapper, both provenance records and the

@@ -14,6 +14,7 @@ for (const algorithm of ['sha1', 'sha256']) {
     const f = fixture(algorithm), c = await connect(f), q = input(), first = await c.search(q);
     q.termsHex[0] = hex('else'); first.query.termsHex[0] = hex('else'); first.index.token = 'bad';
     assert.equal(f.calls.length, 1); assert.equal(c.state.result.complete, false);
+    assert.equal(f.calls[0].params.get('source_mode'), 'exact');
     assert.deepEqual(f.calls[0].params.getAll('term_hex'), [hex('alpha'), hex('beta')]);
     assert.equal(f.calls[0].headers['idempotency-key'], undefined);
     assert.equal(f.calls[0].headers.authorization, `Bearer ${token}`);
@@ -21,6 +22,7 @@ for (const algorithm of ['sha1', 'sha256']) {
     // The current index head may advance; the queried immutable index may not.
     f.config.selected = { token: `alg:2:${'6'.repeat(64)}`, number: 8 };
     const second = await c.nextIndexed(), p = f.calls.at(-1).params;
+    assert.equal(p.get('source_mode'), 'exact');
     assert.equal(second.hits[0].documentId, 2); assert.equal(second.index.token, f.index.token);
     for (const [key, value] of Object.entries({ expected_head: f.common.snapshot_token, expected_commit: f.common.source_commit,
       index_token: f.index.token, index_number: '7', after: '1', minimum_index_token: f.index.token, minimum_index_number: '7' })) assert.equal(p.get(key), value);

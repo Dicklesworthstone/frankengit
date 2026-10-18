@@ -169,7 +169,7 @@ export function mount(document, location, options = {}) {
       symbol_index_stale: get('mode').value === 'symbols'
         ? get('index-source-mode')?.value === 'revalidated'
           ? 'The revalidated declaration index does not match current native source or has conflicting provenance. Ask the operator to reconcile it. No fallback or automatic retry was attempted.'
-          : 'The Rust declaration index does not match this exact source snapshot. Choose Revalidate unchanged Git source explicitly for metadata-only changes, or ask the operator to refresh it. No fallback was attempted.'
+          : 'The Rust declaration index does not match this exact source snapshot. Choose Current Git source for metadata-only changes, or ask the operator to refresh it. No fallback was attempted.'
         : 'Combined retrieval requires an exact source snapshot for symbols. Ask the operator to refresh the index; standalone revalidation is not a combined fallback.',
       source_index_uninitialized: 'No persisted source index is initialized. Ask the trusted local operator to build it. No scan or build was attempted by this page.',
       source_index_stale: 'The persisted index does not match the source selection. Release the snapshot explicitly, or ask the trusted local operator to reconcile the index. No scan fallback was attempted.',

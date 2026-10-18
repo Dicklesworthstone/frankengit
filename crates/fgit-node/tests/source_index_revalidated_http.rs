@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! Real TCP requests, native imported trees and persisted index generations.
-//! Explicit revalidation is not permission to bypass the source gateway.
+//! Default current-source revalidation cannot bypass the source gateway.
 #[path = "source_http/support.rs"]
 mod support;
 use fgit_graph::GenerationActivation;
@@ -36,10 +36,7 @@ fn index_token(activation: &GenerationActivation) -> String {
     )
 }
 fn form(format: GitHashAlgorithm) -> String {
-    format!(
-        "{}&term_hex=6e6565646c65&source_mode=revalidated",
-        common(format)
-    )
+    format!("{}&term_hex=6e6565646c65", common(format))
 }
 fn issue(client: &Endpoint, number: u64) -> Reply {
     let body = b"expected_version=0&title=Metadata+only&body=does+not+change+Git";
@@ -58,6 +55,23 @@ fn issue(client: &Endpoint, number: u64) -> Reply {
         true,
     )
 }
+fn comment(client: &Endpoint, number: u64) -> Reply {
+    let body = b"expected_version=1&body=Search+must+survive+an+issue+comment";
+    exchange(
+        client,
+        &request(
+            client,
+            &format!("/api/v1/issues/{number}/comment"),
+            'b',
+            &format!(
+                "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: default-search-comment-{number}\r\n",
+                body.len(),
+            ),
+            body,
+        ),
+        true,
+    )
+}
 fn nested<'a>(body: &'a str, field: &str) -> &'a str {
     body.split_once(&format!("\"{field}\":{{"))
         .unwrap()
@@ -68,7 +82,7 @@ fn nested<'a>(body: &'a str, field: &str) -> &'a str {
 }
 
 #[test]
-fn authenticated_http_reuses_index_after_metadata_writes_without_rewriting_provenance() {
+fn default_http_reuses_index_after_metadata_writes_without_rewriting_provenance() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
         let config = root.config(format);
@@ -77,14 +91,15 @@ fn authenticated_http_reuses_index_after_metadata_writes_without_rewriting_prove
         let activation = build(&node, None);
         let credentials_path = root.0.join("credentials");
         credentials(&node, &credentials_path);
-        let server = Server::start(node, &credentials_path, 6, true, true);
-        let strict = format!("{}&term_hex=6e6565646c65", common(format));
+        let server = Server::start(node, &credentials_path, 7, true, true);
+        let strict = form(format) + "&source_mode=exact";
         let before = post(&server.client, "search-index", 'a', &strict, false);
         status(&before, 200);
         let same = post(&server.client, "search-index", 'a', &form(format), true);
         status(&same, 200);
         assert!(same.body.contains("\"distinct_provenance\":false"));
         status(&issue(&server.client, 1), 200);
+        status(&comment(&server.client, 1), 200);
         let stale = post(&server.client, "search-index", 'a', &strict, false);
         status(&stale, 409);
         assert!(stale.body.contains("source_index_stale"));
@@ -124,7 +139,7 @@ fn authenticated_http_reuses_index_after_metadata_writes_without_rewriting_prove
             "search-index",
             'a',
             &format!(
-                "{}&source_mode=revalidated&channel=path&term_hex=646174",
+                "{}&channel=path&term_hex=646174",
                 common(format),
             ),
             false,
@@ -132,9 +147,9 @@ fn authenticated_http_reuses_index_after_metadata_writes_without_rewriting_prove
         status(&path, 200);
         assert_eq!(number(&path.body, "returned_hits"), 1);
         assert!(path.body.contains(&hex(BINARY_PATH)));
-        assert_eq!(server.finish().accepted_sessions(), 6);
+        assert_eq!(server.finish().accepted_sessions(), 7);
         let node = reopen(&config);
-        assert_eq!(generation(&node), generation_before + 1);
+        assert_eq!(generation(&node), generation_before + 2);
         let reference = reference();
         let query = LexicalQuery::new(LexicalChannel::Content, &[b"needle".to_vec()], &[]).unwrap();
         let after = node
@@ -146,7 +161,7 @@ fn authenticated_http_reuses_index_after_metadata_writes_without_rewriting_prove
             .unwrap();
         assert_eq!(after.index().generation, activation);
         assert_eq!(after.current_source().commit, commit);
-        assert_eq!(generation(&node), generation_before + 1);
+        assert_eq!(generation(&node), generation_before + 2);
         node.shutdown().unwrap();
     }
 }

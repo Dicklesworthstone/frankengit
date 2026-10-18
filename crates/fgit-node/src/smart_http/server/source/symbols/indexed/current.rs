@@ -9,7 +9,7 @@ pub(super) enum SourceMode {
 }
 impl SourceMode {
     pub(super) fn parse(value: Option<&str>) -> Result<Self, ApiError> {
-        match value.unwrap_or("exact") {
+        match value.unwrap_or("revalidated") {
             "exact" => Ok(Self::Exact),
             "revalidated" => Ok(Self::Revalidated),
             _ => Err(ApiError::bad("unsupported_symbol_source_mode")),
@@ -121,7 +121,7 @@ mod tests {
     const FORM: &str = "object_format=sha1&ref=refs/heads/main&name_hex=5468696e67";
 
     #[test]
-    fn strict_is_the_default_and_revalidation_is_never_an_error_fallback() {
+    fn current_source_is_the_default_and_exact_remains_an_explicit_contract() {
         let (_, _, default) = indexed_command(FORM.as_bytes(), GitHashAlgorithm::Sha1).unwrap();
         let (_, _, exact) = indexed_command(
             (FORM.to_owned() + "&source_mode=exact").as_bytes(),
@@ -133,8 +133,8 @@ mod tests {
             GitHashAlgorithm::Sha1,
         )
         .unwrap();
-        assert_eq!(default, SourceMode::Exact);
-        assert_eq!(exact, default);
+        assert_eq!(default, SourceMode::Revalidated);
+        assert_eq!(exact, SourceMode::Exact);
         assert_eq!(current, SourceMode::Revalidated);
     }
 

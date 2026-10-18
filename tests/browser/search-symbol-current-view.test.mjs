@@ -7,8 +7,8 @@ import { symbolQuery, initialQuery } from '../../crates/fgit-node/src/smart_http
 import { dom, tick } from './search-dom-fixture.mjs';
 import { currentFixture, currentTransport, token, href, hex, response, deferred, webcrypto } from './search-symbol-current-fixtures.mjs';
 
-async function setup(f = currentFixture(), intercept, options = {}) {
-  const page = dom(), wire = currentTransport(f, intercept);
+async function setup(f = currentFixture(), intercept, options = {}, usePageDefaults = false) {
+  const page = dom({ usePageDefaults }), wire = currentTransport(f, intercept);
   const ui = mount(page.document, { href }, { ...wire.options, urlApi: page.urlApi, ...options });
   page.get('token').value = token; page.get('format').value = f.source.object_format;
   await ui.connect();
@@ -24,12 +24,12 @@ const clear = p => {
   assert.equal(p.get('results').textContent, ''); assert.equal(p.get('file').textContent, ''); assert.equal(p.urls.size, 0);
 };
 
-test('source selection defaults to strict and is available only for standalone indexes', async () => {
-  const p = await setup();
-  assert.equal(p.get('index-source-mode').value, 'exact');
+test('source selection defaults to current Git source and is available only for standalone indexes', async () => {
+  const p = await setup(undefined, undefined, {}, true);
+  assert.equal(p.get('index-source-mode').value, 'revalidated');
   assert.equal(p.get('index-source-mode').disabled, false); assert.equal(p.get('index-source-help').hidden, false);
-  assert.equal(symbolQuery(readQuery(p.document)).sourceMode, undefined);
-  p.revalidate(); p.get('case').value = 'ascii-insensitive';
+  assert.equal(symbolQuery(readQuery(p.document)).sourceMode, 'revalidated');
+  p.get('case').value = 'ascii-insensitive';
   assert.equal(symbolQuery(readQuery(p.document)).sourceMode, 'revalidated');
   assert.equal(p.get('case').disabled, true); assert.equal(p.get('index-payload').disabled, true);
   for (const mode of ['literal', 'batch', 'regex', 'initial', 'indexed-content', 'indexed-path', 'symbols']) {
@@ -58,10 +58,10 @@ test('the form preserves raw paths and case-sensitive declaration filters in rev
   assert.equal(p.calls[0].options.headers['Idempotency-Key'], undefined); p.ui.disconnect();
 });
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: submitted form and result button navigate current source before verified download`, async () => {
+  test(`${format}: default form and result button navigate current source before verified download`, async () => {
     const f = currentFixture(format, { name: 'type', raw: true, prefix: '// file\n' + '\n'.repeat(65536),
-      path: Buffer.from('src/<img>\x1b\xff.rs', 'latin1') }), p = await setup(f);
-    p.revalidate(); assert.equal(p.get('search-form').emit('submit').defaultPrevented, true);
+      path: Buffer.from('src/<img>\x1b\xff.rs', 'latin1') }), p = await setup(f, undefined, {}, true);
+    assert.equal(p.get('search-form').emit('submit').defaultPrevented, true);
     await until(() => p.buttons('results').length === 1);
     const output = p.get('results').textContent;
     for (const text of [f.current.snapshot_token, f.current.source_rcr, f.current.forge_position_root,
@@ -83,7 +83,7 @@ for (const format of ['sha1', 'sha256']) {
 }
 test('strict success and same-source revalidation keep honest distinctness labels', async () => {
   const f = currentFixture(); Object.assign(f.current, f.indexed); const p = await setup(f);
-  await p.ui.search(); assert.equal(p.calls[0].fields.has('source_mode'), false);
+  await p.ui.search(); assert.equal(p.calls[0].fields.get('source_mode'), 'exact');
   assert.equal(p.get('results').textContent.includes('Current source snapshot'), false);
   p.revalidate(); await p.ui.search();
   assert.match(p.get('results').textContent, /at its original source snapshot/);
@@ -137,14 +137,14 @@ test('page exit clears private provenance, checkpoints, query text and live down
   await p.ui.search(); assert.equal(p.calls.length, 2);
 });
 test('stale diagnosis is mode-specific, with no retry, scan, or empty successful view', async () => {
-  for (const [mode, source, pattern] of [['symbols', 'exact', /Choose Revalidate unchanged Git source explicitly/],
+  for (const [mode, source, pattern] of [['symbols', 'exact', /Choose Current Git source/],
     ['symbols', 'revalidated', /conflicting provenance/], ['initial', 'revalidated', /Combined retrieval requires an exact/]]) {
     const p = await setup(undefined, () => response({ error: 'symbol_index_stale', message: '<img>' }, 409));
     p.get('mode').value = mode; p.get('index-source-mode').value = source;
     if (mode === 'initial') p.get('initial-symbol-name').value = 'Thing';
     p.get('mode').emit('change'); await p.ui.search(); clear(p);
     assert.match(p.get('status').textContent, pattern); assert.equal(p.get('status').textContent.includes('<img>'), false);
-    assert.equal(p.calls.length, 1); assert.equal(p.calls[0].fields.get('source_mode'), mode === 'symbols' && source === 'revalidated' ? 'revalidated' : null);
+    assert.equal(p.calls.length, 1); assert.equal(p.calls[0].fields.get('source_mode'), mode === 'symbols' ? source : null);
     p.ui.disconnect();
   }
 });

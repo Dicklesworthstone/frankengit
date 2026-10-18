@@ -252,7 +252,7 @@ fn refresh_after_forge_only_write_restores_http_queries_without_reading_source_b
         &server.client,
         "search-index",
         'a',
-        &(common(GitHashAlgorithm::Sha1) + "&term_hex=6e6565646c65"),
+        &(common(GitHashAlgorithm::Sha1) + "&term_hex=6e6565646c65&source_mode=exact"),
         true,
     );
     status(&response, 200);

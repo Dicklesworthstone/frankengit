@@ -147,7 +147,11 @@ fn symbols(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid) {
     (node, commit)
 }
 fn form(format: GitHashAlgorithm) -> String {
-    format!("{}&name_hex={}&match=prefix", common(format), hex(b"Thing"))
+    format!(
+        "{}&name_hex={}&match=prefix&source_mode=exact",
+        common(format),
+        hex(b"Thing")
+    )
 }
 
 #[test]
@@ -830,7 +834,7 @@ fn authenticated_http_reports_whole_corpus_omissions_separately_from_match_limit
             &server.client,
             "search-symbols-index",
             'a',
-            &(input + "&source_mode=revalidated"),
+            &input.replace("source_mode=exact", "source_mode=revalidated"),
             false,
         );
         status(&current, 200);

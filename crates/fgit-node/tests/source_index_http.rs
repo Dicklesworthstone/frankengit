@@ -21,7 +21,7 @@ fn build(node: &OneNode, predecessor: Option<&GenerationActivation>) -> Generati
         .1
 }
 fn form(format: GitHashAlgorithm) -> String {
-    format!("{}&term_hex=6e6565646c65", common(format))
+    format!("{}&term_hex=6e6565646c65&source_mode=exact", common(format))
 }
 fn index_token(activation: &GenerationActivation) -> String {
     let id = activation.generation_id.as_internal_object_id();
@@ -79,7 +79,7 @@ fn authenticated_http_reports_omissions_across_pages_revalidation_and_initial_ch
             &server.client,
             "search-index",
             'a',
-            &(form(format) + "&source_mode=revalidated"),
+            &form(format).replace("source_mode=exact", "source_mode=revalidated"),
             true,
         );
         status(&revalidated, 200);
@@ -116,7 +116,13 @@ fn authenticated_http_reports_omissions_across_pages_revalidation_and_initial_ch
             rest.body.split_once("\"omissions\":").unwrap().1,
             first.body.split_once("\"omissions\":").unwrap().1
         );
-        let initial = post(&server.client, "search-initial", 'a', &form(format), false);
+        let initial = post(
+            &server.client,
+            "search-initial",
+            'a',
+            &format!("{}&term_hex=6e6565646c65", common(format)),
+            false,
+        );
         status(&initial, 200);
         assert!(
             initial
@@ -373,7 +379,7 @@ fn index_missing_and_disabled_are_not_complete_empty_results() {
     node.shutdown().unwrap();
 }
 #[test]
-fn forge_only_publication_returns_stale_not_implicit_rebuild_over_http() {
+fn explicit_exact_mode_refuses_forge_only_publication_without_an_implicit_rebuild() {
     let root = Scratch::new();
     let config = root.config(GitHashAlgorithm::Sha1);
     let (node, _) = fixture(&root, GitHashAlgorithm::Sha1);

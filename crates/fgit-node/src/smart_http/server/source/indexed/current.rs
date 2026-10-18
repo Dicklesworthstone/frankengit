@@ -1,4 +1,4 @@
-//! Explicit HTTP revalidation over the existing native reader, not a fallback.
+//! Current-source HTTP revalidation over the existing native reader.
 //! Authentication, source-read enablement, route binding and idempotency-key
 //! refusal remain in the source gateway and run before request body intake.
 
@@ -18,8 +18,8 @@ pub(super) enum SourceMode {
 impl SourceMode {
     pub(super) fn parse(value: Option<&str>) -> Result<Self, ApiError> {
         match value {
-            None | Some("exact") => Ok(Self::Exact),
-            Some("revalidated") => Ok(Self::Revalidated),
+            Some("exact") => Ok(Self::Exact),
+            None | Some("revalidated") => Ok(Self::Revalidated),
             _ => Err(ApiError::bad("invalid_index_source_mode")),
         }
     }

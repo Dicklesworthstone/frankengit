@@ -15,7 +15,7 @@ test('names retain case and kinds and byte scopes are copied, sorted and dedupli
   assert.equal(q.nameHex, hex('Thing')); assert.deepEqual(q.kinds, ['function', 'struct']); assert.deepEqual(q.prefixesHex, [hex('src')]);
   const fields = new URLSearchParams(symbolCommand(selected('sha256'), { head: 'pin', commit: 'commit' }, q, { token: 'symbol', number: 3 }));
   assert.deepEqual(fields.getAll('kind'), q.kinds); assert.equal(fields.get('expected_head'), 'pin');
-  assert.equal(fields.get('minimum_index_token'), 'symbol'); assert.equal(fields.has('source_mode'), false); assert.equal(fields.has('after'), false);
+  assert.equal(fields.get('minimum_index_token'), 'symbol'); assert.equal(fields.get('source_mode'), 'exact'); assert.equal(fields.has('after'), false);
 });
 test('unsupported grammar, privilege fields and wrong limit boundaries refuse before I/O', () => {
   const f = fixture();

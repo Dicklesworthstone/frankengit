@@ -86,7 +86,7 @@ test('omitted files are escaped, visibly incomplete and locally paged without so
 test('stale index diagnosis does not release pins, rebuild, retry or present an empty result', async () => {
   let stale = false; const p = await setup(fixture(), () => stale ? response({ error: 'symbol_index_stale', message: '<img>' }, 409) : null);
   await p.ui.search(); const pin = p.get('snapshot').textContent; stale = true; await p.ui.search();
-  assert.match(p.get('status').textContent, /Choose Revalidate unchanged Git source explicitly/);
+  assert.match(p.get('status').textContent, /Choose Current Git source/);
   assert.equal(p.get('status').textContent.includes('<img>'), false); assert.equal(p.get('results').textContent, '');
   assert.equal(p.get('snapshot').textContent, pin); assert.equal(p.calls.length, 2);
   p.ui.refresh(); assert.match(p.get('snapshot').textContent, /Retained symbol checkpoint/); p.ui.disconnect();
@@ -112,7 +112,8 @@ test('disconnect during file navigation discards pending verification and all cr
 });
 test('all browser imports remain in the existing native static-asset allowlist', () => {
   const base = new URL('../../crates/fgit-node/src/smart_http/server/browser/', import.meta.url);
-  const allowed = new Set(['search.mjs', 'search-view.mjs', 'search-data.mjs', 'search-index.mjs', 'search-current.mjs', 'pulls-core.mjs']);
+  const allowed = new Set(['search.mjs', 'search-view.mjs', 'search-data.mjs', 'search-index.mjs', 'search-current.mjs', 'pulls-core.mjs',
+    'search-context.mjs', 'search-context-verify.mjs', 'search-context-membership.mjs', 'search-context-package.mjs', 'search-context-package-view.mjs']);
   for (const name of allowed) {
     const code = readFileSync(new URL(name, base), 'utf8');
     for (const match of code.matchAll(/from '\.\/([^']+)'/g)) assert.ok(allowed.has(match[1]), match[1]);

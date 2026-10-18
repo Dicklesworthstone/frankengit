@@ -22,7 +22,7 @@ function fixture(format = 'sha1') {
 
 const parse = f => currentSources(f.reply, f.source);
 
-test('default stays exact; revalidation requires a closed explicit mode', () => {
+test('legacy query objects keep their exact profile and source modes stay closed', () => {
   assert.equal(sourceMode(undefined), 'exact');
   assert.equal(sourceMode('exact'), 'exact');
   assert.equal(sourceMode('revalidated'), 'revalidated');

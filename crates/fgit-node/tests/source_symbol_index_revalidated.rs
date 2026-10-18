@@ -117,6 +117,23 @@ fn issue(client: &Endpoint) -> Reply {
         true,
     )
 }
+fn comment(client: &Endpoint) -> Reply {
+    let body = b"expected_version=1&body=An+issue+comment+does+not+change+declarations";
+    exchange(
+        client,
+        &request(
+            client,
+            "/api/v1/issues/1/comment",
+            'b',
+            &format!(
+                "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: default-symbol-comment\r\n",
+                body.len(),
+            ),
+            body,
+        ),
+        true,
+    )
+}
 fn metadata(node: OneNode, root: &Scratch, format: GitHashAlgorithm) -> OneNode {
     let path = root.0.join("credentials");
     credentials(&node, &path);
@@ -190,6 +207,87 @@ fn changed_native_commit_refuses_reuse_without_rebuilding() {
     ));
     assert_eq!(generation(&node), before);
     node.shutdown().unwrap();
+}
+
+#[test]
+fn default_indexed_http_refuses_changed_source_until_each_index_is_refreshed() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, original, symbols) = setup(&root, format);
+        let (_, lexical) = node
+            .runtime()
+            .block_on(node.build_source_index_local_in(
+                &node.outbox_delivery_context(),
+                &reference(),
+                None,
+                Some(original.commit),
+                None,
+                Default::default(),
+            ))
+            .unwrap();
+        let changed = add_file(&node, original.commit, "extra.rs", b"default-search-source-change");
+        let canonical = generation(&node);
+        let path = root.0.join("credentials");
+        credentials(&node, &path);
+        let server = Server::start(node, &path, 4, true, false);
+        let lexical_form = format!("{}&term_hex={}", common(format), hex(b"Thing"));
+        let symbol_form = format!("{}&name_hex={}&match=prefix", common(format), hex(b"Thing"));
+        for (operation, body, stale_code) in [
+            ("search-index", &lexical_form, "source_index_stale"),
+            ("search-symbols-index", &symbol_form, "symbol_index_stale"),
+        ] {
+            for mode in ["", "&source_mode=exact"] {
+                let stale = post(&server.client, operation, 'a', &(body.clone() + mode), false);
+                status(&stale, 409);
+                assert!(stale.body.contains(stale_code));
+                assert!(!stale.body.contains("\"hits\"") && !stale.body.contains("\"matches\""));
+            }
+        }
+        assert_eq!(server.finish().accepted_sessions(), 4);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), canonical);
+        node.runtime()
+            .block_on(node.build_source_index_local_in(
+                &node.outbox_delivery_context(),
+                &reference(),
+                None,
+                Some(changed),
+                Some(lexical.generation_id),
+                Default::default(),
+            ))
+            .unwrap();
+        node.runtime()
+            .block_on(node.build_source_symbol_index_local_in(
+                &node.outbox_delivery_context(),
+                &reference(),
+                None,
+                Some(changed),
+                Some(symbols.generation_id),
+                Default::default(),
+            ))
+            .unwrap();
+        let server = Server::start(node, &path, 2, true, false);
+        for (operation, body, kind, count) in [
+            ("search-index", &lexical_form, "source_search_index_current", "returned_hits"),
+            (
+                "search-symbols-index",
+                &symbol_form,
+                "source_search_symbols_index_revalidated",
+                "returned_matches",
+            ),
+        ] {
+            let current = post(&server.client, operation, 'a', body, true);
+            status(&current, 200);
+            assert_eq!(text(&current.body, "type"), kind);
+            assert_eq!(text(&current.body, "source_commit"), changed.to_string());
+            assert_eq!(number(&current.body, count), 2);
+        }
+        assert_eq!(server.finish().accepted_sessions(), 2);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), canonical);
+        node.shutdown().unwrap();
+    }
 }
 
 #[test]
@@ -291,25 +389,33 @@ fn missing_indexes_and_existing_read_limits_never_trigger_fallback() {
 }
 
 #[test]
-fn authenticated_http_revalidation_is_explicit_and_keeps_both_source_identities() {
+fn default_http_revalidates_after_issue_comments_and_keeps_both_source_identities() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
         let (node, original, activation) = setup(&root, format);
         let path = root.0.join("credentials");
         let header = credentials(&node, &path);
         let before = generation(&node);
-        let server = Server::start(node, &path, 10, true, true);
+        let server = Server::start(node, &path, 12, true, true);
         let body = format!("{}&name_hex={}&match=prefix", common(format), hex(b"Thing"));
-        let strict = post(&server.client, "search-symbols-index", 'a', &body, false);
+        let exact = body.clone() + "&source_mode=exact";
+        let strict = post(&server.client, "search-symbols-index", 'a', &exact, false);
         status(&strict, 200);
+        let initial = post(&server.client, "search-symbols-index", 'a', &body, true);
+        status(&initial, 200);
+        assert_eq!(
+            initial.body.split_once("\"result\":").unwrap().1.strip_suffix('}').unwrap(),
+            strict.body
+        );
         status(&issue(&server.client), 200);
-        let stale = post(&server.client, "search-symbols-index", 'a', &body, false);
+        status(&comment(&server.client), 200);
+        let stale = post(&server.client, "search-symbols-index", 'a', &exact, false);
         status(&stale, 409);
         let revalidated = post(
             &server.client,
             "search-symbols-index",
             'a',
-            &(body.clone() + "&source_mode=revalidated"),
+            &body,
             true,
         );
         status(&revalidated, 200);
@@ -354,7 +460,7 @@ fn authenticated_http_revalidation_is_explicit_and_keeps_both_source_identities(
             false,
         );
         status(&invalid, 400);
-        let selected_form = body + "&source_mode=revalidated";
+        let selected_form = body;
         let mutation_key = request(
             &server.client,
             "/api/v1/source/search-symbols-index",
@@ -387,9 +493,9 @@ fn authenticated_http_revalidation_is_explicit_and_keeps_both_source_identities(
             ),
             401,
         );
-        assert_eq!(server.finish().accepted_sessions(), 10);
+        assert_eq!(server.finish().accepted_sessions(), 12);
         let node = reopen(&root.config(format));
-        assert_eq!(generation(&node), before + 1);
+        assert_eq!(generation(&node), before + 2);
         let (_, report) = current(&node, Some(&activation), data::MAX_INDEX_BYTES).unwrap();
         assert_eq!(report.source, original);
         node.shutdown().unwrap();

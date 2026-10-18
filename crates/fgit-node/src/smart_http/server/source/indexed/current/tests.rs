@@ -51,12 +51,12 @@ fn source(seed: u8) -> LexicalSource {
 }
 
 #[test]
-fn explicit_modes_preserve_default_and_reject_unknown_or_duplicate_selection() {
+fn default_revalidates_current_source_and_exact_remains_explicit() {
     let parse = |extra: &str| {
         let bytes = [form(), extra.as_bytes()].concat();
         command(&bytes, GitHashAlgorithm::Sha1)
     };
-    assert_eq!(parse("").unwrap().source_mode, SourceMode::Exact);
+    assert_eq!(parse("").unwrap().source_mode, SourceMode::Revalidated);
     assert_eq!(
         parse("&source_mode=exact").unwrap().source_mode,
         SourceMode::Exact

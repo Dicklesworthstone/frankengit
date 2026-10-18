@@ -179,5 +179,6 @@ test('HTML controls and source-gated import graph match the mounted module witho
     for (const m of source.matchAll(/from '\.\/(.*?)'/g)) await walk(m[1]);
   }
   await walk('search-view.mjs');
-  assert.deepEqual([...visited].sort(), ['pulls-core.mjs', 'search-current.mjs', 'search-data.mjs', 'search-index.mjs', 'search-view.mjs', 'search.mjs'].sort());
+  assert.deepEqual([...visited].sort(), ['pulls-core.mjs', 'search-context.mjs', 'search-context-verify.mjs', 'search-context-membership.mjs',
+    'search-context-package.mjs', 'search-context-package-view.mjs', 'search-current.mjs', 'search-data.mjs', 'search-index.mjs', 'search-view.mjs', 'search.mjs'].sort());
 });

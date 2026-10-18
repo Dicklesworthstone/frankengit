@@ -74,6 +74,7 @@ Optional fields:
 
 | Field | Contract |
 |---|---|
+| `source_mode` | `revalidated` (default) checks current source visibility and reuses the index only for the same namespace, ref, native commit and root tree. `exact` also requires the original repository head/RCR/forge position and retains the original response profile. |
 | `channel` | `content` (default) or `path`; the same channel applies to every term. |
 | Repeated `path_prefix_hex` | Up to 128 TreeFS-valid raw path prefixes, 4096 bytes each and 32 KiB combined; slash-component matching. |
 | `expected_head`, `expected_commit` | Exact canonical source snapshot token and complete nonzero native commit ID. |
@@ -103,8 +104,16 @@ Source service grants are whole-repository reads, not sparse agent capabilities.
 
 ## Responses and continuation
 
-`type: source_search_index`, `schema_version: 1`, and
-`profile: ascii-word-postings-v1` identify the response. It carries the repository
+The default response uses `type: source_search_index_current` and
+`profile: source-lexical-revalidated-v1`. It preserves `current_source` and
+`indexed_source` separately: the original index provenance is never relabelled.
+Index numbers, document IDs and continuation IDs use canonical decimal strings
+in this profile. A client continuing a query repeats its selected source mode.
+
+An explicit `source_mode=exact` retains `type: source_search_index`,
+`schema_version: 1`, `profile: ascii-word-postings-v1` and the original numeric
+counter representation. Clients requiring that response must send the field;
+omitting it selects the current-source profile. Both profiles carry the repository
 namespace/incarnation, canonical source head/RCR/commit/tree, exact index token
 and number, and the distinct selected current index head. The latter does not
 replace the generation used by the query. Responses explicitly report
@@ -157,9 +166,13 @@ and infrastructure failures remain errors. Authentication and enablement retain
 the existing 401/403 behavior.
 
 Every query revalidates canonical current source and hidden-ref policy before
-reading an index. This conservative profile requires an exact source-head match:
-even a forge-only write invalidates the old index. Rebuild is an explicit local
-operation, never a side effect of a query. Same-source rebuilt index generations
+reading an index. The default current-source profile survives forge-only writes
+when the selected native commit and tree are unchanged. A different commit
+refuses even if its tree is identical; a source change requires maintenance.
+Explicit exact mode also requires the original source-head match, so a forge-only
+write makes that read stale. Pinned continuations still require their original
+current head and commit, even for metadata-only movement. Rebuild is an explicit
+local operation, never a side effect of a query. Same-source rebuilt index generations
 can be queried through an older exact index while retaining a newer checkpoint.
 The listener's loopback/external-TLS boundary remains unchanged.
 

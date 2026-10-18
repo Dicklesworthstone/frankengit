@@ -72,7 +72,7 @@ test('source mode is explicit and normalized before any I/O; Initial remains str
   const f = currentFixture(), q = symbolQuery(f.input);
   assert.deepEqual(symbolQuery({ ...f.input, sourceMode: 'exact' }), q);
   const strict = new URLSearchParams(symbolCommand(selected('sha1'), null, q));
-  assert.equal(strict.has('source_mode'), false);
+  assert.equal(strict.get('source_mode'), 'exact');
   const { client, calls } = await connected(f);
   for (const mode of [null, '', 'current', 'REVALIDATED', true, {}]) {
     await assert.rejects(client.search({ ...f.input, sourceMode: mode }));

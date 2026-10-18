@@ -27,18 +27,34 @@ export class Element extends Events {
   }
   descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
 }
-export function dom() {
+export function dom({ usePageDefaults = false } = {}) {
   const html = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/search.html', import.meta.url), 'utf8');
   const elements = new Map();
   const document = { defaultView: new Events(), downloads: [], focused: null,
     createElement(tag) { return new Element(tag, document); },
-    getElementById(id) { const el = elements.get(id); if (!el) throw new Error(`Missing HTML element ${id}`); return el; } };
+    getElementById(id) {
+      if (elements.has(id)) return elements.get(id);
+      for (const root of elements.values()) {
+        const found = root.descendants().find(child => child.id === id);
+        if (found) return found;
+      }
+      return null;
+    } };
   for (const match of html.matchAll(/<(\w+)[^>]*\bid="([^"]+)"[^>]*>/g)) {
     const el = document.createElement(match[1]); el.id = match[2]; elements.set(el.id, el);
     el.value = match[0].match(/\bvalue="([^"]*)"/)?.[1] ?? '';
     el.disabled = /\bdisabled\b/.test(match[0]); el.hidden = /\bhidden\b/.test(match[0]);
   }
   for (const [id, value] of Object.entries({ mode: 'literal', encoding: 'utf8', format: 'sha1', case: 'exact', 'prefix-encoding': 'utf8', 'index-source-mode': 'exact', 'symbol-match': 'exact', 'symbol-kind': 'all', 'initial-symbol-policy': 'optional' })) document.getElementById(id).value = value;
+  // Retained strict-profile cases select exact explicitly. Default-flow cases
+  // consume the actual shipped option instead of duplicating it in this fixture.
+  if (usePageDefaults) {
+    for (const select of html.matchAll(/<select\b[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
+      const options = [...select[2].matchAll(/<option\b[^>]*>/g)];
+      const selected = options.find(option => /\bselected\b/.test(option[0])) ?? options[0];
+      document.getElementById(select[1]).value = selected?.[0].match(/\bvalue="([^"]*)"/)?.[1] ?? '';
+    }
+  }
   const urls = new Map(), revoked = [];
   const urlApi = { createObjectURL(blob) { const url = `blob:fixture-${urls.size + revoked.length}`; urls.set(url, blob); return url; },
     revokeObjectURL(url) { revoked.push(url); urls.delete(url); } };

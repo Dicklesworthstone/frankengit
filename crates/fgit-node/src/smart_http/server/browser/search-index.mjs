@@ -45,7 +45,7 @@ function atLeast(observed, floor) {
 export function indexCommand(selected, pin, q, previous = null, minimum = null) {
   const values = { ...fields(selected, pin), channel: q.channel, term_hex: q.termsHex,
     path_prefix_hex: q.prefixesHex, limit: q.maxMatches, max_work: q.maxWork, max_payload_bytes: q.maxPayloadBytes };
-  if (sourceMode(q.sourceMode) === 'revalidated') values.source_mode = 'revalidated';
+  values.source_mode = sourceMode(q.sourceMode);
   if (previous) {
     if (sourceMode(previous.query.sourceMode) !== sourceMode(q.sourceMode)) fail('Indexed continuation changed source mode.');
     if (!pin || previous.nextAfter === null) fail('No pinned indexed continuation remains.');
@@ -212,7 +212,7 @@ export function symbolCommand(selected, pin, q, minimum = null) {
   const values = { ...fields(selected, pin), name_hex: q.nameHex, match: q.match, kind: q.kinds,
     path_prefix_hex: q.prefixesHex, max_matches: q.maxMatches, max_bytes: q.maxBytes,
     max_file_bytes: q.maxFileBytes, max_work: q.maxWork };
-  if (sourceMode(q.sourceMode) === 'revalidated') values.source_mode = 'revalidated';
+  values.source_mode = sourceMode(q.sourceMode);
   if (minimum) Object.assign(values, { minimum_index_token: minimum.token, minimum_index_number: minimum.number });
   return form(values);
 }
