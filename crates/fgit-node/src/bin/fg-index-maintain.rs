@@ -5,7 +5,14 @@
 mod backend;
 #[path = "index_maintenance/state.rs"]
 mod state;
-use backend::{AttemptFailure, IndexKind};
+#[path = "index_maintenance/service.rs"]
+mod service;
+use backend::AttemptFailure;
+pub use backend::IndexKind;
+pub use service::{
+    MaintenanceConfig, MaintenanceControl, MaintenanceError, MaintenanceReceipt, run_service,
+    run_service_with_ready,
+};
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_graph::lexical::{IndexError, LexicalError};
 use fgit_graph::{
@@ -28,6 +35,12 @@ use std::time::Duration;
 
 const USAGE: &str = "fg-index-maintain [--symbols] ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 PRIVATE_STATE_DIR init|resume PASSES INTERVAL_SECONDS FULL_REF [FULL_REF ...]\nExplicit scope: 1-32 refs, 1-3600 passes, up to 24 hours of scheduled waits.\nCreate PRIVATE_STATE_DIR with mode 0700. Create its stop file to request drain.\n--symbols selects Rust declarations; use a separate state directory from lexical maintenance.\nResume never resets missing progress, takes over a stale lock, or forgets an unresolved attempt.";
 const TICK: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy)]
+enum ProgressOutput {
+    Stdout,
+    Stderr,
+}
 struct Options {
     root: PathBuf,
     tenant: TenantId,
@@ -39,6 +52,7 @@ struct Options {
     interval: Duration,
     refs: Vec<RefName>,
     profile: IndexKind,
+    output: ProgressOutput,
 }
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -102,6 +116,7 @@ fn parse(args: &[OsString]) -> io::Result<Options> {
         interval: Duration::from_secs(seconds),
         refs,
         profile,
+        output: ProgressOutput::Stdout,
     })
 }
 fn generation(digest: [u8; 32]) -> io::Result<GraphGenerationId> {
@@ -143,11 +158,19 @@ fn token(id: &InternalObjectId) -> String {
 }
 #[derive(Default)]
 struct Stop {
+    control: Option<MaintenanceControl>,
     requested: bool,
     error: Option<String>,
 }
 impl Stop {
     fn observe(&mut self, directory: &Path) {
+        if self
+            .control
+            .as_ref()
+            .is_some_and(MaintenanceControl::is_stop_requested)
+        {
+            self.requested = true;
+        }
         if self.requested {
             return;
         }
@@ -199,13 +222,16 @@ fn wait(node: &OneNode, directory: &Path, mut remaining: Duration, stop: &mut St
         stop.observe(directory);
     }
 }
-fn emit(profile: IndexKind, reference: &RefName, status: &str, fields: &str) -> io::Result<()> {
-    writeln!(
-        io::stdout().lock(),
+fn emit(options: &Options, reference: &RefName, status: &str, fields: &str) -> io::Result<()> {
+    let line = format!(
         "{{\"type\":\"index_maintenance\",\"index_kind\":\"{}\",\"ref_hex\":\"{}\",\"state\":\"{status}\",\"repository_transaction_created\":false{fields}}}",
-        profile.name(),
+        options.profile.name(),
         hex(reference.as_bytes())
-    )
+    );
+    match options.output {
+        ProgressOutput::Stdout => writeln!(io::stdout().lock(), "{line}"),
+        ProgressOutput::Stderr => writeln!(io::stderr().lock(), "{line}"),
+    }
 }
 fn pin_fields(value: &IndexPin) -> String {
     format!(
@@ -239,10 +265,24 @@ fn candidate_digest(candidate: GraphGenerationId) -> io::Result<[u8; 32]> {
     }
     Ok(digest)
 }
-fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Result<bool> {
-    let mut stop = Stop::default();
+fn run_controlled(
+    node: &OneNode,
+    options: &Options,
+    progress: &mut ProgressFile,
+    control: Option<MaintenanceControl>,
+    receipt: &mut MaintenanceReceipt,
+) -> io::Result<bool> {
+    let mut stop = Stop {
+        control,
+        ..Stop::default()
+    };
     let mut healthy = true;
     'passes: for pass in 0..options.passes {
+        stop.observe(&options.directory);
+        if stop.requested {
+            break;
+        }
+        service::increment(&mut receipt.passes)?;
         for reference in &options.refs {
             stop.observe(&options.directory);
             if stop.requested {
@@ -264,11 +304,12 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                 // durable phase remained selected. Legacy running stays blocked.
                 progress.state.abandon_preparation(reference.as_bytes())?;
                 progress.save()?;
-                emit(options.profile, reference, "preparation_recovered", "")?;
+                emit(options, reference, "preparation_recovered", "")?;
             }
             let floor = row.floor.as_ref().map(activation).transpose()?;
             // One finite background-controller budget per independent attempt.
             // Never replace the context of an in-flight or draining attempt.
+            service::increment(&mut receipt.attempts)?;
             let request = node.outbox_delivery_context();
             if let Some(candidate) = row.pending {
                 let result = drive(
@@ -296,7 +337,8 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                             Some(candidate),
                         )?;
                         progress.save()?;
-                        emit(options.profile, reference, "recovered", &pin_fields(&pin))?;
+                        service::increment(&mut receipt.recovered)?;
+                        emit(options, reference, "recovered", &pin_fields(&pin))?;
                     }
                     Ok(
                         GenerationRecovery::Uninitialized
@@ -306,7 +348,7 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                         // of an earlier write. Keep responsibility and do no build.
                         healthy = false;
                         emit(
-                            options.profile,
+                            options,
                             reference,
                             "pending",
                             &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)),
@@ -314,7 +356,8 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                     }
                     Err(error) => {
                         healthy = false;
-                        emit(options.profile, reference, "recovery_unavailable", "")?;
+                        service::increment(&mut receipt.refused)?;
+                        emit(options, reference, "recovery_unavailable", "")?;
                         eprintln!("Index recovery: {error}");
                     }
                 }
@@ -371,8 +414,9 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                         .state
                         .completed(reference.as_bytes(), pin.clone())?;
                     progress.save()?; // Durably retain the floor BEFORE acknowledging it.
+                    service::increment(&mut receipt.observed_current)?;
                     emit(
-                        options.profile,
+                        options,
                         reference,
                         "observed_current",
                         &format!(
@@ -400,12 +444,13 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                             .state
                             .publication_refused(reference.as_bytes(), candidate)?;
                         progress.save()?;
-                        emit(options.profile, reference, "refused", "")?;
+                        service::increment(&mut receipt.refused)?;
+                        emit(options, reference, "refused", "")?;
                     } else {
                         // Already durable BEFORE the first possible publication
                         // effect. A lost return path needs no second identity write.
                         emit(
-                            options.profile,
+                            options,
                             reference,
                             "pending",
                             &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)),
@@ -422,7 +467,8 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                     progress.state.refuse(reference.as_bytes())?;
                     progress.save()?;
                     healthy = false;
-                    emit(options.profile, reference, "refused", "")?;
+                    service::increment(&mut receipt.refused)?;
+                    emit(options, reference, "refused", "")?;
                     eprintln!("Index maintenance: {error}");
                 }
             }
@@ -441,6 +487,16 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
             .values()
             .all(|row| !row.running && !row.preparing && row.pending.is_none()))
 }
+fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Result<bool> {
+    run_controlled(
+        node,
+        options,
+        progress,
+        None,
+        &mut MaintenanceReceipt::default(),
+    )
+}
+
 #[must_use]
 pub fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os()

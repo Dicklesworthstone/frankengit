@@ -14,6 +14,7 @@ mod credentials;
 mod events;
 mod issues;
 mod lifetime;
+mod maintenance;
 mod outcomes;
 mod protection;
 mod pulls;
@@ -381,6 +382,8 @@ impl OneNode {
                 max_sessions: server_limits.max_sessions(),
                 idle_timeout,
             },
+            None,
+            None,
         )
     }
 
@@ -395,6 +398,8 @@ impl OneNode {
         allow_pulls: bool,
         allow_source: bool,
         acceptance: lifetime::Acceptance<'_>,
+        maintenance: Option<crate::index_maintenance::MaintenanceConfig>,
+        on_ready: Option<&dyn Fn() -> io::Result<()>>,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener
             .local_addr()
@@ -457,13 +462,33 @@ impl OneNode {
         listener
             .set_nonblocking(true)
             .map_err(|source| io_error("configure HTTP listener", source))?;
+        let maintenance = match maintenance
+            .map(|config| maintenance::Worker::start(self, config))
+            .transpose()
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                return match listener.set_nonblocking(false) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(io_error(
+                        "restore HTTP listener after index maintenance startup failure",
+                        io::Error::other(format!("{error}; {cleanup}")),
+                    )),
+                };
+            }
+        };
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<PendingSession> = Vec::new();
         let mut accepted = 0;
         let mut last_activity = Instant::now();
-        let mut failure = None;
-        loop {
+        let mut failure = on_ready.and_then(|ready| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(ready))
+                .unwrap_or_else(|_| Err(io::Error::other("HTTP readiness callback panicked")))
+                .err()
+                .map(|error| io_error("report Smart HTTP readiness", error))
+        });
+        while failure.is_none() {
             let mut index = 0;
             while index < pending.len() {
                 if pending[index].finished.load(Ordering::Acquire) {
@@ -474,6 +499,14 @@ impl OneNode {
                 }
             }
             // Check lifetime control even while all connection slots are full.
+            if maintenance.as_ref().is_some_and(maintenance::Worker::finished) {
+                failure = Some(io_error(
+                    "supervise source index maintenance",
+                    io::Error::other("index maintenance stopped while HTTP acceptance was active"),
+                ));
+                break;
+            }
+            // A stop retires acceptance without abandoning any accepted child.
             // Stop/error retires acceptance, not the responsibility for any
             // accepted request. The common epilogue joins every child.
             match acceptance.keep_accepting(accepted, pending.len(), last_activity.elapsed()) {
@@ -533,8 +566,22 @@ impl OneNode {
                 }
             }
         }
+        if let Some(worker) = &maintenance {
+            worker.request_stop();
+        }
         for child in pending {
             (child.join)();
+        }
+        if let Some(worker) = maintenance {
+            if let Err(error) = worker.finish() {
+                failure = Some(match failure {
+                    Some(service) => io_error(
+                        "drain source index maintenance after HTTP service failure",
+                        io::Error::other(format!("{service}; {error}")),
+                    ),
+                    None => error,
+                });
+            }
         }
         if let Err(error) = profile.nodes.close() {
             log_cleanup(&error);

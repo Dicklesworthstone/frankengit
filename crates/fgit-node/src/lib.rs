@@ -16,6 +16,11 @@
 
 extern crate self as fgit_node;
 
+/// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
+/// service lane. The standalone worker and HTTP service share this controller.
+#[path = "bin/fg-index-maintain.rs"]
+pub mod index_maintenance;
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
@@ -6490,6 +6495,14 @@ impl NodeConfig {
     pub const fn with_runtime_budgets(mut self, runtime_budgets: BudgetPolicy) -> Self {
         self.runtime_budgets = runtime_budgets;
         self
+    }
+
+    /// The configured runtime policy, before each child meets it with its root.
+    /// Service adapters use this to tighten one class without replacing other
+    /// inherited time, work, cost or shutdown limits.
+    #[must_use]
+    pub const fn runtime_budgets(&self) -> BudgetPolicy {
+        self.runtime_budgets
     }
 
     /// Selects the native Git object identity domain.

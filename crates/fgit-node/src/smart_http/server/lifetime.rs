@@ -101,6 +101,8 @@ impl OneNode {
             false,
             false,
             Acceptance::UntilStopped(should_stop),
+            None,
+            None,
         )
     }
 
@@ -133,6 +135,8 @@ impl OneNode {
             allow_pulls,
             allow_source,
             Acceptance::UntilStopped(should_stop),
+            None,
+            None,
         )
     }
 }

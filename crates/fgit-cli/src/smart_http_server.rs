@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fgit_crypto::sha256_digest;
+use fgit_node::index_maintenance::{IndexKind, MaintenanceConfig};
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonServerLimits, GitDaemonServerReceipt,
     GitDaemonSessionTimeout, HttpTrustedOrigin, NodeConfig, OneNode,
 };
-use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
+use fgit_types::{
+    GitHashAlgorithm, PrincipalId, RefName, RepositoryId, RepositoryIncarnationId, TenantId,
+};
 
 use crate::publication_support::quote;
 
@@ -28,6 +31,10 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
   [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]
   [--trusted-origin <origin>]
+  [--index-state-dir <private-directory> --index-state init|resume
+   --index-profile lexical|symbols --index-format sha1|sha256
+   --index-ref <full-ref> [--index-ref <full-ref> ...]
+   [--index-interval-secs <1..3600>] [--index-attempt-timeout-secs <1..3600>]]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an
 initially absent stop file in an existing operator-owned directory. Create that
@@ -36,6 +43,18 @@ The file is never removed automatically. Inaccessible or non-regular control
 entries cause a draining error, not silent continued service. Do not combine
 --continuous with --max-sessions or --idle-timeout-secs; all per-request deadlines,
 connection limits, credentials and quotas remain enforced.
+
+Optional index maintenance requires --allow-source and scoped credentials.
+Create its private state directory with mode 0700 before starting; select init
+once, then resume. Select 1-32 full refs and one lexical or Rust-symbol profile.
+The worker waits 5 seconds between passes by default, reconciles one attempt at
+a time with a 300-second ceiling, and preserves pending publication recovery
+across restarts. --index-attempt-timeout-secs only narrows inherited budgets.
+The interval is a polling delay, not a catch-up deadline. Readiness follows
+authentication and exclusive progress ownership; a controller failure drains
+the HTTP service. Stopping the listener also cancels and drains maintenance
+before node shutdown. Index work does not run inside requests and does not
+publish repository state.
 
 Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
@@ -169,6 +188,7 @@ struct Options {
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
     stop_file: Option<PathBuf>,
+    index_maintenance: Option<MaintenanceConfig>,
 }
 
 fn number(
@@ -199,7 +219,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 {
         return Err(USAGE.into());
     }
-    if arguments.len() > 44
+    if arguments.len() > 120
         || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -217,6 +237,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         return Err("serve-http refuses non-loopback plaintext listeners".into());
     }
     let mut flags = BTreeMap::new();
+    let mut index_refs = Vec::new();
     let mut index = 4;
     while index < arguments.len() {
         let name = arguments[index].as_str();
@@ -250,6 +271,13 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--receive-max-expanded-mib"
                     | "--pack-max-expanded-mib"
                     | "--trusted-origin"
+                    | "--index-state-dir"
+                    | "--index-state"
+                    | "--index-profile"
+                    | "--index-format"
+                    | "--index-ref"
+                    | "--index-interval-secs"
+                    | "--index-attempt-timeout-secs"
             )
         {
             return Err("unknown serve-http option".into());
@@ -266,7 +294,14 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             }
             value.as_str()
         };
-        if flags.insert(name, value).is_some() {
+        if name == "--index-ref" {
+            if index_refs.len() == 32 {
+                return Err("index maintenance accepts at most 32 refs".into());
+            }
+            index_refs.push(
+                RefName::try_new(value.as_bytes()).map_err(|_| "invalid index maintenance ref")?,
+            );
+        } else if flags.insert(name, value).is_some() {
             return Err(format!("duplicate serve-http option {name}"));
         }
     }
@@ -289,7 +324,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         _ => return Err("--continuous and --stop-file must be supplied together".into()),
     };
     let credentials = if flags.contains_key("--print-credentials-header") {
-        if flags.keys().any(|name| {
+        if !index_refs.is_empty() || flags.keys().any(|name| {
             !matches!(
                 *name,
                 "--trusted-local" | "--print-credentials-header" | "--expected-incarnation"
@@ -338,6 +373,46 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 .into(),
         );
     }
+    let index_maintenance = if !index_refs.is_empty()
+        || flags.keys().any(|name| name.starts_with("--index-"))
+    {
+        if !allow_source {
+            return Err("index maintenance requires --allow-source and scoped credentials".into());
+        }
+        let required = |name: &str| -> Result<&str, String> {
+            flags.get(name).copied()
+                .ok_or_else(|| format!("index maintenance requires {name}"))
+        };
+        let kind = match required("--index-profile")? {
+            "lexical" => IndexKind::Lexical,
+            "symbols" => IndexKind::Symbols,
+            _ => return Err("--index-profile must be lexical or symbols".into()),
+        };
+        let format = match required("--index-format")? {
+            "sha1" => GitHashAlgorithm::Sha1,
+            "sha256" => GitHashAlgorithm::Sha256,
+            _ => return Err("--index-format must be sha1 or sha256".into()),
+        };
+        let initialize = match required("--index-state")? {
+            "init" => true,
+            "resume" => false,
+            _ => return Err("--index-state must be init or resume".into()),
+        };
+        Some(MaintenanceConfig::try_new(
+            kind,
+            format,
+            PathBuf::from(required("--index-state-dir")?),
+            initialize,
+            Duration::from_secs(number(&flags, "--index-interval-secs", 5, 3600)?),
+            index_refs,
+        ).and_then(|config| {
+            let seconds = number(&flags, "--index-attempt-timeout-secs", 300, 3600)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            config.with_attempt_timeout(Duration::from_secs(seconds))
+        }).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
     let limits = GitDaemonServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;
@@ -397,6 +472,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         limits,
         idle_timeout,
         stop_file,
+        index_maintenance,
     })
 }
 
@@ -508,12 +584,46 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             _ => "static",
         };
         let control = stop.as_ref().map(stop_file::StopControl::new);
+        let report_ready = || -> io::Result<()> {
         let mut output = io::stdout().lock();
         writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
             options.allow_source, options.allow_protection, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
-            .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
-        drop(output);
+            .and_then(|()| output.flush())
+        };
+        if let Some(maintenance) = options.index_maintenance {
+            let CredentialInput::Reloadable(path) = &options.credentials else {
+                return Err("index maintenance requires scoped credentials".into());
+            };
+            return if let Some(control) = control {
+                node.serve_repository_http_with_index_maintenance_until_stopped(
+                    &listener,
+                    options.limits.max_in_flight(),
+                    path,
+                    options.allow_receive,
+                    options.allow_issues,
+                    options.allow_outcomes,
+                    options.allow_pulls,
+                    maintenance,
+                    &|| control.should_stop(),
+                    &report_ready,
+                )
+            } else {
+                node.serve_repository_http_with_index_maintenance_bounded(
+                    &listener,
+                    options.limits,
+                    path,
+                    options.allow_receive,
+                    options.allow_issues,
+                    options.allow_outcomes,
+                    options.allow_pulls,
+                    options.idle_timeout,
+                    maintenance,
+                    &report_ready,
+                )
+            }.map_err(|error| error.to_string());
+        }
+        report_ready().map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         if let Some(control) = control {
             let should_stop = || control.should_stop();
             // One continuous service, not repeated bounded windows: quotas and
@@ -640,6 +750,7 @@ mod tests {
         assert!(!options.allow_pulls);
         assert!(!options.allow_source);
         assert!(!options.allow_protection);
+        assert!(options.index_maintenance.is_none());
         assert!(!options.config.http_protection_admin_enabled());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
@@ -647,6 +758,89 @@ mod tests {
         args.retain(|arg| arg != "--trusted-local");
         assert!(parse(&args).is_err());
     }
+    fn maintenance_arguments() -> Vec<String> {
+        let mut args = arguments()[..5].to_vec();
+        args.extend([
+            "--credentials-file", "grants", "--allow-source",
+            "--index-state-dir", "maintenance", "--index-state", "init",
+            "--index-profile", "lexical", "--index-format", "sha1",
+            "--index-ref", "refs/heads/main",
+        ].into_iter().map(str::to_owned));
+        args
+    }
+
+    #[test]
+    fn maintenance_requires_complete_explicit_scope_and_uses_bounded_defaults() {
+        let args = maintenance_arguments();
+        let options = parse(&args).unwrap();
+        let maintenance = options.index_maintenance.unwrap();
+        assert_eq!(maintenance.kind(), IndexKind::Lexical);
+        assert_eq!(maintenance.format(), GitHashAlgorithm::Sha1);
+        assert_eq!(maintenance.directory(), Path::new("maintenance"));
+        assert!(maintenance.initialize());
+        assert_eq!(maintenance.interval(), Duration::from_secs(5));
+        assert_eq!(maintenance.attempt_timeout(), Duration::from_secs(300));
+        assert_eq!(maintenance.refs()[0].as_bytes(), b"refs/heads/main");
+        assert!(!options.allow_receive);
+        for flag in ["--index-state-dir", "--index-state", "--index-profile", "--index-format", "--index-ref"] {
+            let mut missing = args.clone();
+            let at = missing.iter().position(|arg| arg == flag).unwrap();
+            missing.drain(at..at + 2);
+            assert!(parse(&missing).is_err(), "{flag}");
+        }
+        let mut no_source = args;
+        no_source.retain(|arg| arg != "--allow-source");
+        assert!(parse(&no_source).is_err());
+    }
+
+    #[test]
+    fn maintenance_supports_symbols_resume_and_canonical_sorted_refs() {
+        let mut args = maintenance_arguments();
+        for (flag, value) in [("--index-state", "resume"), ("--index-profile", "symbols"), ("--index-format", "sha256")] {
+            let at = args.iter().position(|arg| arg == flag).unwrap();
+            args[at + 1] = value.into();
+        }
+        args.extend([
+            "--index-ref", "refs/heads/develop", "--index-interval-secs", "1",
+            "--index-attempt-timeout-secs", "7",
+        ].into_iter().map(str::to_owned));
+        let config = parse(&args).unwrap().index_maintenance.unwrap();
+        assert_eq!(config.kind(), IndexKind::Symbols);
+        assert_eq!(config.format(), GitHashAlgorithm::Sha256);
+        assert!(!config.initialize());
+        assert_eq!(config.interval(), Duration::from_secs(1));
+        assert_eq!(config.attempt_timeout(), Duration::from_secs(7));
+        assert_eq!(config.refs().iter().map(RefName::as_bytes).collect::<Vec<_>>(), [b"refs/heads/develop".as_slice(), b"refs/heads/main"]);
+    }
+
+    #[test]
+    fn maintenance_refuses_ambiguous_scopes_and_unbounded_scheduling() {
+        for (flag, value) in [("--index-state", "auto"), ("--index-profile", "unknown"), ("--index-format", "auto"), ("--index-ref", "main")] {
+            let mut args = maintenance_arguments();
+            let at = args.iter().position(|arg| arg == flag).unwrap();
+            args[at + 1] = value.into();
+            assert!(parse(&args).is_err(), "{flag}");
+        }
+        for seconds in ["0", "01", "3601"] {
+            for flag in ["--index-interval-secs", "--index-attempt-timeout-secs"] {
+                let mut args = maintenance_arguments();
+                args.extend([flag.into(), seconds.into()]);
+                assert!(parse(&args).is_err());
+            }
+        }
+        let mut duplicate = maintenance_arguments();
+        duplicate.extend(["--index-ref".into(), "refs/heads/main".into()]);
+        assert!(parse(&duplicate).is_err());
+        let mut too_many = maintenance_arguments();
+        for n in 0..32 {
+            too_many.extend(["--index-ref".into(), format!("refs/heads/topic-{n}")]);
+        }
+        assert!(parse(&too_many).is_err());
+        let mut header = arguments()[..5].to_vec();
+        header.extend(["--print-credentials-header", "--index-ref", "refs/heads/main"].into_iter().map(str::to_owned));
+        assert!(parse(&header).is_err());
+    }
+
     #[test]
     fn non_loopback_and_unbounded_limits_are_refused_before_side_effects() {
         let mut args = arguments();

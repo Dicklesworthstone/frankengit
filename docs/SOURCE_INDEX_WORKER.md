@@ -1,11 +1,12 @@
 # Bounded automatic source-index maintenance
 
-`fg-index-maintain` reconciles explicitly configured references against canonical
-current source, with bounded foreground polling, operator-owned durable progress,
-anti-rollback checkpoints and cooperative stop/drain. It is not an outbox event
-consumer: several source writes may coalesce into one refresh, and intermediate
-revisions need not be indexed. Repository refs/events/decisions and outbox
-acknowledgements are untouched. Search requests remain read-only. FG-032 is open.
+`fg-index-maintain` and the opt-in HTTP maintenance service reconcile explicitly
+configured references against canonical current source. They share one bounded
+native controller, operator-owned durable progress, anti-rollback checkpoints
+and cooperative stop/drain. Polling does not consume outbox events: several
+source writes may coalesce into one refresh, and intermediate revisions need
+not be indexed. Repository refs/events/decisions and outbox acknowledgements
+are untouched. Search requests remain read-only. FG-032 remains open.
 
 ## Run an explicit scope
 
@@ -40,6 +41,74 @@ continues polling the same future, and explicitly shuts down the node. It never
 drops an active operation. Confirmed publication wins over a later stop. The
 250 ms timer is not a latency SLO: bounded synchronous work is not preemptible.
 SIGKILL/default OS termination is not this drain protocol.
+
+## Maintain indexes while serving HTTP
+
+The HTTP server can own this same controller throughout its serving lifetime.
+Enable one explicit lexical or Rust-symbol profile and a fixed set of refs.
+The server opens a separate node-owned database/request lane against the same
+existing repository, using the listener's exact repository incarnation and
+inherited runtime policy.
+
+```bash
+mkdir -m 700 "$PROGRESS_DIR"
+fg serve-http "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" 127.0.0.1:8080 \
+  --trusted-local --credentials-file "$CREDENTIALS_FILE" \
+  --allow-source --allow-receive --continuous --stop-file "$HTTP_STOP_FILE" \
+  --index-state-dir "$PROGRESS_DIR" --index-state init \
+  --index-profile lexical --index-format sha1 \
+  --index-ref refs/heads/main --index-ref refs/heads/release \
+  --index-interval-secs 5 --index-attempt-timeout-secs 300
+```
+
+Use `--index-profile symbols` for Rust declarations, and `sha256` for that
+repository's object format. The source grant and scoped credential table remain
+required. This configuration does not grant remote index writes. Use
+`--index-state resume` after a clean stop, with the same directory, profile,
+format and exact ref set. Do not reuse one progress directory for another
+profile or run a second live maintenance owner against it.
+
+The first pass starts after successful service readiness. The configured delay
+follows a completed pass; `--index-interval-secs` accepts whole seconds from
+1 through 3600 and defaults to 5. Each pass visits at most 32 references in
+raw-byte order, one finite native attempt at a time. This is not a freshness
+SLA: source movement, ordinary native refusals, index size/resource limits and
+unresolved publication candidates may delay or prevent an index becoming
+current. Queries never initiate builds themselves.
+
+Each native attempt has a 300-second timeout ceiling by default. Use
+`--index-attempt-timeout-secs` with a whole number from 1 through 3600 to select
+another ceiling. The effective timeout is the smaller of that ceiling and the
+inherited background-controller timeout, further met with the node root.
+Existing poll, cost, priority, root and other-class limits remain unchanged.
+Native checkpoints and drain observe the same original request context. A later
+retry receives a new context only after the previous owner has returned.
+
+One runtime-owned blocking child opens and runs the service. HTTP readiness is
+announced only after repository authentication, profile/ref binding, exclusive
+progress ownership and checkpoint loading succeed. A missing or foreign resume
+checkpoint, legacy unresolved attempt or existing stop marker prevents readiness;
+it cannot silently disable the requested worker. Ordinary bounded reconcile
+refusals are observations that permit a later independent pass. Fatal progress,
+controller or shutdown errors retire acceptance and are returned to the owner.
+
+HTTP stop requests signal the controller, cancel its original active context
+and continue polling the same future until its owner returns. The server joins
+the controller before returning. Node shutdown precedes progress release, just
+as in the finite command. Clean stop may retain an unresolved original candidate
+for a later guarded recovery; it does not imply rollback. Service observations
+use stderr so they do not corrupt the HTTP command's stdout receipt.
+
+Embedded callers can use `fgit_node::index_maintenance::MaintenanceConfig::try_new`,
+optionally select a tighter ceiling with `with_attempt_timeout`, and run
+`run_service_with_ready` on their own runtime-owned blocking lane.
+`MaintenanceControl::request_stop` is irreversible and cooperative; the owner
+must still join the service result. The callback acknowledges startup before
+any index attempt. It must not wait for this same lane to perform work.
+`run_service` offers the same lifecycle without a startup callback.
+`MaintenanceReceipt` counts started passes, attempts, current observations,
+recoveries and refusals, plus references still pending at clean stop. These
+observations are not a durable history or a promise of current source at return.
 
 ## Candidate recording BEFORE publication
 
@@ -93,28 +162,36 @@ operator intervention; this change does not promise all-crash automatic recovery
 
 ## Ownership, freshness and remaining deployment limits
 
-`run.lock` excludes another progress writer; it is not an index lease or
-repository authority. It is never stolen or expired. A crash leaves it behind.
-An operator must independently establish that the previous process is dead and
-inspect `checkpoint` and any `checkpoint.next` before recovering ownership.
-Leftover replacement files are never silently overwritten. The new Preparing
-semantics do not authorize deleting a live owner's lock or resetting a floor.
+`owner.lock` is a permanent anchor with an exclusive nonblocking OS file lock;
+`run.lock` is an inode-bound marker for that owner. Neither is an index lease or
+repository authority. A matching crash marker can be resumed only after the
+kernel grants exclusive ownership of the original anchor. Legacy, foreign or
+corrupt markers still require inspection. The anchor is never unlinked, stolen
+or expired, and a controller error retains its locked descriptor until process
+termination. Normal release removes only the run marker after native shutdown.
+Leftover checkpoint replacement files are never silently overwritten. Preparing
+semantics do not authorize deleting a live owner's marker or resetting a floor.
 The directory is trusted operator state, not a hostile same-user filesystem
-sandbox. Simultaneous live-server/worker use of the same backend remains an
-integration scenario requiring the real backend lane.
+sandbox. Live HTTP maintenance uses the same durable backend and recovery path
+as the standalone worker; neither receives a second publication authority.
 
 Current canonical visibility precedes index disclosure. A verified current index
 is a no-op, without source-blob or posting scans or an index-root advance; it is
 not a full segment-integrity scrub. An uninitialized index builds; a stale one
 refreshes with exact path/blob posting reuse. Source movement or a conflicting
-checkpoint refuses rather than selecting a new basis inside that attempt. HTTP
-queries remain stale until maintenance catches up. `observed_current` describes
-the selected observation, not guaranteed freshness when stdout is written.
+checkpoint refuses rather than selecting a new basis inside that attempt. A
+changed Git source remains stale for indexed HTTP queries until maintenance
+catches up. Default revalidated search may continue across forge-only authority
+changes after it proves the indexed commit is still current; explicit exact
+queries retain their stricter source-head pin. `observed_current` describes the
+selected observation, not guaranteed freshness when the observation is emitted.
 
 Output is bounded JSON per result, with raw reference hex and available source/
 index identities. `preparation_recovered` is not itself an index-freshness claim.
-Any refusal, unresolved candidate, controller or shutdown failure yields nonzero
-exit status. Holding a checkpoint does not pin source/index payloads against GC.
+The finite command yields nonzero exit status on refusal, unresolved candidate,
+controller or shutdown failure. The continuous service instead retains ordinary
+refusals for the next bounded pass and returns fatal lifecycle failures to the
+HTTP owner. Holding a checkpoint does not pin source/index payloads against GC.
 
 ## Verification
 
@@ -127,15 +204,26 @@ preparation, legacy refusal and pending-without-publication behavior. The latter
 reuse real node/TreeFS/Fsqlite and progress-file implementations; lost replies
 are explicit simulations, not a power-loss or hostile-filesystem campaign.
 
-Rust/Cargo are unavailable locally. Native tests, native compilation, runtime
-drain, durable-backend, Clippy and full-workspace/release gates remain unverified.
-The repository-owned standalone progress lane may run independently on the
-pinned nightly; its result is not a native-node/full-system pass.
+The in-process service adds two focused scope/budget tests and four native
+lifecycle tests: exact profile/format readiness, bad or foreign resume refusal,
+effect-free startup failure, and cancellation that keeps polling the original
+owner. Timeout coverage checks inherited shorter, longer and absent time limits
+without replacing other budget dimensions or classes. The HTTP integration lane
+exercises catch-up after native writes across both Git formats and both index
+profiles, resume without generation churn, startup refusal and error-path drain.
+
+The original standalone-worker implementation recorded no local native build
+or execution. Native compilation, runtime drain, durable-backend, Clippy and
+full-workspace/release claims require their own revision-bound results. The
+repository-owned standalone progress lane can run independently on the pinned
+nightly; its result is not a native-node/full-system pass.
 
 ```bash
 ./scripts/verify_index_maintenance.sh
 cargo test --locked -p fgit-node --test source_index_checkpoint --test source_index_worker_checkpoint
 cargo test --locked -p fgit-node --bin fg-index-maintain
+cargo test --locked -p fgit-node --lib index_maintenance::service
+cargo test --locked -p fgit-node --test source_index_service_http
 cargo test --locked -p fgit-node --test source_index_reconcile --test source_index_worker
 cargo check --locked -p fgit-node --all-targets
 ```
