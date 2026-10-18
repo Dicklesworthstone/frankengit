@@ -12,13 +12,16 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::time::{Duration, Instant};
 
 use super::{GraphAuditRefusal, checkpoint, revalidate_head};
-use crate::{NodeRefusal, NodeRequestContext, OneNode};
+use crate::{MaterializedAdmission, NodeRefusal, NodeRequestContext, OneNode};
 use fgit_object_fabric::ObjectKind;
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{
     Digest, GitOid, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId,
     RepositoryIncarnationId,
 };
+
+mod session;
+pub use session::SelectedObjectScrubSession;
 
 const MAX_SELECTED_OBJECTS: usize = 1_000_000;
 const MAX_PAGE_OBJECTS: usize = 100_000;
@@ -116,6 +119,8 @@ pub enum ScrubRefusal {
     /// page budget; do not classify a policy/resource ceiling as corruption.
     ObjectExceedsPage { oid: GitOid, payload_bytes: u64, maximum: u64 },
     Allocation,
+    /// A failed or interrupted session cannot be resumed as a successful scan.
+    SessionFailed,
     Audit(GraphAuditRefusal),
 }
 impl fmt::Display for ScrubRefusal {
@@ -133,6 +138,7 @@ impl fmt::Display for ScrubRefusal {
                 write!(out, "scrub_object_exceeds_page: {oid}: {payload_bytes} exceeds {maximum}")
             }
             Self::Allocation => out.write_str("scrub_finding_allocation_failed"),
+            Self::SessionFailed => out.write_str("scrub_session_failed: start a new scan"),
             Self::Audit(cause) => fmt::Display::fmt(cause, out),
         }
     }
@@ -241,9 +247,19 @@ impl OneNode {
         request: &NodeRequestContext,
         query: ScrubQuery,
     ) -> Result<SelectedObjectScrub, ScrubRefusal> {
+        let started = Instant::now();
+        let selected = self.prepare_scrub_selection_in(request, query, started).await?;
+        self.scrub_selected_page_in(request, &selected, query, started).await
+    }
+
+    async fn prepare_scrub_selection_in(
+        &self,
+        request: &NodeRequestContext,
+        query: ScrubQuery,
+        started: Instant,
+    ) -> Result<MaterializedAdmission, ScrubRefusal> {
         query.validate()?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(GraphAuditRefusal::Cell)?;
-        let started = Instant::now();
         checkpoint(request, started, query.timeout)?;
         let selected = self.materialize_admission_in(request).await;
         checkpoint(request, started, query.timeout)?;
@@ -279,6 +295,20 @@ impl OneNode {
                 return Err(ScrubRefusal::ReferenceOutsideClosure(*oid));
             }
         }
+        Ok(selected)
+    }
+
+    async fn scrub_selected_page_in(
+        &self,
+        request: &NodeRequestContext,
+        selected: &MaterializedAdmission,
+        query: ScrubQuery,
+        started: Instant,
+    ) -> Result<SelectedObjectScrub, ScrubRefusal> {
+        let head = selected.basis().id();
+        let generation = selected.basis().generation();
+        let objects = selected.selected_closure().closure().objects();
+        let start_after = query.cursor.map(|cursor| cursor.after);
         // Seek directly in the canonical BTreeSet instead of rescanning the
         // entire prefix on every page. No directory listing or derived index.
         let mut remaining = objects

@@ -103,6 +103,19 @@ if the output sink fails while writing or flushing it; the process then fails.
 `--all` refuses `--resume-after`: caller-supplied cursors do not prove coverage
 of an earlier prefix. The existing single-page mode and explicit cursor
 continuation remain available unchanged. This sweep does not repair storage,
-verify graph edges or enumerate orphan files. Every page currently reuses the
-existing bounded materialization API; this is not a claim of constant total
-work per object or a performance improvement over that API.
+verify graph edges or enumerate orphan files.
+
+The sweep uses `OneNode::begin_selected_object_scrub_local_in` to retain one
+authenticated selection for its entire request. Ref membership and object
+selection are materialized once; every page still authenticates current
+repository authority before and after its native object reads. A changed head
+refuses even if its selected object identities happen to be identical. The
+session never caches object health: newly damaged bytes remain detectable.
+
+`SelectedObjectScrubSession::next_page` preserves the original request and
+absolute deadline. Its payload allowance may be tightened, not widened, for a
+sweep's remaining cumulative budget. A failed or interrupted page makes the
+session unusable rather than resetting its cursor or minting a fresh budget.
+The session owns no write authority or retention pin. Its per-page reports
+cannot certify an unobserved prefix; only the CLI's completed full-sweep
+accounting and successful shutdown permit the terminal receipt.

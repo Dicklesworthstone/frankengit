@@ -174,10 +174,16 @@ pub(super) fn run(options: Options) -> Result<u8, String> {
         let request = fgit_cli::command_request_context(&node);
         let initial = node.runtime().block_on(node.authenticate_authority_head_in(&request))
             .map_err(|error| error.to_string())?;
+        let mut session = node.runtime().block_on(node.begin_selected_object_scrub_local_in(
+            &request,
+            ScrubQuery { timeout: remaining_timeout(&options, started)?, ..options.query },
+        )).map_err(|error| error.to_string())?;
         let summary = drive(&options, &mut output, started, |query| {
-            node.runtime().block_on(node.scrub_selected_objects_local_in(&request, query))
-                .map_err(|error| error.to_string())
+            node.runtime().block_on(session.next_page_with_max_payload_bytes(query.max_payload_bytes))
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "scrub session exhausted before requested continuation".into())
         })?;
+        drop(session);
         let current = node.runtime().block_on(node.authenticate_authority_head_in(&request))
             .map_err(|error| error.to_string())?;
         if initial.receipt().token() != current.receipt().token()

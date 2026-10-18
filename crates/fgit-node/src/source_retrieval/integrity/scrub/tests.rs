@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 impl Scratch {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("fg-native-scrub-{}-{}",
@@ -30,19 +30,22 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
 }
-fn setup(format: GitHashAlgorithm) -> (Scratch, OneNode) {
+pub(super) fn setup(format: GitHashAlgorithm) -> (Scratch, OneNode) {
     let scratch = Scratch::new();
     let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     (scratch, node)
 }
-fn run(node: &OneNode, query: ScrubQuery) -> Result<SelectedObjectScrub, ScrubRefusal> {
+pub(super) fn run(node: &OneNode, query: ScrubQuery) -> Result<SelectedObjectScrub, ScrubRefusal> {
     node.runtime().block_on(node.scrub_selected_objects_local_in(&node.request_context(), query))
 }
 fn put(node: &OneNode, kind: GitKind, payload: Vec<u8>) -> GitOid {
     node.put_git_object(kind, payload).unwrap().identity()
 }
-fn publish(node: &OneNode) -> (BTreeSet<GitOid>, Vec<GitOid>) {
+pub(super) fn publish(node: &OneNode) -> (BTreeSet<GitOid>, Vec<GitOid>) {
+    publish_ref(node, b"refs/heads/main", b"native-scrub-fixture")
+}
+pub(super) fn publish_ref(node: &OneNode, reference: &[u8], key: &[u8]) -> (BTreeSet<GitOid>, Vec<GitOid>) {
     let blob = put(node, GitKind::Blob, b"live content\n".to_vec());
     let mut body = b"100644 file\0".to_vec();
     body.extend_from_slice(blob.as_bytes());
@@ -66,12 +69,12 @@ fn publish(node: &OneNode) -> (BTreeSet<GitOid>, Vec<GitOid>) {
     };
     let zero = GitOid::from_hex(node.object_format, &"0".repeat(node.object_format.digest_len() * 2)).unwrap();
     let validated = validate_source_import(&[SourceRefUpdate {
-        old: zero, new: root, ref_name: b"refs/heads/main".to_vec(),
+        old: zero, new: root, ref_name: reference.to_vec(),
     }], &receipt, closure).unwrap();
     let context = AdmissionContext {
         head_key: node.head_key.clone(), tenant_id: node.tenant_id(), repository_id: node.repository_id(),
         principal_id: PrincipalId::from_bytes([0x63; 16]),
-        idempotency_key: IdempotencyKey::new(b"native-scrub-fixture".to_vec()).unwrap(),
+        idempotency_key: IdempotencyKey::new(key.to_vec()).unwrap(),
         object_format: node.object_format,
     };
     let result = node.runtime().block_on(node.admit_validated_source_import_durable_in(
@@ -84,7 +87,7 @@ fn publish(node: &OneNode) -> (BTreeSet<GitOid>, Vec<GitOid>) {
 // Test-only fault location: inspect the fixture directory, assert its unique
 // existing native body, then damage those actual bytes. Production never scans
 // a directory for membership or uses a stand-in fabric/authority implementation.
-fn body_path(root: &Path, oid: GitOid) -> PathBuf {
+pub(super) fn body_path(root: &Path, oid: GitOid) -> PathBuf {
     let mut pending = vec![root.to_owned()];
     let mut matches = Vec::new();
     while let Some(directory) = pending.pop() {
