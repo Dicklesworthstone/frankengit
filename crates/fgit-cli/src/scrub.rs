@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 //! Trusted-local, bounded native object inventories. No sidecar authority.
 
+mod sweep;
+
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 use std::io::Write;
@@ -23,6 +25,15 @@ const USAGE: &str = "usage: fg scrub <storage-root> <tenant-id> <repository-id> 
   [--max-selected-objects <1..1000000>] [--max-page-objects <1..100000>]
   [--max-findings <1..1000>] [--max-bytes <1..17179869184>]
   [--max-object-bytes <1..268435456>] [--timeout-secs <1..3600>]
+  [--all [--max-pages <1..1000000>] [--max-sweep-bytes <1..17179869184>]]
+
+--all walks all pages with one request budget and one exact authority head.
+It streams provisional page records, then a complete sweep receipt only after
+all pages, final head revalidation and node shutdown succeed. Earlier findings
+remain findings even when the last page is clean. --all cannot resume a cursor.
+Defaults: at most 10000 pages and 16 GiB cumulative accounted payload.
+--timeout-secs is the WHOLE sweep deadline, not a fresh allowance per page.
+A limit, sink or authority failure emits no terminal certificate; exit status is 2.
 
 Inventory missing, damaged or otherwise unverifiable native objects in one
 bounded page of the authenticated selected closure, including hidden/history
@@ -43,7 +54,7 @@ Defaults: 1000 objects/page, 100 findings/page, 64 MiB accounted payload/page,
 counts verified bytes included in a page, not physical I/O. One extra bounded
 object may be read at a page boundary; the node's per-object ceiling still applies.
 Timeouts are cooperative and cannot interrupt a blocking filesystem operation.
-Exit 0: all selected object bytes verified in one fresh complete page;
+Exit 0: all selected object bytes verified in a complete page or --all sweep;
 3: this page has findings; 4: a clean page without a whole-selection certificate;
 2: invalid input, systemic failure, incomplete shutdown, or output failure.";
 
@@ -55,6 +66,7 @@ struct Options {
     format: GitHashAlgorithm,
     object_bytes: u64,
     query: ScrubQuery,
+    sweep: Option<sweep::Limits>,
 }
 
 fn positive(value: &str, maximum: u64, field: &str) -> Result<u64, String> {
@@ -66,7 +78,7 @@ fn positive(value: &str, maximum: u64, field: &str) -> Result<u64, String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 4 || args.len() > 24 || args[0].is_empty()
+    if args.len() < 4 || args.len() > 29 || args[0].is_empty()
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -76,6 +88,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut format = GitHashAlgorithm::Sha1;
     let mut object_bytes = 32 * MIB;
     let mut after = None;
+    let mut sweep_limits = sweep::Limits::default();
     let mut seen = BTreeSet::new();
     let mut at = 3;
     while let Some(flag) = args.get(at) {
@@ -83,7 +96,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             return Err(format!("duplicate option: {flag}"));
         }
         at += 1;
-        if flag == "--trusted-local" {
+        if flag == "--trusted-local" || flag == "--all" {
             continue;
         }
         let value = args.get(at).ok_or_else(|| format!("missing value for {flag}"))?;
@@ -105,11 +118,19 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--max-bytes" => query.max_payload_bytes = positive(value, 16 * 1024 * MIB, flag)?,
             "--max-object-bytes" => object_bytes = positive(value, 256 * MIB, flag)?,
             "--timeout-secs" => query.timeout = Duration::from_secs(positive(value, 3600, flag)?),
+            "--max-pages" => sweep_limits.pages = positive(value, 1_000_000, flag)? as usize,
+            "--max-sweep-bytes" => sweep_limits.payload_bytes = positive(value, 16 * 1024 * MIB, flag)?,
             _ => return Err(format!("unsupported scrub option: {flag}")),
         }
     }
     if !seen.contains("--trusted-local") {
         return Err("scrub requires --trusted-local and authorization to inspect the entire repository".into());
+    }
+    if !seen.contains("--all") && (seen.contains("--max-pages") || seen.contains("--max-sweep-bytes")) {
+        return Err("--max-pages and --max-sweep-bytes require --all".into());
+    }
+    if seen.contains("--all") && after.is_some() {
+        return Err("--all must start at the beginning; --resume-after is not permitted".into());
     }
     // Defaults shrink with a narrower explicitly requested page/selection.
     // Explicit contradictory bounds refuse instead of being silently clamped.
@@ -135,6 +156,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         tenant: TenantId::from_hex(&args[1]).map_err(|error| error.to_string())?,
         repository: RepositoryId::from_hex(&args[2]).map_err(|error| error.to_string())?,
         format, object_bytes, query,
+        sweep: seen.contains("--all").then_some(sweep_limits),
     })
 }
 
@@ -164,6 +186,9 @@ fn nullable_oid(oid: Option<GitOid>) -> String {
     oid.map_or_else(|| "null".into(), |oid| quote(&oid.to_string()))
 }
 fn receipt(options: &Options, report: &SelectedObjectScrub) -> String {
+    render_page(options, report, true)
+}
+fn render_page(options: &Options, report: &SelectedObjectScrub, closed: bool) -> String {
     let findings = report.findings().iter().map(|finding| {
         let code = match &finding.cause {
             ScrubFindingCause::ObjectRead(_) => "object_unverifiable",
@@ -184,23 +209,25 @@ fn receipt(options: &Options, report: &SelectedObjectScrub) -> String {
         ScrubStop::PayloadLimit => "payload_limit",
     };
     format!(concat!(
-        "{{\"type\":\"repository_scrub_page\",\"schema_version\":1,",
+        "{{\"type\":{},\"schema_version\":1,",
         "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation_id\":{},",
         "\"object_format\":{},\"authority_generation\":{},\"snapshot_token\":{},",
         "\"selected_closure_root\":{},\"selected_objects\":{},\"start_after\":{},",
         "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
         "\"payload_bytes_accounted\":{},\"findings\":[{}],\"next_cursor\":{},\"stop\":{},",
-        "\"page_complete\":true,\"complete\":{},\"all_selected_object_bytes_verified\":{},",
+        "\"page_complete\":{},\"complete\":{},\"all_selected_object_bytes_verified\":{},",
         "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
         "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
-        "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":true}}"
+        "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":{}}}"
     ),
+        quote(if closed { "repository_scrub_page" } else { "repository_scrub_sweep_page" }),
         quote(&options.tenant.to_string()), quote(&report.repository_id().to_string()),
         quote(&report.repository_incarnation_id().to_string()), quote(options.format.as_str()),
         report.generation().get(), quote(&head_token(report.head())),
         quote(&report.closure_root().to_string()), report.selected_objects(), nullable_oid(report.start_after()),
         report.checked_objects(), report.verified_objects(), report.read_attempts(), report.payload_bytes(),
-        findings, next, quote(stop), report.entire_selection_checked(), report.entire_selection_verified(),
+        findings, next, quote(stop), closed, closed && report.entire_selection_checked(),
+        closed && report.entire_selection_verified(), closed,
     )
 }
 fn finish(
@@ -231,6 +258,9 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let options = parse(args)?;
+    if options.sweep.is_some() {
+        return sweep::run(options);
+    }
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
             .with_object_format(options.format)

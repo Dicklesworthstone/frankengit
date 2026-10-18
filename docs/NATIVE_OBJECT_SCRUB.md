@@ -74,3 +74,35 @@ or later physical corruption. The CLI emits no page before successful shutdown.
 This command does not repair, delete, create retention roots, check local graph
 connectivity, validate signatures, or certify orphan files. `fg fsck` retains its
 existing complete, all-or-error graph audit without implicit fallback.
+
+## Complete bounded sweep
+
+`fg scrub ... --trusted-local --all` drives native pages in one process, under
+one request context and one exact authority head. `--max-page-objects`,
+`--max-findings` and `--max-bytes` remain per-page limits. `--max-pages` (default
+10,000, maximum 1,000,000) and `--max-sweep-bytes` (default and maximum 16 GiB)
+bound the whole operation. `--timeout-secs` is one cooperative sweep deadline,
+not a renewable per-page allowance. The same inherited runtime budget owns all
+materializations, object reads and final authentication.
+
+Each page is streamed as a `repository_scrub_sweep_page` JSON line with
+`page_complete`, `complete`, `all_selected_object_bytes_verified` and
+`node_closed` false. These are provisional observations, not successful
+closed-node receipts. A single terminal `repository_scrub_sweep` line is
+emitted only after exact coverage, final head revalidation and successful node
+shutdown. It aggregates every page's findings; a clean last page never erases
+earlier corruption or unreadable objects. Exit 0 means the whole selection's
+object bytes verified. Exit 3 means a complete sweep with findings. Exit 2
+means an incomplete operation, including exhausted aggregate budgets, an
+oversized next object, output failure, changed authority or failed shutdown.
+No terminal certificate is emitted after an operation failure. Consumers must
+require the terminal record and successful output delivery, not infer success
+from a page or a truncated stream. A terminal record cannot guarantee delivery
+if the output sink fails while writing or flushing it; the process then fails.
+
+`--all` refuses `--resume-after`: caller-supplied cursors do not prove coverage
+of an earlier prefix. The existing single-page mode and explicit cursor
+continuation remain available unchanged. This sweep does not repair storage,
+verify graph edges or enumerate orphan files. Every page currently reuses the
+existing bounded materialization API; this is not a claim of constant total
+work per object or a performance improvement over that API.
