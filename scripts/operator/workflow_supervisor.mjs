@@ -229,12 +229,56 @@ export function createController(backend) {
     return { type: 'workflow_supervisor_status', schema_version: 1, read_only: true, bound, owner_present: owner,
       lanes, authoritative_check: false, execution_retried: false };
   }
-  return Object.freeze({ configuration, once, serve, status,
+  // Only completed watcher summaries can be added. No source observation,
+  // workflow execution, publication submission or lock repair is permitted.
+  // Immutable same-byte summaries make concurrent read-side reconciliation
+  // idempotent; a retained execution-owner lock remains visible and untouched.
+  async function reconcile(value, options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options) ||
+        Object.keys(options).some(key => !['signal', 'readTimeoutMs'].includes(key))) fail('Unsupported reconciliation options.');
+    if (typeof backend.reconcile !== 'function') fail('Supervisor backend cannot reconcile original watcher custody.');
+    const config = configuration(value), selected = optionsFor(options);
+    const deadline = performance.now() + selected.readTimeoutMs;
+    const remaining = () => {
+      selected.signal?.throwIfAborted();
+      const milliseconds = Math.floor(deadline - performance.now());
+      if (milliseconds < 1) fail('Supervisor reconciliation deadline exceeded; original custody retained.');
+      return milliseconds;
+    };
+    remaining();
+    if (!await binding(config)) fail('Reconciliation requires the original saved supervisor binding.');
+    const owner = await lstat(join(config.state_directory, 'owner.lock')).then(() => true, error => {
+      if (error.code === 'ENOENT') return false; throw error;
+    });
+    const lanes = [];
+    for (const lane of config.lanes) {
+      const row = { name: lane.name };
+      try {
+        remaining();
+        row.watcher = watcherStatus(await backend.reconcile(lane.publisher.watch, {
+          signal: selected.signal, timeoutMs: remaining() }));
+        remaining();
+        const observed = await backend.publicationStatus(lane.publisher);
+        remaining();
+        row.publication = publication(observed);
+        row.publication_owner_present = observed.owner_present === true;
+        row.recovery_owner_present = observed.recovery_owner_present === true;
+      } catch (error) { row.error = errorObservation(error, 'reconciliation'); }
+      lanes.push(row);
+    }
+    return { type: 'workflow_supervisor_reconciliation', schema_version: 1, lanes,
+      owner_present: owner, failed: lanes.some(row => row.error || row.publication?.refused > 0),
+      pending: owner || lanes.some(row => row.error || row.watcher?.owner_present || row.watcher?.queued > 0 ||
+        row.watcher?.execution_unknown > 0 || row.publication?.pending > 0 || row.publication_owner_present || row.recovery_owner_present),
+      stopped: selected.signal?.aborted === true, authoritative_check: false,
+      execution_retried: false, publication_submitted: false, locks_removed: false };
+  }
+  return Object.freeze({ configuration, once, serve, status, reconcile,
     async loadConfiguration(path) { return configuration(parseJson(await readPrivate(path, MAX_BYTES), MAX_BYTES)); } });
 }
 
 export async function nativeController() {
   const [watch, publisher] = await Promise.all([import('./workflow_watch.mjs'), import('./workflow_check_publish.mjs')]);
   return createController({ configuration: publisher.configuration, execute: watch.once, publish: publisher.once,
-    watchStatus: watch.status, publicationStatus: publisher.status });
+    watchStatus: watch.status, publicationStatus: publisher.status, reconcile: watch.reconcile });
 }

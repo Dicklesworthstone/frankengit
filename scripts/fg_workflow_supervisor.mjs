@@ -6,7 +6,7 @@ import { nativeController } from './operator/workflow_supervisor.mjs';
 export function argumentsFor(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) return { help: true };
   const [action, ...args] = argv;
-  if (!['once', 'serve', 'status'].includes(action)) throw new Error('Choose once, serve or status.');
+  if (!['once', 'serve', 'status', 'reconcile'].includes(action)) throw new Error('Choose once, serve, status or reconcile.');
   const values = new Map();
   for (let index = 0; index < args.length; index++) {
     const key = args[index];
@@ -25,7 +25,7 @@ export function argumentsFor(argv) {
     ['--concurrency', 'concurrency', 16], ['--interval-ms', 'intervalMs', 3600000], ['--max-cycles', 'maxCycles', 1000000]]) {
     if (!values.has(flag)) continue;
     const text = values.get(flag), value = Number(text);
-    if (action === 'status' || (['--interval-ms', '--max-cycles'].includes(flag) && action !== 'serve') ||
+    if (action === 'status' || (action === 'reconcile' && flag !== '--read-timeout-ms') || (['--interval-ms', '--max-cycles'].includes(flag) && action !== 'serve') ||
         !(flag === '--max-cycles' ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(text) || !Number.isSafeInteger(value) || value > maximum) throw new Error(`Invalid budget: ${flag}`);
     options[name] = value;
   }
@@ -39,11 +39,17 @@ export function exitCode(result) {
   }
   return result.failed ? 1 : result.pending || result.stopped || result.containment_unknown ? 2 : 0;
 }
-const HELP = `Usage: node scripts/fg_workflow_supervisor.mjs once|serve|status --config /absolute/config.json [--trusted-local]
+const HELP = `Usage: node scripts/fg_workflow_supervisor.mjs once|serve|status|reconcile --config /absolute/config.json [--trusted-local]
 
 once and serve require --trusted-local and run publication -> execution -> publication
 for each explicitly configured branch. Unknown execution/publication is never
 retried. Local success remains non-authoritative for protected merges.
+
+reconcile requires --trusted-local. It validates original saved native reports
+and records missing completed watcher summaries across lanes WITHOUT executing
+workflows, submitting publications, observing new tips or removing owner locks.
+It works without fg/source storage and retains historical outcome/evidence IDs.
+--read-timeout-ms is its one shared cooperative deadline across every lane.
 
 Execution budgets: --max-publications 1..128, --read-timeout-ms 1..30000,
 --dispatch-timeout-ms 1..660000, --publication-timeout-ms 1..660000,
@@ -81,6 +87,7 @@ export async function main(argv = process.argv.slice(2)) {
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
     const result = selected.action === 'status' ? await controller.status(config)
+      : selected.action === 'reconcile' ? await controller.reconcile(config, { ...selected.options, signal: stop.signal })
       : selected.action === 'serve' ? await controller.serve(config, { ...selected.options, signal: stop.signal,
         onCycle: value => writeRecord(process.stdout, value) })
       : await controller.once(config, { ...selected.options, signal: stop.signal });

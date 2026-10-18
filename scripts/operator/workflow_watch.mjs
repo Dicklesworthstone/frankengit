@@ -108,11 +108,13 @@ async function identicalOrNew(path, data) {
     if (!(await readPrivate(path, 128 * 1024)).equals(wanted)) fail('Conflicting immutable watcher observation.');
   }
 }
-async function inventory(config, bind = false) {
+async function inventory(config, bind = false, checkpoint = () => {}) {
+  checkpoint();
   const bindingPath = join(config.state_directory, 'binding.json');
   const saved = await readPrivate(bindingPath, 128 * 1024, true);
   if (saved && !saved.equals(encode(config))) fail('Watcher configuration changed; never reset an existing run namespace.');
   const entries = await names(config.state_directory, 3 * config.max_runs + 2);
+  checkpoint();
   if (!saved) {
     if (entries.some(name => name !== 'owner.lock')) fail('Unbound watcher directory is not empty.');
     if (!bind) return [];
@@ -120,6 +122,7 @@ async function inventory(config, bind = false) {
   }
   const records = new Map();
   for (const name of entries) {
+    checkpoint();
     if (['binding.json', 'owner.lock'].includes(name)) continue;
     const match = /^(intent|started|result)-([0-9a-f]{64})\.json$/.exec(name);
     if (!match) fail('Unrecognized custody entry; interrupted writes must be inspected, never erased automatically.');
@@ -129,6 +132,7 @@ async function inventory(config, bind = false) {
   }
   if (records.size > config.max_runs) fail('Watcher run capacity reached.');
   for (const [key, record] of records) {
+    checkpoint();
     if (!record.intent || validateIntent(config, record.intent).id !== key) fail('Orphaned watcher observation.');
     const intentHash = digest(encode(record.intent));
     if (record.started) keys(record.started, ['schema', 'intent_sha256']);
@@ -301,13 +305,16 @@ export function dispatchReport(config, intent, report) {
     report_sha256: digest(encode(report)), outcome: stopped ? 'observed_stopped' : !selected.length ? 'no_matching_workflows' : report.succeeded ? 'observed_succeeded' : 'observed_failed',
     matched_count: selected.length, executed_count: report.runs.length, authoritative_check: false, ...(stopped ? { stop_reason: report.stop_reason } : {}) };
 }
-async function reconcileOne(config, record) {
+async function reconcileOne(config, record, checkpoint = () => {}) {
+  checkpoint();
   const location = paths(config, record.intent);
   if (!record.started) return false;
   await directory(location.batch);
   const raw = await readPrivate(join(location.batch, 'report.json'), 40 * 1024 * 1024, true);
+  checkpoint();
   if (!raw) return false;
   const result = dispatchReport(config, record.intent, parseJson(raw, 40 * 1024 * 1024));
+  checkpoint();
   await identicalOrNew(location.result, result); record.result = result;
   return true;
 }
@@ -315,22 +322,35 @@ export async function status(config) {
   config = configuration(config);
   await preflight(config, 'status');
   const records = await inventory(config);
+  return statusFrom(config, records);
+}
+async function statusFrom(config, records) {
   const owner = await lstat(join(config.state_directory, 'owner.lock')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
   return { type: 'workflow_watch_status', schema_version: 1, owner_present: owner, read_only: true,
     records: records.map(record => ({ id: record.intent.id, commit: record.intent.commit, run_id: record.intent.run_id,
       state: record.result?.outcome ?? (record.started ? 'execution_unknown' : 'queued'),
       ...(record.result?.stop_reason ? { stop_reason: record.result.stop_reason, unstarted_workflows: record.result.matched_count - record.result.executed_count } : {}), native_directory: paths(config, record.intent).batch })) };
 }
-export async function reconcile(config) {
+export async function reconcile(config, options = {}) {
   config = configuration(config);
+  if (!options || typeof options !== 'object' || Array.isArray(options) ||
+      Object.keys(options).some(key => !['signal', 'timeoutMs'].includes(key)) ||
+      (options.signal !== undefined && !(options.signal instanceof AbortSignal))) fail('Invalid reconciliation options.');
+  const deadline = performance.now() + number(options.timeoutMs ?? 30_000, 1, 660_000);
+  const checkpoint = () => {
+    options.signal?.throwIfAborted();
+    if (performance.now() >= deadline) fail('Workflow reconciliation deadline exceeded; original custody retained.');
+  };
+  checkpoint();
   await preflight(config, 'reconcile');
-  const records = await inventory(config);
+  const records = await inventory(config, false, checkpoint);
   if (records.filter(record => !record.result).length > 1) fail('Multiple unresolved execution records require inspection.');
   for (const record of records) if (!record.result && record.started) {
     // Missing native evidence is never permission to run a second time.
-    try { await reconcileOne(config, record); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    try { await reconcileOne(config, record, checkpoint); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
   }
-  return status(config);
+  checkpoint();
+  return statusFrom(config, records);
 }
 function checkpoint(signal) {
   try { signal?.throwIfAborted(); } catch (error) { error.phase = 'before_execution'; throw error; }
