@@ -436,7 +436,7 @@ fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_publi
     assert_eq!(current.checks[0].id, check_id(&new_record, publisher()));
     assert_eq!(
         current.checks[0].conclusion,
-        WorkflowCheckConclusion::ActionRequired
+        WorkflowCheckConclusion::Success
     );
     assert_eq!(page(&node, None, 100, Some(old_page.source_head)), old_page);
     update_branch(

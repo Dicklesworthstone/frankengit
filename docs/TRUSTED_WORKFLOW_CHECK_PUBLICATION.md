@@ -2,9 +2,18 @@
 
 FG-095b's `fgit-forge::event::workflow_check` defines an immutable job
 observation. It records what an authenticated reporting principal submits,
-not independently attested execution. `ActionRequired`, `Failure`, `Cancelled`
-and `TimedOut` are the only conclusions. There is no successful or neutral
-protected-check result, and no conversion to a review approval or green check.
+not independently attested execution. The native publisher verifies the exact
+completed job against its original retained execution evidence before publishing
+`Success`. Skipped jobs remain `ActionRequired`; unsuccessful jobs retain
+`Failure`, `Cancelled` or `TimedOut`. No conclusion grants merge permission or
+converts the observation into an independent runner attestation or review approval.
+
+Custody history and canonical publication have different result contracts.
+`fg workflow recover` preserves the original proposal: succeeded and skipped
+jobs both have an `action_required` custody conclusion. `fg workflow publish`
+decodes and verifies the saved execution evidence, then maps only an actually
+succeeded job to canonical `success`. Recovery never rewrites the journal to
+match the published result, and publication never acknowledges or reruns it.
 
 ## Identity and compatibility
 
@@ -21,9 +30,10 @@ version is exactly 1. The payload binds reporting principal, canonical branch,
 native source commit, run/attempt/graph commitments, exact job name, conclusion,
 and original evidence bytes. `workflow_check.rs` is the byte-layout authority.
 Existing aggregate and event tags, schema versions, and body encodings remain
-unchanged. Older readers reject the new required kinds rather than ignoring
-an authority-selected event they cannot interpret. Upgrade readers before
-publishing this kind; do not write it into a mixed-version deployment.
+unchanged. `Success` uses conclusion value 5; the existing values 1–4 retain
+their meanings. Older readers reject the new required kind or conclusion rather
+than ignoring an authority-selected event they cannot interpret. Upgrade readers
+before publishing these records; do not write them into a mixed-version deployment.
 
 Job names are nonempty UTF-8 without controls, at most 1,024 bytes. Evidence is
 nonempty and bounded to 1 MiB, checked before copying or encoding. Evidence
@@ -35,18 +45,31 @@ candidates, and signed independent runner attestations are separate boundaries.
 ## Current scope
 
 The event and batch encoders/decoders implement these identity, framing and
-resource checks. The legacy digest-valued PR projection does not reinterpret
-workflow observations as PR rows. This record definition alone does not enable
-a writer, replace authority-head CAS, publish a local journal, or satisfy a
-protected branch's checks.
+resource checks. `OneNode::admit_trusted_workflow_check_in` verifies evidence and
+publishes the observation through ordinary admission and authority-head CAS.
+The native PR checks APIs select canonical observations for the exact recorded
+source ref and commit; stale source observations do not apply to a moved source.
+The legacy digest-valued PR projection does not reinterpret observations as PR
+rows. Required-check authority and protected-merge enforcement remain incomplete;
+the current protected-branch guard still applies independently of `Success`.
 
-The eight Rust tests in `event/workflow_check/tests.rs` cover both native hash
-domains, all admitted conclusions, all 256 identity bits, canonical labels,
-conflicting bodies under one identity, aggregate/version corruption, exact
-bounds, truncation, unknown conclusions, and legacy-byte preservation.
+## Verification
 
-Rust compilation and Rust tests were not run in the editing environment:
-Cargo and rustc are absent. Source/blob equality, patch whitespace, lexical
-checks and independent identity/framing reference checks are not native gate
-results. Run `cargo test -p fgit-forge --lib workflow_check --locked` and the
-owning integration lanes with the pinned toolchain before acceptance.
+The Rust codec tests in `event/workflow_check/tests.rs` cover both native hash
+domains, admitted conclusions, full check identities, canonical labels,
+conflicting bodies, aggregate/version corruption, exact bounds, truncation,
+unknown conclusions and legacy-byte preservation. Node publication and HTTP
+tests assert canonical `Success` after verified execution, including reopen and
+source movement; custody tests retain `ActionRequired` for the same local job.
+
+`scripts/e2e/workflow_publication_smoke.py` and
+`scripts/e2e/workflow_dispatch_smoke.py` exercise fresh real `fg` processes,
+original custody recovery, exact evidence publication and terminal retries in
+both Git hash formats. The publication campaign also refuses a protected branch
+update while its successful check is visible, then admits the same update under
+an explicitly disabled policy. The allowed and refused cases cover the existing
+protection; they do not implement required-check configuration or merge gating.
+
+Run `./scripts/verify.sh pull-request-checks` with the pinned toolchain for the
+owning integration lane. The listed coverage describes test assertions, not a
+passing gate at an unspecified revision.

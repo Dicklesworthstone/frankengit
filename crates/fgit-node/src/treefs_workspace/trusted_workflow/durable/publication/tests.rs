@@ -333,7 +333,7 @@ fn actual_publication_survives_reopen_with_exact_evidence_and_no_branch_or_polic
         assert_eq!(saved.actor, publisher());
         assert_eq!(
             saved.record.conclusion,
-            WorkflowCheckConclusion::ActionRequired
+            WorkflowCheckConclusion::Success
         );
         assert_eq!(
             fs::read(run.run_directory.join("check-proposals.journal")).unwrap(),

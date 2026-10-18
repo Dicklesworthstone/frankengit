@@ -10,9 +10,10 @@ failure still reaches the publisher; an unrelated lane can continue.
 This is an **external trusted-local Linux operator**, not a native executor,
 forge database, sandbox or second publication authority. Node.js 22+ and the
 native `fg` executable are required. Every selected revision executes with the
-operator account's host privileges. Do not select untrusted branches. Native
-trusted-local successes still publish `action_required`, not protected-merge
-success. This does not close the required-check authority decision.
+operator account's host privileges. Do not select untrusted branches. The native
+publisher reports verified trusted-local successes as `success`; skipped jobs remain
+`action_required`. Their original custody proposals are preserved. Neither
+conclusion grants merge permission or closes the required-check authority decision.
 
 ## Configuration
 

@@ -25,7 +25,8 @@ publication. The current token must identify the original publisher principal
 with outcomes-read permission. HTTP is permitted only on numeric loopback.
 The first endpoint is retained independently; a later invocation cannot change it.
 A retained publisher lock is neither bypassed for writes nor cleared by recovery.
-Success/skipped jobs remain action_required, NOT green required checks.
+Verified successful jobs publish success; skipped jobs remain action_required.
+Saved custody still reports action_required for both. Publication grants no merge permission.
 SIGTERM/SIGINT drain the active native publisher. Owner locks are never stolen.
 
 Exit 0: all selected publications settled as committed (or no work);

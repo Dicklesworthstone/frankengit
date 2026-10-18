@@ -88,20 +88,29 @@ Source movement can therefore cause a canonical refusal. An identical retry can
 recover its historical decision after source movement; the operator never edits
 an old request to make it fit a new tip.
 
-## Results are observations, not required green checks
+## Published conclusions and authority
 
 | Actual native job outcome | Published conclusion |
 | --- | --- |
-| Succeeded or skipped | `action_required` |
+| Succeeded, with original evidence verified by the native publisher | `success` |
+| Skipped | `action_required` |
 | Failed, refused or output limit | `failure` |
 | Cancelled | `cancelled` |
 | Timed out | `timed_out` |
 
-The publisher preserves the native rule that a trusted local success is **not**
-an independently verified successful required check. A committed publication
-means the observation was recorded, not that the job passed, the code is correct,
-external delivery completed or the merge is authorized. Protected-green-check
-policy and hostile runner attestation are separate, incomplete features.
+The native custody journal still reports `action_required` for succeeded and
+skipped jobs. The operator checks that original proposal separately from the
+published conclusion: only the native verifier can establish that its retained
+evidence describes a succeeded job and publish `success`. It preserves the
+original journal bytes, exact job identity and publication key.
+
+`success` describes the verified trusted-local job outcome. It is not independent
+runner attestation or merge authority. A committed publication records the
+observation; external delivery and protected-branch policy are separate
+boundaries. Required-check enforcement and hostile runner attestation remain
+incomplete. An old pending publication plan that called a succeeded job
+`action_required` cannot be silently reinterpreted or assigned a new key after an
+upgrade; use the original key's outcome recovery to resolve any prior publication.
 
 ## Restart and uncertain publication
 

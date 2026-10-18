@@ -18,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from typing import NamedTuple
 import zlib
 
 from pull_request_smoke import (
@@ -26,8 +27,21 @@ from pull_request_smoke import (
 )
 
 RUN_ID = "61" * 16
-JOBS = {"a_success": ("succeeded", "action_required", 0, b"workflow-ok"),
-        "b_failure": ("failed", "failure", 7, b"workflow-failed")}
+
+
+class JobExpectation(NamedTuple):
+    outcome: str
+    custody_conclusion: str
+    published_conclusion: str
+    exit_code: int
+    stdout: bytes
+
+
+# A custody proposal is not a canonical result. Native publication re-verifies
+# the original evidence before promoting an executed success; skipped jobs never
+# receive that promotion. Keep both boundaries independently asserted.
+JOBS = {"a_success": JobExpectation("succeeded", "action_required", "success", 0, b"workflow-ok"),
+        "b_failure": JobExpectation("failed", "failure", "failure", 7, b"workflow-failed")}
 
 
 def fixture(root, algorithm, execution_log):
@@ -79,7 +93,7 @@ def expected_observation(entry, fact, evidence):
     require(hashlib.sha256(evidence).hexdigest() == fact["evidence_sha256"], "evidence commitment")
     return dict(id=check_id(entry, fact), publisher=PRINCIPAL, run_id=entry["run_sha256"],
                 attempt_id=entry["attempt_sha256"], graph_root=entry["workflow_graph_sha256"],
-                job=fact["job"], conclusion=JOBS[fact["job"]][1],
+                job=fact["job"], conclusion=JOBS[fact["job"]].published_conclusion,
                 evidence_sha256=fact["evidence_sha256"], evidence_bytes=str(len(evidence)))
 
 
@@ -183,10 +197,11 @@ def run_format(binary, algorithm):
         incarnation = report["repository_incarnation"]
         jobs = {job["id"]: job for job in report["execution"]["jobs"]}
         require(set(jobs) == set(JOBS), "both independent real jobs must execute")
-        for name, (outcome, _, code, output) in JOBS.items():
+        for name, expected in JOBS.items():
             job = jobs[name]
-            require(job["outcome"] == outcome and len(job["steps"]) == 1, "real job outcome")
-            require(job["steps"][0]["exit_code"] == code and job["steps"][0]["stdout_hex"] == output.hex(),
+            require(job["outcome"] == expected.outcome and len(job["steps"]) == 1, "real job outcome")
+            require(job["steps"][0]["exit_code"] == expected.exit_code
+                    and job["steps"][0]["stdout_hex"] == expected.stdout.hex(),
                     "actual shell exit/output")
         require(executions.read_bytes() == b"sf", "each job must execute exactly once")
         require(not invoke(binary, run, 2).stdout and executions.read_bytes() == b"sf",
@@ -214,7 +229,8 @@ def run_format(binary, algorithm):
             for index, fact in enumerate(entry["facts"]):
                 if fact["status"] == "completed":
                     require(fact["job"] not in completed, "duplicate terminal job fact")
-                    require(fact["conclusion"] == JOBS[fact["job"]][1], "job conclusion in retained evidence")
+                    require(fact["conclusion"] == JOBS[fact["job"]].custody_conclusion,
+                            "job conclusion in retained custody must not be promoted")
                     completed[fact["job"]] = (entry, index, fact)
                 else:
                     unfinished.append((entry, index))
@@ -306,9 +322,34 @@ def run_format(binary, algorithm):
                 "same key accepted a different branch at the exact same commit")
         require(document(invoke(binary, checks)) == page, "key-reuse mismatch changed authority")
 
-        moved = document(invoke(binary, ["branch", "update", node, TENANT, REPOSITORY, "--trusted-local",
-                         "--principal", PRINCIPAL, "--idempotency-key", "advance-workflow-source", "--ref", SOURCE,
-                         "--expected-tip", f["source"], "--target", f["advanced"], "--object-format", algorithm]))
+        # An observed Success cannot bypass the existing protected-branch
+        # requirement. This exercises the real admission guard, rather than
+        # relying only on the publisher's merge_permission:null response.
+        protection = ["protection", "set", node, TENANT, REPOSITORY, "--trusted-local",
+                      "--principal", PRINCIPAL, "--admin", PRINCIPAL, "--object-format", algorithm]
+        installed = document(invoke(binary, protection + ["--idempotency-key", "workflow-review-protection",
+                             "--expected-version", 0, "--expected-epoch", 1,
+                             "--require-reviewer", f"{SOURCE}:{'d4' * 16}"]))
+        require(installed["committed"] is True and installed["committed_policy_epoch"] == 2,
+                "install the real protected-branch requirement")
+        advance = ["branch", "update", node, TENANT, REPOSITORY, "--trusted-local",
+                   "--principal", PRINCIPAL, "--idempotency-key", "success-cannot-bypass-protection", "--ref", SOURCE,
+                   "--expected-tip", f["source"], "--target", f["advanced"], "--object-format", algorithm]
+        blocked = document(invoke(binary, advance, 3))
+        require(blocked["command_committed"] is False and blocked["outcome"] == "refused"
+                and blocked["refusal_code"] == "ProtectedRefTransitionDenied",
+                "a successful workflow observation bypassed branch protection")
+        protected_page = document(invoke(binary, checks))
+        check_page(protected_page, algorithm, f, incarnation, ordered)
+        require(invoke(binary, refs).stdout == original_refs, "refused protected update changed code")
+        require(document(invoke(binary, advance, 3)) == blocked
+                and document(invoke(binary, checks)) == protected_page,
+                "protected refusal retry changed its terminal or canonical checks")
+        disabled = document(invoke(binary, protection + ["--idempotency-key", "workflow-review-protection-disabled",
+                            "--expected-version", 1, "--expected-epoch", 2, "--clear"]))
+        require(disabled["committed"] is True and disabled["committed_policy_epoch"] == 3,
+                "explicitly disable protection for the permitted update twin")
+        moved = document(invoke(binary, changed(advance, "--idempotency-key", "advance-workflow-source")))
         require(moved["command_committed"] is True, "advance exact canonical source")
         stale = document(invoke(binary, checks))
         check_page(stale, algorithm, f, incarnation, [], current=False)
@@ -332,7 +373,8 @@ def run_format(binary, algorithm):
         print(json.dumps(dict(type="workflow_publication_smoke", format=algorithm, passed=True,
                               rust_executed=True, fresh_processes=True, native_fixture=True, real_jobs=2,
                               invalid_evidence_requests=len(negatives), output_failure_exercised=output_fault,
-                              no_execution_retry=True, historical_terminal_after_source_move=True)))
+                              no_execution_retry=True, historical_terminal_after_source_move=True,
+                              success_preserves_review_protection=True)))
 
 
 def self_test():
@@ -372,7 +414,7 @@ def self_test():
             check_publication(sample, algorithm, f, incarnation, marker, entry, 1, observation)
             for key, value in [("repository_id", "wrong"), ("repository_incarnation", "wrong"), ("principal_id", "wrong"),
                                ("source_commit", f["advanced"]), ("source_ref_hex", TARGET.encode().hex()),
-                               ("conclusion", "success"), ("evidence_sha256", "00" * 32), ("evidence_bytes", "0"),
+                               ("conclusion", "action_required"), ("evidence_sha256", "00" * 32), ("evidence_bytes", "0"),
                                ("journal_id", "00" * 32), ("batch_sha256", "00" * 32), ("fact_index", True),
                                ("check_id", "check/wrong"), ("job", "b_failure"), ("run_id", "00" * 32),
                                ("command_committed", False), ("historical_outcome", False), ("current_refs_asserted", True),

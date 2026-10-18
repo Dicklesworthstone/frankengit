@@ -297,7 +297,7 @@ fn actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies()
         assert_eq!(token(&first), token(&second));
         let all = get(&server.client, "/api/v1/pulls/7/checks", 'a');
         status(&all, 200);
-        assert!(all.body.contains("\"conclusion\":\"action_required\""));
+        assert!(all.body.contains("\"conclusion\":\"success\""));
         assert!(all.body.contains("\"conclusion\":\"failure\""));
         assert!(all.body.contains("\"merge_permission\":null"));
         assert!(!all.body.contains("\"evidence\":"));

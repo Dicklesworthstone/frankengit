@@ -290,8 +290,11 @@ def run_format(binary, algorithm):
                          for index, fact in enumerate(entry["facts"]) if fact["status"] == "completed"]
             require(len(completed) == 1, "child custody has wrong terminal count")
             entry, index, fact = completed[0]
-            expected = "failure" if bytes.fromhex(run["workflow_path_hex"]).endswith(b"/b.yml") else "action_required"
-            require(fact["conclusion"] == expected and entry["source_commit"] == f["source"], "child custody binding")
+            failed_job = bytes.fromhex(run["workflow_path_hex"]).endswith(b"/b.yml")
+            custody_conclusion = "failure" if failed_job else "action_required"
+            published_conclusion = "failure" if failed_job else "success"
+            require(fact["conclusion"] == custody_conclusion and entry["source_commit"] == f["source"],
+                    "child custody binding must preserve the original unpromoted proposal")
             publication = ["workflow", "publish", node, TENANT, REPOSITORY, SOURCE, "--trusted-local",
                            "--run-directory", child, "--journal-id", marker, "--batch", entry["batch_sha256"],
                            "--fact-index", index, "--principal-id", PRINCIPAL, "--idempotency-key", "dispatch-" + run["run_id"],
@@ -299,8 +302,9 @@ def run_format(binary, algorithm):
                            "--expected-incarnation", run["repository_incarnation"]]
             published = document(invoke(binary, publication))
             require(published["type"] == "workflow_check_publication" and published["command_committed"] is True
-                    and published["conclusion"] == expected and published["source_commit"] == f["source"]
-                    and published["authoritative_check"] is False, "dispatch child did not publish its exact observation")
+                    and published["conclusion"] == published_conclusion and published["source_commit"] == f["source"]
+                    and published["authoritative_check"] is False and published["merge_permission"] is None,
+                    "dispatch child did not publish its exact observation without merge authority")
             pinned = document(invoke(binary, listing))
             require(document(invoke(binary, publication)) == published and document(invoke(binary, listing)) == pinned, "publication retry duplicated canonical state")
             require(document(invoke(binary, recovery)) == history, "publication consumed child custody")
