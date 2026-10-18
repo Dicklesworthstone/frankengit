@@ -94,6 +94,18 @@ recovery paths retain their complete admission materialization.
 
 ## Outbox reconciliation suffix
 
+Full delivery and publication preflight now reads each unique immutable event
+batch once per invocation, even when many aggregate frontiers and outbox
+destinations refer to it. Frontiers sharing a batch are validated in one event
+pass. Only bounded stream counters and validation results survive that pass;
+decoded payloads are not accumulated or cached across requests. Every delivery
+effect and terminal receipt remains independently authenticated. Validation
+errors are reported in the original canonical frontier/delivery order, and
+cancellation is checked inside event validation as well as at storage reads.
+This reduces duplicate materialization work within the existing map limits; it
+does not compact history or remove the publication ceiling. The stored-body
+regressions are in `merge::native::delivery::scaling_tests`.
+
 The runtime settlement reader now uses `history::latest_progress_for_entry`.
 It authenticates the supplied entry against the exact selected outbox map and
 verifies its stable delivery identity and lifecycle chain. It then verifies the

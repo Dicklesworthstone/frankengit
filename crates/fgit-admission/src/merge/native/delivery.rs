@@ -4,7 +4,7 @@
 //! before it is canonical; only an authenticated publication basis selects its
 //! forge/outbox roots. Settlement never creates a second pending table.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
@@ -81,17 +81,66 @@ where
 {
     let state = read_roots_in(store, cx, basis, cancelled).await?;
     let repository = basis.body().repository_id;
+    // The canonical maps already bound these indexes. Retain only root/stream
+    // references and counters, never every decoded event batch. A bulk batch
+    // can advance many frontiers and have many outbox destinations: neither
+    // multiplicity may multiply its immutable reads or event validation work.
+    let mut frontiers = BTreeMap::<Digest, Vec<&ForgePositionStateEntry>>::new();
     for position in state.forge.entries() {
         checkpoint(cancelled)?;
-        let events =
-            storage::read_events(store, cx, repository, position.event_batch_root()).await?;
-        validate_position_batch(position, &events)?;
+        frontiers
+            .entry(position.event_batch_root())
+            .or_default()
+            .push(position);
+    }
+    let mut payload_roots = BTreeSet::new();
+    for entry in state.outbox.entries() {
+        checkpoint(cancelled)?;
+        payload_roots.insert(entry.payload_root());
+    }
+    let mut rejected_frontiers = BTreeSet::new();
+    let mut payload_checks = BTreeMap::new();
+    for position in state.forge.entries() {
+        checkpoint(cancelled)?;
+        let root = position.event_batch_root();
+        if let Some(positions) = frontiers.remove(&root) {
+            let events = storage::read_events(store, cx, repository, root).await?;
+            checkpoint(cancelled)?;
+            let mut ranges = positions
+                .into_iter()
+                .map(|position| (position.stream(), (position, 0_u32)))
+                .collect();
+            rejected_frontiers.extend(validate_position_ranges(&mut ranges, &events, cancelled)?);
+            if payload_roots.contains(&root) {
+                // Keep only a validation result. Report a malformed outbox
+                // payload after its own effect check, in the original order.
+                let valid = match validate_payload_positions_in(&state.forge, &events, cancelled) {
+                    Ok(()) => true,
+                    Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid)) => false,
+                    Err(error) => return Err(error),
+                };
+                payload_checks.insert(root, valid);
+            }
+        }
+        // Later frontiers sharing a batch were checked in the first pass, but
+        // their errors must not overtake an intervening missing/corrupt body.
+        if rejected_frontiers.contains(&position.stream()) {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
     }
     for entry in state.outbox.entries() {
         read_effect_in(store, cx, repository, entry, cancelled).await?;
         checkpoint(cancelled)?;
-        let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
-        validate_payload_positions(&state.forge, &payload)?;
+        match payload_checks.get(&entry.payload_root()) {
+            Some(true) => (),
+            Some(false) => return Err(unavailable(RefusalCode::EvidenceInvalid)),
+            None => {
+                let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
+                checkpoint(cancelled)?;
+                validate_payload_positions_in(&state.forge, &payload, cancelled)?;
+                payload_checks.insert(entry.payload_root(), true);
+            }
+        }
     }
     checkpoint(cancelled)?;
     Ok(state)
@@ -483,10 +532,19 @@ pub(super) fn validate_payload_positions(
     forge: &CanonicalForgePositionState,
     payload: &ForgeEventBatch,
 ) -> Result<(), AdmissionError> {
+    validate_payload_positions_in(forge, payload, &|| false)
+}
+
+fn validate_payload_positions_in(
+    forge: &CanonicalForgePositionState,
+    payload: &ForgeEventBatch,
+    cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<(), AdmissionError> {
     if payload.events.is_empty() {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     for event in &payload.events {
+        checkpoint(cancelled)?;
         let position = forge
             .entry(storage::aggregate_label(event.aggregate)?)
             .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
@@ -494,7 +552,45 @@ pub(super) fn validate_payload_positions(
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
     }
-    Ok(())
+    checkpoint(cancelled)
+}
+
+/// Validate all frontiers selected from this one immutable batch in one pass.
+/// Per-stream counters follow original event order even when streams interleave;
+/// a final matching version alone cannot hide a gap or an extra predecessor.
+/// Return rejected stream identities so the caller reports them in original
+/// canonical frontier order, after any earlier missing or corrupt dependencies.
+fn validate_position_ranges(
+    ranges: &mut BTreeMap<fgit_types::AsciiSlug, (&ForgePositionStateEntry, u32)>,
+    batch: &ForgeEventBatch,
+    cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<BTreeSet<fgit_types::AsciiSlug>, AdmissionError> {
+    let mut rejected = BTreeSet::new();
+    for event in &batch.events {
+        checkpoint(cancelled)?;
+        let stream = storage::aggregate_label(event.aggregate)?;
+        let Some((position, count)) = ranges.get_mut(&stream) else {
+            continue;
+        };
+        let Some(next) = count.checked_add(1) else {
+            rejected.insert(stream);
+            continue;
+        };
+        *count = next;
+        if next > position.event_count()
+            || position.predecessor_position().checked_add(u64::from(next)) != Some(event.version.get())
+        {
+            rejected.insert(stream);
+        }
+    }
+    for (position, count) in ranges.values() {
+        checkpoint(cancelled)?;
+        if *count != position.event_count() {
+            rejected.insert(position.stream());
+        }
+    }
+    checkpoint(cancelled)?;
+    Ok(rejected)
 }
 
 pub(super) fn validate_position_batch(
@@ -570,3 +666,5 @@ fn checkpoint(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionErr
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod scaling_tests;
