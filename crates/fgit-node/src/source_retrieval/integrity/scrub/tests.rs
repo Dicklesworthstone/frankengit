@@ -181,7 +181,6 @@ fn cursor_pages_resume_across_real_reopen_without_skips_duplicates_or_health_inf
             }
             node.shutdown().unwrap();
             if cursor.is_none() { break; }
-            drop(node);
             node = OneNode::open_existing(scratch.config(format)).unwrap();
             node.bring_into_service(HeadGeneration::FIRST).unwrap();
         }
