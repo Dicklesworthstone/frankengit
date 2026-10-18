@@ -240,3 +240,81 @@ test('existing PR actions keep their original body and no-bundle fast-forward be
   assert.equal(body.contentType, 'application/x-www-form-urlencoded'); assert.equal(new TextDecoder().decode(body.bytes).includes('pull_request_version=7'), true);
   assert.throws(() => requestBody('fast-forward', fields, new Uint8Array([1]), '1'.repeat(32)), /must not carry/);
 });
+
+
+const workflowGate = (job = 'test', extra = {}) => ({
+  source_ref_hex: hex('refs/heads/main'), publisher: OTHER, graph_root: '7'.repeat(64), job, ...extra,
+});
+const checkPolicy = (checks = [workflowGate()], reviewers = []) => ({
+  administrators: [ADMIN],
+  branches: [{ reference_hex: hex('refs/heads/main'), required_reviewers: reviewers, required_checks: checks }],
+});
+test('required workflow selectors retain native byte ordering and strict bounded fields', () => {
+  const names = ['\u{10000}', '\ue000', 'α', 'a'];
+  assert.deepEqual(protectionPolicy(checkPolicy(names.map(name => workflowGate(name))))
+    .branches[0].required_checks.map(check => check.job), ['a', 'α', '\ue000', '\u{10000}']);
+  assert.equal(protectionPolicy(checkPolicy([workflowGate('😀'.repeat(256))]))
+    .branches[0].required_checks[0].job, '😀'.repeat(256));
+  const thirtyTwo = Array.from({ length: 32 }, (_, index) => workflowGate(`job-${index}`));
+  assert.equal(protectionPolicy(checkPolicy(thirtyTwo)).branches[0].required_checks.length, 32);
+  for (const checks of [[], null, [workflowGate(), workflowGate()], [...thirtyTwo, workflowGate('extra')],
+    [workflowGate('')], [workflowGate('line\nbreak')], [workflowGate('\u0085')], [workflowGate('\ud800')],
+    [workflowGate('😀'.repeat(257))], [workflowGate('test', { outcome: 'succeeded' })],
+    [workflowGate('test', { source_ref_hex: hex('refs/tags/v1') })],
+    [workflowGate('test', { publisher: 'A'.repeat(32) })], [workflowGate('test', { graph_root: '7'.repeat(62) })]]) {
+    assert.throws(() => protectionPolicy(checkPolicy(checks)));
+  }
+  const source = checkPolicy(), normalized = protectionPolicy(source);
+  source.branches[0].required_checks[0].job = 'mutated';
+  assert.equal(normalized.branches[0].required_checks[0].job, 'test');
+});
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: check-only policy forms retain exact selectors across an unavailable reply and retry`, async () => {
+    let writes = 0;
+    const selected = checkPolicy([workflowGate('build: α'), workflowGate('\u{10000}')]);
+    const h = harness({ format, respond: call => {
+      if (call.method === 'GET') return response(snapshot(format, { policy: selected }));
+      if (++writes === 1) throw new Error('fixture lost check-policy reply');
+    } });
+    await h.ready();
+    assert.deepEqual(h.client.observed.policy, protectionPolicy(selected));
+    const pending = await h.client.stage(selected);
+    const fields = new URLSearchParams(pending.intent.body);
+    assert.deepEqual(fields.getAll('required_reviewer'), []);
+    assert.deepEqual(fields.getAll('required_check'), protectionPolicy(selected).branches[0].required_checks.map(check =>
+      `${hex('refs/heads/main')}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(check.job)}`));
+    await assert.rejects(h.client.send(), error => error.outcomeUnknown);
+    await h.client.send();
+    assert.equal(h.calls[1].body, h.calls[2].body);
+    assert.equal(h.calls[1].headers['Idempotency-Key'], h.calls[2].headers['Idempotency-Key']);
+  });
+}
+test('complete policy preview includes check-only additions and removals', () => {
+  const before = checkPolicy([workflowGate('old')]), after = checkPolicy([workflowGate('new')]);
+  const change = protectionChanges(before, after).branches[0];
+  assert.deepEqual(change.added, []); assert.deepEqual(change.removed, []);
+  assert.deepEqual(change.checks_added, [workflowGate('new')]);
+  assert.deepEqual(change.checks_removed, [workflowGate('old')]);
+  assert.deepEqual(protectionChanges(before, { administrators: [ADMIN], branches: [] }).branches[0].checks_removed, [workflowGate('old')]);
+});
+test('review-only v1 receipt keeps its historical retry key with explicit empty check defaults', async () => {
+  const selected = policy(); selected.branches[0].required_checks = [];
+  const cryptoImpl = { subtle: webcrypto.subtle, getRandomValues(bytes) { bytes.fill(0xee); return bytes; } };
+  const h = harness({ cryptoImpl, respond: call =>
+    call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : undefined });
+  await h.ready();
+  const pending = await h.client.stage(selected);
+  // Generated from the pre-required-check adapter at 76418fef. The basis and
+  // encoded body must remain unchanged, including omission of empty defaults.
+  assert.equal(pending.intent.key, 'fgbp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-7198e47a76a479470b0bce81a39936b133e26f0fac1d2a8a2dd0d054bcc205fe');
+  assert.deepEqual(pending.intent.source.policy, policy());
+  assert.deepEqual(pending.intent.replacement, policy());
+  assert.equal(new URLSearchParams(pending.intent.body).has('required_check'), false);
+  const receipt = h.client.exportReceipt(), restored = harness({ cryptoImpl });
+  await restored.client.connect(TOKEN, ADMIN);
+  const imported = await restored.client.restoreReceipt(receipt);
+  assert.equal(imported.intent.key, pending.intent.key);
+  assert.equal(imported.intent.body, pending.intent.body);
+  assert.equal(imported.sent, true);
+  assert.deepEqual(restored.calls, []);
+});

@@ -20,8 +20,9 @@ requires the separate `outcomes-read` grant. First
 installation remains `fg protection set ... --trusted-local --expected-version 0`
 on the server host. A remote request cannot enroll its own first administrator.
 Every required reviewer on a protected branch remains mandatory; neither the
-PR opener nor merge submitter supplies independent approval. Local workflow
-observations do not become passing CI checks.
+PR opener nor merge submitter supplies independent approval. Workflow observations
+can satisfy a gate only through explicitly configured publisher/source/graph/job
+selectors in the [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
 
 Store the 64-character lowercase token, optionally followed by one LF, in a
 private file rather than a command-line argument. An independently checked scope
@@ -56,16 +57,22 @@ A policy file names the **complete replacement**, not a patch:
   "administrators": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
   "branches": [{
     "reference_hex": "726566732f68656164732f6d61696e",
-    "required_reviewers": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    "required_reviewers": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    "required_checks": []
   }]
 }
 ```
 
 `reference_hex` carries native branch bytes (`refs/heads/main` above), including
 non-UTF-8 names without lossy conversion. Limits match the native profile: 32
-administrators, 64 branches, 32 reviewers per branch, and a 256 KiB encoded
-command. Long branch names may exhaust the byte budget before the count limits.
-Empty branch lists require explicit `--clear` and still retain administrators.
+administrators, 64 branches, 32 reviewers and 32 checks per branch, and a 256 KiB
+encoded command. Each check is `{source_ref_hex, publisher, graph_root, job}`;
+source refs are canonical branches, graph roots are 64 lowercase hex characters,
+and jobs are exact nonempty UTF-8 without controls, at most 1,024 bytes. Preserve
+the complete check array when editing a policy file. A check-only branch may
+have an empty reviewer list. Long refs or jobs may exhaust the byte budget
+before the count limits. Empty branch lists require explicit `--clear` and still
+retain administrators. Empty check arrays retain legacy intent bytes and keys.
 
 ```sh
 node scripts/fg_protection_admin.mjs prepare \
@@ -78,8 +85,8 @@ node scripts/fg_protection_admin.mjs show-intent --intent ./policy-change
 ```
 
 Preparation performs one read and creates a new private intent directory. It
-never sends a mutation. Output lists administrator and reviewer additions and
-removals, the original head/version/epoch, and the exact intent digest. Every
+never sends a mutation. Output lists administrator, reviewer and check additions
+and removals, the original head/version/epoch, and the exact intent digest. Every
 successful native replacement advances the policy epoch and invalidates earlier
 approvals, including administrator-only replacements.
 

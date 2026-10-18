@@ -107,3 +107,37 @@ fn duplicates_nonbranches_overflow_unknown_flags_and_read_mutations_refuse() {
     a[0] = "show".into();
     assert!(parse(&a).is_err());
 }
+
+#[test]
+fn required_check_cli_binds_full_job_names_and_explicit_publisher_graph_and_source() {
+    let mut args = input();
+    args.truncate(args.len() - 2);
+    let check = format!("refs/heads/main:refs/heads/ci-candidate:{}:{}:build:linux λ",
+        "77".repeat(16), "55".repeat(32));
+    args.extend(["--require-check".into(), check.clone()]);
+    let Operation::Set { command, .. } = parse(&args).unwrap().operation else { panic!() };
+    let rule = &command.protection.branches[0];
+    assert!(rule.reviewers.is_empty());
+    assert_eq!(rule.required_checks.len(), 1);
+    assert_eq!(rule.required_checks[0].job, "build:linux λ");
+    assert_eq!(rule.required_checks[0].publisher, PrincipalId::from_bytes([0x77; 16]));
+    assert_eq!(rule.required_checks[0].graph_root, [0x55; 32]);
+    assert_eq!(rule.required_checks[0].source_ref.as_bytes(), b"refs/heads/ci-candidate");
+    assert!(policy_json(&command.protection).contains("\"required_checks\":["));
+    args.extend(["--require-check".into(), check]);
+    assert!(parse(&args).is_err(), "duplicate checks cannot collapse silently");
+}
+#[test]
+fn required_check_cli_refuses_malformed_or_ambiguous_selectors() {
+    for value in [
+        format!("refs/heads/main:refs/tags/ci:{}:{}:job", "77".repeat(16), "55".repeat(32)),
+        format!("refs/heads/main:refs/heads/ci:{}:{}:job", "77".repeat(16), "FF".repeat(32)),
+        format!("refs/heads/main:refs/heads/ci:{}:{}:", "77".repeat(16), "55".repeat(32)),
+        format!("refs/heads/main:refs/heads/ci:{}:{}:bad\njob", "77".repeat(16), "55".repeat(32)),
+        format!("refs/heads/main:refs/heads/ci:{}:55:job", "77".repeat(16)),
+    ] {
+        let mut args = input();
+        args.extend(["--require-check".into(), value]);
+        assert!(parse(&args).is_err());
+    }
+}

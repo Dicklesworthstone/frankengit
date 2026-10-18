@@ -5,7 +5,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
 export const LIMITS = Object.freeze({ command: 256 * 1024, response: 1024 * 1024,
-  intent: 2 * 1024 * 1024, administrators: 32, branches: 64, reviewers: 32, ref: 1024 });
+  intent: 2 * 1024 * 1024, administrators: 32, branches: 64, reviewers: 32, checks: 32, job: 1024, ref: 1024 });
 const U64_MAX = 18446744073709551615n;
 const ID = /^[0-9a-f]{32}$/, HASH = /^[0-9a-f]{64}$/;
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -60,8 +60,8 @@ function binding(value, expected = null, withFormat = true) {
   if (expected && JSON.stringify(selected) !== JSON.stringify(scope(expected))) fail('repository_scope_changed');
   return selected;
 }
-function people(value, maximum) {
-  if (!Array.isArray(value) || !value.length || value.length > maximum) fail('invalid_principal_count');
+function people(value, maximum, allowEmpty = false) {
+  if (!Array.isArray(value) || (!value.length && !allowEmpty) || value.length > maximum) fail('invalid_principal_count');
   const result = value.map(identity).sort();
   if (new Set(result).size !== result.length) fail('duplicate_principal');
   return result;
@@ -77,12 +77,34 @@ function branchHex(value) {
   }
   return value;
 }
+function requiredChecks(values) {
+  if (!Array.isArray(values) || values.length > LIMITS.checks) fail('invalid_required_check_count');
+  const result = values.map(value => {
+    fields(value, ['source_ref_hex', 'publisher', 'graph_root', 'job']);
+    if (typeof value.job !== 'string' || !value.job.length || Buffer.byteLength(value.job) > LIMITS.job ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value.job) || Buffer.from(value.job).toString('utf8') !== value.job) fail('invalid_check_job');
+    return { source_ref_hex: branchHex(value.source_ref_hex), publisher: identity(value.publisher),
+      graph_root: hash(value.graph_root), job: value.job };
+  });
+  const order = (a, b) => {
+    for (const field of ['source_ref_hex', 'publisher', 'graph_root']) {
+      if (a[field] !== b[field]) return a[field] < b[field] ? -1 : 1;
+    }
+    return Buffer.compare(Buffer.from(a.job), Buffer.from(b.job));
+  };
+  result.sort(order);
+  if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('duplicate_required_check');
+  return result;
+}
 export function policy(value) {
   fields(value, ['administrators', 'branches']);
   if (!Array.isArray(value.branches) || value.branches.length > LIMITS.branches) fail('invalid_branch_count');
   const branches = value.branches.map(row => {
-    fields(row, ['reference_hex', 'required_reviewers']);
-    return { reference_hex: branchHex(row.reference_hex), required_reviewers: people(row.required_reviewers, LIMITS.reviewers) };
+    fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : [])]);
+    const checks = requiredChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
+    // Empty defaults preserve the exact normalized spelling of saved v1 intents.
+    return { reference_hex: branchHex(row.reference_hex), required_reviewers: people(row.required_reviewers, LIMITS.reviewers, checks.length > 0),
+      ...(checks.length ? { required_checks: checks } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('duplicate_branch');
   return { administrators: people(value.administrators, LIMITS.administrators), branches };
@@ -109,6 +131,9 @@ function command(source, replacement, clear) {
   const form = new URLSearchParams({ expected_version: source.version, expected_epoch: source.policy_epoch });
   for (const person of replacement.administrators) form.append('administrator', person);
   for (const row of replacement.branches) for (const person of row.required_reviewers) form.append('required_reviewer', `${row.reference_hex}:${person}`);
+  for (const row of replacement.branches) for (const check of row.required_checks ?? []) {
+    form.append('required_check', `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${Buffer.from(check.job).toString('hex')}`);
+  }
   if (clear) form.set('clear', 'true');
   const body = form.toString();
   if (Buffer.byteLength(body) > LIMITS.command) fail('command_byte_limit');

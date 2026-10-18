@@ -54,6 +54,7 @@ impl Fixture {
                 protection: ReviewProtection {
                     administrators: vec![ADMIN],
                     branches: vec![ProtectedBranch {
+                        required_checks: Vec::new(),
                         name: RefName::try_new(b"refs/heads/protected-\xff").unwrap(),
                         reviewers: vec![REVIEWER],
                     }],

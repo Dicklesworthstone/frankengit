@@ -269,6 +269,17 @@ pub(super) async fn read_events<S: AsyncAuthorityStore + ?Sized>(
     repository: RepositoryId,
     event_root: Digest,
 ) -> Result<ForgeEventBatch, AdmissionError> {
+    Ok(read_events_with_size(store, cx, repository, event_root).await?.0)
+}
+
+/// The verified batch and exact frame length, for readers with a cumulative
+/// byte budget in addition to the shared per-frame bound.
+pub(super) async fn read_events_with_size<S: AsyncAuthorityStore + ?Sized>(
+    store: &S,
+    cx: &S::Context,
+    repository: RepositoryId,
+    event_root: Digest,
+) -> Result<(ForgeEventBatch, usize), AdmissionError> {
     let frame = read_frame(store, cx, repository, EVENT_NAMESPACE, event_root)
         .await?
         .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
@@ -276,7 +287,7 @@ pub(super) async fn read_events<S: AsyncAuthorityStore + ?Sized>(
         if root(&batch)? != event_root {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
-        return Ok(batch);
+        return Ok((batch, frame.len()));
     }
     // Ref-only commits use a different, empty evidence schema. It must decode,
     // verify its exact commitment, AND be empty. Corruption is not emptiness.
@@ -289,7 +300,7 @@ pub(super) async fn read_events<S: AsyncAuthorityStore + ?Sized>(
     {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    Ok(ForgeEventBatch { events: Vec::new() })
+    Ok((ForgeEventBatch { events: Vec::new() }, frame.len()))
 }
 
 pub(super) fn body_key(

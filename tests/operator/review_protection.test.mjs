@@ -180,3 +180,66 @@ test('CLI input refusals precede networking and output failure preserves the pre
   await assert.rejects(run(args, { output: async () => { throw new Error('stdout closed'); } }), /stdout closed/);
   assert.equal((await loadIntent(f.intent)).principal_id, ACTOR); assert.equal(p.calls.length, 1);
 });
+
+
+const workflowCheck = (job = 'test', extra = {}) => ({
+  source_ref_hex: ref('refs/heads/main'), publisher: 'c'.repeat(32), graph_root: '7'.repeat(64), job, ...extra,
+});
+const checkedPolicy = (checks = [workflowCheck()], reviewers = []) => ({
+  administrators: [ACTOR],
+  branches: [{ reference_hex: ref('refs/heads/main'), required_reviewers: reviewers, required_checks: checks }],
+});
+test('required workflow selectors roundtrip through pinned snapshot, complete intent and exact form', () => {
+  const replacement = checkedPolicy([workflowCheck('\u{10000}'), workflowCheck('\ue000')]);
+  for (const object_format of ['sha1', 'sha256']) {
+    const expectedScope = { ...SCOPE, object_format };
+    const selected = state({ object_format, policy: replacement });
+    const intent = plan({ expectedScope, snapshot: selected, replacement });
+    assert.deepEqual(intent.source.policy, policy(replacement));
+    assert.deepEqual(intent.replacement, policy(replacement));
+    assert.deepEqual(validateIntent(JSON.parse(canonical(intent))), intent);
+    assert.deepEqual(intent.replacement.branches[0].required_checks.map(check => check.job), ['\ue000', '\u{10000}']);
+    const fields = new URLSearchParams(intent.request.body);
+    assert.deepEqual(fields.getAll('required_reviewer'), []);
+    assert.deepEqual(fields.getAll('required_check'), policy(replacement).branches[0].required_checks.map(check =>
+      `${ref('refs/heads/main')}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${ref(check.job)}`));
+  }
+});
+test('required workflow selector count, UTF8 bytes and exact fields fail closed', () => {
+  const all = Array.from({ length: 32 }, (_, index) => workflowCheck(`job-${index}`));
+  assert.equal(policy(checkedPolicy(all)).branches[0].required_checks.length, 32);
+  assert.equal(policy(checkedPolicy([workflowCheck('😀'.repeat(256))])).branches[0].required_checks[0].job, '😀'.repeat(256));
+  for (const checks of [[], null, [workflowCheck(), workflowCheck()], [...all, workflowCheck('extra')],
+    [workflowCheck('')], [workflowCheck('\n')], [workflowCheck('\u0085')], [workflowCheck('\udfff')],
+    [workflowCheck('😀'.repeat(257))], [workflowCheck('test', { outcome: 'succeeded' })],
+    [workflowCheck('test', { source_ref_hex: ref('refs/tags/v1') })],
+    [workflowCheck('test', { publisher: 'A'.repeat(32) })], [workflowCheck('test', { graph_root: '7'.repeat(62) })]]) {
+    assert.throws(() => policy(checkedPolicy(checks)));
+  }
+  const raw = workflowCheck('  literal job  ', { source_ref_hex: `${ref('refs/heads/')}ff` });
+  assert.deepEqual(policy(checkedPolicy([raw])).branches[0].required_checks, [raw]);
+});
+test('review-only v1 intent preserves its historical digest and retry identity with empty checks', () => {
+  const legacy = plan({ replacement: POLICY });
+  // Golden identity from the pre-required-check adapter at 76418fef.
+  assert.equal(legacy.request.key, 'fgprotection1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-cf91a370761341bba991918476db7ccf1bc0f69b1ad02c0b0e2065a02194108e');
+  assert.equal(legacy.intent_sha256, 'a1cc9de443997ca34304d95718c71950462e1477b4c8926238303633b5c6e6b0');
+  const explicit = structuredClone(POLICY); explicit.branches[0].required_checks = [];
+  assert.deepEqual(plan({ snapshot: state({ policy: explicit }), replacement: explicit }), legacy);
+  assert.deepEqual(validateIntent(JSON.parse(canonical(legacy))), legacy);
+  assert.equal(new URLSearchParams(legacy.request.body).has('required_check'), false);
+});
+test('workflow-only policy changes are reviewable and bound into the original intent', () => {
+  const before = checkedPolicy([workflowCheck('old')]), after = checkedPolicy([workflowCheck('new')]);
+  const intent = plan({ snapshot: state({ policy: before }), replacement: after });
+  const row = intentSummary(intent).branches[0];
+  assert.deepEqual(row.added, []); assert.deepEqual(row.removed, []);
+  assert.deepEqual(row.checks_added, [workflowCheck('new')]);
+  assert.deepEqual(row.checks_removed, [workflowCheck('old')]);
+  for (const field of ['source', 'replacement']) {
+    const changed = structuredClone(intent);
+    const selected = field === 'source' ? changed.source.policy : changed.replacement;
+    selected.branches[0].required_checks[0].job = 'tampered';
+    assert.throws(() => validateIntent(changed), /integrity/);
+  }
+});

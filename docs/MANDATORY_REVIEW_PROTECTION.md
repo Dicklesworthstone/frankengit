@@ -10,10 +10,13 @@ runtime verification are separate gates, not implied by this document.
 
 The supported policy names exact `refs/heads/*` references and requires every
 listed reviewer to approve the exact native merge candidate. It supports current
-policy administrators, replacement, disabling, and ownership rotation. It does
-not implement the general compiled-policy language, review-count thresholds,
-glob rules, status checks, signed-commit requirements, merge queues, remote
-identity or metadata ACLs. The existing compiled-policy storage remains separate.
+policy administrators, replacement, disabling, and ownership rotation. The
+[required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md) also
+lets these administrators require exact-candidate results from explicitly named
+publishers, source branches, workflow graphs and jobs. The general compiled-policy
+language, review-count thresholds, glob rules, generic status-check receipts,
+signed-commit requirements, merge queues, remote identity and metadata ACLs
+remain separate. The existing compiled-policy storage remains separate.
 
 **Upgrade every writer before activating this profile.** Enforcement is in this
 version of the embedded node. Arbitrary application-supplied lower-level authority
@@ -43,10 +46,11 @@ The example version and epoch apply only to a first installation at epoch one.
 Read the actual values rather than refreshing or guessing a predecessor during
 an uncertain retry. Add `--object-format sha256` for a SHA-256 node.
 
-`set` replaces the complete policy. Repeated administrators and reviewer entries
-are sorted before sealing; duplicates refuse rather than silently disappearing.
-At most 32 administrators, 64 exact branches and 32 reviewers per branch are
-accepted. The first administrator set must contain the installing principal.
+`set` replaces the complete policy. Repeated administrators, reviewer entries
+and workflow check selectors are sorted before sealing; duplicates refuse rather
+than silently disappearing. At most 32 administrators, 64 exact branches, 32
+reviewers and 32 workflow checks per branch are accepted. Each protected branch
+requires at least one reviewer or check. The first administrator set must contain the installing principal.
 Subsequent changes are authorized by the **old** administrator set. Supplying a
 new administrator list cannot authorize its own installation.
 
@@ -60,7 +64,7 @@ fg protection set "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
   --admin "$ADMIN_ID" --clear
 ```
 
-An empty branch list disables review requirements but does not reset the stream,
+An empty branch list disables review and check requirements but does not reset the stream,
 forget its administrators, or turn the next replacement into a first install.
 A replacement may rotate all administrators, but only a currently authorized
 administrator may perform it. Every successful change, including an otherwise
@@ -89,8 +93,8 @@ batches, outbox obligations, transaction seals, and repository-head CAS. There
 is no mutable side database, on-disk policy toggle, special branch, or reuse of
 the hidden-ref configuration's `policy_root`.
 
-The canonical event binds actor, expected policy epoch, administrators and the
-entire required-reviewer map. Its aggregate version binds the exact predecessor.
+The canonical event binds actor, expected policy epoch, administrators, the
+entire required-reviewer map and every workflow check selector. Its aggregate version binds the exact predecessor.
 The request's existing stable transaction identity therefore distinguishes every
 material change without including a mutable current-head value.
 
@@ -119,6 +123,10 @@ workspace publication, and rebase publication that use that materializer.
 Creation of a named unborn protected branch is protected too. An unprotected
 branch remains available; a no-ref metadata operation does not become a code
 change. A legacy merge materializer cannot bypass the direct-update guard.
+A branch with required reviewers still refuses direct updates. A branch protected
+only by workflow checks permits a direct set only after all exact-candidate
+checks pass; deletion remains refused. The check profile also guards an atomic
+update from moving its configured CI source away from the checked candidate.
 
 Native two-parent merges use the existing candidate-review gate after native
 object validation. The required reviewer list comes from current policy, not
@@ -140,10 +148,13 @@ remain distinct from evidence that a transaction did not commit.
 
 ## Encoding compatibility
 
-Existing forge-event tags 1–8 retain their exact meanings and bytes. The required
-new event uses tag 9; the singleton aggregate uses kind 5. Reference transaction
-normal-form encoding adds kind 7 without renumbering existing kinds 1–6. Unknown
-required kinds are not treated as optional extensions. No dependency, lockfile,
+Existing forge-event tags 1–8 retain their exact meanings and bytes. Review-only
+policies keep their original tag-9 bytes. A policy with any required workflow
+check uses required tag 13, which includes each branch's check vector; tag 13
+with no checks is refused as a noncanonical spelling. Both forms use singleton
+aggregate kind 5 and reference-transaction normal-form kind 7. Unknown required
+kinds are not treated as optional extensions. Upgrade every reader and writer
+before selecting check-bearing policies. No dependency, lockfile,
 configuration-carrier schema, alternate runtime or production Git subprocess was
 introduced.
 

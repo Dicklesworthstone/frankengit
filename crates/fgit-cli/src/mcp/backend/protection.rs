@@ -227,6 +227,15 @@ fn policy_value(policy: &ReviewProtection) -> Value {
                                         .collect(),
                                 ),
                             ),
+                            (
+                                "required_checks",
+                                Value::Array(branch.required_checks.iter().map(|check| object([
+                                    ("source_ref_hex", text(hex(check.source_ref.as_bytes()))),
+                                    ("publisher", text(check.publisher.to_string())),
+                                    ("graph_root", text(hex(&check.graph_root))),
+                                    ("job", text(&check.job)),
+                                ])).collect()),
+                            ),
                         ])
                     })
                     .collect(),

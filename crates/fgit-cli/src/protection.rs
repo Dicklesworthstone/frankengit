@@ -2,8 +2,8 @@
 use crate::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
-    MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS, MAX_PROTECTED_BRANCHES, ProtectedBranch,
-    ProtectionCommand, ReviewProtection,
+    MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
+    MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
@@ -17,9 +17,13 @@ const USAGE: &str = "usage: fg protection show <storage-root> <tenant-id> <repos
 usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-local\n\
   --principal <id> --idempotency-key <key> --expected-version <0-for-first-install> --expected-epoch <current-epoch>\n\
   --admin <id> [--admin <id> ...]\n\
-  (--require-reviewer <refs/heads/branch>:<id> [...] | --clear)\n\
+  [--require-reviewer <refs/heads/branch>:<id> ...]\n\
+  [--require-check <target-ref>:<source-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
+  [--clear]\n\
   [--object-format sha1|sha256]\n\
 Set replaces the COMPLETE policy. Every listed reviewer is mandatory for that branch.\n\
+Every check requires the latest trusted publisher result for the exact NEW commit.\n\
+Its source ref must still name that commit; the workflow graph and UTF-8 job name must match exactly.\n\
 --clear disables branch protection but retains explicit administrators and immutable history.\n\
 Current administrators authorize replacement; the new list does not authorize itself.\n\
 All embedded-node ref publications enforce installed rules. No per-mutation opt-in is needed.\n\
@@ -49,7 +53,7 @@ fn number(s: &str) -> Result<u64, String> {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 5
-        || args.len() > 4352
+        || args.len() > 8448
         || args.iter().any(|s| s.len() > 4096)
         || args.iter().map(String::len).sum::<usize>() > 256 * 1024
     {
@@ -68,7 +72,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut singleton = BTreeMap::new();
     let (mut trusted, mut clear) = (false, false);
     let mut admins = Vec::new();
-    let mut branches = BTreeMap::<RefName, Vec<PrincipalId>>::new();
+    let mut branches = BTreeMap::<RefName, (Vec<PrincipalId>, Vec<RequiredWorkflowCheck>)>::new();
     let mut i = 4;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -97,6 +101,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "--expected-epoch"
                         | "--admin"
                         | "--require-reviewer"
+                        | "--require-check"
                 ))
         {
             return Err(format!(
@@ -127,11 +132,31 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
                     return Err("too many protected branches".into());
                 }
-                let reviewers = branches.entry(name).or_default();
+                let reviewers = &mut branches.entry(name).or_default().0;
                 if reviewers.len() == MAX_BRANCH_REVIEWERS {
                     return Err("too many branch reviewers".into());
                 }
                 reviewers.push(id);
+            }
+            "--require-check" => {
+                let parts: Vec<_> = value.splitn(5, ':').collect();
+                if parts.len() != 5 {
+                    return Err("check must be target-ref:source-ref:publisher-id:graph-sha256:job".into());
+                }
+                let name = RefName::try_new(parts[0].as_bytes()).map_err(|_| "invalid target branch")?;
+                let source_ref = RefName::try_new(parts[1].as_bytes()).map_err(|_| "invalid check source branch")?;
+                let publisher = PrincipalId::from_hex(parts[2]).map_err(|_| "invalid check publisher")?;
+                let graph_root = graph_bytes(parts[3])?;
+                let check = RequiredWorkflowCheck { source_ref, publisher, graph_root, job: parts[4].to_owned() };
+                check.validate().map_err(|_| "invalid required check")?;
+                if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
+                    return Err("too many protected branches".into());
+                }
+                let checks = &mut branches.entry(name).or_default().1;
+                if checks.len() == MAX_BRANCH_REQUIRED_CHECKS {
+                    return Err("too many required branch checks".into());
+                }
+                checks.push(check);
             }
             _ => {
                 if singleton.insert(flag, value.as_str()).is_some() {
@@ -170,14 +195,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let expected_epoch = PolicyEpoch::try_new(number(get("--expected-epoch")?)?)
             .map_err(|_| "policy epoch must be positive")?;
         if clear == !branches.is_empty() {
-            return Err("supply reviewers OR explicit --clear, never both/neither".into());
+            return Err("supply review/check requirements OR explicit --clear, never both/neither".into());
         }
         admins.sort();
         let branches = branches
             .into_iter()
-            .map(|(name, mut reviewers)| {
+            .map(|(name, (mut reviewers, mut required_checks))| {
                 reviewers.sort();
-                ProtectedBranch { name, reviewers }
+                required_checks.sort();
+                ProtectedBranch { required_checks, name, reviewers }
             })
             .collect();
         let command = ProtectionCommand {
@@ -207,6 +233,19 @@ fn parse(args: &[String]) -> Result<Options, String> {
         operation,
     })
 }
+fn graph_bytes(text: &str) -> Result<[u8; 32], String> {
+    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err("graph root must be exactly 64 lowercase hexadecimal digits".into());
+    }
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| "invalid graph root")?;
+    }
+    Ok(bytes)
+}
+fn bytes_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn policy_json(policy: &ReviewProtection) -> String {
     let ids = |ids: &[PrincipalId]| {
         ids.iter()
@@ -230,10 +269,15 @@ fn policy_json(policy: &ReviewProtection) -> String {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
                 format!(
-                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}]}}",
+                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_checks\":[{}]}}",
                     name,
                     quote(&hex),
-                    ids(&branch.reviewers)
+                    ids(&branch.reviewers),
+                    branch.required_checks.iter().map(|check| format!(
+                        "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
+                        quote(&bytes_hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),
+                        quote(&bytes_hex(&check.graph_root)), quote(&check.job)
+                    )).collect::<Vec<_>>().join(",")
                 )
             })
             .collect::<Vec<_>>()

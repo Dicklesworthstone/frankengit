@@ -17,8 +17,10 @@ use fgit_authority::{
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, validate_transition};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload};
-use fgit_types::{AsciiSlug, PolicyEpoch, PrincipalId, RefusalCode, RepositoryAuthorityHeadId};
-use std::collections::BTreeSet;
+use fgit_types::{AsciiSlug, GitOid, PolicyEpoch, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId};
+use std::collections::{BTreeMap, BTreeSet};
+
+mod checks;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectionState {
@@ -202,10 +204,12 @@ where
 /// Receive, source import, workspace publication, branch changes and rebase all
 /// use that materializer; a client cannot opt out by choosing another CLI verb.
 /// Identity/no-op effects do not change a protected branch and remain permitted.
+/// `refs` must be materialized from this same authenticated publication basis.
 pub async fn enforce_direct_at<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
     fold: &fgit_txn::TransactionFoldReport,
     cancelled: &C,
 ) -> Result<(), ProjectionFailure>
@@ -226,11 +230,12 @@ where
         let has_protected = effects
             .refs
             .keys()
-            .any(|name| policy.branch(name).is_some());
+            .any(|name| policy.branch(name).is_some_and(|rule| !rule.reviewers.is_empty()));
         if has_protected {
             // Evaluated through fg043 PolicySnapshot via evaluate_protection
             let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
-            let compiled = compile_direct_branches(policy.branches.iter().map(|b| &b.name))?;
+            let compiled = compile_direct_branches(policy.branches.iter()
+                .filter(|branch| !branch.reviewers.is_empty()).map(|branch| &branch.name))?;
             let id = source.pin(compiled);
             let verdict = crate::policy_bridge::evaluate_effects_protection(
                 &source,
@@ -245,6 +250,23 @@ where
             .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
             if let Some(code) = verdict.refusal {
                 return Err(ProjectionFailure::Refuse(code));
+            }
+        }
+        for (name, effect) in &effects.refs {
+            if let Some(rule) = policy.branch(name) {
+                let fgit_reference::effect::RefEffect::Set(candidate) = effect else {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied));
+                };
+                // A fanout cannot use a checked source and simultaneously
+                // delete it or repoint it to an unchecked commit.
+                for check in &rule.required_checks {
+                    if effects.refs.get(&check.source_ref).is_some_and(|effect| {
+                        !matches!(effect, fgit_reference::effect::RefEffect::Set(oid) if oid == candidate)
+                    }) {
+                        return Err(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied));
+                    }
+                }
+                checks::verify_at(store, cx, basis, refs, *candidate, &rule.required_checks, cancelled).await?;
             }
         }
     }
@@ -271,11 +293,13 @@ fn compile_direct_branches<'a>(
 /// Required on every production native merge validation attempt. Reuse the
 /// exact-candidate gate, including opener/submitter independence and withdrawals.
 /// The request seal remains unchanged: this is current repository policy, not a
-/// caller-selected additional requirement or a new retry identity.
+/// caller-selected additional requirement or a new retry identity. `refs` must
+/// be materialized from this same authenticated publication basis.
 pub async fn enforce_merge_at<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
     intent: &NativeMergeIntent,
     submitter: PrincipalId,
     cancelled: &C,
@@ -292,9 +316,12 @@ where
         .protection()
         .and_then(|p| p.branch(&merge.target_ref))
     {
-        let required = ReviewRequirements::new(selected.policy_epoch, rule.reviewers.clone())
-            .map_err(infrastructure)?;
-        verify_at(store, cx, basis, intent, submitter, &required, cancelled).await?;
+        if !rule.reviewers.is_empty() {
+            let required = ReviewRequirements::new(selected.policy_epoch, rule.reviewers.clone())
+                .map_err(infrastructure)?;
+            verify_at(store, cx, basis, intent, submitter, &required, cancelled).await?;
+        }
+        checks::verify_at(store, cx, basis, refs, merge.merge_commit, &rule.required_checks, cancelled).await?;
     }
     live(cancelled).map_err(infrastructure)
 }

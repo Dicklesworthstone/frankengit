@@ -423,6 +423,7 @@ fn a_merge_grant_and_weaker_requested_reviewer_list_cannot_bypass_mandatory_prot
             protection: ReviewProtection {
                 administrators: vec![OWNER],
                 branches: vec![ProtectedBranch {
+                    required_checks: Vec::new(),
                     name: candidate.data.target_ref.clone(),
                     reviewers: vec![REVIEWER, SECOND],
                 }],

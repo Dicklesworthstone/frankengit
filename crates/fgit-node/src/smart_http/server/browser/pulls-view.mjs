@@ -644,7 +644,10 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     const reviewers = item(doc, reviewersLabel, 'textarea'); reviewers.rows = 3; reviewers.maxLength = 32 * 33;
     reviewers.spellcheck = false; reviewers.value = data.required_reviewers.join('\n');
     const remove = item(doc, group, 'button', 'Remove this branch rule'); remove.type = 'button';
-    const row = { reference, reviewers, remove }; rows.push(row);
+    const required_checks = data.required_checks ?? [];
+    if (required_checks.length) item(doc, group, 'pre',
+      `Required workflow checks (preserved by this editor; configure through the protection CLI or API):\n${JSON.stringify(required_checks, null, 2)}`);
+    const row = { reference, reviewers, remove, required_checks }; rows.push(row);
     reference.addEventListener('input', () => {
       readable.textContent = 'Edited exact branch bytes; inspect the complete replacement in the preview.'; changed();
     });
@@ -664,7 +667,8 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
   function draft() {
     if (rows.some(row => row.reference.value.length > 2048)) fail('A branch byte string exceeds its editing limit.');
     return { replacement: protectionPolicy({ administrators: people(administrators),
-      branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers) })) }), clear: clear.checked };
+      branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers),
+        ...(row.required_checks.length ? { required_checks: row.required_checks } : {}) })) }), clear: clear.checked };
   }
   function requireDraftAccess() {
     if (!client.connected || client.recoveryOnly || client.pending || !client.observed?.policy) fail('Load an installed policy with an ordinary protection connection and no pending request.');

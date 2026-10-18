@@ -3,8 +3,8 @@
 use fgit_forge::{
     AggregateVersion, ExpectedVersion,
     event::protection::{
-        MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS, MAX_PROTECTED_BRANCHES, ProtectedBranch,
-        ProtectionCommand, ReviewProtection,
+        MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
+        MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
     },
 };
 use fgit_types::{DecisionOutcome, PolicyEpoch, PrincipalId, RefName};
@@ -33,10 +33,10 @@ fn principal_schema() -> Value {
         ("maxLength", json::number(32)),
     ])
 }
-fn principals_schema(maximum: usize) -> Value {
+fn principals_schema(maximum: usize, minimum: u64) -> Value {
     object([
         ("type", text("array")),
-        ("minItems", json::number(1)),
+        ("minItems", json::number(minimum)),
         ("maxItems", json::number(maximum as u64)),
         ("uniqueItems", Value::Bool(true)),
         ("items", principal_schema()),
@@ -64,15 +64,33 @@ pub(super) fn tool() -> Tool {
     );
     branch.insert(
         "required_reviewers".into(),
-        principals_schema(MAX_BRANCH_REVIEWERS),
+        principals_schema(MAX_BRANCH_REVIEWERS, 0),
     );
+    let mut check = Object::new();
+    check.insert("source_ref_hex".into(), branch["reference_hex"].clone());
+    check.insert("publisher".into(), principal_schema());
+    check.insert("graph_root".into(), object([
+        ("type", text("string")), ("pattern", text("^[0-9a-f]{64}$")),
+        ("minLength", json::number(64)), ("maxLength", json::number(64)),
+    ]));
+    check.insert("job".into(), object([
+        ("type", text("string")), ("minLength", json::number(1)),
+        ("maxLength", json::number(fgit_forge::event::workflow_check::MAX_CHECK_JOB_BYTES as u64)),
+        ("description", text("Exact UTF-8 workflow job name, at most 1024 bytes and no control characters.")),
+    ]));
+    branch.insert("required_checks".into(), object([
+        ("type", text("array")), ("maxItems", json::number(MAX_BRANCH_REQUIRED_CHECKS as u64)),
+        ("uniqueItems", Value::Bool(true)),
+        ("items", mutations::input_schema(check, &["source_ref_hex", "publisher", "graph_root", "job"])),
+        ("description", text("Explicit trusted publishers, strictly sorted by source reference bytes, publisher, graph bytes, then UTF-8 job bytes. Empty grants no check authority. Each branch needs reviewers or checks.")),
+    ]));
     let mut properties = Object::new();
     properties.insert("idempotency_key".into(), mutations::key_schema());
     properties.insert("expected_version".into(), decimal_schema());
     properties.insert("expected_epoch".into(), decimal_schema());
     properties.insert(
         "administrators".into(),
-        principals_schema(MAX_POLICY_ADMINISTRATORS),
+        principals_schema(MAX_POLICY_ADMINISTRATORS, 1),
     );
     properties.insert(
         "branches".into(),
@@ -82,7 +100,7 @@ pub(super) fn tool() -> Tool {
             ("uniqueItems", Value::Bool(true)),
             (
                 "items",
-                mutations::input_schema(branch, &["reference_hex", "required_reviewers"]),
+                mutations::input_schema(branch, &["reference_hex", "required_reviewers", "required_checks"]),
             ),
             (
                 "description",
@@ -92,7 +110,7 @@ pub(super) fn tool() -> Tool {
     );
     Tool {
         name: NAME,
-        description: "Replace complete required-review protection at an exact version and policy epoch. Version zero requests first installation by the explicitly trusted local operator. Current canonical administrators authorize subsequent changes; the new list never authorizes itself. Original key and complete command must remain identical on retry. No Git refs move. Subject to the existing 64 KiB MCP input limit.",
+        description: "Replace complete required-review and trusted-workflow protection at an exact version and policy epoch. Version zero requests first installation by the explicitly trusted local operator. Current canonical administrators authorize subsequent changes; the new list never authorizes itself. Original key and complete command must remain identical on retry. No Git refs move. Subject to the existing 64 KiB MCP input limit.",
         schema: mutations::input_schema(properties, FIELDS),
     }
 }
@@ -106,9 +124,9 @@ fn array<'a>(args: &'a Object, name: &str, maximum: usize) -> Result<&'a [Value]
     }
     Ok(values)
 }
-fn principals(args: &Object, name: &str, maximum: usize) -> Result<Vec<PrincipalId>, ToolError> {
+fn principals(args: &Object, name: &str, maximum: usize, allow_empty: bool) -> Result<Vec<PrincipalId>, ToolError> {
     let values = array(args, name, maximum)?;
-    if values.is_empty() {
+    if values.is_empty() && !allow_empty {
         return Err(ToolError::invalid("policy_principals_required"));
     }
     let mut ids = Vec::with_capacity(values.len());
@@ -143,14 +161,14 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
     expected_epoch
         .next()
         .map_err(|_| ToolError::invalid("policy_epoch_exhausted"))?;
-    let administrators = principals(args, "administrators", MAX_POLICY_ADMINISTRATORS)?;
+    let administrators = principals(args, "administrators", MAX_POLICY_ADMINISTRATORS, false)?;
     let raw_branches = array(args, "branches", MAX_PROTECTED_BRANCHES)?;
     let mut branches: Vec<ProtectedBranch> = Vec::with_capacity(raw_branches.len());
     for value in raw_branches {
         let fields = value
             .object()
             .ok_or(ToolError::invalid("policy_branch_object_required"))?;
-        require_fields(fields, &["reference_hex", "required_reviewers"])?;
+        require_fields(fields, &["reference_hex", "required_reviewers", "required_checks"])?;
         let raw = unhex(mutations::required(fields, "reference_hex")?, MAX_REF_BYTES)?;
         if !raw.starts_with(b"refs/heads/") {
             return Err(ToolError::invalid("full_branch_required"));
@@ -163,10 +181,26 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
         {
             return Err(ToolError::invalid("policy_branches_not_canonical"));
         }
-        branches.push(ProtectedBranch {
-            name,
-            reviewers: principals(fields, "required_reviewers", MAX_BRANCH_REVIEWERS)?,
-        });
+        let mut required_checks = Vec::new();
+        for value in array(fields, "required_checks", MAX_BRANCH_REQUIRED_CHECKS)? {
+            let check = value.object().ok_or(ToolError::invalid("policy_check_object_required"))?;
+            require_fields(check, &["source_ref_hex", "publisher", "graph_root", "job"])?;
+            let check = RequiredWorkflowCheck {
+                source_ref: RefName::try_new(&unhex(mutations::required(check, "source_ref_hex")?, MAX_REF_BYTES)?)
+                    .map_err(|_| ToolError::invalid("invalid_check_source"))?,
+                publisher: canonical_principal(mutations::required(check, "publisher")?)?,
+                graph_root: unhex(mutations::required(check, "graph_root")?, 32)?.try_into()
+                    .map_err(|_| ToolError::invalid("invalid_check_graph"))?,
+                job: mutations::required(check, "job")?.to_owned(),
+            };
+            check.validate().map_err(|_| ToolError::invalid("invalid_required_check"))?;
+            if required_checks.last().is_some_and(|previous| previous >= &check) {
+                return Err(ToolError::invalid("policy_checks_not_canonical"));
+            }
+            required_checks.push(check);
+        }
+        let reviewers = principals(fields, "required_reviewers", MAX_BRANCH_REVIEWERS, !required_checks.is_empty())?;
+        branches.push(ProtectedBranch { required_checks, name, reviewers });
     }
     let protection = ReviewProtection {
         administrators,

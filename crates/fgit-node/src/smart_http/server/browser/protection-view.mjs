@@ -26,7 +26,7 @@ export function referenceLabel(encoded) {
   catch { return '[Non-UTF-8 reference; use its exact hex bytes.]'; }
 }
 
-export function editorPolicy(administrators, rules) {
+export function editorPolicy(administrators, rules, observedBranches = []) {
   const lines = (value, maximum, count) => {
     if (typeof value !== 'string' || value.length > maximum) throw new Error('Protection editor exceeds its input limit.');
     const rows = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -36,9 +36,11 @@ export function editorPolicy(administrators, rules) {
   return { administrators: lines(administrators, 2048, 32), branches: lines(rules, 256 * 1024, 64).map(line => {
     const fields = line.split(/\s+/u);
     if (fields.length !== 2) throw new Error('Each rule needs exact reference hex, a space, and comma-separated reviewer IDs.');
-    const reviewers = fields[1].split(',');
+    const reviewers = fields[1] === '-' ? [] : fields[1].split(',');
     if (reviewers.length > 32 || reviewers.some(person => person === '')) throw new Error('Choose 1 through 32 reviewers for each rule.');
-    return { reference_hex: fields[0], required_reviewers: reviewers };
+    const checks = observedBranches.find(branch => branch.reference_hex === fields[0])?.required_checks ?? [];
+    if (!reviewers.length && !checks.length) throw new Error('A protected branch needs reviewers or configured checks.');
+    return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}) };
   }) };
 }
 export function mountProtection(doc, { client, events = doc.defaultView } = {}) {
@@ -112,10 +114,14 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       section.append(node('h3', referenceLabel(branch.reference_hex)), node('p', `Exact reference bytes: ${branch.reference_hex}`),
         node('p', 'Every listed principal must approve the exact candidate. The PR opener and merge submitter cannot satisfy these requirements.'));
       for (const person of branch.required_reviewers) section.append(node('p', person));
+      for (const check of branch.required_checks ?? []) section.append(node('p',
+        `Required check: ${check.job}; publisher ${check.publisher}; workflow ${check.graph_root}; source ${referenceLabel(check.source_ref_hex)}. The latest result must succeed for the exact proposed commit.`));
       ui.policy.append(section);
     }
     ui.administrators.value = policy.administrators.join('\n');
-    ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',')}`).join('\n');
+    ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'}`).join('\n');
+    if (policy.branches.some(branch => branch.required_checks?.length)) ui.policy.append(node('p',
+      'Configured workflow checks are preserved when editing these reviewer rows. Use the protection CLI or API to change check selectors. Removing a branch row removes all its requirements; “-” retains a check-only branch.'));
     ui.clear.checked = false;
   }
   async function run(work, success, message) {
@@ -143,7 +149,7 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       render(selected); say('Complete native policy inspected. No transaction was created.');
     }, 'Reading the complete native protection policy…');
   };
-  const prepare = () => run(() => client.stage(editorPolicy(ui.administrators.value, ui.rules.value), ui.clear.checked), () => {
+  const prepare = () => run(() => client.stage(editorPolicy(ui.administrators.value, ui.rules.value, client.observed?.policy?.branches ?? []), ui.clear.checked), () => {
     ui.terminal.textContent = ''; ui.receipt.value = ''; say('Replacement frozen, not submitted. Review the complete policy and confirm explicitly.');
   }, 'Preparing one exact policy replacement without publication…');
   function settle(result) {

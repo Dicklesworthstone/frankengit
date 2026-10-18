@@ -5,6 +5,7 @@ fn branch(reference: &[u8], reviewers: &[u8]) -> Value {
     object([
         ("reference_hex", text(hex(reference))),
         ("required_reviewers", people(reviewers)),
+        ("required_checks", Value::Array(Vec::new())),
     ])
 }
 fn people(ids: &[u8]) -> Value {
@@ -285,4 +286,27 @@ fn discovered_write_schema_requires_the_complete_canonical_command() {
             .unwrap()
             .contains("empty array")
     );
+}
+
+#[test]
+fn mcp_required_checks_roundtrip_and_cannot_disappear_through_missing_fields() {
+    let mut args = arguments();
+    let check = object([
+        ("source_ref_hex", text(hex(b"refs/heads/ci-candidate"))),
+        ("publisher", text(PrincipalId::from_bytes([0x77; 16]).to_string())),
+        ("graph_root", text("55".repeat(32))),
+        ("job", text("build:linux λ")),
+    ]);
+    fields(&mut args).insert("required_reviewers".into(), Value::Array(Vec::new()));
+    fields(&mut args).insert("required_checks".into(), Value::Array(vec![check.clone()]));
+    let command = write::parse(&args).unwrap();
+    assert_eq!(command.protection.branches[0].required_checks[0].job, "build:linux λ");
+    assert!(command.protection.branches[0].reviewers.is_empty());
+    let Value::Object(policy) = policy_value(&command.protection) else { panic!() };
+    let Value::Array(branches) = policy.get("branches").unwrap() else { panic!() };
+    assert_eq!(branches[0].object().unwrap().get("required_checks"), Some(&Value::Array(vec![check.clone()])));
+    fields(&mut args).insert("required_checks".into(), Value::Array(vec![check.clone(), check]));
+    assert!(write::parse(&args).is_err());
+    fields(&mut args).remove("required_checks");
+    assert!(write::parse(&args).is_err(), "a complete replacement must acknowledge the check list");
 }

@@ -720,6 +720,7 @@ fn protect(node: &OneNode) -> PolicyEpoch {
         protection: ReviewProtection {
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                required_checks: Vec::new(),
                 name: target_ref(),
                 reviewers: vec![actor(3)],
             }],

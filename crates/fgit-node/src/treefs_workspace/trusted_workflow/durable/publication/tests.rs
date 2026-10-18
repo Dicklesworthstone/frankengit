@@ -14,6 +14,7 @@ use std::fs;
 use std::path::Path;
 
 mod pull_request_checks;
+mod required_checks;
 mod saved_check_record;
 
 fn source_ref() -> RefName {

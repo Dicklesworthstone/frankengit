@@ -2434,6 +2434,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 authority,
                 cx,
                 basis,
+                prepared_basis.ref_state.refs(),
                 fold,
                 &|| cx.checkpoint().is_err(),
             )
@@ -2612,6 +2613,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
                         Box::new(error),
                     ))
                 })?;
+        let previous_refs = prepared_basis.ref_state.refs().clone();
         let prepared = fgit_admission::merge::prepare_native_merge(
             context,
             sealed,
@@ -2637,6 +2639,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             authority,
             cx,
             basis,
+            &previous_refs,
             &prepared.fold,
             &is_cancelled,
         )

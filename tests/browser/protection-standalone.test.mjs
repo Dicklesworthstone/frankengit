@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mountProtection, protectionClientHref, referenceLabel } from '../../crates/fgit-node/src/smart_http/server/browser/protection-view.mjs';
+import { mountProtection, protectionClientHref, referenceLabel, editorPolicy } from '../../crates/fgit-node/src/smart_http/server/browser/protection-view.mjs';
 const browser = new URL('../../crates/fgit-node/src/smart_http/server/browser/', import.meta.url);
 const html = readFileSync(new URL('protection.html', browser), 'utf8');
 const script = readFileSync(new URL('protection-view.mjs', browser), 'utf8');
@@ -84,4 +84,19 @@ test('markup and native route include every independent asset without broadening
   assert.doesNotMatch(script, /mountPullRequests|innerHTML|localStorage|sessionStorage|document\.write/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /type="password"/);
+});
+
+
+test('reviewer editor preserves exact workflow selectors and check-only rows', () => {
+  const reference = hex('refs/heads/main');
+  const required_checks = [{
+    source_ref_hex: hex('refs/heads/workflows'), publisher: reviewer, graph_root: '7'.repeat(64), job: 'build: α',
+  }];
+  const branches = [{ reference_hex: reference, required_reviewers: [], required_checks }];
+  assert.deepEqual(editorPolicy(actor, `${reference} -`, branches), { administrators: [actor], branches });
+  const edited = editorPolicy(actor, `${reference} ${reviewer}`, branches);
+  assert.deepEqual(edited.branches[0].required_checks, required_checks);
+  assert.deepEqual(edited.branches[0].required_reviewers, [reviewer]);
+  assert.throws(() => editorPolicy(actor, `${hex('refs/heads/new')} -`, branches), /configured checks/);
+  assert.deepEqual(editorPolicy(actor, '', branches), { administrators: [actor], branches: [] });
 });

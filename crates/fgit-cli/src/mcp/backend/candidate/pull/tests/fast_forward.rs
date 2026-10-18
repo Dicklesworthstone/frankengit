@@ -47,6 +47,7 @@ fn protect(f: &mut Fixture) {
         protection: ReviewProtection {
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                required_checks: Vec::new(),
                 name: f.subject.target_ref.clone(),
                 reviewers: vec![actor(2)],
             }],

@@ -5,8 +5,12 @@ observation. It records what an authenticated reporting principal submits,
 not independently attested execution. The native publisher verifies the exact
 completed job against its original retained execution evidence before publishing
 `Success`. Skipped jobs remain `ActionRequired`; unsuccessful jobs retain
-`Failure`, `Cancelled` or `TimedOut`. No conclusion grants merge permission or
-converts the observation into an independent runner attestation or review approval.
+`Failure`, `Cancelled` or `TimedOut`. A conclusion alone grants no merge
+permission. An administrator can explicitly select a publisher and exact
+workflow subject through the
+[required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
+The observation remains a trusted-host report, never an independent runner
+attestation or review approval.
 
 Custody history and canonical publication have different result contracts.
 `fg workflow recover` preserves the original proposal: succeeded and skipped
@@ -50,8 +54,12 @@ publishes the observation through ordinary admission and authority-head CAS.
 The native PR checks APIs select canonical observations for the exact recorded
 source ref and commit; stale source observations do not apply to a moved source.
 The legacy digest-valued PR projection does not reinterpret observations as PR
-rows. Required-check authority and protected-merge enforcement remain incomplete;
-the current protected-branch guard still applies independently of `Success`.
+rows. Canonical protection can now require a named publisher, current source
+branch, graph and exact job for the proposed new commit. That separate admission
+gate selects the latest matching canonical conclusion and requires `Success`;
+review requirements still apply independently. No check gains authority merely
+by appearing in the PR checks API, and normal merges must check the merge
+candidate itself rather than an unrelated source-tip commit.
 
 ## Verification
 
@@ -67,8 +75,10 @@ source movement; custody tests retain `ActionRequired` for the same local job.
 original custody recovery, exact evidence publication and terminal retries in
 both Git hash formats. The publication campaign also refuses a protected branch
 update while its successful check is visible, then admits the same update under
-an explicitly disabled policy. The allowed and refused cases cover the existing
-protection; they do not implement required-check configuration or merge gating.
+an explicitly disabled policy. Those campaigns cover review-only protection.
+The configured workflow gate has separate native tests for exact candidates,
+trusted publisher selection, later failures, source movement and direct updates,
+described in [the check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
 
 Run `./scripts/verify.sh pull-request-checks` with the pinned toolchain for the
 owning integration lane. The listed coverage describes test assertions, not a

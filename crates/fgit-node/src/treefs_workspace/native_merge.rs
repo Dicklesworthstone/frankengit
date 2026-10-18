@@ -662,6 +662,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 authority,
                 cx,
                 basis,
+                &selected.snapshot().refs,
                 intent,
                 self.inner.context.principal_id,
                 &|| self.merge_checkpoint(cx).is_err(),

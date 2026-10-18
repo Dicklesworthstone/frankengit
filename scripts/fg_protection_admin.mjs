@@ -22,7 +22,8 @@ HTTPS is required except literal 127.0.0.1 or [::1]. Tokens never appear in argv
 or saved intents. Preparation reads the complete native policy and writes only
 an immutable local intent; it sends no mutation. Remote bootstrap is refused.
 A complete replacement preserves ONLY its explicitly listed administrators and
-branches. --clear is mandatory for removing all branch rules. Every successful
+branches, including required_checks selectors in the policy file. --clear is mandatory
+for removing all branch rules. Every successful
 replacement advances the policy epoch and invalidates earlier approvals.
 Sending requires the original token and digest confirmation. A prior send marker
 also requires --retry; only identical bytes and the original key are retried.
@@ -68,14 +69,22 @@ export function parseArgs(args) {
 export function intentSummary(intent) {
   const before = intent.source.policy, after = intent.replacement;
   const changes = (old, next) => ({ added: next.filter(value => !old.includes(value)), removed: old.filter(value => !next.includes(value)) });
-  const old = new Map(before.branches.map(row => [row.reference_hex, row.required_reviewers]));
-  const next = new Map(after.branches.map(row => [row.reference_hex, row.required_reviewers]));
+  const old = new Map(before.branches.map(row => [row.reference_hex, row]));
+  const next = new Map(after.branches.map(row => [row.reference_hex, row]));
+  const checkChanges = (before = [], after = []) => {
+    const diff = changes(before.map(value => JSON.stringify(value)), after.map(value => JSON.stringify(value)));
+    return { checks_added: diff.added.map(value => JSON.parse(value)), checks_removed: diff.removed.map(value => JSON.parse(value)) };
+  };
   return { type: 'prepared_review_protection', intent_sha256: intent.intent_sha256, endpoint: intent.endpoint,
     scope: intent.scope, principal_id: intent.principal_id, source_head: intent.source.source_head,
     expected_version: intent.source.version, expected_epoch: intent.source.policy_epoch,
     administrators: changes(before.administrators, after.administrators),
-    branches: [...new Set([...old.keys(), ...next.keys()])].sort().map(reference_hex => ({ reference_hex,
-      ...changes(old.get(reference_hex) ?? [], next.get(reference_hex) ?? []) })).filter(row => row.added.length || row.removed.length),
+    branches: [...new Set([...old.keys(), ...next.keys()])].sort().map(reference_hex => {
+      const before = old.get(reference_hex), after = next.get(reference_hex);
+      const checks = checkChanges(before?.required_checks, after?.required_checks);
+      return { reference_hex, ...changes(before?.required_reviewers ?? [], after?.required_reviewers ?? []),
+        ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}) };
+    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length),
     clears_all_branch_protection: intent.clear, replacement_invalidates_earlier_approvals: true,
     mutation_sent_by_this_command: false, original_outcome: 'not_queried' };
 }

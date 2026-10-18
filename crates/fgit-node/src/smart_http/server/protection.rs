@@ -9,8 +9,8 @@ use std::io::Read;
 use fgit_admission::merge::native::protection::ProtectionState;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
-    MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS, MAX_PROTECTED_BRANCHES, ProtectedBranch,
-    ProtectionCommand, ReviewProtection,
+    MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
+    MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
 };
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, ForgeEventPayload};
 use fgit_types::{
@@ -32,7 +32,8 @@ const ROUTE: &str = "/api/v1/protection";
 const MAX_COMMAND_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_FIELDS: usize =
-    3 + MAX_POLICY_ADMINISTRATORS + MAX_PROTECTED_BRANCHES * MAX_BRANCH_REVIEWERS;
+    3 + MAX_POLICY_ADMINISTRATORS
+        + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS);
 
 /// Recognize the API family before a malformed suffix can fall through to Git.
 pub(super) fn is_route(target: &str) -> bool {
@@ -270,7 +271,7 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
     }
     let (mut expected_version, mut expected_epoch, mut clear) = (None, None, None);
     let mut administrators = BTreeSet::new();
-    let mut branches: BTreeMap<RefName, BTreeSet<PrincipalId>> = BTreeMap::new();
+    let mut branches: BTreeMap<RefName, (BTreeSet<PrincipalId>, BTreeSet<RequiredWorkflowCheck>)> = BTreeMap::new();
     for (name, value) in parse_form(bytes, MAX_COMMAND_FIELDS)? {
         match name.as_str() {
             "expected_version" => {
@@ -294,13 +295,36 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
                     .ok_or_else(|| ApiError::bad("invalid_required_reviewer"))?;
                 let name = reference(name)?;
                 let person = principal(person)?;
-                let reviewers = branches.entry(name).or_default();
+                let reviewers = &mut branches.entry(name).or_default().0;
                 if !reviewers.insert(person) {
                     return Err(ApiError::bad("duplicate_required_reviewer"));
                 }
                 if reviewers.len() > MAX_BRANCH_REVIEWERS
                     || branches.len() > MAX_PROTECTED_BRANCHES
                 {
+                    return Err(ApiError::too_large());
+                }
+            }
+            "required_check" => {
+                let parts: Vec<_> = value.split(':').collect();
+                if parts.len() != 5 {
+                    return Err(ApiError::bad("invalid_required_check"));
+                }
+                let name = reference(parts[0])?;
+                let check = RequiredWorkflowCheck {
+                    source_ref: reference(parts[1])?,
+                    publisher: principal(parts[2])?,
+                    graph_root: hex_bytes(parts[3], 32)?.try_into()
+                        .map_err(|_| ApiError::bad("invalid_check_graph"))?,
+                    job: String::from_utf8(hex_bytes(parts[4], fgit_forge::event::workflow_check::MAX_CHECK_JOB_BYTES)?)
+                        .map_err(|_| ApiError::bad("invalid_check_job"))?,
+                };
+                check.validate().map_err(|_| ApiError::bad("invalid_required_check"))?;
+                let checks = &mut branches.entry(name).or_default().1;
+                if !checks.insert(check) {
+                    return Err(ApiError::bad("duplicate_required_check"));
+                }
+                if checks.len() > MAX_BRANCH_REQUIRED_CHECKS || branches.len() > MAX_PROTECTED_BRANCHES {
                     return Err(ApiError::too_large());
                 }
             }
@@ -336,7 +360,8 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
         administrators: administrators.into_iter().collect(),
         branches: branches
             .into_iter()
-            .map(|(name, reviewers)| ProtectedBranch {
+            .map(|(name, (reviewers, required_checks))| ProtectedBranch {
+                required_checks: required_checks.into_iter().collect(),
                 name,
                 reviewers: reviewers.into_iter().collect(),
             })
@@ -382,6 +407,15 @@ fn hex_digit(byte: u8) -> Result<u8, ApiError> {
     }
 }
 
+fn hex_bytes(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
+    if text.is_empty() || text.len() % 2 != 0 || text.len() > maximum * 2 {
+        return Err(ApiError::bad("invalid_check_hex"));
+    }
+    text.as_bytes().chunks_exact(2)
+        .map(|pair| Ok((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?))
+        .collect()
+}
+
 fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -424,14 +458,19 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
         .iter()
         .map(|branch| {
             format!(
-                "{{\"reference_hex\":{},\"required_reviewers\":[{}]}}",
+                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_checks\":[{}]}}",
                 quote(&hex(branch.name.as_bytes())),
                 branch
                     .reviewers
                     .iter()
                     .map(|id| quote(&id.to_string()))
                     .collect::<Vec<_>>()
-                    .join(",")
+                    .join(","),
+                branch.required_checks.iter().map(|check| format!(
+                    "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
+                    quote(&hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),
+                    quote(&hex(&check.graph_root)), quote(&check.job)
+                )).collect::<Vec<_>>().join(",")
             )
         })
         .collect::<Vec<_>>()

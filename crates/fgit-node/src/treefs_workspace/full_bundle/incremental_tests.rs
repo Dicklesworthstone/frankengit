@@ -472,6 +472,7 @@ fn incremental_atomic_update_cannot_bypass_repository_required_review_protection
             protection: ReviewProtection {
                 administrators: vec![principal()],
                 branches: vec![ProtectedBranch {
+                    required_checks: Vec::new(),
                     name: reference("refs/heads/main"),
                     reviewers: vec![PrincipalId::from_bytes([9; 16])],
                 }],

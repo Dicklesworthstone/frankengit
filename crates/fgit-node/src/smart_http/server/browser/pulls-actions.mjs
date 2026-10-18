@@ -192,18 +192,43 @@ export function protectionBranch(value) {
       raw.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('Invalid protected branch bytes.');
   return value;
 }
-function protectionPeople(values) {
-  if (!Array.isArray(values) || !values.length || values.length > 32) fail('Select 1 through 32 distinct principals.');
+function protectionPeople(values, allowEmpty = false) {
+  if (!Array.isArray(values) || (!values.length && !allowEmpty) || values.length > 32) fail('Select 1 through 32 distinct principals.');
   const result = values.map(principal).sort();
   if (new Set(result).size !== result.length) fail('Duplicate protection principal.');
+  return result;
+}
+function protectionChecks(values) {
+  if (!Array.isArray(values) || values.length > 32) fail('Select at most 32 required workflow checks per branch.');
+  const result = values.map(value => {
+    protectionFields(value, ['source_ref_hex', 'publisher', 'graph_root', 'job']);
+    if (typeof value.job !== 'string' || !value.job.length || utf8.encode(value.job).length > 1024 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value.job) ||
+        new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(utf8.encode(value.job)) !== value.job) fail('Invalid exact workflow job name.');
+    return { source_ref_hex: protectionBranch(value.source_ref_hex), publisher: principal(value.publisher),
+      graph_root: protectionHash(value.graph_root), job: value.job };
+  });
+  const order = (a, b) => {
+    for (const field of ['source_ref_hex', 'publisher', 'graph_root']) {
+      if (a[field] !== b[field]) return a[field] < b[field] ? -1 : 1;
+    }
+    const x = hex(utf8.encode(a.job)), y = hex(utf8.encode(b.job));
+    return x < y ? -1 : x > y ? 1 : 0;
+  };
+  result.sort(order);
+  if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('Duplicate required workflow check.');
   return result;
 }
 export function protectionPolicy(value) {
   protectionFields(value, ['administrators', 'branches']);
   if (!Array.isArray(value.branches) || value.branches.length > 64) fail('Select at most 64 protected branches.');
   const branches = value.branches.map(row => {
-    protectionFields(row, ['reference_hex', 'required_reviewers']);
-    return { reference_hex: protectionBranch(row.reference_hex), required_reviewers: protectionPeople(row.required_reviewers) };
+    protectionFields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : [])]);
+    const checks = protectionChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
+    // Keep the historical empty-check spelling so saved review-only request
+    // receipts retain their original intent digest and retry identity.
+    return { reference_hex: protectionBranch(row.reference_hex), required_reviewers: protectionPeople(row.required_reviewers, checks.length > 0),
+      ...(checks.length ? { required_checks: checks } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('Duplicate protected branch.');
   return { administrators: protectionPeople(value.administrators), branches };
@@ -228,14 +253,19 @@ function protectionSource(value) {
 export function protectionChanges(before, after) {
   before = protectionPolicy(before); after = protectionPolicy(after);
   const difference = (a, b) => a.filter(value => !b.includes(value));
-  const old = new Map(before.branches.map(row => [row.reference_hex, row.required_reviewers]));
-  const next = new Map(after.branches.map(row => [row.reference_hex, row.required_reviewers]));
+  const old = new Map(before.branches.map(row => [row.reference_hex, row]));
+  const next = new Map(after.branches.map(row => [row.reference_hex, row]));
   const branches = [];
   for (const name of [...new Set([...old.keys(), ...next.keys()])].sort()) {
-    const added = difference(next.get(name) ?? [], old.get(name) ?? []);
-    const removed = difference(old.get(name) ?? [], next.get(name) ?? []);
-    if (added.length || removed.length) branches.push({ reference_hex: name,
-      change: !old.has(name) ? 'added' : !next.has(name) ? 'removed' : 'updated', added, removed });
+    const added = difference(next.get(name)?.required_reviewers ?? [], old.get(name)?.required_reviewers ?? []);
+    const removed = difference(old.get(name)?.required_reviewers ?? [], next.get(name)?.required_reviewers ?? []);
+    const oldChecks = (old.get(name)?.required_checks ?? []).map(value => JSON.stringify(value));
+    const nextChecks = (next.get(name)?.required_checks ?? []).map(value => JSON.stringify(value));
+    const checksAdded = difference(nextChecks, oldChecks).map(value => JSON.parse(value));
+    const checksRemoved = difference(oldChecks, nextChecks).map(value => JSON.parse(value));
+    if (added.length || removed.length || checksAdded.length || checksRemoved.length) branches.push({ reference_hex: name,
+      change: !old.has(name) ? 'added' : !next.has(name) ? 'removed' : 'updated', added, removed,
+      ...(checksAdded.length || checksRemoved.length ? { checks_added: checksAdded, checks_removed: checksRemoved } : {}) });
   }
   return { administrators_added: difference(after.administrators, before.administrators),
     administrators_removed: difference(before.administrators, after.administrators), branches };
@@ -245,6 +275,8 @@ function protectionBody(source, replacement, clear) {
   return form({ expected_version: source.version, expected_epoch: source.epoch,
     administrator: replacement.administrators,
     required_reviewer: replacement.branches.flatMap(row => row.required_reviewers.map(person => `${row.reference_hex}:${person}`)),
+    required_check: replacement.branches.flatMap(row => (row.required_checks ?? []).map(check =>
+      `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(utf8.encode(check.job))}`)),
     ...(clear ? { clear: 'true' } : {}) });
 }
 async function protectionIntent(value, crypto) {

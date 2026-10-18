@@ -102,7 +102,7 @@ fn stdout(output: &Output) -> &str {
 fn real_stdio_policy_write_and_independent_recovery_use_one_persisted_decision() {
     let fixture = Fixture::new();
     let args = format!(
-        "{{\"idempotency_key\":\"{KEY}\",\"expected_version\":\"0\",\"expected_epoch\":\"1\",\"administrators\":[\"{ADMIN}\"],\"branches\":[{{\"reference_hex\":\"726566732f68656164732f6d61696e\",\"required_reviewers\":[\"{REVIEWER}\"]}}]}}",
+        "{{\"idempotency_key\":\"{KEY}\",\"expected_version\":\"0\",\"expected_epoch\":\"1\",\"administrators\":[\"{ADMIN}\"],\"branches\":[{{\"reference_hex\":\"726566732f68656164732f6d61696e\",\"required_reviewers\":[\"{REVIEWER}\"],\"required_checks\":[]}}]}}",
     );
     let input = format!(
         "{HANDSHAKE}{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}}\n{}{}{}",

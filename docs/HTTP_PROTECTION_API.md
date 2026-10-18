@@ -73,8 +73,12 @@ A never-installed policy has `version: "0"`, `installed: false` and
 `policy: null`. An explicitly disabled policy retains its version and
 administrators, has an empty branch array and reports `enabled: false`.
 Policy administrators are lowercase principal IDs. Each branch contains
-`reference_hex` and `required_reviewers`; hex preserves exact native branch
-bytes, including non-UTF-8 names.
+`reference_hex`, `required_reviewers` and `required_checks`; hex preserves exact
+native branch bytes, including non-UTF-8 names. Each check contains
+`source_ref_hex`, `publisher`, `graph_root` and the exact UTF-8 `job`. Empty check
+arrays preserve review-only policies; check-only branches have empty reviewer
+arrays. The [check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md) defines their
+explicit publisher authority and exact-candidate enforcement.
 
 The read reports `complete: true`, `transaction_created: false` and
 `published: false`. It accepts no body, Idempotency-Key, Git-Protocol header
@@ -97,11 +101,13 @@ Every request is a complete replacement:
 | `expected_epoch` | Exact positive decimal predecessor policy epoch. |
 | Repeated `administrator` | One to 32 lowercase 32-hex-character principal IDs. |
 | Repeated `required_reviewer` | `REFERENCE_BYTES_HEX:PRINCIPAL_ID`, with lowercase hex and an exact `refs/heads/*` reference. |
-| `clear` | Exactly `true` to disable branch requirements; mutually exclusive with reviewer entries. |
+| Repeated `required_check` | `TARGET_REF_HEX:SOURCE_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; refs name exact `refs/heads/*`, publisher is a 32-character principal ID, graph is 64 lowercase hex characters, and job is exact UTF-8 encoded as hex. |
+| `clear` | Exactly `true` to disable branch requirements; mutually exclusive with reviewer and check entries. |
 
-Supply reviewers or explicitly supply `clear=true`. Native bounds remain
-64 branches, 32 reviewers per branch and 1,024 bytes per reference. Repeated sets
-are canonically sorted; duplicates refuse. Numeric strings cannot have leading
+Supply reviewers, workflow checks, or explicitly supply `clear=true`. Native
+bounds are 64 branches, 32 reviewers and 32 checks per branch, 1,024 bytes per
+reference and 1,024 UTF-8 bytes per job. Job names must be nonempty and contain
+no control characters. Repeated sets are canonically sorted; duplicates refuse. Numeric strings cannot have leading
 zeros, signs or overflow. Unknown fields, duplicate scalars, malformed escaping
 and invalid references refuse. There is no actor/principal field, implicit
 predecessor refresh or force option.
@@ -119,10 +125,13 @@ curl --fail-with-body --header @/secure/admin.headers \
   "$REPO_URL/api/v1/protection"
 ```
 
-To disable requirements, retain at least one administrator and replace reviewer
-entries with `--data-urlencode 'clear=true'`. Each committed replacement
+To disable requirements, retain at least one administrator and replace all
+reviewer and check entries with `--data-urlencode 'clear=true'`. Each committed replacement
 increments the policy epoch. Old-epoch approvals cannot satisfy the new policy.
-The policy transaction itself does not move Git refs.
+The policy transaction itself does not move Git refs. Preserve every intended
+check selector when replacing administrators or reviewers. The browser and
+operator helpers retain configured selectors; the form remains an explicit
+complete replacement, so omitted requirements are removed.
 
 ## Receipts and recovery
 

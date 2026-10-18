@@ -82,6 +82,7 @@ fn command(
     let branches = if enabled {
         vec![object([
             ("reference_hex", text(hex(b"refs/heads/main-\xff"))),
+            ("required_checks", Value::Array(Vec::new())),
             (
                 "required_reviewers",
                 Value::Array(vec![text(REVIEWER.to_string())]),

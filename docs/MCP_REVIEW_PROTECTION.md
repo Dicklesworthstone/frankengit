@@ -3,8 +3,10 @@
 The separate `--protection-admin` profile lets a trusted repository operator
 inspect, replace and recover canonical required-review protection over the
 existing MCP stdio server. It calls the same native authority reader and durable
-admission used by `fg protection`. The existing code-agent profile gains no
-policy-administration capability, and no canonical schema or dependency changes.
+admission used by `fg protection`. It also carries the explicit
+[required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
+The existing code-agent profile gains no policy-administration capability.
+The required canonical check-policy extension introduces no dependency.
 
 This is a bounded part of `frankengit-root-doctrine-x2mv.4.20` and the explicit
 operator-principal boundary in `.4.13`. It does not complete either bead.
@@ -67,7 +69,8 @@ read to fill missing expected values.
   "branches": [
     {
       "reference_hex": "726566732f68656164732f6d61696e",
-      "required_reviewers": ["22222222222222222222222222222222"]
+      "required_reviewers": ["22222222222222222222222222222222"],
+      "required_checks": []
     }
   ]
 }
@@ -84,23 +87,34 @@ positive predecessor version. Epochs must be positive. Exhausted values,
 numeric JSON values, leading zeros, omitted predecessors and implicit “latest”
 selectors refuse before admission.
 
-Principal IDs are canonical 32-character lowercase hexadecimal strings. Both
-administrator and reviewer lists must be strictly sorted, unique and nonempty.
-The policy accepts at most 32 administrators, 64 exact branches and 32 reviewers
-per branch. Branches are strictly sorted by raw reference bytes and must name
+Principal IDs are canonical 32-character lowercase hexadecimal strings.
+Administrator and reviewer lists must be strictly sorted and unique; the
+administrator list must be nonempty. A protected branch may have no reviewers
+only when it has at least one required workflow check. The policy accepts at
+most 32 administrators, 64 exact branches, 32 reviewers and 32 checks per branch. Branches are strictly sorted by raw reference bytes and must name
 `refs/heads/*`; the `reference_hex` encoding preserves non-UTF-8 names and uses
 the native 1,024-byte reference limit. The adapter rejects duplicate entries
 instead of deduplicating or reordering a changed retry.
+
+Each branch must explicitly include `required_checks`, even when it is empty.
+This prevents a client unaware of checks from silently dropping them while
+replacing other policy fields. Each selector is an object with exactly
+`source_ref_hex`, `publisher`, `graph_root` and `job`. The source is a canonical
+branch; publisher and graph use 32 and 64 lowercase hexadecimal characters,
+respectively. The job is nonempty UTF-8, at most 1,024 bytes, without controls.
+Selectors are strictly sorted and unique by source-reference bytes, publisher,
+graph, then UTF-8 job bytes. Reads emit every selector unchanged.
 
 The existing MCP envelope limits also apply: 64 KiB per input, bounded JSON
 depth, item count and node count. A policy whose complete representation exceeds
 those limits must be managed through another admitted surface. Individual
 native collection limits do not waive the transport budget.
 
-An explicit empty `branches` array disables required reviews while retaining
-administrator ownership and immutable history. Omitting `branches` never
-disables protection. Every listed reviewer remains mandatory; this surface adds
-no quorum, wildcard, required-check or override semantics.
+An explicit empty `branches` array disables required reviews and workflow
+checks while retaining administrator ownership and immutable history. Omitting
+`branches` never disables protection. Every listed reviewer remains mandatory;
+all configured workflow checks must also pass for the exact candidate. This
+surface adds no quorum, wildcard or override semantics.
 
 First installation is authorized by the explicit trusted-operator write grant;
 the installing principal must be in the first administrator set. For every

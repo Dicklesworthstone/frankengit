@@ -353,3 +353,30 @@ fn routes_methods_media_and_declared_body_limits_are_checked_before_publication(
     assert!(!is_route("/repo.git/api/v1/pulls"));
     assert!(!is_route("/repo.git?path=/api/v1/protection"));
 }
+
+#[test]
+fn check_only_http_commands_preserve_exact_selectors_and_read_representation() {
+    let source = hex(b"refs/heads/ci-candidate");
+    let job = "build:linux λ";
+    let base = form().split('&').filter(|part| !part.starts_with("required_reviewer="))
+        .collect::<Vec<_>>().join("&");
+    let check = format!("required_check={}:{}:{}:{}:{}", hex(b"refs/heads/main"),
+        source, person(7), "55".repeat(32), hex(job.as_bytes()));
+    let body = format!("{base}&{check}");
+    let command = parse_command(body.as_bytes()).unwrap();
+    let rule = &command.protection.branches[0];
+    assert!(rule.reviewers.is_empty());
+    assert_eq!(rule.required_checks[0].source_ref.as_bytes(), b"refs/heads/ci-candidate");
+    assert_eq!(rule.required_checks[0].publisher, PrincipalId::from_bytes([7; 16]));
+    assert_eq!(rule.required_checks[0].graph_root, [0x55; 32]);
+    assert_eq!(rule.required_checks[0].job, job);
+    let json = policy_json(&command.protection).unwrap();
+    assert!(json.contains(&format!("\"source_ref_hex\":\"{source}\"")));
+    assert!(json.contains(&format!("\"job\":{}", quote(job))));
+    assert!(parse_command(format!("{body}&{check}").as_bytes()).is_err());
+    for bad in ["".to_owned(), "00".into(), "ff".into(), "61".repeat(1025)] {
+        let malformed = format!("{base}&required_check={}:{}:{}:{}:{bad}",
+            hex(b"refs/heads/main"), source, person(7), "55".repeat(32));
+        assert!(parse_command(malformed.as_bytes()).is_err());
+    }
+}

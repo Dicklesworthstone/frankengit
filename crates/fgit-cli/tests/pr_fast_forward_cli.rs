@@ -157,6 +157,7 @@ fn real_cli_does_not_turn_trusted_local_into_a_review_bypass() {
         protection: ReviewProtection {
             administrators: vec![actor(2)],
             branches: vec![ProtectedBranch {
+                required_checks: Vec::new(),
                 name: main_ref(),
                 reviewers: vec![actor(3)],
             }],
