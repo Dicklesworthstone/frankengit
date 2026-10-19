@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 43,
-  "active_count": 39,
+  "total_count": 44,
+  "active_count": 40,
   "unsupported_count": 4,
   "tools": [
     {
@@ -930,6 +930,34 @@
       "refusal_codes": ["raw_query_prohibited"],
       "cli_command": "",
       "rest_api_path": ""
+    },
+    {
+      "name": "frankengit_ref_list",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "description": "List visible refs (all, or refs/tags/ only) with exact hex names and native tips from an authenticated repository snapshot.",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 65536,
+        "max_depth": 16,
+        "max_items": 100,
+        "max_fan_out": 8,
+        "max_duration_ms": 30000
+      },
+      "pagination": "snapshot_bound_cursor",
+      "disclosure": "public_repository_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["invalid_namespace", "invalid_reference_cursor", "invalid_limit", "snapshot_required", "snapshot_moved", "invalid_reference_page"],
+      "cli_command": "fg refs",
+      "rest_api_path": "GET /repos/{id}/refs"
     },
     {
       "name": "frankengit_source_blame",

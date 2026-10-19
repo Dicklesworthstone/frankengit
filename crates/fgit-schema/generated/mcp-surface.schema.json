@@ -1276,6 +1276,46 @@
       },
       "additionalProperties": false
     },
+    "frankengit_ref_list": {
+      "title": "frankengit_ref_list",
+      "description": "List visible refs (all, or refs/tags/ only) with exact hex names and native tips from an authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "description": "refs (default, every visible ref) or tags (refs/tags/ only).",
+              "x-classification": "selector_position",
+              "maxLength": 4,
+              "pattern": "^(refs|tags)$"
+            },
+            "after_hex": {
+              "type": "string",
+              "description": "Exact next_after_hex cursor from the previous page.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page item limit (1..100, default 50).",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Snapshot token pin; required with after_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_source_blame": {
       "title": "frankengit_source_blame",
       "description": "Compute line provenance for a file in an authenticated repository snapshot.",

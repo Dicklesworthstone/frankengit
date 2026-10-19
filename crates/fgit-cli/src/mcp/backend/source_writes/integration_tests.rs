@@ -559,3 +559,145 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
     assert_eq!(state(&reader.node), held);
     reader.close().unwrap();
 }
+
+fn listed(value: &Value) -> Vec<(String, String)> {
+    assert_eq!(
+        value.object().unwrap()["result"].object().unwrap()["isError"],
+        Value::Bool(false),
+        "{value:?}"
+    );
+    let Value::Array(rows) = &result(value)["references"] else {
+        panic!("references must be an array: {value:?}")
+    };
+    rows.iter()
+        .map(|row| {
+            let row = row.object().unwrap();
+            let name = row["reference_hex"].text().unwrap().to_owned();
+            assert_eq!(
+                row["reference"].text().map(|text| hex(text.as_bytes())),
+                Some(name.clone())
+            );
+            (name, row["tip"].text().unwrap().to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn listed_tips_are_the_exact_expectations_branch_writes_need_in_both_hash_domains() {
+    use super::super::refs::NAME as REFS;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format);
+        let mut backend = NodeTools::open(f.options.clone()).unwrap();
+        let mut server = start(&mut backend);
+        let main = hex(b"refs/heads/main");
+        let topic = hex(b"refs/heads/topic");
+
+        // The first page names the seeded branch and its exact native tip.
+        let first = invoke(&mut server, &mut backend, 2, REFS, object([]));
+        assert_eq!(listed(&first), vec![(main.clone(), f.commit.to_string())]);
+        assert_eq!(result(&first)["complete"], Value::Bool(true));
+        assert_eq!(result(&first)["read_only"], Value::Bool(true));
+        let before_create = result(&first)["snapshot_token"].text().unwrap().to_owned();
+        assert_eq!(
+            listed(&invoke(
+                &mut server,
+                &mut backend,
+                3,
+                REFS,
+                object([("namespace", text("tags"))]),
+            )),
+            Vec::new()
+        );
+
+        // A listed tip is a valid write expectation; the read published nothing.
+        let held = state(&backend.node).0;
+        let tip = listed(&first)[0].1.clone();
+        committed(&invoke(
+            &mut server,
+            &mut backend,
+            4,
+            CREATE,
+            command(
+                "refs/heads/topic",
+                "topic",
+                &[("target", text(tip.clone()))],
+            ),
+        ));
+        assert_ne!(state(&backend.node).0, held);
+
+        // Snapshot-bound pagination across both branches.
+        let page = invoke(
+            &mut server,
+            &mut backend,
+            5,
+            REFS,
+            object([("limit", json::number(1))]),
+        );
+        assert_eq!(listed(&page), vec![(main.clone(), tip.clone())]);
+        assert_eq!(result(&page)["next_after_hex"].text(), Some(main.as_str()));
+        assert_eq!(result(&page)["complete"], Value::Bool(false));
+        let token = result(&page)["snapshot_token"].text().unwrap().to_owned();
+        let next = invoke(
+            &mut server,
+            &mut backend,
+            6,
+            REFS,
+            object([
+                ("after_hex", text(main.clone())),
+                ("expected_head", text(token)),
+            ]),
+        );
+        assert_eq!(listed(&next), vec![(topic.clone(), tip.clone())]);
+        assert_eq!(result(&next)["complete"], Value::Bool(true));
+
+        // Refusal twin: the same continuation pinned to the pre-create head.
+        let stale = invoke(
+            &mut server,
+            &mut backend,
+            7,
+            REFS,
+            object([
+                ("after_hex", text(main)),
+                ("expected_head", text(before_create)),
+            ]),
+        );
+        assert_eq!(
+            stale.object().unwrap()["result"].object().unwrap()["isError"],
+            Value::Bool(true)
+        );
+        assert_eq!(result(&stale)["code"].text(), Some("snapshot_moved"));
+
+        // A wrong expectation is refused and changes nothing; the listed one commits.
+        let mut wrong = tip.clone();
+        let last = wrong.pop().unwrap();
+        wrong.push(if last == '0' { '1' } else { '0' });
+        let held = state(&backend.node).1;
+        refused(&invoke(
+            &mut server,
+            &mut backend,
+            8,
+            DELETE,
+            command(
+                "refs/heads/topic",
+                "delete-wrong",
+                &[("expected_old", text(wrong))],
+            ),
+        ));
+        assert_eq!(state(&backend.node).1, held);
+        let delete = command(
+            "refs/heads/topic",
+            "delete-topic",
+            &[("expected_old", text(tip.clone()))],
+        );
+        let deleted = invoke(&mut server, &mut backend, 9, DELETE, delete.clone());
+        committed(&deleted);
+        assert_eq!(
+            result(&invoke(&mut server, &mut backend, 10, DELETE, delete)),
+            result(&deleted)
+        );
+        assert_eq!(
+            listed(&invoke(&mut server, &mut backend, 11, REFS, object([]))),
+            vec![(hex(b"refs/heads/main"), tip)]
+        );
+    }
+}

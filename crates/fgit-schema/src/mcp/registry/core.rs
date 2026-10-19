@@ -2430,7 +2430,94 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "",
         rest_api_path: "",
     },
-    // 33. frankengit_source_blame
+    // 33. frankengit_ref_list
+    McpToolEntry {
+        name: "frankengit_ref_list",
+        version: 1,
+        entity_kind: McpEntityKind::Tool,
+        owner_subsystem: "git-core",
+        support_profile: SupportProfile::Active,
+        description: "List visible refs (all, or refs/tags/ only) with exact hex names and native tips from an authenticated repository snapshot.",
+        read_mutation: ReadMutationClass::ReadOnly,
+        capability: CapabilityRequirement::READ_CANONICAL_OBJECT,
+        principal: PrincipalRequirement::None,
+        idempotency: IdempotencyRequirement::NotApplicable,
+        authority_root: InputAuthorityRootRequirement::ExactSnapshotToken,
+        budget: BudgetDimensions::READ_STANDARD,
+        pagination: PaginationRules::SnapshotBoundCursor,
+        disclosure: DisclosureClass::PublicRepositoryData,
+        receipt: EvidenceReceiptClass::None,
+        cancellation: CancellationBehavior::ImmediateQuiescent,
+        input_fields: &[
+            McpField {
+                name: "namespace",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "refs (default, every visible ref) or tags (refs/tags/ only).",
+                required: false,
+                max_bytes: Some(4),
+                pattern: Some("^(refs|tags)$"),
+            },
+            McpField {
+                name: "after_hex",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Exact next_after_hex cursor from the previous page.",
+                required: false,
+                max_bytes: Some(8192),
+                pattern: Some("^(?:[0-9a-f]{2})+$"),
+            },
+            McpField {
+                name: "limit",
+                field_type: "integer",
+                classification: FieldClassification::SelectorPosition,
+                description: "Page item limit (1..100, default 50).",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "expected_head",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Snapshot token pin; required with after_hex.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+        ],
+        output_fields: &[
+            McpField {
+                name: "snapshot_token",
+                field_type: "string",
+                classification: FieldClassification::SystemMetadata,
+                description: "Exact repository authority snapshot token.",
+                required: true,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "references",
+                field_type: "array",
+                classification: FieldClassification::SystemMetadata,
+                description: "Rows of reference_hex, reference (UTF-8 or null) and native tip.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        refusal_codes: &[
+            "invalid_namespace",
+            "invalid_reference_cursor",
+            "invalid_limit",
+            "snapshot_required",
+            "snapshot_moved",
+            "invalid_reference_page",
+        ],
+        cli_command: "fg refs",
+        rest_api_path: "GET /repos/{id}/refs",
+    },
+    // 34. frankengit_source_blame
     McpToolEntry {
         name: "frankengit_source_blame",
         version: 1,
@@ -2490,7 +2577,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg blame",
         rest_api_path: "GET /repos/{id}/blame",
     },
-    // 34. frankengit_source_blob
+    // 35. frankengit_source_blob
     McpToolEntry {
         name: "frankengit_source_blob",
         version: 1,
@@ -2584,7 +2671,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg show",
         rest_api_path: "GET /repos/{id}/blobs",
     },
-    // 35. frankengit_source_candidate
+    // 36. frankengit_source_candidate
     McpToolEntry {
         name: "frankengit_source_candidate",
         version: 1,
@@ -2649,7 +2736,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg workspace inspect",
         rest_api_path: "POST /repos/{id}/candidates/inspect",
     },
-    // 36. frankengit_source_compare
+    // 37. frankengit_source_compare
     McpToolEntry {
         name: "frankengit_source_compare",
         version: 1,
@@ -2714,7 +2801,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg diff",
         rest_api_path: "GET /repos/{id}/compare",
     },
-    // 37. frankengit_source_log
+    // 38. frankengit_source_log
     McpToolEntry {
         name: "frankengit_source_log",
         version: 1,
@@ -2783,7 +2870,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg log",
         rest_api_path: "GET /repos/{id}/commits",
     },
-    // 38. frankengit_source_publish
+    // 39. frankengit_source_publish
     McpToolEntry {
         name: "frankengit_source_publish",
         version: 1,
@@ -2866,7 +2953,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg workspace apply",
         rest_api_path: "POST /repos/{id}/commits",
     },
-    // 39. frankengit_source_search
+    // 40. frankengit_source_search
     McpToolEntry {
         name: "frankengit_source_search",
         version: 1,
@@ -2942,7 +3029,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search",
         rest_api_path: "GET /repos/{id}/search",
     },
-    // 40. frankengit_source_search_batch
+    // 41. frankengit_source_search_batch
     McpToolEntry {
         name: "frankengit_source_search_batch",
         version: 1,
@@ -3010,7 +3097,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search --batch",
         rest_api_path: "POST /repos/{id}/search/batch",
     },
-    // 41. frankengit_source_tree
+    // 42. frankengit_source_tree
     McpToolEntry {
         name: "frankengit_source_tree",
         version: 1,
@@ -3099,7 +3186,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg tree",
         rest_api_path: "GET /repos/{id}/trees",
     },
-    // 42. frankengit_transaction_outcome
+    // 43. frankengit_transaction_outcome
     McpToolEntry {
         name: "frankengit_transaction_outcome",
         version: 1,
@@ -3178,7 +3265,7 @@ mod tests {
 
     #[test]
     fn exact_tool_count_and_ordering() {
-        assert_eq!(REGISTRY.len(), 42);
+        assert_eq!(REGISTRY.len(), 43);
         for pair in REGISTRY.windows(2) {
             assert!(
                 (pair[0].name, pair[0].version) < (pair[1].name, pair[1].version),

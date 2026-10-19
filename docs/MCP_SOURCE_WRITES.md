@@ -34,6 +34,9 @@ are nonzero lowercase hex in the repository's SHA-1 or SHA-256 domain.
 | `frankengit_branch_delete` | `expected_old`; exact old-tip condition. |
 | `frankengit_branch_rename` | `expected_old`, and exactly one of `destination` / `destination_hex`; distinct, absent destination. |
 
+Read the exact current tip to pin with `frankengit_ref_list`
+([MCP_READ_ONLY_SERVER.md](MCP_READ_ONLY_SERVER.md)) rather than another surface.
+
 Targets must already be identity-verified commits reachable through the native
 visible-ref boundary. A guessed OID or object already in local storage confers
 no authority. Branch commands do not import new objects. All updates are

@@ -74,6 +74,17 @@ convenience `text_utf8` only when the exact slice is valid UTF-8. Byte ranges
 can split a Unicode character; concatenate exact bytes, not nullable text.
 Symlink payloads are data and never followed; gitlinks cannot be read as files.
 
+`frankengit_ref_list` (granted with source reads) pages the currently visible
+refs from one authenticated snapshot: `namespace` is `refs` (default: branches,
+tags and remote-tracking refs) or `tags` (`refs/tags/` only), with `limit`
+(1..100, default 50), `after_hex` and `expected_head`. Each row carries the
+exact name as `reference_hex`, a convenience `reference` that is null unless
+the name is valid UTF-8, and the native `tip`. `next_after_hex` continues only
+with the same `snapshot_token`; any later publication refuses the continuation
+with `snapshot_moved` (strict current head, as for source browsing). HEAD is not
+a synthetic row. A listed tip is exactly what the branch write tools take as
+`expected_old`; listing never refreshes a failed write expectation.
+
 Every source reply binds the selected commit, root tree, source RCR, object ID,
 and path. `next_after_hex` and `next_offset` require the same head token on the
 next call. Unlike metadata retained-head pagination, source browsing uses strict
