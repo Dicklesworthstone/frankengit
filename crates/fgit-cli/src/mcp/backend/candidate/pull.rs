@@ -149,13 +149,15 @@ fn publication_arguments(
     bytes: &[u8],
     style: MergeCommitStyle,
 ) -> Result<Value, ToolError> {
-    let Value::Object(mut fields) = candidate_arguments(subject, candidate, bytes)?
-    else { return Err(invalid_report()); };
+    let Value::Object(mut fields) = candidate_arguments(subject, candidate, bytes)? else {
+        return Err(invalid_report());
+    };
     // Reviews bind the actual commit. Publication separately binds the chosen
     // method, so the review template must not acquire an inapplicable selector.
     fields.insert("method".into(), text(merge_method_name(style)));
     let arguments = Value::Object(fields);
-    arguments.encode(json::MAX_INPUT - 4096)
+    arguments
+        .encode(json::MAX_INPUT - 4096)
         .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
     Ok(arguments)
 }

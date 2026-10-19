@@ -65,7 +65,9 @@ fn plan(format: GitHashAlgorithm) -> SpeculativeBatchPlan {
                 merge_base_tip: oid(format, 0x01),
                 resulting_speculative_tip: result,
                 workspace_epoch: WorkspaceEpoch::from_u64(7),
-                merged_tree: MergedTree { entries: Vec::new() },
+                merged_tree: MergedTree {
+                    entries: Vec::new(),
+                },
             };
             projected = result;
             step
@@ -103,7 +105,10 @@ fn assert_cannot_land(plan: &SpeculativeBatchPlan) {
             QueueNumber::FIRST,
             AggregateVersion::try_new(5).unwrap(),
             plan.initial_target_tip,
-            plan.steps.iter().map(|step| step.resulting_speculative_tip).collect(),
+            plan.steps
+                .iter()
+                .map(|step| step.resulting_speculative_tip)
+                .collect(),
         )
         .is_err()
     );
@@ -125,7 +130,10 @@ fn valid_multi_pr_chains_land_in_both_git_object_formats() {
             QueueNumber::FIRST,
             AggregateVersion::try_new(5).unwrap(),
             plan.initial_target_tip,
-            plan.steps.iter().map(|step| step.resulting_speculative_tip).collect(),
+            plan.steps
+                .iter()
+                .map(|step| step.resulting_speculative_tip)
+                .collect(),
         )
         .unwrap();
         assert_eq!(package.target_ref_intent.new_tip, plan.final_target_tip);
@@ -157,15 +165,28 @@ fn absent_candidate_observations_never_mean_unchanged() {
 fn moved_candidates_targets_and_epochs_are_still_refused() {
     let plan = plan(GitHashAlgorithm::Sha256);
     let mut tips = observations(&plan);
-    tips.insert(plan.steps[0].pull_request, oid(GitHashAlgorithm::Sha256, 0x70));
+    tips.insert(
+        plan.steps[0].pull_request,
+        oid(GitHashAlgorithm::Sha256, 0x70),
+    );
     assert!(matches!(
         plan.check_freshness(plan.initial_target_tip, &tips, WorkspaceEpoch::from_u64(7)),
-        Err(ForgeRefusal::MergeStale { reference: MergeSide::Source, .. })
+        Err(ForgeRefusal::MergeStale {
+            reference: MergeSide::Source,
+            ..
+        })
     ));
     let tips = observations(&plan);
     assert!(matches!(
-        plan.check_freshness(oid(GitHashAlgorithm::Sha256, 0x71), &tips, WorkspaceEpoch::from_u64(7)),
-        Err(ForgeRefusal::MergeStale { reference: MergeSide::Target, .. })
+        plan.check_freshness(
+            oid(GitHashAlgorithm::Sha256, 0x71),
+            &tips,
+            WorkspaceEpoch::from_u64(7)
+        ),
+        Err(ForgeRefusal::MergeStale {
+            reference: MergeSide::Target,
+            ..
+        })
     ));
     assert!(matches!(
         plan.check_freshness(plan.initial_target_tip, &tips, WorkspaceEpoch::from_u64(8)),
@@ -195,7 +216,8 @@ fn substituted_candidate_tip_or_ref_invalidates_batch_identity() {
     changed_tip.steps[0].candidate_tip = oid(GitHashAlgorithm::Sha256, 0x74);
     assert_cannot_land(&changed_tip);
     let mut changed_ref = plan(GitHashAlgorithm::Sha256);
-    changed_ref.steps[0].candidate_source_ref = RefName::try_new(b"refs/heads/substituted").unwrap();
+    changed_ref.steps[0].candidate_source_ref =
+        RefName::try_new(b"refs/heads/substituted").unwrap();
     assert_cannot_land(&changed_ref);
 }
 
@@ -245,7 +267,9 @@ fn receipt_attestation_refuses_substituted_omitted_or_reordered_candidates() {
     let original = receipt(&plan);
     let digest = original.receipt_digest().unwrap();
     assert_eq!(digest, original.receipt_digest().unwrap());
-    original.check_validity(&plan.target_ref, plan.initial_target_tip).unwrap();
+    original
+        .check_validity(&plan.target_ref, plan.initial_target_tip)
+        .unwrap();
     let mut changed = original.clone();
     changed.entries[0].head_tip = oid(GitHashAlgorithm::Sha256, 0x75);
     let mut omitted = original.clone();
@@ -254,6 +278,10 @@ fn receipt_attestation_refuses_substituted_omitted_or_reordered_candidates() {
     reordered.entries.reverse();
     for invalid in [changed, omitted, reordered] {
         assert!(invalid.receipt_digest().is_err());
-        assert!(invalid.check_validity(&plan.target_ref, plan.initial_target_tip).is_err());
+        assert!(
+            invalid
+                .check_validity(&plan.target_ref, plan.initial_target_tip)
+                .is_err()
+        );
     }
 }

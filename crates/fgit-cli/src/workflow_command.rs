@@ -220,7 +220,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
             if artifact_inputs.len() >= 64 {
                 return Err("at most 64 artifact input selections are permitted".into());
             }
-            artifact_inputs.push(artifacts::input_selection(value, flag == "--artifact-input-hex")?);
+            artifact_inputs.push(artifacts::input_selection(
+                value,
+                flag == "--artifact-input-hex",
+            )?);
         } else if flags.insert(flag, value.as_str()).is_some() {
             return Err(format!("duplicate {flag}"));
         }

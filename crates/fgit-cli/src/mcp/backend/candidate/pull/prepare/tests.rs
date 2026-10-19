@@ -244,7 +244,13 @@ fn returned_arguments_leave_room_for_real_mutation_envelopes_at_native_reference
     parsed.selection.subject.target_ref =
         RefName::try_new(format!("refs/heads/{}", "b".repeat(longest)).as_bytes()).unwrap();
     let bytes = vec![0xab; MAX_BUNDLE_BYTES];
-    let value = publication_arguments(&parsed.selection.subject, candidate, &bytes, MergeCommitStyle::Squash).unwrap();
+    let value = publication_arguments(
+        &parsed.selection.subject,
+        candidate,
+        &bytes,
+        MergeCommitStyle::Squash,
+    )
+    .unwrap();
     let mut fields = value.object().unwrap().clone();
     fields.insert(
         "idempotency_key".into(),
@@ -302,8 +308,13 @@ fn merge_methods_are_closed_and_independent_of_tree_profiles() {
             }
         }
         for value in [
-            Value::Null, Value::Bool(true), json::number(1), text(""),
-            text("Squash"), text("fast-forward-only"), text("rebase"),
+            Value::Null,
+            Value::Bool(true),
+            json::number(1),
+            text(""),
+            text("Squash"),
+            text("fast-forward-only"),
+            text("rebase"),
         ] {
             let mut args = good.clone();
             args.insert("method".into(), value);
@@ -312,10 +323,17 @@ fn merge_methods_are_closed_and_independent_of_tree_profiles() {
     }
     let descriptor = schema();
     let fields = descriptor.object().unwrap();
-    let method = fields["properties"].object().unwrap()["method"].object().unwrap();
+    let method = fields["properties"].object().unwrap()["method"]
+        .object()
+        .unwrap();
     assert_eq!(method["default"].text(), Some("merge-commit"));
-    assert_eq!(method["enum"], Value::Array(vec![text("merge-commit"), text("squash")]));
-    let Value::Array(required) = &fields["required"] else { unreachable!() };
+    assert_eq!(
+        method["enum"],
+        Value::Array(vec![text("merge-commit"), text("squash")])
+    );
+    let Value::Array(required) = &fields["required"] else {
+        unreachable!()
+    };
     assert!(!required.contains(&text("method")));
 }
 
@@ -331,9 +349,13 @@ fn publication_templates_bind_method_without_contaminating_exact_review_argument
         let review = candidate_arguments(&parsed.selection.subject, candidate, &bytes).unwrap();
         assert!(!review.object().unwrap().contains_key("method"));
         for style in [MergeCommitStyle::TwoParent, MergeCommitStyle::Squash] {
-            let publication = publication_arguments(&parsed.selection.subject, candidate, &bytes, style).unwrap();
+            let publication =
+                publication_arguments(&parsed.selection.subject, candidate, &bytes, style).unwrap();
             let mut fields = publication.object().unwrap().clone();
-            assert_eq!(fields.remove("method").unwrap().text(), Some(merge_method_name(style)));
+            assert_eq!(
+                fields.remove("method").unwrap().text(),
+                Some(merge_method_name(style))
+            );
             assert_eq!(Value::Object(fields), review);
             publication.encode(json::MAX_INPUT - 4096).unwrap();
         }
@@ -361,17 +383,32 @@ fn clean_rendering_rejects_a_plan_with_a_different_parent_method() {
             source: parsed.selection.subject.source_tip,
             tree,
             commit,
-            objects: vec![PlannedMergeObject { id: commit, kind: GitObjectKind::Commit, body }],
+            objects: vec![PlannedMergeObject {
+                id: commit,
+                kind: GitObjectKind::Commit,
+                body,
+            }],
         };
         let outcome = MergePreparation::Clean(plan.clone());
         let result = render(format, &parsed, &outcome, Some(b"transport bytes")).unwrap();
-        assert_eq!(result["parents"], Value::Array(vec![text(raw_oid(plan.target))]));
+        assert_eq!(
+            result["parents"],
+            Value::Array(vec![text(raw_oid(plan.target))])
+        );
         assert_eq!(
             result["publication_arguments"].object().unwrap()["method"].text(),
             Some("squash")
         );
         let mut mismatched = plan;
         mismatched.style = MergeCommitStyle::TwoParent;
-        assert!(render(format, &parsed, &MergePreparation::Clean(mismatched), Some(b"transport bytes")).is_err());
+        assert!(
+            render(
+                format,
+                &parsed,
+                &MergePreparation::Clean(mismatched),
+                Some(b"transport bytes")
+            )
+            .is_err()
+        );
     }
 }

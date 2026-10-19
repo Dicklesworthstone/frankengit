@@ -99,8 +99,7 @@ fn write_loose_blob_repository(root: &Path) -> GitOid {
 }
 
 fn write_branch_head(root: &Path) {
-    fs::write(root.join("HEAD"), "ref: refs/heads/main\n")
-        .expect("symbolic branch HEAD writes");
+    fs::write(root.join("HEAD"), "ref: refs/heads/main\n").expect("symbolic branch HEAD writes");
 }
 
 fn write_loose_object(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {

@@ -233,8 +233,11 @@ impl OneNode {
                     }
                     for omission in &report.omissions {
                         live(request)?;
-                        add_result(&mut result_bytes, omission.path.len() + 96,
-                            limits.max_result_bytes)?;
+                        add_result(
+                            &mut result_bytes,
+                            omission.path.len() + 96,
+                            limits.max_result_bytes,
+                        )?;
                     }
                     SymbolChannel::Available(Box::new(report))
                 }

@@ -26,10 +26,17 @@ pub(super) struct Request<'a> {
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
         if let Some(repository_route) = read_route(head, "/api/v1/source/context-initial")? {
-            return Ok(Some(Self { repository_route, hydrate: true }));
+            return Ok(Some(Self {
+                repository_route,
+                hydrate: true,
+            }));
         }
-        read_route(head, "/api/v1/source/search-initial")
-            .map(|route| route.map(|repository_route| Self { repository_route, hydrate: false }))
+        read_route(head, "/api/v1/source/search-initial").map(|route| {
+            route.map(|repository_route| Self {
+                repository_route,
+                hydrate: false,
+            })
+        })
     }
 }
 
@@ -48,8 +55,13 @@ fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, Api
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
     command_fields(parse_form(bytes, 192)?, format)
 }
-fn command_fields(parsed: Vec<(String, String)>, format: GitHashAlgorithm) -> Result<Command, ApiError> {
-    if parsed.len() > 192 { return Err(ApiError::too_large()); }
+fn command_fields(
+    parsed: Vec<(String, String)>,
+    format: GitHashAlgorithm,
+) -> Result<Command, ApiError> {
+    if parsed.len() > 192 {
+        return Err(ApiError::too_large());
+    }
     let mut fields = BTreeMap::new();
     let (mut terms, mut prefixes, mut kinds) = (Vec::new(), Vec::new(), Vec::new());
     for (name, value) in parsed {

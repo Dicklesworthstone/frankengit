@@ -1,10 +1,20 @@
 use super::*;
 
 fn args(extra: &[&str]) -> Vec<String> {
-    ["/unused", "11111111111111111111111111111111", "22222222222222222222222222222222", "--trusted-local"]
-        .into_iter().chain(extra.iter().copied()).map(str::to_owned).collect()
+    [
+        "/unused",
+        "11111111111111111111111111111111",
+        "22222222222222222222222222222222",
+        "--trusted-local",
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    .map(str::to_owned)
+    .collect()
 }
-fn token() -> String { format!("alg:1:{}", "ab".repeat(32)) }
+fn token() -> String {
+    format!("alg:1:{}", "ab".repeat(32))
+}
 
 #[test]
 fn defaults_shrink_with_smaller_explicit_pages_but_conflicting_explicit_limits_refuse() {
@@ -15,9 +25,20 @@ fn defaults_shrink_with_smaller_explicit_pages_but_conflicting_explicit_limits_r
     let one = parse(&args(&["--max-page-objects", "1"])).unwrap();
     assert_eq!(one.query.max_findings, 1);
     let small = parse(&args(&["--max-selected-objects", "3"])).unwrap();
-    assert_eq!((small.query.max_page_objects, small.query.max_findings), (3, 3));
+    assert_eq!(
+        (small.query.max_page_objects, small.query.max_findings),
+        (3, 3)
+    );
     assert!(parse(&args(&["--max-page-objects", "1", "--max-findings", "2"])).is_err());
-    assert!(parse(&args(&["--max-selected-objects", "1", "--max-page-objects", "2"])).is_err());
+    assert!(
+        parse(&args(&[
+            "--max-selected-objects",
+            "1",
+            "--max-page-objects",
+            "2"
+        ]))
+        .is_err()
+    );
 }
 
 #[test]
@@ -25,9 +46,26 @@ fn all_options_fit_the_argument_envelope_and_exact_cursor_fences_round_trip() {
     let token = token();
     let after = "12".repeat(32);
     let all = args(&[
-        "--object-format", "sha256", "--expected-generation", "7", "--expected-head", &token,
-        "--resume-after", &after, "--max-selected-objects", "100", "--max-page-objects", "10",
-        "--max-findings", "3", "--max-bytes", "999", "--max-object-bytes", "1024", "--timeout-secs", "9",
+        "--object-format",
+        "sha256",
+        "--expected-generation",
+        "7",
+        "--expected-head",
+        &token,
+        "--resume-after",
+        &after,
+        "--max-selected-objects",
+        "100",
+        "--max-page-objects",
+        "10",
+        "--max-findings",
+        "3",
+        "--max-bytes",
+        "999",
+        "--max-object-bytes",
+        "1024",
+        "--timeout-secs",
+        "9",
     ]);
     assert_eq!(all.len(), 24);
     let options = parse(&all).unwrap();
@@ -47,10 +85,23 @@ fn resume_requires_an_exact_head_nonzero_canonical_oid_and_matching_git_domain()
     let oid = "ab".repeat(20);
     assert!(parse(&args(&["--resume-after", &oid])).is_err());
     assert!(parse(&args(&["--resume-after", &oid, "--expected-head", &token])).is_ok());
-    for bad in ["AB".repeat(20), "0".repeat(40), "12".repeat(32), "not-an-oid".into()] {
+    for bad in [
+        "AB".repeat(20),
+        "0".repeat(40),
+        "12".repeat(32),
+        "not-an-oid".into(),
+    ] {
         assert!(parse(&args(&["--resume-after", &bad, "--expected-head", &token])).is_err());
     }
-    assert!(parse(&args(&["--expected-head", "deadbeef", "--resume-after", &oid])).is_err());
+    assert!(
+        parse(&args(&[
+            "--expected-head",
+            "deadbeef",
+            "--resume-after",
+            &oid
+        ]))
+        .is_err()
+    );
 }
 
 #[test]
@@ -60,7 +111,15 @@ fn no_implicit_authorization_duplicates_unknown_flags_or_unbounded_input() {
     assert!(parse(&untrusted).is_err());
     assert!(parse(&args(&["--trusted-local"])).is_err());
     assert!(parse(&args(&["--repair", "yes"])).is_err());
-    assert!(parse(&args(&["--max-page-objects", "2", "--max-page-objects", "2"])).is_err());
+    assert!(
+        parse(&args(&[
+            "--max-page-objects",
+            "2",
+            "--max-page-objects",
+            "2"
+        ]))
+        .is_err()
+    );
     assert!(parse(&args(&["--max-page-objects"])).is_err());
     let mut oversized = args(&[]);
     oversized[0] = "x".repeat(8193);
@@ -89,13 +148,19 @@ fn numeric_bounds_and_overflow_refuse_without_silent_clamping() {
 
 #[test]
 fn diagnostic_output_preserves_utf8_prefix_and_hard_byte_bound() {
-    let mut out = Diagnostic { text: String::new(), truncated: false };
+    let mut out = Diagnostic {
+        text: String::new(),
+        truncated: false,
+    };
     fmt::Write::write_str(&mut out, &"a".repeat(1023)).unwrap();
     fmt::Write::write_str(&mut out, "\u{1f600}").unwrap();
     fmt::Write::write_str(&mut out, "must-not-follow-a-truncated-codepoint").unwrap();
     assert_eq!(out.text, "a".repeat(1023));
     assert!(out.truncated);
-    let mut exact = Diagnostic { text: String::new(), truncated: false };
+    let mut exact = Diagnostic {
+        text: String::new(),
+        truncated: false,
+    };
     fmt::Write::write_str(&mut exact, &"b".repeat(1024)).unwrap();
     assert!(!exact.truncated);
     fmt::Write::write_str(&mut exact, "more").unwrap();
@@ -108,7 +173,15 @@ fn shutdown_or_audit_failure_never_emits_a_success_receipt() {
     let options = parse(&args(&[])).unwrap();
     for cleanup in [None, Some("injected shutdown refusal".into())] {
         let mut output = Vec::new();
-        assert!(finish(&mut output, &options, Err("injected authority refusal".into()), cleanup).is_err());
+        assert!(
+            finish(
+                &mut output,
+                &options,
+                Err("injected authority refusal".into()),
+                cleanup
+            )
+            .is_err()
+        );
         assert!(output.is_empty());
     }
 }

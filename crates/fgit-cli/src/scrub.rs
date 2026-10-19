@@ -73,12 +73,17 @@ fn positive(value: &str, maximum: u64, field: &str) -> Result<u64, String> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!("{field} requires a positive decimal integer"));
     }
-    value.parse::<u64>().ok().filter(|value| *value > 0 && *value <= maximum)
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= maximum)
         .ok_or_else(|| format!("{field} must be in 1..={maximum}"))
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 4 || args.len() > 29 || args[0].is_empty()
+    if args.len() < 4
+        || args.len() > 29
+        || args[0].is_empty()
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -99,34 +104,52 @@ fn parse(args: &[String]) -> Result<Options, String> {
         if flag == "--trusted-local" || flag == "--all" {
             continue;
         }
-        let value = args.get(at).ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = args
+            .get(at)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         at += 1;
         match flag.as_str() {
-            "--object-format" => format = match value.as_str() {
-                "sha1" => GitHashAlgorithm::Sha1,
-                "sha256" => GitHashAlgorithm::Sha256,
-                _ => return Err("object format must be sha1 or sha256".into()),
-            },
+            "--object-format" => {
+                format = match value.as_str() {
+                    "sha1" => GitHashAlgorithm::Sha1,
+                    "sha256" => GitHashAlgorithm::Sha256,
+                    _ => return Err("object format must be sha1 or sha256".into()),
+                }
+            }
             "--expected-head" => query.expected_head = Some(parse_head(value)?),
-            "--expected-generation" => query.expected_generation = Some(
-                HeadGeneration::try_new(positive(value, u64::MAX, flag)?).map_err(|error| error.to_string())?
-            ),
+            "--expected-generation" => {
+                query.expected_generation = Some(
+                    HeadGeneration::try_new(positive(value, u64::MAX, flag)?)
+                        .map_err(|error| error.to_string())?,
+                )
+            }
             "--resume-after" => after = Some(value),
-            "--max-selected-objects" => query.max_selected_objects = positive(value, 1_000_000, flag)? as usize,
-            "--max-page-objects" => query.max_page_objects = positive(value, 100_000, flag)? as usize,
+            "--max-selected-objects" => {
+                query.max_selected_objects = positive(value, 1_000_000, flag)? as usize
+            }
+            "--max-page-objects" => {
+                query.max_page_objects = positive(value, 100_000, flag)? as usize
+            }
             "--max-findings" => query.max_findings = positive(value, 1_000, flag)? as usize,
             "--max-bytes" => query.max_payload_bytes = positive(value, 16 * 1024 * MIB, flag)?,
             "--max-object-bytes" => object_bytes = positive(value, 256 * MIB, flag)?,
             "--timeout-secs" => query.timeout = Duration::from_secs(positive(value, 3600, flag)?),
             "--max-pages" => sweep_limits.pages = positive(value, 1_000_000, flag)? as usize,
-            "--max-sweep-bytes" => sweep_limits.payload_bytes = positive(value, 16 * 1024 * MIB, flag)?,
+            "--max-sweep-bytes" => {
+                sweep_limits.payload_bytes = positive(value, 16 * 1024 * MIB, flag)?
+            }
             _ => return Err(format!("unsupported scrub option: {flag}")),
         }
     }
     if !seen.contains("--trusted-local") {
-        return Err("scrub requires --trusted-local and authorization to inspect the entire repository".into());
+        return Err(
+            "scrub requires --trusted-local and authorization to inspect the entire repository"
+                .into(),
+        );
     }
-    if !seen.contains("--all") && (seen.contains("--max-pages") || seen.contains("--max-sweep-bytes")) {
+    if !seen.contains("--all")
+        && (seen.contains("--max-pages") || seen.contains("--max-sweep-bytes"))
+    {
         return Err("--max-pages and --max-sweep-bytes require --all".into());
     }
     if seen.contains("--all") && after.is_some() {
@@ -140,11 +163,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if !seen.contains("--max-findings") {
         query.max_findings = query.max_findings.min(query.max_page_objects);
     }
-    if query.max_page_objects > query.max_selected_objects || query.max_findings > query.max_page_objects {
+    if query.max_page_objects > query.max_selected_objects
+        || query.max_findings > query.max_page_objects
+    {
         return Err("require max-findings <= max-page-objects <= max-selected-objects".into());
     }
     if let Some(value) = after {
-        let head = query.expected_head.ok_or("--resume-after requires --expected-head")?;
+        let head = query
+            .expected_head
+            .ok_or("--resume-after requires --expected-head")?;
         let oid = GitOid::from_hex(format, value).map_err(|error| error.to_string())?;
         if oid.is_zero() || oid.to_string() != *value {
             return Err("--resume-after requires a nonzero canonical lowercase native OID".into());
@@ -155,7 +182,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         storage: PathBuf::from(&args[0]),
         tenant: TenantId::from_hex(&args[1]).map_err(|error| error.to_string())?,
         repository: RepositoryId::from_hex(&args[2]).map_err(|error| error.to_string())?,
-        format, object_bytes, query,
+        format,
+        object_bytes,
+        query,
         sweep: seen.contains("--all").then_some(sweep_limits),
     })
 }
@@ -167,16 +196,23 @@ struct Diagnostic {
 }
 impl fmt::Write for Diagnostic {
     fn write_str(&mut self, value: &str) -> fmt::Result {
-        if self.truncated { return Ok(()); }
+        if self.truncated {
+            return Ok(());
+        }
         let mut end = value.len().min(1024 - self.text.len());
-        while !value.is_char_boundary(end) { end -= 1; }
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
         self.text.push_str(&value[..end]);
         self.truncated |= end < value.len();
         Ok(())
     }
 }
 fn diagnostic(cause: &ScrubFindingCause) -> Diagnostic {
-    let mut out = Diagnostic { text: String::new(), truncated: false };
+    let mut out = Diagnostic {
+        text: String::new(),
+        truncated: false,
+    };
     if write!(&mut out, "{cause}").is_err() {
         out.truncated = true;
     }
@@ -189,45 +225,79 @@ fn receipt(options: &Options, report: &SelectedObjectScrub) -> String {
     render_page(options, report, true)
 }
 fn render_page(options: &Options, report: &SelectedObjectScrub, closed: bool) -> String {
-    let findings = report.findings().iter().map(|finding| {
-        let code = match &finding.cause {
-            ScrubFindingCause::ObjectRead(_) => "object_unverifiable",
-            ScrubFindingCause::NonGitObject => "non_git_object",
-        };
-        let detail = diagnostic(&finding.cause);
-        format!("{{\"oid\":{},\"code\":{},\"detail\":{},\"detail_truncated\":{}}}",
-            quote(&finding.oid.to_string()), quote(code), quote(&detail.text), detail.truncated)
-    }).collect::<Vec<_>>().join(",");
-    let next = report.next_cursor().map_or_else(|| "null".into(), |cursor| {
-        format!("{{\"snapshot_token\":{},\"after\":{}}}",
-            quote(&head_token(cursor.head())), quote(&cursor.after().to_string()))
-    });
+    let findings = report
+        .findings()
+        .iter()
+        .map(|finding| {
+            let code = match &finding.cause {
+                ScrubFindingCause::ObjectRead(_) => "object_unverifiable",
+                ScrubFindingCause::NonGitObject => "non_git_object",
+            };
+            let detail = diagnostic(&finding.cause);
+            format!(
+                "{{\"oid\":{},\"code\":{},\"detail\":{},\"detail_truncated\":{}}}",
+                quote(&finding.oid.to_string()),
+                quote(code),
+                quote(&detail.text),
+                detail.truncated
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let next = report.next_cursor().map_or_else(
+        || "null".into(),
+        |cursor| {
+            format!(
+                "{{\"snapshot_token\":{},\"after\":{}}}",
+                quote(&head_token(cursor.head())),
+                quote(&cursor.after().to_string())
+            )
+        },
+    );
     let stop = match report.stop() {
         ScrubStop::SelectionExhausted => "selection_exhausted",
         ScrubStop::ObjectLimit => "object_limit",
         ScrubStop::FindingLimit => "finding_limit",
         ScrubStop::PayloadLimit => "payload_limit",
     };
-    format!(concat!(
-        "{{\"type\":{},\"schema_version\":1,",
-        "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation_id\":{},",
-        "\"object_format\":{},\"authority_generation\":{},\"snapshot_token\":{},",
-        "\"selected_closure_root\":{},\"selected_objects\":{},\"start_after\":{},",
-        "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
-        "\"payload_bytes_accounted\":{},\"findings\":[{}],\"next_cursor\":{},\"stop\":{},",
-        "\"page_complete\":{},\"complete\":{},\"all_selected_object_bytes_verified\":{},",
-        "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
-        "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
-        "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":{}}}"
-    ),
-        quote(if closed { "repository_scrub_page" } else { "repository_scrub_sweep_page" }),
-        quote(&options.tenant.to_string()), quote(&report.repository_id().to_string()),
-        quote(&report.repository_incarnation_id().to_string()), quote(options.format.as_str()),
-        report.generation().get(), quote(&head_token(report.head())),
-        quote(&report.closure_root().to_string()), report.selected_objects(), nullable_oid(report.start_after()),
-        report.checked_objects(), report.verified_objects(), report.read_attempts(), report.payload_bytes(),
-        findings, next, quote(stop), closed, closed && report.entire_selection_checked(),
-        closed && report.entire_selection_verified(), closed,
+    format!(
+        concat!(
+            "{{\"type\":{},\"schema_version\":1,",
+            "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation_id\":{},",
+            "\"object_format\":{},\"authority_generation\":{},\"snapshot_token\":{},",
+            "\"selected_closure_root\":{},\"selected_objects\":{},\"start_after\":{},",
+            "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
+            "\"payload_bytes_accounted\":{},\"findings\":[{}],\"next_cursor\":{},\"stop\":{},",
+            "\"page_complete\":{},\"complete\":{},\"all_selected_object_bytes_verified\":{},",
+            "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
+            "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
+            "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":{}}}"
+        ),
+        quote(if closed {
+            "repository_scrub_page"
+        } else {
+            "repository_scrub_sweep_page"
+        }),
+        quote(&options.tenant.to_string()),
+        quote(&report.repository_id().to_string()),
+        quote(&report.repository_incarnation_id().to_string()),
+        quote(options.format.as_str()),
+        report.generation().get(),
+        quote(&head_token(report.head())),
+        quote(&report.closure_root().to_string()),
+        report.selected_objects(),
+        nullable_oid(report.start_after()),
+        report.checked_objects(),
+        report.verified_objects(),
+        report.read_attempts(),
+        report.payload_bytes(),
+        findings,
+        next,
+        quote(stop),
+        closed,
+        closed && report.entire_selection_checked(),
+        closed && report.entire_selection_verified(),
+        closed,
     )
 }
 fn finish(
@@ -239,14 +309,22 @@ fn finish(
     let report = match (result, cleanup) {
         (Ok(report), None) => report,
         (result, cleanup) => {
-            return Err(format!("no scrub page returned; audit: {}; shutdown: {}",
+            return Err(format!(
+                "no scrub page returned; audit: {}; shutdown: {}",
                 result.err().unwrap_or_else(|| "completed".into()),
-                cleanup.unwrap_or_else(|| "completed".into())));
+                cleanup.unwrap_or_else(|| "completed".into())
+            ));
         }
     };
-    let code = if !report.findings().is_empty() { 3 }
-        else if report.entire_selection_verified() { 0 } else { 4 };
-    writeln!(output, "{}", receipt(options, &report)).and_then(|()| output.flush())
+    let code = if !report.findings().is_empty() {
+        3
+    } else if report.entire_selection_verified() {
+        0
+    } else {
+        4
+    };
+    writeln!(output, "{}", receipt(options, &report))
+        .and_then(|()| output.flush())
         .map_err(|error| format!("scrub receipt output incomplete: {error}"))?;
     Ok(code)
 }
@@ -254,7 +332,9 @@ fn finish(
 pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
         let mut out = std::io::stdout().lock();
-        writeln!(out, "{USAGE}").and_then(|()| out.flush()).map_err(|error| error.to_string())?;
+        writeln!(out, "{USAGE}")
+            .and_then(|()| out.flush())
+            .map_err(|error| error.to_string())?;
         return Ok(0);
     }
     let options = parse(args)?;
@@ -265,12 +345,15 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
             .with_object_format(options.format)
             .with_max_object_bytes(options.object_bytes),
-    ).map_err(|error| format!("cannot open scrub node: {error}"))?;
-    let result = node.bring_into_service(HeadGeneration::FIRST)
+    )
+    .map_err(|error| format!("cannot open scrub node: {error}"))?;
+    let result = node
+        .bring_into_service(HeadGeneration::FIRST)
         .map_err(|error| error.to_string())
         .and_then(|()| {
             let request = fgit_cli::command_request_context(&node);
-            node.runtime().block_on(node.scrub_selected_objects_local_in(&request, options.query))
+            node.runtime()
+                .block_on(node.scrub_selected_objects_local_in(&request, options.query))
                 .map_err(|error| error.to_string())
         });
     let cleanup = node.shutdown().err().map(|error| error.to_string());

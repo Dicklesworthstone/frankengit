@@ -226,7 +226,12 @@ fn default_indexed_http_refuses_changed_source_until_each_index_is_refreshed() {
                 Default::default(),
             ))
             .unwrap();
-        let changed = add_file(&node, original.commit, "extra.rs", b"default-search-source-change");
+        let changed = add_file(
+            &node,
+            original.commit,
+            "extra.rs",
+            b"default-search-source-change",
+        );
         let canonical = generation(&node);
         let path = root.0.join("credentials");
         credentials(&node, &path);
@@ -238,7 +243,13 @@ fn default_indexed_http_refuses_changed_source_until_each_index_is_refreshed() {
             ("search-symbols-index", &symbol_form, "symbol_index_stale"),
         ] {
             for mode in ["", "&source_mode=exact"] {
-                let stale = post(&server.client, operation, 'a', &(body.clone() + mode), false);
+                let stale = post(
+                    &server.client,
+                    operation,
+                    'a',
+                    &(body.clone() + mode),
+                    false,
+                );
                 status(&stale, 409);
                 assert!(stale.body.contains(stale_code));
                 assert!(!stale.body.contains("\"hits\"") && !stale.body.contains("\"matches\""));
@@ -269,7 +280,12 @@ fn default_indexed_http_refuses_changed_source_until_each_index_is_refreshed() {
             .unwrap();
         let server = Server::start(node, &path, 2, true, false);
         for (operation, body, kind, count) in [
-            ("search-index", &lexical_form, "source_search_index_current", "returned_hits"),
+            (
+                "search-index",
+                &lexical_form,
+                "source_search_index_current",
+                "returned_hits",
+            ),
             (
                 "search-symbols-index",
                 &symbol_form,
@@ -404,20 +420,20 @@ fn default_http_revalidates_after_issue_comments_and_keeps_both_source_identitie
         let initial = post(&server.client, "search-symbols-index", 'a', &body, true);
         status(&initial, 200);
         assert_eq!(
-            initial.body.split_once("\"result\":").unwrap().1.strip_suffix('}').unwrap(),
+            initial
+                .body
+                .split_once("\"result\":")
+                .unwrap()
+                .1
+                .strip_suffix('}')
+                .unwrap(),
             strict.body
         );
         status(&issue(&server.client), 200);
         status(&comment(&server.client), 200);
         let stale = post(&server.client, "search-symbols-index", 'a', &exact, false);
         status(&stale, 409);
-        let revalidated = post(
-            &server.client,
-            "search-symbols-index",
-            'a',
-            &body,
-            true,
-        );
+        let revalidated = post(&server.client, "search-symbols-index", 'a', &body, true);
         status(&revalidated, 200);
         assert!(
             revalidated

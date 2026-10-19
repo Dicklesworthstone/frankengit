@@ -483,8 +483,10 @@ mod tests {
         ] {
             let mut selected = args();
             selected.extend([
-                "--method".into(), "squash".into(),
-                "--object-format".into(), format.into(),
+                "--method".into(),
+                "squash".into(),
+                "--object-format".into(),
+                format.into(),
             ]);
             let parsed = parse(&selected).unwrap();
             assert_eq!(parsed.method, NativeMergeMethod::Squash);

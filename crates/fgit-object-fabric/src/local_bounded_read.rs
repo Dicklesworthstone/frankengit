@@ -88,7 +88,9 @@ fn read_stream<R: Read>(
         }
         if remaining == 0 {
             return Err(StoreRefusal::StoredObjectTooLarge {
-                offered: consumed.checked_add(1).ok_or(StoreRefusal::LengthOverflow)?,
+                offered: consumed
+                    .checked_add(1)
+                    .ok_or(StoreRefusal::LengthOverflow)?,
                 maximum,
             });
         }
@@ -138,9 +140,16 @@ mod tests {
 
     #[test]
     fn exact_limit_and_empty_bodies_are_read_byte_for_byte() {
-        for body in [Vec::new(), vec![0, 255, 1, 0], vec![93; READ_CHUNK_BYTES * 2 + 7]] {
+        for body in [
+            Vec::new(),
+            vec![0, 255, 1, 0],
+            vec![93; READ_CHUNK_BYTES * 2 + 7],
+        ] {
             let size = body.len() as u64;
-            assert_eq!(read_stream(&mut Cursor::new(&body), size, size).unwrap(), body);
+            assert_eq!(
+                read_stream(&mut Cursor::new(&body), size, size).unwrap(),
+                body
+            );
         }
     }
 
@@ -152,15 +161,20 @@ mod tests {
                 panic!("oversized metadata must be refused before reading");
             }
         }
-        assert_eq!(read_stream(&mut NeverRead, 17, 16), Err(StoreRefusal::StoredObjectTooLarge {
-            offered: 17,
-            maximum: 16,
-        }));
+        assert_eq!(
+            read_stream(&mut NeverRead, 17, 16),
+            Err(StoreRefusal::StoredObjectTooLarge {
+                offered: 17,
+                maximum: 16,
+            })
+        );
     }
 
     #[test]
     fn growing_stream_consumes_at_most_the_limit_plus_one_byte() {
-        struct Growing { consumed: usize }
+        struct Growing {
+            consumed: usize,
+        }
         impl Read for Growing {
             fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
                 buffer.fill(42);
@@ -170,23 +184,35 @@ mod tests {
         }
         for maximum in [0, 1, READ_CHUNK_BYTES as u64, READ_CHUNK_BYTES as u64 + 17] {
             let mut source = Growing { consumed: 0 };
-            assert_eq!(read_stream(&mut source, 0, maximum), Err(StoreRefusal::StoredObjectTooLarge {
-                offered: maximum + 1,
-                maximum,
-            }));
+            assert_eq!(
+                read_stream(&mut source, 0, maximum),
+                Err(StoreRefusal::StoredObjectTooLarge {
+                    offered: maximum + 1,
+                    maximum,
+                })
+            );
             assert_eq!(source.consumed as u64, maximum + 1);
         }
     }
 
     #[test]
     fn shrinkage_and_growth_within_the_budget_are_not_accepted_as_immutable() {
-        assert_eq!(read_stream(&mut Cursor::new(b"abc"), 4, 16), Err(StoreRefusal::MalformedStoredObject));
-        assert_eq!(read_stream(&mut Cursor::new(b"abcde"), 4, 16), Err(StoreRefusal::MalformedStoredObject));
+        assert_eq!(
+            read_stream(&mut Cursor::new(b"abc"), 4, 16),
+            Err(StoreRefusal::MalformedStoredObject)
+        );
+        assert_eq!(
+            read_stream(&mut Cursor::new(b"abcde"), 4, 16),
+            Err(StoreRefusal::MalformedStoredObject)
+        );
     }
 
     #[test]
     fn interrupted_read_is_retried_but_other_io_errors_are_returned() {
-        struct InterruptedOnce { inner: Cursor<Vec<u8>>, interrupted: bool }
+        struct InterruptedOnce {
+            inner: Cursor<Vec<u8>>,
+            interrupted: bool,
+        }
         impl Read for InterruptedOnce {
             fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
                 if !self.interrupted {
@@ -196,7 +222,10 @@ mod tests {
                 self.inner.read(buffer)
             }
         }
-        let mut source = InterruptedOnce { inner: Cursor::new(vec![0, 255]), interrupted: false };
+        let mut source = InterruptedOnce {
+            inner: Cursor::new(vec![0, 255]),
+            interrupted: false,
+        };
         assert_eq!(read_stream(&mut source, 2, 2).unwrap(), vec![0, 255]);
         struct Broken;
         impl Read for Broken {
@@ -204,10 +233,13 @@ mod tests {
                 Err(io::Error::from(io::ErrorKind::PermissionDenied))
             }
         }
-        assert_eq!(read_stream(&mut Broken, 0, 8), Err(StoreRefusal::StorageIo {
-            operation: StorageOperation::ReadBody,
-            kind: io::ErrorKind::PermissionDenied,
-        }));
+        assert_eq!(
+            read_stream(&mut Broken, 0, 8),
+            Err(StoreRefusal::StorageIo {
+                operation: StorageOperation::ReadBody,
+                kind: io::ErrorKind::PermissionDenied,
+            })
+        );
     }
 
     #[test]
@@ -217,18 +249,30 @@ mod tests {
         assert_eq!(read(&path, 16), Err(StoreRefusal::ObjectAbsent));
         fs::write(&path, [0, 1, 255, 0]).unwrap();
         assert_eq!(read(&path, 4).unwrap(), [0, 1, 255, 0]);
-        assert_eq!(read(&path, 3), Err(StoreRefusal::StoredObjectTooLarge { offered: 4, maximum: 3 }));
+        assert_eq!(
+            read(&path, 3),
+            Err(StoreRefusal::StoredObjectTooLarge {
+                offered: 4,
+                maximum: 3
+            })
+        );
     }
 
     #[test]
     fn sparse_oversize_is_refused_without_materializing_the_file() {
         let directory = Directory::new();
         let path = directory.0.join("sparse");
-        File::create(&path).unwrap().set_len(4 * 1024 * 1024 * 1024).unwrap();
-        assert_eq!(read(&path, 16), Err(StoreRefusal::StoredObjectTooLarge {
-            offered: 4 * 1024 * 1024 * 1024,
-            maximum: 16,
-        }));
+        File::create(&path)
+            .unwrap()
+            .set_len(4 * 1024 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            read(&path, 16),
+            Err(StoreRefusal::StoredObjectTooLarge {
+                offered: 4 * 1024 * 1024 * 1024,
+                maximum: 16,
+            })
+        );
     }
 
     #[test]

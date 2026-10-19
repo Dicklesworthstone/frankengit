@@ -7,7 +7,8 @@ use super::*;
 use std::collections::BTreeSet;
 
 const MAX_ROUTES: usize = 32;
-const USAGE: &str = "usage: fg webhook dispatch fanout <storage-root> <tenant-id> <repository-id> --trusted-local
+const USAGE: &str =
+    "usage: fg webhook dispatch fanout <storage-root> <tenant-id> <repository-id> --trusted-local
   --route <registered-id>:<canonical-destination> [--route <id>:<destination> ...]
   --at-least-once [--max-total-deliveries <1..1000>]
   [--object-format sha1|sha256] [--max-deliveries <1..1000>]
@@ -65,7 +66,9 @@ fn parse(args: &[String]) -> Result<FanoutOptions, String> {
                 }
             }
             "--max-total-deliveries" => {
-                let value = args.get(index).ok_or("missing --max-total-deliveries value")?;
+                let value = args
+                    .get(index)
+                    .ok_or("missing --max-total-deliveries value")?;
                 index += 1;
                 let value = number(value, 1, 1000)? as usize;
                 if max_total.replace(value).is_some() {
@@ -78,9 +81,15 @@ fn parse(args: &[String]) -> Result<FanoutOptions, String> {
             "--at-least-once" | "--continuous" | "--permissive-for-tests" => {
                 common.push(flag.to_owned());
             }
-            "--object-format" | "--max-deliveries" | "--max-scan-entries"
-            | "--attempt-timeout-secs" | "--stop-file" | "--poll-millis" => {
-                let value = args.get(index).ok_or_else(|| format!("missing {flag} value"))?;
+            "--object-format"
+            | "--max-deliveries"
+            | "--max-scan-entries"
+            | "--attempt-timeout-secs"
+            | "--stop-file"
+            | "--poll-millis" => {
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| format!("missing {flag} value"))?;
                 index += 1;
                 common.push(flag.to_owned());
                 common.push(value.clone());
@@ -218,7 +227,11 @@ fn execute(
             binding,
             registration.retry_schedule.max_attempts,
         )?;
-        routes.push(OwnedRoute { options: route, binding, journal });
+        routes.push(OwnedRoute {
+            options: route,
+            binding,
+            journal,
+        });
     }
     let mut first_route = 0;
     loop {
@@ -232,9 +245,14 @@ fn execute(
             &stopped,
             |index, remaining| {
                 let route = &mut routes[index];
-                emit(output, &format!(
-                    "{{\"type\":\"webhook_fanout_route\",\"schema_version\":1,\"webhook_id\":{},\"destination\":{},\"canonical_settled\":false}}",
-                    route.options.id.0, quote(route.options.destination.as_str())))?;
+                emit(
+                    output,
+                    &format!(
+                        "{{\"type\":\"webhook_fanout_route\",\"schema_version\":1,\"webhook_id\":{},\"destination\":{},\"canonical_settled\":false}}",
+                        route.options.id.0,
+                        quote(route.options.destination.as_str())
+                    ),
+                )?;
                 let per_route_limit = route.options.max_deliveries;
                 route.options.max_deliveries = per_route_limit.min(remaining);
                 let result = super::sweep(
@@ -248,16 +266,35 @@ fn execute(
                 );
                 route.options.max_deliveries = per_route_limit;
                 let summary = result?;
-                emit(output, &format!(
-                    "{{\"type\":\"webhook_fanout_route_result\",\"schema_version\":1,\"webhook_id\":{},\"destination\":{},\"attempts\":{},\"exit_code\":{},\"canonical_settled\":false}}",
-                    route.options.id.0, quote(route.options.destination.as_str()), summary.attempts, summary.exit_code()))?;
+                emit(
+                    output,
+                    &format!(
+                        "{{\"type\":\"webhook_fanout_route_result\",\"schema_version\":1,\"webhook_id\":{},\"destination\":{},\"attempts\":{},\"exit_code\":{},\"canonical_settled\":false}}",
+                        route.options.id.0,
+                        quote(route.options.destination.as_str()),
+                        summary.attempts,
+                        summary.exit_code()
+                    ),
+                )?;
                 Ok(summary)
             },
         )?;
-        emit(output, &format!(
-            "{{\"type\":\"webhook_fanout_sweep\",\"schema_version\":1,\"routes\":{},\"source_head\":{},\"attempts\":{},\"accepted\":{},\"rejected\":{},\"unknown\":{},\"pending\":{},\"filtered\":{},\"claimed_elsewhere\":{},\"stopped\":{},\"canonical_settled\":false}}",
-            routes.len(), quote(&page.head.to_string()), summary.attempts, summary.accepted, summary.rejected,
-            summary.unknown, summary.pending, summary.filtered, summary.claimed, summary.stopped))?;
+        emit(
+            output,
+            &format!(
+                "{{\"type\":\"webhook_fanout_sweep\",\"schema_version\":1,\"routes\":{},\"source_head\":{},\"attempts\":{},\"accepted\":{},\"rejected\":{},\"unknown\":{},\"pending\":{},\"filtered\":{},\"claimed_elsewhere\":{},\"stopped\":{},\"canonical_settled\":false}}",
+                routes.len(),
+                quote(&page.head.to_string()),
+                summary.attempts,
+                summary.accepted,
+                summary.rejected,
+                summary.unknown,
+                summary.pending,
+                summary.filtered,
+                summary.claimed,
+                summary.stopped
+            ),
+        )?;
         if !continuous || summary.stopped {
             return Ok(summary.exit_code());
         }
@@ -298,7 +335,13 @@ mod tests {
 
     #[test]
     fn routes_are_explicit_sorted_and_keep_single_worker_defaults() {
-        let options = parse(&args(&["--route", "9:forge-events", "--route", "2:forge-events"])).unwrap();
+        let options = parse(&args(&[
+            "--route",
+            "9:forge-events",
+            "--route",
+            "2:forge-events",
+        ]))
+        .unwrap();
         assert_eq!(options.routes.len(), 2);
         assert_eq!(options.routes[0].id.0, 2);
         assert_eq!(options.routes[1].id.0, 9);
@@ -328,11 +371,27 @@ mod tests {
         missing_ack.retain(|arg| arg != "--at-least-once");
         assert!(parse(&missing_ack).is_err());
         assert!(parse(&args(&["--route", "7:forge-events", "--continuous"])).is_err());
-        assert!(parse(&args(&["--route", "7:forge-events", "--stop-file", "/stop"])).is_err());
+        assert!(
+            parse(&args(&[
+                "--route",
+                "7:forge-events",
+                "--stop-file",
+                "/stop"
+            ]))
+            .is_err()
+        );
         let options = parse(&args(&[
-            "--route", "7:forge-events", "--continuous", "--stop-file", "/stop",
-            "--poll-millis", "100", "--max-total-deliveries", "1",
-        ])).unwrap();
+            "--route",
+            "7:forge-events",
+            "--continuous",
+            "--stop-file",
+            "/stop",
+            "--poll-millis",
+            "100",
+            "--max-total-deliveries",
+            "1",
+        ]))
+        .unwrap();
         assert!(options.routes[0].continuous);
         assert_eq!(options.max_total_deliveries, 1);
     }
@@ -340,7 +399,15 @@ mod tests {
     #[test]
     fn global_and_route_counts_are_bounded() {
         for value in ["0", "1001", "01", "+2"] {
-            assert!(parse(&args(&["--route", "7:forge-events", "--max-total-deliveries", value])).is_err());
+            assert!(
+                parse(&args(&[
+                    "--route",
+                    "7:forge-events",
+                    "--max-total-deliveries",
+                    value
+                ]))
+                .is_err()
+            );
         }
         let mut many = args(&[]);
         for id in 0..MAX_ROUTES {
@@ -357,11 +424,20 @@ mod tests {
         let summary = round(3, 1, 1, &|| Ok(false), |index, remaining| {
             order.push((index, remaining));
             Ok(if remaining > 0 {
-                Summary { attempts: 1, accepted: 1, ..Summary::default() }
+                Summary {
+                    attempts: 1,
+                    accepted: 1,
+                    ..Summary::default()
+                }
             } else {
-                Summary { unknown: 1, pending: 1, ..Summary::default() }
+                Summary {
+                    unknown: 1,
+                    pending: 1,
+                    ..Summary::default()
+                }
             })
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(order, vec![(1, 1), (2, 0), (0, 0)]);
         assert_eq!(summary.attempts, 1);
         assert_eq!(summary.unknown, 2);
@@ -372,11 +448,20 @@ mod tests {
     fn rejected_route_does_not_starve_a_healthy_route() {
         let summary = round(2, 0, 2, &|| Ok(false), |index, _| {
             Ok(if index == 0 {
-                Summary { attempts: 1, rejected: 1, ..Summary::default() }
+                Summary {
+                    attempts: 1,
+                    rejected: 1,
+                    ..Summary::default()
+                }
             } else {
-                Summary { attempts: 1, accepted: 1, ..Summary::default() }
+                Summary {
+                    attempts: 1,
+                    accepted: 1,
+                    ..Summary::default()
+                }
             })
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(summary.attempts, 2);
         assert_eq!(summary.accepted, 1);
         assert_eq!(summary.exit_code(), 2);
@@ -389,16 +474,23 @@ mod tests {
         let summary = round(3, 0, 3, &|| Ok(stop.get()), |_, _| {
             visits += 1;
             stop.set(true);
-            Ok(Summary { attempts: 1, ..Summary::default() })
-        }).unwrap();
+            Ok(Summary {
+                attempts: 1,
+                ..Summary::default()
+            })
+        })
+        .unwrap();
         assert_eq!(visits, 1);
         assert!(summary.stopped);
         assert_eq!(summary.exit_code(), 1);
         let mut visits = 0;
-        assert!(round(3, 0, 3, &|| Ok(false), |_, _| {
-            visits += 1;
-            Err("journal sync failed".into())
-        }).is_err());
+        assert!(
+            round(3, 0, 3, &|| Ok(false), |_, _| {
+                visits += 1;
+                Err("journal sync failed".into())
+            })
+            .is_err()
+        );
         assert_eq!(visits, 1);
     }
 }

@@ -259,17 +259,50 @@ fn explicit_method_hints_are_closed_and_never_override_actual_parent_shape() {
             input.insert("method".into(), text(method));
             assert_eq!(parse(&input, format).unwrap().style, Some(style));
         }
-        assert!(inspected_method(subject, baseline.candidate, &parents, Some(MergeCommitStyle::Squash)).is_err());
-        assert!(inspected_method(subject, baseline.candidate, &parents[..1], Some(MergeCommitStyle::TwoParent)).is_err());
-        for wrong in [vec![], vec![subject.source_tip], vec![subject.source_tip, subject.target_tip],
-            vec![subject.target_tip, subject.source_tip, subject.target_tip]]
-        {
+        assert!(
+            inspected_method(
+                subject,
+                baseline.candidate,
+                &parents,
+                Some(MergeCommitStyle::Squash)
+            )
+            .is_err()
+        );
+        assert!(
+            inspected_method(
+                subject,
+                baseline.candidate,
+                &parents[..1],
+                Some(MergeCommitStyle::TwoParent)
+            )
+            .is_err()
+        );
+        for wrong in [
+            vec![],
+            vec![subject.source_tip],
+            vec![subject.source_tip, subject.target_tip],
+            vec![subject.target_tip, subject.source_tip, subject.target_tip],
+        ] {
             assert!(inspected_method(subject, baseline.candidate, &wrong, None).is_err());
-            assert!(inspected_method(subject, baseline.candidate, &wrong, Some(MergeCommitStyle::Squash)).is_err());
+            assert!(
+                inspected_method(
+                    subject,
+                    baseline.candidate,
+                    &wrong,
+                    Some(MergeCommitStyle::Squash)
+                )
+                .is_err()
+            );
         }
-        for value in [Value::Null, Value::Bool(true), json::number(1), text(""),
-            text("Squash"), text("fast-forward-only"), text("rebase")]
-        {
+        for value in [
+            Value::Null,
+            Value::Bool(true),
+            json::number(1),
+            text(""),
+            text("Squash"),
+            text("fast-forward-only"),
+            text("rebase"),
+        ] {
             let mut input = original.clone();
             input.insert("method".into(), value);
             assert!(parse(&input, format).is_err());
@@ -282,7 +315,10 @@ fn an_identical_source_commit_keeps_explicit_squash_separate_from_legacy_fast_fo
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let input = parse(&args(format), format).unwrap();
         let subject = &input.selection.subject;
-        let candidate = CandidateBinding { merge_base: subject.target_tip, commit: subject.source_tip };
+        let candidate = CandidateBinding {
+            merge_base: subject.target_tip,
+            commit: subject.source_tip,
+        };
         candidate.validate(subject).unwrap();
         let parents = [subject.target_tip];
         assert_eq!(
@@ -293,11 +329,27 @@ fn an_identical_source_commit_keeps_explicit_squash_separate_from_legacy_fast_fo
             inspected_method(subject, candidate, &parents, Some(MergeCommitStyle::Squash)).unwrap(),
             NativeMergeMethod::Squash
         );
-        assert!(inspected_method(subject, candidate, &parents, Some(MergeCommitStyle::TwoParent)).is_err());
+        assert!(
+            inspected_method(
+                subject,
+                candidate,
+                &parents,
+                Some(MergeCommitStyle::TwoParent)
+            )
+            .is_err()
+        );
         // Fast-forward inspection may prove a longer admitted source history;
         // that proof cannot satisfy an explicit one-parent squash assertion.
         let intermediate = GitOid::from_hex(format, &"55".repeat(format.digest_len())).unwrap();
         assert!(inspected_method(subject, candidate, &[intermediate], None).is_ok());
-        assert!(inspected_method(subject, candidate, &[intermediate], Some(MergeCommitStyle::Squash)).is_err());
+        assert!(
+            inspected_method(
+                subject,
+                candidate,
+                &[intermediate],
+                Some(MergeCommitStyle::Squash)
+            )
+            .is_err()
+        );
     }
 }

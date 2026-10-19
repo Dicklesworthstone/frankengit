@@ -6,8 +6,8 @@
 use std::io::Write;
 use std::time::Instant;
 
-use fgit_types::{Digest, RepositoryAuthorityHeadId, RepositoryIncarnationId};
 use super::*;
+use fgit_types::{Digest, RepositoryAuthorityHeadId, RepositoryIncarnationId};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Limits {
@@ -16,7 +16,10 @@ pub(super) struct Limits {
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { pages: 10_000, payload_bytes: 16 * 1024 * MIB }
+        Self {
+            pages: 10_000,
+            payload_bytes: 16 * 1024 * MIB,
+        }
     }
 }
 
@@ -38,16 +41,27 @@ struct Summary {
 impl Summary {
     fn from_page(page: &SelectedObjectScrub) -> Self {
         Self {
-            head: page.head(), generation: page.generation(),
-            repository: page.repository_id(), incarnation: page.repository_incarnation_id(),
-            closure: page.closure_root(), selected: page.selected_objects(),
-            pages: 0, checked: 0, verified: 0, attempts: 0, bytes: 0, findings: 0,
+            head: page.head(),
+            generation: page.generation(),
+            repository: page.repository_id(),
+            incarnation: page.repository_incarnation_id(),
+            closure: page.closure_root(),
+            selected: page.selected_objects(),
+            pages: 0,
+            checked: 0,
+            verified: 0,
+            attempts: 0,
+            bytes: 0,
+            findings: 0,
         }
     }
     fn accept(&mut self, page: &SelectedObjectScrub, requested: ScrubQuery) -> Result<(), String> {
-        if self.head != page.head() || self.generation != page.generation()
-            || self.repository != page.repository_id() || self.incarnation != page.repository_incarnation_id()
-            || self.closure != page.closure_root() || self.selected != page.selected_objects()
+        if self.head != page.head()
+            || self.generation != page.generation()
+            || self.repository != page.repository_id()
+            || self.incarnation != page.repository_incarnation_id()
+            || self.closure != page.closure_root()
+            || self.selected != page.selected_objects()
             || requested.cursor.map(ScrubCursor::after) != page.start_after()
         {
             return Err("scrub sweep source or continuation changed".into());
@@ -55,50 +69,94 @@ impl Summary {
         if page.checked_objects() > requested.max_page_objects
             || page.findings().len() > requested.max_findings
             || page.payload_bytes() > requested.max_payload_bytes
-            || page.checked_objects() != page.verified_objects().checked_add(page.findings().len())
-                .ok_or("scrub sweep accounting overflow")?
+            || page.checked_objects()
+                != page
+                    .verified_objects()
+                    .checked_add(page.findings().len())
+                    .ok_or("scrub sweep accounting overflow")?
         {
             return Err("scrub sweep page accounting invalid".into());
         }
         if let Some(next) = page.next_cursor() {
-            if page.checked_objects() == 0 || next.head() != self.head
-                || page.start_after().is_some_and(|after| next.after() <= after)
+            if page.checked_objects() == 0
+                || next.head() != self.head
+                || page
+                    .start_after()
+                    .is_some_and(|after| next.after() <= after)
             {
                 return Err("scrub sweep continuation made no progress".into());
             }
         }
-        self.pages = self.pages.checked_add(1).ok_or("scrub sweep page count overflow")?;
-        self.checked = self.checked.checked_add(page.checked_objects()).ok_or("scrub sweep count overflow")?;
-        self.verified = self.verified.checked_add(page.verified_objects()).ok_or("scrub sweep count overflow")?;
-        self.attempts = self.attempts.checked_add(page.read_attempts()).ok_or("scrub sweep count overflow")?;
-        self.bytes = self.bytes.checked_add(page.payload_bytes()).ok_or("scrub sweep byte count overflow")?;
-        self.findings = self.findings.checked_add(page.findings().len()).ok_or("scrub sweep finding count overflow")?;
-        if self.checked > self.selected || (page.next_cursor().is_none() && self.checked != self.selected) {
+        self.pages = self
+            .pages
+            .checked_add(1)
+            .ok_or("scrub sweep page count overflow")?;
+        self.checked = self
+            .checked
+            .checked_add(page.checked_objects())
+            .ok_or("scrub sweep count overflow")?;
+        self.verified = self
+            .verified
+            .checked_add(page.verified_objects())
+            .ok_or("scrub sweep count overflow")?;
+        self.attempts = self
+            .attempts
+            .checked_add(page.read_attempts())
+            .ok_or("scrub sweep count overflow")?;
+        self.bytes = self
+            .bytes
+            .checked_add(page.payload_bytes())
+            .ok_or("scrub sweep byte count overflow")?;
+        self.findings = self
+            .findings
+            .checked_add(page.findings().len())
+            .ok_or("scrub sweep finding count overflow")?;
+        if self.checked > self.selected
+            || (page.next_cursor().is_none() && self.checked != self.selected)
+        {
             return Err("scrub sweep did not cover exactly the selected closure".into());
         }
         Ok(())
     }
     fn receipt(&self, options: &Options) -> String {
-        format!(concat!(
-            "{{\"type\":\"repository_scrub_sweep\",\"schema_version\":1,",
-            "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation_id\":{},",
-            "\"object_format\":{},\"authority_generation\":{},\"snapshot_token\":{},",
-            "\"selected_closure_root\":{},\"selected_objects\":{},\"pages\":{},",
-            "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
-            "\"payload_bytes_accounted\":{},\"finding_count\":{},",
-            "\"complete\":true,\"all_selected_object_bytes_verified\":{},",
-            "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
-            "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
-            "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":true}}"
-        ), quote(&options.tenant.to_string()), quote(&self.repository.to_string()),
-            quote(&self.incarnation.to_string()), quote(options.format.as_str()), self.generation.get(),
-            quote(&head_token(self.head)), quote(&self.closure.to_string()), self.selected, self.pages,
-            self.checked, self.verified, self.attempts, self.bytes, self.findings, self.findings == 0)
+        format!(
+            concat!(
+                "{{\"type\":\"repository_scrub_sweep\",\"schema_version\":1,",
+                "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation_id\":{},",
+                "\"object_format\":{},\"authority_generation\":{},\"snapshot_token\":{},",
+                "\"selected_closure_root\":{},\"selected_objects\":{},\"pages\":{},",
+                "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
+                "\"payload_bytes_accounted\":{},\"finding_count\":{},",
+                "\"complete\":true,\"all_selected_object_bytes_verified\":{},",
+                "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
+                "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
+                "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":true}}"
+            ),
+            quote(&options.tenant.to_string()),
+            quote(&self.repository.to_string()),
+            quote(&self.incarnation.to_string()),
+            quote(options.format.as_str()),
+            self.generation.get(),
+            quote(&head_token(self.head)),
+            quote(&self.closure.to_string()),
+            self.selected,
+            self.pages,
+            self.checked,
+            self.verified,
+            self.attempts,
+            self.bytes,
+            self.findings,
+            self.findings == 0
+        )
     }
 }
 
 fn remaining_timeout(options: &Options, started: Instant) -> Result<Duration, String> {
-    options.query.timeout.checked_sub(started.elapsed()).filter(|left| !left.is_zero())
+    options
+        .query
+        .timeout
+        .checked_sub(started.elapsed())
+        .filter(|left| !left.is_zero())
         .ok_or_else(|| "scrub sweep deadline exceeded; no complete receipt".into())
 }
 
@@ -116,11 +174,16 @@ fn drive(
     let mut summary: Option<Summary> = None;
     loop {
         query.timeout = remaining_timeout(options, started)?;
-        let (pages, bytes) = summary.as_ref().map_or((0, 0), |state| (state.pages, state.bytes));
+        let (pages, bytes) = summary
+            .as_ref()
+            .map_or((0, 0), |state| (state.pages, state.bytes));
         if pages >= limits.pages {
             return Err("scrub sweep max-pages exceeded; no complete receipt".into());
         }
-        let remaining = limits.payload_bytes.checked_sub(bytes).filter(|bytes| *bytes > 0)
+        let remaining = limits
+            .payload_bytes
+            .checked_sub(bytes)
+            .filter(|bytes| *bytes > 0)
             .ok_or("scrub sweep max-sweep-bytes exhausted; no complete receipt")?;
         query.max_payload_bytes = options.query.max_payload_bytes.min(remaining);
         let page = fetch(query)?;
@@ -151,13 +214,17 @@ fn finish(
 ) -> Result<u8, String> {
     let summary = match (result, cleanup) {
         (Ok(summary), None) => summary,
-        (result, cleanup) => return Err(format!(
-            "no complete scrub sweep receipt; audit: {}; shutdown: {}",
-            result.err().unwrap_or_else(|| "completed".into()),
-            cleanup.unwrap_or_else(|| "completed".into()))),
+        (result, cleanup) => {
+            return Err(format!(
+                "no complete scrub sweep receipt; audit: {}; shutdown: {}",
+                result.err().unwrap_or_else(|| "completed".into()),
+                cleanup.unwrap_or_else(|| "completed".into())
+            ));
+        }
     };
     let code = if summary.findings == 0 { 0 } else { 3 };
-    writeln!(output, "{}", summary.receipt(options)).and_then(|()| output.flush())
+    writeln!(output, "{}", summary.receipt(options))
+        .and_then(|()| output.flush())
         .map_err(|error| format!("scrub sweep receipt output incomplete: {error}"))?;
     Ok(code)
 }
@@ -165,26 +232,40 @@ fn finish(
 pub(super) fn run(options: Options) -> Result<u8, String> {
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
-            .with_object_format(options.format).with_max_object_bytes(options.object_bytes),
-    ).map_err(|error| format!("cannot open scrub node: {error}"))?;
+            .with_object_format(options.format)
+            .with_max_object_bytes(options.object_bytes),
+    )
+    .map_err(|error| format!("cannot open scrub node: {error}"))?;
     let mut output = std::io::stdout().lock();
     let result = (|| {
-        node.bring_into_service(HeadGeneration::FIRST).map_err(|error| error.to_string())?;
+        node.bring_into_service(HeadGeneration::FIRST)
+            .map_err(|error| error.to_string())?;
         let started = Instant::now();
         let request = fgit_cli::command_request_context(&node);
-        let initial = node.runtime().block_on(node.authenticate_authority_head_in(&request))
+        let initial = node
+            .runtime()
+            .block_on(node.authenticate_authority_head_in(&request))
             .map_err(|error| error.to_string())?;
-        let mut session = node.runtime().block_on(node.begin_selected_object_scrub_local_in(
-            &request,
-            ScrubQuery { timeout: remaining_timeout(&options, started)?, ..options.query },
-        )).map_err(|error| error.to_string())?;
+        let mut session = node
+            .runtime()
+            .block_on(node.begin_selected_object_scrub_local_in(
+                &request,
+                ScrubQuery {
+                    timeout: remaining_timeout(&options, started)?,
+                    ..options.query
+                },
+            ))
+            .map_err(|error| error.to_string())?;
         let summary = drive(&options, &mut output, started, |query| {
-            node.runtime().block_on(session.next_page_with_max_payload_bytes(query.max_payload_bytes))
+            node.runtime()
+                .block_on(session.next_page_with_max_payload_bytes(query.max_payload_bytes))
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "scrub session exhausted before requested continuation".into())
         })?;
         drop(session);
-        let current = node.runtime().block_on(node.authenticate_authority_head_in(&request))
+        let current = node
+            .runtime()
+            .block_on(node.authenticate_authority_head_in(&request))
             .map_err(|error| error.to_string())?;
         if initial.receipt().token() != current.receipt().token()
             || initial.receipt().body() != current.receipt().body()

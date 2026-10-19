@@ -120,18 +120,22 @@ fn call_reviewed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError>
     let (tx, terminal) = backend
         .node
         .runtime()
-        .block_on(backend.node.apply_reviewed_merge_bundle_with_method_durable_in(
-            &context,
-            principal,
-            common::required(args, "idempotency_key")?.as_bytes(),
-            input.subject.pull_request,
-            ExpectedVersion::Exactly(input.subject.pull_request_version),
-            &input.candidate.merge(&input.subject),
-            &input.bundle,
-            input.subject.policy_epoch,
-            &input.reviewers,
-            input.method,
-        ))
+        .block_on(
+            backend
+                .node
+                .apply_reviewed_merge_bundle_with_method_durable_in(
+                    &context,
+                    principal,
+                    common::required(args, "idempotency_key")?.as_bytes(),
+                    input.subject.pull_request,
+                    ExpectedVersion::Exactly(input.subject.pull_request_version),
+                    &input.candidate.merge(&input.subject),
+                    &input.bundle,
+                    input.subject.policy_epoch,
+                    &input.reviewers,
+                    input.method,
+                ),
+        )
         .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
     // No post-commit metadata query: a moved ref, stopped service, or lost
     // response cannot change the historical decision for this exact key.
@@ -140,11 +144,14 @@ fn call_reviewed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError>
     result.extend(candidate::subject_fields(&input.subject, input.candidate));
     result.insert("type".into(), text("reviewed_merge_publication"));
     result.insert("profile".into(), text("named-candidate-reviewers-v1"));
-    result.insert("method".into(), text(match input.method {
-        NativeMergeMethod::MergeCommit => "merge-commit",
-        NativeMergeMethod::Squash => "squash",
-        NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
-    }));
+    result.insert(
+        "method".into(),
+        text(match input.method {
+            NativeMergeMethod::MergeCommit => "merge-commit",
+            NativeMergeMethod::Squash => "squash",
+            NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
+        }),
+    );
     result.insert(
         "required_reviewers".into(),
         Value::Array(
@@ -524,8 +531,13 @@ mod tests {
                 assert_eq!(parsed.reviewers, expected.reviewers);
             }
             for value in [
-                Value::Null, Value::Bool(true), json::number(1), text(""),
-                text("Squash"), text("fast-forward-only"), text("rebase"),
+                Value::Null,
+                Value::Bool(true),
+                json::number(1),
+                text(""),
+                text("Squash"),
+                text("fast-forward-only"),
+                text("rebase"),
             ] {
                 let mut input = good.clone();
                 input.insert("method".into(), value);
@@ -535,16 +547,29 @@ mod tests {
             // squash input. The native validator still proves actual parents.
             let mut identical_source = good;
             identical_source.insert("method".into(), text("squash"));
-            identical_source.insert("candidate_commit".into(), identical_source["expected_source"].clone());
-            identical_source.insert("merge_base".into(), identical_source["expected_target"].clone());
+            identical_source.insert(
+                "candidate_commit".into(),
+                identical_source["expected_source"].clone(),
+            );
+            identical_source.insert(
+                "merge_base".into(),
+                identical_source["expected_target"].clone(),
+            );
             assert!(parse(&identical_source, format, principal(0x50)).is_ok());
         }
         let descriptor = schema();
         let fields = descriptor.object().unwrap();
-        let method = fields["properties"].object().unwrap()["method"].object().unwrap();
+        let method = fields["properties"].object().unwrap()["method"]
+            .object()
+            .unwrap();
         assert_eq!(method["default"].text(), Some("merge-commit"));
-        assert_eq!(method["enum"], Value::Array(vec![text("merge-commit"), text("squash")]));
-        let Value::Array(required) = &fields["required"] else { unreachable!() };
+        assert_eq!(
+            method["enum"],
+            Value::Array(vec![text("merge-commit"), text("squash")])
+        );
+        let Value::Array(required) = &fields["required"] else {
+            unreachable!()
+        };
         assert!(!required.contains(&text("method")));
         assert!(json::parse(br#"{"method":"merge-commit","method":"squash"}"#).is_err());
     }

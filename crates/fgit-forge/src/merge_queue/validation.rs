@@ -114,10 +114,17 @@ impl QueueBatchReceipt {
     /// valid attestation, without changing the bytes of valid v1 receipts.
     /// A receipt is evidence of a reported outcome, not permission to land it.
     pub fn validate(&self) -> Result<(), ForgeRefusal> {
-        validate_batch_identity(self.batch_id, &self.target_ref, self.base_tip, &self.entries)?;
+        validate_batch_identity(
+            self.batch_id,
+            &self.target_ref,
+            self.base_tip,
+            &self.entries,
+        )?;
         if self.resulting_tip.algorithm() != self.base_tip.algorithm()
-            || (matches!(self.status, BatchStatus::SpeculativePass | BatchStatus::Landed)
-                && self.resulting_tip.is_zero())
+            || (matches!(
+                self.status,
+                BatchStatus::SpeculativePass | BatchStatus::Landed
+            ) && self.resulting_tip.is_zero())
         {
             return Err(invalid_queue("queue.receipt.resulting_tip"));
         }

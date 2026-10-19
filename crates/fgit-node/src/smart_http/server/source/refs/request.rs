@@ -2,8 +2,8 @@
 //! value, not an object-read capability. Rename lowers to one atomic delete
 //! plus absent-destination create; no force or implicit-current-tip option.
 
-use std::collections::BTreeMap;
 use super::cursor::CursorEncoding;
+use std::collections::BTreeMap;
 
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
@@ -167,7 +167,8 @@ impl<'a> Request<'a> {
                     "tags" => Namespace::Tags,
                     _ => return Err(ApiError::bad("invalid_ref_namespace")),
                 };
-                let cursor_encoding = CursorEncoding::parse(fields.remove("cursor_encoding").as_deref())?;
+                let cursor_encoding =
+                    CursorEncoding::parse(fields.remove("cursor_encoding").as_deref())?;
                 let after = fields
                     .remove("after")
                     .map(|name| cursor_encoding.reference(&name, namespace.prefix()))

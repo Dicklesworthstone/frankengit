@@ -116,7 +116,9 @@ where
                 // payload after its own effect check, in the original order.
                 let valid = match validate_payload_positions_in(&state.forge, &events, cancelled) {
                     Ok(()) => true,
-                    Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid)) => false,
+                    Err(AdmissionError::AsyncProjectionUnavailable(
+                        RefusalCode::EvidenceInvalid,
+                    )) => false,
                     Err(error) => return Err(error),
                 };
                 payload_checks.insert(root, valid);
@@ -135,7 +137,8 @@ where
             Some(true) => (),
             Some(false) => return Err(unavailable(RefusalCode::EvidenceInvalid)),
             None => {
-                let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
+                let payload =
+                    storage::read_events(store, cx, repository, entry.payload_root()).await?;
                 checkpoint(cancelled)?;
                 validate_payload_positions_in(&state.forge, &payload, cancelled)?;
                 payload_checks.insert(entry.payload_root(), true);
@@ -578,7 +581,8 @@ fn validate_position_ranges(
         };
         *count = next;
         if next > position.event_count()
-            || position.predecessor_position().checked_add(u64::from(next)) != Some(event.version.get())
+            || position.predecessor_position().checked_add(u64::from(next))
+                != Some(event.version.get())
         {
             rejected.insert(stream);
         }
@@ -665,6 +669,6 @@ fn checkpoint(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionErr
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod scaling_tests;
+#[cfg(test)]
+mod tests;

@@ -173,7 +173,10 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "scrub") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "scrub")
+    {
         return match scrub::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {

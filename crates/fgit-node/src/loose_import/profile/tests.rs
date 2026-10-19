@@ -91,15 +91,15 @@ fn explicit_byte_refusal_has_a_matching_permitted_twin_and_unchanged_retry_ident
         let request = node
             .import_request_context_with_byte_limit(None, bytes - 1)
             .unwrap();
-        let refused = node.runtime().block_on(
-            node.import_loose_git_directory_with_byte_limit_durable_in(
-                &request,
-                &source,
-                PrincipalId::from_bytes([3; 16]),
-                b"profile-key",
-                bytes - 1,
-            ),
-        );
+        let refused =
+            node.runtime()
+                .block_on(node.import_loose_git_directory_with_byte_limit_durable_in(
+                    &request,
+                    &source,
+                    PrincipalId::from_bytes([3; 16]),
+                    b"profile-key",
+                    bytes - 1,
+                ));
         assert!(
             matches!(refused, Err(NodeSourceImportRefusal::Staging(error)) if matches!(*error, LooseGitImportRefusal::TotalObjectBytesExceeded { limit, observed } if limit == bytes - 1 && observed == bytes))
         );
@@ -128,10 +128,12 @@ fn explicit_byte_refusal_has_a_matching_permitted_twin_and_unchanged_retry_ident
                 bytes,
             ))
             .unwrap();
-        assert!(accepted.commands.iter().all(|command| matches!(
-            command.terminal.outcome,
-            DecisionOutcome::Committed { .. }
-        )));
+        assert!(
+            accepted.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ))
+        );
         let request = node.import_request_context(None);
         let retried = node
             .runtime()
@@ -158,15 +160,14 @@ fn explicit_profiles_reject_zero_and_overflow_before_source_access() {
         );
         let request = node.request_context();
         assert!(matches!(
-            node.runtime().block_on(
-                node.import_loose_git_directory_with_byte_limit_durable_in(
+            node.runtime()
+                .block_on(node.import_loose_git_directory_with_byte_limit_durable_in(
                     &request,
                     &scratch.0.join("absent-source"),
                     PrincipalId::from_bytes([3; 16]),
                     b"invalid-profile",
                     limit
-                )
-            ),
+                )),
             Err(NodeSourceImportRefusal::Staging(_))
         ));
     }

@@ -392,9 +392,13 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .host_plan(capability)
             .map_err(TrustedWorkflowFailure::Host)?;
         if artifacts.is_some_and(|config| !config.inputs().is_empty())
-            && inputs.entries().iter().any(|entry| entry.path().components().next() == Some(b".fgit-artifacts".as_slice()))
+            && inputs.entries().iter().any(|entry| {
+                entry.path().components().next() == Some(b".fgit-artifacts".as_slice())
+            })
         {
-            return Err(invalid("selected source overlaps the reserved artifact input namespace"));
+            return Err(invalid(
+                "selected source overlaps the reserved artifact input namespace",
+            ));
         }
     }
     let artifact_session = artifacts

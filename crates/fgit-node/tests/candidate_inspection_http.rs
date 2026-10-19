@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 //! Actual TCP -> native PR inspection -> verified candidate bytes. Independent
 //! review/merge remain separate transactions; no canned inspection engine.
-#[path = "candidate_inspection_http/support.rs"]
-mod support;
 #[path = "candidate_inspection_http/fast_forward.rs"]
 mod fast_forward;
+#[path = "candidate_inspection_http/support.rs"]
+mod support;
 use support::*;
 
 use fgit_authority::{IdempotencyKey, key_recovery::RequestRecovery};

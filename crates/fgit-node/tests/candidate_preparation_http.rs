@@ -79,7 +79,10 @@ fn remote_candidate_is_deterministic_unstaged_and_reviewable_after_restart() {
         let parents = if method == "squash" {
             format!("\"parents\":[\"{}\"]", data.target_tip)
         } else {
-            format!("\"parents\":[\"{}\",\"{}\"]", data.target_tip, data.source_tip)
+            format!(
+                "\"parents\":[\"{}\",\"{}\"]",
+                data.target_tip, data.source_tip
+            )
         };
         assert!(inspected.body.contains(&parents));
         assert!(inspected.body.contains("\"merge_authorized\":false"));

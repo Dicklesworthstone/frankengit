@@ -25,8 +25,8 @@
 
 use core::fmt;
 
-pub mod freshness;
 pub mod blob;
+pub mod freshness;
 
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{

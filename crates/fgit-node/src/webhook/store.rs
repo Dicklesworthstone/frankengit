@@ -397,8 +397,7 @@ impl DeadLetterQueue {
                 }
             }
             entries.retain(|previous| {
-                previous.webhook_id != entry.webhook_id
-                    || previous.delivery_id != entry.delivery_id
+                previous.webhook_id != entry.webhook_id || previous.delivery_id != entry.delivery_id
             });
             entries.push(entry);
             Ok(())
@@ -420,14 +419,21 @@ impl DeadLetterQueue {
     #[must_use]
     pub fn get(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
         let state = self.state.lock().unwrap();
-        let mut matches = state.entries.iter().filter(|entry| entry.delivery_id == delivery_id);
+        let mut matches = state
+            .entries
+            .iter()
+            .filter(|entry| entry.delivery_id == delivery_id);
         let entry = matches.next()?;
         matches.next().is_none().then(|| entry.clone())
     }
 
     /// Read one subscriber's diagnostic from this handle's snapshot.
     #[must_use]
-    pub fn get_for(&self, webhook_id: WebhookId, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
+    pub fn get_for(
+        &self,
+        webhook_id: WebhookId,
+        delivery_id: AsciiSlug,
+    ) -> Option<DeadLetterEntry> {
         self.state
             .lock()
             .unwrap()
@@ -460,8 +466,11 @@ impl DeadLetterQueue {
         delivery_id: AsciiSlug,
     ) -> Result<Option<DeadLetterEntry>, String> {
         self.mutate(|entries| {
-            Ok(entries.iter()
-                .position(|entry| entry.webhook_id == webhook_id && entry.delivery_id == delivery_id)
+            Ok(entries
+                .iter()
+                .position(|entry| {
+                    entry.webhook_id == webhook_id && entry.delivery_id == delivery_id
+                })
                 .map(|position| entries.remove(position)))
         })
     }

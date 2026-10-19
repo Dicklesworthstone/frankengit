@@ -138,10 +138,7 @@ fn default_http_reuses_index_after_metadata_writes_without_rewriting_provenance(
             &server.client,
             "search-index",
             'a',
-            &format!(
-                "{}&channel=path&term_hex=646174",
-                common(format),
-            ),
+            &format!("{}&channel=path&term_hex=646174", common(format),),
             false,
         );
         status(&path, 200);

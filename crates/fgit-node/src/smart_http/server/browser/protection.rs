@@ -153,7 +153,12 @@ mod tests {
         }
         assert!(!include_str!("protection.html").contains("<script>"));
         let script = include_str!("protection-view.mjs");
-        for forbidden in ["innerHTML", "localStorage", "sessionStorage", "document.write"] {
+        for forbidden in [
+            "innerHTML",
+            "localStorage",
+            "sessionStorage",
+            "document.write",
+        ] {
             assert!(!script.contains(forbidden));
         }
         assert!(SECURITY.contains("frame-ancestors 'none'"));

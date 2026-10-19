@@ -201,7 +201,17 @@ fn native_recovery_keeps_all_input_graph_and_index_limits() {
 fn cancellation_remains_latched_during_verification_and_index_construction() {
     let (input, _) = fixture(GitHashAlgorithm::Sha1);
     let mut count = 0_usize;
-    prepare_git_bundle_recovery(&input, &BundleVerifyLimits::default(), None, &head(), &mut || { count += 1; true }).unwrap();
+    prepare_git_bundle_recovery(
+        &input,
+        &BundleVerifyLimits::default(),
+        None,
+        &head(),
+        &mut || {
+            count += 1;
+            true
+        },
+    )
+    .unwrap();
     for stop in [1, count / 2, count.saturating_sub(100), count] {
         let mut calls = 0usize;
         assert!(

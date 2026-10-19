@@ -194,7 +194,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     };
     let method = method.unwrap_or(NativeMergeMethod::MergeCommit);
     if method == NativeMergeMethod::Squash && version == ExpectedVersion::NewStream {
-        return Err("squash requires an existing pull request and a positive --expected-version".to_owned());
+        return Err(
+            "squash requires an existing pull request and a positive --expected-version".to_owned(),
+        );
     }
     let merge = NativeMerge {
         source_ref: source_ref.ok_or("--source-ref is required")?,
@@ -442,7 +444,10 @@ mod tests {
     #[test]
     fn squash_is_explicit_and_requires_an_existing_pr_in_both_hash_domains() {
         for width in [40, 64] {
-            assert_eq!(parse(&args(width)).unwrap().method, NativeMergeMethod::MergeCommit);
+            assert_eq!(
+                parse(&args(width)).unwrap().method,
+                NativeMergeMethod::MergeCommit
+            );
             let mut squash = args(width);
             squash.extend(["--method".into(), "squash".into()]);
             assert!(parse(&squash).is_err());
@@ -459,7 +464,10 @@ mod tests {
             }
             let mut explicit = args(width);
             explicit.extend(["--method".into(), "merge-commit".into()]);
-            assert_eq!(parse(&explicit).unwrap().method, NativeMergeMethod::MergeCommit);
+            assert_eq!(
+                parse(&explicit).unwrap().method,
+                NativeMergeMethod::MergeCommit
+            );
         }
     }
 

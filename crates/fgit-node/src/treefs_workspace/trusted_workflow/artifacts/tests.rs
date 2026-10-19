@@ -407,10 +407,7 @@ fn combined_source_and_input_headroom_cannot_be_replenished_by_child_preflight()
     };
 
     let first = session();
-    first.restrict_input_materialization(
-        MAX_REPLICATED_BYTES - 4,
-        MAX_REPLICATED_ENTRIES - 2,
-    );
+    first.restrict_input_materialization(MAX_REPLICATED_BYTES - 4, MAX_REPLICATED_ENTRIES - 2);
     first.charge_input(3).unwrap();
 
     // A child's smaller source selection cannot reset the batch's remaining

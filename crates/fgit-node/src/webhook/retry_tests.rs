@@ -210,7 +210,10 @@ fn dns_recovery_delivers_the_original_request_without_a_dead_letter() {
             "X-FrankenGit-Signature-256: sha256={signature}\r\n"
         )));
         assert!(dest.dead_letters.list().is_empty());
-        assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Delivered));
+        assert_eq!(
+            dest.probe_acknowledgement(&request),
+            Ok(ProbeVerdict::Delivered)
+        );
     }
 }
 
@@ -222,7 +225,11 @@ fn unsafe_or_overbound_dns_answers_refuse_before_connect_on_every_attempt() {
     let safe = SocketAddr::new("93.184.216.34".parse().unwrap(), local.port());
     let events = ForgeEventBatch { events: Vec::new() };
     for (policy, answers, expected) in [
-        (SsrfPolicy::STRICT, vec![safe, local], "rejected by SSRF policy"),
+        (
+            SsrfPolicy::STRICT,
+            vec![safe, local],
+            "rejected by SSRF policy",
+        ),
         (
             SsrfPolicy::PERMISSIVE_FOR_TESTS,
             vec![local; 17],
@@ -254,23 +261,28 @@ fn unsafe_or_overbound_dns_answers_refuse_before_connect_on_every_attempt() {
 #[test]
 fn stopping_during_dns_does_not_retry_or_dead_letter_a_cancelled_attempt() {
     let events = ForgeEventBatch { events: Vec::new() };
-    for stopped in [RefusalCode::CancellationInProgress, RefusalCode::ResourceBudgetExceeded] {
+    for stopped in [
+        RefusalCode::CancellationInProgress,
+        RefusalCode::ResourceBudgetExceeded,
+    ] {
         for attempt in [1, 3] {
             let dest = destination("http://example.com/hook", 3);
             let lookup_finished = std::cell::Cell::new(false);
-            let checkpoint = || if lookup_finished.get() { Err(stopped) } else { Ok(()) };
-            let result = dest.dispatch_http_with_lookup(
-                &request(&events),
-                attempt,
-                &checkpoint,
-                |_, _| {
+            let checkpoint = || {
+                if lookup_finished.get() {
+                    Err(stopped)
+                } else {
+                    Ok(())
+                }
+            };
+            let result =
+                dest.dispatch_http_with_lookup(&request(&events), attempt, &checkpoint, |_, _| {
                     lookup_finished.set(true);
                     Err::<Vec<SocketAddr>, _>(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "resolver temporarily unavailable",
                     ))
-                },
-            );
+                });
             assert_eq!(result, Err(stopped));
             assert!(dest.dead_letters.list().is_empty());
             assert!(dest.acknowledged.lock().unwrap().is_empty());

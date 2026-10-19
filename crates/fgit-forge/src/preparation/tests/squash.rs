@@ -60,7 +60,10 @@ fn squash_preserves_merged_tree_and_exact_metadata_with_one_target_parent() {
             body.extend_from_slice(&metadata.message);
             assert_eq!(plan.tree, tree);
             assert_eq!(candidate_body(&plan), body);
-            assert_eq!(plan.commit, git_object_id(format, GitObjectKind::Commit, &body));
+            assert_eq!(
+                plan.commit,
+                git_object_id(format, GitObjectKind::Commit, &body)
+            );
             assert_ne!(plan.commit, target);
             assert_ne!(plan.commit, incoming);
             assert!(plan.objects.iter().any(|object| {
@@ -222,9 +225,10 @@ fn explicit_rename_profile_preserves_rename_and_edit_only_when_selected() {
         let plan = clean(prepare(MergeProfile::ExactRenamesV1));
         assert_eq!(plan.tree, tree);
         assert_eq!(plan.style, MergeCommitStyle::Squash);
-        assert!(candidate_body(&plan).starts_with(
-            format!("tree {tree}\nparent {target}\nauthor ").as_bytes()
-        ));
+        assert!(
+            candidate_body(&plan)
+                .starts_with(format!("tree {tree}\nparent {target}\nauthor ").as_bytes())
+        );
     }
 }
 

@@ -153,7 +153,8 @@ fn binary_resolution_survives_restart_and_only_the_reviewed_candidate_can_publis
             let server = Server::start(node, &path, 9, true, true);
             let (base_command, base) = discovery(&server.client, &data);
             let base_command = base_command + &format!("&method={method}");
-            let command = base_command.clone() + &format!("&resolution={PATH_HEX}:file:100755:file_0");
+            let command =
+                base_command.clone() + &format!("&resolution={PATH_HEX}:file:100755:file_0");
             let original = resolve(&server.client, &command, &[("file_0", CONTENT)], false);
             let (candidate, metadata) = extract(&original, data.clone());
             assert_eq!(
@@ -168,7 +169,10 @@ fn binary_resolution_survives_restart_and_only_the_reviewed_candidate_can_publis
             let parents = if method == "squash" {
                 format!("\"parents\":[\"{}\"]", data.target_tip)
             } else {
-                format!("\"parents\":[\"{}\",\"{}\"]", data.target_tip, data.source_tip)
+                format!(
+                    "\"parents\":[\"{}\",\"{}\"]",
+                    data.target_tip, data.source_tip
+                )
             };
             assert!(inspected.body.contains(&parents), "{}", inspected.body);
             assert!(inspected.body.contains("\"all_changed_paths\":true"));
@@ -298,9 +302,15 @@ fn binary_resolution_survives_restart_and_only_the_reviewed_candidate_can_publis
             assert_eq!(selected.snapshot().outbox.len(), outbox + 3);
             assert!(node.read_git_object(blob).is_ok());
             let stored = node.read_git_object(candidate.binding.commit).unwrap();
-            assert_eq!(git_object_id(format, GitObjectKind::Commit, stored.payload()), candidate.binding.commit);
+            assert_eq!(
+                git_object_id(format, GitObjectKind::Commit, stored.payload()),
+                candidate.binding.commit
+            );
             let commit = std::str::from_utf8(stored.payload()).unwrap();
-            let actual_parents = commit.lines().filter_map(|line| line.strip_prefix("parent ")).collect::<Vec<_>>();
+            let actual_parents = commit
+                .lines()
+                .filter_map(|line| line.strip_prefix("parent "))
+                .collect::<Vec<_>>();
             let target = data.target_tip.to_string();
             let source = data.source_tip.to_string();
             let expected_parents = if method == "squash" {

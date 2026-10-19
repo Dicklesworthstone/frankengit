@@ -89,7 +89,10 @@ impl ScrubQuery {
         {
             return Err(ScrubRefusal::InvalidLimit("max-page-objects"));
         }
-        if self.max_findings == 0 || self.max_findings > MAX_FINDINGS || self.max_findings > self.max_page_objects {
+        if self.max_findings == 0
+            || self.max_findings > MAX_FINDINGS
+            || self.max_findings > self.max_page_objects
+        {
             return Err(ScrubRefusal::InvalidLimit("max-findings"));
         }
         if self.max_payload_bytes == 0 || self.max_payload_bytes > MAX_PAGE_BYTES {
@@ -110,14 +113,21 @@ impl ScrubQuery {
 #[derive(Debug)]
 pub enum ScrubRefusal {
     InvalidLimit(&'static str),
-    SelectionLimit { selected: usize, maximum: usize },
+    SelectionLimit {
+        selected: usize,
+        maximum: usize,
+    },
     CursorHeadMismatch,
     CursorNotSelected,
     ReferenceOutsideClosure(GitOid),
     ObjectFormat(GitOid),
     /// The next object cannot fit even on an otherwise empty page. Increase the
     /// page budget; do not classify a policy/resource ceiling as corruption.
-    ObjectExceedsPage { oid: GitOid, payload_bytes: u64, maximum: u64 },
+    ObjectExceedsPage {
+        oid: GitOid,
+        payload_bytes: u64,
+        maximum: u64,
+    },
     Allocation,
     /// A failed or interrupted session cannot be resumed as a successful scan.
     SessionFailed,
@@ -132,10 +142,19 @@ impl fmt::Display for ScrubRefusal {
             }
             Self::CursorHeadMismatch => out.write_str("scrub_cursor_head_mismatch"),
             Self::CursorNotSelected => out.write_str("scrub_cursor_not_in_selected_closure"),
-            Self::ReferenceOutsideClosure(oid) => write!(out, "reference_outside_selected_closure: {oid}"),
+            Self::ReferenceOutsideClosure(oid) => {
+                write!(out, "reference_outside_selected_closure: {oid}")
+            }
             Self::ObjectFormat(oid) => write!(out, "object_format_mismatch: {oid}"),
-            Self::ObjectExceedsPage { oid, payload_bytes, maximum } => {
-                write!(out, "scrub_object_exceeds_page: {oid}: {payload_bytes} exceeds {maximum}")
+            Self::ObjectExceedsPage {
+                oid,
+                payload_bytes,
+                maximum,
+            } => {
+                write!(
+                    out,
+                    "scrub_object_exceeds_page: {oid}: {payload_bytes} exceeds {maximum}"
+                )
             }
             Self::Allocation => out.write_str("scrub_finding_allocation_failed"),
             Self::SessionFailed => out.write_str("scrub_session_failed: start a new scan"),
@@ -200,33 +219,61 @@ pub struct SelectedObjectScrub {
 }
 impl SelectedObjectScrub {
     #[must_use]
-    pub const fn repository_id(&self) -> RepositoryId { self.repository }
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository
+    }
     #[must_use]
-    pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId { self.incarnation }
+    pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId {
+        self.incarnation
+    }
     #[must_use]
-    pub const fn head(&self) -> RepositoryAuthorityHeadId { self.head }
+    pub const fn head(&self) -> RepositoryAuthorityHeadId {
+        self.head
+    }
     #[must_use]
-    pub const fn generation(&self) -> HeadGeneration { self.generation }
+    pub const fn generation(&self) -> HeadGeneration {
+        self.generation
+    }
     #[must_use]
-    pub const fn closure_root(&self) -> Digest { self.closure_root }
+    pub const fn closure_root(&self) -> Digest {
+        self.closure_root
+    }
     #[must_use]
-    pub const fn selected_objects(&self) -> usize { self.selected_objects }
+    pub const fn selected_objects(&self) -> usize {
+        self.selected_objects
+    }
     #[must_use]
-    pub const fn start_after(&self) -> Option<GitOid> { self.start_after }
+    pub const fn start_after(&self) -> Option<GitOid> {
+        self.start_after
+    }
     #[must_use]
-    pub const fn checked_objects(&self) -> usize { self.checked_objects }
+    pub const fn checked_objects(&self) -> usize {
+        self.checked_objects
+    }
     #[must_use]
-    pub const fn verified_objects(&self) -> usize { self.verified_objects }
+    pub const fn verified_objects(&self) -> usize {
+        self.verified_objects
+    }
     #[must_use]
-    pub const fn read_attempts(&self) -> usize { self.read_attempts }
+    pub const fn read_attempts(&self) -> usize {
+        self.read_attempts
+    }
     #[must_use]
-    pub const fn payload_bytes(&self) -> u64 { self.payload_bytes }
+    pub const fn payload_bytes(&self) -> u64 {
+        self.payload_bytes
+    }
     #[must_use]
-    pub fn findings(&self) -> &[ScrubFinding] { &self.findings }
+    pub fn findings(&self) -> &[ScrubFinding] {
+        &self.findings
+    }
     #[must_use]
-    pub const fn next_cursor(&self) -> Option<ScrubCursor> { self.next }
+    pub const fn next_cursor(&self) -> Option<ScrubCursor> {
+        self.next
+    }
     #[must_use]
-    pub const fn stop(&self) -> ScrubStop { self.stop }
+    pub const fn stop(&self) -> ScrubStop {
+        self.stop
+    }
     #[must_use]
     pub fn entire_selection_checked(&self) -> bool {
         self.start_after.is_none() && self.next.is_none()
@@ -248,8 +295,11 @@ impl OneNode {
         query: ScrubQuery,
     ) -> Result<SelectedObjectScrub, ScrubRefusal> {
         let started = Instant::now();
-        let selected = self.prepare_scrub_selection_in(request, query, started).await?;
-        self.scrub_selected_page_in(request, &selected, query, started).await
+        let selected = self
+            .prepare_scrub_selection_in(request, query, started)
+            .await?;
+        self.scrub_selected_page_in(request, &selected, query, started)
+            .await
     }
 
     async fn prepare_scrub_selection_in(
@@ -263,15 +313,18 @@ impl OneNode {
         checkpoint(request, started, query.timeout)?;
         let selected = self.materialize_admission_in(request).await;
         checkpoint(request, started, query.timeout)?;
-        let selected = selected.map_err(|error| GraphAuditRefusal::Materialization(Box::new(error)))?;
+        let selected =
+            selected.map_err(|error| GraphAuditRefusal::Materialization(Box::new(error)))?;
         let head = selected.basis().id();
         let generation = selected.basis().generation();
         if let Some(expected) = query.expected_generation
             && expected != generation
         {
             return Err(GraphAuditRefusal::ExpectedGeneration {
-                expected: expected.get(), observed: generation.get(),
-            }.into());
+                expected: expected.get(),
+                observed: generation.get(),
+            }
+            .into());
         }
         if query.expected_head.is_some_and(|expected| expected != head) {
             return Err(GraphAuditRefusal::ExpectedHead.into());
@@ -282,7 +335,8 @@ impl OneNode {
         let objects = selected.selected_closure().closure().objects();
         if objects.len() > query.max_selected_objects {
             return Err(ScrubRefusal::SelectionLimit {
-                selected: objects.len(), maximum: query.max_selected_objects,
+                selected: objects.len(),
+                maximum: query.max_selected_objects,
             });
         }
         let start_after = query.cursor.map(|cursor| cursor.after);
@@ -318,7 +372,8 @@ impl OneNode {
         let mut report = SelectedObjectScrub {
             repository: self.repository_id(),
             incarnation: self.repository_incarnation_id(),
-            head, generation,
+            head,
+            generation,
             closure_root: selected.selected_closure().root(),
             selected_objects: objects.len(),
             start_after,
@@ -357,7 +412,9 @@ impl OneNode {
                     }
                     if size > query.max_payload_bytes {
                         return Err(ScrubRefusal::ObjectExceedsPage {
-                            oid, payload_bytes: size, maximum: query.max_payload_bytes,
+                            oid,
+                            payload_bytes: size,
+                            maximum: query.max_payload_bytes,
                         });
                     }
                     if size > query.max_payload_bytes - report.payload_bytes {
@@ -375,7 +432,10 @@ impl OneNode {
                 }
             };
             if let Some(cause) = finding {
-                report.findings.try_reserve(1).map_err(|_| ScrubRefusal::Allocation)?;
+                report
+                    .findings
+                    .try_reserve(1)
+                    .map_err(|_| ScrubRefusal::Allocation)?;
                 report.findings.push(ScrubFinding { oid, cause });
             }
             report.checked_objects += 1;
@@ -385,7 +445,10 @@ impl OneNode {
         if remaining.peek().is_some() {
             // All stopping limits are positive. The only possible zero-progress
             // payload case returned ObjectExceedsPage above, never a loop cursor.
-            report.next = Some(ScrubCursor::new(head, last.ok_or(ScrubRefusal::InvalidLimit("no progress"))?));
+            report.next = Some(ScrubCursor::new(
+                head,
+                last.ok_or(ScrubRefusal::InvalidLimit("no progress"))?,
+            ));
         }
         checkpoint(request, started, query.timeout)?;
         let current = self.authenticate_authority_head_in(request).await;

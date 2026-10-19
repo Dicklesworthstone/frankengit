@@ -162,11 +162,9 @@ fn parent_shape_matches(input: &Input, parents: &[GitOid]) -> bool {
             // A fast-forward can span several commits. Its source tip's direct
             // parents need not equal the observed target; native ancestry
             // validation owns that proof before this response is rendered.
-            let fast_forward = merge.merge_commit == merge.source_tip
-                && merge.base_tip == merge.target_tip_before;
-            fast_forward
-                || parents == [input.base, merge.source_tip]
-                || parents == [input.base]
+            let fast_forward =
+                merge.merge_commit == merge.source_tip && merge.base_tip == merge.target_tip_before;
+            fast_forward || parents == [input.base, merge.source_tip] || parents == [input.base]
         }
         None => parents == [input.base],
     }
@@ -386,7 +384,10 @@ mod tests {
             let parsed = parse(&input(true, width), true).unwrap();
             let merge = parsed.merge.as_ref().unwrap();
             assert!(parent_shape_matches(&parsed, &[parsed.base]));
-            assert!(parent_shape_matches(&parsed, &[parsed.base, merge.source_tip]));
+            assert!(parent_shape_matches(
+                &parsed,
+                &[parsed.base, merge.source_tip]
+            ));
             for parents in [
                 vec![],
                 vec![merge.source_tip],
@@ -421,9 +422,15 @@ mod tests {
     fn fast_forward_inspection_retains_native_validated_source_history() {
         for width in [40, 64] {
             let mut arguments = input(true, width);
-            let expected = arguments.iter().position(|arg| arg == "--expected-commit").unwrap();
+            let expected = arguments
+                .iter()
+                .position(|arg| arg == "--expected-commit")
+                .unwrap();
             arguments[expected + 1] = "c".repeat(width);
-            let base = arguments.iter().position(|arg| arg == "--merge-base").unwrap();
+            let base = arguments
+                .iter()
+                .position(|arg| arg == "--merge-base")
+                .unwrap();
             arguments[base + 1] = "a".repeat(width);
             let parsed = parse(&arguments, true).unwrap();
             let intermediate = parse_oid(&"d".repeat(width)).unwrap();

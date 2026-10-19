@@ -256,8 +256,12 @@ impl OneNode {
             })?,
             object_format: self.object_format,
         };
-        let intent =
-            super::super::native_merge::bundle_merge_intent(number, version, merge.clone(), method)?;
+        let intent = super::super::native_merge::bundle_merge_intent(
+            number,
+            version,
+            merge.clone(),
+            method,
+        )?;
         let attempt =
             gate::reviewed_seal_attempt(&context, &intent, &required).map_err(map_error)?;
         let tx_id = attempt
@@ -390,7 +394,8 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
         head: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
-        self.inner.validate_squash_async(store, cx, basis, head, intent)
+        self.inner
+            .validate_squash_async(store, cx, basis, head, intent)
     }
 
     fn merge_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {

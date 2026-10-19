@@ -2,8 +2,8 @@
 //! Same-origin API calls authenticate through existing grants. Each shell is
 //! independently enabled by its existing gateway profile.
 
-mod pulls;
 mod protection;
+mod pulls;
 
 mod activity;
 mod branches;

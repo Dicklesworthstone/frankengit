@@ -232,8 +232,7 @@ fn build_inner(
         return Err(ApiError::too_large());
     }
     if resolutions.is_some()
-        && (profile != MergeProfile::PathMergeV1
-            || !matches!(outcome, MergePreparation::Clean(_)))
+        && (profile != MergeProfile::PathMergeV1 || !matches!(outcome, MergePreparation::Clean(_)))
     {
         return Err(ApiError::unavailable());
     }

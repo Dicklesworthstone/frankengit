@@ -610,7 +610,9 @@ mod tests {
     #[test]
     fn merge_method_and_tree_profile_are_independent_explicit_choices() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-            let baseline = request(false).command(form(format).as_bytes(), format).unwrap();
+            let baseline = request(false)
+                .command(form(format).as_bytes(), format)
+                .unwrap();
             for (method, style) in [
                 ("merge-commit", MergeCommitStyle::TwoParent),
                 ("squash", MergeCommitStyle::Squash),
@@ -635,7 +637,10 @@ mod tests {
             for method in ["", "Squash", "fast-forward-only", "rebase", "merge-commit+"] {
                 let bytes = form(format) + &format!("&method={method}");
                 assert_eq!(
-                    request(false).command(bytes.as_bytes(), format).unwrap_err().code,
+                    request(false)
+                        .command(bytes.as_bytes(), format)
+                        .unwrap_err()
+                        .code,
                     "unsupported_merge_method"
                 );
             }
@@ -685,13 +690,17 @@ mod tests {
         for duplicate in ["method", "met%68od"] {
             let bytes = format!("method=merge-commit&{duplicate}=squash");
             assert_eq!(
-                request(false).command(bytes.as_bytes(), format).unwrap_err().code,
+                request(false)
+                    .command(bytes.as_bytes(), format)
+                    .unwrap_err()
+                    .code,
                 "duplicate_field"
             );
             assert_eq!(
                 request(true)
                     .resolved_command(bytes.as_bytes(), BTreeMap::new(), format)
-                    .unwrap_err().code,
+                    .unwrap_err()
+                    .code,
                 "duplicate_field"
             );
         }

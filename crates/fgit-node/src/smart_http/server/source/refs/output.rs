@@ -8,8 +8,8 @@ use fgit_types::{DecisionOutcome, GitOid, PrincipalId, RefName, RepositoryAuthor
 
 use super::super::super::Status;
 use super::super::super::issues::{ApiError, Reply, quote, ref_fields};
-use super::request::{Operation, Page};
 use super::cursor::CursorEncoding;
+use super::request::{Operation, Page};
 use crate::OneNode;
 
 pub(super) const MAX_REPLY_BYTES: usize = 1024 * 1024;
@@ -39,7 +39,10 @@ fn hex(bytes: &[u8]) -> String {
 }
 // The request grammar accepts only UTF-8 `after`, so native byte cursors
 // must refuse the page rather than masquerade as end-of-pagination.
-fn selected_cursor(reference: Option<&RefName>, encoding: CursorEncoding) -> Result<String, ApiError> {
+fn selected_cursor(
+    reference: Option<&RefName>,
+    encoding: CursorEncoding,
+) -> Result<String, ApiError> {
     if encoding == CursorEncoding::Hex {
         Ok(reference.map_or_else(|| "null".into(), |name| quote(&hex(name.as_bytes()))))
     } else {
@@ -113,7 +116,11 @@ pub(super) fn page(
             ),
             metadata(node),
             quote(query.namespace.as_str()),
-            if query.cursor_encoding == CursorEncoding::Hex { "\"cursor_encoding\":\"hex\"," } else { "" },
+            if query.cursor_encoding == CursorEncoding::Hex {
+                "\"cursor_encoding\":\"hex\","
+            } else {
+                ""
+            },
             quote(&head.to_string()),
             quote(&token),
             selected_cursor(query.after.as_ref(), query.cursor_encoding)?,

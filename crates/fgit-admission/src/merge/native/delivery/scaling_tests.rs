@@ -130,7 +130,10 @@ impl AsyncAuthorityStore for Store {
         body: &[u8],
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
         self.writes.fetch_add(1, Ordering::Relaxed);
-        ready(self.backend.compare_exchange_head(key, expected, generation, body))
+        ready(
+            self.backend
+                .compare_exchange_head(key, expected, generation, body),
+        )
     }
 
     fn authenticate_head_receipt(
@@ -204,66 +207,129 @@ impl Fixture {
         let mut payloads = Vec::new();
         for batch in batches {
             let payload = run(storage::stage_body(
-                &store, &(), repository, storage::EVENT_NAMESPACE, &batch,
+                &store,
+                &(),
+                repository,
+                storage::EVENT_NAMESPACE,
+                &batch,
             ))
             .unwrap();
             payloads.push(payload);
             forge = storage::advance_positions(&forge, &batch, payload).unwrap();
             for destination in 0..destinations {
                 let destination = AsciiSlug::try_new(
-                    "destination", format!("projection-{destination}").as_bytes(),
+                    "destination",
+                    format!("projection-{destination}").as_bytes(),
                 )
                 .unwrap();
                 let class = AsciiSlug::from_static("forge-event");
                 let key = derive_outbox_delivery_key(OutboxDeliveryIdentityInput::new(
-                    repository, class, destination, payload, tx_id(), None,
+                    repository,
+                    class,
+                    destination,
+                    payload,
+                    tx_id(),
+                    None,
                 ))
                 .unwrap();
-                let mut effect = CanonicalOutboxEffectState::committed(repository, key, tx_id(), payload);
-                run(storage::stage_body(&store, &(), repository, EFFECT_NAMESPACE, &effect)).unwrap();
+                let mut effect =
+                    CanonicalOutboxEffectState::committed(repository, key, tx_id(), payload);
+                run(storage::stage_body(
+                    &store,
+                    &(),
+                    repository,
+                    EFFECT_NAMESPACE,
+                    &effect,
+                ))
+                .unwrap();
                 if settled {
                     let receipt = CanonicalOutboxDeliveryReceipt::try_new(
-                        repository, key, destination, payload, effect.root().unwrap(),
-                        OutboxDeliveryDisposition::Acknowledged, b"receiver accepted stable key".to_vec(),
+                        repository,
+                        key,
+                        destination,
+                        payload,
+                        effect.root().unwrap(),
+                        OutboxDeliveryDisposition::Acknowledged,
+                        b"receiver accepted stable key".to_vec(),
                     )
                     .unwrap();
                     let receipt_root = run(storage::stage_body(
-                        &store, &(), repository, RECEIPT_NAMESPACE, &receipt,
+                        &store,
+                        &(),
+                        repository,
+                        RECEIPT_NAMESPACE,
+                        &receipt,
                     ))
                     .unwrap();
-                    effect = effect.transition(LifecycleEvent::Acknowledge, Some(receipt_root)).unwrap();
-                    run(storage::stage_body(&store, &(), repository, EFFECT_NAMESPACE, &effect)).unwrap();
+                    effect = effect
+                        .transition(LifecycleEvent::Acknowledge, Some(receipt_root))
+                        .unwrap();
+                    run(storage::stage_body(
+                        &store,
+                        &(),
+                        repository,
+                        EFFECT_NAMESPACE,
+                        &effect,
+                    ))
+                    .unwrap();
                 }
                 entries.push(CanonicalOutboxStateEntry::new(
-                    key, class, destination, payload, tx_id(), None,
-                    effect.root().unwrap(), effect.predecessor_root(),
+                    key,
+                    class,
+                    destination,
+                    payload,
+                    tx_id(),
+                    None,
+                    effect.root().unwrap(),
+                    effect.predecessor_root(),
                 ));
             }
         }
         let outbox = CanonicalOutboxState::try_new(repository, entries).unwrap();
         head.forge_position_root = run(storage::stage_body(
-            &store, &(), repository, storage::POSITION_NAMESPACE, &forge,
+            &store,
+            &(),
+            repository,
+            storage::POSITION_NAMESPACE,
+            &forge,
         ))
         .unwrap();
         head.outbox_root = run(storage::stage_body(
-            &store, &(), repository, OUTBOX_NAMESPACE, &outbox,
+            &store,
+            &(),
+            repository,
+            OUTBOX_NAMESPACE,
+            &outbox,
         ))
         .unwrap();
-        let basis = PublicationBasis::new(fgit_authority::authority_head_identity(&head).unwrap(), head);
-        Self { store, state: DeliveryState { forge, outbox }, basis, payloads }
+        let basis = PublicationBasis::new(
+            fgit_authority::authority_head_identity(&head).unwrap(),
+            head,
+        );
+        Self {
+            store,
+            state: DeliveryState { forge, outbox },
+            basis,
+            payloads,
+        }
     }
 
     fn select_forge(&mut self, entries: Vec<ForgePositionStateEntry>) {
-        self.state.forge = CanonicalForgePositionState::try_new(
-            self.basis.body().repository_id, entries,
-        )
-        .unwrap();
+        self.state.forge =
+            CanonicalForgePositionState::try_new(self.basis.body().repository_id, entries).unwrap();
         let mut head = self.basis.body().clone();
         head.forge_position_root = run(storage::stage_body(
-            &self.store, &(), head.repository_id, storage::POSITION_NAMESPACE, &self.state.forge,
+            &self.store,
+            &(),
+            head.repository_id,
+            storage::POSITION_NAMESPACE,
+            &self.state.forge,
         ))
         .unwrap();
-        self.basis = PublicationBasis::new(fgit_authority::authority_head_identity(&head).unwrap(), head);
+        self.basis = PublicationBasis::new(
+            fgit_authority::authority_head_identity(&head).unwrap(),
+            head,
+        );
     }
 
     fn read(&self) -> Result<DeliveryState, AdmissionError> {
@@ -278,12 +344,15 @@ fn reference(fixture: &Fixture) -> Result<DeliveryState, AdmissionError> {
         let state = read_roots_in(&fixture.store, &(), &fixture.basis, &|| false).await?;
         let repository = fixture.basis.body().repository_id;
         for position in state.forge.entries() {
-            let events = storage::read_events(&fixture.store, &(), repository, position.event_batch_root()).await?;
+            let events =
+                storage::read_events(&fixture.store, &(), repository, position.event_batch_root())
+                    .await?;
             validate_position_batch(position, &events)?;
         }
         for entry in state.outbox.entries() {
             read_effect_in(&fixture.store, &(), repository, entry, &|| false).await?;
-            let payload = storage::read_events(&fixture.store, &(), repository, entry.payload_root()).await?;
+            let payload =
+                storage::read_events(&fixture.store, &(), repository, entry.payload_root()).await?;
             validate_payload_positions(&state.forge, &payload)?;
         }
         Ok(state)
@@ -294,9 +363,14 @@ fn reference(fixture: &Fixture) -> Result<DeliveryState, AdmissionError> {
 fn bulk_frontiers_and_delivery_fanout_read_each_stored_payload_once() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = Fixture::new(
-            (1..=3).map(|version| ForgeEventBatch {
-                events: (1..=128).rev().map(|number| event(number, version, format)).collect(),
-            }).collect(),
+            (1..=3)
+                .map(|version| ForgeEventBatch {
+                    events: (1..=128)
+                        .rev()
+                        .map(|number| event(number, version, format))
+                        .collect(),
+                })
+                .collect(),
             32,
             true,
         );
@@ -309,28 +383,44 @@ fn bulk_frontiers_and_delivery_fanout_read_each_stored_payload_once() {
         let actual = fixture.read().unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual, fixture.state);
-        assert_eq!(encode_body(&actual.forge).unwrap(), encode_body(&expected.forge).unwrap());
-        assert_eq!(encode_body(&actual.outbox).unwrap(), encode_body(&expected.outbox).unwrap());
+        assert_eq!(
+            encode_body(&actual.forge).unwrap(),
+            encode_body(&expected.forge).unwrap()
+        );
+        assert_eq!(
+            encode_body(&actual.outbox).unwrap(),
+            encode_body(&expected.outbox).unwrap()
+        );
         assert_eq!(fixture.store.event_reads(), 3);
         assert_eq!(reference_reads - fixture.store.read_count(), 221);
         assert_eq!(fixture.store.writes.load(Ordering::Relaxed), writes);
         fixture.store.clear_reads();
         assert_eq!(fixture.read().unwrap(), actual);
-        assert_eq!(fixture.store.event_reads(), 3, "no persistent payload cache masks a read");
+        assert_eq!(
+            fixture.store.event_reads(),
+            3,
+            "no persistent payload cache masks a read"
+        );
     }
 }
 
 #[test]
 fn incremental_mixed_stream_histories_match_the_full_preflight_oracle() {
     for seed in 1_u64..=24 {
-        let format = if seed % 2 == 0 { GitHashAlgorithm::Sha1 } else { GitHashAlgorithm::Sha256 };
+        let format = if seed % 2 == 0 {
+            GitHashAlgorithm::Sha1
+        } else {
+            GitHashAlgorithm::Sha256
+        };
         let mut random = seed;
         let mut versions = [0_u64; 8];
         let mut batches = Vec::new();
         for _ in 0..6 {
             let mut events = Vec::new();
             for _ in 0..12 {
-                random = random.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
                 let index = (random >> 32) as usize % versions.len();
                 versions[index] += 1;
                 events.push(event(index as u64 + 1, versions[index], format));
@@ -338,7 +428,11 @@ fn incremental_mixed_stream_histories_match_the_full_preflight_oracle() {
             batches.push(ForgeEventBatch { events });
         }
         let fixture = Fixture::new(batches, (seed % 4) as usize, seed % 3 == 0);
-        assert_eq!(fixture.read().unwrap(), reference(&fixture).unwrap(), "seed {seed}");
+        assert_eq!(
+            fixture.read().unwrap(),
+            reference(&fixture).unwrap(),
+            "seed {seed}"
+        );
         assert_eq!(fixture.read().unwrap(), fixture.state, "seed {seed}");
     }
 }
@@ -346,10 +440,16 @@ fn incremental_mixed_stream_histories_match_the_full_preflight_oracle() {
 #[test]
 fn grouped_ranges_require_every_selected_streams_complete_contiguous_range() {
     let mut fixture = Fixture::new(
-        vec![ForgeEventBatch { events: vec![
-            event(1, 1, GitHashAlgorithm::Sha1), event(2, 1, GitHashAlgorithm::Sha1),
-            event(1, 2, GitHashAlgorithm::Sha1), event(2, 2, GitHashAlgorithm::Sha1),
-        ] }], 2, false,
+        vec![ForgeEventBatch {
+            events: vec![
+                event(1, 1, GitHashAlgorithm::Sha1),
+                event(2, 1, GitHashAlgorithm::Sha1),
+                event(1, 2, GitHashAlgorithm::Sha1),
+                event(2, 2, GitHashAlgorithm::Sha1),
+            ],
+        }],
+        2,
+        false,
     );
     let original = fixture.state.forge.entries().to_vec();
     for index in 0..original.len() {
@@ -357,11 +457,25 @@ fn grouped_ranges_require_every_selected_streams_complete_contiguous_range() {
         for (before, count) in [(0, 1), (0, 3), (1, 1), (1, 2)] {
             let mut bad = original.clone();
             bad[index] = ForgePositionStateEntry::try_new(
-                entry.stream(), before, count, entry.event_batch_root(),
-            ).unwrap();
+                entry.stream(),
+                before,
+                count,
+                entry.event_batch_root(),
+            )
+            .unwrap();
             fixture.select_forge(bad);
-            assert!(matches!(fixture.read(), Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid))));
-            assert!(matches!(reference(&fixture), Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid))));
+            assert!(matches!(
+                fixture.read(),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceInvalid
+                ))
+            ));
+            assert!(matches!(
+                reference(&fixture),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceInvalid
+                ))
+            ));
             fixture.select_forge(original.clone());
             assert_eq!(fixture.read().unwrap(), reference(&fixture).unwrap());
         }
@@ -371,17 +485,37 @@ fn grouped_ranges_require_every_selected_streams_complete_contiguous_range() {
 #[test]
 fn deduplication_does_not_skip_payloads_effects_receipts_or_root_commitments() {
     let fixture = Fixture::new(
-        (1..=2).map(|version| ForgeEventBatch { events: vec![
-            event(1, version, GitHashAlgorithm::Sha256), event(2, version, GitHashAlgorithm::Sha256),
-        ] }).collect(), 3, true,
+        (1..=2)
+            .map(|version| ForgeEventBatch {
+                events: vec![
+                    event(1, version, GitHashAlgorithm::Sha256),
+                    event(2, version, GitHashAlgorithm::Sha256),
+                ],
+            })
+            .collect(),
+        3,
+        true,
     );
     fixture.read().unwrap();
     let keys = fixture.store.reads.lock().unwrap().clone();
-    assert!(keys.iter().any(|key| key.as_bytes().starts_with(RECEIPT_NAMESPACE)));
-    assert!(keys.iter().any(|key| key.as_bytes().starts_with(EFFECT_NAMESPACE)));
-    let different = encode_body(&ForgeEventBatch { events: vec![event(3, 1, GitHashAlgorithm::Sha256)] }).unwrap();
+    assert!(
+        keys.iter()
+            .any(|key| key.as_bytes().starts_with(RECEIPT_NAMESPACE))
+    );
+    assert!(
+        keys.iter()
+            .any(|key| key.as_bytes().starts_with(EFFECT_NAMESPACE))
+    );
+    let different = encode_body(&ForgeEventBatch {
+        events: vec![event(3, 1, GitHashAlgorithm::Sha256)],
+    })
+    .unwrap();
     for key in keys {
-        for fault in [Fault::Missing, Fault::Replaced(b"corrupt canonical body".to_vec()), Fault::Replaced(different.clone())] {
+        for fault in [
+            Fault::Missing,
+            Fault::Replaced(b"corrupt canonical body".to_vec()),
+            Fault::Replaced(different.clone()),
+        ] {
             *fixture.store.fault.lock().unwrap() = Some((key.clone(), fault));
             let expected = reference(&fixture).unwrap_err();
             let actual = fixture.read().unwrap_err();
@@ -395,18 +529,31 @@ fn deduplication_does_not_skip_payloads_effects_receipts_or_root_commitments() {
 #[test]
 fn every_read_interruption_returns_no_partial_state_and_retry_revalidates_bodies() {
     let fixture = Fixture::new(
-        vec![ForgeEventBatch { events: (1..=9).map(|number| event(number, 1, GitHashAlgorithm::Sha1)).collect() }],
-        4, true,
+        vec![ForgeEventBatch {
+            events: (1..=9)
+                .map(|number| event(number, 1, GitHashAlgorithm::Sha1))
+                .collect(),
+        }],
+        4,
+        true,
     );
     fixture.store.clear_reads();
     let expected = fixture.read().unwrap();
     let reads = fixture.store.read_count();
     for boundary in 0..=reads {
         fixture.store.clear_reads();
-        assert!(matches!(
-            run(read_in(&fixture.store, &(), &fixture.basis, &|| fixture.store.read_count() >= boundary)),
-            Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress)),
-        ), "read boundary {boundary}");
+        assert!(
+            matches!(
+                run(read_in(&fixture.store, &(), &fixture.basis, &|| fixture
+                    .store
+                    .read_count()
+                    >= boundary)),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::CancellationInProgress
+                )),
+            ),
+            "read boundary {boundary}"
+        );
         assert_eq!(fixture.store.read_count(), boundary);
         fixture.store.clear_reads();
         assert_eq!(fixture.read().unwrap(), expected);
@@ -435,7 +582,11 @@ fn the_existing_full_frontier_envelope_uses_one_payload_read() {
     assert_eq!(fixture.read().unwrap(), fixture.state);
     assert_eq!(fixture.state.forge.entries().len(), count);
     assert_eq!(fixture.store.event_reads(), 1);
-    assert_eq!(fixture.store.read_count(), 3, "two maps plus one shared payload");
+    assert_eq!(
+        fixture.store.read_count(),
+        3,
+        "two maps plus one shared payload"
+    );
 }
 
 #[test]
@@ -443,7 +594,10 @@ fn frontier_only_batches_keep_the_existing_unselected_stream_semantics() {
     for destinations in [0, 2] {
         let mut fixture = Fixture::new(
             vec![ForgeEventBatch {
-                events: vec![event(1, 1, GitHashAlgorithm::Sha1), event(2, 1, GitHashAlgorithm::Sha1)],
+                events: vec![
+                    event(1, 1, GitHashAlgorithm::Sha1),
+                    event(2, 1, GitHashAlgorithm::Sha1),
+                ],
             }],
             destinations,
             false,
@@ -453,8 +607,18 @@ fn frontier_only_batches_keep_the_existing_unselected_stream_semantics() {
         if destinations == 0 {
             assert_eq!(fixture.read().unwrap(), reference(&fixture).unwrap());
         } else {
-            assert!(matches!(fixture.read(), Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid))));
-            assert!(matches!(reference(&fixture), Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid))));
+            assert!(matches!(
+                fixture.read(),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceInvalid
+                ))
+            ));
+            assert!(matches!(
+                reference(&fixture),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceInvalid
+                ))
+            ));
         }
         fixture.select_forge(original);
         assert_eq!(fixture.read().unwrap(), reference(&fixture).unwrap());
@@ -465,7 +629,9 @@ fn frontier_only_batches_keep_the_existing_unselected_stream_semantics() {
 fn cancellation_during_a_shared_batch_does_not_wait_for_the_next_storage_read() {
     let fixture = Fixture::new(
         vec![ForgeEventBatch {
-            events: (1..=32).map(|number| event(number, 1, GitHashAlgorithm::Sha1)).collect(),
+            events: (1..=32)
+                .map(|number| event(number, 1, GitHashAlgorithm::Sha1))
+                .collect(),
         }],
         1,
         false,
@@ -479,9 +645,15 @@ fn cancellation_during_a_shared_batch_does_not_wait_for_the_next_storage_read() 
         };
         assert!(matches!(
             run(read_in(&fixture.store, &(), &fixture.basis, &cancelled)),
-            Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress)),
+            Err(AdmissionError::AsyncProjectionUnavailable(
+                RefusalCode::CancellationInProgress
+            )),
         ));
-        assert_eq!(fixture.store.read_count(), 3, "cancellation stays inside the shared batch");
+        assert_eq!(
+            fixture.store.read_count(),
+            3,
+            "cancellation stays inside the shared batch"
+        );
         fixture.store.clear_reads();
         assert_eq!(fixture.read().unwrap(), fixture.state);
     }
@@ -492,30 +664,52 @@ fn grouped_frontier_errors_keep_precedence_against_an_intervening_missing_body()
     let format = GitHashAlgorithm::Sha1;
     let mut fixture = Fixture::new(
         vec![
-            ForgeEventBatch { events: vec![event(1, 1, format), event(3, 1, format)] },
-            ForgeEventBatch { events: vec![event(2, 1, format)] },
+            ForgeEventBatch {
+                events: vec![event(1, 1, format), event(3, 1, format)],
+            },
+            ForgeEventBatch {
+                events: vec![event(2, 1, format)],
+            },
         ],
         0,
         false,
     );
     let original = fixture.state.forge.entries().to_vec();
     let missing = storage::body_key(
-        storage::EVENT_NAMESPACE, fixture.basis.body().repository_id, fixture.payloads[1],
-    ).unwrap();
+        storage::EVENT_NAMESPACE,
+        fixture.basis.body().repository_id,
+        fixture.payloads[1],
+    )
+    .unwrap();
     for number in [1, 3] {
         let stream = storage::aggregate_label(event(number, 1, format).aggregate).unwrap();
         let mut entries = original.clone();
-        let position = entries.iter_mut().find(|entry| entry.stream() == stream).unwrap();
-        *position = ForgePositionStateEntry::try_new(stream, 0, 2, position.event_batch_root()).unwrap();
+        let position = entries
+            .iter_mut()
+            .find(|entry| entry.stream() == stream)
+            .unwrap();
+        *position =
+            ForgePositionStateEntry::try_new(stream, 0, 2, position.event_batch_root()).unwrap();
         fixture.select_forge(entries);
         *fixture.store.fault.lock().unwrap() = Some((missing.clone(), Fault::Missing));
-        let expected = if number == 1 { RefusalCode::EvidenceInvalid } else { RefusalCode::EvidenceMissing };
+        let expected = if number == 1 {
+            RefusalCode::EvidenceInvalid
+        } else {
+            RefusalCode::EvidenceMissing
+        };
         for result in [reference(&fixture), fixture.read()] {
-            assert!(matches!(result, Err(AdmissionError::AsyncProjectionUnavailable(code)) if code == expected));
+            assert!(
+                matches!(result, Err(AdmissionError::AsyncProjectionUnavailable(code)) if code == expected)
+            );
         }
         *fixture.store.fault.lock().unwrap() = None;
         for result in [reference(&fixture), fixture.read()] {
-            assert!(matches!(result, Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid))));
+            assert!(matches!(
+                result,
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceInvalid
+                ))
+            ));
         }
         fixture.select_forge(original.clone());
         assert_eq!(fixture.read().unwrap(), reference(&fixture).unwrap());
@@ -525,9 +719,12 @@ fn grouped_frontier_errors_keep_precedence_against_an_intervening_missing_body()
 #[test]
 fn prevalidated_payload_errors_keep_precedence_against_missing_delivery_effects() {
     let mut fixture = Fixture::new(
-        vec![ForgeEventBatch { events: vec![
-            event(1, 1, GitHashAlgorithm::Sha256), event(2, 1, GitHashAlgorithm::Sha256),
-        ] }],
+        vec![ForgeEventBatch {
+            events: vec![
+                event(1, 1, GitHashAlgorithm::Sha256),
+                event(2, 1, GitHashAlgorithm::Sha256),
+            ],
+        }],
         2,
         false,
     );
@@ -538,16 +735,30 @@ fn prevalidated_payload_errors_keep_precedence_against_missing_delivery_effects(
         fixture.select_forge(vec![original[0]]);
         let entry = fixture.state.outbox.entries()[missing_index];
         let key = storage::body_key(
-            EFFECT_NAMESPACE, fixture.basis.body().repository_id, entry.effect_state_root(),
-        ).unwrap();
+            EFFECT_NAMESPACE,
+            fixture.basis.body().repository_id,
+            entry.effect_state_root(),
+        )
+        .unwrap();
         *fixture.store.fault.lock().unwrap() = Some((key, Fault::Missing));
-        let expected = if missing_index == 0 { RefusalCode::EvidenceMissing } else { RefusalCode::EvidenceInvalid };
+        let expected = if missing_index == 0 {
+            RefusalCode::EvidenceMissing
+        } else {
+            RefusalCode::EvidenceInvalid
+        };
         for result in [reference(&fixture), fixture.read()] {
-            assert!(matches!(result, Err(AdmissionError::AsyncProjectionUnavailable(code)) if code == expected));
+            assert!(
+                matches!(result, Err(AdmissionError::AsyncProjectionUnavailable(code)) if code == expected)
+            );
         }
         *fixture.store.fault.lock().unwrap() = None;
         for result in [reference(&fixture), fixture.read()] {
-            assert!(matches!(result, Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceInvalid))));
+            assert!(matches!(
+                result,
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceInvalid
+                ))
+            ));
         }
         fixture.select_forge(original.clone());
         assert_eq!(fixture.read().unwrap(), reference(&fixture).unwrap());

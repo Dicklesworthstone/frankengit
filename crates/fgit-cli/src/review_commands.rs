@@ -217,8 +217,7 @@ fn flags(
                         | "--bundle"
                 ) || (mode == Mode::Review
                     && matches!(flag, "--review-version" | "--decision" | "--reason"))
-                    || (mode == Mode::Apply
-                        && matches!(flag, "--require-reviewer" | "--method"))
+                    || (mode == Mode::Apply && matches!(flag, "--require-reviewer" | "--method"))
             };
         if !allowed {
             return Err(format!("unknown or inapplicable option {flag:?}"));

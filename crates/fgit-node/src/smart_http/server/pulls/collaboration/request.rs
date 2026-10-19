@@ -474,7 +474,9 @@ mod tests {
             candidate: expected_candidate,
             method: default_method,
             ..
-        } = request(Operation::Merge).command(body.as_bytes(), format, actor).unwrap()
+        } = request(Operation::Merge)
+            .command(body.as_bytes(), format, actor)
+            .unwrap()
         else {
             panic!("merge");
         };
@@ -484,8 +486,14 @@ mod tests {
             ("squash", NativeMergeMethod::Squash),
         ] {
             let bytes = body.clone() + &format!("&method={name}");
-            let Command::Merge { subject, candidate, required, method } =
-                request(Operation::Merge).command(bytes.as_bytes(), format, actor).unwrap()
+            let Command::Merge {
+                subject,
+                candidate,
+                required,
+                method,
+            } = request(Operation::Merge)
+                .command(bytes.as_bytes(), format, actor)
+                .unwrap()
             else {
                 panic!("merge");
             };
@@ -497,14 +505,22 @@ mod tests {
         for method in ["", "Squash", "fast-forward-only", "rebase", "merge-commit+"] {
             let bytes = body.clone() + &format!("&method={method}");
             assert_eq!(
-                request(Operation::Merge).command(bytes.as_bytes(), format, actor).err().unwrap().code,
+                request(Operation::Merge)
+                    .command(bytes.as_bytes(), format, actor)
+                    .err()
+                    .unwrap()
+                    .code,
                 "unsupported_merge_method"
             );
         }
         for duplicate in ["method", "met%68od"] {
             let bytes = format!("method=merge-commit&{duplicate}=squash");
             assert_eq!(
-                request(Operation::Merge).command(bytes.as_bytes(), format, actor).err().unwrap().code,
+                request(Operation::Merge)
+                    .command(bytes.as_bytes(), format, actor)
+                    .err()
+                    .unwrap()
+                    .code,
                 "duplicate_field"
             );
         }
@@ -520,7 +536,9 @@ mod tests {
                 PrincipalId::from_bytes([byte; 16])
             ));
         }
-        let Command::Merge { required, method, .. } = request(Operation::Merge)
+        let Command::Merge {
+            required, method, ..
+        } = request(Operation::Merge)
             .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)
             .unwrap()
         else {
@@ -528,9 +546,14 @@ mod tests {
         };
         assert_eq!(required.reviewers().len(), 32);
         assert_eq!(method, NativeMergeMethod::Squash);
-        body.push_str(&format!("&required_reviewer={}", PrincipalId::from_bytes([33; 16])));
-        assert!(request(Operation::Merge)
-            .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)
-            .is_err());
+        body.push_str(&format!(
+            "&required_reviewer={}",
+            PrincipalId::from_bytes([33; 16])
+        ));
+        assert!(
+            request(Operation::Merge)
+                .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)
+                .is_err()
+        );
     }
 }
