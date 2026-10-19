@@ -186,7 +186,7 @@
       "key": "yaml.block-scalar",
       "status": "normalized",
       "refuses": false,
-      "reason": "bare literal | is accepted with clip semantics; folded > and all chomping/indent modifiers remain refused"
+      "reason": "literal and folded blocks accept bounded 1..9 indentation and clip/strip/keep chomping; new forms normalize line endings while bare | preserves existing command bytes"
     },
     {
       "key": "yaml.block-sequence",

@@ -213,7 +213,7 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "yaml.block-scalar",
         status: ConstructStatus::Normalized,
-        reason: "bare literal | is accepted with clip semantics; folded > and all chomping/indent modifiers remain refused",
+        reason: "literal and folded blocks accept bounded 1..9 indentation and clip/strip/keep chomping; new forms normalize line endings while bare | preserves existing command bytes",
     },
     Construct {
         key: "yaml.block-sequence",

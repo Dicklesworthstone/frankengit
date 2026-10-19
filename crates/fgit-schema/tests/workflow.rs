@@ -213,10 +213,6 @@ fn yaml_constructs_outside_the_subset_are_refused_by_name() {
             "yaml.document-marker",
         ),
         (
-            "name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: >\n          folded\n",
-            "yaml.block-scalar",
-        ),
-        (
             "name: ci\non: push\njobs:\n\ta:\n    runs-on: linux\n    steps:\n      - run: x\n",
             "yaml.tab-indent",
         ),

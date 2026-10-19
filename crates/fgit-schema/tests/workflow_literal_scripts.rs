@@ -42,16 +42,18 @@ fn literal_scalar_budget_is_checked_before_retaining_large_script() {
 }
 
 #[test]
-fn folded_and_modified_block_scalars_remain_explicit_refusals() {
-    for marker in [">", "|-", "|+", "|2", ">-"] {
-        let input = workflow(marker);
-        let error = compile(&input, &Limits::default()).unwrap_err();
-        assert!(matches!(
-            error,
-            WorkflowRefusal::ConstructUnsupported {
-                construct: "yaml.block-scalar",
-                ..
-            }
+fn run_steps_accept_bounded_literal_and_folded_block_forms() {
+    for (marker, expected) in [
+        (">", "printf first printf second\n"),
+        ("|-", "printf first\nprintf second"),
+        ("|+", "printf first\nprintf second\n"),
+        ("|2", "printf first\nprintf second\n"),
+        (">-", "printf first printf second"),
+    ] {
+        let input = workflow(&format!(
+            "{marker}\n          printf first\n          printf second"
         ));
+        let graph = compile(&input, &Limits::default()).unwrap();
+        assert_eq!(graph.jobs[0].steps[0].run, expected, "{marker}");
     }
 }

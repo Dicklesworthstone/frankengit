@@ -1,7 +1,7 @@
 //! A bounded scanner for the YAML subset the workflow profile accepts.
 //!
 //! This is not a YAML parser and does not try to be one. It accepts block
-//! mappings, block sequences and three scalar forms, and refuses every other
+//! mappings, block sequences and bounded scalar forms, and refuses every other
 //! construct **by its registry key**, so the refusal a user sees and the
 //! published compatibility table are the same fact.
 //!
@@ -224,9 +224,12 @@ fn strip_comment(text: &str) -> &str {
         match bytes[index] {
             b'\'' if !double => single = !single,
             b'"' if !single => double = !double,
-            // A comment must start the line or follow a space; `a#b` is a
+            // A comment must start the line or follow YAML separation whitespace; `a#b` is a
             // plain scalar containing a hash, not a truncated one.
-            b'#' if !single && !double && (index == 0 || bytes[index - 1] == b' ') => {
+            b'#' if !single
+                && !double
+                && (index == 0 || matches!(bytes[index - 1], b' ' | b'\t')) =>
+            {
                 return &text[..index];
             }
             _ => {}
@@ -236,118 +239,242 @@ fn strip_comment(text: &str) -> &str {
     text
 }
 
-/// Splits the source into significant lines, refusing tabs and markers.
-fn literal_parent_indent(text: &str, indent: usize) -> Option<usize> {
-    let trimmed = text.trim_start();
-    let (candidate, offset) = if let Some(rest) = trimmed.strip_prefix("- ") {
-        let rest = rest.trim_start();
-        (rest, text.len().saturating_sub(rest.len()))
-    } else {
-        (trimmed, text.len().saturating_sub(trimmed.len()))
-    };
-    split_entry(candidate)
-        .filter(|(_, value)| *value == "|")
-        .map(|_| indent.saturating_add(offset))
+/// A physical line borrows the original bytes, preserving spans across LF, CRLF
+/// and CR line endings. The final line has no invented line break.
+#[derive(Clone, Copy)]
+struct SourceLine<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+    number: u32,
+    line_break: bool,
 }
 
-/// Split significant syntax lines while treating a bare literal block's body as
-/// opaque source bytes. Blank literal lines need not enter the syntax stream:
-/// the block decoder reads them directly from the original source.
-fn significant_lines(source: &str, limits: &Limits) -> Result<Vec<Line>, WorkflowRefusal> {
-    let mut lines = Vec::new();
-    let mut offset = 0_usize;
-    let mut literal_parent = None;
-    for (index, raw) in source.split('\n').enumerate() {
-        let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        let line_start = offset;
-        offset = offset.saturating_add(raw.len()).saturating_add(1);
-        let indent = raw.len() - raw.trim_start_matches(' ').len();
+struct SourceLines<'a> {
+    remaining: &'a str,
+    offset: usize,
+    number: u32,
+}
 
-        if let Some(parent) = literal_parent {
-            if raw.trim().is_empty() {
-                continue;
-            }
-            if indent > parent {
-                // Literal content is data. Shell comments, document markers,
-                // colons, quotes and tabs after the required space indentation
-                // are not YAML syntax and must survive byte-for-byte.
-                lines.push(Line {
-                    indent,
-                    text: raw[indent..].to_owned(),
-                    span: Span::new(
-                        line_start + indent,
-                        line_start + raw.len(),
-                        line_number,
-                        u32::try_from(indent + 1).unwrap_or(u32::MAX),
-                    ),
-                });
-                if lines.len() > limits.max_lines {
-                    return Err(WorkflowRefusal::LimitExceeded {
-                        limit: "lines",
-                        allowed: limits.max_lines,
-                        observed: lines.len(),
-                        span: lines[lines.len() - 1].span,
-                    });
+impl<'a> SourceLines<'a> {
+    const fn new(source: &'a str, offset: usize, number: u32) -> Self {
+        Self {
+            remaining: source,
+            offset,
+            number,
+        }
+    }
+}
+
+impl<'a> SourceLines<'a> {
+    /// Legacy literal scripts treat only LF as a delimiter; an embedded CR is
+    /// command data. Syntax and newly admitted block forms use YAML line breaks.
+    fn next_with_mode(&mut self, legacy_literal: bool) -> Option<SourceLine<'a>> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+        let width = if legacy_literal {
+            self.remaining.find('\n')
+        } else {
+            self.remaining.find(['\r', '\n'])
+        }
+        .unwrap_or(self.remaining.len());
+        let line_break = width < self.remaining.len();
+        let consumed = width
+            + if !legacy_literal && self.remaining[width..].starts_with("\r\n") {
+                2
+            } else {
+                usize::from(line_break)
+            };
+        let line = SourceLine {
+            text: &self.remaining[..width],
+            start: self.offset,
+            end: self.offset + consumed,
+            number: self.number,
+            line_break,
+        };
+        let physical_lines = if legacy_literal {
+            // Keep subsequent source spans accurate even when command bytes
+            // contain CR characters which the legacy decoder does not normalize.
+            u32::try_from(Self::new(&self.remaining[..consumed], 0, 1).count()).unwrap_or(u32::MAX)
+        } else {
+            1
+        };
+        self.remaining = &self.remaining[consumed..];
+        self.offset = line.end;
+        self.number = self.number.saturating_add(physical_lines);
+        Some(line)
+    }
+}
+
+impl<'a> Iterator for SourceLines<'a> {
+    type Item = SourceLine<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_mode(false)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chomping {
+    Clip,
+    Strip,
+    Keep,
+}
+
+#[derive(Clone, Copy)]
+struct BlockHeader {
+    folded: bool,
+    indent: Option<usize>,
+    chomping: Chomping,
+}
+
+impl BlockHeader {
+    /// YAML 1.2.2 section 8.1.1 permits one digit 1..9 and one chomping
+    /// indicator, in either order, with no intervening whitespace.
+    fn parse(text: &str) -> Option<Self> {
+        let mut bytes = text.bytes();
+        let folded = match bytes.next()? {
+            b'|' => false,
+            b'>' => true,
+            _ => return None,
+        };
+        let mut header = Self {
+            folded,
+            indent: None,
+            chomping: Chomping::Clip,
+        };
+        for byte in bytes {
+            match byte {
+                b'1'..=b'9' if header.indent.is_none() => {
+                    header.indent = Some(usize::from(byte - b'0'));
                 }
+                b'-' if header.chomping == Chomping::Clip => header.chomping = Chomping::Strip,
+                b'+' if header.chomping == Chomping::Clip => header.chomping = Chomping::Keep,
+                _ => return None,
+            }
+        }
+        Some(header)
+    }
+}
+
+struct BlockContext {
+    parent: usize,
+    content_indent: Option<usize>,
+    legacy_literal: bool,
+}
+
+fn block_context(text: &str, indent: usize) -> Option<BlockContext> {
+    let (candidate, offset, sequence) = if let Some(rest) = text.strip_prefix("- ") {
+        let rest = scalar_start(rest);
+        (rest, text.len() - rest.len(), true)
+    } else {
+        (text, 0, false)
+    };
+    let (parent, value) = if let Some((_, value)) = split_entry(candidate) {
+        (indent + offset, value)
+    } else if sequence {
+        (indent, candidate)
+    } else {
+        return None;
+    };
+    if !matches!(value.as_bytes().first(), Some(b'|' | b'>')) {
+        return None;
+    }
+    Some(BlockContext {
+        parent,
+        content_indent: BlockHeader::parse(value)
+            .and_then(|header| header.indent)
+            .map(|extra| parent + extra),
+        legacy_literal: value == "|",
+    })
+}
+
+/// Split syntax lines without copying any scalar body. Block contents, including
+/// comments and blank lines, are decoded from the original source and covered by
+/// their scalar's span. Physical line limits are checked in `scan` first.
+fn significant_lines(source: &str, _limits: &Limits) -> Result<Vec<Line>, WorkflowRefusal> {
+    let mut lines = Vec::new();
+    let mut block: Option<BlockContext> = None;
+    let mut source_lines = SourceLines::new(source, 0, 1);
+    loop {
+        let legacy = block.as_ref().is_some_and(|context| context.legacy_literal);
+        let Some(mut raw) = source_lines.next_with_mode(legacy) else {
+            break;
+        };
+        let mut indent = raw.text.len() - raw.text.trim_start_matches(' ').len();
+        if let Some(context) = &mut block {
+            let empty = if context.legacy_literal {
+                raw.text.trim().is_empty()
+            } else {
+                indent == raw.text.len()
+            };
+            if empty {
                 continue;
             }
-            literal_parent = None;
+            if indent > context.parent {
+                let required = *context.content_indent.get_or_insert(indent);
+                if context.legacy_literal
+                    || indent >= required
+                    || !raw.text[indent..].starts_with('#')
+                {
+                    // Content remains opaque even when its indentation is
+                    // invalid. The block decoder owns that precise refusal.
+                    continue;
+                }
+            }
+            block = None;
+            if legacy {
+                // This line is outside the literal. Re-read it with normal
+                // syntax delimiters so a following CR-only block header works.
+                source_lines = SourceLines::new(&source[raw.start..], raw.start, raw.number);
+                raw = source_lines
+                    .next()
+                    .expect("the unconsumed syntax line exists");
+                indent = raw.text.len() - raw.text.trim_start_matches(' ').len();
+            }
         }
 
-        let after_indent = &raw[indent..];
-        if let Some(tab_at) = raw[..indent.min(raw.len())].find('\t') {
-            return Err(refuse(
-                "yaml.tab-indent",
-                Span::new(
-                    line_start + tab_at,
-                    line_start + tab_at + 1,
-                    line_number,
-                    u32::try_from(tab_at + 1).unwrap_or(u32::MAX),
-                ),
-            ));
-        }
+        let after_indent = &raw.text[indent..];
         if after_indent.starts_with('\t') {
             return Err(refuse(
                 "yaml.tab-indent",
-                Span::new(line_start + indent, line_start + indent + 1, line_number, 1),
-            ));
-        }
-
-        let content = strip_comment(after_indent).trim_end();
-        if content.is_empty() {
-            continue;
-        }
-        if content == "---" || content == "..." || content.starts_with("--- ") {
-            return Err(refuse(
-                "yaml.document-marker",
                 Span::new(
-                    line_start + indent,
-                    line_start + indent + content.len(),
-                    line_number,
+                    raw.start + indent,
+                    raw.start + indent + 1,
+                    raw.number,
                     u32::try_from(indent + 1).unwrap_or(u32::MAX),
                 ),
             ));
         }
-
+        let uncommented = strip_comment(after_indent);
+        let trimmed = uncommented.trim_end();
+        let content =
+            if block_context(trimmed, indent).is_some_and(|context| !context.legacy_literal) {
+                // YAML separation is only space/tab. Unicode whitespace after a
+                // new block header is invalid content, not another spelling of it.
+                uncommented.trim_end_matches([' ', '\t'])
+            } else {
+                trimmed
+            };
+        if content.is_empty() {
+            continue;
+        }
+        let span = Span::new(
+            raw.start + indent,
+            raw.start + indent + content.len(),
+            raw.number,
+            u32::try_from(indent + 1).unwrap_or(u32::MAX),
+        );
+        if content == "---" || content == "..." || content.starts_with("--- ") {
+            return Err(refuse("yaml.document-marker", span));
+        }
+        block = block_context(content, indent);
         lines.push(Line {
             indent,
             text: content.to_owned(),
-            span: Span::new(
-                line_start + indent,
-                line_start + indent + content.len(),
-                line_number,
-                u32::try_from(indent + 1).unwrap_or(u32::MAX),
-            ),
+            span,
         });
-        if lines.len() > limits.max_lines {
-            return Err(WorkflowRefusal::LimitExceeded {
-                limit: "lines",
-                allowed: limits.max_lines,
-                observed: lines.len(),
-                span: lines[lines.len() - 1].span,
-            });
-        }
-        literal_parent = literal_parent_indent(content, indent);
     }
     Ok(lines)
 }
@@ -400,8 +527,30 @@ fn scalar(text: &str, span: Span, limits: &Limits) -> Result<String, WorkflowRef
     Ok(text.to_owned())
 }
 
-/// Splits `key: value` at the first unquoted colon-space (or trailing colon).
-fn split_entry(text: &str) -> Option<(&str, &str)> {
+/// Recognizes new block-form lookalikes without consuming any whitespace.
+/// Bare `|` retains the legacy decoder's broader whitespace normalization.
+fn new_block_form(text: &str) -> bool {
+    let candidate = text.trim();
+    matches!(candidate.as_bytes().first(), Some(b'|' | b'>')) && candidate != "|"
+}
+
+/// Newly admitted block forms use only YAML separation (space/tab). A Unicode
+/// prefix is scalar/key data, including before a compact mapping's first key.
+/// Lookahead must not itself erase that data or change existing bare-`|` bytes.
+fn scalar_start(text: &str) -> &str {
+    let legacy = text.trim_start();
+    if new_block_form(legacy)
+        || split_entry_parts(legacy).is_some_and(|(_, value)| new_block_form(value))
+    {
+        text.trim_start_matches([' ', '\t'])
+    } else {
+        legacy
+    }
+}
+
+/// Splits `key: value` at the first unquoted colon-space (or trailing colon),
+/// retaining the raw value prefix for the context-sensitive separation rule.
+fn split_entry_parts(text: &str) -> Option<(&str, &str)> {
     let bytes = text.as_bytes();
     let mut single = false;
     let mut double = false;
@@ -415,13 +564,62 @@ fn split_entry(text: &str) -> Option<(&str, &str)> {
                     return Some((&text[..index], ""));
                 }
                 if rest.starts_with(' ') {
-                    return Some((&text[..index], rest.trim_start()));
+                    return Some((&text[..index], rest));
                 }
             }
             _ => {}
         }
     }
     None
+}
+
+fn split_entry(text: &str) -> Option<(&str, &str)> {
+    split_entry_parts(text).map(|(key, value)| (key, scalar_start(value)))
+}
+
+/// Visit resolved fragments without allocation. Folding occurs only between
+/// ordinary non-empty lines; whitespace-prefixed lines and their separating
+/// breaks remain literal. The final break run is chomped, never folded.
+fn block_fragments(
+    body: &str,
+    indent: usize,
+    header: BlockHeader,
+    mut emit: impl FnMut(&str, usize) -> Result<(), WorkflowRefusal>,
+) -> Result<(), WorkflowRefusal> {
+    let mut pending_breaks = 0;
+    let mut previous_more_indented = false;
+    let mut seen_content = false;
+    for raw in SourceLines::new(body, 0, 1) {
+        let text = if raw.text.len() <= indent {
+            ""
+        } else {
+            &raw.text[indent..]
+        };
+        if text.is_empty() {
+            pending_breaks += usize::from(raw.line_break);
+            continue;
+        }
+        let more_indented = text.starts_with([' ', '\t']);
+        if header.folded && seen_content && !previous_more_indented && !more_indented {
+            if pending_breaks == 1 {
+                emit(" ", 0)?;
+            } else {
+                emit("", pending_breaks.saturating_sub(1))?;
+            }
+        } else {
+            emit("", pending_breaks)?;
+        }
+        emit(text, 0)?;
+        seen_content = true;
+        previous_more_indented = more_indented;
+        pending_breaks = usize::from(raw.line_break);
+    }
+    let trailing = match header.chomping {
+        Chomping::Strip => 0,
+        Chomping::Clip => usize::from(seen_content && pending_breaks != 0),
+        Chomping::Keep => pending_breaks,
+    };
+    emit("", trailing)
 }
 
 /// Recursive-descent state, carrying the node budget across the whole document.
@@ -506,10 +704,15 @@ impl Scanner<'_> {
                 line.span.line,
                 line.span.column,
             );
-            if raw_key.trim() == "<<" {
+            let key_text = if new_block_form(raw_value) {
+                raw_key.trim_matches([' ', '\t'])
+            } else {
+                raw_key.trim()
+            };
+            if key_text == "<<" {
                 return Err(refuse("yaml.merge-key", key_span));
             }
-            let key = scalar(raw_key.trim(), key_span, self.limits)?;
+            let key = scalar(key_text, key_span, self.limits)?;
             if entries.iter().any(|(existing, _, _)| existing == &key) {
                 return Err(WorkflowRefusal::DuplicateKey {
                     key: key.into(),
@@ -546,9 +749,13 @@ impl Scanner<'_> {
                 line.span.line,
                 line.span.column + u32::try_from(line.text.len() - raw_value.len()).unwrap_or(0),
             );
-            if raw_value == "|" {
+            if matches!(raw_value.as_bytes().first(), Some(b'|' | b'>')) {
                 self.charge(value_span)?;
-                let (value, after) = self.literal_block(at, indent, value_span)?;
+                let (value, after) = if raw_value == "|" {
+                    self.literal_block(at, indent, value_span)?
+                } else {
+                    self.block_scalar(at, indent, raw_value, value_span)?
+                };
                 entries.push((key, value, key_span));
                 at = after;
                 continue;
@@ -567,6 +774,125 @@ impl Scanner<'_> {
                 span: start,
             },
             at,
+        ))
+    }
+
+    /// Decode newly admitted YAML block forms. Bare `|` retains its historical
+    /// decoder below because its resolved bytes already enter graph identities.
+    fn block_scalar(
+        &self,
+        at: usize,
+        parent_indent: usize,
+        text: &str,
+        marker: Span,
+    ) -> Result<(Node, usize), WorkflowRefusal> {
+        let header = BlockHeader::parse(text).ok_or(WorkflowRefusal::Malformed {
+            expected: "a block scalar header with one optional digit 1..9 and one optional + or -",
+            span: marker,
+        })?;
+        let header_end = self.lines[at].span.end;
+        let start = SourceLines::new(&self.source[header_end..], header_end, marker.line)
+            .next()
+            .map_or(header_end, |line| line.end);
+        let mut end = start;
+        let mut required = header.indent.map(|extra| parent_indent + extra);
+        let mut leading_spaces = 0;
+        let mut leading_span = marker;
+        let mut seen_text = false;
+        for raw in SourceLines::new(&self.source[start..], start, marker.line.saturating_add(1)) {
+            let indent = raw.text.len() - raw.text.trim_start_matches(' ').len();
+            if indent == raw.text.len() {
+                if !seen_text && indent > leading_spaces {
+                    leading_spaces = indent;
+                    leading_span = Span::new(raw.start, raw.end, raw.number, 1);
+                }
+                end = raw.end;
+                continue;
+            }
+            if indent <= parent_indent {
+                break;
+            }
+            let content_indent = *required.get_or_insert(indent);
+            if indent < content_indent {
+                // The first comment following scalar content must have less
+                // indentation; it is a comment, not part of the script.
+                if raw.text[indent..].starts_with('#') {
+                    break;
+                }
+                return Err(WorkflowRefusal::Malformed {
+                    expected: "block scalar content at its declared or detected indentation",
+                    span: Span::new(
+                        raw.start + indent,
+                        raw.end,
+                        raw.number,
+                        u32::try_from(indent + 1).unwrap_or(u32::MAX),
+                    ),
+                });
+            }
+            if !seen_text && header.indent.is_none() && leading_spaces > content_indent {
+                return Err(WorkflowRefusal::Malformed {
+                    expected: "leading empty block lines no more indented than the first content line",
+                    span: leading_span,
+                });
+            }
+            if let Some((offset, character)) = raw.text.char_indices().find(|(_, character)| {
+                !matches!(*character, '\t' | ' '..='~' | '\u{85}' | '\u{a0}'..='\u{d7ff}' |
+                    '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+                    || *character == '\u{feff}'
+            }) {
+                return Err(WorkflowRefusal::Malformed {
+                    expected: "printable YAML block scalar content",
+                    span: Span::new(
+                        raw.start + offset,
+                        raw.start + offset + character.len_utf8(),
+                        raw.number,
+                        u32::try_from(offset + 1).unwrap_or(u32::MAX),
+                    ),
+                });
+            }
+            seen_text = true;
+            end = raw.end;
+        }
+        let required = required.unwrap_or_else(|| leading_spaces.max(parent_indent + 1));
+        let body = &self.source[start..end];
+        let mut total = 0_usize;
+        // Fold/chomp in a counting pass before allocating the resolved script.
+        block_fragments(body, required, header, |text, breaks| {
+            total = total
+                .checked_add(text.len())
+                .and_then(|n| n.checked_add(breaks))
+                .ok_or(WorkflowRefusal::LimitExceeded {
+                    limit: "scalar bytes",
+                    allowed: self.limits.max_scalar_bytes,
+                    observed: usize::MAX,
+                    span: marker,
+                })?;
+            if total > self.limits.max_scalar_bytes {
+                return Err(WorkflowRefusal::LimitExceeded {
+                    limit: "scalar bytes",
+                    allowed: self.limits.max_scalar_bytes,
+                    observed: total,
+                    span: marker,
+                });
+            }
+            Ok(())
+        })?;
+        let mut value = String::with_capacity(total);
+        block_fragments(body, required, header, |text, breaks| {
+            value.push_str(text);
+            value.extend(core::iter::repeat_n('\n', breaks));
+            Ok(())
+        })?;
+        let mut after = at + 1;
+        while after < self.lines.len() && self.lines[after].span.start < end {
+            after += 1;
+        }
+        Ok((
+            Node::Scalar {
+                value,
+                span: Span::new(marker.start, end, marker.line, marker.column),
+            },
+            after,
         ))
     }
 
@@ -707,7 +1033,7 @@ impl Scanner<'_> {
                     span: line.span,
                 });
             }
-            let rest = line.text[1..].trim_start();
+            let rest = scalar_start(&line.text[1..]);
             let rest_offset = line.text.len() - rest.len();
             let rest_span = Span::new(
                 line.span.start + rest_offset,
@@ -742,6 +1068,16 @@ impl Scanner<'_> {
             }
 
             self.charge(rest_span)?;
+            if matches!(rest.as_bytes().first(), Some(b'|' | b'>')) {
+                let (value, after) = if rest == "|" {
+                    self.literal_block(at, indent, rest_span)?
+                } else {
+                    self.block_scalar(at, indent, rest, rest_span)?
+                };
+                items.push(value);
+                at = after;
+                continue;
+            }
             items.push(Node::Scalar {
                 value: scalar(rest, rest_span, self.limits)?,
                 span: rest_span,
@@ -793,7 +1129,13 @@ impl Scanner<'_> {
             limits: self.limits,
             nodes: self.nodes,
         };
-        let (node, _) = inner.mapping(0, indent, depth)?;
+        let (node, parsed) = inner.mapping(0, indent, depth)?;
+        if parsed != rewritten.len() {
+            return Err(WorkflowRefusal::Malformed {
+                expected: "consistent indentation after a sequence mapping entry",
+                span: rewritten[parsed].span,
+            });
+        }
         self.nodes = inner.nodes;
         Ok((node, at + consumed))
     }
@@ -811,6 +1153,16 @@ pub fn scan(source: &str, limits: &Limits) -> Result<Node, WorkflowRefusal> {
             observed: source.len(),
             span: whole,
         });
+    }
+    for (index, line) in SourceLines::new(source, 0, 1).enumerate() {
+        if index >= limits.max_lines {
+            return Err(WorkflowRefusal::LimitExceeded {
+                limit: "lines",
+                allowed: limits.max_lines,
+                observed: index.saturating_add(1),
+                span: Span::new(line.start, line.end, line.number, 1),
+            });
+        }
     }
     let lines = significant_lines(source, limits)?;
     if lines.is_empty() {
