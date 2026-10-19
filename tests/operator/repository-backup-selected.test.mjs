@@ -65,7 +65,10 @@ for (const format of ['sha1', 'sha256']) test(`selected ${format} checkpoint use
   for (const c of calls) { assert.equal(c.args[2], b.input); assert.ok(!c.args.includes(f.trustKey)); assert.ok(!c.args.includes(b.approval)); }
   assert.equal(await readFile(join(f.restore.destination, 'authority-visible'), 'utf8'), report.selection.authentication.statement.artifact.sha256);
   assert.equal(report.selection.native_content_verified, false);
-  assert.equal(report.result.approval_effect_time_enforced, false);
+  // Since 63c9572f/77b30653 restore runs in native signed mode, where the
+  // native side observes approval expiry at its publication boundary
+  // (docs/NATIVE_BACKUP_OPERATOR_APPROVAL.md).
+  assert.equal(report.result.approval_effect_time_enforced, true);
   const record = JSON.parse(await readFile(f.restore.approvalRecord));
   assert.equal(record.statement.head_generation, '10'); assert.equal(record.policy.minimum_head_generation, '1');
 });

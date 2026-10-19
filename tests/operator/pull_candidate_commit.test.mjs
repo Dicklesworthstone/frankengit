@@ -4,11 +4,11 @@ import { candidateCommitMatches } from '../../scripts/operator/pull_candidate_co
 
 const sha1 = {
   format: 'sha1', tree: '1'.repeat(40), targetTip: '2'.repeat(40), sourceTip: '3'.repeat(40),
-  metadata: { author: 'Alice <alice@example.invalid>', committer: 'Bob <bob@example.invalid>', timestamp: '1700000000', message: 'Merge exact bytes\\n🦀\\n' },
+  metadata: { author: 'Alice <alice@example.invalid>', committer: 'Bob <bob@example.invalid>', timestamp: '1700000000', message: 'Merge exact bytes\n🦀\n' },
 };
 function body(input, method) {
-  const incoming = method === 'merge-commit' ? `parent ${input.sourceTip}\\n` : '';
-  return Buffer.from(`tree ${input.tree}\\nparent ${input.targetTip}\\n${incoming}author ${input.metadata.author} ${input.metadata.timestamp} +0000\\ncommitter ${input.metadata.committer} ${input.metadata.timestamp} +0000\\n\\n${input.metadata.message}`).toString('hex');
+  const incoming = method === 'merge-commit' ? `parent ${input.sourceTip}\n` : '';
+  return Buffer.from(`tree ${input.tree}\nparent ${input.targetTip}\n${incoming}author ${input.metadata.author} ${input.metadata.timestamp} +0000\ncommitter ${input.metadata.committer} ${input.metadata.timestamp} +0000\n\n${input.metadata.message}`).toString('hex');
 }
 for (const method of ['merge-commit', 'squash']) test(`${method} exact construction matches`, () => {
   assert.equal(candidateCommitMatches({ ...sha1, method, bodyHex: body(sha1, method) }), true);

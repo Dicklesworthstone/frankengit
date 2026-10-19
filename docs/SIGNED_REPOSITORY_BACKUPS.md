@@ -144,8 +144,11 @@ a record without a resumable destination. Preserve and inspect that boundary;
 this adapter does not promise automatic recovery from every crash point.
 
 Approval expiry is rechecked after preflight and immediately before submission.
-It is a submission gate, NOT a lease enforced at the native authority publication
-instruction. `approval_effect_time_enforced` remains false. Confirmed native
+In native signed mode (the only restore mode since 63c9572f) the native side also
+observes expiry immediately before its authority publication boundary, and the
+receipt reports `approval_effect_time_enforced: true`
+([NATIVE_BACKUP_OPERATOR_APPROVAL.md](NATIVE_BACKUP_OPERATOR_APPROVAL.md)). That is
+still not an external revocation lease. Confirmed native
 completion is not retroactively rolled back by later expiry or lost wrapper
 stdout. This is not a canonical authorization or instant-revocation mechanism.
 Do not serve partial roots or automatically replay restored outbox/external effects.
