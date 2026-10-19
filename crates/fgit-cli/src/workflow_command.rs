@@ -413,11 +413,14 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
             super::publication_support::read_bundle(&candidate.bundle, 128 * 1024 * 1024)
         })
         .transpose()?;
+    let signals = fgit_node::TerminationSignals::install()
+        .map_err(|e| format!("workflow signal registration failed: {e}"))?;
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage, options.tenant, options.repository)
             .with_object_format(options.format),
     )
     .map_err(|e| e.to_string())?;
+    let mut monitor_cleanup = None;
     let operation = (|| -> Result<_, String> {
         if options
             .incarnation
@@ -431,59 +434,65 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
             .map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
-        let request = fgit_cli::command_request_context(&node);
-        let result = match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
-            (Some(merge), Some(_), Some(bytes)) => {
-                node.runtime()
-                    .block_on(node.run_trusted_merge_workflow_with_artifacts_in(
-                        &request,
-                        merge,
-                        bytes,
-                        &options.workflow,
-                        options.run_id,
-                        &options.parent,
-                        &options.inputs,
-                        options.head,
-                        Default::default(),
-                        artifact_config.as_ref(),
-                    ))
+        let (result, cleanup) = with_signal_request(&node, signals, |request| {
+            match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
+                (Some(merge), Some(_), Some(bytes)) => {
+                    node.runtime()
+                        .block_on(node.run_trusted_merge_workflow_with_artifacts_in(
+                            request,
+                            merge,
+                            bytes,
+                            &options.workflow,
+                            options.run_id,
+                            &options.parent,
+                            &options.inputs,
+                            options.head,
+                            Default::default(),
+                            artifact_config.as_ref(),
+                        ))
+                }
+                (None, Some(candidate), Some(bytes)) => {
+                    node.runtime()
+                        .block_on(node.run_trusted_candidate_workflow_with_artifacts_in(
+                            request,
+                            &options.reference,
+                            (candidate.base, candidate.commit),
+                            bytes,
+                            &options.workflow,
+                            options.run_id,
+                            &options.parent,
+                            &options.inputs,
+                            options.head,
+                            Default::default(),
+                            artifact_config.as_ref(),
+                        ))
+                }
+                (None, None, None) => {
+                    node.runtime()
+                        .block_on(node.run_trusted_workflow_with_artifacts_in(
+                            request,
+                            &options.reference,
+                            &options.workflow,
+                            options.run_id,
+                            &options.parent,
+                            &options.inputs,
+                            (options.head, options.commit),
+                            Default::default(),
+                            artifact_config.as_ref(),
+                        ))
+                }
+                _ => return Err("candidate input was not loaded; no workflow started".into()),
             }
-            (None, Some(candidate), Some(bytes)) => {
-                node.runtime()
-                    .block_on(node.run_trusted_candidate_workflow_with_artifacts_in(
-                        &request,
-                        &options.reference,
-                        (candidate.base, candidate.commit),
-                        bytes,
-                        &options.workflow,
-                        options.run_id,
-                        &options.parent,
-                        &options.inputs,
-                        options.head,
-                        Default::default(),
-                        artifact_config.as_ref(),
-                    ))
-            }
-            (None, None, None) => {
-                node.runtime()
-                    .block_on(node.run_trusted_workflow_with_artifacts_in(
-                        &request,
-                        &options.reference,
-                        &options.workflow,
-                        options.run_id,
-                        &options.parent,
-                        &options.inputs,
-                        (options.head, options.commit),
-                        Default::default(),
-                        artifact_config.as_ref(),
-                    ))
-            }
-            _ => return Err("candidate input was not loaded; no workflow started".into()),
-        }
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())
+        })?;
+        monitor_cleanup = cleanup;
+        let result = result?;
         Ok((result.to_json(), result.succeeded(), result.run_directory))
     })();
-    let cleanup = node.shutdown().err().map(|e| e.to_string());
+    let cleanup = workflow_cleanup(
+        monitor_cleanup,
+        node.shutdown().err().map(|e| e.to_string()),
+    );
     match operation {
         Ok((report, succeeded, directory)) => finish(
             &mut std::io::stdout().lock(),
@@ -503,6 +512,30 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
         )),
     }
 }
+#[cfg(target_os = "linux")]
+fn with_signal_request<T>(
+    node: &fgit_node::OneNode,
+    signals: fgit_node::TerminationSignals,
+    work: impl FnOnce(&fgit_node::NodeRequestContext) -> T,
+) -> Result<(T, Option<String>), String> {
+    let parent = fgit_cli::command_request_context(node);
+    let (result, cleanup) = signals
+        .run_request(node.runtime(), &parent, work)
+        .map_err(|e| e.to_string())?;
+    Ok((result, cleanup.err().map(|e| e.to_string())))
+}
+
+#[cfg(target_os = "linux")]
+fn workflow_cleanup(monitor: Option<String>, node: Option<String>) -> Option<String> {
+    match (monitor, node) {
+        (Some(monitor), Some(node)) => {
+            Some(format!("{monitor}; node shutdown also failed: {node}"))
+        }
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn finish(
     output: &mut impl Write,

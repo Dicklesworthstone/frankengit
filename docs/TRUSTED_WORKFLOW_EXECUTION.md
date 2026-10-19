@@ -141,6 +141,42 @@ does not create a BuildInputCapsule, cache hit or independent check attestation.
 See [trusted workflow artifacts](TRUSTED_WORKFLOW_ARTIFACTS.md) for selectors,
 byte paths, trust, bounds, cancellation and exact retrieval examples.
 
+## Stopping a foreground attempt
+
+On Linux, `fg workflow run`, `run-candidate`, `run-merge-candidate` and
+`dispatch` install the existing Asupersync SIGTERM/SIGINT handlers before opening
+the node. Either signal requests cooperative cancellation of the selected
+workflow request, including synchronous source, process and artifact work.
+Repeated signals do not terminate the owner underneath its drain. SIGKILL and
+machine failure remain abrupt failures; they cannot produce a completed report.
+
+The signal observer is one child of the node's bounded blocking pool. It must
+acknowledge startup before execution is admitted. Its cancellation relay targets
+only a derived request subtree, never the shared native runtime context needed
+for workspace close, durable job settlement and node shutdown. The CLI explicitly
+stops and joins the observer after the operation settles. An observer startup or
+cleanup failure is an infrastructure refusal, not successful completion.
+
+Once a stop is observed, no dependent, `always()` diagnostic, independent job or
+later dispatch workflow starts. An active process uses the runner's existing
+bounded process-group drain. Unproven containment still retains the workspace and
+produces a non-green observation; signal wiring is not hostile-code isolation or
+proof that every possible escaped descendant was reaped. Completed job records
+and reports survive the stop and remain inspectable with `fg workflow recover`.
+The original occupied run/batch identity still refuses reexecution.
+
+A completed non-green result exits 1 when node and observer cleanup succeed.
+Infrastructure or owner-cleanup failure exits 2 and retains any completed report.
+Cancellation never changes canonical repository authority or fabricates rollback
+of effects a trusted script may already have performed.
+
+The native `scripts/e2e/suites/workflow/signal_drain.sh` campaign covers real
+`fg` run/dispatch in both object formats, both signals and repeated signals,
+live nested processes, no-signal completion twins, suppression of later work,
+unchanged authority, repeated journal recovery and occupied-attempt refusal.
+Candidate modes share the same foreground request owner; their existing source
+and bundle-validation tests remain separate.
+
 ## Results and interrupted attempts
 
 The create-only `workflow-<run-id>` directory contains a synced `attempt.json`
@@ -195,7 +231,6 @@ cargo test --locked -p fgit-cli --bin fg workflow_command::
 cargo test --locked -p fgit-cli --test workflow_run
 ```
 
-The implementation-session environment had no Rust compiler/Cargo/rustfmt.
-These new tests and full repository gates were **not executed** there. The
-commands above identify the required checks, not a passing result or release
-certificate. No hosted or hostile-code readiness is claimed.
+The commands above identify relevant focused checks; a passing focused run is
+not a whole-repository verification result or release certificate. No hosted or
+hostile-code readiness is claimed.

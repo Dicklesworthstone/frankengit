@@ -124,11 +124,14 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
         options.head.ok_or("missing dispatch head")?,
         options.commit.ok_or("missing dispatch commit")?,
     );
+    let signals = fgit_node::TerminationSignals::install()
+        .map_err(|e| format!("workflow signal registration failed: {e}"))?;
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage, options.tenant, options.repository)
             .with_object_format(options.format),
     )
     .map_err(|e| e.to_string())?;
+    let mut monitor_cleanup = None;
     let operation = (|| {
         if options
             .incarnation
@@ -142,23 +145,29 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
-        let request = fgit_cli::command_request_context(&node);
-        node.runtime()
-            .block_on(node.dispatch_trusted_workflows_with_artifacts_in(
-                &request,
-                &options.reference,
-                &options.workflow,
-                event,
-                options.run_id,
-                &options.parent,
-                &options.inputs,
-                expected,
-                Default::default(),
-                artifact_config.as_ref(),
-            ))
-            .map_err(|e| e.to_string())
+        let (result, cleanup) = super::with_signal_request(&node, signals, |request| {
+            node.runtime()
+                .block_on(node.dispatch_trusted_workflows_with_artifacts_in(
+                    request,
+                    &options.reference,
+                    &options.workflow,
+                    event,
+                    options.run_id,
+                    &options.parent,
+                    &options.inputs,
+                    expected,
+                    Default::default(),
+                    artifact_config.as_ref(),
+                ))
+                .map_err(|e| e.to_string())
+        })?;
+        monitor_cleanup = cleanup;
+        result
     })();
-    let cleanup = node.shutdown().err().map(|e| e.to_string());
+    let cleanup = super::workflow_cleanup(
+        monitor_cleanup,
+        node.shutdown().err().map(|e| e.to_string()),
+    );
     match operation {
         Ok(report) => finish(
             &mut std::io::stdout().lock(),
