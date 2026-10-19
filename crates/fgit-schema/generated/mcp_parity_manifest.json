@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 42,
+  "total_tools": 43,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -54,6 +54,16 @@
       "capability": "prepare_publication",
       "cli_command": "fg branch rename",
       "rest_api_path": "POST /repos/{id}/branches/{ref}/rename"
+    },
+    {
+      "tool": "frankengit_branch_transaction",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg branch transaction",
+      "rest_api_path": "/api/v1/source/branches/transaction"
     },
     {
       "tool": "frankengit_branch_update",

@@ -1,6 +1,7 @@
 //! Source mutations are ordinary native receive admission, not MCP-local refs.
 //! The launch sponsor grants writes explicitly; source bytes grant no authority.
 mod initial;
+mod transaction;
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::{NodeTools, hex, require_fields, unhex};
@@ -15,13 +16,17 @@ pub(super) const CREATE: &str = "frankengit_branch_create";
 pub(super) const UPDATE: &str = "frankengit_branch_update";
 pub(super) const DELETE: &str = "frankengit_branch_delete";
 pub(super) const RENAME: &str = "frankengit_branch_rename";
+pub(super) const TRANSACTION: &str = "frankengit_branch_transaction";
 pub(super) const PUBLISH: &str = "frankengit_source_publish";
 const MAX_CHUNKS: usize = 3;
 const CHUNK_BYTES: usize = 8 * 1024;
 const MAX_BUNDLE_BYTES: usize = MAX_CHUNKS * CHUNK_BYTES;
 
 pub(super) fn is_tool(name: &str) -> bool {
-    matches!(name, CREATE | UPDATE | DELETE | RENAME | PUBLISH)
+    matches!(
+        name,
+        CREATE | UPDATE | DELETE | RENAME | PUBLISH | TRANSACTION
+    )
 }
 pub(super) fn tools() -> Vec<Tool> {
     [
@@ -29,10 +34,14 @@ pub(super) fn tools() -> Vec<Tool> {
         (UPDATE, "Move a branch from an exact expected tip to an already-visible commit through non-forced native admission. No implicit latest tip or protection bypass."),
         (DELETE, "Delete a branch at its exact expected tip. The native default-branch and current protection checks remain mandatory. Does not rewrite PR metadata."),
         (RENAME, "Atomically delete an exact-tip branch and create an absent destination at that SAME tip. No partial rename, overwrite, default-branch rename or PR retargeting."),
+        (TRANSACTION, "Atomically create, advance or delete 1..64 distinct branches. All commands share one exact durable key and canonical decision; stale or protected members cannot publish a partial prefix."),
         (PUBLISH, "Publish a reviewed native Git bundle. The default requires an exact base and single parent; initial:true explicitly creates zero-parent history at an absent branch and forbids expected_base. At most 24 KiB in three hex chunks. Native quarantine verifies objects before ordinary admission; no merge approval."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }
 fn schema(name: &str) -> Value {
+    if name == TRANSACTION {
+        return transaction::schema();
+    }
     let mut properties = Object::new();
     properties.insert("idempotency_key".into(), common::key_schema());
     let mut required = vec!["idempotency_key"];
@@ -143,6 +152,9 @@ fn bundle(args: &Object) -> Result<Vec<u8>, ToolError> {
     Ok(bytes)
 }
 fn parse(name: &str, args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
+    if name == TRANSACTION {
+        return transaction::parse(args, format);
+    }
     let allowed: &[&str] = match name {
         CREATE => &["reference", "reference_hex", "target", "idempotency_key"],
         UPDATE => &[
@@ -264,6 +276,16 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
                 candidate,
                 bytes,
             ))
+    } else if name == TRANSACTION {
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.admit_branch_transaction_durable_in(
+                &request,
+                &session,
+                &input.commands,
+                Default::default(),
+            ))
     } else {
         backend
             .node
@@ -299,6 +321,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             UPDATE => "update",
             DELETE => "delete",
             RENAME => "rename",
+            TRANSACTION => "transaction",
             _ => "publish",
         }),
     );
@@ -355,7 +378,7 @@ fn atomic_terminal(
     let invalid = || ToolError::uncertain("inconsistent_atomic_outcome");
     let first = observations.first().copied().ok_or_else(invalid)?;
     if !atomic
-        || !(1..=2).contains(&expected)
+        || !(1..=fgit_node::OneNode::MAX_BRANCH_TRANSACTION_COMMANDS).contains(&expected)
         || observations.len() != expected
         || ids != [first.0]
         || observations.iter().any(|entry| *entry != first)

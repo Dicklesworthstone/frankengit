@@ -243,7 +243,16 @@ fn partial_or_contradictory_atomic_outcomes_never_become_a_successful_rename() {
 }
 #[test]
 fn discovery_requires_each_semantic_pin_and_has_no_force_or_host_path_field() {
-    assert_eq!(tools().len(), 5);
+    assert_eq!(
+        tools()
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [CREATE, UPDATE, DELETE, RENAME, PUBLISH, TRANSACTION]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(tools().len(), 6);
     for tool in tools() {
         assert!(is_tool(tool.name));
         let schema = tool.schema.object().unwrap();

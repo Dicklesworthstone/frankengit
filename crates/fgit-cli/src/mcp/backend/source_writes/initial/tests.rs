@@ -150,7 +150,23 @@ fn schema_keeps_creation_and_incremental_predecessors_disjoint_in_one_tool() {
             Value::Array(vec![text(forbidden)])
         );
     }
-    assert_eq!(tools().len(), 5);
+    assert_eq!(
+        tools()
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            CREATE,
+            UPDATE,
+            DELETE,
+            RENAME,
+            PUBLISH,
+            super::super::TRANSACTION
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(tools().len(), 6);
     assert!(
         super::super::schema(CREATE)
             .object()

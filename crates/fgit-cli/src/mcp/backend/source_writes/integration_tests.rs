@@ -518,7 +518,17 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
     options.outcomes = false;
     options.writes.pulls = false;
     let mut writer = NodeTools::open(options).unwrap();
-    assert_eq!(writer.tools().len(), 5);
+    assert_eq!(
+        writer
+            .tools()
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [CREATE, UPDATE, DELETE, RENAME, PUBLISH, TRANSACTION]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(writer.tools().len(), 6);
     for tool in writer.tools() {
         assert!(is_tool(tool.name));
         assert!(writer.is_mutation(tool.name));
@@ -538,7 +548,7 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
     options.principal = None;
     let mut reader = NodeTools::open(options).unwrap();
     let held = state(&reader.node);
-    for name in [CREATE, UPDATE, DELETE, RENAME, PUBLISH] {
+    for name in [CREATE, UPDATE, DELETE, RENAME, PUBLISH, TRANSACTION] {
         assert!(!reader.tools().iter().any(|tool| tool.name == name));
         assert!(reader.call(name, &Object::new()).unwrap_err().invalid);
         assert_eq!(

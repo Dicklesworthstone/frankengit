@@ -247,7 +247,8 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    assert_eq!(backend.tools().len(), 36);
+    assert_eq!(backend.tools().len(), 37);
+    assert!(backend.tools().iter().any(|tool| tool.name == "frankengit_branch_transaction"));
     let mut server = server(&mut backend);
     let tools = server
         .receive(

@@ -186,6 +186,34 @@
       },
       "additionalProperties": false
     },
+    "frankengit_branch_transaction": {
+      "title": "frankengit_branch_transaction",
+      "description": "Atomically create, advance or delete 1..64 distinct branches under one durable key and canonical decision.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "array",
+              "description": "1..64 distinct create/update/delete objects with exact branch names and native old/new OIDs; no nested keys, force or identity overrides.",
+              "x-classification": "selector_position",
+              "maxLength": 65536
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "One durable printable ASCII key for the entire canonical transaction.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["commands", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_branch_update": {
       "title": "frankengit_branch_update",
       "description": "Move a branch from an exact expected tip to an already-visible commit through non-forced native admission.",

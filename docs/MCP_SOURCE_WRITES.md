@@ -1,8 +1,9 @@
 # Native source publication through MCP
 
-`--allow-source-writes` enables five narrow, operator-sponsored source mutations:
+`--allow-source-writes` enables six narrow, operator-sponsored source mutations:
 `frankengit_branch_create`, `frankengit_branch_update`,
-`frankengit_branch_delete`, `frankengit_branch_rename`, and
+`frankengit_branch_delete`, `frankengit_branch_rename`,
+`frankengit_branch_transaction`, and
 `frankengit_source_publish`. None launches Git, a shell or a host-file reader.
 Every command uses the existing node quarantine/admission/recovery boundary.
 
@@ -21,7 +22,7 @@ broker. Do not forward the channel to an untrusted remote principal.
 
 ## Branch lifecycle
 
-All commands require `reference` and `idempotency_key`. `reference_hex` is the
+The four lifecycle tools require `reference` and `idempotency_key`. `reference_hex` is the
 lossless alternative for non-UTF-8 ref names; exactly one encoding is required.
 Refs must be full `refs/heads/...` names, bounded to 4096 bytes. Native OIDs
 are nonzero lowercase hex in the repository's SHA-1 or SHA-256 domain.
@@ -45,6 +46,12 @@ only half the rename published. A default-branch delete/rename refuses rather
 than silently rewriting HEAD. Branch operations do not retarget PR metadata.
 Unknown fields, force flags, caller principals and implicit latest-tip selectors
 are rejected before native admission.
+
+## Atomic multi-branch transactions
+
+See [MCP branch transactions](MCP_BRANCH_TRANSACTIONS.md) for the bounded
+`commands` array and whole-transaction key. It shares the native publication
+and recovery path with these tools, but takes its reference operands per command.
 
 ## Reviewed single-parent bundle publication
 
@@ -113,6 +120,7 @@ default-branch refusal, non-fast-forward refusal, rename/delete/reopen recovery,
 independent grants and a lost-stdout reply followed by original-key recovery.
 
 Run `cargo test --locked -p fgit-cli --bin fg-mcp` using the pinned toolchain.
-Rust/Cargo were unavailable in the development session introducing this slice;
-tests are written, not executed. This is not an end-to-end live-client campaign,
-a full Git compatibility result, or completed broker-backed FG-096 acceptance.
+The focused source suite also runs under `--bin fg mcp::`. The transaction
+campaign in `MCP_BRANCH_TRANSACTIONS.md` drives real stdio clients through the
+new atomic tool. These checks are not a full Git compatibility result, release
+gate, or completed broker-backed FG-096 acceptance.

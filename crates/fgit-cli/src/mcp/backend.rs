@@ -450,7 +450,8 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 38);
+        assert_eq!(server_names.len(), 39);
+        assert!(server_names.contains(&source_writes::TRANSACTION));
         assert_eq!(validate_server_parity(&server_names, REGISTRY), Ok(()));
 
         // Also verify 1-for-1 set equality with committed mcp_parity_manifest.json active entries.

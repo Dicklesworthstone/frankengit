@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 42,
-  "active_count": 38,
+  "total_count": 43,
+  "active_count": 39,
   "unsupported_count": 4,
   "tools": [
     {
@@ -146,6 +146,34 @@
       "refusal_codes": ["predecessor_tip_mismatch", "destination_already_exists", "rename_requires_distinct_branches", "idempotency_key_reused"],
       "cli_command": "fg branch rename",
       "rest_api_path": "POST /repos/{id}/branches/{ref}/rename"
+    },
+    {
+      "name": "frankengit_branch_transaction",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "description": "Atomically create, advance or delete 1..64 distinct branches under one durable key and canonical decision.",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "exact_predecessor_commit",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "public_repository_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "commands_required", "branch_transaction_limit", "command_must_be_object", "invalid_branch_action", "duplicate_branch_target", "source_mutation_outcome_unknown", "inconsistent_atomic_outcome"],
+      "cli_command": "fg branch transaction",
+      "rest_api_path": "/api/v1/source/branches/transaction"
     },
     {
       "name": "frankengit_branch_update",
@@ -489,7 +517,7 @@
       "kind": "tool",
       "owner_subsystem": "forge",
       "support_profile": "active",
-      "description": "Replace complete required-review protection at an exact version and policy epoch. Version zero is first installation by the trusted local operator; current canonical administrators authorize later changes. No Git refs move.",
+      "description": "Replace complete review and workflow-check protection at an exact version and policy epoch. Version zero is first installation by the trusted local operator; current canonical administrators authorize later changes. No Git refs move.",
       "read_mutation": "mutation",
       "capability": "mutate_forge_entity",
       "principal": "operator_bound",
@@ -517,7 +545,7 @@
       "kind": "tool",
       "owner_subsystem": "forge",
       "support_profile": "active",
-      "description": "Read complete required-review protection, administrators, version, and policy epoch at one authenticated head.",
+      "description": "Read complete review and workflow-check protection, administrators, version, and policy epoch at one authenticated head.",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
       "principal": "none",
