@@ -120,6 +120,29 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
     }
 }
 
+/// A plan marker commits expected input identity, not the mutable host bytes.
+/// Reuse the descriptor-confined, bounded reader so missing bodies, aliases,
+/// symlinks, special files and concurrent substitution all fail before a
+/// reopened workspace can be handed back to a tool. Ordinary source files keep
+/// their existing edit/import semantics.
+pub(super) fn verify_retained(root: &File, inputs: &[JobInput]) -> Result<(), HostRefusal> {
+    let mut aliases = BTreeSet::new();
+    for input in inputs {
+        let (body, mode) = read_regular(
+            root,
+            &input.path,
+            input.body.len(),
+            &mut aliases,
+            &|| Ok(()),
+        )?
+        .ok_or(HostRefusal::IdentityMismatch)?;
+        if body.as_slice() != input.body.as_slice() || mode != input.mode {
+            return Err(HostRefusal::IdentityMismatch);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,7 +153,7 @@ mod tests {
     use fgit_types::{
         CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryCommitId, RepositoryId,
     };
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     struct Source(BTreeMap<GitOid<Sha1>, Vec<u8>>);
@@ -283,6 +306,7 @@ mod tests {
             .create(&root)
             .unwrap();
         let mut inodes = Vec::new();
+        let mut live = Vec::new();
         for n in 0..2 {
             let ledger = ObligationLedger::root(
                 RegionId::new(n + 1),
@@ -309,7 +333,17 @@ mod tests {
                 workspace.import(&cap, 0, &|_| false),
                 Err(HostRefusal::IdentityMismatch)
             ));
-            workspace.close().unwrap();
+            live.push((ledger, workspace));
+        }
+        assert_ne!(inodes[0], inodes[1]);
+        std::fs::write(root.join("job-0/.fgit-artifacts/bin/tool"), b"changed").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("job-1/.fgit-artifacts/bin/tool")).unwrap(),
+            b"payload"
+        );
+        assert_eq!(plan.job_inputs[0].body.as_slice(), b"payload");
+        for (ledger, workspace) in live {
+            let _settled = workspace.close().unwrap();
             assert!(matches!(ledger.close(), RegionCloseOutcome::Quiescent(_)));
         }
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
@@ -353,5 +387,116 @@ mod tests {
         assert!(matches!(ledger.close(), RegionCloseOutcome::Quiescent(_)));
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         std::fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn reopen_verifies_retained_inputs_before_returning_a_workspace() {
+        for mutation in 0..9 {
+            let (plan, cap) = plan(b"source");
+            let plan = plan
+                .with_job_inputs(vec![input(b"bin/tool", b"payload", b"producer")])
+                .unwrap();
+            let root = std::env::temp_dir().join(format!(
+                "fg-job-reopen-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let prior = ObligationLedger::root(
+                RegionId::new(1),
+                LeakDisposition::RecordAndContinue,
+                plan.budget(),
+            );
+            let workspace = SparseWorkspace::materialize(
+                plan.clone(),
+                File::open(&root).unwrap(),
+                TreePath::parse_default(b"job").unwrap(),
+                prior
+                    .reserve(plan.reservation(), prior.grant(plan.budget()).unwrap())
+                    .unwrap(),
+                &cap,
+                0,
+                &|_| false,
+            )
+            .unwrap();
+            let file = workspace.tool_directory().join(".fgit-artifacts/bin/tool");
+            let marker =
+                std::fs::read(workspace.tool_directory().join(".fgit-host-receipt")).unwrap();
+            let sentinel = root.join("untouched");
+            std::fs::write(&sentinel, b"outside workspace").unwrap();
+            match mutation {
+                0 => {}
+                1 => std::fs::write(&file, b"forged!").unwrap(),
+                2 => {
+                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap()
+                }
+                3 => std::fs::remove_file(&file).unwrap(),
+                4 => std::fs::hard_link(&file, root.join("alias")).unwrap(),
+                5 => {
+                    std::fs::remove_file(&file).unwrap();
+                    symlink(&sentinel, &file).unwrap();
+                }
+                6 => {
+                    std::fs::remove_file(&file).unwrap();
+                    std::fs::create_dir(&file).unwrap();
+                }
+                7 => std::fs::write(&file, b"too long").unwrap(),
+                8 => std::fs::write(&file, b"").unwrap(),
+                _ => unreachable!(),
+            }
+            // Model an interrupted owner: its outstanding responsibility is
+            // retained as containment, independently of the recovery attempt.
+            drop(workspace);
+            assert!(matches!(
+                prior.close(),
+                RegionCloseOutcome::ContainmentFailure(_)
+            ));
+            let recovery = ObligationLedger::root(
+                RegionId::new(2),
+                LeakDisposition::RecordAndContinue,
+                plan.budget(),
+            );
+            let reopened = SparseWorkspace::reopen(
+                plan.clone(),
+                File::open(&root).unwrap(),
+                TreePath::parse_default(b"job").unwrap(),
+                recovery
+                    .reserve(plan.reservation(), recovery.grant(plan.budget()).unwrap())
+                    .unwrap(),
+                &cap,
+                0,
+            );
+            if mutation == 0 {
+                let workspace = reopened.expect("unchanged retained inputs must reopen");
+                assert_eq!(
+                    std::fs::read(workspace.tool_directory().join(".fgit-artifacts/bin/tool"))
+                        .unwrap(),
+                    b"payload"
+                );
+                let _settled = workspace.close().unwrap();
+            } else {
+                let refusal = reopened
+                    .err()
+                    .expect("tampering must refuse before tool access");
+                match mutation {
+                    1 | 2 | 3 | 8 => assert_eq!(refusal, HostRefusal::IdentityMismatch),
+                    4 | 6 => assert!(matches!(refusal, HostRefusal::UnsupportedEntry(_))),
+                    5 => assert!(matches!(refusal, HostRefusal::Io { .. })),
+                    7 => assert_eq!(refusal, HostRefusal::ResourceLimit),
+                    _ => unreachable!(),
+                }
+                assert!(root.join("job").is_dir());
+                assert_eq!(
+                    std::fs::read(root.join("job/.fgit-host-receipt")).unwrap(),
+                    marker
+                );
+            }
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside workspace");
+            assert!(matches!(recovery.close(), RegionCloseOutcome::Quiescent(_)));
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 }

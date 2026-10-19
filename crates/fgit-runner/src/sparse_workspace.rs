@@ -532,6 +532,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
     /// Reopen a completed root using the reconstructed, authorized plan.
     /// A surviving staging directory is incomplete, never a completed root.
     /// Marker equality is a plan check, not authorization or proof of commit.
+    /// Supplemental job inputs must still match their exact delivered bytes
+    /// and executable modes; the source marker alone cannot prove their custody.
     pub fn reopen(
         plan: SparseWorkspacePlan<A>,
         parent: File,
@@ -549,6 +551,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 .map_err(|_| HostRefusal::IncompleteWorkspace)?;
             lock(&root)?;
             check_marker(&root, &plan.marker)?;
+            job_inputs::verify_retained(&root, &plan.job_inputs)?;
             Ok(root)
         })();
         match opened {
