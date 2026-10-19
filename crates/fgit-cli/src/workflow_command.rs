@@ -58,7 +58,8 @@ unsafe, oversized or corrupt payloads prevent success. Defaults: 16 MiB per file
 manifests bind exact producing attempts and sources. Use fg artifact inspect/export
 with --trust-domain trusted-workflow-local-owner to retrieve immutable bytes.
 This script profile does not create a BuildInputCapsule or authorize cache reuse.
-Capture is currently supported for canonical run/dispatch only.
+Capture also supports run-candidate and run-merge-candidate; candidate provenance
+is explicit and never substitutes for a canonical published check.
 
 Each run creates workflow-<run-id>/attempt.json before starting any process and
 report.json after close or explicit containment. Occupied run IDs always refuse.
@@ -267,7 +268,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             RepositoryIncarnationId::from_hex(text).map_err(|_| "invalid incarnation ID".to_owned())
         })
         .transpose()?;
-    let artifacts = artifacts::options(&flags, artifact_selections, candidate_mode)?;
+    let artifacts = artifacts::options(&flags, artifact_selections)?;
     let candidate = if candidate_mode {
         let base = commit.ok_or("--expected-commit is mandatory for run-candidate")?;
         let candidate = native_oid(value("--candidate-commit")?, format)?;
@@ -412,21 +413,23 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
         let request = fgit_cli::command_request_context(&node);
         let result = match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
             (Some(merge), Some(_), Some(bytes)) => {
-                node.runtime().block_on(node.run_trusted_merge_workflow_in(
-                    &request,
-                    merge,
-                    bytes,
-                    &options.workflow,
-                    options.run_id,
-                    &options.parent,
-                    &options.inputs,
-                    options.head,
-                    Default::default(),
-                ))
+                node.runtime()
+                    .block_on(node.run_trusted_merge_workflow_with_artifacts_in(
+                        &request,
+                        merge,
+                        bytes,
+                        &options.workflow,
+                        options.run_id,
+                        &options.parent,
+                        &options.inputs,
+                        options.head,
+                        Default::default(),
+                        artifact_config.as_ref(),
+                    ))
             }
             (None, Some(candidate), Some(bytes)) => {
                 node.runtime()
-                    .block_on(node.run_trusted_candidate_workflow_in(
+                    .block_on(node.run_trusted_candidate_workflow_with_artifacts_in(
                         &request,
                         &options.reference,
                         (candidate.base, candidate.commit),
@@ -437,6 +440,7 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
                         &options.inputs,
                         options.head,
                         Default::default(),
+                        artifact_config.as_ref(),
                     ))
             }
             (None, None, None) => {

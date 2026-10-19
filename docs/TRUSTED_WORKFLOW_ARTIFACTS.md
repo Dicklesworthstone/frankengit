@@ -1,7 +1,8 @@
 # Retained outputs from trusted workflows
 
-Canonical `fg workflow run` and `fg workflow dispatch` can retain explicitly
-selected output files through the existing immutable `LocalArtifactStore`.
+`fg workflow run`, `dispatch`, `run-candidate` and `run-merge-candidate` can
+retain explicitly selected output files through the existing immutable
+`LocalArtifactStore`.
 The runner copies and verifies these files after the job's processes have
 settled and before its private TreeFS workspace is closed. A completed report
 includes exact artifact IDs that can be inspected or exported after the
@@ -54,9 +55,40 @@ The whole contract is checked before reserving the batch or starting a child.
 The total output allowance is shared by every workflow in the dispatch; it is
 not reset for each child.
 
-Only canonical run/dispatch support collection. Candidate and merge-candidate
-commands refuse artifact flags. Capture is opt-in: calls without a contract keep
-their original attempt identity, result fields and execution checkpoints.
+Capture is opt-in: calls without a contract keep their original attempt identity
+and result fields. Candidate modes use the same file validation, custody and
+job-settlement code, not an alternate artifact store or publication path.
+
+### Retain an unpublished candidate's build output
+
+```sh
+fg workflow run-candidate "$NODE" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --workflow ci/build.yml --input ci --input src \
+  --expected-commit "$BASE_COMMIT" --candidate-commit "$CANDIDATE_COMMIT" \
+  --bundle "$CANDIDATE_BUNDLE" --run-parent "$RUN_PARENT" --run-id "$RUN_ID" \
+  --artifact-root "$ARTIFACT_ROOT" --artifact ci/build.yml:build:dist/program
+```
+
+The candidate's workflow and input tree, not the base script, produce these
+bytes. The native bundle, exact base and candidate, current ref, optional head
+and output contract are checked before an attempt starts. Each output manifest
+records `input_kind: "unpublished_candidate"`, actual executed commit/tree and
+bundle SHA-256 separately from canonical base head/RCR/commit/tree. Capture
+neither imports the candidate objects nor creates a temporary reference.
+
+The same output options work with `fg workflow run-merge-candidate`; its exact
+source/target tips, common base, ordered parents and bundle prerequisites remain
+mandatory. Provenance records both parents and the actual merged candidate.
+All selectors must name the one selected workflow and existing expanded jobs.
+See `TRUSTED_CANDIDATE_WORKFLOW_CLI.md` and `TRUSTED_MERGE_WORKFLOW_CLI.md` for
+candidate input flags and their trust boundary.
+
+After job cleanup, use the ordinary artifact inspect/export commands below.
+Neither the candidate bundle nor the original import directory is needed to
+export retained bytes. `fg workflow recover` reads the unchanged attempt marker
+and journal, including the output contract, without executing the workflow.
+An occupied run ID still refuses execution. Artifact custody and offline
+recovery never promote a candidate observation into a canonical green check.
 
 ## What is retained
 
@@ -155,7 +187,9 @@ marker bytes, including this contract.
 The node embedding API exposes `TrustedWorkflowArtifactConfig` and exact
 `TrustedWorkflowArtifactSelection` values through
 `run_trusted_workflow_with_artifacts_in` and
-`dispatch_trusted_workflows_with_artifacts_in`. Existing entry points delegate
+`dispatch_trusted_workflows_with_artifacts_in`. Candidate embeddings use
+`run_trusted_candidate_workflow_with_artifacts_in` or
+`run_trusted_merge_workflow_with_artifacts_in`. Existing entry points delegate
 with no contract. `TrustedWorkflowRun.artifacts` and dispatch `runs()` expose
 completed custody observations.
 
@@ -173,15 +207,18 @@ cargo test --locked -p fgit-runner --test sparse_workspace
 cargo test --locked -p fgit-node --lib treefs_workspace::trusted_workflow::artifacts
 cargo test --locked -p fgit-node --test trusted_workflow
 cargo test --locked -p fgit-cli --bin fg workflow_command::
+cargo test --locked -p fgit-node --test candidate_artifact_custody
+cargo test --locked -p fgit-cli --test workflow_candidate_artifacts
 ```
 
-These commands identify the native checks; they are not a passing result.
-The pinned nightly parsed the final Rust sources, and the runner library and
-test targets completed `cargo check`. Executing the runner tests was blocked
-while building `rustix` by shared filesystem exhaustion. The broader native
-check stopped in `asupersync` after shared memory exhaustion on an earlier
-attempt and filesystem exhaustion on a later attempt. The node/CLI integration
-tests therefore remain unexecuted; source review and runner checks do not
-establish a complete native workflow or workspace pass.
+These commands identify the focused checks, not a full-workspace release gate.
+The candidate suite executes native SHA-1 and SHA-256 single-parent and merge
+inputs, exports payload/provenance after reopen, checks actual changed candidate
+scripts, and pairs missing/oversized/mismatched/cancelled cases with permitted
+runs. The CLI suite invokes real `fg` processes for capture, retained export,
+offline recovery and no-replay checks after original inputs move offline.
+Source refs and authority generations must remain unchanged, and the candidate
+commit must remain absent from admitted object storage. Run IDs, root paths and
+artifact identities in these fixtures are test-local, not service configuration.
 Broader BuildInputCapsule-based reuse, remote artifact authorization, canonical
 retention management and hostile execution remain separate capabilities.

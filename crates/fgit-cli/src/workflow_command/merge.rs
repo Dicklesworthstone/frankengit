@@ -14,6 +14,9 @@ const USAGE: &str =
   [--expected-incarnation <id>] [--ref-hex]
   [--source-ref-hex <hex> instead of --source-ref]
   [--workflow-hex <hex> instead of --workflow] [--input-hex <hex> instead of --input]
+  [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
+  [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
 
 Linux trusted-local execution only: review and trust the ACTUAL candidate's
 workflow/scripts. They run with host-user privileges, not in a hostile sandbox.
@@ -22,7 +25,9 @@ ordered target/source parents and exactly those two bundle prerequisites.
 
 All inputs and workflow scripts come from the verified merged tree. No objects
 are staged, no temporary ref is created, no PR approval or canonical check is
-published. Source-only and canonical commands do not accept these merge flags.
+published. Optional artifact capture binds the exact merged input and both
+parents; durable output custody does not authorize a check or cache reuse.
+Source-only and canonical commands do not accept these merge flags.
 
 The usual workflow journal, fresh job copies, resource limits, no-replay rule,
 post-shutdown JSON result and exit codes apply. An occupied run ID refuses;

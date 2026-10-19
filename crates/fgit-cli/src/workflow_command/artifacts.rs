@@ -59,18 +59,12 @@ pub(super) fn selection(value: &str, encoded: bool) -> Result<Selection, String>
 pub(super) fn options(
     flags: &BTreeMap<&str, &str>,
     mut selections: Vec<Selection>,
-    candidate: bool,
 ) -> Result<Option<Options>, String> {
     let root = flags.get("--artifact-root");
     let has_limit =
         flags.contains_key("--max-artifact-mib") || flags.contains_key("--max-artifact-total-mib");
     if root.is_none() && selections.is_empty() && !has_limit {
         return Ok(None);
-    }
-    if candidate {
-        return Err(
-            "artifact output capture currently requires canonical workflow run or dispatch".into(),
-        );
     }
     let root = PathBuf::from(*root.ok_or("--artifact-root is required for output capture")?);
     if !root.is_absolute() || root.as_os_str().len() > 4096 {
@@ -162,18 +156,15 @@ mod tests {
     }
 
     #[test]
-    fn root_contract_budget_and_candidate_refusals_are_preflight_only() {
+    fn root_contract_and_budget_refusals_are_preflight_only() {
         let selected = selection("ci/a.yml:build:out/result", false).unwrap();
         let base = BTreeMap::from([("--artifact-root", "/explicit-not-opened-root")]);
-        let config = options(&base, vec![selected.clone()], false)
-            .unwrap()
-            .unwrap();
+        let config = options(&base, vec![selected.clone()]).unwrap().unwrap();
         assert_eq!(config.maximum_bytes, 16 * 1024 * 1024);
         assert_eq!(config.total_bytes, 64 * 1024 * 1024);
-        assert!(options(&base, vec![selected.clone()], true).is_err());
-        assert!(options(&base, vec![], false).is_err());
-        assert!(options(&BTreeMap::new(), vec![selected.clone()], false).is_err());
-        assert!(options(&base, vec![selected.clone(), selected.clone()], false).is_err());
+        assert!(options(&base, vec![]).is_err());
+        assert!(options(&BTreeMap::new(), vec![selected.clone()]).is_err());
+        assert!(options(&base, vec![selected.clone(), selected.clone()]).is_err());
         for (flag, value) in [
             ("--max-artifact-mib", "0"),
             ("--max-artifact-mib", "65"),
@@ -183,16 +174,9 @@ mod tests {
         ] {
             let mut flags = base.clone();
             flags.insert(flag, value);
-            assert!(options(&flags, vec![selected.clone()], false).is_err());
+            assert!(options(&flags, vec![selected.clone()]).is_err());
         }
-        assert!(
-            options(
-                &BTreeMap::from([("--max-artifact-mib", "4")]),
-                vec![],
-                false
-            )
-            .is_err()
-        );
-        assert!(options(&BTreeMap::new(), vec![], false).unwrap().is_none());
+        assert!(options(&BTreeMap::from([("--max-artifact-mib", "4")]), vec![],).is_err());
+        assert!(options(&BTreeMap::new(), vec![]).unwrap().is_none());
     }
 }
