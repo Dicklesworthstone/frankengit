@@ -4,6 +4,7 @@ import { lstat, realpath, open, link, unlink, mkdir, rmdir, opendir } from 'node
 import { dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { parseExactJson } from './workflow_json.mjs';
 
 export const fail = message => { throw new Error(message); };
 export function absolute(value) {
@@ -51,12 +52,9 @@ export async function readPrivate(path, maximum, optional = false) {
   } finally { await handle.close(); }
 }
 export function parseJson(bytes, maximum = 128 * 1024) {
-  if (!Buffer.isBuffer(bytes) || bytes.length > maximum) fail('JSON input exceeds its byte limit.');
+  if (!Number.isSafeInteger(maximum) || maximum < 0 || !Buffer.isBuffer(bytes) || bytes.length > maximum) fail('JSON input exceeds its byte limit.');
   const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  return JSON.parse(text, (_key, value) => {
-    if (typeof value === 'number' && !Number.isSafeInteger(value)) fail('Inexact JSON counters are not supported.');
-    return value;
-  });
+  return parseExactJson(text);
 }
 // Create-only atomic visibility. A failure after linking does not mean absence.
 export async function writeNew(path, bytes) {
