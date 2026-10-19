@@ -28,6 +28,46 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>,
         limits: WorkflowLimits,
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
+        self.run_trusted_merge_workflow_with_artifacts_in(
+            request,
+            merge,
+            bundle,
+            workflow_path,
+            run_id,
+            parent,
+            read_prefixes,
+            expected_head,
+            limits,
+            None,
+        )
+        .await
+    }
+
+    /// Retain explicitly selected candidate outputs with exact producing-attempt
+    /// provenance. Artifact custody does not publish objects, refs or checks.
+    pub async fn run_trusted_merge_workflow_with_artifacts_in(
+        &self,
+        request: &NodeRequestContext,
+        merge: &NativeMerge,
+        bundle: &[u8],
+        workflow_path: &[u8],
+        run_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+    ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
+        if artifacts.is_some_and(|config| {
+            config
+                .selections()
+                .iter()
+                .any(|selection| selection.workflow_path() != workflow_path)
+        }) {
+            return Err(TrustedWorkflowFailure::InvalidInput(
+                "single-run artifact selections must name the selected workflow",
+            ));
+        }
         limits
             .validate()
             .map_err(TrustedWorkflowFailure::Workflow)?;
@@ -46,6 +86,7 @@ impl OneNode {
                     expected_head,
                     limits,
                     started,
+                    artifacts,
                 )
                 .await
             }
@@ -61,6 +102,7 @@ impl OneNode {
                     expected_head,
                     limits,
                     started,
+                    artifacts,
                 )
                 .await
             }
@@ -79,6 +121,7 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>,
         limits: WorkflowLimits,
         started: Instant,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("merge workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -107,6 +150,14 @@ impl OneNode {
             )
             .await
             .map_err(|error| TrustedWorkflowFailure::Candidate(Box::new(error)))?;
+        if !workspace_request_live(request) || started.elapsed() >= limits.run_timeout {
+            return Err(TrustedWorkflowFailure::InvalidInput(
+                "request stopped before artifact capture setup",
+            ));
+        }
+        let artifact_session = artifacts
+            .map(|config| artifacts::Session::open(self, config))
+            .transpose()?;
         run_inputs(
             self,
             request,
@@ -124,7 +175,7 @@ impl OneNode {
             parent,
             limits,
             started,
-            None,
+            artifact_session.as_ref(),
         )
     }
 }
