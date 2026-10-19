@@ -24,10 +24,7 @@ const fn actor(value: u8) -> PrincipalId {
 }
 
 fn session(value: u8, key: &[u8]) -> LoopbackReceiveSession {
-    LoopbackReceiveSession::authenticated(
-        actor(value),
-        IdempotencyKey::new(key.to_vec()).unwrap(),
-    )
+    LoopbackReceiveSession::authenticated(actor(value), IdempotencyKey::new(key.to_vec()).unwrap())
 }
 
 fn references() -> (RefName, RefName) {
@@ -231,7 +228,13 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
                 bytes: bytes.to_vec(),
             },
         }];
-        let ordinary = prepare(&node, &subject, inputs, &choices, MergeCommitStyle::TwoParent);
+        let ordinary = prepare(
+            &node,
+            &subject,
+            inputs,
+            &choices,
+            MergeCommitStyle::TwoParent,
+        );
         let legacy = node
             .runtime()
             .block_on(node.prepare_resolved_pull_request_bundle_in(
@@ -271,7 +274,10 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         assert_ne!(squash.resolved.plan.commit, ordinary.resolved.plan.commit);
         assert_eq!(squash.resolved.plan.style, MergeCommitStyle::Squash);
         assert_eq!(squash.source_head, before_preparation.basis().id());
-        assert_eq!(squash.bundle_sha256, fgit_crypto::sha256_digest(&squash.bundle));
+        assert_eq!(
+            squash.bundle_sha256,
+            fgit_crypto::sha256_digest(&squash.bundle)
+        );
         let merge = candidate(&subject, &squash);
         let expected_body = format!(
             "tree {}\nparent {}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nreviewable merge\n",
@@ -298,15 +304,31 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
             .unwrap();
         assert_eq!(inspected.parents, [inputs.target]);
         assert_eq!(inspected.candidate_commit_body, expected_body);
-        assert_eq!(inspected.review.comparison.requested_after, merge.merge_commit);
+        assert_eq!(
+            inspected.review.comparison.requested_after,
+            merge.merge_commit
+        );
         assert_eq!(inspected.review.comparison.entries.len(), 1);
         assert_eq!(inspected.review.comparison.entries[0].path, b"text");
-        assert_eq!(inspected.review.comparison.entries[0].after.unwrap().mode, 0o100755);
+        assert_eq!(
+            inspected.review.comparison.entries[0].after.unwrap().mode,
+            0o100755
+        );
         assert!(node.read_git_object(merge.merge_commit).is_err());
         assert_eq!(snapshot(&node).basis(), before_preparation.basis());
-        assert_eq!(coordinates(&node), inputs, "resolution cannot rewrite source history");
+        assert_eq!(
+            coordinates(&node),
+            inputs,
+            "resolution cannot rewrite source history"
+        );
 
-        vote(&node, &subject, &ordinary, ExpectedVersion::NewStream, b"review-two-parent");
+        vote(
+            &node,
+            &subject,
+            &ordinary,
+            ExpectedVersion::NewStream,
+            b"review-two-parent",
+        );
         let before_refusal = snapshot(&node);
         let (_, refused) = node
             .runtime()
@@ -325,11 +347,20 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
             .unwrap();
         assert!(matches!(
             refused.outcome,
-            DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }
+            DecisionOutcome::Refused {
+                code: RefusalCode::EvidenceStale,
+                ..
+            }
         ));
         let after_refusal = snapshot(&node);
-        assert_eq!(after_refusal.snapshot().refs, before_refusal.snapshot().refs);
-        assert_eq!(after_refusal.snapshot().outbox, before_refusal.snapshot().outbox);
+        assert_eq!(
+            after_refusal.snapshot().refs,
+            before_refusal.snapshot().refs
+        );
+        assert_eq!(
+            after_refusal.snapshot().outbox,
+            before_refusal.snapshot().outbox
+        );
         assert_eq!(
             after_refusal.basis().body().forge_position_root,
             before_refusal.basis().body().forge_position_root
@@ -359,14 +390,35 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
             .unwrap();
         committed(&accepted.1);
         let after = snapshot(&node);
-        assert_eq!(after.basis().generation().get(), before.basis().generation().get() + 1);
-        assert_eq!(after.snapshot().refs[&subject.target_ref], merge.merge_commit);
+        assert_eq!(
+            after.basis().generation().get(),
+            before.basis().generation().get() + 1
+        );
+        assert_eq!(
+            after.snapshot().refs[&subject.target_ref],
+            merge.merge_commit
+        );
         assert_eq!(after.snapshot().refs[&subject.source_ref], inputs.source);
-        assert_eq!(after.snapshot().outbox.len(), before.snapshot().outbox.len() + 1);
-        assert_ne!(after.basis().body().ref_root, before.basis().body().ref_root);
-        assert_ne!(after.basis().body().forge_position_root, before.basis().body().forge_position_root);
-        assert_ne!(after.basis().body().outbox_root, before.basis().body().outbox_root);
-        assert_eq!(node.read_git_object(merge.merge_commit).unwrap().payload(), expected_body);
+        assert_eq!(
+            after.snapshot().outbox.len(),
+            before.snapshot().outbox.len() + 1
+        );
+        assert_ne!(
+            after.basis().body().ref_root,
+            before.basis().body().ref_root
+        );
+        assert_ne!(
+            after.basis().body().forge_position_root,
+            before.basis().body().forge_position_root
+        );
+        assert_ne!(
+            after.basis().body().outbox_root,
+            before.basis().body().outbox_root
+        );
+        assert_eq!(
+            node.read_git_object(merge.merge_commit).unwrap().payload(),
+            expected_body
+        );
         assert_eq!(
             node.read_git_object(git_object_id(format, GitObjectKind::Blob, bytes))
                 .unwrap()
@@ -379,12 +431,18 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
             merge.clone(),
         )
         .unwrap();
-        let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&request))
+            .unwrap();
         let last = history.last().unwrap();
         assert_eq!(last.batch.committed_rcrs.len(), 1);
         assert_eq!(last.batch.committed_rcrs[0].tx_id, accepted.0);
         assert_eq!(last.forge_events, vec![intent.event().clone()]);
-        assert_eq!(last.batch.committed_rcrs[0].resulting_ref_root, after.basis().body().ref_root);
+        assert_eq!(
+            last.batch.committed_rcrs[0].resulting_ref_root,
+            after.basis().body().ref_root
+        );
         assert_eq!(
             last.batch.committed_rcrs[0].resulting_forge_position_root,
             after.basis().body().forge_position_root
@@ -395,18 +453,38 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
             .unwrap();
         assert_eq!(page.pull_requests[0].event, *intent.event());
         assert_eq!(page.pull_requests[0].data, Some(data));
-        assert!(node.runtime().block_on(node.apply_reviewed_merge_bundle_with_method_durable_in(
-            &request, actor(2), b"publish-resolved-squash", PullRequestNumber::FIRST,
-            ExpectedVersion::Exactly(AggregateVersion::FIRST), &merge, &squash.bundle,
-            subject.policy_epoch, &[actor(3)], NativeMergeMethod::MergeCommit,
-        )).is_err(), "the same retry key cannot select another merge method");
+        assert!(
+            node.runtime()
+                .block_on(node.apply_reviewed_merge_bundle_with_method_durable_in(
+                    &request,
+                    actor(2),
+                    b"publish-resolved-squash",
+                    PullRequestNumber::FIRST,
+                    ExpectedVersion::Exactly(AggregateVersion::FIRST),
+                    &merge,
+                    &squash.bundle,
+                    subject.policy_epoch,
+                    &[actor(3)],
+                    NativeMergeMethod::MergeCommit,
+                ))
+                .is_err(),
+            "the same retry key cannot select another merge method"
+        );
         assert_eq!(snapshot(&node).basis(), after.basis());
         assert!(matches!(
-            node.runtime().block_on(node.prepare_resolved_merge_bundle_with_style_in(
-                &request, &subject.target_ref, &subject.source_ref, &RefVisibility::new(),
-                None, inputs, &choices, &metadata(), PreparationLimits::default(),
-                MergeCommitStyle::Squash,
-            )),
+            node.runtime()
+                .block_on(node.prepare_resolved_merge_bundle_with_style_in(
+                    &request,
+                    &subject.target_ref,
+                    &subject.source_ref,
+                    &RefVisibility::new(),
+                    None,
+                    inputs,
+                    &choices,
+                    &metadata(),
+                    PreparationLimits::default(),
+                    MergeCommitStyle::Squash,
+                )),
             Err(NodeResolutionRefusal::TipsMoved)
         ));
         node.shutdown().unwrap();
@@ -416,9 +494,16 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let retry = reopened
             .runtime()
             .block_on(reopened.apply_reviewed_merge_bundle_with_method_durable_in(
-                &request, actor(2), b"publish-resolved-squash", PullRequestNumber::FIRST,
-                ExpectedVersion::Exactly(AggregateVersion::FIRST), &merge, &[],
-                subject.policy_epoch, &[actor(3)], NativeMergeMethod::Squash,
+                &request,
+                actor(2),
+                b"publish-resolved-squash",
+                PullRequestNumber::FIRST,
+                ExpectedVersion::Exactly(AggregateVersion::FIRST),
+                &merge,
+                &[],
+                subject.policy_epoch,
+                &[actor(3)],
+                NativeMergeMethod::Squash,
             ))
             .unwrap();
         assert_eq!(retry, accepted);
@@ -447,10 +532,17 @@ fn choosing_ours_can_publish_a_resolved_squash_with_an_empty_target_diff() {
         let plan = &artifact.resolved.plan;
         let target = node.read_git_object(inputs.target).unwrap();
         assert_eq!(
-            target.payload().split(|byte| *byte == b'\n').next().unwrap(),
+            target
+                .payload()
+                .split(|byte| *byte == b'\n')
+                .next()
+                .unwrap(),
             format!("tree {}", plan.tree).as_bytes()
         );
-        assert_eq!(artifact.resolved.resolutions[0].result, artifact.resolved.resolutions[0].conflict.ours);
+        assert_eq!(
+            artifact.resolved.resolutions[0].result,
+            artifact.resolved.resolutions[0].conflict.ours
+        );
         assert_eq!(plan.style, MergeCommitStyle::Squash);
         assert_ne!(plan.commit, inputs.target);
         assert_ne!(plan.commit, inputs.source);
@@ -461,7 +553,10 @@ fn choosing_ours_can_publish_a_resolved_squash_with_an_empty_target_diff() {
             .block_on(node.inspect_pull_request_bundle_in(
                 &request,
                 &subject,
-                CandidateBinding { merge_base: inputs.base, commit: plan.commit },
+                CandidateBinding {
+                    merge_base: inputs.base,
+                    commit: plan.commit,
+                },
                 &artifact.bundle,
                 &RefVisibility::new(),
                 &Default::default(),
@@ -486,10 +581,16 @@ fn choosing_ours_can_publish_a_resolved_squash_with_an_empty_target_diff() {
             .unwrap();
         committed(&accepted.1);
         let after = snapshot(&node);
-        assert_eq!(after.basis().generation().get(), before.basis().generation().get() + 1);
+        assert_eq!(
+            after.basis().generation().get(),
+            before.basis().generation().get() + 1
+        );
         assert_eq!(after.snapshot().refs[&subject.target_ref], plan.commit);
         assert_eq!(after.snapshot().refs[&subject.source_ref], inputs.source);
-        assert_eq!(after.snapshot().outbox.len(), before.snapshot().outbox.len() + 1);
+        assert_eq!(
+            after.snapshot().outbox.len(),
+            before.snapshot().outbox.len() + 1
+        );
         node.shutdown().unwrap();
     }
 }

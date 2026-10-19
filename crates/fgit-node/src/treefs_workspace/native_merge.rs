@@ -45,9 +45,7 @@ pub(in crate::treefs_workspace) fn bundle_merge_intent(
     method: NativeMergeMethod,
 ) -> Result<NativeMergeIntent, NodeWorkspaceRefusal> {
     let intent = match (method, version) {
-        (NativeMergeMethod::MergeCommit, version) => {
-            NativeMergeIntent::new(number, version, merge)
-        }
+        (NativeMergeMethod::MergeCommit, version) => NativeMergeIntent::new(number, version, merge),
         (NativeMergeMethod::Squash, ExpectedVersion::Exactly(version)) => {
             NativeMergeIntent::squash(number, version, merge)
         }
@@ -62,9 +60,7 @@ pub(in crate::treefs_workspace) fn bundle_merge_intent(
             ));
         }
     };
-    intent.map_err(|error| {
-        receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)))
-    })
+    intent.map_err(|error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error))))
 }
 
 impl OneNode {

@@ -590,6 +590,34 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         ))
     }
 
+    /// Read one explicitly selected regular output for immutable artifact custody.
+    /// The caller owns the output contract, cumulative byte budget and proof of
+    /// process quiescence. This does not import edits or grant cache reuse. Reads
+    /// stay beneath the pinned workspace descriptor without symlink, hardlink or
+    /// mount traversal, and refuse files changed during the bounded read.
+    pub fn read_artifact_output(
+        &self,
+        path: &TreePath,
+        maximum_bytes: usize,
+        cancelled: &dyn Fn(HostEpoch) -> bool,
+    ) -> Result<Option<(Vec<u8>, FileMode)>, HostRefusal> {
+        if maximum_bytes > 64 * 1024 * 1024 || path.as_bytes() == MARKER {
+            return Err(HostRefusal::ResourceLimit);
+        }
+        checkpoint(cancelled, HostEpoch::Importing(0))?;
+        check_marker(&self.root, &self.plan.marker)?;
+        let result = read_regular(
+            &self.root,
+            path,
+            maximum_bytes,
+            &mut BTreeSet::new(),
+            &|| checkpoint(cancelled, HostEpoch::Importing(0)),
+        )?;
+        checkpoint(cancelled, HostEpoch::Imported)?;
+        check_marker(&self.root, &self.plan.marker)?;
+        Ok(result)
+    }
+
     /// Read a declared output set at quiescence and return an all-or-nothing
     /// semantic edit log. No arbitrary directory walk contributes to import.
     /// Successful logs consume the lease's cumulative import allowance even

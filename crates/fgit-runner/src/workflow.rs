@@ -296,6 +296,36 @@ impl WorkflowPlan {
                         if result.outcome == JobOutcome::Succeeded && !run_live() {
                             result.outcome = stopped();
                         }
+                        // Persist required outputs before the quiescent working
+                        // copy closes and before durable terminal observation.
+                        // Legacy adapters take no extra cancellation checkpoints.
+                        if executor.has_job_outputs(job)
+                            && !containment_lost
+                            && matches!(result.outcome, JobOutcome::Succeeded | JobOutcome::Failed)
+                        {
+                            // Latch this observation even if a caller-supplied
+                            // liveness predicate later returns true again.
+                            if !run_live() {
+                                result.outcome = stopped();
+                            } else if let Err(failure) =
+                                executor.capture_job_outputs(job, &run_live)
+                            {
+                                containment_lost |= failure.retain_workspace;
+                                result.outcome = if !failure.retain_workspace && !run_live() {
+                                    stopped()
+                                } else {
+                                    JobOutcome::Refused
+                                };
+                                let detail = result.failure.take().map_or_else(
+                                    || failure.detail.clone(),
+                                    |original| {
+                                        format!("{}; outputs: {}", original.detail, failure.detail)
+                                    },
+                                );
+                                result.failure =
+                                    Some(WorkerFailure::new(detail, failure.retain_workspace));
+                            }
+                        }
                         let retain = containment_lost;
                         if let Err(failure) = executor.finish_job(retain) {
                             containment_lost = true;
@@ -408,6 +438,28 @@ pub trait WorkflowExecutor {
         }
         self.execute_step(index, script, limits, live)
     }
+    /// Whether this job has an explicit output custody contract. Defaults keep
+    /// existing adapters and their cancellation checkpoint order unchanged.
+    fn has_job_outputs(&self, _job: &Job) -> bool {
+        false
+    }
+
+    /// Persist explicitly selected outputs after the process scope is quiescent
+    /// and before its working copy closes. Called only when has_job_outputs is
+    /// true, the request is live, containment is proved, and the job reached an
+    /// ordinary success or failure. Refusal prevents a successful observation;
+    /// finish_job still owns unconditional, non-cancellable cleanup.
+    fn capture_job_outputs(
+        &mut self,
+        _job: &Job,
+        _live: &dyn Fn() -> bool,
+    ) -> Result<(), WorkerFailure> {
+        Err(WorkerFailure::new(
+            "executor does not implement output custody",
+            false,
+        ))
+    }
+
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure>;
 
     /// Receives one normalized terminal observation after cleanup, or after a

@@ -135,10 +135,7 @@ fn every_claimed_coordinate_and_scope_is_checked_against_the_retained_frame() {
 #[test]
 fn reported_states_remain_distinct_and_skips_are_not_green() {
     for (outcome, expected) in [
-        (
-            JobOutcome::Succeeded,
-            WorkflowCheckConclusion::Success,
-        ),
+        (JobOutcome::Succeeded, WorkflowCheckConclusion::Success),
         (JobOutcome::Skipped, WorkflowCheckConclusion::ActionRequired),
         (JobOutcome::Failed, WorkflowCheckConclusion::Failure),
         (JobOutcome::Refused, WorkflowCheckConclusion::Failure),
@@ -332,10 +329,7 @@ fn actual_publication_survives_reopen_with_exact_evidence_and_no_branch_or_polic
             .unwrap();
         assert_eq!(saved.record, record);
         assert_eq!(saved.actor, publisher());
-        assert_eq!(
-            saved.record.conclusion,
-            WorkflowCheckConclusion::Success
-        );
+        assert_eq!(saved.record.conclusion, WorkflowCheckConclusion::Success);
         assert_eq!(
             fs::read(run.run_directory.join("check-proposals.journal")).unwrap(),
             journal_before

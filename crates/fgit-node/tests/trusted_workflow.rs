@@ -25,6 +25,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new(format: GitHashAlgorithm, workflow: &str) -> Self {
+        Self::new_inner(format, workflow, false)
+    }
+    fn new_dispatch(format: GitHashAlgorithm, workflow: &str) -> Self {
+        Self::new_inner(format, workflow, true)
+    }
+    fn new_inner(format: GitHashAlgorithm, workflow: &str, dispatch: bool) -> Self {
         // Create-new ownership, including stale directories from a reused PID.
         let root = loop {
             let path = std::env::temp_dir().join(format!(
@@ -61,6 +67,18 @@ impl Fixture {
         );
         let input = loose(&source, format, GitObjectKind::Blob, "blob", b"original\n");
         let mut tree = Vec::new();
+        if dispatch {
+            let mut children = Vec::new();
+            for name in [b"a.yml".as_slice(), b"b.yml".as_slice()] {
+                children.extend_from_slice(b"100644 ");
+                children.extend_from_slice(name);
+                children.push(0);
+                children.extend_from_slice(workflow.as_bytes());
+            }
+            let ci = loose(&source, format, GitObjectKind::Tree, "tree", &children);
+            tree.extend_from_slice(b"40000 ci\0");
+            tree.extend_from_slice(ci.as_bytes());
+        }
         for (name, oid) in [
             (b"input.txt".as_slice(), input),
             (b"workflow.yml".as_slice(), workflow),
@@ -592,3 +610,6 @@ fn literal_multiline_script_executes_exact_decoded_bytes_and_persists_commitment
         assert_eq!(generation(f.node()), before);
     }
 }
+
+#[path = "trusted_workflow/artifacts.rs"]
+mod artifacts;

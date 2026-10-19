@@ -1,9 +1,11 @@
 //! Repository-bound execution of the existing trusted workflow profile.
 //! Never expose this local-owner operation as a remote or hostile CI endpoint.
 
+pub(super) mod artifacts;
 mod candidate;
 mod completion;
 mod durable;
+use artifacts::TrustedWorkflowArtifactConfig;
 use candidate::WorkflowInputs;
 
 use std::collections::BTreeSet;
@@ -50,6 +52,7 @@ pub enum TrustedWorkflowFailure {
     Candidate(Box<super::candidate_inspection::BundleInspectionRefusal>),
     Workflow(fgit_runner::workflow::WorkflowError),
     Host(HostRefusal),
+    Artifacts(fgit_object_fabric::artifact::storage::ArtifactStorageError),
     /// Never reuse an occupied slot: it can contain an interrupted execution.
     AttemptExists(PathBuf),
     Io {
@@ -102,6 +105,9 @@ pub struct TrustedWorkflowRun {
     pub run_directory: PathBuf,
     pub workspaces_closed: bool,
     pub request_interrupted: bool,
+    /// Explicit operator output contract, included in the immutable attempt identity.
+    pub artifact_contract: Option<TrustedWorkflowArtifactConfig>,
+    pub artifacts: Vec<artifacts::TrustedWorkflowJobArtifacts>,
     pub execution: WorkflowReport,
 }
 impl TrustedWorkflowRun {
@@ -125,7 +131,7 @@ impl TrustedWorkflowRun {
             .join(",");
         let candidate = self.candidate.map_or_else(|| "null".to_owned(), |c|
             format!("{{\"commit\":\"{}\",\"tree\":\"{}\",\"bundle_sha256\":\"{}\",\"admitted\":false}}", c.commit, c.tree, hex(&c.bundle_sha256)));
-        format!(
+        let mut identity = format!(
             concat!(
                 "\"schema_version\":1,\"tenant_id\":\"{}\",\"repository_id\":\"{}\",",
                 "\"repository_incarnation\":\"{}\",\"source_head\":\"{}\",\"source_rcr\":\"{}\",",
@@ -158,7 +164,11 @@ impl TrustedWorkflowRun {
             self.executed_tree(),
             candidate,
             candidate::merge_json(self.merge.as_ref())
-        )
+        );
+        if let Some(contract) = &self.artifact_contract {
+            identity.push_str(&format!(",\"artifact_contract\":{}", contract.to_json()));
+        }
+        identity
     }
     // Identity remains stable after execution fills in the job observations.
     // Retain the historical marker bytes for the original empty plan exactly.
@@ -179,16 +189,30 @@ impl TrustedWorkflowRun {
     /// Output stays bounded by the native workflow report and source profile.
     /// All arbitrary source/output/path bytes use lossless hexadecimal encoding.
     pub fn to_json(&self) -> String {
+        let artifacts = self
+            .artifact_contract
+            .as_ref()
+            .map_or_else(String::new, |_| {
+                format!(
+                    ",\"artifacts\":[{}]",
+                    self.artifacts
+                        .iter()
+                        .map(artifacts::TrustedWorkflowJobArtifacts::to_json)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            });
         format!(
             concat!(
                 "{{\"type\":\"trusted_workflow_run\",{},\"succeeded\":{},",
-                "\"workspaces_closed\":{},\"request_interrupted\":{},\"execution\":{}}}"
+                "\"workspaces_closed\":{},\"request_interrupted\":{},\"execution\":{}{}}}"
             ),
             self.identity_json(),
             self.succeeded(),
             self.workspaces_closed,
             self.request_interrupted,
-            self.execution.to_json()
+            self.execution.to_json(),
+            artifacts
         )
     }
 }
@@ -224,6 +248,45 @@ impl OneNode {
         expected: (Option<RepositoryAuthorityHeadId>, Option<GitOid>),
         limits: WorkflowLimits,
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
+        self.run_trusted_workflow_with_artifacts_in(
+            request,
+            reference,
+            workflow_path,
+            run_id,
+            parent,
+            read_prefixes,
+            expected,
+            limits,
+            None,
+        )
+        .await
+    }
+
+    /// Execute with an optional exact output contract. Verified payloads and a
+    /// producing-job provenance manifest are durable before the job can succeed.
+    /// Only the explicitly trusted local owner may select the protected store.
+    pub async fn run_trusted_workflow_with_artifacts_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        workflow_path: &[u8],
+        run_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        expected: (Option<RepositoryAuthorityHeadId>, Option<GitOid>),
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+    ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
+        if artifacts.is_some_and(|config| {
+            config
+                .selections()
+                .iter()
+                .any(|selection| selection.workflow_path() != workflow_path)
+        }) {
+            return Err(TrustedWorkflowFailure::InvalidInput(
+                "single-run artifact selections must name the selected workflow",
+            ));
+        }
         limits
             .validate()
             .map_err(TrustedWorkflowFailure::Workflow)?;
@@ -241,6 +304,7 @@ impl OneNode {
                     expected,
                     limits,
                     started,
+                    artifacts,
                 )
                 .await
             }
@@ -255,6 +319,7 @@ impl OneNode {
                     expected,
                     limits,
                     started,
+                    artifacts,
                 )
                 .await
             }
@@ -272,6 +337,7 @@ impl OneNode {
         expected: (Option<RepositoryAuthorityHeadId>, Option<GitOid>),
         limits: WorkflowLimits,
         started: Instant,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -315,6 +381,7 @@ impl OneNode {
                         parent,
                         limits,
                         started,
+                        artifacts,
                     );
                     *observed
                         .lock()
@@ -397,6 +464,7 @@ fn run_at<A: GitHashAlgorithm>(
     parent: &Path,
     limits: WorkflowLimits,
     started: Instant,
+    artifacts: Option<&TrustedWorkflowArtifactConfig>,
 ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
     if !workspace_request_live(request) || started.elapsed() >= limits.run_timeout {
         return Err(TrustedWorkflowFailure::InvalidInput(
@@ -408,6 +476,9 @@ fn run_at<A: GitHashAlgorithm>(
             TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Manifest(error))
         })?,
     );
+    let artifact_session = artifacts
+        .map(|config| artifacts::Session::open(node, config))
+        .transpose()?;
     run_inputs(
         node,
         request,
@@ -421,6 +492,7 @@ fn run_at<A: GitHashAlgorithm>(
         parent,
         limits,
         started,
+        artifact_session.as_ref(),
     )
 }
 
@@ -437,6 +509,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     parent: &Path,
     limits: WorkflowLimits,
     started: Instant,
+    artifact_session: Option<&artifacts::Session<'_>>,
 ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
     if !live() {
@@ -461,6 +534,9 @@ fn run_inputs<A: GitHashAlgorithm>(
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("workflow is not UTF-8"))?,
     )
     .map_err(TrustedWorkflowFailure::Workflow)?;
+    if let Some(session) = artifact_session {
+        session.config.validate_workflow(workflow_path, &plan)?;
+    }
     if inputs
         .payload_bytes()
         .checked_mul(plan.graph().jobs.len())
@@ -504,6 +580,8 @@ fn run_inputs<A: GitHashAlgorithm>(
         run_directory: parent.join(format!("workflow-{}", hex(&run_id))),
         workspaces_closed: false,
         request_interrupted: false,
+        artifact_contract: artifact_session.map(|session| session.config.clone()),
+        artifacts: Vec::new(),
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),
@@ -558,6 +636,7 @@ fn run_inputs<A: GitHashAlgorithm>(
             "attempt marker durability failed before any job: {e}"
         ))
     })?;
+    let collector = artifact_session.map(|session| artifacts::Collector::new(session, &report));
     let mut worker = Executor {
         plan: host_plan,
         capability,
@@ -567,12 +646,16 @@ fn run_inputs<A: GitHashAlgorithm>(
         capture_paths: Vec::new(),
         retained: false,
         job_index: 0,
+        artifacts: collector,
     };
     // This outer predicate also charges source discovery against the run budget.
     // The scheduler owns every begun job and always calls non-cancellable close.
     // Queue custody and a durable Started fence precede the first process.
     // Each normalized job result is synced before a dependent scope can open.
     report.execution = coordinated.execute(&report.run_directory, &mut worker, &live)?;
+    if let Some(collector) = &mut worker.artifacts {
+        report.artifacts = std::mem::take(&mut collector.jobs);
+    }
     report.workspaces_closed = !worker.retained && worker.current.is_none();
     report.request_interrupted =
         !workspace_request_live(request) || started.elapsed() >= limits.run_timeout;
@@ -616,6 +699,7 @@ struct Executor<'a, A: GitHashAlgorithm> {
     capture_paths: Vec<PathBuf>,
     retained: bool,
     job_index: usize,
+    artifacts: Option<artifacts::Collector<'a>>,
 }
 impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
     fn begin_job(
@@ -720,6 +804,33 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
             limits,
             &stdout,
             &stderr,
+            live,
+        )
+    }
+    fn has_job_outputs(&self, job: &WorkflowJob) -> bool {
+        self.artifacts
+            .as_ref()
+            .is_some_and(|collector| collector.selects(&job.id))
+    }
+    fn capture_job_outputs(
+        &mut self,
+        job: &WorkflowJob,
+        live: &dyn Fn() -> bool,
+    ) -> Result<(), WorkerFailure> {
+        let Some(collector) = &mut self.artifacts else {
+            return Ok(());
+        };
+        let (workspace, _) = self
+            .current
+            .as_ref()
+            .ok_or_else(|| WorkerFailure::new("artifact workspace missing", true))?;
+        collector.capture(
+            workspace,
+            self.job_index,
+            &job.id,
+            &self.parent,
+            &self.directory,
+            &mut self.capture_paths,
             live,
         )
     }

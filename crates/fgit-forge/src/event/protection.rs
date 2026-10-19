@@ -72,7 +72,10 @@ impl ReviewProtection {
             }
             if (branch.reviewers.is_empty() && branch.required_checks.is_empty())
                 || branch.required_checks.len() > MAX_BRANCH_REQUIRED_CHECKS
-                || branch.required_checks.windows(2).any(|pair| pair[0] >= pair[1])
+                || branch
+                    .required_checks
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
             {
                 return Err(invalid_native("review_protection.required_checks"));
             }
@@ -84,7 +87,9 @@ impl ReviewProtection {
     }
     #[must_use]
     pub fn has_required_checks(&self) -> bool {
-        self.branches.iter().any(|branch| !branch.required_checks.is_empty())
+        self.branches
+            .iter()
+            .any(|branch| !branch.required_checks.is_empty())
     }
     #[must_use]
     pub fn branch(&self, name: &RefName) -> Option<&ProtectedBranch> {
@@ -185,10 +190,16 @@ impl NativeProtectionEvent {
             let reviewers = people(input, MAX_BRANCH_REVIEWERS, with_checks)?;
             let mut required_checks = Vec::new();
             if with_checks {
-                let n = count(input, "review_protection.required_checks", MAX_BRANCH_REQUIRED_CHECKS)?;
+                let n = count(
+                    input,
+                    "review_protection.required_checks",
+                    MAX_BRANCH_REQUIRED_CHECKS,
+                )?;
                 for _ in 0..n {
                     let source_ref = input.read_ref_name()?;
-                    let publisher = PrincipalId::from_bytes(input.read_opaque_id("review_protection.check_publisher")?);
+                    let publisher = PrincipalId::from_bytes(
+                        input.read_opaque_id("review_protection.check_publisher")?,
+                    );
                     let mut graph_root = [0; 32];
                     graph_root.copy_from_slice(input.take("review_protection.check_graph", 32)?);
                     let job = input.read_bytes("review_protection.check_job")?;
@@ -196,11 +207,21 @@ impl NativeProtectionEvent {
                         return Err(invalid_native("review_protection.check_job"));
                     }
                     let job = std::str::from_utf8(job)
-                        .map_err(|_| invalid_native("review_protection.check_job"))?.to_owned();
-                    required_checks.push(RequiredWorkflowCheck { source_ref, publisher, graph_root, job });
+                        .map_err(|_| invalid_native("review_protection.check_job"))?
+                        .to_owned();
+                    required_checks.push(RequiredWorkflowCheck {
+                        source_ref,
+                        publisher,
+                        graph_root,
+                        job,
+                    });
                 }
             }
-            branches.push(ProtectedBranch { name, reviewers, required_checks });
+            branches.push(ProtectedBranch {
+                name,
+                reviewers,
+                required_checks,
+            });
         }
         let value = Self {
             actor,

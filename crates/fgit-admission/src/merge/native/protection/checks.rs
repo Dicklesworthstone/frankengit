@@ -44,7 +44,10 @@ where
     if required.is_empty() {
         return Ok(());
     }
-    if required.iter().any(|check| refs.get(&check.source_ref) != Some(&candidate)) {
+    if required
+        .iter()
+        .any(|check| refs.get(&check.source_ref) != Some(&candidate))
+    {
         return Err(denied());
     }
     let mut unresolved: Vec<_> = required.iter().collect();
@@ -56,8 +59,17 @@ where
     loop {
         live(cancelled).map_err(infrastructure)?;
         let (predecessor, batch) = match read_history_step_async(
-            store, cx, &successor, &mut walked, MAX_HISTORY_STEPS, cancelled,
-        ).await.map_err(storage::history_step_refusal).map_err(infrastructure)? {
+            store,
+            cx,
+            &successor,
+            &mut walked,
+            MAX_HISTORY_STEPS,
+            cancelled,
+        )
+        .await
+        .map_err(storage::history_step_refusal)
+        .map_err(infrastructure)?
+        {
             HistoryStep::Genesis => return Err(denied()),
             HistoryStep::Checkpoint { predecessor } => {
                 successor = predecessor.body().clone();
@@ -67,19 +79,37 @@ where
         };
         for record in batch.committed_rcrs.iter().rev() {
             live(cancelled).map_err(infrastructure)?;
-            batches_seen = batches_seen.checked_add(1).filter(|n| *n <= MAX_SCAN_BATCHES)
-                .ok_or(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))?;
+            batches_seen = batches_seen
+                .checked_add(1)
+                .filter(|n| *n <= MAX_SCAN_BATCHES)
+                .ok_or(ProjectionFailure::Unavailable(
+                    RefusalCode::ResourceBudgetExceeded,
+                ))?;
             let (events, bytes) = storage::read_events_with_size(
-                store, cx, basis.body().repository_id, record.forge_event_batch_root,
-            ).await.map_err(infrastructure)?;
+                store,
+                cx,
+                basis.body().repository_id,
+                record.forge_event_batch_root,
+            )
+            .await
+            .map_err(infrastructure)?;
             live(cancelled).map_err(infrastructure)?;
-            bytes_seen = bytes_seen.checked_add(bytes).filter(|n| *n <= MAX_SCAN_BYTES)
-                .ok_or(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))?;
-            events_seen = events_seen.checked_add(events.events.len()).filter(|n| *n <= MAX_SCAN_EVENTS)
-                .ok_or(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))?;
+            bytes_seen = bytes_seen
+                .checked_add(bytes)
+                .filter(|n| *n <= MAX_SCAN_BYTES)
+                .ok_or(ProjectionFailure::Unavailable(
+                    RefusalCode::ResourceBudgetExceeded,
+                ))?;
+            events_seen = events_seen
+                .checked_add(events.events.len())
+                .filter(|n| *n <= MAX_SCAN_EVENTS)
+                .ok_or(ProjectionFailure::Unavailable(
+                    RefusalCode::ResourceBudgetExceeded,
+                ))?;
             for event in events.events.iter().rev() {
                 live(cancelled).map_err(infrastructure)?;
-                let ForgeEventPayload::WorkflowCheckObservedNative(observation) = &event.payload else {
+                let ForgeEventPayload::WorkflowCheckObservedNative(observation) = &event.payload
+                else {
                     continue;
                 };
                 let check = &observation.record;

@@ -225,7 +225,9 @@ fn every_administrator_reviewer_branch_and_epoch_is_identity_material() {
 fn required_check() -> RequiredWorkflowCheck {
     RequiredWorkflowCheck {
         source_ref: RefName::try_new(b"refs/heads/ci-candidate").unwrap(),
-        publisher: actor(7), graph_root: [0x51; 32], job: "build:linux λ".into(),
+        publisher: actor(7),
+        graph_root: [0x51; 32],
+        job: "build:linux λ".into(),
     }
 }
 #[test]
@@ -234,15 +236,24 @@ fn required_checks_have_a_required_wire_kind_and_preserve_review_only_encoding()
     assert_eq!(old.payload.kind(), 9);
     let original = encode_body(&old).unwrap();
     let mut new = old.clone();
-    let ForgeEventPayload::ReviewProtectionChanged(change) = &mut new.payload else { panic!() };
-    change.protection.branches[0].required_checks.push(required_check());
+    let ForgeEventPayload::ReviewProtectionChanged(change) = &mut new.payload else {
+        panic!()
+    };
+    change.protection.branches[0]
+        .required_checks
+        .push(required_check());
     assert_eq!(new.payload.kind(), 13);
     let frame = encode_body(&new).unwrap();
-    assert_eq!(decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap(), new);
+    assert_eq!(
+        decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap(),
+        new
+    );
     for length in 0..frame.len() {
         assert!(decode_body::<ForgeEvent>(&frame[..length], DecodeLimits::DEFAULT).is_err());
     }
-    let ForgeEventPayload::ReviewProtectionChanged(change) = &mut new.payload else { panic!() };
+    let ForgeEventPayload::ReviewProtectionChanged(change) = &mut new.payload else {
+        panic!()
+    };
     change.protection.branches[0].required_checks.clear();
     assert_eq!(encode_body(&new).unwrap(), original);
 }
@@ -256,7 +267,12 @@ fn check_only_policies_are_explicit_bounded_and_canonical() {
     let mut invalid = p.clone();
     invalid.branches[0].required_checks.push(required_check());
     assert!(invalid.validate().is_err());
-    for job in ["".to_owned(), "a\nb".to_owned(), "\u{85}".to_owned(), "λ".repeat(513)] {
+    for job in [
+        "".to_owned(),
+        "a\nb".to_owned(),
+        "\u{85}".to_owned(),
+        "λ".repeat(513),
+    ] {
         let mut invalid = p.clone();
         invalid.branches[0].required_checks[0].job = job;
         assert!(invalid.validate().is_err());
@@ -264,14 +280,20 @@ fn check_only_policies_are_explicit_bounded_and_canonical() {
     let mut invalid = p.clone();
     invalid.branches[0].required_checks[0].source_ref = RefName::try_new(b"refs/tags/ci").unwrap();
     assert!(invalid.validate().is_err());
-    p.branches[0].required_checks = (0..MAX_BRANCH_REQUIRED_CHECKS).map(|n| {
-        RequiredWorkflowCheck { job: format!("job-{n:02}"), ..required_check() }
-    }).collect();
+    p.branches[0].required_checks = (0..MAX_BRANCH_REQUIRED_CHECKS)
+        .map(|n| RequiredWorkflowCheck {
+            job: format!("job-{n:02}"),
+            ..required_check()
+        })
+        .collect();
     p.validate().unwrap();
     p.branches[0].required_checks.reverse();
     assert!(p.validate().is_err());
     p.branches[0].required_checks.reverse();
-    p.branches[0].required_checks.push(RequiredWorkflowCheck { job: "zz".into(), ..required_check() });
+    p.branches[0].required_checks.push(RequiredWorkflowCheck {
+        job: "zz".into(),
+        ..required_check()
+    });
     assert!(p.validate().is_err());
 }
 #[test]
@@ -281,8 +303,14 @@ fn publishers_do_not_authorize_their_own_policy_and_every_selector_is_identity_m
     p.branches[0].required_checks.push(required_check());
     let authorized = after(&first, 1, p.clone());
     validate_transition(Some(&first), &authorized, PolicyEpoch::try_new(2).unwrap()).unwrap();
-    assert_eq!(validate_transition(Some(&first), &after(&first, 7, p.clone()), PolicyEpoch::try_new(2).unwrap()),
-        Err(RefusalCode::ProtectedRefTransitionDenied));
+    assert_eq!(
+        validate_transition(
+            Some(&first),
+            &after(&first, 7, p.clone()),
+            PolicyEpoch::try_new(2).unwrap()
+        ),
+        Err(RefusalCode::ProtectedRefTransitionDenied)
+    );
     let bytes = encode_body(&authorized).unwrap();
     for field in 0..4 {
         let mut changed = p.clone();

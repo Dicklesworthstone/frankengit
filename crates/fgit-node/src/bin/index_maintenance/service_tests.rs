@@ -211,8 +211,7 @@ mod native {
                     control.clone(),
                     || {
                         assert!(directory.join("run.lock").is_file());
-                        let checkpoint =
-                            fs::read_to_string(directory.join("checkpoint")).unwrap();
+                        let checkpoint = fs::read_to_string(directory.join("checkpoint")).unwrap();
                         assert!(checkpoint.contains(format.as_str()));
                         assert_eq!(checkpoint.contains("symbols1"), kind == IndexKind::Symbols);
                         called.set(true);
@@ -237,7 +236,12 @@ mod native {
         let called = Cell::new(false);
         let missing = run_service_with_ready(
             node.clone(),
-            config(IndexKind::Lexical, GitHashAlgorithm::Sha1, &directory, false),
+            config(
+                IndexKind::Lexical,
+                GitHashAlgorithm::Sha1,
+                &directory,
+                false,
+            ),
             MaintenanceControl::default(),
             || {
                 called.set(true);
@@ -261,7 +265,12 @@ mod native {
         let checkpoint = fs::read(directory.join("checkpoint")).unwrap();
         let foreign = run_service_with_ready(
             node.clone(),
-            config(IndexKind::Symbols, GitHashAlgorithm::Sha1, &directory, false),
+            config(
+                IndexKind::Symbols,
+                GitHashAlgorithm::Sha1,
+                &directory,
+                false,
+            ),
             MaintenanceControl::default(),
             || {
                 called.set(true);
@@ -274,7 +283,12 @@ mod native {
         let control = MaintenanceControl::default();
         run_service_with_ready(
             node,
-            config(IndexKind::Lexical, GitHashAlgorithm::Sha1, &directory, false),
+            config(
+                IndexKind::Lexical,
+                GitHashAlgorithm::Sha1,
+                &directory,
+                false,
+            ),
             control.clone(),
             || {
                 control.request_stop();
@@ -303,7 +317,12 @@ mod native {
         let called = Cell::new(false);
         let stopped = run_service_with_ready(
             node.clone(),
-            config(IndexKind::Lexical, GitHashAlgorithm::Sha1, &directory, false),
+            config(
+                IndexKind::Lexical,
+                GitHashAlgorithm::Sha1,
+                &directory,
+                false,
+            ),
             MaintenanceControl::default(),
             || {
                 called.set(true);
@@ -318,7 +337,12 @@ mod native {
         let control = MaintenanceControl::default();
         run_service_with_ready(
             node,
-            config(IndexKind::Lexical, GitHashAlgorithm::Sha1, &directory, false),
+            config(
+                IndexKind::Lexical,
+                GitHashAlgorithm::Sha1,
+                &directory,
+                false,
+            ),
             control.clone(),
             || {
                 control.request_stop();
@@ -386,14 +410,15 @@ mod native {
         // The same cancelled context stays cancelled; an independent permitted
         // attempt uses a fresh context and reaches ordinary current-ref checks.
         assert!(matches!(
-            node.runtime().block_on(node.reconcile_source_index_local_in(
-                &request,
-                &reference,
-                None,
-                None,
-                Default::default(),
-                Default::default(),
-            )),
+            node.runtime()
+                .block_on(node.reconcile_source_index_local_in(
+                    &request,
+                    &reference,
+                    None,
+                    None,
+                    Default::default(),
+                    Default::default(),
+                )),
             Err(NodeWorkspaceRefusal::Cancelled { .. })
         ));
         let fresh = node.outbox_delivery_context();
@@ -403,14 +428,15 @@ mod native {
             7
         );
         assert!(matches!(
-            node.runtime().block_on(node.reconcile_source_index_local_in(
-                &fresh,
-                &reference,
-                None,
-                None,
-                Default::default(),
-                Default::default(),
-            )),
+            node.runtime()
+                .block_on(node.reconcile_source_index_local_in(
+                    &fresh,
+                    &reference,
+                    None,
+                    None,
+                    Default::default(),
+                    Default::default(),
+                )),
             Err(NodeWorkspaceRefusal::RefUnavailable)
         ));
         node.shutdown().unwrap();

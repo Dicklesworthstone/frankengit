@@ -36,6 +36,11 @@ impl TrustedWorkflowDispatch {
             && self.runs.iter().all(TrustedWorkflowRun::succeeded)
     }
 
+    /// Completed child observations in their deterministic dispatch order.
+    pub fn runs(&self) -> &[TrustedWorkflowRun] {
+        &self.runs
+    }
+
     fn manifest_json(&self) -> String {
         let definitions = self.definitions.iter().map(|d| format!(
             "{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"graph_sha256\":\"{}\",\"run_id\":\"{}\",\"selected\":{}}}",
@@ -118,6 +123,37 @@ impl OneNode {
         expected: (RepositoryAuthorityHeadId, GitOid),
         limits: WorkflowLimits,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
+        self.dispatch_trusted_workflows_with_artifacts_in(
+            request,
+            reference,
+            directory,
+            event,
+            run_id,
+            parent,
+            read_prefixes,
+            expected,
+            limits,
+            None,
+        )
+        .await
+    }
+
+    /// Dispatch with one explicit output contract and a cumulative artifact byte
+    /// allowance shared by all selected workflows. Every selector is resolved
+    /// before batch reservation; output custody precedes successful job evidence.
+    pub async fn dispatch_trusted_workflows_with_artifacts_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        directory: &[u8],
+        event: &str,
+        run_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        expected: (RepositoryAuthorityHeadId, GitOid),
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+    ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         if !event_supported(event) {
             return Err(TrustedWorkflowFailure::InvalidInput(
                 "unsupported dispatch event",
@@ -132,14 +168,14 @@ impl OneNode {
             Format::Sha1 => {
                 self.dispatch_workflow_format::<Sha1>(
                     request, reference, directory, event, run_id, parent, paths, expected, limits,
-                    started,
+                    started, artifacts,
                 )
                 .await
             }
             Format::Sha256 => {
                 self.dispatch_workflow_format::<Sha256>(
                     request, reference, directory, event, run_id, parent, paths, expected, limits,
-                    started,
+                    started, artifacts,
                 )
                 .await
             }
@@ -158,6 +194,7 @@ impl OneNode {
         expected: (RepositoryAuthorityHeadId, GitOid),
         limits: WorkflowLimits,
         started: Instant,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -203,7 +240,7 @@ impl OneNode {
                         );
                         dispatch_at(
                             self, request, manifest, capability, head, reference, directory, event,
-                            run_id, parent, &declared, limits, started,
+                            run_id, parent, &declared, limits, started, artifacts,
                         )
                     })();
                     *observed
@@ -248,6 +285,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     declared: &[Vec<u8>],
     limits: WorkflowLimits,
     started: Instant,
+    artifacts: Option<&TrustedWorkflowArtifactConfig>,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
@@ -285,6 +323,19 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .triggers
             .iter()
             .any(|trigger| trigger.name == event);
+        if let Some(config) = artifacts {
+            config.validate_workflow(entry.path().as_bytes(), &plan)?;
+            if !selected
+                && config
+                    .selections()
+                    .iter()
+                    .any(|s| s.workflow_path() == entry.path().as_bytes())
+            {
+                return Err(invalid(
+                    "artifact workflow is not selected by this dispatch event",
+                ));
+            }
+        }
         if selected {
             jobs += plan.graph().jobs.len();
             steps += plan
@@ -311,6 +362,17 @@ fn dispatch_at<A: GitHashAlgorithm>(
             selected,
         });
     }
+    if artifacts.is_some_and(|config| {
+        config.selections().iter().any(|s| {
+            !definitions
+                .iter()
+                .any(|d| d.selected && d.path == s.workflow_path())
+        })
+    }) {
+        return Err(invalid(
+            "artifact selection names an absent dispatch workflow",
+        ));
+    }
     if inputs
         .payload_bytes()
         .checked_mul(jobs)
@@ -330,13 +392,16 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .host_plan(capability)
             .map_err(TrustedWorkflowFailure::Host)?;
     }
+    let artifact_session = artifacts
+        .map(|config| artifacts::Session::open(node, config))
+        .transpose()?;
     let run_directory = parent.join(format!("dispatch-{}", hex(&run_id)));
     let prefixes = declared
         .iter()
         .map(|p| format!("\"{}\"", hex(p)))
         .collect::<Vec<_>>()
         .join(",");
-    let identity = format!(
+    let mut identity = format!(
         concat!(
             "\"schema_version\":1,\"tenant_id\":\"{}\",\"repository_id\":\"{}\",\"repository_incarnation\":\"{}\",",
             "\"source_head\":\"{}\",\"source_rcr\":\"{}\",\"source_commit\":\"{}\",\"source_tree\":\"{}\",\"object_format\":\"{}\",",
@@ -362,6 +427,9 @@ fn dispatch_at<A: GitHashAlgorithm>(
         limits.run_timeout.as_millis(),
         limits.total_output_bytes,
     );
+    if let Some(config) = artifacts {
+        identity.push_str(&format!(",\"artifact_contract\":{}", config.to_json()));
+    }
     let mut report = TrustedWorkflowDispatch {
         run_directory,
         identity,
@@ -427,7 +495,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
             ..limits
         };
         let run = run_inputs(node, request, WorkflowInputs::Canonical(Arc::clone(&manifest)), capability, head, reference,
-            &definition.path, declared, definition.run_id, &batch_directory, child_limits, started)
+            &definition.path, declared, definition.run_id, &batch_directory, child_limits, started, artifact_session.as_ref())
             .map_err(|e| failed(format!("dispatch child {} failed: {e}; retain the batch and inspect its child journals, do not replay", hex(&definition.run_id))))?;
         let captured = run
             .execution

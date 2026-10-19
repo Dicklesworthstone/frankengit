@@ -499,7 +499,10 @@ impl OneNode {
                 }
             }
             // Check lifetime control even while all connection slots are full.
-            if maintenance.as_ref().is_some_and(maintenance::Worker::finished) {
+            if maintenance
+                .as_ref()
+                .is_some_and(maintenance::Worker::finished)
+            {
                 failure = Some(io_error(
                     "supervise source index maintenance",
                     io::Error::other("index maintenance stopped while HTTP acceptance was active"),
@@ -1106,17 +1109,15 @@ fn serve_connection(
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
         }
-        let issue_request = if protection_request.is_none()
-            && source_request.is_none()
-            && pull_request.is_none()
-        {
-            issues::Request::parse(&envelope).map_err(|error| {
-                api_error = Some(error);
-                error.status
-            })?
-        } else {
-            None
-        };
+        let issue_request =
+            if protection_request.is_none() && source_request.is_none() && pull_request.is_none() {
+                issues::Request::parse(&envelope).map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?
+            } else {
+                None
+            };
         let git_request = if protection_request.is_none()
             && source_request.is_none()
             && issue_request.is_none()
@@ -1130,9 +1131,9 @@ fn serve_connection(
             if let Some(request) = &protection_request {
                 protection::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
                     .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
+                    api_error = Some(error);
+                    error.status
+                })?
             } else if let Some(request) = &source_request {
                 source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
                     .map_err(|error| {

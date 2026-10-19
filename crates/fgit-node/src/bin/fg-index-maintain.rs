@@ -3,16 +3,12 @@
 //! second async runtime, remote index-write grant, or query-side mutation.
 #[path = "index_maintenance/backend.rs"]
 mod backend;
-#[path = "index_maintenance/state.rs"]
-mod state;
 #[path = "index_maintenance/service.rs"]
 mod service;
+#[path = "index_maintenance/state.rs"]
+mod state;
 use backend::AttemptFailure;
 pub use backend::IndexKind;
-pub use service::{
-    MaintenanceConfig, MaintenanceControl, MaintenanceError, MaintenanceReceipt, run_service,
-    run_service_with_ready,
-};
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_graph::lexical::{IndexError, LexicalError};
 use fgit_graph::{
@@ -22,6 +18,10 @@ use fgit_node::{NodeConfig, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, HeadGeneration, InternalObjectId,
     RefName, RepositoryId, TenantId,
+};
+pub use service::{
+    MaintenanceConfig, MaintenanceControl, MaintenanceError, MaintenanceReceipt, run_service,
+    run_service_with_ready,
 };
 use state::{Pin as IndexPin, ProgressFile, State, decimal, hex, unhex};
 use std::ffi::OsString;

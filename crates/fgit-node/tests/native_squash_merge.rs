@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_admission::merge::native::{NativeMergeIntent, NativeMergeMethod};
-use fgit_authority::{
-    ExpectedOld, IdempotencyKey, ProposedNew, RefCommand, TerminalOutcome,
-};
+use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand, TerminalOutcome};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::event::NativeMerge;
 use fgit_forge::event::protection::{ProtectedBranch, ProtectionCommand, ReviewProtection};
@@ -16,9 +14,7 @@ use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, Pul
 use fgit_forge::event::review::{
     CandidateBinding, CandidateReviewCommand, ReviewCommand, ReviewDecision, ReviewSubject,
 };
-use fgit_forge::preparation::{
-    MergeCommitStyle, MergeMetadata, MergePreparation, MergeProfile,
-};
+use fgit_forge::preparation::{MergeCommitStyle, MergeMetadata, MergePreparation, MergeProfile};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_node::{
     LoopbackReceiveSession, MaterializedAdmission, NodeConfig, NodeReceiveTransportRefusal,
@@ -77,7 +73,11 @@ fn config(root: &Path, format: GitHashAlgorithm) -> NodeConfig {
 
 fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, body: &[u8]) -> GitOid {
     let id = git_object_id(format, kind, body);
-    let raw = [format!("{} {}\0", kind.label(), body.len()).as_bytes(), body].concat();
+    let raw = [
+        format!("{} {}\0", kind.label(), body.len()).as_bytes(),
+        body,
+    ]
+    .concat();
     let length = u16::try_from(raw.len()).unwrap();
     let mut zlib = vec![0x78, 0x01, 0x01];
     zlib.extend(length.to_le_bytes());
@@ -271,7 +271,10 @@ fn refused(outcome: &TerminalOutcome, expected: RefusalCode) {
 fn unchanged_effects(before: &MaterializedAdmission, after: &MaterializedAdmission) {
     assert_eq!(before.snapshot().refs, after.snapshot().refs);
     assert_eq!(before.snapshot().head_target, after.snapshot().head_target);
-    assert_eq!(before.basis().body().ref_root, after.basis().body().ref_root);
+    assert_eq!(
+        before.basis().body().ref_root,
+        after.basis().body().ref_root
+    );
     assert_eq!(
         before.basis().body().forge_position_root,
         after.basis().body().forge_position_root
@@ -399,7 +402,8 @@ fn review_command(
 }
 
 #[test]
-fn native_squash_combines_content_and_atomically_publishes_pr_ref_outbox_then_replays_after_restart() {
+fn native_squash_combines_content_and_atomically_publishes_pr_ref_outbox_then_replays_after_restart()
+ {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let f = fixture(&scratch.0, format);
@@ -452,8 +456,14 @@ fn native_squash_combines_content_and_atomically_publishes_pr_ref_outbox_then_re
             candidate.merge.merge_commit
         );
         assert_eq!(after.snapshot().refs[&source_ref()], f.source);
-        assert_eq!(after.snapshot().outbox.len(), before.snapshot().outbox.len() + 1);
-        assert_ne!(after.basis().body().ref_root, before.basis().body().ref_root);
+        assert_eq!(
+            after.snapshot().outbox.len(),
+            before.snapshot().outbox.len() + 1
+        );
+        assert_ne!(
+            after.basis().body().ref_root,
+            before.basis().body().ref_root
+        );
         assert_ne!(
             after.basis().body().forge_position_root,
             before.basis().body().forge_position_root
@@ -504,13 +514,10 @@ fn native_squash_combines_content_and_atomically_publishes_pr_ref_outbox_then_re
         let page = f
             .node
             .runtime()
-            .block_on(f.node.read_pull_requests_in(
-                &request,
-                &RefVisibility::new(),
-                0,
-                10,
-                None,
-            ))
+            .block_on(
+                f.node
+                    .read_pull_requests_in(&request, &RefVisibility::new(), 0, 10, None),
+            )
             .unwrap();
         assert_eq!(page.pull_requests[0].event, *intent.event());
         assert_eq!(page.pull_requests[0].data, Some(f.data.clone()));
@@ -854,7 +861,10 @@ fn protected_squash_requires_its_exact_candidate_vote_and_honors_withdrawal_afte
             squash.merge.merge_commit
         );
         assert_eq!(after.snapshot().refs[&source_ref()], f.source);
-        assert_eq!(after.snapshot().outbox.len(), before.snapshot().outbox.len() + 1);
+        assert_eq!(
+            after.snapshot().outbox.len(),
+            before.snapshot().outbox.len() + 1
+        );
         reopened.shutdown().unwrap();
     }
 }
@@ -863,7 +873,11 @@ fn protected_squash_requires_its_exact_candidate_vote_and_honors_withdrawal_afte
 fn cancellation_before_squash_admission_leaves_the_exact_request_retryable() {
     let scratch = Scratch::new();
     let f = fixture(&scratch.0, GitHashAlgorithm::Sha1);
-    let candidate = prepare(&f.node, MergeCommitStyle::Squash, b"cancelled then retried\n");
+    let candidate = prepare(
+        &f.node,
+        MergeCommitStyle::Squash,
+        b"cancelled then retried\n",
+    );
     let before = snapshot(&f.node);
     let request = f.node.request_context();
     request.cancel();

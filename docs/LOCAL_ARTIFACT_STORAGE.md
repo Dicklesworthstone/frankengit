@@ -58,6 +58,11 @@ service. The existing OutputStore and deterministic-build reuse policy are not
 made durable by this payload slice. Those consumers can use exact immutable
 artifacts without treating payload existence as authorization.
 
+An explicit trusted-workflow consumer now captures selected regular job outputs
+before workspace cleanup and binds their immutable provenance to the producing
+attempt. See [trusted workflow artifacts](TRUSTED_WORKFLOW_ARTIFACTS.md). This
+consumer does not turn payload custody into a cache-hit or check authorization.
+
 ## Validation
 
 `cargo test -p fgit-object-fabric --test artifact_storage --locked` covers real

@@ -17,7 +17,9 @@ use fgit_authority::{
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, validate_transition};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload};
-use fgit_types::{AsciiSlug, GitOid, PolicyEpoch, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId};
+use fgit_types::{
+    AsciiSlug, GitOid, PolicyEpoch, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod checks;
@@ -227,15 +229,21 @@ where
         .await
         .map_err(infrastructure)?;
     if let Some(policy) = selected.protection() {
-        let has_protected = effects
-            .refs
-            .keys()
-            .any(|name| policy.branch(name).is_some_and(|rule| !rule.reviewers.is_empty()));
+        let has_protected = effects.refs.keys().any(|name| {
+            policy
+                .branch(name)
+                .is_some_and(|rule| !rule.reviewers.is_empty())
+        });
         if has_protected {
             // Evaluated through fg043 PolicySnapshot via evaluate_protection
             let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
-            let compiled = compile_direct_branches(policy.branches.iter()
-                .filter(|branch| !branch.reviewers.is_empty()).map(|branch| &branch.name))?;
+            let compiled = compile_direct_branches(
+                policy
+                    .branches
+                    .iter()
+                    .filter(|branch| !branch.reviewers.is_empty())
+                    .map(|branch| &branch.name),
+            )?;
             let id = source.pin(compiled);
             let verdict = crate::policy_bridge::evaluate_effects_protection(
                 &source,
@@ -255,7 +263,9 @@ where
         for (name, effect) in &effects.refs {
             if let Some(rule) = policy.branch(name) {
                 let fgit_reference::effect::RefEffect::Set(candidate) = effect else {
-                    return Err(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied));
+                    return Err(ProjectionFailure::Refuse(
+                        RefusalCode::ProtectedRefTransitionDenied,
+                    ));
                 };
                 // A fanout cannot use a checked source and simultaneously
                 // delete it or repoint it to an unchecked commit.
@@ -266,7 +276,16 @@ where
                         return Err(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied));
                     }
                 }
-                checks::verify_at(store, cx, basis, refs, *candidate, &rule.required_checks, cancelled).await?;
+                checks::verify_at(
+                    store,
+                    cx,
+                    basis,
+                    refs,
+                    *candidate,
+                    &rule.required_checks,
+                    cancelled,
+                )
+                .await?;
             }
         }
     }
@@ -321,7 +340,16 @@ where
                 .map_err(infrastructure)?;
             verify_at(store, cx, basis, intent, submitter, &required, cancelled).await?;
         }
-        checks::verify_at(store, cx, basis, refs, merge.merge_commit, &rule.required_checks, cancelled).await?;
+        checks::verify_at(
+            store,
+            cx,
+            basis,
+            refs,
+            merge.merge_commit,
+            &rule.required_checks,
+            cancelled,
+        )
+        .await?;
     }
     live(cancelled).map_err(infrastructure)
 }

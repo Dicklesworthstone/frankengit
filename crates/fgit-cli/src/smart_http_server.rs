@@ -324,12 +324,14 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         _ => return Err("--continuous and --stop-file must be supplied together".into()),
     };
     let credentials = if flags.contains_key("--print-credentials-header") {
-        if !index_refs.is_empty() || flags.keys().any(|name| {
-            !matches!(
-                *name,
-                "--trusted-local" | "--print-credentials-header" | "--expected-incarnation"
-            )
-        }) {
+        if !index_refs.is_empty()
+            || flags.keys().any(|name| {
+                !matches!(
+                    *name,
+                    "--trusted-local" | "--print-credentials-header" | "--expected-incarnation"
+                )
+            })
+        {
             return Err(
                 "header provisioning cannot be combined with serving or credential options".into(),
             );
@@ -380,7 +382,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             return Err("index maintenance requires --allow-source and scoped credentials".into());
         }
         let required = |name: &str| -> Result<&str, String> {
-            flags.get(name).copied()
+            flags
+                .get(name)
+                .copied()
                 .ok_or_else(|| format!("index maintenance requires {name}"))
         };
         let kind = match required("--index-profile")? {
@@ -398,18 +402,22 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "resume" => false,
             _ => return Err("--index-state must be init or resume".into()),
         };
-        Some(MaintenanceConfig::try_new(
-            kind,
-            format,
-            PathBuf::from(required("--index-state-dir")?),
-            initialize,
-            Duration::from_secs(number(&flags, "--index-interval-secs", 5, 3600)?),
-            index_refs,
-        ).and_then(|config| {
-            let seconds = number(&flags, "--index-attempt-timeout-secs", 300, 3600)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            config.with_attempt_timeout(Duration::from_secs(seconds))
-        }).map_err(|error| error.to_string())?)
+        Some(
+            MaintenanceConfig::try_new(
+                kind,
+                format,
+                PathBuf::from(required("--index-state-dir")?),
+                initialize,
+                Duration::from_secs(number(&flags, "--index-interval-secs", 5, 3600)?),
+                index_refs,
+            )
+            .and_then(|config| {
+                let seconds = number(&flags, "--index-attempt-timeout-secs", 300, 3600)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                config.with_attempt_timeout(Duration::from_secs(seconds))
+            })
+            .map_err(|error| error.to_string())?,
+        )
     } else {
         None
     };
@@ -585,8 +593,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         };
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
-        let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            let mut output = io::stdout().lock();
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
             options.allow_source, options.allow_protection, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
@@ -621,7 +629,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     maintenance,
                     &report_ready,
                 )
-            }.map_err(|error| error.to_string());
+            }
+            .map_err(|error| error.to_string());
         }
         report_ready().map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         if let Some(control) = control {
@@ -760,12 +769,25 @@ mod tests {
     }
     fn maintenance_arguments() -> Vec<String> {
         let mut args = arguments()[..5].to_vec();
-        args.extend([
-            "--credentials-file", "grants", "--allow-source",
-            "--index-state-dir", "maintenance", "--index-state", "init",
-            "--index-profile", "lexical", "--index-format", "sha1",
-            "--index-ref", "refs/heads/main",
-        ].into_iter().map(str::to_owned));
+        args.extend(
+            [
+                "--credentials-file",
+                "grants",
+                "--allow-source",
+                "--index-state-dir",
+                "maintenance",
+                "--index-state",
+                "init",
+                "--index-profile",
+                "lexical",
+                "--index-format",
+                "sha1",
+                "--index-ref",
+                "refs/heads/main",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
         args
     }
 
@@ -782,7 +804,13 @@ mod tests {
         assert_eq!(maintenance.attempt_timeout(), Duration::from_secs(300));
         assert_eq!(maintenance.refs()[0].as_bytes(), b"refs/heads/main");
         assert!(!options.allow_receive);
-        for flag in ["--index-state-dir", "--index-state", "--index-profile", "--index-format", "--index-ref"] {
+        for flag in [
+            "--index-state-dir",
+            "--index-state",
+            "--index-profile",
+            "--index-format",
+            "--index-ref",
+        ] {
             let mut missing = args.clone();
             let at = missing.iter().position(|arg| arg == flag).unwrap();
             missing.drain(at..at + 2);
@@ -796,26 +824,50 @@ mod tests {
     #[test]
     fn maintenance_supports_symbols_resume_and_canonical_sorted_refs() {
         let mut args = maintenance_arguments();
-        for (flag, value) in [("--index-state", "resume"), ("--index-profile", "symbols"), ("--index-format", "sha256")] {
+        for (flag, value) in [
+            ("--index-state", "resume"),
+            ("--index-profile", "symbols"),
+            ("--index-format", "sha256"),
+        ] {
             let at = args.iter().position(|arg| arg == flag).unwrap();
             args[at + 1] = value.into();
         }
-        args.extend([
-            "--index-ref", "refs/heads/develop", "--index-interval-secs", "1",
-            "--index-attempt-timeout-secs", "7",
-        ].into_iter().map(str::to_owned));
+        args.extend(
+            [
+                "--index-ref",
+                "refs/heads/develop",
+                "--index-interval-secs",
+                "1",
+                "--index-attempt-timeout-secs",
+                "7",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
         let config = parse(&args).unwrap().index_maintenance.unwrap();
         assert_eq!(config.kind(), IndexKind::Symbols);
         assert_eq!(config.format(), GitHashAlgorithm::Sha256);
         assert!(!config.initialize());
         assert_eq!(config.interval(), Duration::from_secs(1));
         assert_eq!(config.attempt_timeout(), Duration::from_secs(7));
-        assert_eq!(config.refs().iter().map(RefName::as_bytes).collect::<Vec<_>>(), [b"refs/heads/develop".as_slice(), b"refs/heads/main"]);
+        assert_eq!(
+            config
+                .refs()
+                .iter()
+                .map(RefName::as_bytes)
+                .collect::<Vec<_>>(),
+            [b"refs/heads/develop".as_slice(), b"refs/heads/main"]
+        );
     }
 
     #[test]
     fn maintenance_refuses_ambiguous_scopes_and_unbounded_scheduling() {
-        for (flag, value) in [("--index-state", "auto"), ("--index-profile", "unknown"), ("--index-format", "auto"), ("--index-ref", "main")] {
+        for (flag, value) in [
+            ("--index-state", "auto"),
+            ("--index-profile", "unknown"),
+            ("--index-format", "auto"),
+            ("--index-ref", "main"),
+        ] {
             let mut args = maintenance_arguments();
             let at = args.iter().position(|arg| arg == flag).unwrap();
             args[at + 1] = value.into();
@@ -837,7 +889,15 @@ mod tests {
         }
         assert!(parse(&too_many).is_err());
         let mut header = arguments()[..5].to_vec();
-        header.extend(["--print-credentials-header", "--index-ref", "refs/heads/main"].into_iter().map(str::to_owned));
+        header.extend(
+            [
+                "--print-credentials-header",
+                "--index-ref",
+                "refs/heads/main",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
         assert!(parse(&header).is_err());
     }
 

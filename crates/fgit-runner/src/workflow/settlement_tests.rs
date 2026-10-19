@@ -23,6 +23,9 @@ struct Executor<'a> {
     observations: Vec<JobReport>,
     cancel_on_finish: Option<&'a Cell<bool>>,
     close_error: bool,
+    output_error: bool,
+    cancel_on_capture: Option<&'a Cell<bool>>,
+    stop_before_capture: Option<&'a Cell<bool>>,
 }
 impl Executor<'_> {
     fn new(first: StepObservation) -> Self {
@@ -32,6 +35,9 @@ impl Executor<'_> {
             observations: Vec::new(),
             cancel_on_finish: None,
             close_error: false,
+            output_error: false,
+            cancel_on_capture: None,
+            stop_before_capture: None,
         }
     }
 }
@@ -57,6 +63,25 @@ impl WorkflowExecutor for Executor<'_> {
             .pending
             .pop_front()
             .expect("one observation per started step"))
+    }
+    fn has_job_outputs(&self, job: &Job) -> bool {
+        let selected = job.id == "first"
+            && (self.output_error
+                || self.cancel_on_capture.is_some()
+                || self.stop_before_capture.is_some());
+        if selected {
+            if let Some(stop) = self.stop_before_capture {
+                stop.set(true);
+            }
+        }
+        selected
+    }
+    fn capture_job_outputs(&mut self, _: &Job, _: &dyn Fn() -> bool) -> Result<(), WorkerFailure> {
+        self.events.push("capture:first".into());
+        if let Some(live) = self.cancel_on_capture {
+            live.set(false);
+        }
+        Err(WorkerFailure::new("required output custody failed", false))
     }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
         self.events.push(format!("close:{retain}"));
@@ -212,4 +237,108 @@ fn output_limit_remains_distinct_from_containment_on_clean_refusal_twin() {
     assert_eq!(report.jobs[0].outcome, JobOutcome::OutputLimit);
     assert!(!report.jobs[0].requires_containment());
     assert_eq!(report.jobs[1].outcome, JobOutcome::Succeeded);
+}
+
+#[test]
+fn artifact_custody_refusal_closes_before_observation_and_skips_success_dependents() {
+    let mut executor = Executor::new(observation(StepOutcome::Succeeded));
+    executor.output_error = true;
+    let workflow = WORKFLOW.replace("    if: always()\n", "    needs: first\n");
+    let report = WorkflowPlan::compile(&workflow)
+        .unwrap()
+        .execute(WorkflowLimits::default(), &mut executor, &|| true)
+        .unwrap();
+    assert_eq!(report.jobs[0].outcome, JobOutcome::Refused);
+    assert!(!report.jobs[0].requires_containment());
+    assert_eq!(report.jobs[1].outcome, JobOutcome::Skipped);
+    assert_eq!(executor.observations, report.jobs);
+    assert_eq!(
+        &executor.events[2..5],
+        ["capture:first", "close:false", "observe:first"]
+    );
+    assert!(
+        !executor
+            .events
+            .iter()
+            .any(|event| event == "begin:independent")
+    );
+}
+
+#[test]
+fn ordinary_artifact_refusal_allows_independent_diagnostics_without_claiming_success() {
+    let mut executor = Executor::new(observation(StepOutcome::Succeeded));
+    executor.output_error = true;
+    let report = run(&mut executor);
+    assert_eq!(report.jobs[0].outcome, JobOutcome::Refused);
+    assert_eq!(report.jobs[1].outcome, JobOutcome::Succeeded);
+    assert!(!report.succeeded());
+    assert!(!report.jobs[0].requires_containment());
+}
+
+#[test]
+fn cancellation_during_artifact_custody_still_closes_and_never_observes_success() {
+    let live = Cell::new(true);
+    let mut executor = Executor::new(observation(StepOutcome::Succeeded));
+    executor.cancel_on_capture = Some(&live);
+    let report = WorkflowPlan::compile(WORKFLOW)
+        .unwrap()
+        .execute(WorkflowLimits::default(), &mut executor, &|| live.get())
+        .unwrap();
+    assert_eq!(report.jobs[0].outcome, JobOutcome::Cancelled);
+    assert_eq!(report.jobs[1].outcome, JobOutcome::Cancelled);
+    assert_eq!(
+        &executor.events[2..5],
+        ["capture:first", "close:false", "observe:first"]
+    );
+    assert!(!report.jobs[0].requires_containment());
+    assert!(!report.succeeded());
+}
+
+#[test]
+fn containment_failure_never_attempts_artifact_reads_even_when_selected() {
+    let mut executor = Executor::new(observation(StepOutcome::ContainmentFailure));
+    executor.output_error = true;
+    let report = run(&mut executor);
+    assert!(report.jobs[0].requires_containment());
+    assert!(
+        !executor
+            .events
+            .iter()
+            .any(|event| event.starts_with("capture:"))
+    );
+    assert!(executor.events.iter().any(|event| event == "close:true"));
+}
+
+#[test]
+fn one_shot_stop_before_required_capture_cannot_become_success_after_close() {
+    let stop = Cell::new(false);
+    let mut executor = Executor::new(observation(StepOutcome::Succeeded));
+    executor.stop_before_capture = Some(&stop);
+    // has_job_outputs arms only the next sample: later close-time samples are
+    // live again, so the capture boundary itself must preserve the stopped job.
+    let live = || !stop.replace(false);
+    let report = WorkflowPlan::compile(WORKFLOW)
+        .unwrap()
+        .execute(WorkflowLimits::default(), &mut executor, &live)
+        .unwrap();
+    assert!(!stop.get());
+    assert!(live());
+    assert_eq!(report.jobs[0].outcome, JobOutcome::Cancelled);
+    assert_eq!(report.jobs[1].outcome, JobOutcome::Cancelled);
+    assert_eq!(executor.observations, report.jobs);
+    assert_eq!(&executor.events[2..4], ["close:false", "observe:first"]);
+    assert!(
+        !executor
+            .events
+            .iter()
+            .any(|event| event.starts_with("capture:"))
+    );
+    assert!(
+        !executor
+            .events
+            .iter()
+            .any(|event| event == "begin:independent")
+    );
+    assert!(!report.jobs[0].requires_containment());
+    assert!(!report.succeeded());
 }

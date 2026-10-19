@@ -40,6 +40,7 @@ use fgit_admission::evidence::{
     PolicyDecisionEvidence, PrincipalSnapshot, RefusalEvidenceBodies, RetentionDelta,
     evidence_root, principal_snapshot_id,
 };
+pub use fgit_admission::merge::native::NativeMergeMethod;
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
@@ -51,7 +52,6 @@ use fgit_admission::{
     permitted_object_closure_root, prepare_canonical_commit, ref_state_root,
     validate_source_import,
 };
-pub use fgit_admission::merge::native::NativeMergeMethod;
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod capsule_history;
 pub mod source_retrieval;
@@ -59,6 +59,12 @@ mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::candidate_inspection::{
     BundleInspectionRefusal, PullRequestInspectionRefusal,
+};
+#[cfg(target_os = "linux")]
+pub use treefs_workspace::{
+    DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES, TRUSTED_WORKFLOW_ARTIFACT_TRUST,
+    TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactOutput, TrustedWorkflowArtifactSelection,
+    TrustedWorkflowFailure, TrustedWorkflowJobArtifacts, TrustedWorkflowRun,
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,

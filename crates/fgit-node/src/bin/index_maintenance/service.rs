@@ -38,16 +38,15 @@ impl MaintenanceConfig {
         if directory.as_os_str().is_empty() || directory.as_os_str().len() > 4096 {
             return Err(invalid("Invalid maintenance progress directory."));
         }
-        if interval.as_secs() == 0
-            || interval.as_secs() > 3600
-            || interval.subsec_nanos() != 0
-        {
+        if interval.as_secs() == 0 || interval.as_secs() > 3600 || interval.subsec_nanos() != 0 {
             return Err(invalid(
                 "Maintenance interval must be a whole number of seconds from 1 through 3600.",
             ));
         }
         if refs.is_empty() || refs.len() > state::MAX_REFS {
-            return Err(invalid("Maintenance requires 1 through 32 explicit references."));
+            return Err(invalid(
+                "Maintenance requires 1 through 32 explicit references.",
+            ));
         }
         refs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         if refs.windows(2).any(|pair| pair[0] == pair[1])
@@ -177,7 +176,10 @@ impl Display for MaintenanceError {
             Self::Ready(error) => write!(formatter, "Maintenance readiness: {error}"),
             Self::Controller(error) => write!(formatter, "Maintenance controller: {error}"),
             Self::Shutdown { error, preceding } => {
-                write!(formatter, "Maintenance shutdown failed; ownership retained: {error}")?;
+                write!(
+                    formatter,
+                    "Maintenance shutdown failed; ownership retained: {error}"
+                )?;
                 if let Some(preceding) = preceding {
                     write!(formatter, "; preceding failure: {preceding}")?;
                 }
@@ -201,9 +203,9 @@ impl Error for MaintenanceError {
             | Self::Ready(error)
             | Self::Controller(error)
             | Self::Release { error, .. } => Some(error),
-            Self::Shutdown { preceding, .. } => {
-                preceding.as_deref().map(|error| error as &(dyn Error + 'static))
-            }
+            Self::Shutdown { preceding, .. } => preceding
+                .as_deref()
+                .map(|error| error as &(dyn Error + 'static)),
             Self::Open(_) | Self::Authority(_) => None,
         }
     }
@@ -224,7 +226,11 @@ fn bounded_node_config(
 ) -> Result<NodeConfig, MaintenanceError> {
     let inherited = node_config.runtime_budgets();
     let mut background = inherited.limits_for(BudgetClass::BackgroundController);
-    background.timeout = Some(background.timeout.map_or(timeout, |limit| limit.min(timeout)));
+    background.timeout = Some(
+        background
+            .timeout
+            .map_or(timeout, |limit| limit.min(timeout)),
+    );
     let narrowed = inherited
         .with_class_limits(BudgetClass::BackgroundController, background)
         .map_err(|error| MaintenanceError::Configuration(invalid(error.to_string())))?;
@@ -309,15 +315,26 @@ pub fn run_service_with_ready(
     };
     stop.observe(&config.directory);
     if stop.requested {
-        let error = invalid(stop.error.unwrap_or_else(|| {
-            "Maintenance was stopped before readiness.".to_owned()
-        }));
-        return finish(node, Some(progress), Err(MaintenanceError::Ready(error)), true);
+        let error = invalid(
+            stop.error
+                .unwrap_or_else(|| "Maintenance was stopped before readiness.".to_owned()),
+        );
+        return finish(
+            node,
+            Some(progress),
+            Err(MaintenanceError::Ready(error)),
+            true,
+        );
     }
     let announced = catch_unwind(AssertUnwindSafe(on_ready))
         .unwrap_or_else(|_| Err(io::Error::other("Maintenance readiness callback panicked.")));
     if let Err(error) = announced {
-        return finish(node, Some(progress), Err(MaintenanceError::Ready(error)), true);
+        return finish(
+            node,
+            Some(progress),
+            Err(MaintenanceError::Ready(error)),
+            true,
+        );
     }
     let options = Options {
         root: PathBuf::new(),

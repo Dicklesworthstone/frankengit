@@ -1342,3 +1342,95 @@ fn host_subprocess_driver() {
     .unwrap();
     panic!("requested crash epoch was not reached");
 }
+
+#[test]
+fn explicit_artifact_output_read_is_bounded_and_never_imports_or_follows_aliases() {
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let obligations = ledger();
+    let workspace = create(&scratch, &obligations, plan(manifest), b"artifacts");
+    let directory = workspace.tool_directory();
+    fs::write(directory.join("result"), b"verified").unwrap();
+    assert_eq!(
+        workspace
+            .read_artifact_output(&path(b"result"), 8, &|_| false)
+            .unwrap()
+            .unwrap()
+            .0,
+        b"verified",
+    );
+    assert!(matches!(
+        workspace.read_artifact_output(&path(b"result"), 7, &|_| false),
+        Err(HostRefusal::ResourceLimit)
+    ));
+    fs::write(directory.join("empty"), b"").unwrap();
+    assert!(
+        workspace
+            .read_artifact_output(&path(b"empty"), 0, &|_| false)
+            .unwrap()
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert!(
+        workspace
+            .read_artifact_output(&path(b"absent"), 8, &|_| false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        workspace
+            .read_artifact_output(&path(b".fgit-host-receipt"), 8192, &|_| false)
+            .is_err()
+    );
+    symlink("result", directory.join("linked")).unwrap();
+    assert!(
+        workspace
+            .read_artifact_output(&path(b"linked"), 8, &|_| false)
+            .is_err()
+    );
+    fs::create_dir(directory.join("nested")).unwrap();
+    fs::write(directory.join("nested/file"), b"safe").unwrap();
+    symlink("nested", directory.join("alias")).unwrap();
+    assert!(
+        workspace
+            .read_artifact_output(&path(b"alias/file"), 8, &|_| false)
+            .is_err()
+    );
+    fs::hard_link(directory.join("result"), directory.join("hardlink")).unwrap();
+    assert!(
+        workspace
+            .read_artifact_output(&path(b"hardlink"), 8, &|_| false)
+            .is_err()
+    );
+    assert!(
+        workspace
+            .read_artifact_output(&path(b"result"), 8, &|_| false)
+            .is_err()
+    );
+    let _ = workspace.close().unwrap();
+    quiescent(obligations);
+    assert!(!scratch.0.join("artifacts").exists());
+}
+
+#[test]
+fn cancellation_during_artifact_read_releases_only_through_explicit_close() {
+    use std::cell::Cell;
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let obligations = ledger();
+    let workspace = create(&scratch, &obligations, plan(manifest), b"cancel-artifact");
+    fs::write(workspace.tool_directory().join("large"), vec![b'x'; 32768]).unwrap();
+    let checkpoints = Cell::new(0);
+    let result = workspace.read_artifact_output(&path(b"large"), 32768, &|_| {
+        let previous = checkpoints.get();
+        checkpoints.set(previous + 1);
+        previous >= 3
+    });
+    assert!(matches!(result, Err(HostRefusal::Cancelled(_))));
+    assert!(checkpoints.get() >= 4);
+    assert!(workspace.tool_directory().join("large").exists());
+    let _ = workspace.close().unwrap();
+    quiescent(obligations);
+    assert!(!scratch.0.join("cancel-artifact").exists());
+}

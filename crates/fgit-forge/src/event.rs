@@ -178,7 +178,7 @@ impl ForgeEventPayload {
                 } else {
                     KIND_REVIEW_PROTECTION_CHANGED
                 }
-            },
+            }
             Self::MergeQueueChangedNative(_) => KIND_NATIVE_MERGE_QUEUE_CHANGED,
             Self::WorkflowCheckObservedNative(_) => KIND_WORKFLOW_CHECK_OBSERVED,
             Self::PullRequestCommentedNative(_) => KIND_NATIVE_PULL_REQUEST_COMMENTED,

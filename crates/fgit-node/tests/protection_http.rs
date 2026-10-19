@@ -206,7 +206,10 @@ fn canonical_admin_rotation_retries_revocation_and_restart_work_over_real_http()
             .unwrap();
         let pinned = get(client, &format!("{PATH}?expected_head={head}"), 'a');
         status(&pinned, 200);
-        assert_eq!(pinned.body, initial.body, "the returned head token round-trips");
+        assert_eq!(
+            pinned.body, initial.body,
+            "the returned head token round-trips"
+        );
         status(&get(client, PATH, 'b'), 403); // write is not read
         let rotation = policy_form(1, epoch, FOREIGN, false);
         status(

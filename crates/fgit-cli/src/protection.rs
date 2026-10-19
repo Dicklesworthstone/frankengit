@@ -3,7 +3,8 @@ use crate::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
     MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-    MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
+    MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck,
+    ReviewProtection,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
@@ -141,13 +142,23 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--require-check" => {
                 let parts: Vec<_> = value.splitn(5, ':').collect();
                 if parts.len() != 5 {
-                    return Err("check must be target-ref:source-ref:publisher-id:graph-sha256:job".into());
+                    return Err(
+                        "check must be target-ref:source-ref:publisher-id:graph-sha256:job".into(),
+                    );
                 }
-                let name = RefName::try_new(parts[0].as_bytes()).map_err(|_| "invalid target branch")?;
-                let source_ref = RefName::try_new(parts[1].as_bytes()).map_err(|_| "invalid check source branch")?;
-                let publisher = PrincipalId::from_hex(parts[2]).map_err(|_| "invalid check publisher")?;
+                let name =
+                    RefName::try_new(parts[0].as_bytes()).map_err(|_| "invalid target branch")?;
+                let source_ref = RefName::try_new(parts[1].as_bytes())
+                    .map_err(|_| "invalid check source branch")?;
+                let publisher =
+                    PrincipalId::from_hex(parts[2]).map_err(|_| "invalid check publisher")?;
                 let graph_root = graph_bytes(parts[3])?;
-                let check = RequiredWorkflowCheck { source_ref, publisher, graph_root, job: parts[4].to_owned() };
+                let check = RequiredWorkflowCheck {
+                    source_ref,
+                    publisher,
+                    graph_root,
+                    job: parts[4].to_owned(),
+                };
                 check.validate().map_err(|_| "invalid required check")?;
                 if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
                     return Err("too many protected branches".into());
@@ -195,7 +206,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let expected_epoch = PolicyEpoch::try_new(number(get("--expected-epoch")?)?)
             .map_err(|_| "policy epoch must be positive")?;
         if clear == !branches.is_empty() {
-            return Err("supply review/check requirements OR explicit --clear, never both/neither".into());
+            return Err(
+                "supply review/check requirements OR explicit --clear, never both/neither".into(),
+            );
         }
         admins.sort();
         let branches = branches
@@ -203,7 +216,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
             .map(|(name, (mut reviewers, mut required_checks))| {
                 reviewers.sort();
                 required_checks.sort();
-                ProtectedBranch { required_checks, name, reviewers }
+                ProtectedBranch {
+                    required_checks,
+                    name,
+                    reviewers,
+                }
             })
             .collect();
         let command = ProtectionCommand {
@@ -234,12 +251,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 fn graph_bytes(text: &str) -> Result<[u8; 32], String> {
-    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err("graph root must be exactly 64 lowercase hexadecimal digits".into());
     }
     let mut bytes = [0; 32];
     for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| "invalid graph root")?;
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "invalid graph root")?;
     }
     Ok(bytes)
 }

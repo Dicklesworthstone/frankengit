@@ -124,6 +124,23 @@ named explicitly in trusted scripts. Captures are private, file-backed streams;
 the retained-output bounds are **not** enforced OS disk/CPU/memory/network quotas.
 A killed/reaped direct child is not proof that all descendants are gone.
 
+## Retaining selected output files
+
+Canonical run and event-matched dispatch can retain exact regular output files
+before workspace cleanup through the existing immutable artifact store. Supply
+`--artifact-root` and repeated `--artifact workflow:expanded-job:output` selectors.
+The default budget is 16 MiB per file and 64 MiB for the entire invocation,
+shared across dispatch children. Missing, unsafe, oversized or corrupt selected
+outputs prevent successful job evidence; ordinary refusal still closes the
+workspace. Outputs are not automatically copied into dependent jobs.
+
+The optional output contract binds the original run/source identity. Each
+completed capture retains immutable payload/provenance IDs and a create-only
+job receipt, retrievable with `fg artifact inspect/export` after cleanup. This
+does not create a BuildInputCapsule, cache hit or independent check attestation.
+See [trusted workflow artifacts](TRUSTED_WORKFLOW_ARTIFACTS.md) for selectors,
+byte paths, trust, bounds, cancellation and exact retrieval examples.
+
 ## Results and interrupted attempts
 
 The create-only `workflow-<run-id>` directory contains a synced `attempt.json`
@@ -133,7 +150,9 @@ commitments, runner profile, and execution limits.
 
 After execution and close/explicit containment, `report.json` is written and
 synced, installed without replacement using a hard link, then the directory is
-synced. Successful cleanup normally leaves only `attempt.json` and `report.json`.
+synced. Successful cleanup retains `attempt.json`, `report.json` and the durable
+runner journal; configured output capture also retains completed job artifact
+receipts.
 A timeout/signal/cancellation that cannot establish descendant quiescence retains
 job directories and captures with the result explicitly marked non-green.
 

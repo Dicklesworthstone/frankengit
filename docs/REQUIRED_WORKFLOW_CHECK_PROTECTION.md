@@ -179,10 +179,11 @@ CI-ref deletion, direct creation, protected deletion, terminal retries,
 cancellation and reopen. Schema tests cover old tag-9 bytes, required tag 13,
 truncation, canonical ordering, identity material and administrator authority.
 
-Native execution of this change remains pending: the development execution
-service disconnected after shared resource exhaustion. Source/API review and
-focused JavaScript checks do not establish a final-tree Rust build or native
-test pass. The independent adapter review executed 60 focused semantic cases
-and seven new pure regression callbacks in V8. The additional asynchronous
-browser cases and the listed Node/native commands still need their normal
-runtime gates.
+The focused Node.js lanes completed 102 tests: 58 browser-client tests, 22
+standalone-page tests and 22 operator tests, including real loopback HTTP reads.
+These cover the new selectors and compatibility with existing review-only
+receipts and intents. The pinned nightly parsed the final Rust changes, but the
+broader native check stopped in the `asupersync` dependency after shared memory
+exhaustion on an earlier attempt and filesystem exhaustion on a later attempt.
+Native gate execution remains pending. Adapter tests and source/API review do
+not establish a full Rust build or native admission-test pass.

@@ -37,9 +37,14 @@ fn maintenance(
     initialize: bool,
 ) -> MaintenanceConfig {
     MaintenanceConfig::try_new(
-        kind, format, directory.into(), initialize, Duration::from_secs(1),
+        kind,
+        format,
+        directory.into(),
+        initialize,
+        Duration::from_secs(1),
         vec![reference()],
-    ).unwrap()
+    )
+    .unwrap()
 }
 fn add_file(node: &OneNode, base: GitOid, name: &str, contents: &str, ordinal: u8) -> GitOid {
     let patch = format!(
@@ -52,19 +57,38 @@ fn add_file(node: &OneNode, base: GitOid, name: &str, contents: &str, ordinal: u
         message: b"maintained source fixture\n".to_vec(),
     };
     let context = node.request_context();
-    let prepared = node.runtime().block_on(node.prepare_trusted_patch_in(
-        &context, &reference(), base, [ordinal; 16], patch.as_bytes(), &metadata,
-        PatchLimits::default(),
-    )).unwrap();
+    let prepared = node
+        .runtime()
+        .block_on(node.prepare_trusted_patch_in(
+            &context,
+            &reference(),
+            base,
+            [ordinal; 16],
+            patch.as_bytes(),
+            &metadata,
+            PatchLimits::default(),
+        ))
+        .unwrap();
     let key = format!("http-maintained-source-{ordinal}");
-    let result = node.runtime().block_on(node.apply_workspace_bundle_durable_in(
-        &context, OWNER, key.as_bytes(), &reference(), base,
-        prepared.candidate_commit, prepared.bundle_bytes(),
-    )).unwrap();
+    let result = node
+        .runtime()
+        .block_on(node.apply_workspace_bundle_durable_in(
+            &context,
+            OWNER,
+            key.as_bytes(),
+            &reference(),
+            base,
+            prepared.candidate_commit,
+            prepared.bundle_bytes(),
+        ))
+        .unwrap();
     assert!(!result.commands.is_empty());
-    assert!(result.commands.iter().all(|command| matches!(
-        command.terminal.outcome, DecisionOutcome::Committed { .. }
-    )));
+    assert!(
+        result
+            .commands
+            .iter()
+            .all(|command| matches!(command.terminal.outcome, DecisionOutcome::Committed { .. }))
+    );
     prepared.candidate_commit
 }
 struct MaintainedServer {
@@ -77,7 +101,8 @@ impl MaintainedServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = Endpoint {
             address: listener.local_addr().unwrap(),
-            route: String::from_utf8(node.git_daemon_repository_path().as_bytes().to_vec()).unwrap(),
+            route: String::from_utf8(node.git_daemon_repository_path().as_bytes().to_vec())
+                .unwrap(),
         };
         let credentials_path = root.0.join("credentials");
         credentials(&node, &credentials_path);
@@ -85,11 +110,24 @@ impl MaintainedServer {
         let child_stop = Arc::clone(&stop);
         let (sender, ready) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
-            let result = node.serve_repository_http_with_index_maintenance_until_stopped(
-                &listener, 2, &credentials_path, false, true, false, false, config,
-                &|| Ok(child_stop.load(Ordering::Acquire)),
-                &|| sender.send(()).map_err(|_| io::Error::other("test readiness receiver left")),
-            ).map_err(|error| error.to_string());
+            let result = node
+                .serve_repository_http_with_index_maintenance_until_stopped(
+                    &listener,
+                    2,
+                    &credentials_path,
+                    false,
+                    true,
+                    false,
+                    false,
+                    config,
+                    &|| Ok(child_stop.load(Ordering::Acquire)),
+                    &|| {
+                        sender
+                            .send(())
+                            .map_err(|_| io::Error::other("test readiness receiver left"))
+                    },
+                )
+                .map_err(|error| error.to_string());
             let cleanup = node.shutdown().map_err(|error| error.to_string());
             match (result, cleanup) {
                 (Ok(receipt), Ok(())) => Ok(receipt),
@@ -97,8 +135,14 @@ impl MaintainedServer {
                 (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
             }
         });
-        let server = Self { client, stop, worker: Some(worker) };
-        ready.recv_timeout(Duration::from_secs(30)).expect("authenticated controller readiness");
+        let server = Self {
+            client,
+            stop,
+            worker: Some(worker),
+        };
+        ready
+            .recv_timeout(Duration::from_secs(30))
+            .expect("authenticated controller readiness");
         server
     }
     fn finish(mut self) -> GitDaemonServerReceipt {
@@ -115,17 +159,33 @@ impl Drop for MaintainedServer {
     }
 }
 fn query(
-    client: &Endpoint, kind: IndexKind, format: GitHashAlgorithm, word: &[u8], commit: GitOid,
+    client: &Endpoint,
+    kind: IndexKind,
+    format: GitHashAlgorithm,
+    word: &[u8],
+    commit: GitOid,
 ) -> Reply {
     let (route, input) = match kind {
         IndexKind::Lexical => ("search-index", format!("term_hex={}", hex(word))),
-        IndexKind::Symbols => ("search-symbols-index", format!("name_hex={}&match=exact", hex(word))),
+        IndexKind::Symbols => (
+            "search-symbols-index",
+            format!("name_hex={}&match=exact", hex(word)),
+        ),
     };
-    post(client, route, 'a',
-        &format!("{}&{input}&expected_commit={commit}", common(format)), false)
+    post(
+        client,
+        route,
+        'a',
+        &format!("{}&{input}&expected_commit={commit}", common(format)),
+        false,
+    )
 }
 fn wait_for_index(
-    client: &Endpoint, kind: IndexKind, format: GitHashAlgorithm, word: &[u8], commit: GitOid,
+    client: &Endpoint,
+    kind: IndexKind,
+    format: GitHashAlgorithm,
+    word: &[u8],
+    commit: GitOid,
 ) -> Reply {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -133,13 +193,21 @@ fn wait_for_index(
         if reply.status == 200 {
             assert_eq!(text(&reply.body, "source_commit"), commit.to_string());
             match kind {
-                IndexKind::Lexical => assert!(number(&reply.body, "returned_hits") > 0, "{}", reply.raw),
-                IndexKind::Symbols => assert!(number(&reply.body, "returned_matches") > 0, "{}", reply.raw),
+                IndexKind::Lexical => {
+                    assert!(number(&reply.body, "returned_hits") > 0, "{}", reply.raw)
+                }
+                IndexKind::Symbols => {
+                    assert!(number(&reply.body, "returned_matches") > 0, "{}", reply.raw)
+                }
             }
             return reply;
         }
         assert_eq!(reply.status, 409, "{}", reply.raw);
-        assert!(Instant::now() < deadline, "maintenance did not catch up: {}", reply.raw);
+        assert!(
+            Instant::now() < deadline,
+            "maintenance did not catch up: {}",
+            reply.raw
+        );
         thread::sleep(Duration::from_millis(300));
     }
 }
@@ -159,9 +227,8 @@ fn live_http_maintenance_builds_and_refreshes_lexical_and_symbols_in_both_format
             };
             let before_generation = generation(&node);
             let directory = progress(&root);
-            let server = MaintainedServer::start(
-                node, &root, maintenance(kind, format, &directory, true),
-            );
+            let server =
+                MaintainedServer::start(node, &root, maintenance(kind, format, &directory, true));
             let first = wait_for_index(&server.client, kind, format, before_word, base);
             let refused = post(&server.client, "tree", 'b', &common(format), false);
             status(&refused, 403);
@@ -169,24 +236,39 @@ fn live_http_maintenance_builds_and_refreshes_lexical_and_symbols_in_both_format
             assert_eq!(generation(&writer), before_generation);
             let (name, contents, word) = match kind {
                 IndexKind::Lexical => ("after.txt", "serviceafter", b"serviceafter".as_slice()),
-                IndexKind::Symbols => ("after.rs", "pub fn ServiceAfter() {}", b"ServiceAfter".as_slice()),
+                IndexKind::Symbols => (
+                    "after.rs",
+                    "pub fn ServiceAfter() {}",
+                    b"ServiceAfter".as_slice(),
+                ),
             };
             let commit = add_file(&writer, base, name, contents, 2);
             let after_generation = generation(&writer);
             writer.shutdown().unwrap();
             let updated = wait_for_index(&server.client, kind, format, word, commit);
-            assert_ne!(text(&first.body, "index_token"), text(&updated.body, "index_token"));
+            assert_ne!(
+                text(&first.body, "index_token"),
+                text(&updated.body, "index_token")
+            );
             assert!(server.finish().accepted_sessions() >= 3);
-            assert!(!directory.join("run.lock").exists(), "stop releases progress after drain");
+            assert!(
+                !directory.join("run.lock").exists(),
+                "stop releases progress after drain"
+            );
             assert!(directory.join("checkpoint").is_file());
             let node = reopen(&config);
-            assert_eq!(generation(&node), after_generation,
-                "index maintenance must not advance repository authority");
-            let resumed = MaintainedServer::start(
-                node, &root, maintenance(kind, format, &directory, false),
+            assert_eq!(
+                generation(&node),
+                after_generation,
+                "index maintenance must not advance repository authority"
             );
+            let resumed =
+                MaintainedServer::start(node, &root, maintenance(kind, format, &directory, false));
             let again = wait_for_index(&resumed.client, kind, format, word, commit);
-            assert_eq!(text(&updated.body, "index_token"), text(&again.body, "index_token"));
+            assert_eq!(
+                text(&updated.body, "index_token"),
+                text(&again.body, "index_token")
+            );
             resumed.finish();
             assert!(!directory.join("run.lock").exists());
         }
@@ -203,12 +285,23 @@ fn invalid_maintenance_progress_refuses_http_readiness_and_preserves_checkpoint(
     credentials(&node, &path);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let ready = AtomicBool::new(false);
-    let error = node.serve_repository_http_with_index_maintenance_bounded(
-        &listener, GitDaemonServerLimits::try_new(1, 1).unwrap(), &path,
-        false, false, false, false, Duration::from_secs(1),
-        maintenance(IndexKind::Lexical, format, &directory, false),
-        &|| { ready.store(true, Ordering::Release); Ok(()) },
-    ).unwrap_err();
+    let error = node
+        .serve_repository_http_with_index_maintenance_bounded(
+            &listener,
+            GitDaemonServerLimits::try_new(1, 1).unwrap(),
+            &path,
+            false,
+            false,
+            false,
+            false,
+            Duration::from_secs(1),
+            maintenance(IndexKind::Lexical, format, &directory, false),
+            &|| {
+                ready.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .unwrap_err();
     assert!(error.to_string().contains("maintenance"));
     assert!(!ready.load(Ordering::Acquire));
     assert!(!directory.join("checkpoint").exists());
@@ -224,11 +317,20 @@ fn http_stop_control_failure_still_drains_and_releases_maintenance() {
     let path = root.0.join("credentials");
     credentials(&node, &path);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let error = node.serve_repository_http_with_index_maintenance_until_stopped(
-        &listener, 1, &path, false, false, false, false,
-        maintenance(IndexKind::Lexical, format, &directory, true),
-        &|| Err(io::Error::other("operator stop unavailable")), &|| Ok(()),
-    ).unwrap_err();
+    let error = node
+        .serve_repository_http_with_index_maintenance_until_stopped(
+            &listener,
+            1,
+            &path,
+            false,
+            false,
+            false,
+            false,
+            maintenance(IndexKind::Lexical, format, &directory, true),
+            &|| Err(io::Error::other("operator stop unavailable")),
+            &|| Ok(()),
+        )
+        .unwrap_err();
     assert!(error.to_string().contains("operator stop unavailable"));
     assert!(!directory.join("run.lock").exists());
     assert!(directory.join("checkpoint").is_file());

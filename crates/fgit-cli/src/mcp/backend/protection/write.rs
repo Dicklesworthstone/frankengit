@@ -4,7 +4,8 @@ use fgit_forge::{
     AggregateVersion, ExpectedVersion,
     event::protection::{
         MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-        MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
+        MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck,
+        ReviewProtection,
     },
 };
 use fgit_types::{DecisionOutcome, PolicyEpoch, PrincipalId, RefName};
@@ -69,15 +70,32 @@ pub(super) fn tool() -> Tool {
     let mut check = Object::new();
     check.insert("source_ref_hex".into(), branch["reference_hex"].clone());
     check.insert("publisher".into(), principal_schema());
-    check.insert("graph_root".into(), object([
-        ("type", text("string")), ("pattern", text("^[0-9a-f]{64}$")),
-        ("minLength", json::number(64)), ("maxLength", json::number(64)),
-    ]));
-    check.insert("job".into(), object([
-        ("type", text("string")), ("minLength", json::number(1)),
-        ("maxLength", json::number(fgit_forge::event::workflow_check::MAX_CHECK_JOB_BYTES as u64)),
-        ("description", text("Exact UTF-8 workflow job name, at most 1024 bytes and no control characters.")),
-    ]));
+    check.insert(
+        "graph_root".into(),
+        object([
+            ("type", text("string")),
+            ("pattern", text("^[0-9a-f]{64}$")),
+            ("minLength", json::number(64)),
+            ("maxLength", json::number(64)),
+        ]),
+    );
+    check.insert(
+        "job".into(),
+        object([
+            ("type", text("string")),
+            ("minLength", json::number(1)),
+            (
+                "maxLength",
+                json::number(fgit_forge::event::workflow_check::MAX_CHECK_JOB_BYTES as u64),
+            ),
+            (
+                "description",
+                text(
+                    "Exact UTF-8 workflow job name, at most 1024 bytes and no control characters.",
+                ),
+            ),
+        ]),
+    );
     branch.insert("required_checks".into(), object([
         ("type", text("array")), ("maxItems", json::number(MAX_BRANCH_REQUIRED_CHECKS as u64)),
         ("uniqueItems", Value::Bool(true)),
@@ -124,7 +142,12 @@ fn array<'a>(args: &'a Object, name: &str, maximum: usize) -> Result<&'a [Value]
     }
     Ok(values)
 }
-fn principals(args: &Object, name: &str, maximum: usize, allow_empty: bool) -> Result<Vec<PrincipalId>, ToolError> {
+fn principals(
+    args: &Object,
+    name: &str,
+    maximum: usize,
+    allow_empty: bool,
+) -> Result<Vec<PrincipalId>, ToolError> {
     let values = array(args, name, maximum)?;
     if values.is_empty() && !allow_empty {
         return Err(ToolError::invalid("policy_principals_required"));
@@ -168,7 +191,10 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
         let fields = value
             .object()
             .ok_or(ToolError::invalid("policy_branch_object_required"))?;
-        require_fields(fields, &["reference_hex", "required_reviewers", "required_checks"])?;
+        require_fields(
+            fields,
+            &["reference_hex", "required_reviewers", "required_checks"],
+        )?;
         let raw = unhex(mutations::required(fields, "reference_hex")?, MAX_REF_BYTES)?;
         if !raw.starts_with(b"refs/heads/") {
             return Err(ToolError::invalid("full_branch_required"));
@@ -183,24 +209,44 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
         }
         let mut required_checks = Vec::new();
         for value in array(fields, "required_checks", MAX_BRANCH_REQUIRED_CHECKS)? {
-            let check = value.object().ok_or(ToolError::invalid("policy_check_object_required"))?;
+            let check = value
+                .object()
+                .ok_or(ToolError::invalid("policy_check_object_required"))?;
             require_fields(check, &["source_ref_hex", "publisher", "graph_root", "job"])?;
             let check = RequiredWorkflowCheck {
-                source_ref: RefName::try_new(&unhex(mutations::required(check, "source_ref_hex")?, MAX_REF_BYTES)?)
-                    .map_err(|_| ToolError::invalid("invalid_check_source"))?,
+                source_ref: RefName::try_new(&unhex(
+                    mutations::required(check, "source_ref_hex")?,
+                    MAX_REF_BYTES,
+                )?)
+                .map_err(|_| ToolError::invalid("invalid_check_source"))?,
                 publisher: canonical_principal(mutations::required(check, "publisher")?)?,
-                graph_root: unhex(mutations::required(check, "graph_root")?, 32)?.try_into()
+                graph_root: unhex(mutations::required(check, "graph_root")?, 32)?
+                    .try_into()
                     .map_err(|_| ToolError::invalid("invalid_check_graph"))?,
                 job: mutations::required(check, "job")?.to_owned(),
             };
-            check.validate().map_err(|_| ToolError::invalid("invalid_required_check"))?;
-            if required_checks.last().is_some_and(|previous| previous >= &check) {
+            check
+                .validate()
+                .map_err(|_| ToolError::invalid("invalid_required_check"))?;
+            if required_checks
+                .last()
+                .is_some_and(|previous| previous >= &check)
+            {
                 return Err(ToolError::invalid("policy_checks_not_canonical"));
             }
             required_checks.push(check);
         }
-        let reviewers = principals(fields, "required_reviewers", MAX_BRANCH_REVIEWERS, !required_checks.is_empty())?;
-        branches.push(ProtectedBranch { required_checks, name, reviewers });
+        let reviewers = principals(
+            fields,
+            "required_reviewers",
+            MAX_BRANCH_REVIEWERS,
+            !required_checks.is_empty(),
+        )?;
+        branches.push(ProtectedBranch {
+            required_checks,
+            name,
+            reviewers,
+        });
     }
     let protection = ReviewProtection {
         administrators,

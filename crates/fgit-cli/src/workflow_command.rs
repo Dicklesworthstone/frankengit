@@ -1,6 +1,7 @@
 //! Explicit local-owner entry point for repository-bound workflow execution.
 //! Parsing never opens a repository or interprets workflow text as authority.
 
+mod artifacts;
 mod dispatch;
 mod merge;
 mod publish;
@@ -21,6 +22,9 @@ const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <reposito
   [--expected-commit <native-oid>] [--expected-incarnation <id>]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow]
   [--input-hex <hex> instead of each --input]
+  [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
+  [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
 
 Unpublished candidate: replace run with run-candidate and also supply
   --bundle <stable-local-file> --candidate-commit <reviewed-native-oid>
@@ -45,6 +49,16 @@ One pinned source snapshot; fresh private copies for jobs; ordered steps within
 jobs. No automatic retries, source publication, secret injection, remote listener,
 trigger service, or authoritative green check. Native defaults: 60 seconds per
 step, 600 seconds per run, 256 KiB per captured stream, 16 MiB total captured output.
+
+Optional output capture requires an existing nonsymlink 0700 artifact root and
+1..64 exact workflow/job/file selections. Matrix jobs use their expanded IDs.
+Regular selected files are verified and retained before workspace cleanup; missing,
+unsafe, oversized or corrupt payloads prevent success. Defaults: 16 MiB per file,
+64 MiB cumulative raw payloads, including all children of a dispatch. Provenance
+manifests bind exact producing attempts and sources. Use fg artifact inspect/export
+with --trust-domain trusted-workflow-local-owner to retrieve immutable bytes.
+This script profile does not create a BuildInputCapsule or authorize cache reuse.
+Capture is currently supported for canonical run/dispatch only.
 
 Each run creates workflow-<run-id>/attempt.json before starting any process and
 report.json after close or explicit containment. Occupied run IDs always refuse.
@@ -77,6 +91,7 @@ struct Options {
     commit: Option<GitOid>,
     incarnation: Option<RepositoryIncarnationId>,
     candidate: Option<Candidate>,
+    artifacts: Option<artifacts::Options>,
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
@@ -134,6 +149,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let repository = RepositoryId::from_hex(&args[3]).map_err(|_| "invalid repository ID")?;
     let mut flags = BTreeMap::new();
     let mut inputs = BTreeSet::new();
+    let mut artifact_selections = Vec::new();
     let mut cursor = 5;
     while cursor < args.len() {
         let flag = args[cursor].as_str();
@@ -156,6 +172,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 | "--expected-head"
                 | "--expected-commit"
                 | "--expected-incarnation"
+                | "--artifact-root"
+                | "--artifact"
+                | "--artifact-hex"
+                | "--max-artifact-mib"
+                | "--max-artifact-total-mib"
         ) && !(candidate_mode && matches!(flag, "--bundle" | "--candidate-commit"))
         {
             return Err(format!("unknown workflow option {flag:?}"));
@@ -176,6 +197,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     "inputs must be distinct top-level file/directory names, at most 1024".into(),
                 );
             }
+        } else if matches!(flag, "--artifact" | "--artifact-hex") {
+            if artifact_selections.len() >= 64 {
+                return Err("at most 64 artifact selections are permitted".into());
+            }
+            artifact_selections.push(artifacts::selection(value, flag == "--artifact-hex")?);
         } else if flags.insert(flag, value.as_str()).is_some() {
             return Err(format!("duplicate {flag}"));
         }
@@ -241,6 +267,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             RepositoryIncarnationId::from_hex(text).map_err(|_| "invalid incarnation ID".to_owned())
         })
         .transpose()?;
+    let artifacts = artifacts::options(&flags, artifact_selections, candidate_mode)?;
     let candidate = if candidate_mode {
         let base = commit.ok_or("--expected-commit is mandatory for run-candidate")?;
         let candidate = native_oid(value("--candidate-commit")?, format)?;
@@ -279,6 +306,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         commit,
         incarnation,
         candidate,
+        artifacts,
     })
 }
 fn native_oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, String> {
@@ -349,6 +377,11 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
 #[cfg(target_os = "linux")]
 fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
+    let artifact_config = options
+        .artifacts
+        .as_ref()
+        .map(artifacts::Options::node_config)
+        .transpose()?;
     // Complete bounded local intake before opening repository state. The file
     // is transport only; native validation still precedes host execution.
     let bundle = options
@@ -406,16 +439,20 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
                         Default::default(),
                     ))
             }
-            (None, None, None) => node.runtime().block_on(node.run_trusted_workflow_in(
-                &request,
-                &options.reference,
-                &options.workflow,
-                options.run_id,
-                &options.parent,
-                &options.inputs,
-                (options.head, options.commit),
-                Default::default(),
-            )),
+            (None, None, None) => {
+                node.runtime()
+                    .block_on(node.run_trusted_workflow_with_artifacts_in(
+                        &request,
+                        &options.reference,
+                        &options.workflow,
+                        options.run_id,
+                        &options.parent,
+                        &options.inputs,
+                        (options.head, options.commit),
+                        Default::default(),
+                        artifact_config.as_ref(),
+                    ))
+            }
             _ => return Err("candidate input was not loaded; no workflow started".into()),
         }
         .map_err(|e| e.to_string())?;
@@ -589,5 +626,42 @@ mod tests {
             same[at + 1] = base;
             assert!(parse(&same).is_err());
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn run_routes_explicit_artifact_contract_and_limits_before_node_io() {
+        let mut input = args();
+        input.extend([
+            "--artifact-root".into(),
+            "/not-opened-artifact-root".into(),
+            "--artifact".into(),
+            "ci/run.yml:build:out.bin".into(),
+            "--artifact-hex".into(),
+            "63692f72756e2e796d6c:build__matrix_007:6f75742fff".into(),
+            "--max-artifact-mib".into(),
+            "2".into(),
+            "--max-artifact-total-mib".into(),
+            "3".into(),
+        ]);
+        let options = parse(&input).unwrap();
+        let contract = options.artifacts.unwrap().node_config().unwrap();
+        assert_eq!(
+            contract.root(),
+            std::path::Path::new("/not-opened-artifact-root")
+        );
+        assert_eq!(contract.maximum_bytes(), 2 * 1024 * 1024);
+        assert_eq!(contract.total_bytes(), 3 * 1024 * 1024);
+        assert_eq!(contract.selections().len(), 2);
+        assert_eq!(contract.selections()[1].job_id(), "build__matrix_007");
+        assert_eq!(contract.selections()[1].output_path(), b"out/\xff");
+        assert!(parse(&args()).unwrap().artifacts.is_none());
+        let mut missing_root = input.clone();
+        let at = missing_root
+            .iter()
+            .position(|s| s == "--artifact-root")
+            .unwrap();
+        missing_root.drain(at..at + 2);
+        assert!(parse(&missing_root).is_err());
     }
 }

@@ -10,6 +10,9 @@ const USAGE: &str = "usage: fg workflow dispatch <storage-root> <tenant-id> <rep
   --expected-head <snapshot-token> --expected-commit <native-oid>
   [--expected-incarnation <id>] [--object-format sha1|sha256]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
+  [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
+  [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
 
 Unlike workflow run, --workflow selects a directory (usually .github/workflows).
 Discover its direct .yml/.yaml children from ONE pinned canonical commit, compile
@@ -20,6 +23,11 @@ No unattended trigger, automatic retry, secret injection or green check is creat
 
 At most 32 definitions, 1 MiB workflow text, 128 selected jobs and 512 selected
 steps. Workflows share the native 600-second run and 16 MiB captured-output budgets.
+Selected artifact files share one cumulative byte allowance across every child:
+16 MiB per file and 64 MiB total by default. Explicit selectors name full workflow
+paths and expanded job IDs. All selectors are validated before any child starts.
+Verified payloads and immutable producing-job provenance are saved before cleanup;
+a capture failure prevents success. See fg workflow run --help for retrieval.
 Ordinary job failure does not suppress independent workflows. Lost containment,
 cancellation, exhausted time/output, or infrastructure failure stops later work.
 
@@ -100,6 +108,11 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
 #[cfg(target_os = "linux")]
 fn execute(options: Options, event: &str) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
+    let artifact_config = options
+        .artifacts
+        .as_ref()
+        .map(super::artifacts::Options::node_config)
+        .transpose()?;
     let expected = (
         options.head.ok_or("missing dispatch head")?,
         options.commit.ok_or("missing dispatch commit")?,
@@ -124,7 +137,7 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         node.runtime()
-            .block_on(node.dispatch_trusted_workflows_in(
+            .block_on(node.dispatch_trusted_workflows_with_artifacts_in(
                 &request,
                 &options.reference,
                 &options.workflow,
@@ -134,6 +147,7 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
                 &options.inputs,
                 expected,
                 Default::default(),
+                artifact_config.as_ref(),
             ))
             .map_err(|e| e.to_string())
     })();
@@ -296,5 +310,33 @@ mod tests {
             }
         }
         assert!(finish(&mut Broken, "{}", true, None).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn dispatch_routes_artifact_selectors_and_one_shared_budget() {
+        let mut input = args();
+        input.extend([
+            "--artifact-root".into(),
+            "/not-opened-dispatch-artifacts".into(),
+            "--artifact".into(),
+            ".github/workflows/a.yml:build:first.bin".into(),
+            "--artifact".into(),
+            ".github/workflows/b.yml:build:second.bin".into(),
+            "--max-artifact-mib".into(),
+            "4".into(),
+            "--max-artifact-total-mib".into(),
+            "6".into(),
+        ]);
+        let (parsed, event) = options(&input).unwrap();
+        assert_eq!(event, "push");
+        let contract = parsed.artifacts.unwrap().node_config().unwrap();
+        assert_eq!(contract.selections().len(), 2);
+        assert_eq!(contract.maximum_bytes(), 4 * 1024 * 1024);
+        assert_eq!(contract.total_bytes(), 6 * 1024 * 1024);
+        assert!(options(&args()).unwrap().0.artifacts.is_none());
+        let mut duplicate = input.clone();
+        duplicate.extend(["--artifact-root".into(), "/another-root".into()]);
+        assert!(options(&duplicate).is_err());
     }
 }

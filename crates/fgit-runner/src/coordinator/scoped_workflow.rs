@@ -640,6 +640,16 @@ where
         self.inner
             .execute_step_with_context(index, script, context, limits, live)
     }
+    fn has_job_outputs(&self, job: &fgit_schema::workflow::Job) -> bool {
+        self.inner.has_job_outputs(job)
+    }
+    fn capture_job_outputs(
+        &mut self,
+        job: &fgit_schema::workflow::Job,
+        live: &dyn Fn() -> bool,
+    ) -> Result<(), WorkerFailure> {
+        self.inner.capture_job_outputs(job, live)
+    }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
         let result = self.inner.finish_job(retain);
         self.scope_open = false;

@@ -269,7 +269,9 @@ pub(super) async fn read_events<S: AsyncAuthorityStore + ?Sized>(
     repository: RepositoryId,
     event_root: Digest,
 ) -> Result<ForgeEventBatch, AdmissionError> {
-    Ok(read_events_with_size(store, cx, repository, event_root).await?.0)
+    Ok(read_events_with_size(store, cx, repository, event_root)
+        .await?
+        .0)
 }
 
 /// The verified batch and exact frame length, for readers with a cumulative
