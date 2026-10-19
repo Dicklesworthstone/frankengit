@@ -3,10 +3,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PullClient } from '../../crates/fgit-node/src/smart_http/server/browser/pulls.mjs';
-import { commentsReply, sourceCommentAnchor, SOURCE_COMMENT_FIELDS } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-comments.mjs';
+import { commentsReply, sourceCommentAnchor, sourceCommentSelection, SOURCE_COMMENT_FIELDS } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-comments.mjs';
 import { commentCommand, requestBody, publication } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-actions.mjs';
-import { token, actor, ids, head, page, row, data, json, options, hex } from './pulls-fixtures.mjs';
-import { anchor } from './pulls-comment-anchor-fixtures.mjs';
+import { renderPullDiff } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-view.mjs';
+import { token, actor, ids, head, page, row, data, show, json, options, hex } from './pulls-fixtures.mjs';
+import { anchor, sourceDiff } from './pulls-comment-anchor-fixtures.mjs';
+import { fakeDocument } from './helpers/pulls-workflow-fixture.mjs';
 
 function conversation(format = 'sha1', comments = []) {
   return { ...ids, object_format: format, type: 'pull_request_comments', number: 1, found: true,
@@ -119,4 +121,81 @@ test('a terminal reply must echo exactly the retained anchor, including on refus
   client.discardUnsent(); await client.stageComment(1, 2, 'Ordinary comment');
   assert.throws(() => publication(terminal(client.pending, { anchor: anchor() }), client.pending, 200));
   assert.equal(publication(terminal(client.pending), client.pending, 200).terminal, true);
+});
+
+async function validatedDiff(raw = sourceDiff()) {
+  const format = raw.object_format, width = format === 'sha1' ? 40 : 64;
+  const client = new PullClient(options(url => json(url.pathname.endsWith('/diff') ? raw : show({ object_format: format,
+    pull_request: row(1, { data: data({ object_format: format, source_tip: 'a'.repeat(width), target_tip: 'b'.repeat(width) }) }) }))));
+  await client.connect(token); const observed = await client.show(1);
+  return client.diff(1, observed, raw.mode);
+}
+function spanEntry(before, after, lines) {
+  const entry = sourceDiff().entries[0], count = Buffer.byteLength(before);
+  entry.content = { kind: 'text', algorithm: 'Myers', before_bytes: count, after_bytes: Buffer.byteLength(after),
+    additions: lines, deletions: lines, hunks: [{ old: { byte_start: 0, byte_end: count, line_start: 0, line_count: lines },
+      new: { byte_start: 0, byte_end: Buffer.byteLength(after), line_start: 0, line_count: lines }, before_hex: hex(before), after_hex: hex(after) }] };
+  return entry;
+}
+
+test('source selection uses exact LF-delimited bytes, side identity and bounded complete spans', async () => {
+  const selected = await validatedDiff();
+  for (const side of ['before', 'after']) {
+    const value = sourceCommentSelection(selected, 0, 0, side);
+    assert.equal(value.anchor.side, side); assert.equal(value.excerpt_hex, side === 'before' ? '610d0aff62' : '610d0afe63');
+    assert.equal(value.anchor.blob, (side === 'before' ? 'c' : 'd').repeat(40)); assert.equal(value.anchor.line_count, 2);
+  }
+  for (const [size, permitted] of [[65536, true], [65537, false]]) {
+    const result = await validatedDiff(sourceDiff('sha1', 'merge-base', { entries: [spanEntry('a'.repeat(size), 'b'.repeat(size), 1)] }));
+    if (permitted) assert.equal(sourceCommentSelection(result, 0, 0, 'after').anchor.byte_end, size);
+    else assert.throws(() => sourceCommentSelection(result, 0, 0, 'after'));
+  }
+  for (const [lines, permitted] of [[128, true], [129, false]]) {
+    const result = await validatedDiff(sourceDiff('sha1', 'merge-base', { entries: [spanEntry('a\n'.repeat(lines), 'b\n'.repeat(lines), lines)] }));
+    if (permitted) assert.equal(sourceCommentSelection(result, 0, 0, 'after').anchor.line_count, lines);
+    else assert.throws(() => sourceCommentSelection(result, 0, 0, 'after'));
+  }
+  for (const alter of [d => { d.reply.profile = 'candidate'; }, d => { d.reply.complete = false; },
+    d => { d.reply.snapshot_token = 'alg:1:ff'; }, d => { d.reply.approval_created = true; },
+    d => { d.comparison.entries[0].content.hunks[0].after_hex = '610d0a0063'; },
+    d => { d.comparison.entries[0].content.hunks[0].new.line_count = 3; },
+    d => { d.comparison.entries[0].content.after_bytes = 1024 * 1024 + 1; }]) {
+    const bad = structuredClone(selected); alter(bad); assert.throws(() => sourceCommentSelection(bad, 0, 0, 'after'));
+  }
+});
+
+test('added and deleted source only offer their present side; binary and mode-only changes have no source action', async () => {
+  for (const side of ['before', 'after']) {
+    const raw = sourceDiff(), entry = raw.entries[0], absent = side === 'before' ? 'after' : 'before', span = absent === 'before' ? 'old' : 'new';
+    entry.kind = side === 'before' ? 'deleted' : 'added'; entry[absent] = null; entry.content[`${absent}_bytes`] = 0;
+    entry.content[side === 'before' ? 'additions' : 'deletions'] = 0;
+    entry.content[side === 'before' ? 'deletions' : 'additions'] = 2;
+    entry.content.hunks[0][`${absent}_hex`] = ''; entry.content.hunks[0][span] = { byte_start: 0, byte_end: 0, line_start: 0, line_count: 0 };
+    const result = await validatedDiff(raw), doc = fakeDocument(), parent = doc.createElement('div');
+    const rendered = renderPullDiff(doc, parent, result, { onComment() {} });
+    assert.equal(rendered.commentButtons.length, 1); assert.equal(sourceCommentSelection(result, 0, 0, side).anchor.side, side);
+    assert.throws(() => sourceCommentSelection(result, 0, 0, absent));
+  }
+  for (const kind of ['binary', 'identical']) {
+    const raw = sourceDiff(), entry = raw.entries[0];
+    if (kind === 'binary') entry.content = { kind, before_bytes: 5, after_bytes: 5 };
+    else { entry.kind = 'mode_changed'; entry.after = { ...entry.before, mode: '100755' }; entry.content = { kind }; }
+    const result = await validatedDiff(raw), doc = fakeDocument();
+    assert.equal(renderPullDiff(doc, doc.createElement('div'), result, { onComment() {} }).commentButtons.length, 0);
+    assert.throws(() => sourceCommentSelection(result, 0, 0, 'after'));
+  }
+});
+
+test('display clipping never offers a source comment for undisplayed text or drops its changed path label', async () => {
+  const large = spanEntry(`${'a'.repeat(511)}\n`.repeat(128), `${'b'.repeat(511)}\n`.repeat(128), 128);
+  const entries = Array.from({ length: 4 }, (_, index) => ({ ...structuredClone(large), path_hex: hex(`${index}.rs`) }));
+  entries.push({ ...sourceDiff().entries[0], path_hex: hex('4-hidden.rs') });
+  const result = await validatedDiff(sourceDiff('sha1', 'merge-base', { entries, entry_count: entries.length }));
+  const doc = fakeDocument(), parent = doc.createElement('div'), selections = [];
+  const rendered = renderPullDiff(doc, parent, result, { onComment: value => selections.push(value) });
+  assert.equal(rendered.clipped, true); assert.equal(rendered.commentButtons.length, 8);
+  assert.match(parent.textContent, /4-hidden\.rs/); assert.match(parent.textContent, /DISPLAY CLIPPED/);
+  rendered.commentButtons[0].click(); assert.equal(selections[0].anchor.path_hex, hex('0.rs'));
+  selections[0].anchor.path_hex = hex('changed.rs'); rendered.commentButtons[0].click();
+  assert.equal(selections[1].anchor.path_hex, hex('0.rs')); assert.equal(result.reply.entries.length, 5);
 });

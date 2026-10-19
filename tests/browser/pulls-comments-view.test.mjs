@@ -9,7 +9,7 @@ import { mountPulls } from '../../crates/fgit-node/src/smart_http/server/browser
 import { fakeDocument, sourceRoot, until } from './helpers/pulls-workflow-fixture.mjs';
 import { actor, token, ids, head as prHead, page, row, data, show, reviews, json, webcrypto, deferred } from './pulls-fixtures.mjs';
 import { fixture as candidateFixture } from './pulls-candidate-fixtures.mjs';
-import { anchor } from './pulls-comment-anchor-fixtures.mjs';
+import { anchor, sourceDiff } from './pulls-comment-anchor-fixtures.mjs';
 
 const conversationHead = `alg:1:${'8'.repeat(64)}`;
 const changedHead = `alg:1:${'9'.repeat(64)}`;
@@ -33,7 +33,8 @@ function terminal(pending, outcome = 'committed') {
     refusal_record_id: outcome === 'refused' ? 'conversation-refusal' : null,
     refusal_code: outcome === 'refused' ? 'EvidenceStale' : null,
     refusal_code_point: outcome === 'refused' ? 1 : null,
-    refs_changed: false, delivery_acknowledged: null };
+    refs_changed: false, delivery_acknowledged: null,
+    ...(pending.fields.anchor ? { anchor: structuredClone(pending.fields.anchor) } : {}) };
 }
 function descendants(node) { return [node, ...node.children.flatMap(descendants)]; }
 function button(node, prefix) {
@@ -43,7 +44,7 @@ function button(node, prefix) {
 const commentReads = calls => calls.filter(call => new URL(call.url).pathname.endsWith('/comments') && call.method === 'GET');
 const writes = calls => calls.filter(call => call.method === 'POST' && call.headers['Idempotency-Key']);
 
-async function harness({ observed = show(), read = null, dispatch = null } = {}) {
+async function harness({ observed = show(), read = null, dispatch = null, compare = null } = {}) {
   const doc = fakeDocument(), calls = [], digests = new Set(), candidate = candidateFixture(observed.object_format);
   const node = id => { const value = doc.getElementById(id); assert.ok(value, `missing template control ${id}`); return value; };
   // The shared DOM double discovers controls but does not implement option
@@ -85,6 +86,8 @@ async function harness({ observed = show(), read = null, dispatch = null } = {})
       snapshot_token: observed.snapshot_token, pull_requests: [observed.pull_request] }));
     if (url.pathname.endsWith('/pulls/1')) return json(observed);
     if (url.pathname.endsWith('/reviews')) return json(reviews({ object_format: observed.object_format }));
+    if (url.pathname.endsWith('/diff')) return compare ? compare(call)
+      : json(sourceDiff(observed.object_format, new URLSearchParams(call.bytes).get('mode')));
     if (url.pathname.endsWith('/prepare')) return new Response(candidate.mixed(), { headers: { 'Content-Type': candidate.type } });
     if (url.pathname.endsWith('/inspect')) return json(candidate.inspection);
     throw new Error(`Unexpected API request ${url}`);
@@ -156,6 +159,83 @@ test('anchored conversation renders exact and outdated source identities as iner
   assert.equal(writes(h.calls).length, 0); assert.equal(h.client.pending, null); assert.equal(h.client.candidate, null);
   assert.equal(h.node('comment-stage').disabled, false);
   h.disconnect(); assert.equal(h.node('conversation').textContent, '');
+});
+
+for (const format of ['sha1', 'sha256']) for (const mode of ['merge-base', 'direct']) {
+  test(`${format} ${mode}: source selection is explicit and prepared comments retain exact before/after coordinates`, async t => {
+    const width = format === 'sha1' ? 40 : 64, observed = show({ object_format: format,
+      pull_request: row(1, { data: data({ object_format: format, source_tip: 'a'.repeat(width), target_tip: 'b'.repeat(width) }) }) });
+    const h = await harness({ observed }); t.after(h.disconnect);
+    await h.prepare(); const candidate = h.client.candidate, candidateText = h.node('candidate').textContent;
+    button(h.node('selected'), `Compare ${mode} — read only`).click(); await h.ready();
+    assert.equal(writes(h.calls).length, 0); assert.equal(h.client.pending, null);
+    button(h.node('selected'), 'Comment on Before lines 1–2').click(); await h.ready();
+    assert.match(h.node('comment-location').textContent, /Source comment · Before · src\/main.rs/);
+    assert.ok(h.node('comment-location').textContent.includes('a\\x0d\n\\xffb'));
+    assert.equal(h.node('comment-stage').disabled, true, 'selecting source does not fabricate a conversation version');
+    await h.load();
+    const before = anchor(format, { side: 'before', blob: 'c'.repeat(width),
+      comparison: mode === 'direct' ? 'direct' : 'merge_base', compared_base: (mode === 'direct' ? 'b' : 'e').repeat(width) });
+    // Editing the metadata proposal cannot retarget the observed source.
+    h.node('source-tip').value = '9'.repeat(width); h.node('expected-version').value = '99';
+    await h.stage('Before source\r\nreview'); assert.deepEqual(h.client.pending.fields.anchor, before);
+    const saved = h.client.pending; assert.equal(writes(h.calls).length, 0); assert.equal(h.node('send').disabled, true);
+    assert.equal(button(h.node('selected'), 'Comment on After lines 1–2').disabled, true);
+    h.node('comment-body').value = 'Other editor text'; assert.equal(h.client.pending.fields.body, saved.fields.body);
+    await h.send();
+    const first = new URLSearchParams(writes(h.calls)[0].bytes);
+    assert.equal(first.get('anchor_blob'), before.blob); assert.equal(first.get('anchor_pull_request_version'), '1');
+    assert.equal(first.get('anchor_comparison'), before.comparison); assert.equal(first.get('body'), saved.fields.body);
+    assert.deepEqual(h.client.candidate, candidate); assert.equal(h.node('candidate').textContent, candidateText);
+    assert.match(h.node('comment-location').textContent, /General conversation comment/);
+    await h.load(); button(h.node('selected'), 'Comment on After lines 1–2').click(); await h.ready();
+    await h.stage('After source review'); assert.equal(h.client.pending.fields.anchor.side, 'after');
+    assert.equal(h.client.pending.fields.anchor.blob, 'd'.repeat(width));
+    assert.equal(h.client.pending.fields.anchor.source_tip, 'a'.repeat(width));
+  });
+}
+
+test('switching explicitly to a general comment preserves the draft and omits all anchor fields', async t => {
+  const h = await harness(); t.after(h.disconnect); await h.load();
+  button(h.node('selected'), 'Compare merge-base — read only').click(); await h.ready();
+  button(h.node('selected'), 'Comment on After lines 1–2').click(); await h.ready();
+  h.node('comment-body').value = 'Keep my discussion text';
+  h.node('comment-general').click();
+  assert.equal(h.node('comment-body').value, 'Keep my discussion text');
+  assert.match(h.node('comment-location').textContent, /General conversation comment/);
+  h.submit('comment-form'); await h.ready();
+  assert.equal(Object.hasOwn(h.client.pending.fields, 'anchor'), false);
+  await h.send(); assert.deepEqual([...new URLSearchParams(writes(h.calls)[0].bytes).keys()], ['expected_version', 'body']);
+});
+
+test('stale diff refresh fences a retained source selection without silently turning the draft into a general comment', async t => {
+  let comparisons = 0;
+  const h = await harness({ compare: () => ++comparisons === 1 ? json(sourceDiff()) : json({}, 409) }); t.after(h.disconnect);
+  await h.load(); button(h.node('selected'), 'Compare merge-base — read only').click(); await h.ready();
+  const oldButton = button(h.node('selected'), 'Comment on After lines 1–2'); oldButton.click(); await h.ready();
+  h.node('comment-body').value = 'Preserve the selected source';
+  button(h.node('selected'), 'Compare direct — read only').click(); await h.ready();
+  assert.match(h.node('comment-location').textContent, /source selection is stale/); assert.equal(h.node('comment-stage').disabled, true);
+  h.submit('comment-form'); await h.ready(); assert.equal(h.client.pending, null); assert.equal(writes(h.calls).length, 0);
+  oldButton.click(); await h.ready(); assert.equal(h.client.pending, null); assert.match(h.node('comment-location').textContent, /source selection is stale/);
+  h.node('comment-general').click(); h.submit('comment-form'); await h.ready();
+  assert.equal(h.client.pending.fields.body, 'Preserve the selected source'); assert.equal(Object.hasOwn(h.client.pending.fields, 'anchor'), false);
+});
+
+test('disconnect and rejected credentials clear private selected source bytes and fence late comparison callbacks', async t => {
+  const wait = deferred(); let comparisons = 0;
+  const h = await harness({ compare: () => ++comparisons === 1 ? json(sourceDiff()) : wait.promise }); t.after(h.disconnect);
+  await h.load(); button(h.node('selected'), 'Compare merge-base — read only').click(); await h.ready();
+  const oldButton = button(h.node('selected'), 'Comment on After lines 1–2'); oldButton.click(); await h.ready();
+  button(h.node('selected'), 'Compare direct — read only').click(); h.disconnect(); wait.resolve(json(sourceDiff('sha1', 'direct'))); await h.ready();
+  assert.doesNotMatch(h.node('comment-location').textContent, /Blob|src\/main.rs|\\xfec/);
+  assert.equal(h.node('comment-general').disabled, true); assert.equal(h.node('comment-body').value, '');
+  oldButton.click(); await h.ready(); assert.equal(h.client.pending, null); assert.doesNotMatch(h.node('comment-location').textContent, /Blob|src\/main.rs/);
+  const rejected = await harness({ read: () => json({}, 401) }); t.after(rejected.disconnect);
+  button(rejected.node('selected'), 'Compare merge-base — read only').click(); await rejected.ready();
+  button(rejected.node('selected'), 'Comment on After lines 1–2').click(); await rejected.ready();
+  await rejected.load(); assert.equal(rejected.client.connected, false);
+  assert.doesNotMatch(rejected.node('comment-location').textContent, /Blob|src\/main.rs/);
 });
 
 test('comment paging keeps its own exact snapshot and high water while preserving an unsubmitted draft', async t => {

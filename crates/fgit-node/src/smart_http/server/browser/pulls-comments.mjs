@@ -1,6 +1,6 @@
 // A canonical conversation has its own contiguous sequence and exact retry
 // input. A comment grants no approval, PR metadata change, or actor identity.
-import { binding, fail, integer, keys, oid, pinned, principal, text, unhex } from './pulls-core.mjs';
+import { binding, fail, integer, keys, oid, pinned, principal, snapshot, text, unhex } from './pulls-core.mjs';
 import { checkedPath } from './pulls-candidate.mjs';
 
 export const SOURCE_COMMENT_PROFILE = 'frankengit.source-comment.myers-lines.v1';
@@ -46,6 +46,35 @@ export function sourceCommentAnchor(value, algorithm) {
 
 export function sourceCommentFields(anchor) {
   return Object.fromEntries(SOURCE_COMMENT_FIELDS.map(name => [`anchor_${name}`, anchor[name]]));
+}
+
+// Select one complete before/after text span from a validated, snapshot-bound
+// PR diff. Candidate inspections and imported reports are not source selectors.
+export function sourceCommentSelection(diff, entryIndex, hunkIndex, side) {
+  const reply = diff?.reply;
+  if (reply?.type !== 'source_diff' || reply.profile !== 'native-tree-review-v1' ||
+      reply.complete !== true || reply.read_only !== true || reply.transaction_created !== false ||
+      reply.published !== false || reply.approval_created !== false || reply.line_origin !== 0 ||
+      reply.context_lines !== 3 || !['direct', 'merge-base'].includes(reply.mode) ||
+      !['before', 'after'].includes(side)) fail('Select a source comment from the complete recorded PR comparison.');
+  const selected = pinned(reply, diff.binding, diff.head);
+  snapshot(selected.head); integer(reply.pull_request?.number, 'source comment PR number', 1);
+  integer(entryIndex, 'source comment entry'); integer(hunkIndex, 'source comment hunk');
+  const entry = diff.comparison?.entries?.[entryIndex], content = entry?.content, hunk = content?.hunks?.[hunkIndex];
+  if (content?.type !== 'text' || content.algorithm !== 'Myers' || !hunk || !entry[side]) fail('Select a nonempty native text span.');
+  const bytes = unhex(hunk[`${side}_hex`], SOURCE_COMMENT_LIMITS.spanBytes), span = hunk[side === 'before' ? 'old' : 'new'];
+  const total = integer(content[`${side}_bytes`], 'source comment blob bytes', 1, SOURCE_COMMENT_LIMITS.blobBytes);
+  if (!bytes.length || bytes.includes(0) || span.byte_end - span.byte_start !== bytes.length || span.byte_end > total ||
+      (span.byte_end < total && bytes.at(-1) !== 10)) fail('Source comments require complete nonbinary lines.');
+  let lines = bytes.at(-1) === 10 ? 0 : 1;
+  for (const byte of bytes) if (byte === 10) lines += 1;
+  if (span.line_count !== lines) fail('Source comment bytes and line count disagree.');
+  const anchor = sourceCommentAnchor({ profile: SOURCE_COMMENT_PROFILE,
+    pull_request_version: reply.pull_request.version, source_ref_hex: reply.after_ref_hex, target_ref_hex: reply.before_ref_hex,
+    source_tip: reply.requested_after, target_tip: reply.requested_before, compared_base: reply.compared_before,
+    comparison: reply.mode === 'merge-base' ? 'merge_base' : 'direct', path_hex: entry.path_hex,
+    side, blob: entry[side].oid, mode: entry[side].mode.toString(8), ...span }, selected.binding.format);
+  return { number: reply.pull_request.number, head: selected.head, anchor, excerpt_hex: hunk[`${side}_hex`] };
 }
 
 export function commentsReply(reply, number, { after = 0, limit = 20, head = null, scope = null } = {}) {

@@ -328,6 +328,23 @@ PR metadata, and displayed review evidence. Reload the conversation explicitly t
 observe the result. Open, closed, and merged native PRs use the same discussion
 flow, subject to the server's independent read and write grants.
 
+To attach the draft to source, load a complete PR source diff and choose
+**Comment on Before lines** or **Comment on After lines** for an eligible
+nonempty text-hunk range. These controls select at most 128 lines and 64 KiB
+from a blob within the 1 MiB profile. The page retains the exact PR basis and
+source coordinates and displays the selected original bytes as inert text.
+Load the discussion version when needed, write the comment body, and choose
+**Prepare comment**. Review the saved anchor and body before the existing
+explicit confirmation and send step.
+
+A changed PR or conflicting diff leaves the stale location visible but blocks
+anchored staging until the source is refreshed and selected again. **Use a
+general comment instead** clears the anchor while preserving the body.
+Switching PR, disconnecting or losing credentials clears the source preview
+and prevents late requests from restoring it. Historical rows show their
+original exact/outdated location without moving it to a newer source line.
+An uncertain send retains the complete original anchor and body for recovery.
+
 ## Retry, history, and delivery
 
 Retry an uncertain append using the **identical principal, original key, PR

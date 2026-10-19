@@ -7,6 +7,7 @@ import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, 
 import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
+import { sourceCommentSelection } from './pulls-comments.mjs';
 
 export const DISPLAY_BYTES = 512 * 1024;
 const DISPLAY_HUNKS = 256;
@@ -49,7 +50,7 @@ export function renderInspection(doc, parent, report) {
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
   return renderComparison(doc, parent, report.comparison, 'inspection');
 }
-export function renderPullDiff(doc, parent, result) {
+export function renderPullDiff(doc, parent, result, { onComment = null } = {}) {
   const report = result.reply;
   parent.replaceChildren();
   item(doc, parent, 'h3', `PR #${report.pull_request.number} changes · ${report.mode}`);
@@ -60,14 +61,15 @@ export function renderPullDiff(doc, parent, result) {
     ? 'Changes from the native merge base to the recorded PR source. This is not the result of merging into the target.'
     : 'Direct tree comparison from the recorded target to the recorded source, including target-only divergence.');
   item(doc, parent, 'p', 'Read-only, snapshot-bound source evidence. No candidate, approval, transaction or publication is created. Object identities are server-reported, not independently proven by these hunks.');
-  return renderComparison(doc, parent, result.comparison, 'diff');
+  return renderComparison(doc, parent, result.comparison, 'diff', onComment ? { result, onComment } : null);
 }
-function renderComparison(doc, parent, comparison, kind) {
+function renderComparison(doc, parent, comparison, kind, comments = null) {
   let remaining = DISPLAY_BYTES, shownHunks = 0, clipped = false;
+  const commentButtons = [];
   if (!comparison.entries.length) item(doc, parent, 'p', kind === 'inspection'
     ? 'No changed paths in this exact candidate comparison. The commit identity is still significant.'
     : 'No changed paths in this complete selected comparison. This does not establish mergeability or approval.');
-  for (const entry of comparison.entries) {
+  for (const [entryIndex, entry] of comparison.entries.entries()) {
     const section = element(doc, 'section'); parent.append(section);
     item(doc, section, 'h4', `${entry.kind}: ${displayBytes(entry.path_hex)}`);
     item(doc, section, 'pre', `Path bytes: ${entry.path_hex}\nBefore: ${identity(entry.before)}\nAfter: ${identity(entry.after)}`);
@@ -79,7 +81,7 @@ function renderComparison(doc, parent, comparison, kind) {
       continue;
     }
     item(doc, section, 'p', `${content.algorithm}: +${content.additions} / −${content.deletions}; ${content.hunks.length} hunks.`);
-    for (const hunk of content.hunks) {
+    for (const [hunkIndex, hunk] of content.hunks.entries()) {
       if (shownHunks >= DISPLAY_HUNKS || remaining === 0) { clipped = true; break; }
       shownHunks += 1;
       item(doc, section, 'h5', `Old bytes ${hunk.old.byte_start}–${hunk.old.byte_end}; new bytes ${hunk.new.byte_start}–${hunk.new.byte_end}`);
@@ -88,11 +90,24 @@ function renderComparison(doc, parent, comparison, kind) {
         item(doc, section, 'p', label);
         item(doc, section, 'pre', displayBytes(bytes.slice(0, count * 2)) || '(empty byte span)');
         if (count * 2 !== bytes.length) { clipped = true; item(doc, section, 'p', 'This byte span is clipped in the display.'); }
+        if (comments && count && count * 2 === bytes.length) {
+          let selection = null;
+          try { selection = sourceCommentSelection(comments.result, entryIndex, hunkIndex, label.toLowerCase()); }
+          catch { /* This span remains readable; unsupported source selections have no comment action. */ }
+          if (selection) {
+            const anchor = selection.anchor, control = element(doc, 'button',
+              `Comment on ${label} lines ${anchor.line_start + 1}–${anchor.line_start + anchor.line_count}`);
+            control.type = 'button'; control.addEventListener('click', event => {
+              event.preventDefault(); comments.onComment(structuredClone(selection));
+            });
+            section.append(control); commentButtons.push(control);
+          }
+        }
       }
     }
   }
   if (clipped) item(doc, parent, 'p', `DISPLAY CLIPPED: not every hunk or byte is shown. Download the full ${kind} JSON before completing review. All changed path labels remain above.`);
-  return { clipped, shownHunks };
+  return { clipped, shownHunks, commentButtons };
 }
 // The selected show() observation, not the editable metadata/candidate forms,
 // supplies every fast-forward coordinate. This is a proposal, not proof that
@@ -124,7 +139,7 @@ async function fileText(input) {
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load',
-  'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-body', 'comment-stage',
+  'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
   'prepare', 'candidate-method', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
@@ -138,6 +153,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   nodes['candidate-method'].value ||= 'merge-commit';
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
+  let inlineSelection = null, inlineButtons = [];
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
   const status = message => { nodes.status.textContent = displayText(message); };
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
@@ -159,8 +175,17 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['comments-load'].disabled = !connected || busy || !selected;
     nodes['comments-limit'].disabled = !connected || busy || !selected;
     const canComment = connected && selected && conversation?.reply.found && conversation.reply.number === selected.row.number;
-    nodes['comment-stage'].disabled = !canComment || busy || Boolean(pending);
+    const sourceCurrent = !inlineSelection || (inlineSelection.row === selected?.row && inlineSelection.head === selected?.head && !selected?.stale && !inlineSelection.stale);
+    nodes['comment-stage'].disabled = !canComment || !sourceCurrent || busy || Boolean(pending);
     nodes['comment-body'].disabled = !canComment || busy;
+    nodes['comment-general'].disabled = !connected || busy || Boolean(pending) || !inlineSelection;
+    for (const control of inlineButtons) control.disabled = !connected || busy || Boolean(pending) || !selected || Boolean(selected.stale);
+    nodes['comment-location'].replaceChildren();
+    if (inlineSelection) {
+      renderCommentAnchor(doc, nodes['comment-location'], inlineSelection.anchor);
+      item(doc, nodes['comment-location'], 'pre', displayBytes(inlineSelection.excerpt_hex));
+      if (!sourceCurrent) item(doc, nodes['comment-location'], 'p', 'This source selection is stale. Reload the PR and compare again, or explicitly choose a general comment.');
+    } else item(doc, nodes['comment-location'], 'p', 'General conversation comment. To discuss specific source, compare the PR and choose a Before or After block.');
     if (fastForward) fastForward.button.disabled = !connected || busy || Boolean(pending) ||
       !fastForward.available || selected?.row !== fastForward.row || Boolean(selected?.stale);
     const resolving = Boolean(client.conflict);
@@ -198,6 +223,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   }
   function clearViews() {
     clearComments();
+    inlineButtons = [];
     selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
@@ -262,10 +288,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   function clearComments(keepDraft = false) {
     conversation = null; nodes.conversation.replaceChildren(); nodes['comment-paging'].replaceChildren();
     nodes['comment-version'].value = '';
-    if (!keepDraft) nodes['comment-body'].value = '';
+    if (!keepDraft) { nodes['comment-body'].value = ''; inlineSelection = null; }
   }
   function renderSelected(result) {
-    clearProposal(); fastForward = null;
+    clearProposal(); fastForward = null; inlineButtons = [];
     const row = result.reply.pull_request; nodes.selected.replaceChildren(); nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren(); reviewPage = null;
     nodes.snapshot.textContent = `Selected snapshot: ${result.head}`;
     if (!row) { selected = null; item(doc, nodes.selected, 'p', 'This PR was not found or is not disclosed.'); return; }
@@ -297,6 +323,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       const diffPanel = element(doc, 'section'), diffOutput = element(doc, 'div');
       item(doc, diffPanel, 'h3', 'Compare recorded PR changes');
       item(doc, diffPanel, 'p', 'Inspect changed paths without preparing a merge candidate. Both Git-read and PR-read grants are required. Reads keep this exact snapshot and both recorded tips; a stale snapshot must be reloaded explicitly.');
+      item(doc, diffPanel, 'p', 'Choose a Before or After text block to attach a source comment. Blocks must contain 1–128 complete lines and at most 64 KiB; clipped or non-text blocks have no source-comment button.');
       let lastDiff = null;
       const compareButtons = [];
       const exportDiff = button(diffPanel, 'Download full diff JSON', () => run('export', async () => {
@@ -307,14 +334,24 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       exportDiff.disabled = true;
       for (const mode of ['merge-base', 'direct']) compareButtons.push(button(diffPanel, `Compare ${mode} — read only`, () => run('read', async guard => {
         if (selected?.row !== row) fail('The selected PR changed.');
-        lastDiff = null; exportDiff.disabled = true; diffOutput.replaceChildren();
+        lastDiff = null; inlineButtons = []; exportDiff.disabled = true; diffOutput.replaceChildren();
         for (const control of compareButtons) control.disabled = true;
         try {
           const diff = await client.diff(row.number, result, mode); guard();
           if (selected?.row !== row) fail('The selected PR changed.');
-          const rendered = renderPullDiff(doc, diffOutput, diff);
+          const rendered = renderPullDiff(doc, diffOutput, diff, { onComment: selection => run('stage', async () => {
+            if (selected?.row !== row || selected.stale || lastDiff !== diff || client.pending) fail('Keep the prepared request or select source from the current PR comparison.');
+            inlineSelection = { ...selection, row }; nodes.confirm.checked = false;
+            nodes['comment-body'].focus();
+            status(conversation?.reply.found ? 'Source lines selected. Write your comment, then prepare and review its exact source location before sending.'
+              : 'Source lines selected. Load the conversation next, write your comment, then prepare it for review.');
+          }) });
+          inlineButtons = rendered.commentButtons;
           lastDiff = diff; exportDiff.disabled = false;
           status(`PR ${mode} comparison loaded without preparing a candidate.${rendered.clipped ? ' Display clipped: download the full diff JSON.' : ''}`);
+        } catch (error) {
+          if (error.status === 409 && inlineSelection?.row === row) inlineSelection.stale = true;
+          throw error;
         } finally { for (const control of compareButtons) control.disabled = !client.connected; }
       })));
       diffPanel.append(diffOutput); nodes.selected.append(diffPanel);
@@ -454,11 +491,18 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   }));
   on('reviews-load', 'click', () => loadReviews());
   on('comments-load', 'click', () => loadComments());
+  on('comment-general', 'click', () => {
+    if (operation || client.busy || client.pending || !client.connected || client.recoveryOnly) return;
+    inlineSelection = null; nodes.confirm.checked = false; controls();
+    status('General conversation comment selected. Your draft body is preserved; no source anchor will be submitted.');
+  });
   on('comment-form', 'submit', () => run('stage', async guard => {
     if (!selected || !conversation?.reply.found || conversation.reply.number !== selected.row.number) fail('Load the selected PR conversation first.');
-    await client.stageComment(selected.row.number, conversation.reply.discussion_version, nodes['comment-body'].value); guard();
+    if (inlineSelection && (inlineSelection.row !== selected.row || inlineSelection.head !== selected.head || selected.stale || inlineSelection.stale)) fail('Reload the PR and select current source lines, or explicitly choose a general comment.');
+    await client.stageComment(selected.row.number, conversation.reply.discussion_version, nodes['comment-body'].value, inlineSelection?.anchor); guard();
     nodes.confirm.checked = false;
-    status('Comment prepared locally. Review its exact body and discussion version below, then send it explicitly.');
+    status(inlineSelection ? 'Source comment prepared locally. Review the exact path, side, lines, blob, PR version and comment body below, then send it explicitly.'
+      : 'Comment prepared locally. Review its exact body and discussion version below, then send it explicitly.');
   }));
   on('new-pr', 'click', () => {
     if (operation || !client.connected || client.recoveryOnly) return;

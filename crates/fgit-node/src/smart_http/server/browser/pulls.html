@@ -52,6 +52,8 @@
     <div id="conversation"></div><div id="comment-paging"></div>
     <form id="comment-form">
       <label>Conversation version <input id="comment-version" readonly aria-readonly="true"></label>
+      <div id="comment-location" role="status" aria-live="polite"></div>
+      <button id="comment-general" type="button">Use a general comment instead</button>
       <label>Your comment <textarea id="comment-body" rows="5" maxlength="65536" required></textarea></label>
       <button id="comment-stage" type="submit">Prepare comment — do not send</button>
     </form>
