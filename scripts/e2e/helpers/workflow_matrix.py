@@ -123,7 +123,8 @@ for fmt in ('sha1', 'sha256'):
         envelope = json.loads(raw)
         assert envelope['node_closed'] and envelope['node_cleanup_error'] is None
         report = envelope['run']
-        assert report['workspaces_closed'] and not report['request_interrupted']
+        assert report['workspaces_closed'] and not report['request_interrupted'], \
+            json.dumps({key: report.get(key) for key in ('workspaces_closed', 'request_interrupted', 'succeeded')})
         assert report['source_commit'] == tip
         assert [job['id'] for job in report['execution']['jobs']] == variants + ['diagnostics', 'package', 'unrelated']
         saved = (directory / 'report.json').read_bytes()

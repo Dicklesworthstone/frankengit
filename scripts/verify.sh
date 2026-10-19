@@ -101,15 +101,18 @@ run_fast() {
 # Suites that need a missing client (Chrome, Node, the pinned oracle) report a
 # non-pass skip, so this lane cannot go green by skipping them.
 run_e2e() {
-  echo_step "Building the fg binary once for the product suites"
-  cargo build --locked -p fgit-cli --bin fg
-  local target_dir
+  # fg-mcp is built with fg: the MCP suites drive both executables.
+  echo_step "Building the fg and fg-mcp binaries once for the product suites"
+  cargo build --locked -p fgit-cli --bin fg --bin fg-mcp
+  local target_dir binary
   target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
     grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)
-  [ -x "$target_dir/debug/fg" ] || {
-    printf 'verify: e2e: no fg binary at %s/debug/fg\n' "$target_dir" >&2
-    return 1
-  }
+  for binary in fg fg-mcp; do
+    [ -x "$target_dir/debug/$binary" ] || {
+      printf 'verify: e2e: no %s binary at %s/debug/%s\n' "$binary" "$target_dir" "$binary" >&2
+      return 1
+    }
+  done
   local -a suites=()
   local suite
   while IFS= read -r suite; do
@@ -122,7 +125,7 @@ run_e2e() {
     return 1
   }
   echo_step "Running ${#suites[@]} product suites against $target_dir/debug/fg"
-  FG_BIN="$target_dir/debug/fg" "$ROOT/scripts/e2e/run_all.sh" \
+  FG_BIN="$target_dir/debug/fg" FG_MCP_BIN="$target_dir/debug/fg-mcp" "$ROOT/scripts/e2e/run_all.sh" \
     --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
 }
 

@@ -96,7 +96,6 @@ for format in ['sha1', 'sha256']:
 if os.environ.get('FG_PACKED_LARGE') == '1':
     campaign('sha256', 16 * 1024 * 1024, True)
 PY
-fge_phase verify
+fge_phase assert
 fge_assert_eq PACKED-IMPORT-EXIT 0 "$FGE_LAST_EXIT"
 fge_artifact "$WORK/commands.json" command_results
-fge_done

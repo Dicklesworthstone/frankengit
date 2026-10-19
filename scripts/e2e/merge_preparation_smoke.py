@@ -161,10 +161,13 @@ def current_state(binary, node):
     return refs, summary, int(generations[0])
 
 
-def prep_args(node, path, message=b"prepared merge\n"):
+def prep_args(node, path, algorithm, message=b"prepared merge\n"):
+    # Since 7cffff1e `merge prepare` takes the repository's object format
+    # explicitly (default sha1) and refuses a mismatch.
     return ["merge", "prepare", node, TENANT, REPOSITORY, TARGET, path,
             "--trusted-local", "--profile", "path-v1", "--source-ref", SOURCE,
-            "--author", IDENTITY, "--timestamp", "1", "--message", message.decode()]
+            "--author", IDENTITY, "--timestamp", "1", "--message", message.decode(),
+            "--object-format", algorithm]
 
 
 def apply_args(node, path, receipt, key, number):
@@ -202,7 +205,7 @@ def run_format(binary, algorithm, conflict=False):
         invoke(binary, ["import", node, TENANT, REPOSITORY, PRINCIPAL, "prepare-import", source])
         before = current_state(binary, node)
         first = root / "first.bundle"
-        result = invoke(binary, prep_args(node, first), success=not conflict)
+        result = invoke(binary, prep_args(node, first, algorithm), success=not conflict)
         receipt = json.loads(result.stdout)
         check_receipt(receipt, history, "conflicted" if conflict else "prepared")
         require(current_state(binary, node) == before, "preparation changed repository state")
@@ -231,12 +234,12 @@ def run_format(binary, algorithm, conflict=False):
                 "candidate objects differ from independent exact result")
         require(history["kept"] not in objects, "unchanged sibling was unnecessarily copied")
         repeat = root / "repeat.bundle"
-        again = json.loads(invoke(binary, prep_args(node, repeat)).stdout)
+        again = json.loads(invoke(binary, prep_args(node, repeat, algorithm)).stdout)
         require(repeat.read_bytes() == data and again["candidate_commit"] == candidate, "nondeterministic candidate")
-        invoke(binary, prep_args(node, first), success=False)
+        invoke(binary, prep_args(node, first, algorithm), success=False)
         require(first.read_bytes() == data, "existing artifact was replaced")
         competitor = root / "competitor.bundle"
-        rival = json.loads(invoke(binary, prep_args(node, competitor, b"different reviewed merge\n")).stdout)
+        rival = json.loads(invoke(binary, prep_args(node, competitor, algorithm, b"different reviewed merge\n")).stdout)
         require(rival["candidate_commit"] != candidate, "message not bound into candidate identity")
         args = apply_args(node, first, receipt, "prepared-review", 1)
         accepted = json.loads(invoke(binary, args).stdout)
@@ -251,7 +254,7 @@ def run_format(binary, algorithm, conflict=False):
         refused = current_state(binary, node)
         require(refused[0] == after[0] and refused[2] == after[2] + 1, "stale refusal changed source state")
         noop_path = root / "noop.bundle"
-        noop = json.loads(invoke(binary, prep_args(node, noop_path)).stdout)
+        noop = json.loads(invoke(binary, prep_args(node, noop_path, algorithm)).stdout)
         check_receipt(noop, history, "already_up_to_date")
         require(not noop_path.exists() and noop["expected_target"] == candidate, "no-op created another merge")
         require(current_state(binary, node) == refused, "no-op advanced authority")

@@ -349,6 +349,12 @@ def run_format(binary, algorithm):
                             "--expected-version", 1, "--expected-epoch", 2, "--clear"]))
         require(disabled["committed"] is True and disabled["committed_policy_epoch"] == 3,
                 "explicitly disable protection for the permitted update twin")
+        # Protection writes are policy boundaries. The authenticated ancestor
+        # walk behind a pinned historical read refuses to cross one
+        # (OneNode::read_pull_request_checks_in), so the retained-snapshot
+        # check below pins the head after the clear, just before the source moves.
+        pre_move_page = document(invoke(binary, checks))
+        check_page(pre_move_page, algorithm, f, incarnation, ordered)
         moved = document(invoke(binary, changed(advance, "--idempotency-key", "advance-workflow-source")))
         require(moved["command_committed"] is True, "advance exact canonical source")
         stale = document(invoke(binary, checks))
@@ -356,8 +362,11 @@ def run_format(binary, algorithm):
         for name in JOBS:
             require(document(invoke(binary, commands[name])) == receipts[name], "source movement erased historical terminal")
         require(document(invoke(binary, checks)) == stale, "historical retry republished after source movement")
-        require(document(invoke(binary, checks + ["--expected-head", page["snapshot_token"]])) == page,
-                "retained source snapshot lost its exact historical observations")
+        require(document(invoke(binary, checks + ["--expected-head", pre_move_page["snapshot_token"]]))
+                == pre_move_page, "retained source snapshot lost its exact historical observations")
+        across_policy = invoke(binary, checks + ["--expected-head", page["snapshot_token"]], 2)
+        require(not across_policy.stdout and b"SnapshotMoved" in across_policy.stderr,
+                "a pinned historical read crossed a protection-policy boundary")
         new_attempt = changed(valid, "--idempotency-key", "new-request-old-workflow-source")
         rejected = document(invoke(binary, new_attempt, 3))
         entry, index, _ = completed["a_success"]

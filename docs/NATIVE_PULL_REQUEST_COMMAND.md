@@ -91,9 +91,13 @@ current canonical codec version implicit in this typed option. It is not an
 access capability. The node compares the typed identity before returning rows;
 the CLI also verifies its returned window before emitting it.
 
-This is an exact-current-head precondition, **not** a persistent historical read
-session. If any canonical decision changes the head, continuation refuses with
-`SnapshotMoved`; restart from the first page rather than mixing the two views.
+The pin selects a retained snapshot. A pinned page reads the PR window at
+exactly that head, even after later canonical decisions, so a continuation
+never mixes two views. It refuses with `SnapshotMoved` only when the named head
+lies outside the retained-snapshot window (the 256-transition and epoch
+boundaries of `HTTP_REVIEW_MERGE_API.md`); restart from the first page then.
+The `pull_request_cli` smoke campaign pins both a retained first page and its
+continuation across a later update.
 A partial final page has no cursor, as does an exactly full page when no further
 visible PR exists. Read failure is never reported as a completed empty list.
 

@@ -178,9 +178,13 @@ def run_format(binary, algorithm):
         require(read("show", 8, code=4)["pull_request"] is None, "show substituted the next higher PR")
         updated_data = dict(data, title="Changed exactly once")
         updated = mutate("update", 7, 1, "update-7", updated_data)
-        stale_page = ["pr", "list", node, TENANT, REPOSITORY, "--trusted-local", "--object-format", algorithm,
-                      "--after", "7", "--expected-head", first["snapshot_token"]]
-        require(not invoke(binary, stale_page, 2), "stale page returned a success report")
+        # A pinned page reads the retained snapshot it names (5c294d6e), so a
+        # later update can neither leak into it nor make it refuse; refusal is
+        # reserved for heads outside the retained window.
+        require(read(extra=["--limit", "2", "--after", "7", "--expected-head", first["snapshot_token"]]) == second,
+                "a retained continuation changed after a later update")
+        require(read(extra=["--limit", "2", "--expected-head", first["snapshot_token"]]) == first,
+                "a retained first page changed after a later update")
         check_view(read("show", 7)["pull_request"], updated_data, 7, 2, "open")
         stale = mutate("update", 7, 1, "stale-update", dict(data, title="Must not win"), False)
         require(stale["refusal_code"] == "EvidenceStale", "stale version refusal")

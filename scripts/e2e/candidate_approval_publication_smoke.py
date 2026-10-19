@@ -162,7 +162,12 @@ def scenario(binary, fmt):
         require(vote(PEER, "approve") == approved, "review retry changed result")
         first_head = run_fg(binary, read_args)["snapshot_token"]
         vote(OTHER, "approve-other")
-        run_fg(binary, read_args + ["--after", PEER, "--expected-head", first_head], 2, False)
+        # A pinned continuation reads the retained snapshot it names (5c294d6e;
+        # docs/HTTP_REVIEW_MERGE_API.md), so the later vote stays out of it.
+        retained = run_fg(binary, read_args + ["--after", PEER, "--expected-head", first_head])
+        require(retained["snapshot_token"] == first_head and retained["next_after"] is None
+                and all(row["reviewer"] != OTHER for row in retained["reviews"]),
+                "a later vote leaked into a retained review continuation")
         first = run_fg(binary, read_args + ["--limit", "1"])
         require(first["next_after"] == PEER and first["complete"] is False and first["page_complete"] is True, "review page truncation")
         second = run_fg(binary, read_args + ["--limit", "1", "--after", PEER, "--expected-head", first["snapshot_token"]])

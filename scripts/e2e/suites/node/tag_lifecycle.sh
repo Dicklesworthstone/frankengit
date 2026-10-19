@@ -116,24 +116,31 @@ fge_assert_cmd FG-097-TAGS-014 'clone retains the lightweight tag without a synt
 
 # The hostile control is constructed and observed exclusively through the
 # pinned Bubblewrap oracle.  The tag object exists, but its declared target
-# does not; upstream upload-pack refuses its advertisement rather than
-# presenting an unpeelable `refs/tags/*` record.
-ORACLE_RUN="$(fge_tempdir fg097-oracle)"
-printf 'object %040d\ntype commit\ntag dangling\ntagger FG <fg097@invalid.example> 1 +0000\n\n' 0 \
-  > "${ORACLE_RUN}/dangling-tag.body"
+# (the null object ID) does not.  Observed at git-2.54.0 (2026-10-19, the first
+# time this control executed): upstream upload-pack ADVERTISES the dangling tag
+# with its declared peel and exits 0; it does not refuse it.  These assertions
+# record that oracle behaviour.  This suite asserts nothing about how
+# FrankenGit handles the same state.
+# The oracle accepts only run directories it created under its own runs/
+# directory, and maps <run>/work to the sandbox's /work.
 oracle_setup_exit=0
-env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" . \
-  -- init --quiet --bare dangling.git || oracle_setup_exit=$?
+ORACLE_RUN="$(env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" create-run "${ORACLE_PIN}" fg097-oracle)" ||
+  oracle_setup_exit=$?
+if [[ "${oracle_setup_exit}" -eq 0 ]]; then
+  printf 'object %040d\ntype commit\ntag dangling\ntagger FG <fg097@invalid.example> 1 +0000\n\n' 0 \
+    > "${ORACLE_RUN}/work/dangling-tag.body"
+  env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" . \
+    -- init --quiet --bare dangling.git || oracle_setup_exit=$?
+fi
 fge_assert_exit FG-097-TAGS-015 0 "${oracle_setup_exit}" \
   'pinned Git oracle creates the isolated dangling-tag repository'
 if [[ "${oracle_setup_exit}" -eq 0 ]]; then
-  alias_exit=0
-  env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" \
-    dangling.git -- config alias.fg097-store-dangling \
-    '!$GIT_EXEC_PATH/git-hash-object -t tag -w --stdin < ../dangling-tag.body' || alias_exit=$?
-  fge_assert_exit FG-097-TAGS-016 0 "${alias_exit}" \
+  store_exit=0
+  env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" capture "${ORACLE_PIN}" "${ORACLE_RUN}" \
+    dangling.git fg097-store-dangling -- hash-object -t tag -w ../dangling-tag.body || store_exit=$?
+  fge_assert_exit FG-097-TAGS-016 0 "${store_exit}" \
     'pinned Git stores an annotated tag whose target is absent'
-  if [[ "${alias_exit}" -eq 0 ]]; then
+  if [[ "${store_exit}" -eq 0 ]]; then
     tag_oid="$(tr -d '\r\n' < "${ORACLE_RUN}/transcripts/fg097-store-dangling/stdout.bin")"
     ref_exit=0
     env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" \
@@ -148,13 +155,12 @@ if [[ "${oracle_setup_exit}" -eq 0 ]]; then
       if [[ -f "${ORACLE_RUN}/transcripts/dangling-advertisement/stdout.bin" ]]; then
         advertisement_output="$(<"${ORACLE_RUN}/transcripts/dangling-advertisement/stdout.bin")"
       fi
-      fge_assert_not_contains FG-097-TAGS-018 \
+      fge_assert_contains FG-097-TAGS-018 \
         "${advertisement_output}" \
-        'refs/tags/dangling' \
-        'pinned Git never advertises a dangling annotated tag'
-      fge_assert_cmd FG-097-TAGS-019 \
-        'pinned Git gives a typed non-success outcome for a dangling tag advertisement' \
-        test "${advertisement_exit}" -ne 0
+        "0000000000000000000000000000000000000000 refs/tags/dangling^{}" \
+        'pinned Git advertises the dangling annotated tag with its declared null peel'
+      fge_assert_exit FG-097-TAGS-019 0 "${advertisement_exit}" \
+        'pinned Git completes the dangling-tag advertisement successfully'
     fi
   fi
 fi
