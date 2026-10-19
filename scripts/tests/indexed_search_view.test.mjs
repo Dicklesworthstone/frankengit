@@ -35,10 +35,21 @@ function dom() {
     controls.set(match[2], element);
   }
   const get = id => { assert.ok(controls.has(id), `missing shipped control ${id}`); return controls.get(id); };
+  // Controls the view mounts at runtime (the source-context panel since
+  // b00bdc30) are found once mounted; any other unknown ID is null, as in a
+  // browser. The test-side `get` above stays strict about shipped HTML.
+  const mounted = new Map();
+  const lookup = id => controls.get(id) ?? mounted.get(id) ?? null;
+  const createElement = tag => {
+    const element = new Element(tag);
+    Object.defineProperty(element, 'id', { configurable: true, enumerable: true, get() { return this.mountedId; },
+      set(value) { this.mountedId = value; assert.ok(!controls.has(value), `duplicate HTML ID ${value}`); mounted.set(value, this); } });
+    return element;
+  };
   for (const [id, value] of Object.entries({ mode: 'indexed-content', encoding: 'utf8', case: 'exact',
     'prefix-encoding': 'utf8', 'index-source-mode': 'exact', format: 'sha1', token, query: 'Alpha\nBETA' })) get(id).value = value;
   const events = new Element();
-  return { get, controls, document: { getElementById: get, createElement: tag => new Element(tag), defaultView: events }, events };
+  return { get, controls, document: { getElementById: lookup, createElement, defaultView: events }, events };
 }
 function fixture({ docs = [indexedDocument()], complete = true, respond, mode = 'indexed-content', queryText = 'Alpha\nBETA', limit = '100' } = {}) {
   const d = dom(), calls = [], urls = new Map(), revoked = [];

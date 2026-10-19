@@ -207,7 +207,9 @@ test('invalid requests fail before network and cannot widen authority or resourc
 });
 test('the search transport structurally excludes writes, recovery, bodyless reads, keys, artifacts and cross-origin paths', async () => {
   const f = fixture(), transport = new Transport({ ...f.options, pageSuffix: '/ui/search/' }); await transport.connect(TOKEN);
-  for (const path of ['source/apply', 'source/initial/apply', 'source/prepare', 'source/bundle/import', 'source/tree', 'outcomes', 'pulls',
+  // source/log and source/tree are pinned reads of this profile since 3285807b
+  // (context membership); source/inspect is a read the profile still excludes.
+  for (const path of ['source/apply', 'source/initial/apply', 'source/prepare', 'source/bundle/import', 'source/inspect', 'outcomes', 'pulls',
     'https://evil.example/source/search', '../source/search', '/source/search', 'source/search?x=y']) {
     await assert.rejects(transport.request(path, { method: 'POST', body: 'x=y' }));
   }

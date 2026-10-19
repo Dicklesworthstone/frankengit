@@ -38,11 +38,15 @@ test('both Git domains preserve native tips and decimal string counts', () => {
   }
 });
 
-test('all four native conclusions remain observations, never successful protected checks', () => {
-  for (const conclusion of ['action_required', 'failure', 'cancelled', 'timed_out']) {
-    assert.equal(validate(checks({ checks: [checkRow({ conclusion })] })).reply.checks[0].conclusion, conclusion);
+// Since f0b8a026 a verified trusted-workflow `success` is displayed; it stays an
+// observation and never grants merge permission (pulls-checks-success.test.mjs).
+test('all five native conclusions remain observations, never merge permission', () => {
+  for (const conclusion of ['action_required', 'success', 'failure', 'cancelled', 'timed_out']) {
+    const result = validate(checks({ checks: [checkRow({ conclusion })] }));
+    assert.equal(result.reply.checks[0].conclusion, conclusion);
+    assert.equal(result.reply.merge_permission, null);
   }
-  for (const conclusion of ['success', 'neutral', 'succeeded', 'approved', 'pending', null]) {
+  for (const conclusion of ['neutral', 'succeeded', 'approved', 'pending', null]) {
     assert.throws(() => validate(checks({ checks: [checkRow({ conclusion })] })));
   }
   for (const extra of [{ merge_permission: true }, { merge_permission: false }, { scope: 'protected_checks' }]) assert.throws(() => validate(checks(extra)));
