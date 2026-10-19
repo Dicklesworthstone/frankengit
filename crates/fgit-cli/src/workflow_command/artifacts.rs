@@ -10,12 +10,48 @@ pub(super) struct Selection {
     output: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) struct InputSelection {
+    workflow: Vec<u8>,
+    consumer: String,
+    producer: String,
+    output: Vec<u8>,
+    destination: Vec<u8>,
+}
+
+pub(super) fn input_selection(value: &str, encoded: bool) -> Result<InputSelection, String> {
+    let fields = value.splitn(5, ':').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err("artifact input must be workflow:consumer:producer:output:destination".into());
+    }
+    let producer = selection(
+        &format!("{}:{}:{}", fields[0], fields[2], fields[3]),
+        encoded,
+    )?;
+    let target = selection(
+        &format!("{}:{}:{}", fields[0], fields[1], fields[4]),
+        encoded,
+    )?;
+    if producer.job == target.job || target.output.len() > 4000 {
+        return Err("artifact input needs different jobs and a bounded destination".into());
+    }
+    Ok(InputSelection {
+        workflow: producer.workflow,
+        consumer: target.job,
+        producer: producer.job,
+        output: producer.output,
+        destination: target.output,
+    })
+}
+
 #[derive(Debug)]
 pub(super) struct Options {
     root: PathBuf,
     selections: Vec<Selection>,
     maximum_bytes: usize,
     total_bytes: usize,
+    inputs: Vec<InputSelection>,
+    input_total_bytes: usize,
 }
 
 pub(super) fn selection(value: &str, encoded: bool) -> Result<Selection, String> {
@@ -56,14 +92,16 @@ pub(super) fn selection(value: &str, encoded: bool) -> Result<Selection, String>
     })
 }
 
-pub(super) fn options(
+pub(super) fn options_with_inputs(
     flags: &BTreeMap<&str, &str>,
     mut selections: Vec<Selection>,
+    mut inputs: Vec<InputSelection>,
 ) -> Result<Option<Options>, String> {
     let root = flags.get("--artifact-root");
-    let has_limit =
-        flags.contains_key("--max-artifact-mib") || flags.contains_key("--max-artifact-total-mib");
-    if root.is_none() && selections.is_empty() && !has_limit {
+    let has_limit = flags.contains_key("--max-artifact-mib")
+        || flags.contains_key("--max-artifact-total-mib")
+        || flags.contains_key("--max-artifact-input-total-mib");
+    if root.is_none() && selections.is_empty() && inputs.is_empty() && !has_limit {
         return Ok(None);
     }
     let root = PathBuf::from(*root.ok_or("--artifact-root is required for output capture")?);
@@ -84,6 +122,48 @@ pub(super) fn options(
     selections.sort();
     if selections.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err("artifact selections must be distinct".into());
+    }
+    if inputs.len() > 64
+        || (inputs.is_empty() && flags.contains_key("--max-artifact-input-total-mib"))
+    {
+        return Err("artifact input limits require 1..64 explicit input selections".into());
+    }
+    if selections
+        .iter()
+        .map(|s| s.workflow.len() + s.output.len())
+        .sum::<usize>()
+        + inputs
+            .iter()
+            .map(|s| s.workflow.len() + s.output.len() + s.destination.len())
+            .sum::<usize>()
+        > 64 * 1024
+    {
+        return Err("combined artifact input/output paths exceed 64 KiB".into());
+    }
+    inputs.sort();
+    for (index, input) in inputs.iter().enumerate() {
+        if !selections.iter().any(|output| {
+            output.workflow == input.workflow
+                && output.job == input.producer
+                && output.output == input.output
+        }) {
+            return Err("artifact input producer output must be explicitly captured".into());
+        }
+        if inputs[..index].iter().any(|previous| {
+            previous.workflow == input.workflow
+                && previous.consumer == input.consumer
+                && (previous.destination == input.destination
+                    || previous
+                        .destination
+                        .strip_prefix(input.destination.as_slice())
+                        .is_some_and(|r| r.starts_with(b"/"))
+                    || input
+                        .destination
+                        .strip_prefix(previous.destination.as_slice())
+                        .is_some_and(|r| r.starts_with(b"/")))
+        }) {
+            return Err("artifact input destinations overlap within a consumer".into());
+        }
     }
     let mib = |flag: &str, default: usize, maximum: usize| -> Result<usize, String> {
         let count = match flags.get(flag) {
@@ -109,7 +189,17 @@ pub(super) fn options(
         selections,
         maximum_bytes: mib("--max-artifact-mib", 16, 64)?,
         total_bytes: mib("--max-artifact-total-mib", 64, 512)?,
+        inputs,
+        input_total_bytes: mib("--max-artifact-input-total-mib", 64, 512)?,
     }))
+}
+
+#[cfg(test)]
+fn options(
+    flags: &BTreeMap<&str, &str>,
+    selections: Vec<Selection>,
+) -> Result<Option<Options>, String> {
+    options_with_inputs(flags, selections, Vec::new())
 }
 
 #[cfg(target_os = "linux")]
@@ -123,13 +213,33 @@ impl Options {
                     .map_err(str::to_owned)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        fgit_node::TrustedWorkflowArtifactConfig::new(
+        let config = fgit_node::TrustedWorkflowArtifactConfig::new(
             self.root.clone(),
             selections,
             self.maximum_bytes,
             self.total_bytes,
         )
-        .map_err(str::to_owned)
+        .map_err(str::to_owned)?;
+        if self.inputs.is_empty() {
+            return Ok(config);
+        }
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|input| {
+                fgit_node::TrustedWorkflowArtifactInput::new(
+                    &input.workflow,
+                    &input.consumer,
+                    &input.producer,
+                    &input.output,
+                    &input.destination,
+                )
+                .map_err(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        config
+            .with_inputs(inputs, self.input_total_bytes)
+            .map_err(str::to_owned)
     }
 }
 
@@ -178,5 +288,85 @@ mod tests {
         }
         assert!(options(&BTreeMap::from([("--max-artifact-mib", "4")]), vec![],).is_err());
         assert!(options(&BTreeMap::new(), vec![]).unwrap().is_none());
+    }
+
+    #[test]
+    fn input_selectors_preserve_byte_paths_and_require_explicit_direct_job_names() {
+        let selected = input_selection(
+            "63692fff2e796d6c:test__matrix_003:build__matrix_007:6f75742ffe:62696e2fff",
+            true,
+        )
+        .unwrap();
+        assert_eq!(selected.workflow, b"ci/\xff.yml");
+        assert_eq!(selected.consumer, "test__matrix_003");
+        assert_eq!(selected.producer, "build__matrix_007");
+        assert_eq!(selected.output, b"out/\xfe");
+        assert_eq!(selected.destination, b"bin/\xff");
+        for value in [
+            "ci/a.yml:test:build:out",
+            "ci/a.yml:build:build:out:bin/tool",
+            "ci/a.yml:test:build:out:../outside",
+            "ci/a.yml:test:build:out:/outside",
+            "ci/a.yml:test:build:out:.fgit-host-receipt",
+            "ci/a.yml::build:out:tool",
+            "ci/a.yml:bad job:build:out:tool",
+        ] {
+            assert!(input_selection(value, false).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn input_options_bound_delivery_and_refuse_uncaptured_or_overlapping_destinations() {
+        let base = BTreeMap::from([("--artifact-root", "/explicit-not-opened-root")]);
+        let capture = selection("ci/a.yml:build:out", false).unwrap();
+        let selected = input_selection("ci/a.yml:test:build:out:bin/tool", false).unwrap();
+        let config = options_with_inputs(&base, vec![capture.clone()], vec![selected.clone()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.input_total_bytes, 64 * 1024 * 1024);
+        assert!(options_with_inputs(&base, Vec::new(), vec![selected.clone()]).is_err());
+        assert!(
+            options_with_inputs(
+                &base,
+                vec![capture.clone()],
+                vec![input_selection("ci/a.yml:test:build:other:bin/tool", false).unwrap(),]
+            )
+            .is_err()
+        );
+        for path in ["bin", "bin/tool", "bin/tool/child"] {
+            let other = input_selection(&format!("ci/a.yml:test:build:out:{path}"), false).unwrap();
+            assert!(
+                options_with_inputs(&base, vec![capture.clone()], vec![selected.clone(), other])
+                    .is_err()
+            );
+        }
+        assert!(
+            options_with_inputs(
+                &base,
+                vec![capture.clone()],
+                vec![
+                    selected.clone(),
+                    input_selection("ci/a.yml:package:build:out:bin/tool", false).unwrap(),
+                ]
+            )
+            .is_ok()
+        );
+        for total in ["0", "513", "01", "+1"] {
+            let mut flags = base.clone();
+            flags.insert("--max-artifact-input-total-mib", total);
+            assert!(
+                options_with_inputs(&flags, vec![capture.clone()], vec![selected.clone()]).is_err()
+            );
+        }
+        let mut flags = base;
+        flags.insert("--max-artifact-input-total-mib", "1");
+        assert!(options_with_inputs(&flags, vec![capture.clone()], Vec::new()).is_err());
+        assert_eq!(
+            options_with_inputs(&flags, vec![capture], vec![selected])
+                .unwrap()
+                .unwrap()
+                .input_total_bytes,
+            1024 * 1024
+        );
     }
 }

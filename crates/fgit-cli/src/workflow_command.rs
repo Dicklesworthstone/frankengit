@@ -25,6 +25,9 @@ const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <reposito
   [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
+  [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
+  [--max-artifact-input-total-mib <1..512>]
 
 Unpublished candidate: replace run with run-candidate and also supply
   --bundle <stable-local-file> --candidate-commit <reviewed-native-oid>
@@ -58,8 +61,14 @@ unsafe, oversized or corrupt payloads prevent success. Defaults: 16 MiB per file
 manifests bind exact producing attempts and sources. Use fg artifact inspect/export
 with --trust-domain trusted-workflow-local-owner to retrieve immutable bytes.
 This script profile does not create a BuildInputCapsule or authorize cache reuse.
-Capture also supports run-candidate and run-merge-candidate; candidate provenance
-is explicit and never substitutes for a canonical published check.
+Capture and explicit inputs also support run-candidate and run-merge-candidate;
+provenance retains the exact unpublished candidate and canonical base identity.
+Explicit artifact inputs copy a successful direct dependency's captured output to
+.fgit-artifacts/<destination> in the consumer's fresh workspace. The entire contract
+is validated before any job starts. Payload and current-attempt provenance are
+reverified before materialization. Fan-out copies share a separate 64 MiB delivery
+allowance by default, including every child of a dispatch. Destinations cannot
+overlap source inputs. Delivery refusal prevents the consumer from starting.
 
 Each run creates workflow-<run-id>/attempt.json before starting any process and
 report.json after close or explicit containment. Occupied run IDs always refuse.
@@ -151,6 +160,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut flags = BTreeMap::new();
     let mut inputs = BTreeSet::new();
     let mut artifact_selections = Vec::new();
+    let mut artifact_inputs = Vec::new();
     let mut cursor = 5;
     while cursor < args.len() {
         let flag = args[cursor].as_str();
@@ -178,6 +188,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 | "--artifact-hex"
                 | "--max-artifact-mib"
                 | "--max-artifact-total-mib"
+                | "--artifact-input"
+                | "--artifact-input-hex"
+                | "--max-artifact-input-total-mib"
         ) && !(candidate_mode && matches!(flag, "--bundle" | "--candidate-commit"))
         {
             return Err(format!("unknown workflow option {flag:?}"));
@@ -203,6 +216,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 return Err("at most 64 artifact selections are permitted".into());
             }
             artifact_selections.push(artifacts::selection(value, flag == "--artifact-hex")?);
+        } else if matches!(flag, "--artifact-input" | "--artifact-input-hex") {
+            if artifact_inputs.len() >= 64 {
+                return Err("at most 64 artifact input selections are permitted".into());
+            }
+            artifact_inputs.push(artifacts::input_selection(value, flag == "--artifact-input-hex")?);
         } else if flags.insert(flag, value.as_str()).is_some() {
             return Err(format!("duplicate {flag}"));
         }
@@ -268,7 +286,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             RepositoryIncarnationId::from_hex(text).map_err(|_| "invalid incarnation ID".to_owned())
         })
         .transpose()?;
-    let artifacts = artifacts::options(&flags, artifact_selections)?;
+    let artifacts = artifacts::options_with_inputs(&flags, artifact_selections, artifact_inputs)?;
     let candidate = if candidate_mode {
         let base = commit.ok_or("--expected-commit is mandatory for run-candidate")?;
         let candidate = native_oid(value("--candidate-commit")?, format)?;

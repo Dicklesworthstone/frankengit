@@ -1,6 +1,8 @@
 //! Actual authenticated source selection, process execution, immutable artifact
 //! custody and offline journal reopening. These remain trusted-owner tests.
 use super::*;
+#[path = "artifact_inputs.rs"]
+mod input_delivery;
 use fgit_node::{
     TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig as Config,
     TrustedWorkflowArtifactSelection as Selection, TrustedWorkflowRun,

@@ -12,6 +12,11 @@ use fgit_treefs::FileMode;
 use fgit_types::{Digest, DigestBytes};
 use std::cell::Cell;
 use std::time::Duration;
+mod inputs;
+pub use inputs::{
+    DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, TrustedWorkflowArtifactInput,
+    TrustedWorkflowArtifactInputReceipt, TrustedWorkflowJobArtifactInputs,
+};
 
 /// Filesystem namespace selected with fg artifact inspect/export --trust-domain.
 pub const TRUSTED_WORKFLOW_ARTIFACT_TRUST: &str = "trusted-workflow-local-owner";
@@ -75,6 +80,8 @@ pub struct TrustedWorkflowArtifactConfig {
     selections: Vec<TrustedWorkflowArtifactSelection>,
     maximum_bytes: usize,
     total_bytes: usize,
+    inputs: Vec<TrustedWorkflowArtifactInput>,
+    input_total_bytes: usize,
 }
 impl TrustedWorkflowArtifactConfig {
     pub fn new(
@@ -111,6 +118,8 @@ impl TrustedWorkflowArtifactConfig {
             selections,
             maximum_bytes,
             total_bytes,
+            inputs: Vec::new(),
+            input_total_bytes: DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES,
         })
     }
     pub fn root(&self) -> &Path {
@@ -131,14 +140,19 @@ impl TrustedWorkflowArtifactConfig {
             "{{\"workflow_path_hex\":\"{}\",\"job_id_hex\":\"{}\",\"output_path_hex\":\"{}\"}}",
             hex(s.workflow_path()), hex(s.job.as_bytes()), hex(s.output_path()),
         )).collect::<Vec<_>>().join(",");
-        format!(
+        let mut json = format!(
             "{{\"schema_version\":1,\"root_hex\":\"{}\",\"trust_domain\":\"{}\",\"maximum_file_bytes\":{},\"total_payload_bytes\":{},\"retention_ttl_seconds\":86400,\"selections\":[{}]}}",
             hex(self.root.as_os_str().as_bytes()),
             TRUSTED_WORKFLOW_ARTIFACT_TRUST,
             self.maximum_bytes,
             self.total_bytes,
             selections,
-        )
+        );
+        if !self.inputs.is_empty() {
+            json.pop();
+            json.push_str(&format!(",\"input_delivery\":{}}}", self.inputs_json()));
+        }
+        json
     }
 
     pub(super) fn validate_workflow(
@@ -156,15 +170,19 @@ impl TrustedWorkflowArtifactConfig {
                 "artifact selection names an absent expanded workflow job",
             ));
         }
+        self.validate_inputs(path, plan)?;
         Ok(())
     }
 }
 
-/// One cumulative output allowance, shared by every child in a dispatch.
+/// Cumulative capture and input allowances, shared by every dispatch child.
 pub(super) struct Session<'a> {
     pub(super) config: &'a TrustedWorkflowArtifactConfig,
     store: LocalArtifactStore,
     remaining: Cell<usize>,
+    input_remaining: Cell<usize>,
+    input_materialization_remaining: Cell<usize>,
+    input_entry_remaining: Cell<usize>,
 }
 impl<'a> Session<'a> {
     pub(super) fn open(
@@ -184,7 +202,57 @@ impl<'a> Session<'a> {
             config,
             store,
             remaining: Cell::new(config.total_bytes),
+            input_remaining: Cell::new(config.input_total_bytes),
+            input_materialization_remaining: Cell::new(MAX_REPLICATED_BYTES),
+            input_entry_remaining: Cell::new(MAX_REPLICATED_ENTRIES),
         })
+    }
+
+    /// Preflight reserves all potential source replicas before delivery. The
+    /// dispatch installs its whole-batch ceiling before any child; later child
+    /// preflights may only tighten it, never replenish a spent allowance.
+    pub(super) fn restrict_input_materialization(
+        &self,
+        source_bytes: usize,
+        source_entries: usize,
+    ) {
+        if self.config.inputs.is_empty() {
+            return;
+        }
+        self.input_materialization_remaining.set(
+            self.input_materialization_remaining
+                .get()
+                .min(MAX_REPLICATED_BYTES.saturating_sub(source_bytes)),
+        );
+        self.input_entry_remaining.set(
+            self.input_entry_remaining
+                .get()
+                .min(MAX_REPLICATED_ENTRIES.saturating_sub(source_entries)),
+        );
+    }
+
+    fn charge_input(&self, bytes: usize) -> Result<(), String> {
+        let delivery = self
+            .input_remaining
+            .get()
+            .checked_sub(bytes)
+            .ok_or_else(|| "aggregate artifact input delivery limit exceeded".to_owned())?;
+        let materialization = self
+            .input_materialization_remaining
+            .get()
+            .checked_sub(bytes)
+            .ok_or_else(|| {
+                "aggregate source-plus-artifact materialization limit exceeded".to_owned()
+            })?;
+        let entries = self
+            .input_entry_remaining
+            .get()
+            .checked_sub(1)
+            .ok_or_else(|| "aggregate source-plus-artifact entry limit exceeded".to_owned())?;
+        self.input_remaining.set(delivery);
+        self.input_materialization_remaining.set(materialization);
+        self.input_entry_remaining.set(entries);
+        Ok(())
     }
 
     fn charge(&self, bytes: usize) -> Result<(), String> {
@@ -250,6 +318,8 @@ pub(super) struct Collector<'a> {
     workflow: Vec<u8>,
     source_rcr: Option<Digest>,
     pub(super) jobs: Vec<TrustedWorkflowJobArtifacts>,
+    pub(super) inputs: Vec<TrustedWorkflowJobArtifactInputs>,
+    completed: std::collections::BTreeMap<String, fgit_runner::workflow::JobOutcome>,
 }
 impl<'a> Collector<'a> {
     pub(super) fn new(session: &'a Session<'a>, report: &TrustedWorkflowRun) -> Self {
@@ -269,6 +339,8 @@ impl<'a> Collector<'a> {
             workflow: report.workflow_path.clone(),
             source_rcr,
             jobs: Vec::new(),
+            inputs: Vec::new(),
+            completed: std::collections::BTreeMap::new(),
         }
     }
 
@@ -362,19 +434,7 @@ impl<'a> Collector<'a> {
                 executable: mode == FileMode::Executable,
             });
         }
-        let manifest = format!(
-            "{{\"type\":\"trusted_workflow_artifact_provenance\",\"schema_version\":1,\"producer\":{{{}}},\"attempt_sha256\":\"{}\",\"workflow_source_sha256\":\"{}\",\"workflow_graph_sha256\":\"{}\",\"job_id_hex\":\"{}\",\"build_input_capsule_id\":null,\"check_receipt_id\":null,\"cache_reuse_authorized\":false,\"job_success_asserted\":false,\"outputs\":[{}]}}",
-            self.producer,
-            hex(&self.attempt_sha256),
-            self.workflow_source,
-            self.workflow_graph,
-            hex(job.as_bytes()),
-            outputs
-                .iter()
-                .map(TrustedWorkflowArtifactOutput::to_json)
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+        let manifest = self.manifest(job, &outputs);
         if manifest.len() > MAX_MANIFEST_BYTES {
             return Err("artifact provenance manifest exceeds 1 MiB".into());
         }
@@ -420,6 +480,27 @@ impl<'a> Collector<'a> {
         // the durable successful job observation. A lost response never replays.
         self.jobs.push(saved);
         Ok(())
+    }
+
+    fn manifest(&self, job: &str, outputs: &[TrustedWorkflowArtifactOutput]) -> String {
+        let mut manifest = format!(
+            "{{\"type\":\"trusted_workflow_artifact_provenance\",\"schema_version\":1,\"producer\":{{{}}},\"attempt_sha256\":\"{}\",\"workflow_source_sha256\":\"{}\",\"workflow_graph_sha256\":\"{}\",\"job_id_hex\":\"{}\",\"build_input_capsule_id\":null,\"check_receipt_id\":null,\"cache_reuse_authorized\":false,\"job_success_asserted\":false,\"outputs\":[{}]}}",
+            self.producer,
+            hex(&self.attempt_sha256),
+            self.workflow_source,
+            self.workflow_graph,
+            hex(job.as_bytes()),
+            outputs
+                .iter()
+                .map(TrustedWorkflowArtifactOutput::to_json)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        if let Some(inputs) = self.inputs.iter().find(|inputs| inputs.job_id == job) {
+            manifest.pop();
+            manifest.push_str(&format!(",\"artifact_inputs\":{}}}", inputs.to_json()));
+        }
+        manifest
     }
 
     fn identity(&self, bytes: &[u8], kind: ArtifactPayloadKind, media: &str) -> ArtifactIdentity {

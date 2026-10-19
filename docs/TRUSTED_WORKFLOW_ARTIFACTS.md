@@ -12,8 +12,9 @@ This is the trusted local script execution profile. Review every script and
 protect the run parent, artifact root and their ancestors against replacement;
 scripts still run with the host user's privileges. Artifact custody provides
 verified immutable bytes and bound producing-attempt provenance. It does not
-create a BuildInputCapsule, authorize a cache hit, skip execution, transfer files
-to dependent jobs, or independently attest that a job succeeded.
+create a BuildInputCapsule, authorize a cache hit, skip execution, or independently
+attest that a job succeeded. Explicit artifact-input selectors can deliver verified
+copies to successful producers' direct dependent jobs in the same attempt.
 
 ## Select the producing workflow, expanded job and file
 
@@ -89,6 +90,105 @@ export retained bytes. `fg workflow recover` reads the unchanged attempt marker
 and journal, including the output contract, without executing the workflow.
 An occupied run ID still refuses execution. Artifact custody and offline
 recovery never promote a candidate observation into a canonical green check.
+
+## Pass verified outputs to dependent jobs
+
+A consumer can explicitly receive a captured output from a successful direct
+dependency in the same workflow attempt. Its source workspace remains fresh.
+The output is copied into the reserved `.fgit-artifacts/` directory before the
+consumer's first script starts:
+
+```yaml
+name: build and test
+on: push
+jobs:
+  build:
+    runs-on: fgit-trusted-local
+    steps:
+      - run: mkdir -p dist; printf 'built payload' > dist/result
+  test:
+    runs-on: fgit-trusted-local
+    needs: build
+    steps:
+      - run: test "$(cat .fgit-artifacts/build/result)" = 'built payload'
+```
+
+Run this reviewed workflow with both the output selection and delivery selection:
+
+```sh
+fg workflow run "$NODE" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --workflow ci/build.yml --input ci --input src \
+  --run-parent "$RUN_PARENT" --run-id "$RUN_ID" \
+  --artifact-root "$ARTIFACT_ROOT" \
+  --artifact ci/build.yml:build:dist/result \
+  --artifact-input ci/build.yml:test:build:dist/result:build/result
+```
+
+Each repeated `--artifact-input` contains
+`workflow:consumer:producer:output:destination`. The destination is relative to
+`.fgit-artifacts/`, so `build/result` becomes
+`.fgit-artifacts/build/result`. For arbitrary byte paths or paths containing a
+colon, use `--artifact-input-hex` with
+`workflow-hex:consumer:producer:output-hex:destination-hex`. Expanded job IDs
+remain literal, including matrix expansion suffixes.
+
+The producer output must also appear in `--artifact` or `--artifact-hex`.
+Consumer and producer must exist in the selected workflow, and the consumer's
+`needs` must directly name that producer. An indirect dependency does not grant
+delivery. Every workflow, output selector and consumer edge is validated before
+any attempt or dispatch batch is reserved. The same flags work with dispatch
+and both candidate modes; candidate manifests retain their exact unpublished
+input provenance.
+
+Delivery requires the producer's completed successful job observation and the
+output custody receipt from this attempt. Retained files from another run,
+failed-producer diagnostic outputs, or a guessed artifact ID cannot satisfy it.
+Before each consumer opens, the node reconstructs and verifies the producer's
+exact immutable manifest, then verifies the full stored payload's scope,
+identity, length and digest. A corrupt or substituted payload or manifest refuses
+that consumer before any script starts. The producer workspace may already have
+been removed.
+
+Each consumer receives a separate regular file with the captured executable
+mode. Editing a delivered file affects only that workspace; later consumers
+receive newly verified copies from immutable storage. Destinations in one
+consumer cannot be equal or nested under one another. Absolute paths, traversal
+and the workspace ownership marker are rejected. A selected source entry under
+`.fgit-artifacts` refuses preflight; the check uses the authorized selected source
+manifest and does not inspect unrelated repository paths.
+
+Delivery has its own cumulative payload allowance, separate from capture.
+`--max-artifact-input-total-mib 1..512` configures it; the default is 64 MiB.
+Every consumer copy counts, even when several consumers use the same immutable
+object. Dispatch shares one allowance across all selected workflows. A charged
+delivery is not refunded if a later verification or preparation step refuses.
+There are at most 64 delivery selections, with destinations at most 4000 bytes,
+and combined capture/delivery path bytes at most 64 KiB. The existing sparse
+workspace bounds also apply: each delivered file is at most 16 MiB, and selected
+source bytes plus all delivered bytes in one workspace are at most 64 MiB.
+Increasing the capture limit does not increase these workspace limits.
+All source replicas and delivered files together also stay within the existing
+256 MiB and 100,000-entry aggregate materialization profile. Dispatch reserves
+the complete batch's source allowance before the first delivery, so an earlier
+consumer cannot consume capacity promised to a later workflow's source inputs.
+
+The immutable input contract is included in attempt and dispatch identity.
+Before materialization, a synced, create-only
+`job-NNN-artifact-inputs.json` records `state: "verified_inputs_prepared"`,
+the attempt digest, producer manifest and output IDs, destination, mode and
+augmented workspace-plan digest. This prepared receipt alone does not assert
+that the consumer started or succeeded. After its workspace materializes, the
+run report's `artifact_inputs` array includes the actual delivered set. If that
+consumer subsequently produces retained outputs, its output manifest embeds
+this delivery receipt, preserving the build-to-test-to-package lineage.
+
+Input staging is cleaned on success, failure and cancellation. A cancellation
+or materialization failure cannot start the consumer's first script. Retained
+workspaces verify supplemental bytes, modes and file identities on reopening.
+Supplemental-input plans cannot import workspace edits as canonical Git source;
+delivery adds no source-authoring capability. Calls without input selectors keep
+their existing capture-only marker, report and manifest bytes.
+
 
 ## What is retained
 
@@ -193,6 +293,13 @@ The node embedding API exposes `TrustedWorkflowArtifactConfig` and exact
 with no contract. `TrustedWorkflowRun.artifacts` and dispatch `runs()` expose
 completed custody observations.
 
+For delivery, construct exact `TrustedWorkflowArtifactInput` selectors and call
+`TrustedWorkflowArtifactConfig::with_inputs` with the shared byte allowance.
+`TrustedWorkflowRun.artifact_inputs` exposes the verified consumer receipts;
+`TrustedWorkflowArtifactInputReceipt` binds each producer manifest/output to its
+private destination. The runner uses its existing `JobInput` plan capability,
+with no cache lookup, artifact-ID execution API or new source authority.
+
 Focused tests cover real SHA-1/SHA-256 imports and child processes, binary and
 executable outputs exported after workspace cleanup/reopen, exact provenance,
 poisoned stored bytes, missing and unsafe files, refusal before successful
@@ -200,6 +307,14 @@ journal evidence, source stability, occupied-attempt contract changes, whole-bat
 preflight and a shared dispatch byte budget. Runner and workspace tests cover
 capture/cancellation/containment ordering and descriptor-relative refusal;
 staging tests preserve cleanup responsibility after cancellation.
+
+The dependent-input suite exercises real binary/executable fan-out after producer
+cleanup in both native formats, downstream provenance, separate consumer copies,
+poisoned producer payloads and manifests with intact twins, failed-producer
+refusal, exact delivery budgets across consumers and dispatch children, early
+cancellation, graph preflight and changed-contract refusal. Contract/parser tests
+cover unsafe paths, overlapping destinations, bounded selectors and direct-edge
+requirements. Retained-input reopen tests cover byte, mode and alias tampering.
 
 ```sh
 cargo test --locked -p fgit-runner --lib workflow::settlement_tests

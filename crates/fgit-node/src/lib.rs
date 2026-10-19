@@ -62,9 +62,11 @@ pub use treefs_workspace::candidate_inspection::{
 };
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::{
-    DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES, TRUSTED_WORKFLOW_ARTIFACT_TRUST,
-    TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactOutput, TrustedWorkflowArtifactSelection,
-    TrustedWorkflowFailure, TrustedWorkflowJobArtifacts, TrustedWorkflowRun,
+    DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES,
+    TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
+    TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
+    TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
+    TrustedWorkflowJobArtifacts, TrustedWorkflowRun,
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,

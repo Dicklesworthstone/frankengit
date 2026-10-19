@@ -17,6 +17,9 @@ const USAGE: &str =
   [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
+  [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
+  [--max-artifact-input-total-mib <1..512>]
 
 Linux trusted-local execution only: review and trust the ACTUAL candidate's
 workflow/scripts. They run with host-user privileges, not in a hostile sandbox.
@@ -27,6 +30,9 @@ All inputs and workflow scripts come from the verified merged tree. No objects
 are staged, no temporary ref is created, no PR approval or canonical check is
 published. Optional artifact capture binds the exact merged input and both
 parents; durable output custody does not authorize a check or cache reuse.
+Explicit artifact inputs deliver verified current-run outputs from successful
+direct dependencies into .fgit-artifacts/ before the consumer's first script.
+Delivery shares its own cumulative byte limit. See fg workflow run --help.
 Source-only and canonical commands do not accept these merge flags.
 
 The usual workflow journal, fresh job copies, resource limits, no-replay rule,

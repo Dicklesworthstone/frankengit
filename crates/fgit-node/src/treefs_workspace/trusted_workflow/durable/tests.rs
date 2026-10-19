@@ -86,6 +86,7 @@ pub(super) fn report(temp: &Temp) -> TrustedWorkflowRun {
         request_interrupted: false,
         artifact_contract: None,
         artifacts: Vec::new(),
+        artifact_inputs: Vec::new(),
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),

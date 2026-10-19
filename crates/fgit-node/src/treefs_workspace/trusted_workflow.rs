@@ -108,6 +108,8 @@ pub struct TrustedWorkflowRun {
     /// Explicit operator output contract, included in the immutable attempt identity.
     pub artifact_contract: Option<TrustedWorkflowArtifactConfig>,
     pub artifacts: Vec<artifacts::TrustedWorkflowJobArtifacts>,
+    /// Verified copies supplied to started consumers in their private namespace.
+    pub artifact_inputs: Vec<artifacts::TrustedWorkflowJobArtifactInputs>,
     pub execution: WorkflowReport,
 }
 impl TrustedWorkflowRun {
@@ -189,7 +191,7 @@ impl TrustedWorkflowRun {
     /// Output stays bounded by the native workflow report and source profile.
     /// All arbitrary source/output/path bytes use lossless hexadecimal encoding.
     pub fn to_json(&self) -> String {
-        let artifacts = self
+        let mut artifacts = self
             .artifact_contract
             .as_ref()
             .map_or_else(String::new, |_| {
@@ -202,6 +204,20 @@ impl TrustedWorkflowRun {
                         .join(",")
                 )
             });
+        if self
+            .artifact_contract
+            .as_ref()
+            .is_some_and(|config| !config.inputs().is_empty())
+        {
+            artifacts.push_str(&format!(
+                ",\"artifact_inputs\":[{}]",
+                self.artifact_inputs
+                    .iter()
+                    .map(artifacts::TrustedWorkflowJobArtifactInputs::to_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
         format!(
             concat!(
                 "{{\"type\":\"trusted_workflow_run\",{},\"succeeded\":{},",
@@ -551,11 +567,27 @@ fn run_inputs<A: GitHashAlgorithm>(
             "aggregate job materialization exceeds profile",
         ));
     }
+    if let Some(session) = artifact_session {
+        session.restrict_input_materialization(
+            inputs.payload_bytes() * plan.graph().jobs.len(),
+            inputs.entries().len() * plan.graph().jobs.len(),
+        );
+    }
     // Refuse unsupported host entries before even the first independent job.
     // Each job clones this immutable plan, then rechecks capability at materialize.
     let host_plan = inputs
         .host_plan(capability)
         .map_err(TrustedWorkflowFailure::Host)?;
+    if artifact_session.is_some_and(|session| !session.config.inputs().is_empty())
+        && inputs
+            .entries()
+            .iter()
+            .any(|entry| entry.path().components().next() == Some(b".fgit-artifacts".as_slice()))
+    {
+        return Err(TrustedWorkflowFailure::InvalidInput(
+            "selected source overlaps the reserved artifact input namespace",
+        ));
+    }
     let format = node.object_format;
     let native = |bytes: &[u8]| {
         GitOid::from_hex(format, &hex(bytes))
@@ -582,6 +614,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         request_interrupted: false,
         artifact_contract: artifact_session.map(|session| session.config.clone()),
         artifacts: Vec::new(),
+        artifact_inputs: Vec::new(),
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),
@@ -639,6 +672,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     let collector = artifact_session.map(|session| artifacts::Collector::new(session, &report));
     let mut worker = Executor {
         plan: host_plan,
+        source_bytes: inputs.payload_bytes(),
         capability,
         parent: root,
         directory: report.run_directory.clone(),
@@ -655,6 +689,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     report.execution = coordinated.execute(&report.run_directory, &mut worker, &live)?;
     if let Some(collector) = &mut worker.artifacts {
         report.artifacts = std::mem::take(&mut collector.jobs);
+        report.artifact_inputs = std::mem::take(&mut collector.inputs);
     }
     report.workspaces_closed = !worker.retained && worker.current.is_none();
     report.request_interrupted =
@@ -692,6 +727,7 @@ fn hex(bytes: &[u8]) -> String {
 
 struct Executor<'a, A: GitHashAlgorithm> {
     plan: SparseWorkspacePlan<A>,
+    source_bytes: usize,
     capability: &'a TreeCapability,
     parent: File,
     directory: PathBuf,
@@ -705,14 +741,31 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
     fn begin_job(
         &mut self,
         index: usize,
-        _job: &WorkflowJob,
+        job: &WorkflowJob,
         live: &dyn Fn() -> bool,
     ) -> Result<(), WorkerFailure> {
         if self.current.is_some() || self.retained {
             return Err(WorkerFailure::new("previous job is not quiescent", true));
         }
         self.job_index = index;
-        let plan = self.plan.clone();
+        let (plan, input_receipt) = match &self.artifacts {
+            Some(collector) => match collector.prepare_inputs(
+                self.plan.clone(),
+                self.source_bytes,
+                index,
+                job,
+                &self.parent,
+                &self.directory,
+                live,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.retained |= error.retain_workspace;
+                    return Err(error);
+                }
+            },
+            None => (self.plan.clone(), None),
+        };
         let parent = self
             .parent
             .try_clone()
@@ -741,6 +794,9 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         ) {
             Ok(workspace) => {
                 self.current = Some((workspace, ledger));
+                if let (Some(collector), Some(receipt)) = (&mut self.artifacts, input_receipt) {
+                    collector.inputs.push(receipt);
+                }
                 Ok(())
             }
             Err(error) => {
@@ -811,6 +867,11 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         self.artifacts
             .as_ref()
             .is_some_and(|collector| collector.selects(&job.id))
+    }
+    fn observe_job(&mut self, report: &fgit_runner::workflow::JobReport) {
+        if let Some(collector) = &mut self.artifacts {
+            collector.observe(report);
+        }
     }
     fn capture_job_outputs(
         &mut self,

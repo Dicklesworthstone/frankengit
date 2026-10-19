@@ -51,6 +51,7 @@ fn report() -> TrustedWorkflowRun {
         request_interrupted: false,
         artifact_contract: None,
         artifacts: Vec::new(),
+        artifact_inputs: Vec::new(),
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),
@@ -202,4 +203,255 @@ fn staging_cancellation_keeps_exact_cleanup_responsibility_and_never_finishes_a_
     assert!(stages.is_empty());
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
     fs::remove_dir(directory).unwrap();
+}
+
+fn input(
+    consumer: &str,
+    producer: &str,
+    output: &[u8],
+    destination: &[u8],
+) -> TrustedWorkflowArtifactInput {
+    TrustedWorkflowArtifactInput::new(b"workflow.yml", consumer, producer, output, destination)
+        .unwrap()
+}
+
+#[test]
+fn input_contract_requires_exact_capture_safe_destinations_and_bounded_delivery() {
+    let capture = config("/operator/store", vec![selection("build", b"out")]);
+    let selected = input("test", "build", b"out", b"bin/tool");
+    assert!(
+        capture
+            .clone()
+            .with_inputs(vec![selected.clone()], 4)
+            .is_ok()
+    );
+    for total in [0, MAX_ARTIFACT_TOTAL_BYTES + 1] {
+        assert!(
+            capture
+                .clone()
+                .with_inputs(vec![selected.clone()], total)
+                .is_err()
+        );
+    }
+    assert!(capture.clone().with_inputs(Vec::new(), 4).is_err());
+    assert!(
+        capture
+            .clone()
+            .with_inputs(vec![selected.clone(); 65], 4)
+            .is_err()
+    );
+    assert!(
+        capture
+            .clone()
+            .with_inputs(vec![input("test", "build", b"other", b"bin/tool")], 4)
+            .is_err()
+    );
+    assert!(
+        capture
+            .clone()
+            .with_inputs(vec![input("test", "other", b"out", b"bin/tool")], 4)
+            .is_err()
+    );
+    for path in [
+        b"/outside".as_slice(),
+        b"../outside",
+        b"bin/../../outside",
+        b".fgit-host-receipt",
+        b"out\0",
+    ] {
+        assert!(
+            TrustedWorkflowArtifactInput::new(b"workflow.yml", "test", "build", b"out", path)
+                .is_err()
+        );
+    }
+    assert!(
+        TrustedWorkflowArtifactInput::new(b"workflow.yml", "build", "build", b"out", b"bin/tool")
+            .is_err()
+    );
+    assert!(
+        TrustedWorkflowArtifactInput::new(
+            b"workflow.yml",
+            "test",
+            "build",
+            b"out",
+            &vec![b'x'; 4001]
+        )
+        .is_err()
+    );
+    for destination in [b"bin".as_slice(), b"bin/tool", b"bin/tool/child"] {
+        assert!(
+            capture
+                .clone()
+                .with_inputs(
+                    vec![
+                        selected.clone(),
+                        input("test", "build", b"out", destination)
+                    ],
+                    4,
+                )
+                .is_err()
+        );
+    }
+    let enabled = capture
+        .with_inputs(
+            vec![
+                selected.clone(),
+                input("package", "build", b"out", b"bin/tool"),
+            ],
+            8,
+        )
+        .unwrap();
+    assert!(enabled.with_inputs(vec![selected], 4).is_err());
+}
+
+#[test]
+fn input_contract_is_canonical_and_binds_attempt_destinations_and_delivery_limit() {
+    let capture = config("/operator/store", vec![selection("build", b"out")]);
+    let mut run = report();
+    run.artifact_contract = Some(capture.clone());
+    let original = run.attempt_marker();
+    assert!(!original.contains("\"input_delivery\""));
+    assert!(!run.to_json().contains("\"artifact_inputs\""));
+    let first = input("test", "build", b"out", b"bin/tool");
+    let second = input("package", "build", b"out", b"bin/tool");
+    let forward = capture
+        .clone()
+        .with_inputs(vec![first.clone(), second.clone()], 8)
+        .unwrap();
+    let reverse = capture
+        .clone()
+        .with_inputs(vec![second, first.clone()], 8)
+        .unwrap();
+    assert_eq!(forward, reverse);
+    run.artifact_contract = Some(forward);
+    let enabled = run.attempt_marker();
+    assert_ne!(original, enabled);
+    assert!(run.to_json().contains("\"artifact_inputs\":[]"));
+    for changed in [
+        capture.clone().with_inputs(vec![first], 4).unwrap(),
+        capture
+            .clone()
+            .with_inputs(vec![input("test", "build", b"out", b"different")], 8)
+            .unwrap(),
+    ] {
+        run.artifact_contract = Some(changed);
+        assert_ne!(enabled, run.attempt_marker());
+    }
+    run.artifact_contract = Some(capture);
+    assert_eq!(run.attempt_marker(), original);
+}
+
+#[test]
+fn artifact_inputs_require_present_consumers_and_direct_not_transitive_dependencies() {
+    let plan = WorkflowPlan::compile(
+        "name: dependencies\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf build\n  test:\n    runs-on: fgit-trusted-local\n    needs: build\n    steps:\n      - run: printf test\n  package:\n    runs-on: fgit-trusted-local\n    needs: test\n    steps:\n      - run: printf package\n",
+    ).unwrap();
+    let capture = config("/operator/store", vec![selection("build", b"out")]);
+    for (consumer, allowed) in [("test", true), ("package", false), ("absent", false)] {
+        let contract = capture
+            .clone()
+            .with_inputs(vec![input(consumer, "build", b"out", b"tool")], 4)
+            .unwrap();
+        assert_eq!(
+            contract.validate_workflow(b"workflow.yml", &plan).is_ok(),
+            allowed
+        );
+    }
+}
+
+#[test]
+fn combined_source_and_input_headroom_cannot_be_replenished_by_child_preflight() {
+    // Budget semantics use fabricated scope coordinates and a real empty store;
+    // this test creates neither payload custody nor an execution observation.
+    let directory = std::env::temp_dir().join(format!(
+        "fgit-input-budget-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+
+    let coordinates = report();
+    let contract = config(
+        directory.to_str().unwrap(),
+        vec![selection("build", b"out")],
+    )
+    .with_inputs(
+        vec![input("test", "build", b"out", b"input")],
+        MAX_ARTIFACT_TOTAL_BYTES,
+    )
+    .unwrap();
+
+    let session = || Session {
+        config: &contract,
+        store: LocalArtifactStore::open(
+            &directory,
+            ArtifactScope::new(
+                coordinates.tenant,
+                coordinates.repository,
+                coordinates.incarnation,
+                TRUSTED_WORKFLOW_ARTIFACT_TRUST,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        remaining: Cell::new(contract.total_bytes),
+        input_remaining: Cell::new(contract.input_total_bytes),
+        input_materialization_remaining: Cell::new(MAX_REPLICATED_BYTES),
+        input_entry_remaining: Cell::new(MAX_REPLICATED_ENTRIES),
+    };
+
+    let first = session();
+    first.restrict_input_materialization(
+        MAX_REPLICATED_BYTES - 4,
+        MAX_REPLICATED_ENTRIES - 2,
+    );
+    first.charge_input(3).unwrap();
+
+    // A child's smaller source selection cannot reset the batch's remaining
+    // capacity. Rejected delivery also cannot partially charge another counter.
+    first.restrict_input_materialization(1, 1);
+    let before = (
+        first.input_remaining.get(),
+        first.input_materialization_remaining.get(),
+        first.input_entry_remaining.get(),
+    );
+    assert!(
+        first
+            .charge_input(2)
+            .unwrap_err()
+            .contains("materialization limit")
+    );
+    assert_eq!(
+        before,
+        (
+            first.input_remaining.get(),
+            first.input_materialization_remaining.get(),
+            first.input_entry_remaining.get(),
+        )
+    );
+    first.charge_input(1).unwrap();
+    assert_eq!(first.input_materialization_remaining.get(), 0);
+    assert!(
+        first
+            .charge_input(1)
+            .unwrap_err()
+            .contains("materialization limit")
+    );
+
+    // Empty payloads still consume manifest-entry capacity.
+    let second = session();
+    second.restrict_input_materialization(1, MAX_REPLICATED_ENTRIES - 1);
+    second.charge_input(0).unwrap();
+    second.restrict_input_materialization(1, 1);
+    assert!(second.charge_input(0).unwrap_err().contains("entry limit"));
+    assert_eq!(second.input_remaining.get(), MAX_ARTIFACT_TOTAL_BYTES);
+
+    drop((first, second));
+    fs::remove_dir(&directory).unwrap();
 }

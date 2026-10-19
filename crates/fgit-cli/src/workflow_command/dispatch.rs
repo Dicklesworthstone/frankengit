@@ -13,6 +13,9 @@ const USAGE: &str = "usage: fg workflow dispatch <storage-root> <tenant-id> <rep
   [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
+  [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
+  [--max-artifact-input-total-mib <1..512>]
 
 Unlike workflow run, --workflow selects a directory (usually .github/workflows).
 Discover its direct .yml/.yaml children from ONE pinned canonical commit, compile
@@ -28,6 +31,10 @@ Selected artifact files share one cumulative byte allowance across every child:
 paths and expanded job IDs. All selectors are validated before any child starts.
 Verified payloads and immutable producing-job provenance are saved before cleanup;
 a capture failure prevents success. See fg workflow run --help for retrieval.
+Artifact-input selectors require a direct needs dependency in that same workflow.
+They materialize verified copies inside .fgit-artifacts/ before consumer scripts.
+All child deliveries share a separate 64 MiB default allowance; each consumer
+still fits the existing 64 MiB source-plus-input workspace envelope.
 Ordinary job failure does not suppress independent workflows. Lost containment,
 cancellation, exhausted time/output, or infrastructure failure stops later work.
 
