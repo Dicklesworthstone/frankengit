@@ -83,3 +83,24 @@ to 5. The requested needle count multiplied by `max_matches` must not exceed
 apply to the whole batch, not separately to each slot. A failed source read,
 snapshot precondition, cancellation or aggregate budget refuses the whole
 operation; the adapter never returns whatever subset happened to finish first.
+
+## Rust declaration search
+
+`frankengit_source_symbols` (same `--allow-source` grant) answers "where is
+`name` declared?" with the native reader behind `fg search --symbols`. It takes
+a required `reference` and `name` (case-sensitive ASCII identifier without
+`r#`), `match` (`exact`, the default, or `prefix`), up to eight `kinds`
+(`function`, `struct`, `enum`, `trait`, `type`, `module`, `union`, `macro`),
+`path_prefixes_hex`, `expected_head`, `expected_commit`, the literal search's
+file/byte/match bounds, and `max_work` (default and maximum: the native symbol
+work ceiling). Each match carries the declared name, kind, `raw_identifier`,
+exact `path_hex`, blob, byte offset/line/column, and a bounded excerpt.
+
+Only `.rs` regular files are parsed; other files are counted in
+`unsupported_language_files`. This is declaration-head matching, not compiler
+name resolution: attributes and macro bodies are opaque and every `cfg` branch
+is searched. Malformed Rust refuses the read with `unsupported_rust_source`
+rather than answering empty, and a match ceiling returns an explicitly
+incomplete prefix (`complete: false`, `truncated_reason: "match_limit"`). The
+adapter re-checks every reported span against the declared name, kind filter,
+path scope and hash domain before emitting it. No index is read or built.

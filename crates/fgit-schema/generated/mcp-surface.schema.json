@@ -1612,6 +1612,57 @@
       },
       "additionalProperties": false
     },
+    "frankengit_source_symbols": {
+      "title": "frankengit_source_symbols",
+      "description": "Find Rust declaration heads by exact or prefix ASCII name in one authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full ref name (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "name": {
+              "type": "string",
+              "description": "Case-sensitive ASCII identifier without r#.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "match": {
+              "type": "string",
+              "description": "exact (default) or prefix.",
+              "x-classification": "selector_position",
+              "maxLength": 6,
+              "pattern": "^(exact|prefix)$"
+            },
+            "kinds": {
+              "type": "array",
+              "description": "Up to eight of function, struct, enum, trait, type, module, union, macro.",
+              "x-classification": "selector_position"
+            },
+            "path_prefixes_hex": {
+              "type": "array",
+              "description": "Up to 32 slash-bounded hex path prefixes narrowing the read.",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["reference", "name"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_source_tree": {
       "title": "frankengit_source_tree",
       "description": "List directory tree entries by hex path from an authenticated repository snapshot.",

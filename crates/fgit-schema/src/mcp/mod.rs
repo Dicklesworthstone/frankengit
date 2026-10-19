@@ -3,8 +3,8 @@
 //!
 //! # Deliverables (FG-096a)
 //!
-//! - Single-source MCP surface registry ([`registry::REGISTRY`]) with 44 tool
-//!   definitions (40 active server tools and 4 unsupported sentinels).
+//! - Single-source MCP surface registry ([`registry::REGISTRY`]) with 45 tool
+//!   definitions (41 active server tools and 4 unsupported sentinels).
 //! - Canonical capability, budget, authority root, and principal contracts ([`types`]).
 //! - Strict constitutional anti-admin validation ([`validate`]).
 //! - Discoverable typed refusals for unsupported operations ([`refusal`] and [`dispatch`]).

@@ -3097,7 +3097,114 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search --batch",
         rest_api_path: "POST /repos/{id}/search/batch",
     },
-    // 42. frankengit_source_tree
+    // 42. frankengit_source_symbols
+    McpToolEntry {
+        name: "frankengit_source_symbols",
+        version: 1,
+        entity_kind: McpEntityKind::Tool,
+        owner_subsystem: "search",
+        support_profile: SupportProfile::Active,
+        description: "Find Rust declaration heads by exact or prefix ASCII name in one authenticated repository snapshot.",
+        read_mutation: ReadMutationClass::ReadOnly,
+        capability: CapabilityRequirement::READ_CANONICAL_OBJECT,
+        principal: PrincipalRequirement::None,
+        idempotency: IdempotencyRequirement::NotApplicable,
+        authority_root: InputAuthorityRootRequirement::ExactSnapshotToken,
+        budget: BudgetDimensions::READ_STANDARD,
+        pagination: PaginationRules::Unpaginated,
+        disclosure: DisclosureClass::UntrustedContentData,
+        receipt: EvidenceReceiptClass::None,
+        cancellation: CancellationBehavior::ImmediateQuiescent,
+        input_fields: &[
+            McpField {
+                name: "reference",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Full ref name (e.g. refs/heads/main).",
+                required: true,
+                max_bytes: Some(4096),
+                pattern: None,
+            },
+            McpField {
+                name: "name",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Case-sensitive ASCII identifier without r#.",
+                required: true,
+                max_bytes: Some(256),
+                pattern: Some("^[A-Za-z_][A-Za-z0-9_]*$"),
+            },
+            McpField {
+                name: "match",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "exact (default) or prefix.",
+                required: false,
+                max_bytes: Some(6),
+                pattern: Some("^(exact|prefix)$"),
+            },
+            McpField {
+                name: "kinds",
+                field_type: "array",
+                classification: FieldClassification::SelectorPosition,
+                description: "Up to eight of function, struct, enum, trait, type, module, union, macro.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "path_prefixes_hex",
+                field_type: "array",
+                classification: FieldClassification::SelectorPosition,
+                description: "Up to 32 slash-bounded hex path prefixes narrowing the read.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "expected_head",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional snapshot token pin.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+        ],
+        output_fields: &[
+            McpField {
+                name: "snapshot_token",
+                field_type: "string",
+                classification: FieldClassification::SystemMetadata,
+                description: "Exact repository authority snapshot token.",
+                required: true,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "matches",
+                field_type: "array",
+                classification: FieldClassification::UntrustedContent,
+                description: "Declaration name, kind, exact path, blob, span and excerpt bytes.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        refusal_codes: &[
+            "name_required",
+            "invalid_symbol_query",
+            "invalid_match_mode",
+            "invalid_symbol_kinds",
+            "invalid_limit",
+            "unsupported_rust_source",
+            "snapshot_moved",
+            "resource_limit",
+        ],
+        cli_command: "fg search --symbols",
+        rest_api_path: "/api/v1/source/search-symbols",
+    },
+    // 43. frankengit_source_tree
     McpToolEntry {
         name: "frankengit_source_tree",
         version: 1,
@@ -3186,7 +3293,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg tree",
         rest_api_path: "GET /repos/{id}/trees",
     },
-    // 43. frankengit_transaction_outcome
+    // 44. frankengit_transaction_outcome
     McpToolEntry {
         name: "frankengit_transaction_outcome",
         version: 1,
@@ -3265,7 +3372,7 @@ mod tests {
 
     #[test]
     fn exact_tool_count_and_ordering() {
-        assert_eq!(REGISTRY.len(), 43);
+        assert_eq!(REGISTRY.len(), 44);
         for pair in REGISTRY.windows(2) {
             assert!(
                 (pair[0].name, pair[0].version) < (pair[1].name, pair[1].version),

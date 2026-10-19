@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 44,
-  "active_count": 40,
+  "total_count": 45,
+  "active_count": 41,
   "unsupported_count": 4,
   "tools": [
     {
@@ -1182,6 +1182,34 @@
       "refusal_codes": ["needles_required", "batch_match_limit", "invalid_search_query", "snapshot_moved", "resource_limit"],
       "cli_command": "fg search --batch",
       "rest_api_path": "POST /repos/{id}/search/batch"
+    },
+    {
+      "name": "frankengit_source_symbols",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "description": "Find Rust declaration heads by exact or prefix ASCII name in one authenticated repository snapshot.",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 65536,
+        "max_depth": 16,
+        "max_items": 100,
+        "max_fan_out": 8,
+        "max_duration_ms": 30000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["name_required", "invalid_symbol_query", "invalid_match_mode", "invalid_symbol_kinds", "invalid_limit", "unsupported_rust_source", "snapshot_moved", "resource_limit"],
+      "cli_command": "fg search --symbols",
+      "rest_api_path": "/api/v1/source/search-symbols"
     },
     {
       "name": "frankengit_source_tree",

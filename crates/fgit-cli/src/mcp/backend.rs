@@ -259,6 +259,9 @@ impl ReadTools for NodeTools {
         if self.options.source && name == search::BATCH_NAME {
             return search::call_batch(self, args);
         }
+        if self.options.source && name == search::SYMBOLS_NAME {
+            return search::call_symbols(self, args);
+        }
         if review::permitted(self.options.source, self.options.pulls, name) {
             return review::call(self, name, args);
         }
@@ -455,7 +458,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 40);
+        assert_eq!(server_names.len(), 41);
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert_eq!(validate_server_parity(&server_names, REGISTRY), Ok(()));
 

@@ -2,6 +2,7 @@
 //! Query paths narrow the launch grant; they never mint authority or host access.
 mod batch;
 mod regex;
+mod symbols;
 
 use super::*;
 use fgit_forge::source_browse::SourceBrowseError;
@@ -26,7 +27,14 @@ pub(super) fn tools() -> Vec<Tool> {
             schema: regex::schema(input_schema()),
         },
         batch::tool(),
+        symbols::tool(),
     ]
+}
+
+pub(super) use symbols::NAME as SYMBOLS_NAME;
+
+pub(super) fn call_symbols(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    symbols::call(backend, args)
 }
 
 pub(super) fn call_batch(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
