@@ -3,10 +3,13 @@ use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::mutations as common;
 use super::{NodeTools, decimal, decimal_schema, head, head_token, limit, require_fields};
-use fgit_forge::event::pull_request_comment::PullRequestCommentCommand;
-use fgit_forge::{ExpectedVersion, PullRequestNumber};
+use fgit_forge::event::pull_request_comment::{
+    PullRequestCommentCommand, SOURCE_COMMENT_PROFILE, SourceCommentAnchor,
+    SourceCommentComparison, SourceCommentSide,
+};
+use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_node::PullRequestCommentsPage;
-use fgit_types::RepositoryAuthorityHeadId;
+use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 
 pub(super) const READ: &str = "frankengit_pull_comments";
 pub(super) const WRITE: &str = "frankengit_pull_comment";
@@ -17,9 +20,10 @@ pub(super) fn write_tool() -> Tool {
         "body".into(),
         common::text_schema(common::MAX_TEXT_BYTES as u64),
     );
+    properties.insert("anchor".into(), anchor_schema());
     Tool {
         name: WRITE,
-        description: "Append a literal conversation comment to an existing visible PR, including closed or merged PRs. expected_version is the independent discussion version (zero for the first comment), not the PR metadata version. The launch principal owns authorship. Does not change PR metadata, branch tips or approvals. Retry only the identical command and durable key.",
+        description: "Append a literal conversation comment, optionally anchored to exact original source lines, to an existing visible PR including closed or merged PRs. expected_version is the independent discussion version (zero for the first comment), not the PR metadata version. Supply the complete anchor from an inspected diff; the service verifies its recorded PR basis, blob and whole-line byte span. The launch principal owns authorship. Does not change PR metadata, branch tips or approvals. Retry only the identical command, optional anchor and durable key.",
         schema: common::input_schema(
             properties,
             &["number", "expected_version", "idempotency_key", "body"],
@@ -51,10 +55,19 @@ pub(super) fn read_tool() -> Tool {
     }
 }
 
-fn command(args: &Object) -> Result<PullRequestCommentCommand, ToolError> {
+fn command(
+    args: &Object,
+    format: GitHashAlgorithm,
+) -> Result<PullRequestCommentCommand, ToolError> {
     require_fields(
         args,
-        &["number", "expected_version", "idempotency_key", "body"],
+        &[
+            "number",
+            "expected_version",
+            "idempotency_key",
+            "body",
+            "anchor",
+        ],
     )?;
     let number = PullRequestNumber::try_new(common::number(args, "number")?)
         .ok_or(ToolError::invalid("positive_pull_number_required"))?;
@@ -67,6 +80,7 @@ fn command(args: &Object) -> Result<PullRequestCommentCommand, ToolError> {
         number,
         expected_version,
         body,
+        anchor: parse_anchor(args, format)?,
     })
 }
 
@@ -74,7 +88,7 @@ pub(super) fn append(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
     if !backend.options.writes.pulls {
         return Err(ToolError::invalid("tool_not_granted"));
     }
-    let command = command(args)?;
+    let command = command(args, backend.options.format)?;
     let session = common::session(backend, common::key(args)?)?;
     let principal = session
         .authenticated_session()
@@ -110,6 +124,9 @@ pub(super) fn append(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
     result.insert("refs_changed".into(), Value::Bool(false));
     result.insert("delivery_acknowledged".into(), Value::Null);
     result.insert("historical_outcome".into(), Value::Bool(true));
+    if let Some(anchor) = &command.anchor {
+        result.insert("anchor".into(), render_anchor(anchor));
+    }
     Ok(Value::Object(result))
 }
 
@@ -166,6 +183,13 @@ pub(super) fn read(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         }
         page.validate_window(query.after, query.limit)
             .map_err(|_| ToolError::failed("invalid_pull_comments_page"))?;
+        if page
+            .comments
+            .iter()
+            .any(|comment| comment.anchor.is_some() != comment.anchor_status.is_some())
+        {
+            return Err(ToolError::failed("invalid_pull_comments_page"));
+        }
     }
     Ok(render(backend, &query, page.as_ref()))
 }
@@ -219,15 +243,220 @@ fn render(backend: &NodeTools, query: &Query, page: Option<&PullRequestCommentsP
                 page.comments
                     .iter()
                     .map(|comment| {
-                        object([
-                            ("version", text(comment.version.get().to_string())),
-                            ("actor", text(comment.actor.to_string())),
-                            ("body", text(comment.body.clone())),
-                        ])
+                        let mut row = Object::new();
+                        row.insert("version".into(), text(comment.version.get().to_string()));
+                        row.insert("actor".into(), text(comment.actor.to_string()));
+                        row.insert("body".into(), text(comment.body.clone()));
+                        if let Some(anchor) = &comment.anchor {
+                            row.insert("anchor".into(), render_anchor(anchor));
+                            row.insert(
+                                "anchor_status".into(),
+                                comment
+                                    .anchor_status
+                                    .map_or(Value::Null, |status| text(status.as_str())),
+                            );
+                        }
+                        Value::Object(row)
                     })
                     .collect()
             })),
         ),
+    ])
+}
+
+const ANCHOR_FIELDS: [&str; 15] = [
+    "pull_request_version",
+    "source_ref_hex",
+    "target_ref_hex",
+    "source_tip",
+    "target_tip",
+    "compared_base",
+    "comparison",
+    "path_hex",
+    "side",
+    "blob",
+    "mode",
+    "byte_start",
+    "byte_end",
+    "line_start",
+    "line_count",
+];
+
+fn anchor_schema() -> Value {
+    let mut properties = Object::new();
+    for field in [
+        "pull_request_version",
+        "byte_start",
+        "byte_end",
+        "line_start",
+        "line_count",
+    ] {
+        properties.insert(field.into(), decimal_schema());
+    }
+    for field in ["source_ref_hex", "target_ref_hex", "path_hex"] {
+        properties.insert(
+            field.into(),
+            object([
+                ("type", text("string")),
+                ("minLength", json::number(2)),
+                ("maxLength", json::number(8192)),
+                ("pattern", text("^(?:[0-9a-f]{2})+$")),
+            ]),
+        );
+    }
+    for field in ["source_tip", "target_tip", "compared_base", "blob"] {
+        properties.insert(
+            field.into(),
+            object([
+                ("type", text("string")),
+                ("pattern", text("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")),
+                (
+                    "description",
+                    text("Native object ID in this repository's configured hash format."),
+                ),
+            ]),
+        );
+    }
+    for (field, choices) in [
+        ("comparison", vec!["direct", "merge_base"]),
+        ("side", vec!["before", "after"]),
+        ("mode", vec!["100644", "100755", "120000"]),
+    ] {
+        properties.insert(
+            field.into(),
+            object([
+                ("type", text("string")),
+                (
+                    "enum",
+                    Value::Array(choices.into_iter().map(text).collect()),
+                ),
+            ]),
+        );
+    }
+    let Value::Object(mut schema) = common::input_schema(properties, &ANCHOR_FIELDS) else {
+        unreachable!("object schema")
+    };
+    schema.insert("description".into(), text(
+        "Exact original diff anchor. All 15 fields are required. Coordinates are canonical decimal strings; line_start is zero-based, line_count is 1..128, and byte_start..byte_end is a half-open span of complete LF-delimited lines, at most 64 KiB from a non-NUL blob at most 1 MiB. The fixed profile is frankengit.source-comment.myers-lines.v1 and cannot be overridden. No heuristic reanchoring occurs."
+    ));
+    Value::Object(schema)
+}
+
+fn parse_anchor(
+    args: &Object,
+    format: GitHashAlgorithm,
+) -> Result<Option<SourceCommentAnchor>, ToolError> {
+    let Some(value) = args.get("anchor") else {
+        return Ok(None);
+    };
+    let fields = value
+        .object()
+        .ok_or(ToolError::invalid("source_anchor_object_required"))?;
+    require_fields(fields, &ANCHOR_FIELDS)?;
+    let oid = |field| {
+        GitOid::from_hex(format, common::required(fields, field)?)
+            .map_err(|_| ToolError::invalid("invalid_source_anchor_oid"))
+    };
+    let reference = |field| {
+        RefName::try_new(&anchor_hex(common::required(fields, field)?)?)
+            .map_err(|_| ToolError::invalid("invalid_source_anchor_ref"))
+    };
+    let anchor = SourceCommentAnchor {
+        pull_request_version: AggregateVersion::try_new(common::number(
+            fields,
+            "pull_request_version",
+        )?)
+        .ok_or(ToolError::invalid("invalid_source_anchor_version"))?,
+        source_ref: reference("source_ref_hex")?,
+        target_ref: reference("target_ref_hex")?,
+        source_tip: oid("source_tip")?,
+        target_tip: oid("target_tip")?,
+        compared_base: oid("compared_base")?,
+        comparison: match common::required(fields, "comparison")? {
+            "direct" => SourceCommentComparison::Direct,
+            "merge_base" => SourceCommentComparison::MergeBase,
+            _ => return Err(ToolError::invalid("invalid_source_anchor_comparison")),
+        },
+        path: anchor_hex(common::required(fields, "path_hex")?)?,
+        side: match common::required(fields, "side")? {
+            "before" => SourceCommentSide::Before,
+            "after" => SourceCommentSide::After,
+            _ => return Err(ToolError::invalid("invalid_source_anchor_side")),
+        },
+        blob: oid("blob")?,
+        mode: match common::required(fields, "mode")? {
+            "100644" => 0o100644,
+            "100755" => 0o100755,
+            "120000" => 0o120000,
+            _ => return Err(ToolError::invalid("invalid_source_anchor_mode")),
+        },
+        byte_start: common::number(fields, "byte_start")?,
+        byte_end: common::number(fields, "byte_end")?,
+        line_start: common::number(fields, "line_start")?,
+        line_count: common::number(fields, "line_count")?,
+    };
+    anchor
+        .validate()
+        .map_err(|_| ToolError::invalid("invalid_source_anchor"))?;
+    Ok(Some(anchor))
+}
+
+fn anchor_hex(text: &str) -> Result<Vec<u8>, ToolError> {
+    if text.is_empty()
+        || text.len() > 8192
+        || !text.len().is_multiple_of(2)
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ToolError::invalid("invalid_source_anchor_hex"));
+    }
+    Ok(text
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let digit = |byte| {
+                if byte <= b'9' {
+                    byte - b'0'
+                } else {
+                    byte - b'a' + 10
+                }
+            };
+            digit(pair[0]) * 16 + digit(pair[1])
+        })
+        .collect())
+}
+
+fn render_anchor(anchor: &SourceCommentAnchor) -> Value {
+    use fgit_crypto::lowercase_hex;
+    object([
+        ("profile", text(SOURCE_COMMENT_PROFILE)),
+        (
+            "pull_request_version",
+            text(anchor.pull_request_version.get().to_string()),
+        ),
+        (
+            "source_ref_hex",
+            text(lowercase_hex(anchor.source_ref.as_bytes())),
+        ),
+        (
+            "target_ref_hex",
+            text(lowercase_hex(anchor.target_ref.as_bytes())),
+        ),
+        ("source_tip", text(anchor.source_tip.to_string())),
+        ("target_tip", text(anchor.target_tip.to_string())),
+        ("compared_base", text(anchor.compared_base.to_string())),
+        ("comparison", text(anchor.comparison.as_str())),
+        ("path_hex", text(lowercase_hex(&anchor.path))),
+        ("side", text(anchor.side.as_str())),
+        ("blob", text(anchor.blob.to_string())),
+        ("mode", text(format!("{:o}", anchor.mode))),
+        ("byte_start", text(anchor.byte_start.to_string())),
+        ("byte_end", text(anchor.byte_end.to_string())),
+        ("line_start", text(anchor.line_start.to_string())),
+        ("line_count", text(anchor.line_count.to_string())),
     ])
 }
 

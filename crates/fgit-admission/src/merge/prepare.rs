@@ -154,7 +154,7 @@ pub fn prepare_event(
                 .map_err(|_| RefusalCode::EvidenceInvalid)?;
             if comment.actor != context.principal_id
                 || !attempt.request.ref_commands().is_empty()
-                || !closure.objects.is_empty()
+                || (comment.anchor.is_none() && !closure.objects.is_empty())
             {
                 return Err(RefusalCode::EvidenceInvalid);
             }
@@ -170,6 +170,7 @@ pub fn prepare_event(
                 number,
                 expected_version,
                 body: comment.body.clone(),
+                anchor: comment.anchor.clone(),
             };
             let (expected, sealed) =
                 super::native::pull_request::comments::proposal(context, &command)
@@ -181,7 +182,14 @@ pub fn prepare_event(
                 ForgeEventKind::PullRequestCommented {
                     conversation: entity,
                 },
-                Vec::new(),
+                comment.anchor.as_ref().map_or_else(Vec::new, |anchor| {
+                    vec![
+                        anchor.source_tip,
+                        anchor.target_tip,
+                        anchor.compared_base,
+                        anchor.blob,
+                    ]
+                }),
                 None,
             )
         }

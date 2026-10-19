@@ -4,6 +4,9 @@
 #[path = "pull_request_http/support.rs"]
 mod support;
 
+#[path = "pull_request_comments_http/source_anchors.rs"]
+mod source_anchors;
+
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::event::pull_request_comment::PullRequestCommentCommand;
@@ -79,6 +82,7 @@ fn native_comment(
             ExpectedVersion::Exactly(AggregateVersion::try_new(version).unwrap())
         },
         body: body.into(),
+        anchor: None,
     };
     node.runtime()
         .block_on(node.admit_pull_request_comment_durable_in(
@@ -371,6 +375,7 @@ fn hidden_refs_cancellation_and_stopped_intake_preserve_native_discussion_bounda
             number: PullRequestNumber::FIRST,
             expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
             body: "Cancelled comment".into(),
+            anchor: None,
         };
         assert!(
             node.runtime()

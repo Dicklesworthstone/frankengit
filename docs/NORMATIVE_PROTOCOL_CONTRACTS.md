@@ -584,23 +584,118 @@ Admission resolves the native PR at the exact publication basis and checks both
 branches against current disclosure policy; closed and merged native PRs remain
 valid conversation subjects. An absent or legacy-only PR cannot be invented by
 posting a comment. Exact discussion versions, the authenticated actor, PR number,
-and original text form the sealed command; retries never refresh these values.
+original text and optional original source anchor form the sealed command;
+retries never refresh these values.
 
 The canonical owner is `fgit-forge/src/event/pull_request_comment.rs`. The new
 required aggregate kind is **8** after the existing zero escape, followed by the
 positive PR number; its stream label is `conversation/N`. Required event kind
-**12** carries the exact 16-byte actor and bounded UTF-8 body. The reference trace
-and transaction normal form append marker **9**, `PullRequestCommented`, naming
-the conversation entity with no required ref effect. Existing tags and canonical
-bytes retain their meanings and identities. Earlier readers refuse unfamiliar
-required tags rather than silently treating comments as PR lifecycle or review
-events. There is no reinterpretation of historical bytes or implicit migration.
+**12** carries the exact 16-byte actor and bounded UTF-8 body without an anchor.
+Required event kind **15** carries that actor and body followed by the exact
+source anchor defined below. Both are `PullRequestCommentedNative` events in
+the same conversation stream. The reference trace and transaction normal form
+retain append marker **9**, `PullRequestCommented`, naming the conversation
+entity with no required ref effect. An absent anchor adds no presence flag,
+profile string or other bytes to kind 12; existing event roots and sealed plain
+comment identities remain unchanged. Earlier readers refuse unfamiliar required
+kind 15 rather than reinterpret it as kind 12, PR lifecycle or review evidence.
 
 Conversation projections carry the selected authority head, discussion high-water
 version and exact version cursor. Missing accepted history, conflicting events at
 one version, or resource/cancellation failure cannot become a complete empty or
-partial timeline. Source-line anchors, comment editing/deletion, thread resolution
-and comment federation are outside this append-only event type.
+partial timeline. Comment editing/deletion, thread resolution, source remapping
+and comment federation remain outside this append-only event type.
+
+#### 20.1.1 Exact original source comments
+
+Kind 15 fixes profile `frankengit.source-comment.myers-lines.v1`. Its canonical
+owner is `fgit-forge/src/event/pull_request_comment/anchor.rs`. The profile is
+implied by the required event kind, not a caller-selected string. The following
+fields are encoded in this order after the actor and body, using the existing
+canonical scalar, ref-name, native-OID and byte-string codecs:
+
+| Field | Canonical type and meaning |
+|---|---|
+| `pull_request_version` | Positive `u64` PR metadata aggregate version; independent of the discussion predecessor. |
+| `source_ref` | Exact `RefName` bytes for the recorded source branch. |
+| `target_ref` | Exact `RefName` bytes for the recorded target branch. |
+| `source_tip` | Typed native `GitOid` for the recorded source commit. |
+| `target_tip` | Typed native `GitOid` for the recorded target commit. |
+| `compared_base` | Typed native `GitOid` for the before-side comparison commit. |
+| `comparison` | `u8`: 0 is direct, 1 is unique merge base; other values refuse. |
+| `path` | Exact raw repository-relative path bytes. |
+| `side` | `u8`: 0 is before, 1 is after; other values refuse. |
+| `blob` | Typed native `GitOid` for the selected side's exact blob. |
+| `mode` | `u32` Git mode: `0o100644`, `0o100755` or `0o120000`. |
+| `byte_start` | `u64` inclusive zero-based byte offset. |
+| `byte_end` | `u64` exclusive byte offset. |
+| `line_start` | `u64` zero-based source-line index. |
+| `line_count` | Positive `u64` count of complete source lines. |
+
+All four object IDs MUST be nonzero and in the repository's single configured
+SHA-1 or SHA-256 domain. References MUST be distinct valid `refs/heads/*` names,
+within the existing 1,024-byte `RefName` bound. Paths MUST contain 1–4,096 bytes
+and at most 64 components, with no NUL, empty component, `.` or `..`. Raw
+non-UTF-8 path, reference and source bytes remain exact; no Unicode conversion
+or path normalization may replace them.
+
+At each fresh publication basis, admission MUST resolve the existing native PR
+and match the anchor's PR metadata version, both references and both recorded
+tips exactly. A mismatch is stale evidence. An ordinary branch advance or
+deletion does not retarget the PR's recorded comparison. Closed and merged PRs
+retain their recorded source. The same authenticated admission path independently
+verifies the comparison from its selected immutable object closure:
+
+- Direct comparison requires `compared_base == target_tip`. Merge-base
+  comparison requires the unique best common ancestor of the recorded tips to
+  equal `compared_base`; absent or multiple bases are refused.
+- The before tree is the compared base's tree; the after tree is the recorded
+  source tip's tree. The path must change identity or mode between those trees.
+  The selected side must exist and match the submitted blob and mode. Any real
+  line of that changed file may be selected, including unchanged context.
+- Whole LF-delimited lines determine the byte span. An LF belongs to its line;
+  CRLF and an unterminated final line retain their original bytes. A final LF
+  creates no phantom empty line. The verifier recomputes the exact start and end
+  offsets from `line_start` and `line_count`; caller-supplied excerpts, rendered
+  diffs and line numbers alone are insufficient.
+- Each compared blob is at most 1,048,576 bytes and contains no NUL. The selected
+  span contains 1–128 lines, is nonempty, and is at most 65,536 bytes.
+  `byte_end` cannot exceed the blob limit. Structural validation also requires
+  `byte_start == 0` exactly when `line_start == 0`,
+  `line_start <= byte_start`, `line_count <= byte_end - byte_start`, and checked
+  `line_start + line_count <= 1,048,576`.
+- The fixed raw Myers-line comparison is recomputed with at most 2,097,152
+  combined input bytes, 100,000 units, 1,000,000 work and 512,000 trace cells.
+  Both path walks share a 100,000-entry bound. Merge-base traversal admits at
+  most 4,096 commits and 16,384 edges. Node object intake, selected closure,
+  deadline and cancellation bounds also apply before work or allocation can
+  exceed their profiles. Exhaustion or unavailable evidence is not a successful
+  partial validation.
+
+Symlink payloads remain inert source bytes; symlinks are never followed.
+Directories and gitlinks are not selectable blob anchors. No attributes, hooks,
+text conversion, external diff driver, whitespace normalization or heuristic
+remapping participates in this profile. The source anchor grants no review vote,
+write permission, object admission or Git-ref effect.
+
+Conversation rows with an anchor expose the fixed profile and the original
+coordinates plus a derived `anchor_status`. It is `exact` only when the anchor's
+PR version, references and tips match the PR metadata at that page's selected
+`source_head`; otherwise it is `outdated`. Thus a metadata-only PR version change
+can make the latest page outdated while a retained earlier page stays exact.
+Moving branches alone do not change this status. Status is neither approval nor
+a claim about the current tips, and never modifies the original anchor.
+
+Both the selected PR's references and every comment anchor's references in that
+selected conversation MUST satisfy current caller and canonical disclosure policy
+before any discussion body, actor, anchor or count is disclosed, including on a
+historical read.
+If an anchor is undisclosed, hide the whole conversation rather than create a
+version gap or leak its count. Plain rows omit anchor and status fields.
+Publication receipts may echo the original anchor but do not invent a read-time
+status. A known immutable terminal result is resolved using the original complete
+command before fresh PR-basis validation; retrying after PR changes must not
+refresh an anchor, body, discussion version or idempotency key.
 
 ### 20.2 Native issue assignment deltas
 

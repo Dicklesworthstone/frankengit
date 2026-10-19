@@ -9,7 +9,9 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::CanonicalForgePositionState;
-use fgit_forge::event::pull_request_comment::{PullRequestCommentCommand, validate_body};
+use fgit_forge::event::pull_request_comment::{
+    PullRequestCommentCommand, SourceCommentAnchor, SourceCommentStatus, validate_body,
+};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_types::{AsciiSlug, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId};
 
@@ -36,6 +38,13 @@ pub fn proposal(
     let event = command
         .proposed_event(context.principal_id)
         .map_err(unavailable)?;
+    if command
+        .anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.source_tip.algorithm() != context.object_format)
+    {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
     let root = storage::root(&ForgeEventBatch::of_one(event.clone()))?;
     let request = SemanticRequest::build(
         fgit_authority::RECEIVE_ADMISSION_SCHEMA,
@@ -102,7 +111,7 @@ where
         store: &'a S,
         cx: &'a S::Context,
         basis: &'a PublicationBasis,
-        _: &'a AuthenticatedHead,
+        authenticated: &'a AuthenticatedHead,
         snapshot: &'a AdmissionSnapshot,
         resolved: &'a NativeMergeBasis,
         event: &'a ForgeEvent,
@@ -117,6 +126,7 @@ where
             .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?;
         let data = selected
             .data
+            .as_ref()
             .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
         if snapshot.hidden_refs.hides(data.source_ref.as_bytes())
             || snapshot.hidden_refs.hides(data.target_ref.as_bytes())
@@ -132,6 +142,24 @@ where
         projection
             .merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
+        let ForgeEventPayload::PullRequestCommentedNative(comment) = &event.payload else {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+        };
+        if let Some(anchor) = &comment.anchor {
+            // PR data is resolved by canonical admission, not supplied by a
+            // transport or object-owner precheck. Mutable branch tips do not
+            // silently retarget recorded closed/merged PR source coordinates.
+            if anchor.status(selected.event.version, data) != SourceCommentStatus::Exact {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+            }
+            let closure = projection
+                .validate_comment_anchor_async(store, cx, basis, authenticated, anchor)
+                .await?;
+            projection
+                .merge_checkpoint(cx)
+                .map_err(ProjectionFailure::Unavailable)?;
+            return Ok(closure);
+        }
         let objects = PermittedObjectClosure::default();
         Ok(ValidatedClosure {
             object_closure_root: crate::permitted_object_closure_root(&objects)
@@ -148,6 +176,8 @@ pub struct PullRequestCommentView {
     pub version: AggregateVersion,
     pub actor: PrincipalId,
     pub body: String,
+    pub anchor: Option<SourceCommentAnchor>,
+    pub anchor_status: Option<SourceCommentStatus>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,6 +206,11 @@ impl PullRequestCommentsPage {
             if previous.checked_add(1) != Some(comment.version.get())
                 || comment.version.get() > latest
                 || validate_body(&comment.body).is_err()
+                || comment.anchor.is_some() != comment.anchor_status.is_some()
+                || comment
+                    .anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.validate().is_err())
             {
                 return Err(RefusalCode::EvidenceInvalid);
             }
@@ -214,12 +249,13 @@ where
         return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
     }
     super::checkpoint(cancelled)?;
-    if native_pr_at(store, cx, basis, number, visible, cancelled)
-        .await?
-        .is_none()
-    {
+    let Some(subject) = native_pr_at(store, cx, basis, number, visible, cancelled).await? else {
         return Ok(None);
-    }
+    };
+    let data = subject
+        .data
+        .as_ref()
+        .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
     let state = delivery::read_roots_in(store, cx, basis, cancelled).await?;
     let mut page = PullRequestCommentsPage {
         number,
@@ -275,13 +311,30 @@ where
             let ForgeEventPayload::PullRequestCommentedNative(comment) = event.payload else {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             };
+            // The PR may since have changed references. Its current refs do
+            // not authorize disclosure of historical anchors on hidden refs.
+            // Preserve contiguous page/count semantics by hiding the complete
+            // discussion when any retained source anchor is undisclosed.
+            if comment
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| !visible(&anchor.source_ref, &anchor.target_ref))
+            {
+                return Ok(None);
+            }
             if event.version.get() > after && event.version.get() <= end {
+                let anchor_status = comment
+                    .anchor
+                    .as_ref()
+                    .map(|anchor| anchor.status(subject.event.version, data));
                 selected.insert(
                     event.version,
                     PullRequestCommentView {
                         version: event.version,
                         actor: comment.actor,
                         body: comment.body,
+                        anchor: comment.anchor,
+                        anchor_status,
                     },
                 );
             }

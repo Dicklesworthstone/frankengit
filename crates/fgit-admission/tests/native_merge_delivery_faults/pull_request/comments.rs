@@ -15,6 +15,63 @@ fn command(previous: u64, body: &str) -> PullRequestCommentCommand {
         expected_version: AggregateVersion::try_new(previous)
             .map_or(ExpectedVersion::NewStream, ExpectedVersion::Exactly),
         body: body.into(),
+        anchor: None,
+    }
+}
+
+#[test]
+fn source_comments_require_explicit_object_validation_and_exact_pr_subject() {
+    use fgit_forge::event::pull_request_comment::{
+        SourceCommentAnchor, SourceCommentComparison, SourceCommentSide,
+    };
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let case = opened(format);
+        let merge = case.fixture.intent.merge().unwrap();
+        let mut anchored = command(0, "Source needs a real object owner");
+        anchored.anchor = Some(SourceCommentAnchor {
+            pull_request_version: AggregateVersion::FIRST,
+            source_ref: merge.source_ref.clone(),
+            target_ref: merge.target_ref.clone(),
+            source_tip: merge.source_tip,
+            target_tip: merge.target_tip_before,
+            compared_base: merge.target_tip_before,
+            comparison: SourceCommentComparison::Direct,
+            path: b"source.rs".to_vec(),
+            side: SourceCommentSide::After,
+            blob: merge.source_tip,
+            mode: 0o100644,
+            byte_start: 0,
+            byte_end: 2,
+            line_start: 0,
+            line_count: 1,
+        });
+        // This actual metadata driver projection supports plain comments but
+        // intentionally has not opted into independent anchored-object reads.
+        let denied = submit(&case, &anchored).unwrap();
+        assert!(matches!(
+            denied.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::PublicationPolicyRefused,
+                ..
+            }
+        ));
+        let stale_case = case.with_key(b"source-comment-stale-subject");
+        anchored.anchor.as_mut().unwrap().pull_request_version =
+            AggregateVersion::try_new(2).unwrap();
+        let stale = submit(&stale_case, &anchored).unwrap();
+        assert!(matches!(
+            stale.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::EvidenceStale,
+                ..
+            }
+        ));
+        let permitted = case.with_key(b"source-comment-plain-twin");
+        let terminal = submit(&permitted, &command(0, "Plain comment remains supported")).unwrap();
+        assert!(matches!(
+            terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
     }
 }
 

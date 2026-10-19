@@ -303,8 +303,9 @@ export class PullClient {
     return this.inspect(number, fields, bytes, Object.hasOwn(receipt, 'method') ? mergeMethod(receipt.method) : undefined);
   }
   async stageMetadata(number, action, fields) { return this.#stage(number, action, fields, null); }
-  async stageComment(number, version, body) {
-    return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body }, null);
+  async stageComment(number, version, body, anchor = undefined) {
+    return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body,
+      ...(anchor === undefined ? {} : { anchor }) }, null);
   }
   async stageReview(action, version, reason) {
     if (!['approve', 'request-changes', 'withdraw'].includes(action) || !this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a review.');

@@ -40,6 +40,7 @@ const KIND_WORKFLOW_CHECK_OBSERVED: u32 = 11;
 const KIND_NATIVE_PULL_REQUEST_COMMENTED: u32 = 12;
 const KIND_REQUIRED_CHECK_PROTECTION_CHANGED: u32 = 13;
 const KIND_REVIEW_QUORUM_PROTECTION_CHANGED: u32 = 14;
+const KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED: u32 = 15;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -157,7 +158,8 @@ pub enum ForgeEventPayload {
     /// Immutable reported job evidence. Only explicit canonical protection can
     /// grant a named publisher's exact observation authority over a ref update.
     WorkflowCheckObservedNative(workflow_check::NativeWorkflowCheck),
-    /// Append-only PR conversation text in its independent stream, wire kind 12.
+    /// Append-only PR conversation text in its independent stream: kind 12 for
+    /// plain text, kind 15 when exact immutable source coordinates are included.
     PullRequestCommentedNative(pull_request_comment::NativePullRequestComment),
 }
 
@@ -184,7 +186,13 @@ impl ForgeEventPayload {
             }
             Self::MergeQueueChangedNative(_) => KIND_NATIVE_MERGE_QUEUE_CHANGED,
             Self::WorkflowCheckObservedNative(_) => KIND_WORKFLOW_CHECK_OBSERVED,
-            Self::PullRequestCommentedNative(_) => KIND_NATIVE_PULL_REQUEST_COMMENTED,
+            Self::PullRequestCommentedNative(comment) => {
+                if comment.anchor.is_some() {
+                    KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED
+                } else {
+                    KIND_NATIVE_PULL_REQUEST_COMMENTED
+                }
+            }
         }
     }
 }
@@ -481,6 +489,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         ),
         KIND_NATIVE_PULL_REQUEST_COMMENTED => ForgeEventPayload::PullRequestCommentedNative(
             pull_request_comment::NativePullRequestComment::read(input)?,
+        ),
+        KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED => ForgeEventPayload::PullRequestCommentedNative(
+            pull_request_comment::NativePullRequestComment::read_with_anchor(input, true)?,
         ),
         KIND_NATIVE_MERGE_QUEUE_CHANGED => {
             ForgeEventPayload::MergeQueueChangedNative(NativeQueueEvent::read(input)?)

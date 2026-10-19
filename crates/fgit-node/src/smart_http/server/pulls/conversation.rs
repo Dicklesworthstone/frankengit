@@ -74,7 +74,7 @@ pub(super) fn execute(
     if request.is_mutation() {
         // Finish framing and validate the entire supplied form before the
         // native driver can acquire any publication responsibility.
-        let command = request.command(&read_form(reader, framing, limits)?)?;
+        let command = request.command(&read_form(reader, framing, limits)?, node.object_format)?;
         command
             .proposed_event(principal)
             .map_err(|_| ApiError::bad("invalid_comment_command"))?;

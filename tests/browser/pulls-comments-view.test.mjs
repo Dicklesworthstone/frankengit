@@ -9,6 +9,7 @@ import { mountPulls } from '../../crates/fgit-node/src/smart_http/server/browser
 import { fakeDocument, sourceRoot, until } from './helpers/pulls-workflow-fixture.mjs';
 import { actor, token, ids, head as prHead, page, row, data, show, reviews, json, webcrypto, deferred } from './pulls-fixtures.mjs';
 import { fixture as candidateFixture } from './pulls-candidate-fixtures.mjs';
+import { anchor } from './pulls-comment-anchor-fixtures.mjs';
 
 const conversationHead = `alg:1:${'8'.repeat(64)}`;
 const changedHead = `alg:1:${'9'.repeat(64)}`;
@@ -138,6 +139,23 @@ test('explicit conversation reads select the latest head while retaining the sel
     assert.equal(h.node('comment-stage').disabled, false); assert.equal(h.node('comment-body').disabled, false);
     assert.equal(h.client.pending, null); assert.equal(h.client.candidate, null); assert.equal(writes(h.calls).length, 0);
   }
+});
+
+test('anchored conversation renders exact and outdated source identities as inert historical locations', async t => {
+  const path = '<script>\u202e/source.rs', path_hex = Buffer.from(path).toString('hex');
+  const exact = anchor('sha1', { path_hex }), old = anchor('sha1', { side: 'before', pull_request_version: 2 });
+  const h = await harness({ read: () => json(conversation({ comments: [comment(1, { anchor: exact, anchor_status: 'exact' }),
+    comment(2, { anchor: old, anchor_status: 'outdated' })] })) }); t.after(h.disconnect);
+  await h.load();
+  const rendered = h.node('conversation').textContent;
+  assert.match(rendered, /Exact at this conversation snapshot/); assert.match(rendered, /Outdated: the PR coordinates changed/);
+  assert.match(rendered, /has not been moved to new lines/); assert.match(rendered, /lines 1–2/);
+  assert.ok(rendered.includes('<script>\\u202e/source.rs')); assert.ok(rendered.includes(path_hex));
+  assert.ok(rendered.includes(exact.blob)); assert.match(rendered, /PR version 2/);
+  assert.equal(descendants(h.node('conversation')).some(node => node.tagName === 'SCRIPT'), false);
+  assert.equal(writes(h.calls).length, 0); assert.equal(h.client.pending, null); assert.equal(h.client.candidate, null);
+  assert.equal(h.node('comment-stage').disabled, false);
+  h.disconnect(); assert.equal(h.node('conversation').textContent, '');
 });
 
 test('comment paging keeps its own exact snapshot and high water while preserving an unsubmitted draft', async t => {

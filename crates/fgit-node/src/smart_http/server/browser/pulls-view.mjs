@@ -27,6 +27,17 @@ function item(doc, parent, tag, value) { const el = element(doc, tag, value); pa
 function nativeRef(data, name) { return data[name] === null ? `byte ref: ${data[`${name}_hex`]}` : data[name]; }
 function identity(entry) { return entry === null ? '(absent)' : `${entry.mode.toString(8)} ${entry.oid}`; }
 
+export function renderCommentAnchor(doc, parent, anchor, status = null) {
+  item(doc, parent, 'p', `Source comment · ${anchor.side === 'before' ? 'Before' : 'After'} · ${displayBytes(anchor.path_hex)} · ` +
+    `lines ${anchor.line_start + 1}–${anchor.line_start + anchor.line_count}`);
+  if (status !== null) item(doc, parent, 'p', status === 'exact'
+    ? 'Exact at this conversation snapshot: the recorded PR coordinates still match.'
+    : 'Outdated: the PR coordinates changed. This comment remains attached to its original source; it has not been moved to new lines.');
+  item(doc, parent, 'pre', `PR version ${anchor.pull_request_version} · ${anchor.comparison === 'merge_base' ? 'merge-base' : 'direct'} comparison\n` +
+    `Source ${anchor.source_tip}\nTarget ${anchor.target_tip}\nCompared base ${anchor.compared_base}\n` +
+    `Blob ${anchor.blob} · mode ${anchor.mode}\nBytes ${anchor.byte_start}–${anchor.byte_end} (end exclusive)\nPath bytes ${anchor.path_hex}`);
+}
+
 // The validated full report is retained for download; rendering has a separate
 // ceiling. Clipping never changes the comparison receipt or omits a path label.
 export function renderInspection(doc, parent, report) {
@@ -373,6 +384,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
         for (const comment of result.reply.comments) {
           const section = element(doc, 'section'); nodes.conversation.append(section);
           item(doc, section, 'h3', `Comment ${comment.version} · ${comment.actor}`);
+          if (comment.anchor) renderCommentAnchor(doc, section, comment.anchor, comment.anchor_status);
           section.append(markdownBody(doc, comment.body, comment.body_rendered, {
             cryptoImpl, current: () => client.connected && generation === renderGeneration && conversation === result && selected?.row === row,
           }).element);

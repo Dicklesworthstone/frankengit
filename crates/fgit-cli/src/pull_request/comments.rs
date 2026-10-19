@@ -7,6 +7,7 @@ use super::options::head_token;
 use crate::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::ExpectedVersion;
+use fgit_forge::event::pull_request_comment::{SOURCE_COMMENT_PROFILE, SourceCommentAnchor};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode, PullRequestCommentsPage};
 use fgit_types::{DecisionOutcome, PrincipalId, TxId};
 use options::{Operation, Options};
@@ -18,6 +19,13 @@ usage: fg pr comment <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key>
   --expected-version <discussion version, 0 for first comment>
   (--body <text> | --body-file <path>) [--object-format sha1|sha256]
+  [--anchor-pull-request-version <version>
+   --anchor-source-ref-hex <hex> --anchor-target-ref-hex <hex>
+   --anchor-source-tip <oid> --anchor-target-tip <oid> --anchor-compared-base <oid>
+   --anchor-comparison direct|merge_base --anchor-path-hex <hex>
+   --anchor-side before|after --anchor-blob <oid> --anchor-mode 100644|100755|120000
+   --anchor-byte-start <offset> --anchor-byte-end <offset>
+   --anchor-line-start <zero-based line> --anchor-line-count <1..128>]
 
 usage: fg pr comments <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local [--object-format sha1|sha256] [--limit <1..100>]
@@ -26,10 +34,15 @@ usage: fg pr comments <storage-root> <tenant-id> <repository-id> <number>
 Comments append to an independent conversation stream. The expected version is
 the discussion_version from a complete or paginated comments read, not the PR
 metadata version. Comments do not change branch tips, PR versions or approvals.
-Open, closed and merged native PRs can be discussed. There are no line anchors,
-edits or deletions in this profile. Bodies are literal nonblank UTF-8, up to 64 KiB.
+Open, closed and merged native PRs can be discussed. Optional source anchors
+require the complete immutable diff basis and exact whole-line byte coordinates.
+Use all anchor fields together; paths and refs are lowercase byte hex. Lines are
+zero-based; byte ranges are half-open. Anchors are checked against the recorded
+PR source and retained exactly. Reads label old PR metadata anchors outdated;
+they never silently move a comment. No edits or deletions are admitted.
+Bodies are literal nonblank UTF-8, up to 64 KiB.
 Retry an uncertain append using the identical principal, key, number, discussion
-version and body bytes. Never refresh an uncertain request or replace its key.
+version, body bytes and optional anchor. Never refresh an uncertain request or replace its key.
 Exit 0: committed append or complete page; 3: canonical refusal;
 4: PR absent or hidden; 2: input/infrastructure/cleanup/output failure.";
 
@@ -122,6 +135,7 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                 &incarnation,
                 *principal,
                 command.expected_version,
+                command.anchor.as_ref(),
                 tx,
                 &terminal,
                 cleanup.as_deref(),
@@ -154,7 +168,7 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             let error = with_cleanup(error, cleanup.as_deref());
             if matches!(options.operation, Operation::Append { .. }) {
                 Err(format!(
-                    "no terminal comment outcome returned: {error}; this does not prove non-commit. Retry the identical principal, key, number, discussion version and body bytes"
+                    "no terminal comment outcome returned: {error}; this does not prove non-commit. Retry the identical principal, key, number, discussion version, body bytes and optional anchor"
                 ))
             } else {
                 Err(format!(
@@ -209,16 +223,33 @@ fn read_report(
         }
         page.validate_window(*after, *limit)
             .map_err(|_| "comments page does not match its pinned window")?;
+        if page
+            .comments
+            .iter()
+            .any(|comment| comment.anchor.is_some() != comment.anchor_status.is_some())
+        {
+            return Err("comments page has incomplete anchor status".into());
+        }
     }
     let rows = page.map_or_else(Vec::new, |page| {
         page.comments
             .iter()
             .map(|comment| {
+                let anchor = comment.anchor.as_ref().map_or_else(String::new, |anchor| {
+                    format!(
+                        ",\"anchor\":{},\"anchor_status\":{}",
+                        anchor_json(anchor),
+                        comment
+                            .anchor_status
+                            .map_or_else(|| "null".into(), |status| quote(status.as_str())),
+                    )
+                });
                 format!(
-                    "{{\"version\":{},\"actor\":{},\"body\":{}}}",
+                    "{{\"version\":{},\"actor\":{},\"body\":{}{}}}",
                     quote(&comment.version.get().to_string()),
                     quote(&comment.actor.to_string()),
-                    quote(&comment.body)
+                    quote(&comment.body),
+                    anchor,
                 )
             })
             .collect::<Vec<_>>()
@@ -262,6 +293,7 @@ fn append_report(
     incarnation: &str,
     principal: PrincipalId,
     expected: ExpectedVersion,
+    anchor: Option<&SourceCommentAnchor>,
     tx: TxId,
     terminal: &TerminalOutcome,
     cleanup: Option<&str>,
@@ -292,7 +324,7 @@ fn append_report(
         ExpectedVersion::Exactly(version) => version.get(),
     };
     format!(
-        "{{\"type\":\"pull_request_comment_publication\",{},\"action\":\"comment\",\"principal_id\":{},\"expected_version\":{},\"outcome\":{},\"command_committed\":{},\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},\"terminal\":true,\"historical_outcome\":true,\"refs_changed\":false,\"delivery_acknowledged\":null,\"node_closed\":{},\"cleanup_error\":{}}}",
+        "{{\"type\":\"pull_request_comment_publication\",{},\"action\":\"comment\",\"principal_id\":{},\"expected_version\":{},\"outcome\":{},\"command_committed\":{},\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},\"terminal\":true,\"historical_outcome\":true,\"refs_changed\":false,\"delivery_acknowledged\":null,\"node_closed\":{},\"cleanup_error\":{}{}}}",
         scope(options, incarnation),
         quote(&principal.to_string()),
         quote(&version.to_string()),
@@ -304,6 +336,38 @@ fn append_report(
         refusal,
         code,
         cleanup.is_none(),
-        cleanup.map_or_else(|| "null".into(), quote)
+        cleanup.map_or_else(|| "null".into(), quote),
+        anchor.map_or_else(String::new, |anchor| format!(
+            ",\"anchor\":{}",
+            anchor_json(anchor)
+        )),
+    )
+}
+
+fn anchor_json(anchor: &SourceCommentAnchor) -> String {
+    use super::options::hex;
+    format!(
+        concat!(
+            "{{\"profile\":{},\"pull_request_version\":{},\"source_ref_hex\":{},",
+            "\"target_ref_hex\":{},\"source_tip\":{},\"target_tip\":{},\"compared_base\":{},",
+            "\"comparison\":{},\"path_hex\":{},\"side\":{},\"blob\":{},\"mode\":{},",
+            "\"byte_start\":{},\"byte_end\":{},\"line_start\":{},\"line_count\":{}}}"
+        ),
+        quote(SOURCE_COMMENT_PROFILE),
+        quote(&anchor.pull_request_version.get().to_string()),
+        quote(&hex(anchor.source_ref.as_bytes())),
+        quote(&hex(anchor.target_ref.as_bytes())),
+        quote(&anchor.source_tip.to_string()),
+        quote(&anchor.target_tip.to_string()),
+        quote(&anchor.compared_base.to_string()),
+        quote(anchor.comparison.as_str()),
+        quote(&hex(&anchor.path)),
+        quote(anchor.side.as_str()),
+        quote(&anchor.blob.to_string()),
+        quote(&format!("{:o}", anchor.mode)),
+        quote(&anchor.byte_start.to_string()),
+        quote(&anchor.byte_end.to_string()),
+        quote(&anchor.line_start.to_string()),
+        quote(&anchor.line_count.to_string()),
     )
 }

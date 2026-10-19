@@ -275,6 +275,23 @@ where
         Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))
     }
 
+    /// Explicit object-owner opt-in for exact-source conversation comments.
+    /// Admission has matched the immutable PR metadata; the owner must verify
+    /// native identities, path membership, comparison base, profile and line
+    /// spans at this same authenticated basis on every CAS preparation.
+    fn validate_comment_anchor_async<'a>(
+        &'a self,
+        _authority: &'a S,
+        _cx: &'a S::Context,
+        _basis: &'a PublicationBasis,
+        _authenticated: &'a AuthenticatedHead,
+        _anchor: &'a fgit_forge::event::pull_request_comment::SourceCommentAnchor,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        std::future::ready(Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        )))
+    }
+
     /// Re-read native objects and validate ordered parents, common ancestry
     /// and full closure on every CAS attempt. Staging is not object authority.
     fn validate_merge_async<'a>(

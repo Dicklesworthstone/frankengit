@@ -21,6 +21,7 @@ fn comment_seal_binds_every_command_field_without_a_pr_metadata_version() {
         number: PullRequestNumber::FIRST,
         expected_version: ExpectedVersion::NewStream,
         body: "An exact discussion comment".into(),
+        anchor: None,
     };
     let expected = proposal(&context, &command).unwrap();
     assert!(expected.1.request.atomic());
@@ -56,10 +57,106 @@ fn page() -> PullRequestCommentsPage {
                 version: AggregateVersion::try_new(version).unwrap(),
                 actor: context().principal_id,
                 body: format!("Comment {version}"),
+                anchor: None,
+                anchor_status: None,
             })
             .collect(),
         next_after: Some(3),
     }
+}
+
+#[test]
+fn source_anchor_seals_every_coordinate_and_page_pairs_cannot_be_fabricated() {
+    use fgit_forge::event::pull_request_comment::{SourceCommentComparison, SourceCommentSide};
+    use fgit_types::{GitOid, RefName};
+    let id = |n: &str| GitOid::from_hex(GitHashAlgorithm::Sha1, &n.repeat(20)).unwrap();
+    let anchor = SourceCommentAnchor {
+        pull_request_version: AggregateVersion::FIRST,
+        source_ref: RefName::try_new(b"refs/heads/topic").unwrap(),
+        target_ref: RefName::try_new(b"refs/heads/main").unwrap(),
+        source_tip: id("11"),
+        target_tip: id("22"),
+        compared_base: id("22"),
+        comparison: SourceCommentComparison::Direct,
+        path: b"src/main.rs".to_vec(),
+        side: SourceCommentSide::After,
+        blob: id("33"),
+        mode: 0o100644,
+        byte_start: 0,
+        byte_end: 4,
+        line_start: 0,
+        line_count: 1,
+    };
+    let plain = PullRequestCommentCommand {
+        number: PullRequestNumber::FIRST,
+        expected_version: ExpectedVersion::NewStream,
+        body: "Review this source".into(),
+        anchor: None,
+    };
+    let mut command = plain.clone();
+    command.anchor = Some(anchor.clone());
+    let original = proposal(&context(), &command).unwrap();
+    assert_ne!(
+        original.1.derive().unwrap().0,
+        proposal(&context(), &plain).unwrap().1.derive().unwrap().0
+    );
+    for field in 0..14 {
+        let mut changed = command.clone();
+        let a = changed.anchor.as_mut().unwrap();
+        match field {
+            0 => a.pull_request_version = AggregateVersion::try_new(2).unwrap(),
+            1 => a.source_ref = RefName::try_new(b"refs/heads/other-topic").unwrap(),
+            2 => a.target_ref = RefName::try_new(b"refs/heads/other-main").unwrap(),
+            3 => a.source_tip = id("44"),
+            4 => {
+                a.target_tip = id("44");
+                a.compared_base = a.target_tip;
+            }
+            5 => a.comparison = SourceCommentComparison::MergeBase,
+            6 => {
+                a.comparison = SourceCommentComparison::MergeBase;
+                a.compared_base = id("44");
+            }
+            7 => a.path = b"src/lib.rs".to_vec(),
+            8 => a.side = SourceCommentSide::Before,
+            9 => a.blob = id("44"),
+            10 => a.mode = 0o100755,
+            11 => a.byte_end = 5,
+            12 => {
+                a.byte_start = 1;
+                a.line_start = 1;
+            }
+            _ => a.line_count = 2,
+        }
+        assert_ne!(
+            original.1.derive().unwrap().0,
+            proposal(&context(), &changed)
+                .unwrap()
+                .1
+                .derive()
+                .unwrap()
+                .0,
+            "field {field}"
+        );
+    }
+    let mut page = page();
+    page.comments[0].anchor = Some(anchor);
+    assert_eq!(
+        page.validate_window(1, 2),
+        Err(RefusalCode::EvidenceInvalid)
+    );
+    page.comments[0].anchor_status = Some(SourceCommentStatus::Exact);
+    page.validate_window(1, 2).unwrap();
+    page.comments[0].anchor = None;
+    assert_eq!(
+        page.validate_window(1, 2),
+        Err(RefusalCode::EvidenceInvalid)
+    );
+    page.comments[0].anchor_status = None;
+    page.validate_window(1, 2).unwrap();
+    let mut wrong_format = context();
+    wrong_format.object_format = GitHashAlgorithm::Sha256;
+    assert!(proposal(&wrong_format, &command).is_err());
 }
 
 #[test]

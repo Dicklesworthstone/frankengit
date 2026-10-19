@@ -2,6 +2,13 @@ use super::*;
 use fgit_wire::smart_http::{HttpLimits, head};
 
 fn command(body: &str) -> Result<PullRequestCommentCommand, ApiError> {
+    command_with_format(body, GitHashAlgorithm::Sha1)
+}
+
+fn command_with_format(
+    body: &str,
+    format: GitHashAlgorithm,
+) -> Result<PullRequestCommentCommand, ApiError> {
     let bytes = format!(
         "POST /repo.git/api/v1/pulls/7/comments HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
         body.len()
@@ -9,7 +16,9 @@ fn command(body: &str) -> Result<PullRequestCommentCommand, ApiError> {
     let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
         .unwrap()
         .unwrap();
-    Request::parse(&envelope)?.unwrap().command(body.as_bytes())
+    Request::parse(&envelope)?
+        .unwrap()
+        .command(body.as_bytes(), format)
 }
 
 #[test]
@@ -18,6 +27,7 @@ fn comment_form_keeps_exact_text_and_its_independent_discussion_version() {
     let first = command(body).unwrap();
     assert_eq!(first.number.get(), 7);
     assert_eq!(first.expected_version, ExpectedVersion::NewStream);
+    assert!(first.anchor.is_none());
     assert_eq!(first.body, "Review 🦀\n<script>%2f\"");
     let second = command(&body.replace("expected_version=0", "expected_version=1")).unwrap();
     assert_eq!(
@@ -27,6 +37,125 @@ fn comment_form_keeps_exact_text_and_its_independent_discussion_version() {
     assert_eq!(second.body, first.body);
     let reordered = body.split('&').rev().collect::<Vec<_>>().join("&");
     assert_eq!(command(&reordered).unwrap(), first);
+}
+
+fn anchor_fields(format: GitHashAlgorithm) -> BTreeMap<String, String> {
+    let bytes = match format {
+        GitHashAlgorithm::Sha1 => 20,
+        GitHashAlgorithm::Sha256 => 32,
+    };
+    [
+        ("anchor_pull_request_version", "1".into()),
+        (
+            "anchor_source_ref_hex",
+            fgit_crypto::lowercase_hex(b"refs/heads/topic"),
+        ),
+        (
+            "anchor_target_ref_hex",
+            fgit_crypto::lowercase_hex(b"refs/heads/main"),
+        ),
+        ("anchor_source_tip", "11".repeat(bytes)),
+        ("anchor_target_tip", "22".repeat(bytes)),
+        ("anchor_compared_base", "22".repeat(bytes)),
+        ("anchor_comparison", "direct".into()),
+        (
+            "anchor_path_hex",
+            fgit_crypto::lowercase_hex(b"src/\xff.rs"),
+        ),
+        ("anchor_side", "after".into()),
+        ("anchor_blob", "33".repeat(bytes)),
+        ("anchor_mode", "100755".into()),
+        ("anchor_byte_start", "0".into()),
+        ("anchor_byte_end", "6".into()),
+        ("anchor_line_start", "0".into()),
+        ("anchor_line_count", "1".into()),
+    ]
+    .into_iter()
+    .map(|(field, value)| (field.into(), value))
+    .collect()
+}
+
+fn anchored_form(fields: &BTreeMap<String, String>) -> String {
+    format!(
+        "expected_version=0&body=Review+%F0%9F%A6%80&{}",
+        fields
+            .iter()
+            .map(|(field, value)| format!("{field}={value}"))
+            .collect::<Vec<_>>()
+            .join("&")
+    )
+}
+
+#[test]
+fn source_anchor_form_binds_every_exact_field_and_the_repository_hash_format() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fields = anchor_fields(format);
+        let form = anchored_form(&fields);
+        let parsed = command_with_format(&form, format).unwrap();
+        let anchor = parsed.anchor.as_ref().unwrap();
+        assert_eq!(parsed.body, "Review 🦀");
+        assert_eq!(anchor.path, b"src/\xff.rs");
+        assert_eq!(anchor.source_tip.algorithm(), format);
+        assert_eq!(
+            (
+                anchor.byte_start,
+                anchor.byte_end,
+                anchor.line_start,
+                anchor.line_count
+            ),
+            (0, 6, 0, 1)
+        );
+        let reordered = form.split('&').rev().collect::<Vec<_>>().join("&");
+        assert_eq!(command_with_format(&reordered, format).unwrap(), parsed);
+        for field in ANCHOR_FIELDS {
+            let mut missing = fields.clone();
+            missing.remove(field);
+            assert!(
+                command_with_format(&anchored_form(&missing), format).is_err(),
+                "missing {field}"
+            );
+            let duplicate = format!("{form}&{field}={}", fields[field]);
+            assert!(
+                command_with_format(&duplicate, format).is_err(),
+                "duplicate {field}"
+            );
+        }
+        for (field, value) in [
+            ("anchor_pull_request_version", "0"),
+            ("anchor_line_count", "0"),
+            ("anchor_line_count", "129"),
+            ("anchor_line_start", "01"),
+            ("anchor_byte_end", "0"),
+            ("anchor_byte_end", "65537"),
+            ("anchor_mode", "160000"),
+            ("anchor_mode", "0100644"),
+            ("anchor_path_hex", "FF"),
+            ("anchor_path_hex", "2e2e2f66696c65"),
+            ("anchor_side", "guess"),
+            ("anchor_comparison", "remapped"),
+        ] {
+            let mut invalid = fields.clone();
+            invalid.insert(field.into(), value.into());
+            assert!(
+                command_with_format(&anchored_form(&invalid), format).is_err(),
+                "{field}={value}"
+            );
+        }
+        for extra in [
+            "anchor_profile=untrusted",
+            "anchor_status=exact",
+            "actor=admin",
+            "approved=true",
+        ] {
+            assert!(command_with_format(&format!("{form}&{extra}"), format).is_err());
+        }
+        let other = if format == GitHashAlgorithm::Sha1 {
+            GitHashAlgorithm::Sha256
+        } else {
+            GitHashAlgorithm::Sha1
+        };
+        assert!(command_with_format(&form, other).is_err());
+    }
 }
 
 #[test]

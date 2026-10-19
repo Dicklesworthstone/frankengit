@@ -2,7 +2,9 @@
 
 use fgit_authority::TerminalOutcome;
 use fgit_forge::ExpectedVersion;
-use fgit_forge::event::pull_request_comment::PullRequestCommentCommand;
+use fgit_forge::event::pull_request_comment::{
+    PullRequestCommentCommand, SOURCE_COMMENT_PROFILE, SourceCommentAnchor,
+};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 
 use super::super::super::Status;
@@ -133,14 +135,24 @@ fn page_with_binding(
             let rendered = request.page.render.map_or_else(String::new, |rendering| {
                 format!(",\"body_rendered\":{}", render_body(&row.body, rendering))
             });
+            let anchor = match (&row.anchor, row.anchor_status) {
+                (None, None) => String::new(),
+                (Some(anchor), Some(status)) => format!(
+                    ",\"anchor\":{},\"anchor_status\":{}",
+                    anchor_json(anchor),
+                    quote(status.as_str()),
+                ),
+                _ => return Err(ApiError::unavailable()),
+            };
             append(
                 &mut out,
                 &format!(
-                    "{{\"version\":{},\"actor\":{},\"body\":{}{}}}",
+                    "{{\"version\":{},\"actor\":{},\"body\":{}{}{}}}",
                     row.version.get(),
                     quote(&row.actor.to_string()),
                     quote(&row.body),
                     rendered,
+                    anchor,
                 ),
                 maximum,
             )?;
@@ -196,7 +208,7 @@ pub(super) fn publication(
             "\"number\":{},\"action\":\"comment\",\"expected_version\":{},\"comment_version\":{},",
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"refusal_code_point\":{},",
-            "\"refs_changed\":false,\"delivery_acknowledged\":null}}"
+            "\"refs_changed\":false,\"delivery_acknowledged\":null{}}}"
         ),
         binding(node),
         quote(&principal.to_string()),
@@ -210,7 +222,38 @@ pub(super) fn publication(
         refusal,
         code,
         code_point,
+        command.anchor.as_ref().map_or_else(String::new, |anchor| {
+            format!(",\"anchor\":{}", anchor_json(anchor))
+        }),
     ))
+}
+
+fn anchor_json(anchor: &SourceCommentAnchor) -> String {
+    use fgit_crypto::lowercase_hex;
+    format!(
+        concat!(
+            "{{\"profile\":{},\"pull_request_version\":{},\"source_ref_hex\":{},",
+            "\"target_ref_hex\":{},\"source_tip\":{},\"target_tip\":{},\"compared_base\":{},",
+            "\"comparison\":{},\"path_hex\":{},\"side\":{},\"blob\":{},\"mode\":{},",
+            "\"byte_start\":{},\"byte_end\":{},\"line_start\":{},\"line_count\":{}}}"
+        ),
+        quote(SOURCE_COMMENT_PROFILE),
+        anchor.pull_request_version.get(),
+        quote(&lowercase_hex(anchor.source_ref.as_bytes())),
+        quote(&lowercase_hex(anchor.target_ref.as_bytes())),
+        quote(&anchor.source_tip.to_string()),
+        quote(&anchor.target_tip.to_string()),
+        quote(&anchor.compared_base.to_string()),
+        quote(anchor.comparison.as_str()),
+        quote(&lowercase_hex(&anchor.path)),
+        quote(anchor.side.as_str()),
+        quote(&anchor.blob.to_string()),
+        quote(&format!("{:o}", anchor.mode)),
+        anchor.byte_start,
+        anchor.byte_end,
+        anchor.line_start,
+        anchor.line_count,
+    )
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ fn command() -> PullRequestCommentCommand {
         number: PullRequestNumber::FIRST,
         expected_version: ExpectedVersion::NewStream,
         body: "Original discussion\n<script>inert</script> é 🦀".into(),
+        anchor: None,
     }
 }
 
@@ -120,6 +121,7 @@ fn bare_comment_codec_has_a_literal_and_refuses_every_truncation() {
     let comment = NativePullRequestComment {
         actor: PrincipalId::from_bytes([1; 16]),
         body: "hi".into(),
+        anchor: None,
     };
     let mut encoder = Encoder::new();
     comment.write(&mut encoder).unwrap();

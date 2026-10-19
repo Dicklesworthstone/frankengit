@@ -2,13 +2,15 @@
 import { keys, record, integer, principal, opaque, text, oid, binding, subject, SUBJECT_FIELDS, metadataCommand,
   matchSubject, form, utf8, fail, hex, format, branch, reference, unhex, snapshot, rootFor, readBytes, apiError } from './pulls-core.mjs';
 import { BUNDLE_LIMIT, multipart, checkedBundle, digest, mergeMethod } from './pulls-candidate.mjs';
+import { sourceCommentAnchor, sourceCommentFields } from './pulls-comments.mjs';
 export const RECEIPT_LIMIT = 24 * 1024 * 1024;
 export function commentCommand(fields) {
-  keys(fields, ['object_format', 'expected_version', 'body']);
+  keys(fields, ['object_format', 'expected_version', 'body', 'anchor']);
   const body = text(fields.body, 64 * 1024, 'comment body');
   if (!body.trim()) fail('Write a nonblank comment.');
   return { object_format: format(fields.object_format),
-    expected_version: integer(fields.expected_version, 'conversation version', 0, Number.MAX_SAFE_INTEGER - 1), body };
+    expected_version: integer(fields.expected_version, 'conversation version', 0, Number.MAX_SAFE_INTEGER - 1), body,
+    ...(Object.hasOwn(fields, 'anchor') ? { anchor: sourceCommentAnchor(fields.anchor, fields.object_format) } : {}) };
 }
 export function collaborationCommand(action, fields) {
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unsupported review action.');
@@ -52,9 +54,11 @@ export function requestPath(number, action) {
 }
 export function requestBody(action, fields, bundle, nonce) {
   const normalized = command(action, fields);
-  // The native comment form accepts only its predecessor and literal body;
-  // the retained request scope independently binds the repository hash domain.
-  const encoded = form(action === 'comment' ? { expected_version: normalized.expected_version, body: normalized.body } : normalized);
+  // Plain comment bytes remain unchanged; an anchored comment additionally
+  // binds the complete source selection, with no caller-selected authority.
+  // The retained request scope independently binds the repository hash domain.
+  const encoded = form(action === 'comment' ? { expected_version: normalized.expected_version, body: normalized.body,
+    ...(normalized.anchor ? sourceCommentFields(normalized.anchor) : {}) } : normalized);
   if (!/^[0-9a-f]{32}$/.test(nonce)) fail('Invalid request nonce.');
   if (['approve', 'request-changes', 'merge'].includes(action)) {
     return { fields: normalized, ...multipart(encoded, checkedBundle(bundle), `fg-browser-${nonce}`) };
@@ -79,6 +83,9 @@ export function publication(reply, pending, status) {
     if (reply.type !== 'pull_request_comment_publication' || reply.number !== pending.number ||
         reply.expected_version !== pending.fields.expected_version || reply.refs_changed !== false ||
         reply.comment_version !== (reply.outcome === 'committed' ? pending.fields.expected_version + 1 : null)) fail('Wrong terminal conversation command.');
+    if (Object.hasOwn(reply, 'anchor_status') || Object.hasOwn(reply, 'anchor') !== Object.hasOwn(pending.fields, 'anchor')) fail('Terminal source comment coordinates changed.');
+    if (Object.hasOwn(reply, 'anchor') && JSON.stringify(sourceCommentAnchor(reply.anchor, pending.scope.format)) !==
+        JSON.stringify(sourceCommentAnchor(pending.fields.anchor, pending.scope.format))) fail('Terminal source comment anchor changed.');
   } else if (pending.action === 'fast-forward') {
     const fields = pending.fields;
     if (reply.type !== 'fast_forward_merge_publication' || reply.number !== pending.number ||

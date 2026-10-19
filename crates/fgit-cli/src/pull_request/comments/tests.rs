@@ -54,6 +54,7 @@ fn comment_inputs_preserve_body_and_discussion_version_in_both_formats() {
         assert_eq!(command.number.get(), 7);
         assert_eq!(command.body, " é\r\n<script>literal</script> \n");
         assert_eq!(command.expected_version, ExpectedVersion::NewStream);
+        assert!(command.anchor.is_none());
         assert_eq!(key, b"private-key");
         replace(&mut input, "--expected-version", "9007199254740993");
         let Operation::Append { command, .. } = options::parse(&input).unwrap().operation else {
@@ -142,6 +143,8 @@ fn read_reports_keep_high_water_separate_from_page_completion_and_reject_bad_win
             version: AggregateVersion::try_new(1).unwrap(),
             actor: PrincipalId::from_bytes([3; 16]),
             body: "\"untrusted\"\n\u{202e}".into(),
+            anchor: None,
+            anchor_status: None,
         }],
         next_after: None,
     };
@@ -159,4 +162,159 @@ fn read_reports_keep_high_water_separate_from_page_completion_and_reject_bad_win
     let absent = read_report(&options, "incarnation", None).unwrap();
     assert!(absent.contains("\"found\":false"));
     assert!(absent.contains("\"discussion_version\":null"));
+}
+
+fn anchor_args(format: GitHashAlgorithm) -> Vec<(String, String)> {
+    let bytes = match format {
+        GitHashAlgorithm::Sha1 => 20,
+        GitHashAlgorithm::Sha256 => 32,
+    };
+    [
+        ("--anchor-pull-request-version", "1".into()),
+        (
+            "--anchor-source-ref-hex",
+            super::super::options::hex(b"refs/heads/topic"),
+        ),
+        (
+            "--anchor-target-ref-hex",
+            super::super::options::hex(b"refs/heads/main"),
+        ),
+        ("--anchor-source-tip", "11".repeat(bytes)),
+        ("--anchor-target-tip", "22".repeat(bytes)),
+        ("--anchor-compared-base", "22".repeat(bytes)),
+        ("--anchor-comparison", "direct".into()),
+        (
+            "--anchor-path-hex",
+            super::super::options::hex(b"src/\xff.rs"),
+        ),
+        ("--anchor-side", "after".into()),
+        ("--anchor-blob", "33".repeat(bytes)),
+        ("--anchor-mode", "100644".into()),
+        ("--anchor-byte-start", "0".into()),
+        ("--anchor-byte-end", "6".into()),
+        ("--anchor-line-start", "0".into()),
+        ("--anchor-line-count", "1".into()),
+    ]
+    .into_iter()
+    .map(|(field, value)| (field.into(), value))
+    .collect()
+}
+
+fn anchored_input(format: GitHashAlgorithm) -> Vec<String> {
+    let mut input = args(true);
+    input.extend(["--object-format".into(), format.as_str().into()]);
+    for (field, value) in anchor_args(format) {
+        input.extend([field, value]);
+    }
+    input
+}
+
+#[test]
+fn exact_source_anchor_is_an_optional_complete_bounded_cli_group() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let input = anchored_input(format);
+        let Operation::Append { command, .. } = options::parse(&input).unwrap().operation else {
+            panic!("append")
+        };
+        let anchor = command.anchor.as_ref().unwrap();
+        assert_eq!(anchor.source_tip.algorithm(), format);
+        assert_eq!(anchor.path, b"src/\xff.rs");
+        assert_eq!(
+            (
+                anchor.byte_start,
+                anchor.byte_end,
+                anchor.line_start,
+                anchor.line_count
+            ),
+            (0, 6, 0, 1)
+        );
+        assert_eq!(command.body, " é\r\n<script>literal</script> \n");
+        for (missing, _) in anchor_args(format) {
+            let mut incomplete = input.clone();
+            let position = incomplete
+                .iter()
+                .position(|value| value == &missing)
+                .unwrap();
+            incomplete.drain(position..position + 2);
+            assert!(options::parse(&incomplete).is_err(), "missing {missing}");
+            let mut duplicate = input.clone();
+            duplicate.extend([missing.clone(), "1".into()]);
+            assert!(options::parse(&duplicate).is_err(), "duplicate {missing}");
+        }
+        for (field, value) in [
+            ("--anchor-pull-request-version", "0"),
+            ("--anchor-line-count", "0"),
+            ("--anchor-line-count", "129"),
+            ("--anchor-line-start", "01"),
+            ("--anchor-byte-end", "0"),
+            ("--anchor-byte-end", "65537"),
+            ("--anchor-mode", "160000"),
+            ("--anchor-mode", "0100644"),
+            ("--anchor-path-hex", "FF"),
+            ("--anchor-path-hex", "2e2e2f66696c65"),
+            ("--anchor-side", "guess"),
+            ("--anchor-comparison", "remapped"),
+        ] {
+            let mut invalid = input.clone();
+            replace(&mut invalid, field, value);
+            assert!(options::parse(&invalid).is_err(), "{field}={value}");
+        }
+        let mut wrong_format = input;
+        replace(
+            &mut wrong_format,
+            "--anchor-blob",
+            &"44".repeat(if format == GitHashAlgorithm::Sha1 {
+                32
+            } else {
+                20
+            }),
+        );
+        assert!(options::parse(&wrong_format).is_err());
+    }
+    for (field, value) in anchor_args(GitHashAlgorithm::Sha1) {
+        let mut read = args(false);
+        read.extend([field, value]);
+        assert!(options::parse(&read).is_err());
+    }
+}
+
+#[test]
+fn comment_reports_preserve_exact_anchor_identity_and_explicit_outdated_status() {
+    use fgit_forge::event::pull_request_comment::SourceCommentStatus;
+    let Operation::Append { command, .. } = options::parse(&anchored_input(GitHashAlgorithm::Sha1))
+        .unwrap()
+        .operation
+    else {
+        panic!("append")
+    };
+    let options = options::parse(&args(false)).unwrap();
+    let mut page = PullRequestCommentsPage {
+        number: options.number,
+        source_head: head(),
+        discussion_version: Some(AggregateVersion::FIRST),
+        comments: vec![PullRequestCommentView {
+            version: AggregateVersion::FIRST,
+            actor: PrincipalId::from_bytes([3; 16]),
+            body: command.body,
+            anchor: command.anchor,
+            anchor_status: Some(SourceCommentStatus::Exact),
+        }],
+        next_after: None,
+    };
+    let exact = read_report(&options, "incarnation", Some(&page)).unwrap();
+    assert!(exact.contains("\"anchor_status\":\"exact\""));
+    assert!(exact.contains("\"line_start\":\"0\""));
+    assert!(exact.contains("\"path_hex\":\"7372632fff2e7273\""));
+    assert!(exact.contains(SOURCE_COMMENT_PROFILE));
+    page.comments[0].anchor_status = Some(SourceCommentStatus::Outdated);
+    let outdated = read_report(&options, "incarnation", Some(&page)).unwrap();
+    assert_eq!(
+        outdated,
+        exact.replace(
+            "\"anchor_status\":\"exact\"",
+            "\"anchor_status\":\"outdated\""
+        )
+    );
+    page.comments[0].anchor_status = None;
+    assert!(read_report(&options, "incarnation", Some(&page)).is_err());
 }

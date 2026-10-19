@@ -3,10 +3,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use fgit_authority::IdempotencyKey;
-use fgit_forge::event::pull_request_comment::{MAX_COMMENT_BYTES, PullRequestCommentCommand};
+use fgit_forge::event::pull_request_comment::{
+    MAX_COMMENT_BYTES, PullRequestCommentCommand, SourceCommentAnchor, SourceCommentComparison,
+    SourceCommentSide,
+};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::{
-    GitHashAlgorithm, PrincipalId, RepositoryAuthorityHeadId, RepositoryId, TenantId,
+    GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryAuthorityHeadId, RepositoryId,
+    TenantId,
 };
 
 use super::super::options::{decimal, parse_head};
@@ -37,7 +41,7 @@ pub(super) enum Operation {
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 6 || args.len() > 22 {
+    if args.len() < 6 || args.len() > 52 {
         return Err(super::USAGE.into());
     }
     let append = match args[0].as_str() {
@@ -76,7 +80,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                         | "--expected-version"
                         | "--body"
                         | "--body-file"
-                )
+                ) || ANCHOR_FIELDS.contains(&flag)
             } else {
                 matches!(flag, "--after" | "--limit" | "--expected-head")
             };
@@ -135,6 +139,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 number,
                 expected_version,
                 body,
+                anchor: parse_anchor(&flags, format)?,
             },
             body_file,
         }
@@ -165,6 +170,110 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         number,
         operation,
     })
+}
+
+const ANCHOR_FIELDS: [&str; 15] = [
+    "--anchor-pull-request-version",
+    "--anchor-source-ref-hex",
+    "--anchor-target-ref-hex",
+    "--anchor-source-tip",
+    "--anchor-target-tip",
+    "--anchor-compared-base",
+    "--anchor-comparison",
+    "--anchor-path-hex",
+    "--anchor-side",
+    "--anchor-blob",
+    "--anchor-mode",
+    "--anchor-byte-start",
+    "--anchor-byte-end",
+    "--anchor-line-start",
+    "--anchor-line-count",
+];
+
+fn parse_anchor(
+    fields: &BTreeMap<&str, &str>,
+    format: GitHashAlgorithm,
+) -> Result<Option<SourceCommentAnchor>, String> {
+    if !ANCHOR_FIELDS.iter().any(|field| fields.contains_key(field)) {
+        return Ok(None);
+    }
+    let required = |field: &str| {
+        fields.get(field).copied().ok_or_else(|| {
+            format!("source comment anchor requires every anchor field; missing {field}")
+        })
+    };
+    let oid = |field| {
+        GitOid::from_hex(format, required(field)?)
+            .map_err(|_| format!("invalid {field} for {}", format.as_str()))
+    };
+    let reference = |field| {
+        RefName::try_new(&anchor_hex(required(field)?)?).map_err(|_| format!("invalid {field}"))
+    };
+    let anchor = SourceCommentAnchor {
+        pull_request_version: AggregateVersion::try_new(decimal(required(
+            "--anchor-pull-request-version",
+        )?)?)
+        .ok_or("anchor PR version must be positive")?,
+        source_ref: reference("--anchor-source-ref-hex")?,
+        target_ref: reference("--anchor-target-ref-hex")?,
+        source_tip: oid("--anchor-source-tip")?,
+        target_tip: oid("--anchor-target-tip")?,
+        compared_base: oid("--anchor-compared-base")?,
+        comparison: match required("--anchor-comparison")? {
+            "direct" => SourceCommentComparison::Direct,
+            "merge_base" => SourceCommentComparison::MergeBase,
+            _ => return Err("anchor comparison must be direct or merge_base".into()),
+        },
+        path: anchor_hex(required("--anchor-path-hex")?)?,
+        side: match required("--anchor-side")? {
+            "before" => SourceCommentSide::Before,
+            "after" => SourceCommentSide::After,
+            _ => return Err("anchor side must be before or after".into()),
+        },
+        blob: oid("--anchor-blob")?,
+        mode: match required("--anchor-mode")? {
+            "100644" => 0o100644,
+            "100755" => 0o100755,
+            "120000" => 0o120000,
+            _ => return Err("anchor mode must be 100644, 100755 or 120000".into()),
+        },
+        byte_start: decimal(required("--anchor-byte-start")?)?,
+        byte_end: decimal(required("--anchor-byte-end")?)?,
+        line_start: decimal(required("--anchor-line-start")?)?,
+        line_count: decimal(required("--anchor-line-count")?)?,
+    };
+    anchor
+        .validate()
+        .map_err(|_| "invalid bounded source comment anchor")?;
+    Ok(Some(anchor))
+}
+
+fn anchor_hex(text: &str) -> Result<Vec<u8>, String> {
+    if text.is_empty()
+        || text.len() > 8192
+        || !text.len().is_multiple_of(2)
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("anchor paths and refs require nonempty bounded lowercase hex".into());
+    }
+    Ok(text
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let digit = |byte| {
+                if byte <= b'9' {
+                    byte - b'0'
+                } else {
+                    byte - b'a' + 10
+                }
+            };
+            digit(pair[0]) * 16 + digit(pair[1])
+        })
+        .collect())
 }
 
 pub(super) fn validate_body(body: &str) -> Result<(), String> {

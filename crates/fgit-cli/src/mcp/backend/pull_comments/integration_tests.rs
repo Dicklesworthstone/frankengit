@@ -7,7 +7,8 @@ use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, Pul
 use fgit_forge::preparation::MergeMetadata;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RefName, RepositoryId, TenantId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RepositoryId,
+    TenantId,
 };
 use std::{
     fs,
@@ -21,9 +22,15 @@ const ACTOR: PrincipalId = PrincipalId::from_bytes([0xc3; 16]);
 struct Fixture {
     root: PathBuf,
     options: Options,
+    base: GitOid,
+    source: GitOid,
 }
 impl Fixture {
     fn new(format: GitHashAlgorithm) -> Self {
+        Self::with_changed_source(format, false)
+    }
+
+    fn with_changed_source(format: GitHashAlgorithm, changed: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "fg-mcp-comments-{}-{}",
             std::process::id(),
@@ -103,6 +110,32 @@ impl Fixture {
             branch.commands[0].terminal.outcome,
             DecisionOutcome::Committed { .. }
         ));
+        let source = if changed {
+            let candidate = node.runtime().block_on(node.prepare_trusted_patch_in(
+                &request, &topic, plan.commit, [0xc4; 16],
+                b"diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-base\n+reviewed\n",
+                &metadata, Default::default(),
+            )).unwrap();
+            let result = node
+                .runtime()
+                .block_on(node.apply_workspace_bundle_durable_in(
+                    &request,
+                    ACTOR,
+                    b"changed-topic",
+                    &topic,
+                    plan.commit,
+                    candidate.candidate_commit,
+                    candidate.bundle_bytes(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                result.commands[0].terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ));
+            candidate.candidate_commit
+        } else {
+            plan.commit
+        };
         let command = PullRequestCommand {
             number: PullRequestNumber::FIRST,
             expected_version: ExpectedVersion::NewStream,
@@ -110,7 +143,7 @@ impl Fixture {
             data: PullRequestData {
                 source_ref: topic,
                 target_ref: main,
-                source_tip: plan.commit,
+                source_tip: source,
                 target_tip: plan.commit,
                 title: "Discuss".into(),
                 body: "Original PR body".into(),
@@ -131,7 +164,12 @@ impl Fixture {
         ));
         options.incarnation = Some(node.repository_incarnation_id());
         node.shutdown().unwrap();
-        Self { root, options }
+        Self {
+            root,
+            options,
+            base: plan.commit,
+            source,
+        }
     }
 }
 impl Drop for Fixture {
@@ -287,4 +325,140 @@ fn write_only_launch_does_not_grant_comment_reads_or_original_key_lookup() {
         Some("committed")
     );
     backend.close().unwrap();
+}
+
+#[test]
+fn source_comments_verify_real_blob_coordinates_and_retain_anchor_identity_across_mcp_restart() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::with_changed_source(format, true);
+        let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
+        let anchor = object([
+            ("pull_request_version", text("1")),
+            (
+                "source_ref_hex",
+                text(fgit_crypto::lowercase_hex(b"refs/heads/topic")),
+            ),
+            (
+                "target_ref_hex",
+                text(fgit_crypto::lowercase_hex(b"refs/heads/main")),
+            ),
+            ("source_tip", text(fixture.source.to_string())),
+            ("target_tip", text(fixture.base.to_string())),
+            ("compared_base", text(fixture.base.to_string())),
+            ("comparison", text("direct")),
+            ("path_hex", text("66696c65")),
+            ("side", text("after")),
+            (
+                "blob",
+                text(
+                    fgit_crypto::git_object_id(
+                        format,
+                        fgit_crypto::GitObjectKind::Blob,
+                        b"reviewed\n",
+                    )
+                    .to_string(),
+                ),
+            ),
+            ("mode", text("100644")),
+            ("byte_start", text("0")),
+            ("byte_end", text("9")),
+            ("line_start", text("0")),
+            ("line_count", text("1")),
+        ]);
+        let mut original = args("0", "source-comment", "Please explain this source change.");
+        original.insert("anchor".into(), anchor.clone());
+        let mut wrong_span = original.clone();
+        wrong_span.insert("idempotency_key".into(), text("wrong-source-span"));
+        let mut invalid_anchor = anchor.object().unwrap().clone();
+        invalid_anchor.insert("byte_end".into(), text("8"));
+        wrong_span.insert("anchor".into(), Value::Object(invalid_anchor));
+        let refused = backend.call(WRITE, &wrong_span).unwrap();
+        assert_eq!(refused.object().unwrap()["outcome"].text(), Some("refused"));
+        assert_eq!(
+            backend.call(READ, &read_args()).unwrap().object().unwrap()["discussion_version"]
+                .text(),
+            Some("0")
+        );
+        let accepted = backend.call(WRITE, &original).unwrap();
+        assert_eq!(
+            accepted.object().unwrap()["outcome"].text(),
+            Some("committed")
+        );
+        let receipt_anchor = &accepted.object().unwrap()["anchor"];
+        assert_eq!(
+            receipt_anchor.object().unwrap()["byte_end"].text(),
+            Some("9")
+        );
+        assert!(!accepted.object().unwrap().contains_key("anchor_status"));
+        let first_page = backend.call(READ, &read_args()).unwrap();
+        let Value::Array(rows) = &first_page.object().unwrap()["comments"] else {
+            panic!("comments")
+        };
+        assert_eq!(rows[0].object().unwrap()["anchor"], *receipt_anchor);
+        assert_eq!(
+            rows[0].object().unwrap()["anchor_status"].text(),
+            Some("exact")
+        );
+        let pinned = first_page.object().unwrap()["snapshot_token"].clone();
+        let update = PullRequestCommand {
+            number: PullRequestNumber::FIRST,
+            expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+            action: PullRequestAction::Update,
+            data: PullRequestData {
+                source_ref: RefName::try_new(b"refs/heads/topic").unwrap(),
+                target_ref: RefName::try_new(b"refs/heads/main").unwrap(),
+                source_tip: fixture.source,
+                target_tip: fixture.base,
+                title: "Updated discussion basis".into(),
+                body: "Original PR body".into(),
+            },
+        };
+        let context = fgit_cli::command_request_context(&backend.node);
+        let (_, terminal) = backend
+            .node
+            .runtime()
+            .block_on(backend.node.admit_pull_request_durable_in(
+                &context,
+                &session("change-pr-metadata"),
+                &update,
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let current = backend.call(READ, &read_args()).unwrap();
+        let Value::Array(rows) = &current.object().unwrap()["comments"] else {
+            panic!("comments")
+        };
+        assert_eq!(rows[0].object().unwrap()["anchor"], *receipt_anchor);
+        assert_eq!(
+            rows[0].object().unwrap()["anchor_status"].text(),
+            Some("outdated")
+        );
+        let mut historical = read_args();
+        historical.insert("expected_head".into(), pinned);
+        assert_eq!(backend.call(READ, &historical).unwrap(), first_page);
+        assert_eq!(backend.call(WRITE, &original).unwrap(), accepted);
+        let mut stale = original.clone();
+        stale.insert("idempotency_key".into(), text("new-stale-anchor"));
+        stale.insert("expected_version".into(), text("1"));
+        assert_eq!(
+            backend.call(WRITE, &stale).unwrap().object().unwrap()["outcome"].text(),
+            Some("refused")
+        );
+        backend.close().unwrap();
+        let mut reopened = NodeTools::open(fixture.options.clone()).unwrap();
+        assert_eq!(reopened.call(WRITE, &original).unwrap(), accepted);
+        let mut changed_key = original;
+        let mut changed_anchor = anchor.object().unwrap().clone();
+        changed_anchor.insert("side".into(), text("before"));
+        changed_key.insert("anchor".into(), Value::Object(changed_anchor));
+        assert!(
+            reopened.call(WRITE, &changed_key).is_err(),
+            "same key cannot change source anchor"
+        );
+        reopened.close().unwrap();
+    }
 }

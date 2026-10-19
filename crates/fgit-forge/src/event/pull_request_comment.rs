@@ -1,5 +1,13 @@
 //! Append-only conversation comments in a stream independent of PR metadata.
-//! A comment is untrusted text, never an approval or a source-line anchor.
+//! A comment is untrusted text, never an approval. Optional source anchors
+//! retain exact immutable coordinates and require independent object validation.
+
+mod anchor;
+pub use anchor::{
+    MAX_SOURCE_COMMENT_BLOB_BYTES, MAX_SOURCE_COMMENT_LINES, MAX_SOURCE_COMMENT_SPAN_BYTES,
+    SOURCE_COMMENT_PROFILE, SourceCommentAnchor, SourceCommentComparison, SourceCommentError,
+    SourceCommentSide, SourceCommentStatus,
+};
 
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::{AggregateId, AggregateVersion, ExpectedVersion, PullRequestNumber};
@@ -8,26 +16,44 @@ use fgit_types::{PrincipalId, RefusalCode};
 
 pub const MAX_COMMENT_BYTES: usize = 65_536;
 
-/// Exact submitted text and its authenticated author. No clock, current PR
-/// version, mutable branch tip or rendering result enters the event identity.
+/// Exact submitted text and its authenticated author. An optional source anchor
+/// retains the submitted immutable PR basis. No clock, later branch motion or
+/// rendering result changes this original event or its retry identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativePullRequestComment {
     pub actor: PrincipalId,
     pub body: String,
+    /// None retains the complete historical kind-12 encoding.
+    pub anchor: Option<SourceCommentAnchor>,
 }
 
 impl NativePullRequestComment {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
-        validate_body(&self.body)
+        validate_body(&self.body)?;
+        if let Some(anchor) = &self.anchor {
+            anchor.validate()?;
+        }
+        Ok(())
     }
 
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
         out.write_bytes("actor", self.actor.as_bytes())?;
-        out.write_bytes("body", self.body.as_bytes())
+        out.write_bytes("body", self.body.as_bytes())?;
+        if let Some(anchor) = &self.anchor {
+            anchor.write(out)?;
+        }
+        Ok(())
     }
 
     pub(super) fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Self::read_with_anchor(input, false)
+    }
+
+    pub(super) fn read_with_anchor(
+        input: &mut Decoder<'_>,
+        anchored: bool,
+    ) -> Result<Self, CodecRefusal> {
         let actor: [u8; 16] = input
             .read_bytes("actor")?
             .try_into()
@@ -42,6 +68,11 @@ impl NativePullRequestComment {
         Ok(Self {
             actor: PrincipalId::from_bytes(actor),
             body: body.to_owned(),
+            anchor: if anchored {
+                Some(SourceCommentAnchor::read(input)?)
+            } else {
+                None
+            },
         })
     }
 }
@@ -60,11 +91,17 @@ pub struct PullRequestCommentCommand {
     pub number: PullRequestNumber,
     pub expected_version: ExpectedVersion,
     pub body: String,
+    pub anchor: Option<SourceCommentAnchor>,
 }
 
 impl PullRequestCommentCommand {
     pub fn proposed_event(&self, actor: PrincipalId) -> Result<ForgeEvent, RefusalCode> {
         validate_body(&self.body).map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if let Some(anchor) = &self.anchor {
+            anchor
+                .validate()
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        }
         let version = match self.expected_version {
             ExpectedVersion::NewStream => AggregateVersion::FIRST,
             ExpectedVersion::Exactly(previous) => previous
@@ -77,6 +114,7 @@ impl PullRequestCommentCommand {
             payload: ForgeEventPayload::PullRequestCommentedNative(NativePullRequestComment {
                 actor,
                 body: self.body.clone(),
+                anchor: self.anchor.clone(),
             }),
         })
     }

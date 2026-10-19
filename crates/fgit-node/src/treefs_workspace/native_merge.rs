@@ -415,6 +415,17 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn validate_comment_anchor_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        anchor: &'a fgit_forge::event::pull_request_comment::SourceCommentAnchor,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        self.validate_source_comment_anchor_in(authority, cx, basis, authenticated, anchor)
+    }
+
     fn validate_squash_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,

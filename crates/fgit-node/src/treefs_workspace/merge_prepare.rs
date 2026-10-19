@@ -1,6 +1,8 @@
 //! Native merge preparation over one authenticated source snapshot. Unlike
 //! merge admission, this path performs NO object staging, seal or head write.
 
+#[path = "comment_anchor.rs"]
+mod comment_anchor;
 #[path = "commit_replay.rs"]
 mod commit_replay;
 #[path = "merge_resolution.rs"]
@@ -26,7 +28,7 @@ use fgit_forge::preparation::{
     PreparedMerge, prepare_merge_with_options,
 };
 use fgit_git_object::{
-    AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
+    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
 };
 use fgit_pack::{
     CanonicalObjectSource, CanonicalPackObject, PackError, PackLimits, PackPlanner, PackWriteError,
@@ -343,7 +345,15 @@ impl SelectedSource<'_> {
         }
         let read = self.inner.read_object(&id);
         self.checkpoint()?;
-        let (kind, body) = read.map_err(|_| MergeSourceError::Unavailable(id))?;
+        let (kind, body) = read.map_err(|error| match error {
+            PackWriteError::Pack(
+                PackError::ObjectSizeLimit { .. } | PackError::AllocationFailed { .. },
+            ) => {
+                self.budget_failed.set(true);
+                MergeSourceError::BudgetExceeded
+            }
+            _ => MergeSourceError::Unavailable(id),
+        })?;
         let Some(total) = self
             .read_bytes
             .get()
@@ -368,6 +378,19 @@ impl SelectedSource<'_> {
             std::str::from_utf8(value).map_err(|_| MergeSourceError::InvalidObject(owner))?;
         GitOid::from_hex(self.inner.object_format, &value.to_ascii_lowercase())
             .map_err(|_| MergeSourceError::InvalidObject(owner))
+    }
+
+    fn parse_error(&self, owner: GitOid, error: ObjectError) -> MergeSourceError {
+        match error {
+            ObjectError::ObjectTooLarge { .. }
+            | ObjectError::TooManyTreeEntries { .. }
+            | ObjectError::HeaderLimitExceeded { .. }
+            | ObjectError::AllocationFailure => {
+                self.budget_failed.set(true);
+                MergeSourceError::BudgetExceeded
+            }
+            _ => MergeSourceError::InvalidObject(owner),
+        }
     }
 }
 
@@ -394,7 +417,7 @@ impl MergeObjectSource for SelectedSource<'_> {
             AcceptanceProfile::GitCompatibleImport,
             &self.limits,
         )
-        .map_err(|_| MergeSourceError::InvalidObject(id))?
+        .map_err(|error| self.parse_error(id, error))?
         else {
             return Err(MergeSourceError::InvalidObject(id));
         };
@@ -434,7 +457,7 @@ impl MergeObjectSource for SelectedSource<'_> {
             AcceptanceProfile::GitCompatibleImport,
             &self.limits,
         )
-        .map_err(|_| MergeSourceError::InvalidObject(id))?
+        .map_err(|error| self.parse_error(id, error))?
         else {
             return Err(MergeSourceError::InvalidObject(id));
         };

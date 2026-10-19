@@ -1,5 +1,9 @@
 use super::*;
 
+fn command(args: &Object) -> Result<PullRequestCommentCommand, ToolError> {
+    super::command(args, GitHashAlgorithm::Sha1)
+}
+
 fn input(version: &str, body: &str) -> Object {
     object([
         ("number", text("7")),
@@ -19,6 +23,7 @@ fn comment_command_uses_exact_independent_versions_and_literal_bodies() {
         let parsed = command(&input(version, body)).unwrap();
         assert_eq!(parsed.number.get(), 7);
         assert_eq!(parsed.body, body);
+        assert!(parsed.anchor.is_none());
         let observed = match parsed.expected_version {
             ExpectedVersion::NewStream => 0,
             ExpectedVersion::Exactly(version) => version.get(),
@@ -102,11 +107,139 @@ fn discovery_distinguishes_read_only_comment_pages_and_append_inputs() {
     let properties = write.schema.object().unwrap()["properties"]
         .object()
         .unwrap();
-    assert_eq!(properties.len(), 4);
+    assert_eq!(properties.len(), 5);
     assert!(properties.contains_key("expected_version"));
     assert!(properties.contains_key("idempotency_key"));
+    let anchor = properties["anchor"].object().unwrap();
+    assert_eq!(anchor["additionalProperties"], Value::Bool(false));
+    assert_eq!(anchor["properties"].object().unwrap().len(), 15);
+    assert_eq!(
+        anchor["required"],
+        Value::Array(ANCHOR_FIELDS.into_iter().map(text).collect())
+    );
     assert_eq!(
         write.schema.object().unwrap()["additionalProperties"],
         Value::Bool(false)
     );
+}
+
+fn anchor_fields(format: GitHashAlgorithm) -> Object {
+    let bytes = match format {
+        GitHashAlgorithm::Sha1 => 20,
+        GitHashAlgorithm::Sha256 => 32,
+    };
+    object([
+        ("pull_request_version", text("1")),
+        (
+            "source_ref_hex",
+            text(fgit_crypto::lowercase_hex(b"refs/heads/topic")),
+        ),
+        (
+            "target_ref_hex",
+            text(fgit_crypto::lowercase_hex(b"refs/heads/main")),
+        ),
+        ("source_tip", text("11".repeat(bytes))),
+        ("target_tip", text("22".repeat(bytes))),
+        ("compared_base", text("22".repeat(bytes))),
+        ("comparison", text("direct")),
+        ("path_hex", text(fgit_crypto::lowercase_hex(b"src/\xff.rs"))),
+        ("side", text("after")),
+        ("blob", text("33".repeat(bytes))),
+        ("mode", text("100644")),
+        ("byte_start", text("0")),
+        ("byte_end", text("6")),
+        ("line_start", text("0")),
+        ("line_count", text("1")),
+    ])
+    .object()
+    .unwrap()
+    .clone()
+}
+
+#[test]
+fn source_anchor_inputs_are_complete_exact_and_bound_to_the_launch_hash_format() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fields = anchor_fields(format);
+        let mut args = input("0", " literal body \r\n");
+        args.insert("anchor".into(), Value::Object(fields.clone()));
+        let parsed = super::command(&args, format).unwrap();
+        let anchor = parsed.anchor.as_ref().unwrap();
+        assert_eq!(parsed.body, " literal body \r\n");
+        assert_eq!(anchor.path, b"src/\xff.rs");
+        assert_eq!(anchor.source_tip.algorithm(), format);
+        assert_eq!(
+            (
+                anchor.byte_start,
+                anchor.byte_end,
+                anchor.line_start,
+                anchor.line_count
+            ),
+            (0, 6, 0, 1)
+        );
+        let rendered = render_anchor(anchor);
+        let rendered = rendered.object().unwrap();
+        assert_eq!(rendered["profile"], text(SOURCE_COMMENT_PROFILE));
+        assert!(!rendered.contains_key("anchor_status"));
+        for field in ANCHOR_FIELDS {
+            assert_eq!(rendered[field], fields[field], "{field}");
+            let mut missing = fields.clone();
+            missing.remove(field);
+            args.insert("anchor".into(), Value::Object(missing));
+            assert!(super::command(&args, format).is_err(), "missing {field}");
+        }
+        for (field, value) in [
+            ("pull_request_version", "0"),
+            ("line_count", "0"),
+            ("line_count", "129"),
+            ("line_start", "01"),
+            ("byte_end", "0"),
+            ("byte_end", "65537"),
+            ("mode", "160000"),
+            ("mode", "0100644"),
+            ("path_hex", "FF"),
+            ("path_hex", "2e2e2f66696c65"),
+            ("side", "guess"),
+            ("comparison", "remapped"),
+        ] {
+            let mut invalid = fields.clone();
+            invalid.insert(field.into(), text(value));
+            args.insert("anchor".into(), Value::Object(invalid));
+            assert!(super::command(&args, format).is_err(), "{field}={value}");
+        }
+        for field in [
+            "profile",
+            "anchor_status",
+            "principal",
+            "approved",
+            "idempotency_key",
+        ] {
+            let mut injected = fields.clone();
+            injected.insert(field.into(), text("untrusted"));
+            args.insert("anchor".into(), Value::Object(injected));
+            assert!(super::command(&args, format).is_err(), "{field}");
+        }
+        for field in [
+            "pull_request_version",
+            "byte_start",
+            "byte_end",
+            "line_start",
+            "line_count",
+        ] {
+            let mut rounded = fields.clone();
+            rounded.insert(field.into(), json::number(1));
+            args.insert("anchor".into(), Value::Object(rounded));
+            assert!(super::command(&args, format).is_err(), "numeric {field}");
+        }
+        args.insert("anchor".into(), Value::Object(fields));
+        let other = if format == GitHashAlgorithm::Sha1 {
+            GitHashAlgorithm::Sha256
+        } else {
+            GitHashAlgorithm::Sha1
+        };
+        assert!(super::command(&args, other).is_err());
+        for value in [Value::Null, text("fake"), Value::Array(Vec::new())] {
+            args.insert("anchor".into(), value);
+            assert!(super::command(&args, format).is_err());
+        }
+    }
 }
