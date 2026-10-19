@@ -12,6 +12,8 @@
 //! [`TerminationSignals::requested`] and drain. A library entry point never
 //! installs them; the `fg` process decides to.
 
+mod request;
+
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::io;
