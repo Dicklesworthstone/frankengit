@@ -14,7 +14,9 @@
 //! symlink materialization, and gitlinks are not supported by this profile.
 
 mod inputs;
+mod job_inputs;
 use inputs::WorkspaceManifest;
+pub use job_inputs::JobInput;
 
 use crate::Commitment;
 use fgit_codec::Encoder;
@@ -134,6 +136,7 @@ impl InternalEffect for SparseDirectoryLease {}
 #[derive(Clone, Debug)]
 pub struct SparseWorkspacePlan<A: GitHashAlgorithm> {
     manifest: WorkspaceManifest<A>,
+    job_inputs: Vec<JobInput>,
     outputs: BTreeSet<TreePath>,
     directories: BTreeSet<TreePath>,
     limits: SparseLimits,
@@ -290,6 +293,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         };
         Ok(Self {
             manifest,
+            job_inputs: Vec::new(),
             outputs,
             directories,
             limits,
@@ -436,6 +440,25 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                     remember_inode(&file, entry.path(), &mut aliases)?;
                 }
             }
+            for (index, input) in plan.job_inputs.iter().enumerate() {
+                checkpoint(
+                    cancelled,
+                    HostEpoch::Writing(plan.manifest.entries().len() + index),
+                )?;
+                let file = write_new(
+                    &root,
+                    input.path.as_bytes(),
+                    &input.body,
+                    host_mode(input.mode),
+                    &|| {
+                        checkpoint(
+                            cancelled,
+                            HostEpoch::Writing(plan.manifest.entries().len() + index),
+                        )
+                    },
+                )?;
+                remember_inode(&file, &input.path, &mut aliases)?;
+            }
             // Children before parents, root last. No path is returned before
             // every body and directory has crossed its selected sync boundary.
             for (index, path) in plan.directories.iter().rev().enumerate() {
@@ -484,7 +507,12 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 }
             }
         }
-        let copied_bytes = plan.manifest.receipt().payload_bytes() as u64;
+        let copied_bytes = plan.manifest.receipt().payload_bytes() as u64
+            + plan
+                .job_inputs
+                .iter()
+                .map(|input| input.body.len() as u64)
+                .sum::<u64>();
         let metadata_bytes = plan.marker.len() as u64;
         let created_entries = plan.created_entries;
         Ok(Self {
@@ -631,7 +659,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         now: u64,
         cancelled: &dyn Fn(HostEpoch) -> bool,
     ) -> Result<IntentLog, HostRefusal> {
-        if self.plan.manifest.is_candidate() {
+        if self.plan.manifest.is_candidate() || !self.plan.job_inputs.is_empty() {
             return Err(HostRefusal::IdentityMismatch);
         }
         self.plan.authorize(capability, now)?;

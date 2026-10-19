@@ -23,6 +23,45 @@ impl LocalArtifactStore {
             scope,
         })
     }
+    /// Return a complete verified payload in memory. No partial bytes escape on
+    /// failure. This grants custody only, not permission to execute or reuse.
+    pub fn read_payload(
+        &self,
+        id: &Digest,
+        op: &ArtifactOperation<'_>,
+    ) -> Result<(ArtifactIdentity, Vec<u8>), ArtifactStorageError> {
+        if op.maximum_bytes > 64 * 1024 * 1024 {
+            return Err(ArtifactStorageError::PayloadLimit);
+        }
+        struct Buffer {
+            bytes: Vec<u8>,
+            maximum: usize,
+        }
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.len() > self.maximum.saturating_sub(self.bytes.len()) {
+                    return Err(std::io::ErrorKind::OutOfMemory.into());
+                }
+                self.bytes
+                    .try_reserve(bytes.len())
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        op.checkpoint()?;
+        let mut file = self.source(id)?;
+        let mut buffer = Buffer {
+            bytes: Vec::new(),
+            maximum: op.maximum_bytes as usize,
+        };
+        let identity = verify(&mut file, &self.scope, id, &mut buffer, op)?;
+        op.checkpoint()?;
+        Ok((identity, buffer.bytes))
+    }
     pub fn scope(&self) -> &ArtifactScope {
         &self.scope
     }
