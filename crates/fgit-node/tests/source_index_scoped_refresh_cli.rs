@@ -256,8 +256,12 @@ fn native_refresh_command_never_overwrites_candidates_or_publishes_on_resource_r
         fs::read(&existing).unwrap(),
         b"retain this exact diagnostic"
     );
+    // Since b624117e a selected file above --max-file-bytes is recorded as an
+    // explicit omission and the refresh publishes (docs/SCOPED_INDEX_COMMAND.md),
+    // so the source-side resource refusal is the aggregate source budget, which
+    // also counts reused rows.
     for (label, flag) in [
-        ("source-limit", "--max-file-bytes"),
+        ("source-limit", "--max-source-bytes"),
         ("read-limit", "--max-payload-bytes"),
     ] {
         let record = candidate(&root, &format!("{label}.json"));

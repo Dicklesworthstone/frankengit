@@ -175,10 +175,15 @@ fn binary_streams_both_hash_domains_into_file_verification_and_native_recovery()
         fixture.scratch();
         let before = fixture.refs(format);
         let report = success(fixture.export(format, "stream.bundle", &[]));
+        // The seed bundle's pack carries five objects, one of them an
+        // unreachable blob ("alpha\n"). The streaming export selects only what
+        // the advertised refs reach and refuses unreachable extras
+        // (docs/NATIVE_GIT_BUNDLE_STREAMING_EXPORT.md), so it writes four:
+        // tag, commit, tree and the one reachable blob.
         for required in [
             "\"type\":\"git_bundle_export\"",
             "\"streaming\":true",
-            "\"object_count\":5",
+            "\"object_count\":4",
             "\"node_closed\":true",
             "\"publication_state\":\"durable\"",
             "\"bundle_created\":true",

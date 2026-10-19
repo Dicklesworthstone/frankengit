@@ -118,6 +118,11 @@ fn binary_refuses_selected_file_overflow_without_recording_or_replacing_a_candid
     let (node, _) = fixture(&root, format);
     node.shutdown().unwrap();
     let records = private(&root);
+    // Since b624117e a selected file above --max-file-bytes is an explicit
+    // omission, but its bytes still consume the source budget
+    // (docs/SCOPED_INDEX_COMMAND.md). One byte short of that budget refuses
+    // before any candidate is recorded.
+    let short_budget = (TEXT.len() - 1).to_string();
     let refused = records.join("refused.json");
     let output = run(
         &root,
@@ -129,11 +134,59 @@ fn binary_refuses_selected_file_overflow_without_recording_or_replacing_a_candid
             refused.to_str().unwrap(),
             "--max-file-bytes",
             "1",
+            "--max-source-bytes",
+            &short_budget,
         ],
     );
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "an exhausted source budget must refuse: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(output.stdout.is_empty());
     assert!(!refused.exists());
+    // Permitted twin: the exact budget publishes, and the oversized selected
+    // file is reported as an omission rather than silently dropped.
+    let exact_budget = TEXT.len().to_string();
+    let omitted = records.join("omitted.json");
+    let partial = success(run(
+        &root,
+        format,
+        "build",
+        "alpha.txt",
+        &[
+            "--candidate-file",
+            omitted.to_str().unwrap(),
+            "--max-file-bytes",
+            "1",
+            "--max-source-bytes",
+            &exact_budget,
+        ],
+    ));
+    assert!(partial.contains("\"index_published\":true"), "{partial}");
+    assert!(omitted.exists());
+    // A read of an omission-bearing generation still exits zero; partial
+    // coverage is reported in the document, not as a refusal.
+    let searched_out = success(run(
+        &root,
+        format,
+        "search",
+        "alpha.txt",
+        &["--term", "needle"],
+    ));
+    assert!(
+        searched_out.contains("\"complete_within_scope\":false"),
+        "{searched_out}"
+    );
+    assert!(
+        searched_out.contains("\"coverage_complete\":false"),
+        "{searched_out}"
+    );
+    assert!(
+        searched_out.contains(&format!("\"path_hex\":\"{}\"", hex(b"alpha.txt"))),
+        "{searched_out}"
+    );
     let allowed = records.join("allowed.json");
     let built = success(run(
         &root,

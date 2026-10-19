@@ -448,6 +448,11 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
             Cause::Causeless,
         ),
         (
+            "UnsupportedRootLayout",
+            CliRefusal::UnsupportedRootLayout("ref-merkle-v2".to_string()),
+            Cause::Causeless,
+        ),
+        (
             "SampleObjectFormat",
             CliRefusal::SampleObjectFormat {
                 repository: fgit_types::GitHashAlgorithm::Sha256,
