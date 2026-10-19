@@ -7,15 +7,24 @@ use crate::source_retrieval::context::{ContextLimits, InitialContext, PROFILE as
 
 use crate::source_retrieval::context::ranked::{self, ContextRanking};
 
-struct ContextCommand {
+pub(super) struct ContextCommand {
     initial: Command,
     limits: ContextLimits,
     ranked: bool,
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<ContextCommand, ApiError> {
+    command_fields(parse_form(bytes, 197)?, format)
+}
+pub(super) fn command_fields(
+    parsed: Vec<(String, String)>,
+    format: GitHashAlgorithm,
+) -> Result<ContextCommand, ApiError> {
+    if parsed.len() > 197 {
+        return Err(ApiError::too_large());
+    }
     let mut fields = BTreeMap::new();
     let mut initial = Vec::new();
-    for (name, value) in parse_form(bytes, 197)? {
+    for (name, value) in parsed {
         match name.as_str() {
             "context_max_files"
             | "context_radius_bytes"
@@ -101,6 +110,21 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let command = command(&read_form(reader, framing, http)?, node.object_format)?;
+    Ok(JsonReply {
+        status: Status::Success,
+        body: run(
+            node,
+            &command,
+            usize::try_from(maximum).unwrap_or(usize::MAX),
+        )?,
+        terminal: None,
+    })
+}
+pub(super) fn run(
+    node: &OneNode,
+    command: &ContextCommand,
+    maximum: usize,
+) -> Result<String, ApiError> {
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
@@ -139,19 +163,14 @@ pub(super) fn execute(
         &mut live,
     )
     .map_err(failure)?;
-    let body = render(
+    render(
         node,
-        &command,
+        command,
         &context,
         ranking.as_ref(),
-        usize::try_from(maximum).unwrap_or(usize::MAX),
+        maximum,
         &mut live,
-    )?;
-    Ok(JsonReply {
-        status: Status::Success,
-        body,
-        terminal: None,
-    })
+    )
 }
 fn append_hex(
     out: &mut String,

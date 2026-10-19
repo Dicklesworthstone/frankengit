@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 46,
+  "total_tools": 48,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -394,6 +394,26 @@
       "capability": "read_canonical_object",
       "cli_command": "fg diff",
       "rest_api_path": "GET /repos/{id}/compare"
+    },
+    {
+      "tool": "frankengit_source_context",
+      "version": 1,
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_derived_generation",
+      "cli_command": "fg search --context",
+      "rest_api_path": "/api/v1/source/context-initial"
+    },
+    {
+      "tool": "frankengit_source_initial",
+      "version": 1,
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_derived_generation",
+      "cli_command": "fg search --initial",
+      "rest_api_path": "/api/v1/source/search-initial"
     },
     {
       "tool": "frankengit_source_log",

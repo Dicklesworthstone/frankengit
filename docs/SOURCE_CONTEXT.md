@@ -185,6 +185,30 @@ and retain source pins, budget failures, scope, revocation and no-match behavior
 These tests are included in the existing commands below; their presence is not
 an assertion that they have run at an arbitrary later revision.
 
+## The same read in process: CLI and MCP
+
+`fgit_node::source_retrieval_json` runs the exact `search-initial` /
+`context-initial` implementation (form grammar, validation, one request
+deadline across retrieval and hydration, JSON document) without HTTP framing
+or credentials; the HTTP routes call the same functions, so the surfaces cannot
+drift. The node supplies `object_format`; a caller-supplied one is refused.
+
+- `fg search --initial` / `fg search --context <root> <tenant> <repository>
+  --trusted-local field=value...` takes the route fields verbatim (repeat
+  `term_hex`, `path_prefix_hex`, `symbol_kind`). Exit 0 is a complete document,
+  3 an explicitly truncated channel, 2 a refusal carrying the route code.
+- MCP `frankengit_source_initial` and `frankengit_source_context` (source grant)
+  take the same fields as JSON (`reference`, `terms_hex`, `path_prefixes_hex`,
+  `symbol_kinds` as arrays; limits as integers) and return the node's document
+  as structured content, after checking it is read-only and bound to the
+  launch's tenant, repository and object format. Request-shape codes are
+  invalid arguments; index state (`source_index_uninitialized`, stale or
+  mismatched generations) is a failure, never an empty answer.
+
+Neither builds or refreshes indexes. `scripts/e2e/suites/search/initial_retrieval_cli.sh`
+builds both indexes with `fg index` / `fg symbol-index` and checks the
+complete, truncated, ranked, raw-path and refusal cases through the binary.
+
 ## Verification and scope
 
 Verification uses production-native imports, patch admission, indexes, source

@@ -250,6 +250,44 @@ pub(super) fn execute(
         return context::execute(node, session, framing, reader, http, maximum);
     }
     let command = command(&read_form(reader, framing, http)?, node.object_format)?;
+    Ok(JsonReply {
+        status: Status::Success,
+        body: run(
+            node,
+            &command,
+            usize::try_from(maximum).unwrap_or(usize::MAX),
+        )?,
+        terminal: None,
+    })
+}
+
+/// The Initial (`hydrate == false`) or context-hydrated read behind HTTP
+/// `search-initial` / `context-initial`, for an in-process host such as
+/// `fg mcp`. `fields` are those routes' form pairs without `object_format`,
+/// which the node supplies. The grammar, validation, single request deadline
+/// and JSON document are the routes' own; there is no HTTP framing and no
+/// credential check, so the caller must already hold source-read authority.
+/// Errors are the routes' stable refusal codes.
+pub fn source_retrieval_json(
+    node: &OneNode,
+    mut fields: Vec<(String, String)>,
+    hydrate: bool,
+    maximum: usize,
+) -> Result<String, &'static str> {
+    if fields.iter().any(|(name, _)| name == "object_format") {
+        return Err("unknown_initial_field");
+    }
+    fields.push(("object_format".into(), node.object_format.as_str().into()));
+    let result = if hydrate {
+        context::command_fields(fields, node.object_format)
+            .and_then(|command| context::run(node, &command, maximum))
+    } else {
+        command_fields(fields, node.object_format).and_then(|command| run(node, &command, maximum))
+    };
+    result.map_err(|error| error.code)
+}
+
+fn run(node: &OneNode, command: &Command, maximum: usize) -> Result<String, ApiError> {
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
@@ -271,18 +309,7 @@ pub(super) fn execute(
         &mut live,
     )
     .map_err(failure)?;
-    let body = render(
-        node,
-        &command,
-        &report,
-        usize::try_from(maximum).unwrap_or(usize::MAX),
-        &mut live,
-    )?;
-    Ok(JsonReply {
-        status: Status::Success,
-        body,
-        terminal: None,
-    })
+    render(node, command, &report, maximum, &mut live)
 }
 
 fn generation_json(value: &fgit_graph::GenerationActivation) -> String {

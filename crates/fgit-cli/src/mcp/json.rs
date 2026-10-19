@@ -8,6 +8,25 @@ const MAX_ITEMS: usize = 256;
 const MAX_STRING: usize = 16 * 1024;
 pub type Object = BTreeMap<String, Value>;
 
+/// Every parse is bounded. Client requests use the strict defaults; a
+/// document the node itself rendered (already bounded by its own output
+/// ceiling) may be larger but is still finite.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    pub input: usize,
+    pub depth: usize,
+    pub nodes: usize,
+    pub items: usize,
+    pub string: usize,
+}
+pub const REQUEST_LIMITS: Limits = Limits {
+    input: MAX_INPUT,
+    depth: MAX_DEPTH,
+    nodes: MAX_NODES,
+    items: MAX_ITEMS,
+    string: MAX_STRING,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Value {
     Null,
@@ -72,7 +91,10 @@ pub fn decimal(value: &str) -> Result<u64, &'static str> {
     value.parse().map_err(|_| "integer_overflow")
 }
 pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
-    if bytes.len() > MAX_INPUT {
+    parse_with(bytes, REQUEST_LIMITS)
+}
+pub fn parse_with(bytes: &[u8], limits: Limits) -> Result<Value, &'static str> {
+    if bytes.len() > limits.input {
         return Err("input_limit");
     }
     let source = std::str::from_utf8(bytes).map_err(|_| "invalid_utf8")?;
@@ -80,6 +102,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
         source,
         at: 0,
         nodes: 0,
+        limits,
     };
     let value = parser.value(0)?;
     parser.whitespace();
@@ -92,6 +115,7 @@ struct Parser<'a> {
     source: &'a str,
     at: usize,
     nodes: usize,
+    limits: Limits,
 }
 impl Parser<'_> {
     fn byte(&self) -> Option<u8> {
@@ -114,14 +138,14 @@ impl Parser<'_> {
         }
     }
     const fn node(&mut self) -> Result<(), &'static str> {
-        if self.nodes == MAX_NODES {
+        if self.nodes == self.limits.nodes {
             return Err("node_limit");
         }
         self.nodes += 1;
         Ok(())
     }
     fn value(&mut self, depth: usize) -> Result<Value, &'static str> {
-        if depth > MAX_DEPTH {
+        if depth > self.limits.depth {
             return Err("depth_limit");
         }
         self.node()?;
@@ -136,7 +160,7 @@ impl Parser<'_> {
                     return Ok(Value::Object(fields));
                 }
                 loop {
-                    if fields.len() == MAX_ITEMS {
+                    if fields.len() == self.limits.items {
                         return Err("object_limit");
                     }
                     self.node()?;
@@ -172,7 +196,7 @@ impl Parser<'_> {
                     return Ok(Value::Array(values));
                 }
                 loop {
-                    if values.len() == MAX_ITEMS {
+                    if values.len() == self.limits.items {
                         return Err("array_limit");
                     }
                     let value = self.value(depth + 1)?;
@@ -301,7 +325,7 @@ impl Parser<'_> {
                     ch
                 }
             };
-            if out.len() + ch.len_utf8() > MAX_STRING {
+            if out.len() + ch.len_utf8() > self.limits.string {
                 return Err("string_limit");
             }
             out.try_reserve(ch.len_utf8())
@@ -363,6 +387,7 @@ impl Output {
                     source: value,
                     at: 0,
                     nodes: 0,
+                    limits: REQUEST_LIMITS,
                 };
                 parser.numeric()?;
                 if parser.at != value.len() {

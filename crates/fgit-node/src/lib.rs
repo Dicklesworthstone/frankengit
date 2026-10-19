@@ -157,6 +157,8 @@ mod loose_import;
 mod merge_delivery;
 mod node_lanes;
 mod smart_http;
+/// HTTP `search-initial`/`context-initial` for an in-process host (see the fn).
+pub use smart_http::source_retrieval_json;
 mod termination;
 pub use smart_http::{
     HttpTrustedOrigin, HttpTrustedOriginRefusal, NodeSmartHttpDiscovery, NodeSmartHttpRefusal,

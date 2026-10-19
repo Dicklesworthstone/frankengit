@@ -104,3 +104,13 @@ rather than answering empty, and a match ceiling returns an explicitly
 incomplete prefix (`complete: false`, `truncated_reason: "match_limit"`). The
 adapter re-checks every reported span against the declared name, kind filter,
 path scope and hash domain before emitting it. No index is read or built.
+
+## Joined Initial search and context packets
+
+`frankengit_source_initial` and `frankengit_source_context` expose the node's
+model-free joined search over persisted lexical, path and symbol indexes, and
+its exact-excerpt context packets (raw-path or ranked weighted fusion), with
+the HTTP `search-initial` / `context-initial` grammar and JSON document; see
+[SOURCE_CONTEXT.md](SOURCE_CONTEXT.md). They require built indexes and never
+build them; a missing index fails with `source_index_uninitialized`.
+

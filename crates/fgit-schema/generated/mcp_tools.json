@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 46,
-  "active_count": 42,
+  "total_count": 48,
+  "active_count": 44,
   "unsupported_count": 4,
   "tools": [
     {
@@ -1098,6 +1098,62 @@
       "refusal_codes": ["invalid_reference", "invalid_comparison_mode", "source_review_failed", "review_response_limit"],
       "cli_command": "fg diff",
       "rest_api_path": "GET /repos/{id}/compare"
+    },
+    {
+      "name": "frankengit_source_context",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector.",
+      "read_mutation": "read_only",
+      "capability": "read_derived_generation",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 65536,
+        "max_depth": 16,
+        "max_items": 100,
+        "max_fan_out": 8,
+        "max_duration_ms": 30000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["invalid_initial_query", "symbol_options_without_name", "source_index_uninitialized", "source_index_stale", "source_snapshot_mismatch", "index_generation_mismatch", "invalid_retrieval_report", "unsupported_context_selection", "invalid_context_limits"],
+      "cli_command": "fg search --context",
+      "rest_api_path": "/api/v1/source/context-initial"
+    },
+    {
+      "name": "frankengit_source_initial",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "description": "Model-free Initial search over persisted lexical, path and symbol indexes in one snapshot and index generation vector.",
+      "read_mutation": "read_only",
+      "capability": "read_derived_generation",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 65536,
+        "max_depth": 16,
+        "max_items": 100,
+        "max_fan_out": 8,
+        "max_duration_ms": 30000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["invalid_initial_query", "symbol_options_without_name", "source_index_uninitialized", "source_index_stale", "source_snapshot_mismatch", "index_generation_mismatch", "invalid_retrieval_report"],
+      "cli_command": "fg search --initial",
+      "rest_api_path": "/api/v1/source/search-initial"
     },
     {
       "name": "frankengit_source_log",

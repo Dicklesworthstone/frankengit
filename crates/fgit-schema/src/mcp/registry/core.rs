@@ -2888,7 +2888,275 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg diff",
         rest_api_path: "GET /repos/{id}/compare",
     },
-    // 39. frankengit_source_log
+    // 39. frankengit_source_context
+    McpToolEntry {
+        name: "frankengit_source_context",
+        version: 1,
+        entity_kind: McpEntityKind::Tool,
+        owner_subsystem: "search",
+        support_profile: SupportProfile::Active,
+        description: "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector.",
+        read_mutation: ReadMutationClass::ReadOnly,
+        capability: CapabilityRequirement::READ_DERIVED_GENERATION,
+        principal: PrincipalRequirement::None,
+        idempotency: IdempotencyRequirement::NotApplicable,
+        authority_root: InputAuthorityRootRequirement::ExactSnapshotToken,
+        budget: BudgetDimensions::READ_STANDARD,
+        pagination: PaginationRules::Unpaginated,
+        disclosure: DisclosureClass::UntrustedContentData,
+        receipt: EvidenceReceiptClass::None,
+        cancellation: CancellationBehavior::ImmediateQuiescent,
+        input_fields: &[
+            McpField {
+                name: "reference",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Full visible ref (e.g. refs/heads/main).",
+                required: true,
+                max_bytes: Some(4096),
+                pattern: None,
+            },
+            McpField {
+                name: "terms_hex",
+                field_type: "array",
+                classification: FieldClassification::SelectorPosition,
+                description: "Up to 32 search terms as exact hex bytes.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "path_prefixes_hex",
+                field_type: "array",
+                classification: FieldClassification::SelectorPosition,
+                description: "Up to 128 slash-bounded hex path prefixes.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "symbol_name_hex",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional symbol channel name as hex.",
+                required: false,
+                max_bytes: Some(256),
+                pattern: None,
+            },
+            McpField {
+                name: "expected_head",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional snapshot token pin.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "minimum_lexical_token",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional lexical index floor checkpoint.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "max_results_per_channel",
+                field_type: "integer",
+                classification: FieldClassification::SelectorPosition,
+                description: "Per-channel result ceiling.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "context_max_files",
+                field_type: "integer",
+                classification: FieldClassification::SelectorPosition,
+                description: "At most 32 hydrated files.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "context_selection",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "raw-path-prefix or the ranked weighted-fusion profile.",
+                required: false,
+                max_bytes: Some(64),
+                pattern: None,
+            },
+        ],
+        output_fields: &[
+            McpField {
+                name: "snapshot_token",
+                field_type: "string",
+                classification: FieldClassification::SystemMetadata,
+                description: "Exact repository authority snapshot token.",
+                required: true,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "generation_vector",
+                field_type: "object",
+                classification: FieldClassification::SystemMetadata,
+                description: "Lexical and symbol index generations read.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "files",
+                field_type: "array",
+                classification: FieldClassification::UntrustedContent,
+                description: "Hydrated files with anchors and exact excerpt bytes.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        refusal_codes: &[
+            "invalid_initial_query",
+            "symbol_options_without_name",
+            "source_index_uninitialized",
+            "source_index_stale",
+            "source_snapshot_mismatch",
+            "index_generation_mismatch",
+            "invalid_retrieval_report",
+            "unsupported_context_selection",
+            "invalid_context_limits",
+        ],
+        cli_command: "fg search --context",
+        rest_api_path: "/api/v1/source/context-initial",
+    },
+    // 40. frankengit_source_initial
+    McpToolEntry {
+        name: "frankengit_source_initial",
+        version: 1,
+        entity_kind: McpEntityKind::Tool,
+        owner_subsystem: "search",
+        support_profile: SupportProfile::Active,
+        description: "Model-free Initial search over persisted lexical, path and symbol indexes in one snapshot and index generation vector.",
+        read_mutation: ReadMutationClass::ReadOnly,
+        capability: CapabilityRequirement::READ_DERIVED_GENERATION,
+        principal: PrincipalRequirement::None,
+        idempotency: IdempotencyRequirement::NotApplicable,
+        authority_root: InputAuthorityRootRequirement::ExactSnapshotToken,
+        budget: BudgetDimensions::READ_STANDARD,
+        pagination: PaginationRules::Unpaginated,
+        disclosure: DisclosureClass::UntrustedContentData,
+        receipt: EvidenceReceiptClass::None,
+        cancellation: CancellationBehavior::ImmediateQuiescent,
+        input_fields: &[
+            McpField {
+                name: "reference",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Full visible ref (e.g. refs/heads/main).",
+                required: true,
+                max_bytes: Some(4096),
+                pattern: None,
+            },
+            McpField {
+                name: "terms_hex",
+                field_type: "array",
+                classification: FieldClassification::SelectorPosition,
+                description: "Up to 32 search terms as exact hex bytes.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "path_prefixes_hex",
+                field_type: "array",
+                classification: FieldClassification::SelectorPosition,
+                description: "Up to 128 slash-bounded hex path prefixes.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "symbol_name_hex",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional symbol channel name as hex.",
+                required: false,
+                max_bytes: Some(256),
+                pattern: None,
+            },
+            McpField {
+                name: "expected_head",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional snapshot token pin.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "minimum_lexical_token",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional lexical index floor checkpoint.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "max_results_per_channel",
+                field_type: "integer",
+                classification: FieldClassification::SelectorPosition,
+                description: "Per-channel result ceiling.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        output_fields: &[
+            McpField {
+                name: "snapshot_token",
+                field_type: "string",
+                classification: FieldClassification::SystemMetadata,
+                description: "Exact repository authority snapshot token.",
+                required: true,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "generation_vector",
+                field_type: "object",
+                classification: FieldClassification::SystemMetadata,
+                description: "Lexical and symbol index generations read.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "content",
+                field_type: "object",
+                classification: FieldClassification::UntrustedContent,
+                description: "Content, path and symbol channel results.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        refusal_codes: &[
+            "invalid_initial_query",
+            "symbol_options_without_name",
+            "source_index_uninitialized",
+            "source_index_stale",
+            "source_snapshot_mismatch",
+            "index_generation_mismatch",
+            "invalid_retrieval_report",
+        ],
+        cli_command: "fg search --initial",
+        rest_api_path: "/api/v1/source/search-initial",
+    },
+    // 41. frankengit_source_log
     McpToolEntry {
         name: "frankengit_source_log",
         version: 1,
@@ -2966,7 +3234,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg log",
         rest_api_path: "GET /repos/{id}/commits",
     },
-    // 40. frankengit_source_publish
+    // 42. frankengit_source_publish
     McpToolEntry {
         name: "frankengit_source_publish",
         version: 1,
@@ -3049,7 +3317,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg workspace apply",
         rest_api_path: "POST /repos/{id}/commits",
     },
-    // 41. frankengit_source_search
+    // 43. frankengit_source_search
     McpToolEntry {
         name: "frankengit_source_search",
         version: 1,
@@ -3125,7 +3393,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search",
         rest_api_path: "GET /repos/{id}/search",
     },
-    // 42. frankengit_source_search_batch
+    // 44. frankengit_source_search_batch
     McpToolEntry {
         name: "frankengit_source_search_batch",
         version: 1,
@@ -3193,7 +3461,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search --batch",
         rest_api_path: "POST /repos/{id}/search/batch",
     },
-    // 43. frankengit_source_symbols
+    // 45. frankengit_source_symbols
     McpToolEntry {
         name: "frankengit_source_symbols",
         version: 1,
@@ -3300,7 +3568,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search --symbols",
         rest_api_path: "/api/v1/source/search-symbols",
     },
-    // 44. frankengit_source_tree
+    // 46. frankengit_source_tree
     McpToolEntry {
         name: "frankengit_source_tree",
         version: 1,
@@ -3389,7 +3657,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg tree",
         rest_api_path: "GET /repos/{id}/trees",
     },
-    // 45. frankengit_transaction_outcome
+    // 47. frankengit_transaction_outcome
     McpToolEntry {
         name: "frankengit_transaction_outcome",
         version: 1,
@@ -3468,7 +3736,7 @@ mod tests {
 
     #[test]
     fn exact_tool_count_and_ordering() {
-        assert_eq!(REGISTRY.len(), 45);
+        assert_eq!(REGISTRY.len(), 47);
         for pair in REGISTRY.windows(2) {
             assert!(
                 (pair[0].name, pair[0].version) < (pair[1].name, pair[1].version),

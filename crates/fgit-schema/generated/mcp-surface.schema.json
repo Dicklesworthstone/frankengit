@@ -1504,6 +1504,125 @@
       },
       "additionalProperties": false
     },
+    "frankengit_source_context": {
+      "title": "frankengit_source_context",
+      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full visible ref (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "terms_hex": {
+              "type": "array",
+              "description": "Up to 32 search terms as exact hex bytes.",
+              "x-classification": "selector_position"
+            },
+            "path_prefixes_hex": {
+              "type": "array",
+              "description": "Up to 128 slash-bounded hex path prefixes.",
+              "x-classification": "selector_position"
+            },
+            "symbol_name_hex": {
+              "type": "string",
+              "description": "Optional symbol channel name as hex.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "minimum_lexical_token": {
+              "type": "string",
+              "description": "Optional lexical index floor checkpoint.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "max_results_per_channel": {
+              "type": "integer",
+              "description": "Per-channel result ceiling.",
+              "x-classification": "selector_position"
+            },
+            "context_max_files": {
+              "type": "integer",
+              "description": "At most 32 hydrated files.",
+              "x-classification": "selector_position"
+            },
+            "context_selection": {
+              "type": "string",
+              "description": "raw-path-prefix or the ranked weighted-fusion profile.",
+              "x-classification": "selector_position",
+              "maxLength": 64
+            }
+          },
+          "required": ["reference", "terms_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_initial": {
+      "title": "frankengit_source_initial",
+      "description": "Model-free Initial search over persisted lexical, path and symbol indexes in one snapshot and index generation vector.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full visible ref (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "terms_hex": {
+              "type": "array",
+              "description": "Up to 32 search terms as exact hex bytes.",
+              "x-classification": "selector_position"
+            },
+            "path_prefixes_hex": {
+              "type": "array",
+              "description": "Up to 128 slash-bounded hex path prefixes.",
+              "x-classification": "selector_position"
+            },
+            "symbol_name_hex": {
+              "type": "string",
+              "description": "Optional symbol channel name as hex.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "minimum_lexical_token": {
+              "type": "string",
+              "description": "Optional lexical index floor checkpoint.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "max_results_per_channel": {
+              "type": "integer",
+              "description": "Per-channel result ceiling.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": ["reference", "terms_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_source_log": {
       "title": "frankengit_source_log",
       "description": "Read commit ancestry log from an authenticated repository snapshot.",

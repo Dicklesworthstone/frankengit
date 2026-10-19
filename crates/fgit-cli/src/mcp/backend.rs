@@ -15,6 +15,7 @@ mod pull_reviews;
 mod pull_writes;
 mod pulls;
 mod refs;
+mod retrieval;
 mod review;
 mod review_writes;
 mod search;
@@ -127,6 +128,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.extend(search::tools());
         tools.push(candidate::tool());
         tools.push(refs::tool());
+        tools.extend(retrieval::tools());
     }
     if options.writes.issues {
         tools.extend(issue_writes::tools());
@@ -257,6 +259,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.source && name == refs::NAME {
             return refs::call(self, args);
+        }
+        if self.options.source && matches!(name, retrieval::INITIAL | retrieval::CONTEXT) {
+            return retrieval::call(self, name, args);
         }
         if self.options.source && name == search::NAME {
             return search::call(self, args);
@@ -463,7 +468,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 42);
+        assert_eq!(server_names.len(), 44);
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert_eq!(validate_server_parity(&server_names, REGISTRY), Ok(()));
 

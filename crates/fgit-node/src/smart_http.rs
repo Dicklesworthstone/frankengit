@@ -8,6 +8,7 @@
 mod ingress;
 mod receive_session;
 mod server;
+pub use server::source_retrieval_json;
 mod verdict;
 
 use std::cell::Cell;

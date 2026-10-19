@@ -1,5 +1,6 @@
 //! Machine-readable, read-only source search for a trusted local operator.
 mod indexed;
+mod initial;
 mod regex;
 mod symbols;
 use super::publication_support::{quote, set_once};
@@ -35,9 +36,15 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments.first().is_some_and(|arg| arg == "--symbols") {
         return symbols::run(&arguments[1..]);
     }
+    if let Some(mode) = arguments
+        .first()
+        .filter(|arg| matches!(arg.as_str(), "--initial" | "--context"))
+    {
+        return initial::run(&arguments[1..], mode == "--context");
+    }
     if arguments == ["--help"] {
         println!(
-            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor Rust declarations: fg search --symbols --help\nFor byte regex: fg search --regex --help"
+            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor Rust declarations: fg search --symbols --help\nFor byte regex: fg search --regex --help\nFor joined retrieval or context packets: fg search --initial --help"
         );
         return Ok(0);
     }
