@@ -34,6 +34,25 @@ precondition, not an authentication credential or a self-contained cursor.
 Each invocation traverses the bounded DAG before slicing its page; pagination
 does not pretend to make an otherwise over-budget history complete.
 
+### History of one exact path
+
+```bash
+fg log "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --path src/lib.rs
+```
+
+`--path` (raw bytes) or `--path-hex` selects `scope: "exact_path_changes"`:
+only the commits whose `(mode, native object ID)` entry at that exact path
+differs from at least one stored parent, plus a root that contains it. This is
+unsimplified history over the same bounded DAG and order: merges keep their
+real parents, and there is no rename, copy or first-parent inference.
+Directories compare subtree IDs; symlinks and gitlinks are opaque leaves. A
+never-present path returns a complete, empty page (`total_commits: 0`), not an
+error. `path_hex` echoes the filter and is null for the unfiltered log. The
+same native reader serves HTTP `source/log?path_hex=…` and MCP
+`frankengit_source_log` with `path_hex`. `scripts/e2e/source_history_smoke.py`
+exercises unchanged, changed and absent paths through the binary.
+
 ## Line attribution through merges
 
 ```bash

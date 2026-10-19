@@ -2848,6 +2848,15 @@ pub static REGISTRY: &[McpToolEntry] = &[
                 pattern: None,
             },
             McpField {
+                name: "path_hex",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Optional exact path: only commits whose entry there differs from a parent.",
+                required: false,
+                max_bytes: Some(8192),
+                pattern: Some("^(?:[0-9a-f]{2})+$"),
+            },
+            McpField {
                 name: "expected_head",
                 field_type: "string",
                 classification: FieldClassification::SelectorPosition,

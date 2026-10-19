@@ -86,9 +86,12 @@ pub(super) fn log(
     report: &HistoryPage,
 ) -> Result<Object, ToolError> {
     oid(format, report.tip)?;
+    // A path filter may match nothing (a never-present path) and need not
+    // start at the tip; the unfiltered DAG always contains and starts at it.
+    let filtered = query.log_path.is_some();
     if query.path.is_some()
         || report.after != query.after
-        || report.total_commits == 0
+        || (report.total_commits == 0 && !filtered)
         || report.total_commits > query.limits.max_commits
         || report.after > report.total_commits
     {
@@ -101,7 +104,9 @@ pub(super) fn log(
         .min(report.total_commits);
     if report.commits.len() != end - query.after
         || report.next_after != (end < report.total_commits).then_some(end)
-        || (query.after == 0 && report.commits.first().map(|row| row.id) != Some(report.tip))
+        || (!filtered
+            && query.after == 0
+            && report.commits.first().map(|row| row.id) != Some(report.tip))
     {
         return Err(invalid());
     }
@@ -123,6 +128,13 @@ pub(super) fn log(
     }
     let mut result = common("source_history_page", &query.reference, report.tip);
     result.insert("order".into(), text("child-before-parent-native-id-ties"));
+    result.insert(
+        "path_hex".into(),
+        query
+            .log_path
+            .as_ref()
+            .map_or(Value::Null, |path| text(hex(path))),
+    );
     result.insert("after".into(), text(report.after.to_string()));
     result.insert("limit".into(), text(query.limit.to_string()));
     result.insert(

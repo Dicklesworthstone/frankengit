@@ -701,3 +701,146 @@ fn listed_tips_are_the_exact_expectations_branch_writes_need_in_both_hash_domain
         );
     }
 }
+
+/// Publish one candidate built from an arbitrary patch on `branch`.
+fn publish_patch(
+    server: &mut Server,
+    backend: &mut NodeTools,
+    id: u64,
+    branch: &str,
+    base: GitOid,
+    patch: &[u8],
+    time: u64,
+) -> GitOid {
+    let request = backend.node.request_context();
+    let candidate = backend
+        .node
+        .runtime()
+        .block_on(backend.node.prepare_trusted_patch_in(
+            &request,
+            &reference(branch),
+            base,
+            [0x65; 16],
+            patch,
+            &metadata(time),
+            Default::default(),
+        ))
+        .unwrap();
+    let tip = candidate.candidate_commit;
+    committed(&invoke(
+        server,
+        backend,
+        id,
+        PUBLISH,
+        publishing(
+            branch,
+            &format!("publish-{id}"),
+            base,
+            tip,
+            candidate.bundle_bytes(),
+        ),
+    ));
+    tip
+}
+
+#[test]
+fn path_filtered_log_matches_the_native_path_history_in_both_hash_domains() {
+    use super::super::history::LOG;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format);
+        let mut backend = NodeTools::open(f.options.clone()).unwrap();
+        let mut server = start(&mut backend);
+        // main: A (adds file) -> B (adds other) -> C (changes file).
+        let b = publish_patch(
+            &mut server,
+            &mut backend,
+            2,
+            "refs/heads/main",
+            f.commit,
+            b"diff --git a/other b/other\nnew file mode 100644\n--- /dev/null\n+++ b/other\n@@ -0,0 +1 @@\n+other\n",
+            2,
+        );
+        let c = publish_patch(
+            &mut server,
+            &mut backend,
+            3,
+            "refs/heads/main",
+            b,
+            b"diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-before\n+after\n",
+            3,
+        );
+        let ids = |value: &Value| -> Vec<String> {
+            assert_eq!(
+                value.object().unwrap()["result"].object().unwrap()["isError"],
+                Value::Bool(false),
+                "{value:?}"
+            );
+            let Value::Array(rows) = &result(value)["commits"] else {
+                panic!("commits")
+            };
+            rows.iter()
+                .map(|row| row.object().unwrap()["id"].text().unwrap().to_owned())
+                .collect()
+        };
+        let log = |path: Option<&[u8]>| {
+            let Value::Object(mut args) = object([
+                ("reference", text("refs/heads/main")),
+                ("limit", json::number(20)),
+            ]) else {
+                unreachable!()
+            };
+            if let Some(path) = path {
+                args.insert("path_hex".into(), text(hex(path)));
+            }
+            Value::Object(args)
+        };
+        let all = invoke(&mut server, &mut backend, 4, LOG, log(None));
+        assert_eq!(
+            ids(&all),
+            vec![c.to_string(), b.to_string(), f.commit.to_string()]
+        );
+        assert_eq!(result(&all)["path_hex"], Value::Null);
+        let file = invoke(&mut server, &mut backend, 5, LOG, log(Some(b"file")));
+        assert_eq!(ids(&file), vec![c.to_string(), f.commit.to_string()]);
+        assert_eq!(
+            result(&file)["path_hex"].text(),
+            Some(hex(b"file").as_str())
+        );
+        let other = invoke(&mut server, &mut backend, 6, LOG, log(Some(b"other")));
+        assert_eq!(ids(&other), vec![b.to_string()]);
+        let never = invoke(&mut server, &mut backend, 7, LOG, log(Some(b"absent")));
+        assert!(ids(&never).is_empty());
+        assert_eq!(result(&never)["complete"], Value::Bool(true));
+        // The same native reader serves HTTP source/log?path_hex: equal pages.
+        let request = backend.node.request_context();
+        let (_, native) = backend
+            .node
+            .runtime()
+            .block_on(backend.node.read_path_history_in(
+                &request,
+                &reference("refs/heads/main"),
+                &Default::default(),
+                None,
+                &fgit_forge::history::path::PathLogOptions {
+                    path: b"file".to_vec(),
+                    log: fgit_forge::history::LogOptions {
+                        after: 0,
+                        limit: 20,
+                        limits: fgit_forge::history::HistoryLimits {
+                            max_metadata_bytes: 128 * 1024,
+                            ..Default::default()
+                        },
+                    },
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            native
+                .commits
+                .iter()
+                .map(|row| row.id.to_string())
+                .collect::<Vec<_>>(),
+            ids(&file)
+        );
+    }
+}

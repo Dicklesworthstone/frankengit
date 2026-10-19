@@ -1489,6 +1489,13 @@
               "x-classification": "selector_position",
               "maxLength": 64
             },
+            "path_hex": {
+              "type": "string",
+              "description": "Optional exact path: only commits whose entry there differs from a parent.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
             "expected_head": {
               "type": "string",
               "description": "Optional snapshot token pin.",

@@ -186,6 +186,21 @@ def run(binary, algorithm):
         token = first["snapshot_token"]
         tail = json.loads(invoke(binary, ["log", *base, "--after", "2", "--limit", "2", "--expected-head", token]).stdout)
         check_log(tail, f, after=2, limit=2)
+        # Exact-path change history: only commits whose entry differs from a
+        # parent. "binary" never changes after the root; "file" changes in every
+        # commit, including the merge; a never-present path is complete and empty.
+        unchanged = json.loads(invoke(binary, ["log", *base, "--path", "binary"]).stdout)
+        check_header(unchanged, f)
+        require(unchanged["scope"] == "exact_path_changes" and unchanged["path_hex"] == b"binary".hex(),
+                "path log scope")
+        require(unchanged["total_commits"] == 1 and [row["commit"] for row in unchanged["commits"]] == [f["order"][-1]],
+                "an unchanged path lists only the root that introduced it")
+        changed = json.loads(invoke(binary, ["log", *base, "--path-hex", b"file".hex()]).stdout)
+        require([row["commit"] for row in changed["commits"]] == f["order"], "every commit changed file")
+        absent = json.loads(invoke(binary, ["log", *base, "--path", "absent"]).stdout)
+        require(absent["total_commits"] == 0 and absent["commits"] == [] and absent["complete"] is True,
+                "a never-present path is a complete empty answer")
+        require(json.loads(invoke(binary, ["log", *base]).stdout)["path_hex"] is None, "unfiltered log has no path")
         for start, end, path in [(0, 5, b"file"), (1, 4, b"file"), (0, 5, b"\xff"), (5, 5, b"file")]:
             args = ["blame", *base, "--path-hex", path.hex(), "--line-start", str(start), "--line-end", str(end), "--expected-head", token]
             response = invoke(binary, args)
@@ -196,7 +211,8 @@ def run(binary, algorithm):
                      ["blame", *base, "--path", "link"], ["blame", *base, "--path", "binary"],
                      ["blame", *base, "--path", "file", "--line-end", "6"],
                      ["blame", *base, "--path", "file", "--max-blob-bytes", "1"],
-                     ["blame", *base, "--path", "../file"]]:
+                     ["blame", *base, "--path", "../file"], ["log", *base, "--path", "../file"],
+                     ["log", *base, "--path", "file", "--path-hex", b"file".hex()]]:
             require(not invoke(binary, args, 2).stdout, "failed query returned successful data")
         require(invoke(binary, state).stdout == before, "read commands moved authority")
         print(json.dumps({"type": "source_history_smoke", "format": algorithm, "passed": True, "rust_executed": True}))

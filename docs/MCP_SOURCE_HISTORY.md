@@ -29,6 +29,14 @@ A missing ancestor, corrupt object or traversal limit is an error, not a short
 successful page. Exactly-at-end requests produce an empty completed page;
 beyond-end offsets refuse. A new publication invalidates the strict head pin.
 
+With `path_hex` (exact repository path bytes), the page lists only the commits
+whose entry at that path differs from at least one stored parent, plus a root
+containing it, over the same graph and order. It is unsimplified (real merge
+parents, no rename inference) and reports `path_hex`; a never-present path is a
+complete empty page. It is served by the same node reader as `fg log --path`
+and HTTP `source/log?path_hex`, and the adapter accepts a filtered page that
+starts below the tip only when a path was requested.
+
 ## Exact line ancestry
 
 Call `frankengit_source_blame` with:

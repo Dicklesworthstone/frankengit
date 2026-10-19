@@ -5,6 +5,7 @@ mod output;
 mod tests;
 
 use super::*;
+use fgit_forge::history::path::PathLogOptions;
 use fgit_forge::history::{BlameOptions, HistoryError, HistoryLimits, LogOptions};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 
@@ -20,7 +21,7 @@ pub(super) fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: LOG,
-            description: "Page the complete bounded commit DAG of a visible ref in child-before-parent order. Exact commit bytes and parent order; continuation requires the same snapshot. Author headers are not authentication.",
+            description: "Page the complete bounded commit DAG of a visible ref in child-before-parent order, or with path_hex only the commits whose exact path entry differs from a parent (unsimplified; no rename inference). Exact commit bytes and parent order; continuation requires the same snapshot. Author headers are not authentication.",
             schema: input_schema(false),
         },
         Tool {
@@ -37,7 +38,10 @@ struct Query {
     limits: HistoryLimits,
     after: usize,
     limit: usize,
+    /// Blame's file; its presence selects blame.
     path: Option<Vec<u8>>,
+    /// Log's optional exact-path filter.
+    log_path: Option<Vec<u8>>,
 }
 fn bound(args: &Object, field: &str, default: usize, max: usize) -> Result<usize, ToolError> {
     let value = args
@@ -80,6 +84,7 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
                 "expected_head",
                 "expected_commit",
                 "max_commits",
+                "path_hex",
             ]
         },
     )?;
@@ -144,14 +149,29 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
         (Some(path), bound(args, "limit", 100, MAX_BLAME_LINES)?)
     } else {
         let limit = bound(args, "limit", 5, MAX_LOG_PAGE)?;
-        LogOptions {
+        let log = LogOptions {
             after,
             limit,
             limits,
+        };
+        log.validate()
+            .map_err(|_| ToolError::invalid("invalid_log_options"))?;
+        if let Some(value) = string(args, "path_hex")? {
+            PathLogOptions {
+                path: unhex(value, 4096)?,
+                log,
+            }
+            .validate()
+            .map_err(|_| ToolError::invalid("invalid_history_path"))?;
         }
-        .validate()
-        .map_err(|_| ToolError::invalid("invalid_log_options"))?;
         (None, limit)
+    };
+    let log_path = if blame {
+        None
+    } else {
+        string(args, "path_hex")?
+            .map(|value| unhex(value, 4096))
+            .transpose()?
     };
     limits
         .validate()
@@ -164,6 +184,7 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
         after,
         limit,
         path,
+        log_path,
     })
 }
 
@@ -267,13 +288,37 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         let (head, report) = backend
             .node
             .runtime()
-            .block_on(backend.node.read_commit_history_in(
-                &request,
-                &query.reference,
-                &Default::default(),
-                query.expected_head,
-                options,
-            ))
+            .block_on(async {
+                match &query.log_path {
+                    Some(path) => {
+                        backend
+                            .node
+                            .read_path_history_in(
+                                &request,
+                                &query.reference,
+                                &Default::default(),
+                                query.expected_head,
+                                &PathLogOptions {
+                                    path: path.clone(),
+                                    log: options,
+                                },
+                            )
+                            .await
+                    }
+                    None => {
+                        backend
+                            .node
+                            .read_commit_history_in(
+                                &request,
+                                &query.reference,
+                                &Default::default(),
+                                query.expected_head,
+                                options,
+                            )
+                            .await
+                    }
+                }
+            })
             .map_err(|error| {
                 if error.is_snapshot_moved() {
                     ToolError::failed("snapshot_moved")
@@ -360,8 +405,8 @@ fn input_schema(blame: bool) -> Value {
         integer_schema(if blame { 100 } else { 5 }, if blame { 200 } else { 20 }),
     );
     properties.insert("max_commits".into(), integer_schema(4096, 4096));
+    properties.insert("path_hex".into(), bytes);
     if blame {
-        properties.insert("path_hex".into(), bytes);
         properties.insert(
             "max_blob_bytes".into(),
             integer_schema(1_048_576, 1_048_576),

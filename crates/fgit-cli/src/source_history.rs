@@ -1,6 +1,7 @@
 //! Native log/blame commands. Input is bounded before repository opening;
 //! complete, snapshot-bound results are rendered only after explicit shutdown.
 use super::publication_support::quote;
+use fgit_forge::history::path::PathLogOptions;
 use fgit_forge::history::{
     BlameOptions, BlameResult, HistoryCommit, HistoryLimits, HistoryPage, LogOptions,
 };
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "\
 usage: fg log <storage-root> <tenant-id> <repository-id> <ref> --trusted-local
+  [--path <raw-path> | --path-hex <hex>]
   [--limit <1..100>] [--after <offset> --expected-head <snapshot-token>]
 usage: fg blame <storage-root> <tenant-id> <repository-id> <ref> --trusted-local
   (--path <raw-path> | --path-hex <hex>) [--line-start <n>] [--line-end <n>]
@@ -24,7 +26,9 @@ Both: [--object-format sha1|sha256] [--ref-hex] [--expected-head <snapshot-token
 Blame: [--max-blob-bytes <1..1048576>] [--max-lines <1..20000>]
   [--max-comparisons <1..128>] [--max-diff-work <1..1000000>]
 
-Log is child-before-parent, with native-ID ties, NOT timestamp order.
+Log is child-before-parent, with native-ID ties, NOT timestamp order. With a
+path it lists only commits whose exact path entry differs from a parent (or a
+root containing it): unsimplified, all parents kept, no rename inference.
 Blame traces exact same-path lines through ALL parents; the first stored parent
 with a matching line wins. No rename/copy guessing or whitespace normalization.
 Line intervals are zero-based and half-open. Raw bytes and commit bodies remain
@@ -46,6 +50,7 @@ struct Options {
 #[derive(Debug)]
 enum Query {
     Log(LogOptions),
+    PathLog(PathLogOptions),
     Blame(BlameOptions),
 }
 enum Answer {
@@ -76,6 +81,17 @@ pub fn run(arguments: &[String], is_blame: bool) -> Result<(), String> {
                     &Default::default(),
                     options.head,
                     *query,
+                ))
+                .map(|(head, result)| (head, Answer::Log(result)))
+                .map_err(|e| e.to_string()),
+            Query::PathLog(query) => node
+                .runtime()
+                .block_on(node.read_path_history_in(
+                    &request,
+                    &options.reference,
+                    &Default::default(),
+                    options.head,
+                    query,
                 ))
                 .map(|(head, result)| (head, Answer::Log(result)))
                 .map_err(|e| e.to_string()),
@@ -151,7 +167,7 @@ fn parse(args: &[String], is_blame: bool) -> Result<Options, String> {
                         | "--max-diff-work"
                 )
             } else {
-                matches!(flag, "--after" | "--limit")
+                matches!(flag, "--after" | "--limit" | "--path" | "--path-hex")
             };
         if !allowed {
             return Err(format!("unknown or inapplicable history option {flag:?}"));
@@ -223,7 +239,20 @@ fn parse(args: &[String], is_blame: bool) -> Result<Options, String> {
                 "log continuation requires the original --expected-head snapshot_token".into(),
             );
         }
-        Query::Log(query)
+        match (flags.get("--path"), flags.get("--path-hex")) {
+            (None, None) => Query::Log(query),
+            (Some(_), Some(_)) => return Err("supply at most one of --path or --path-hex".into()),
+            (path, path_hex) => {
+                let path = match (path, path_hex) {
+                    (Some(path), _) => path.as_bytes().to_vec(),
+                    (_, Some(path)) => unhex(path, 4096)?,
+                    _ => unreachable!(),
+                };
+                let query = PathLogOptions { path, log: query };
+                query.validate().map_err(|e| e.to_string())?;
+                Query::PathLog(query)
+            }
+        }
     };
     Ok(Options {
         storage: args[0].clone().into(),
@@ -377,8 +406,10 @@ fn render_log(
     head: RepositoryAuthorityHeadId,
     page: &HistoryPage,
 ) -> Result<String, String> {
-    let Query::Log(query) = &options.query else {
-        return Err("history operation mismatch".into());
+    let (query, path) = match &options.query {
+        Query::Log(query) => (query, None),
+        Query::PathLog(query) => (&query.log, Some(query.path.as_slice())),
+        Query::Blame(_) => return Err("history operation mismatch".into()),
     };
     let end = page
         .after
@@ -392,7 +423,10 @@ fn render_log(
                 .limit
                 .min(page.total_commits.saturating_sub(page.after))
         || page.next_after != (end < page.total_commits).then_some(end)
-        || (page.after == 0
+        // Unfiltered history always starts at the tip; a path filter may match
+        // nothing at all, or first match below it.
+        || (path.is_none()
+            && page.after == 0
             && page
                 .commits
                 .first()
@@ -403,7 +437,13 @@ fn render_log(
     let header = header(options, head, page.tip)?;
     let entries = records(options, &page.commits)?;
     let mut out = format!(
-        "{{\"type\":\"commit_history\",\"profile\":\"topo-oid-v1\",\"scope\":\"reachable_commit_dag\",{header},\"total_commits\":{},\"after\":{},\"limit\":{},\"next_after\":{},\"commits\":",
+        "{{\"type\":\"commit_history\",\"profile\":\"topo-oid-v1\",\"scope\":{},\"path_hex\":{},{header},\"total_commits\":{},\"after\":{},\"limit\":{},\"next_after\":{},\"commits\":",
+        if path.is_some() {
+            "\"exact_path_changes\""
+        } else {
+            "\"reachable_commit_dag\""
+        },
+        path.map_or_else(|| "null".into(), |path| quote(&hex(path))),
         page.total_commits,
         page.after,
         query.limit,
@@ -569,16 +609,21 @@ mod tests {
     }
     #[test]
     fn malformed_or_inapplicable_options_refuse_instead_of_changing_the_query() {
+        // `--path` filters log since the exact-path history slice; a bad or
+        // doubled path still refuses, as do blame-only options.
         for extra in [
             vec!["--limit", "0"],
             vec!["--max-commits", "4097"],
-            vec!["--path", "file"],
+            vec!["--path", "../file"],
+            vec!["--path", "file", "--path-hex", "66"],
+            vec!["--path-hex", "6"],
+            vec!["--path", "file", "--line-start", "1"],
             vec!["--trusted-local"],
             vec!["--after", "01"],
         ] {
             let mut input = args();
             input.extend(extra.into_iter().map(str::to_owned));
-            assert!(parse(&input, false).is_err());
+            assert!(parse(&input, false).is_err(), "{input:?}");
         }
         for extra in [
             vec!["--path", "../file"],
@@ -595,6 +640,52 @@ mod tests {
         assert!(parse(&no_trust, false).is_err());
         assert_eq!(text(b"\xff"), "null");
         assert_eq!(text(b"\x1b[2J"), "\"\\u001b[2J\"");
+    }
+    #[test]
+    fn log_path_filters_parse_and_render_their_own_scope() {
+        let mut input = args();
+        input.extend(["--path-hex".into(), "6469722fff".into()]);
+        let options = parse(&input, false).unwrap();
+        let Query::PathLog(query) = &options.query else {
+            panic!("path log");
+        };
+        assert_eq!(query.path, b"dir/\xff");
+        let head = parse_head(&format!("alg:1:{}", "ab".repeat(32))).unwrap();
+        let tip = GitOid::from_hex(GitHashAlgorithm::Sha1, &"11".repeat(20)).unwrap();
+        let root = GitOid::from_hex(GitHashAlgorithm::Sha1, &"33".repeat(20)).unwrap();
+        let tree = GitOid::from_hex(GitHashAlgorithm::Sha1, &"22".repeat(20)).unwrap();
+        // Only a root below the tip changed the path.
+        let page = HistoryPage {
+            tip,
+            total_commits: 1,
+            after: 0,
+            next_after: None,
+            commits: vec![HistoryCommit {
+                id: root,
+                tree,
+                parents: Vec::new(),
+                body: b"root".to_vec(),
+            }],
+        };
+        let json = render_log(&options, head, &page).unwrap();
+        assert!(json.contains("\"scope\":\"exact_path_changes\""), "{json}");
+        assert!(json.contains("\"path_hex\":\"6469722fff\""), "{json}");
+        let none = HistoryPage {
+            total_commits: 0,
+            commits: Vec::new(),
+            ..page.clone()
+        };
+        assert!(render_log(&options, head, &none).is_ok());
+        // Refusal twins: the same pages are corrupt for an unfiltered log.
+        let unfiltered = parse(&args(), false).unwrap();
+        assert!(render_log(&unfiltered, head, &page).is_err());
+        assert!(render_log(&unfiltered, head, &none).is_err());
+        let mut raw = args();
+        raw.extend(["--path".into(), "dir/file".into()]);
+        let Query::PathLog(query) = parse(&raw, false).unwrap().query else {
+            panic!("path log");
+        };
+        assert_eq!(query.path, b"dir/file");
     }
     #[test]
     fn report_output_errors_never_return_success() {

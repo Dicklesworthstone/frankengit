@@ -308,3 +308,78 @@ fn misbound_blame_spans_missing_origins_and_oversized_content_refuse() {
     bad.origins[0].body.push(1);
     assert!(output::blame(format, &query, &bad).is_err());
 }
+
+#[test]
+fn path_filtered_log_validates_its_path_and_keeps_blame_semantics_apart() {
+    let format = GitHashAlgorithm::Sha1;
+    let mut filtered = args(false);
+    filtered.insert("path_hex".into(), text(hex(b"src/lib.rs")));
+    let query = parse(&filtered, false, format).unwrap();
+    assert_eq!(query.log_path.as_deref(), Some(b"src/lib.rs".as_slice()));
+    assert!(query.path.is_none(), "a log path must not select blame");
+    assert!(
+        parse(&args(false), false, format)
+            .unwrap()
+            .log_path
+            .is_none()
+    );
+    assert!(parse(&args(true), true, format).unwrap().log_path.is_none());
+    for path in [
+        b"".as_slice(),
+        b"../secret",
+        b"/etc/passwd",
+        b"a//b",
+        b"a\0b",
+    ] {
+        let mut bad = args(false);
+        bad.insert("path_hex".into(), text(hex(path)));
+        assert!(parse(&bad, false, format).is_err(), "{path:?}");
+    }
+    let mut odd = args(false);
+    odd.insert("path_hex".into(), text("abc"));
+    assert!(parse(&odd, false, format).is_err());
+}
+
+#[test]
+fn path_filtered_pages_may_be_empty_or_start_below_the_tip_but_unfiltered_ones_may_not() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut filtered = args(false);
+        filtered.insert("path_hex".into(), text(hex(b"file")));
+        let query = parse(&filtered, false, format).unwrap();
+        let full = log_report(format);
+        // Only the root changed the path: the page starts below the tip.
+        let below = HistoryPage {
+            total_commits: 1,
+            commits: vec![full.commits[1].clone()],
+            ..full.clone()
+        };
+        let result = output::log(format, &query, &below).unwrap();
+        assert_eq!(result["path_hex"].text(), Some(hex(b"file").as_str()));
+        assert_eq!(result["total_commits"].text(), Some("1"));
+        assert_eq!(result["complete"], Value::Bool(true));
+        // A never-present path is a complete empty answer at the tip.
+        let none = HistoryPage {
+            total_commits: 0,
+            commits: vec![],
+            ..full.clone()
+        };
+        let empty = output::log(format, &query, &none).unwrap();
+        assert_eq!(empty["total_commits"].text(), Some("0"));
+        assert_eq!(empty["complete"], Value::Bool(true));
+        // Refusal twins: the same pages without a path filter are corrupt.
+        let unfiltered = parse(&args(false), false, format).unwrap();
+        assert!(output::log(format, &unfiltered, &below).is_err());
+        assert!(output::log(format, &unfiltered, &none).is_err());
+        assert_eq!(
+            output::log(format, &unfiltered, &full).unwrap()["path_hex"],
+            Value::Null
+        );
+        // A filtered page still refuses a wrong count or cursor.
+        let short = HistoryPage {
+            total_commits: 2,
+            commits: vec![full.commits[1].clone()],
+            ..full
+        };
+        assert!(output::log(format, &query, &short).is_err());
+    }
+}
