@@ -181,11 +181,15 @@ test('a real killed witness owner leaves a blocking lease, never an automaticall
   const retained = JSON.parse(await f.state()); assert.equal(retained.type, 'repository_backup_witness_v1');
 });
 
-test('an unawaited observation is quiesced before the cross-process lease is released', async t => {
+// c69db34c: an owned observation drains into durable state before the lease is
+// released (docs/RECOVERY_WITNESS_PERSISTENCE_FAILURES.md); new work is refused.
+test('an unawaited observation is drained before the cross-process lease is released', async t => {
   const f = await fixture(t); await f.create(); const row = await f.candidate('row', '2'), encoded = await readFile(row.approval);
-  let pending;
-  await assert.rejects(f.withWitness(w => { pending = w.observe(encoded); pending.catch(() => {}); return { state: 'complete' }; }), code('backup_witness_not_live'));
-  await assert.rejects(pending, code('backup_witness_not_live'));
-  assert.equal((await f.withWitness(w => w.snapshot())).highest_observed_generation, null);
+  let pending, witness;
+  const result = await f.withWitness(w => { witness = w; pending = w.observe(encoded); pending.catch(() => {}); return { state: 'complete' }; });
+  assert.deepEqual(result, { state: 'complete' });
+  assert.equal((await pending).highest_observed_generation, '2');
+  await assert.rejects(witness.observe(encoded), code('backup_witness_not_live'));
+  assert.equal((await f.withWitness(w => w.snapshot())).highest_observed_generation, '2');
   await f.select([row]);
 });
