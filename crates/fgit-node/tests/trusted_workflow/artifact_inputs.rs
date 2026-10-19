@@ -153,7 +153,7 @@ fn changed_stored_payload_or_provenance_refuses_before_consumers_first_script() 
                 .replace("FIELD", field)
                 .replace("TAMPER", if poison { "printf poisoned >\"$file\"" } else { "test -s \"$file\"" });
             let workflow = format!(
-                "name: verify inputs\non: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf immutable > out.bin\n  b:\n    runs-on: fgit-trusted-local\n    needs: a\n    steps:\n      - run: {inspect}\n  c:\n    runs-on: fgit-trusted-local\n    needs: [a, b]\n    steps:\n      - run: test \"$(cat .fgit-artifacts/input)\" = immutable; printf consumed\n"
+                "name: verify inputs\non: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf immutable > out.bin\n  b:\n    runs-on: fgit-trusted-local\n    needs: a\n    steps:\n      - run: {inspect}\n  c:\n    runs-on: fgit-trusted-local\n    needs:\n      - a\n      - b\n    steps:\n      - run: test \"$(cat .fgit-artifacts/input)\" = immutable; printf consumed\n"
             );
             let f = Fixture::new(GitHashAlgorithm::Sha256, &workflow);
             let contract = config(&f, b"out.bin", 1024, 4096)
