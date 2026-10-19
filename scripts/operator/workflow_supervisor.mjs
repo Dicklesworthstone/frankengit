@@ -83,11 +83,12 @@ export function createController(backend) {
       return Object.freeze({ name: lane.name, publisher: backend.configuration(lane.publisher) });
     }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     if (new Set(lanes.map(lane => lane.name)).size !== lanes.length) fail('Duplicate supervisor lane name.');
-    const custody = [value.state_directory], stores = [], binaries = [], selections = new Set();
+    const custody = [value.state_directory], stores = [], artifactRoots = [], binaries = [], selections = new Set();
     for (const { publisher } of lanes) {
       const watch = publisher.watch;
       custody.push(watch.state_directory, watch.run_parent, publisher.state_directory);
       stores.push(watch.storage_root); binaries.push(watch.fg);
+      if (watch.artifacts) artifactRoots.push(absolute(watch.artifacts.root));
       const selection = JSON.stringify([watch.storage_root, watch.tenant_id, watch.repository_id, watch.ref_hex]);
       if (selections.has(selection)) fail('A selected branch must have exactly one execution lane.');
       selections.add(selection);
@@ -95,10 +96,18 @@ export function createController(backend) {
     for (let i = 0; i < custody.length; i++) {
       absolute(custody[i]);
       if (custody.slice(i + 1).some(path => overlap(custody[i], path)) ||
-          [...stores, ...binaries].some(path => overlap(custody[i], path))) fail('All supervisor, watcher, run and publisher custody must be disjoint from each other, stores and executables.');
+          [...stores, ...artifactRoots, ...binaries].some(path => overlap(custody[i], path))) fail('All supervisor, watcher, run and publisher custody must be disjoint from each other, stores and executables.');
     }
     for (let i = 0; i < stores.length; i++) {
       if (stores.slice(i + 1).some(path => path !== stores[i] && overlap(path, stores[i]))) fail('Overlapping native stores are not independent.');
+    }
+    for (let i = 0; i < artifactRoots.length; i++) {
+      // Equal roots share the native store's tenant/repository/trust-scoped
+      // immutable namespace. Partial overlap with another root is ambiguous.
+      if ([...stores, ...binaries].some(path => overlap(artifactRoots[i], path)) ||
+          artifactRoots.slice(i + 1).some(path => path !== artifactRoots[i] && overlap(path, artifactRoots[i]))) {
+        fail('Artifact roots must be equal or disjoint, and separate from native stores and executables.');
+      }
     }
     const config = { schema: value.schema, state_directory: value.state_directory, lanes: Object.freeze(lanes) };
     if (encode(config).length > MAX_BYTES) fail('Supervisor configuration exceeds its byte budget.');

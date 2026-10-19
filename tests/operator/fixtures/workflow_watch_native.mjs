@@ -37,6 +37,26 @@ if (!dispatch) {
   const runId = hash(Buffer.concat([Buffer.from('frankengit/workflow-dispatch-child/v1\0'), Buffer.from(batchId, 'hex'), frame(Buffer.from(event)), frame(Buffer.from(path, 'hex'))])).slice(0, 32);
   const oid = char => `${control.format}:${char.repeat(control.format === 'sha1' ? 40 : 64)}`;
   const prefixes = args.flatMap((value, index) => value === '--input-hex' ? [args[index + 1]] : []);
+  // Fixture-only reconstruction of the native JSON contract from actual argv.
+  // No artifact is stored, copied or executed by this schema peer.
+  let artifactContract;
+  if (args.includes('--artifact-root')) {
+    const values = flag => args.flatMap((value, index) => value === flag ? [args[index + 1]] : []);
+    artifactContract = { schema_version: 1, root_hex: hex(get('--artifact-root')), trust_domain: 'trusted-workflow-local-owner',
+      maximum_file_bytes: Number(get('--max-artifact-mib')) * 1048576,
+      total_payload_bytes: Number(get('--max-artifact-total-mib')) * 1048576, retention_ttl_seconds: 86400,
+      selections: values('--artifact-hex').map(value => {
+        const [workflow_path_hex, job, output_path_hex] = value.split(':');
+        return { workflow_path_hex, job_id_hex: hex(job), output_path_hex };
+      }) };
+    const inputs = values('--artifact-input-hex');
+    if (inputs.length) artifactContract.input_delivery = { schema_version: 1, namespace_hex: hex('.fgit-artifacts'),
+      total_delivery_bytes: Number(get('--max-artifact-input-total-mib')) * 1048576,
+      selections: inputs.map(value => {
+        const [workflow_path_hex, consumer, producer, output_path_hex, destination_hex] = value.split(':');
+        return { workflow_path_hex, consumer_job_id_hex: hex(consumer), producer_job_id_hex: hex(producer), output_path_hex, destination_hex };
+      }) };
+  }
   const selected = !control.no_match;
   const definition = { path_hex: path, blob: oid('b'), graph_sha256: 'c'.repeat(64), run_id: runId, selected };
   const plan = { type: 'trusted_workflow_dispatch_plan', schema_version: 1, tenant_id: control.tenant, repository_id: control.repository,
@@ -44,7 +64,8 @@ if (!dispatch) {
     source_commit: `${control.format}:${control.commit}`, source_tree: oid('d'), object_format: control.format,
     source_ref_hex: control.ref_hex, workflow_directory_hex: get('--workflow-hex'), read_prefixes_hex: prefixes, event,
     trigger_provenance: 'explicit_local_operator', run_id: batchId, run_directory_hex: hex(batch), authoritative_check: false,
-    hostile_code_isolated: false, published: false, execution_retried: false, run_timeout_ms: 600000, total_output_bytes: 16777216, workflows: [definition] };
+    hostile_code_isolated: false, published: false, execution_retried: false, run_timeout_ms: 600000, total_output_bytes: 16777216,
+    ...(artifactContract ? { artifact_contract: artifactContract } : {}), workflows: [definition] };
   await json(join(batch, 'dispatch.json'), plan);
   await appendFile(join(storage, 'effects.ndjson'), `${JSON.stringify({ run: batchId, commit: control.commit })}\n`, { mode: 0o600 });
   if (control.dispatch_delay) await sleep(control.dispatch_delay);
@@ -55,7 +76,9 @@ if (!dispatch) {
     workflow_path_hex: path, read_prefixes_hex: prefixes, run_id: runId, run_directory_hex: hex(join(batch, `workflow-${runId}`)),
     authoritative_check: false, hostile_code_isolated: false, published: false, input_kind: 'canonical', executed_commit: plan.source_commit,
     executed_tree: plan.source_tree, candidate: null, merge: null, succeeded: !control.job_failure, workspaces_closed: true,
-    request_interrupted: false, execution: { schema_version: 1, profile: 'trusted-local-foreground-v1', authoritative_check: false,
+    request_interrupted: false, ...(artifactContract ? { artifact_contract: artifactContract, artifacts: [],
+      ...(artifactContract.input_delivery ? { artifact_inputs: [] } : {}) } : {}),
+    execution: { schema_version: 1, profile: 'trusted-local-foreground-v1', authoritative_check: false,
       workflow_source: 'alg:2:' + 'b'.repeat(64), workflow_graph: 'alg:2:' + 'c'.repeat(64),
       shell: '/bin/sh', shell_flags: ['-eu', '-c'], environment: { PATH: '/usr/bin:/bin', LANG: 'C' },
       step_timeout_millis: 60000, run_timeout_millis: 600000, stream_bytes: 262144, total_output_bytes: 16777216,

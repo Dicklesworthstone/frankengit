@@ -20,16 +20,21 @@ const json = async path => JSON.parse(await readFile(path, 'utf8'));
 const save = (path, value) => writeFile(path, encode(value), { mode: 0o600 });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(check) { for (let i = 0; i < 400; i++) { if (await check()) return; await sleep(10); } throw new Error('fixture wait failed'); }
-async function fixture(t, format = 'sha1', patch = {}) {
+async function fixture(t, format = 'sha1', patch = {}, artifactPipeline = false) {
   const root = await mkdtemp(join(tmpdir(), 'fg-check-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const dir of ['store', 'watch', 'runs', 'publication']) await mkdir(join(root, dir), { mode: 0o700 });
+  if (artifactPipeline) await mkdir(join(root, 'artifacts'), { mode: 0o700 });
   const fg = join(root, 'fg');
   await writeFile(fg, `#!${process.execPath}\nimport { handle } from ${JSON.stringify(publisherPeer)};\nif (!await handle(process.argv.slice(2))) await import(${JSON.stringify(watcherPeer)});\n`, { mode: 0o700 });
   const watch = watchConfiguration({ schema: 'frankengit-workflow-watch-v1', fg, storage_root: join(root, 'store'),
     tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32), object_format: format,
     ref_hex: hex('refs/heads/main'), workflow_directory_hex: hex('.github/workflows'), input_prefixes_hex: [hex('.github')],
-    event: 'push', state_directory: join(root, 'watch'), run_parent: join(root, 'runs'), max_runs: 16, trust: 'selected-branch-host-execution' });
+    event: 'push', state_directory: join(root, 'watch'), run_parent: join(root, 'runs'), max_runs: 16, trust: 'selected-branch-host-execution',
+    ...(artifactPipeline ? { artifacts: { root: join(root, 'artifacts'),
+      selections: [{ workflow_path_hex: hex('.github/workflows/ci.yml'), job_id: 'build', output_path_hex: hex('dist/result') }],
+      inputs: [{ workflow_path_hex: hex('.github/workflows/ci.yml'), consumer_job_id: 'test', producer_job_id: 'build',
+        output_path_hex: hex('dist/result'), destination_hex: hex('build/result') }] } } : {}) });
   let control = { tenant: watch.tenant_id, repository: watch.repository_id, incarnation: watch.repository_incarnation,
     format, ref_hex: watch.ref_hex, commit: 'a'.repeat(format === 'sha1' ? 40 : 64),
     source_head: 'fixture-head', snapshot: `alg:2:${'4'.repeat(64)}`, ...patch };
@@ -44,7 +49,7 @@ async function fixture(t, format = 'sha1', patch = {}) {
     const report = await json(join(observation.native_directory, 'report.json'));
     for (const run of report.runs) {
       const directory = Buffer.from(run.run_directory_hex, 'hex').toString();
-      const marker = Object.fromEntries(Object.entries(run).filter(([key]) => !['type', 'succeeded', 'workspaces_closed', 'request_interrupted', 'execution'].includes(key)));
+      const marker = Object.fromEntries(Object.entries(run).filter(([key]) => !['type', 'succeeded', 'workspaces_closed', 'request_interrupted', 'execution', 'artifacts', 'artifact_inputs'].includes(key)));
       const markerBytes = Buffer.from(JSON.stringify({ type: 'trusted_workflow_attempt', ...marker, state: 'started', execution_plan: { ...run.execution, succeeded: false, jobs: [] } }));
       await writeFile(join(directory, 'attempt.json'), markerBytes, { mode: 0o600 });
       const entries = run.execution.jobs.map((job, index) => ({ batch_sha256: sha256(encode([run.run_id, index])), body_bytes: 256, ordinal: index,
@@ -76,6 +81,32 @@ const multiple = { execution_patch: { jobs: [
   { id: 'first', outcome: 'succeeded', steps: [], failure: null },
   { id: 'second', outcome: 'succeeded', steps: [], failure: null },
 ] } };
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: artifact pipeline publication matches the immutable contract without treating output receipts as marker fields`, async t => {
+    const f = await fixture(t, format, { execution_patch: { jobs: [
+      { id: 'build', outcome: 'succeeded', steps: [], failure: null },
+      { id: 'test', outcome: 'succeeded', steps: [], failure: null },
+    ] } }, true);
+    const run = await f.run(), markerPath = join(run.directory, 'attempt.json'), marker = await readFile(markerPath);
+    const value = JSON.parse(marker);
+    assert.deepEqual(value.artifact_contract, run.report.runs[0].artifact_contract);
+    assert.equal(Object.hasOwn(value, 'artifacts'), false);
+    assert.equal(Object.hasOwn(value, 'artifact_inputs'), false);
+    assert.deepEqual(run.report.runs[0].artifacts, []);
+    assert.deepEqual(run.report.runs[0].artifact_inputs, []);
+    const bad = structuredClone(value); bad.artifact_contract.input_delivery.total_delivery_bytes++;
+    await writeFile(markerPath, Buffer.from(JSON.stringify(bad)), { mode: 0o600 });
+    await assert.rejects(once(f.config), /Original workflow marker changed/);
+    assert.equal((await f.lines('published.ndjson')).length, 0);
+    await writeFile(markerPath, marker, { mode: 0o600 });
+    const result = await once(f.config);
+    assert.equal(result.publications, 2);
+    assert.equal(result.runs[0].committed, 2);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await once(f.config)).publications, 0);
+    assert.deepEqual(await readFile(markerPath), marker);
+  });
+}
 for (const format of ['sha1', 'sha256']) {
   test(`${format}: successful execution publishes a check observation, not merge approval`, async t => {
     const f = await fixture(t, format); await f.run();

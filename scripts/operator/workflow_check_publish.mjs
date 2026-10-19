@@ -17,7 +17,7 @@ export function configuration(value) {
   if (value.schema !== 'frankengit-workflow-check-publisher-v1') fail('Unsupported workflow publisher configuration.');
   const watch = watchConfiguration(value.watch), state = absolute(value.state_directory);
   principal(value.principal_id);
-  for (const path of [watch.storage_root, watch.state_directory, watch.run_parent, watch.fg]) {
+  for (const path of [watch.storage_root, watch.state_directory, watch.run_parent, watch.fg, ...(watch.artifacts ? [watch.artifacts.root] : [])]) {
     if (contains(state, path) || contains(path, state)) fail('Check publication custody must be disjoint from watcher, native storage, runs and executable.');
   }
   const result = { schema: value.schema, watch, state_directory: state, principal_id: value.principal_id };
@@ -135,7 +135,9 @@ async function native(config, args, cx, reading) {
 function markerMatches(marker, run) {
   if (marker.type !== 'trusted_workflow_attempt' || marker.state !== 'started') fail('Original workflow marker is unavailable.');
   for (const [name, value] of Object.entries(run)) {
-    if (['type', 'succeeded', 'workspaces_closed', 'request_interrupted', 'execution'].includes(name)) continue;
+    // Custody observations arrive after execution. The configured contract is
+    // part of the immutable marker; these resulting arrays are not.
+    if (['type', 'succeeded', 'workspaces_closed', 'request_interrupted', 'execution', 'artifacts', 'artifact_inputs'].includes(name)) continue;
     if (JSON.stringify(marker[name]) !== JSON.stringify(value)) fail('Original workflow marker changed the selected executed input.');
   }
   record(marker.execution_plan);

@@ -5,6 +5,7 @@ import { lstat } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { absolute, contains, directory, executable, fail, lock, names, parseJson,
   readPrivate, runNative, writeNew } from './workflow_watch_io.mjs';
+import { artifactArguments, artifactConfiguration, verifyArtifactContract, verifyArtifactWorkflows } from './workflow_watch_artifacts.mjs';
 
 const hex = bytes => Buffer.from(bytes).toString('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
@@ -50,7 +51,7 @@ const SETTLED_STOPS = ['request_stopped', 'output_budget_exhausted', 'workflow_r
 const CONFIG = ['schema', 'fg', 'storage_root', 'tenant_id', 'repository_id', 'repository_incarnation',
   'object_format', 'ref_hex', 'workflow_directory_hex', 'input_prefixes_hex', 'event', 'state_directory', 'run_parent', 'max_runs', 'trust'];
 export function configuration(value) {
-  keys(value, CONFIG);
+  keys(value, Object.hasOwn(object(value), 'artifacts') ? [...CONFIG, 'artifacts'] : CONFIG);
   if (process.platform !== 'linux' || value.schema !== 'frankengit-workflow-watch-v1' ||
       value.trust !== 'selected-branch-host-execution' || !['push', 'workflow_dispatch'].includes(value.event) ||
       !['sha1', 'sha256'].includes(value.object_format)) fail('Select the explicit trusted-local Linux workflow profile.');
@@ -65,11 +66,13 @@ export function configuration(value) {
   }).sort();
   if (new Set(prefixes).size !== prefixes.length || !prefixes.some(prefix =>
       result.workflow_directory_hex === prefix || result.workflow_directory_hex.startsWith(`${prefix}2f`))) fail('Workflow directory must be included exactly once in selected inputs.');
+  if (Object.hasOwn(value, 'artifacts')) result.artifacts = artifactConfiguration(value.artifacts, pathBytes, result.workflow_directory_hex);
   number(result.max_runs, 1, 4096);
-  const dirs = [result.storage_root, result.state_directory, result.run_parent];
+  const dirs = [result.storage_root, result.state_directory, result.run_parent, ...(result.artifacts ? [result.artifacts.root] : [])];
   for (let a = 0; a < dirs.length; a++) for (let b = a + 1; b < dirs.length; b++) {
     if (contains(dirs[a], dirs[b]) || contains(dirs[b], dirs[a])) fail('Native storage, run parent and watcher custody must be disjoint.');
   }
+  if (result.artifacts && (contains(result.artifacts.root, result.fg) || contains(result.fg, result.artifacts.root))) fail('Artifact custody and the native executable must be disjoint.');
   if (encode(result).length > 128 * 1024) fail('Watcher configuration exceeds its byte limit.');
   Object.freeze(result.input_prefixes_hex);
   return Object.freeze(result);
@@ -78,7 +81,10 @@ export async function loadConfiguration(path) { return configuration(parseJson(a
 async function preflight(config, mode = 'execute') {
   await directory(config.state_directory);
   if (mode !== 'status') await directory(config.run_parent);
-  if (mode === 'execute') { await directory(config.storage_root, false); await executable(config.fg); }
+  if (mode === 'execute') {
+    await directory(config.storage_root, false); await executable(config.fg);
+    if (config.artifacts) await directory(config.artifacts.root);
+  }
 }
 function intentFor(config, selected) {
   const configHash = digest(encode(config));
@@ -267,6 +273,7 @@ export function dispatchReport(config, intent, report) {
       plan.run_id !== intent.run_id || plan.run_directory_hex !== hex(locations.batch) || plan.trigger_provenance !== 'explicit_local_operator' ||
       ['authoritative_check', 'hostile_code_isolated', 'published', 'execution_retried'].some(key => plan[key] !== false)) fail('Native dispatch changed the retained source, scope or execution profile.');
   oid(plan.source_tree, config.object_format); bounded(plan.source_rcr, 256, 'source record');
+  verifyArtifactContract(config.artifacts, plan);
   number(plan.run_timeout_ms, 1, 600_000); number(plan.total_output_bytes, 2, 16 * 1024 * 1024);
   if (!Array.isArray(plan.workflows) || plan.workflows.length > 32 || !Array.isArray(report.runs) || report.runs.length > 32 ||
       typeof report.succeeded !== 'boolean') fail('Invalid native dispatch manifest.');
@@ -281,6 +288,7 @@ export function dispatchReport(config, intent, report) {
     previous = definition.path_hex;
     if (definition.selected) selected.push(definition);
   }
+  verifyArtifactWorkflows(config.artifacts, plan.workflows);
   if (report.matched_count !== selected.length || report.executed_count !== report.runs.length || report.runs.length > selected.length) fail('Native dispatch counts disagree.');
   // Native stopped reports distinguish intentionally unstarted children from
   // ambiguous execution. Only known stop reasons plus closed workspaces settle
@@ -298,6 +306,7 @@ export function dispatchReport(config, intent, report) {
         JSON.stringify(run.read_prefixes_hex) !== JSON.stringify(plan.read_prefixes_hex) || run.candidate !== null || run.merge !== null ||
         run.input_kind !== 'canonical' || run.workspaces_closed !== true || typeof run.request_interrupted !== 'boolean' || (!stopped && run.request_interrupted) ||
         ['authoritative_check', 'hostile_code_isolated', 'published'].some(key => run[key] !== false) || typeof run.succeeded !== 'boolean') fail('Native child report changed identity or did not finish cleanup.');
+    verifyArtifactContract(config.artifacts, run);
     executionReport(run, plan, totals, definition.graph_sha256);
   }
   if (report.succeeded !== (!stopped && report.runs.every(run => run.succeeded))) fail('Native aggregate success disagrees with child observations.');
@@ -358,12 +367,18 @@ function checkpoint(signal) {
 async function execute(config, intent, options) {
   const location = paths(config, intent);
   checkpoint(options.signal);
-  await identicalOrNew(location.started, { schema: 'frankengit-workflow-watch-start-v1', intent_sha256: digest(encode(intent)) });
   const args = ['workflow', 'dispatch', config.storage_root, config.tenant_id, config.repository_id, config.ref_hex,
     '--trusted-local', '--ref-hex', '--event', config.event, '--workflow-hex', config.workflow_directory_hex,
     '--run-parent', config.run_parent, '--run-id', intent.run_id, '--expected-head', intent.snapshot_token,
     '--expected-commit', intent.commit, '--expected-incarnation', config.repository_incarnation, '--object-format', config.object_format];
   for (const prefix of config.input_prefixes_hex) args.push('--input-hex', prefix);
+  args.push(...artifactArguments(config.artifacts));
+  // Apply the native dispatch parser's complete envelope before recording a
+  // started execution, including the combined source and artifact arguments.
+  const nativeArgs = args.slice(1);
+  if (nativeArgs.length > 2102 || nativeArgs.some(arg => Buffer.byteLength(arg) > 8192) ||
+      nativeArgs.reduce((n, arg) => n + Buffer.byteLength(arg), 0) > 128 * 1024) fail('Watcher arguments exceed the native dispatch envelope.');
+  await identicalOrNew(location.started, { schema: 'frankengit-workflow-watch-start-v1', intent_sha256: digest(encode(intent)) });
   // Abort after the synced start marker must leave an uncertain record, not an
   // invented rollback. No caller-provided command or shell is accepted here.
   const native = await runNative(config.fg, args, { signal: options.signal, drain: true, timeoutMs: options.dispatchTimeoutMs ?? 660_000 });
