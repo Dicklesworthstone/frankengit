@@ -247,7 +247,8 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    assert_eq!(backend.tools().len(), 37);
+    // 37 plus the h3f4 agent reads: ref list, symbols, initial, context, reviews.
+    assert_eq!(backend.tools().len(), 42);
     assert!(
         backend
             .tools()

@@ -280,7 +280,9 @@ fn failures_are_sanitized_not_empty_searches() {
 #[test]
 fn tool_schema_disallows_unknown_authority_fields() {
     let descriptors = tools();
-    assert_eq!(descriptors.len(), 2);
+    // Literal/regex, batch, and Rust declaration search (frankengit_source_symbols).
+    assert_eq!(descriptors.len(), 3);
+    assert_eq!(descriptors[2].name, SYMBOLS_NAME);
     assert_eq!(descriptors[0].name, NAME);
     let schema = descriptors[0].schema.object().unwrap();
     assert_eq!(schema["additionalProperties"], Value::Bool(false));

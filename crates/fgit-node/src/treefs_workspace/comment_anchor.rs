@@ -117,5 +117,8 @@ fn failure(error: SourceCommentError) -> ProjectionFailure {
     }
 }
 
+// Explicit: this file is loaded through #[path], so a bare `mod tests;` would
+// resolve beside it (treefs_workspace/tests.rs), not in comment_anchor/.
 #[cfg(test)]
+#[path = "comment_anchor/tests.rs"]
 mod tests;

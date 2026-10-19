@@ -203,7 +203,10 @@ fn malformed_spans_work_and_truncation_never_become_successful_output() {
 #[test]
 fn schema_retains_closed_literal_and_regex_alternatives_without_adding_a_tool() {
     let tools = super::super::tools();
-    assert_eq!(tools.len(), 2);
+    // Regex is an operation of the literal tool; the third search tool is the
+    // separate symbol search, not a regex tool.
+    assert_eq!(tools.len(), 3);
+    assert!(tools.iter().all(|tool| !tool.name.contains("regex")));
     let schema = tools[0].schema.object().unwrap();
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
     assert!(

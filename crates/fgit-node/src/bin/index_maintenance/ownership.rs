@@ -9,7 +9,9 @@ const MAX_MARKER: u64 = 128;
 /// The anchor descriptor is close-on-exec, but a child forked by any sibling
 /// thread holds a copy of it, and so the flock, until that child execs. Wait a
 /// bounded moment for such a transient holder; a live owner still refuses.
-const LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+/// Ownership is taken once per service start, so a one-second bound costs
+/// nothing and tolerates a heavily loaded host's scheduling delay.
+const LOCK_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(2);
 
 fn lock_within_grace(anchor: &File) -> io::Result<()> {
