@@ -565,3 +565,5 @@ fn cancellation_during_the_last_selected_review_never_returns_a_page_or_approval
         fixture.gate(vec![principal(9)]).unwrap();
     }
 }
+
+mod quorum;

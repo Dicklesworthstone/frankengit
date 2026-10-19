@@ -208,6 +208,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
                     protection: ReviewProtection {
                         administrators: vec![actor(1)],
                         branches: vec![ProtectedBranch {
+                            required_approvals: 1,
                             required_checks: Vec::new(),
                             name: subject.target_ref.clone(),
                             reviewers: vec![actor(3)],

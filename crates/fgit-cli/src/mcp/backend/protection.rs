@@ -228,6 +228,10 @@ fn policy_value(policy: &ReviewProtection) -> Value {
                                 ),
                             ),
                             (
+                                "required_approvals",
+                                json::number(u64::from(branch.required_approvals)),
+                            ),
+                            (
                                 "required_checks",
                                 Value::Array(
                                     branch

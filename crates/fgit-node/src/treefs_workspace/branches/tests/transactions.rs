@@ -227,6 +227,7 @@ fn mandatory_review_protection_rejects_whole_transaction_not_just_protected_memb
             protection: ReviewProtection {
                 administrators: vec![principal()],
                 branches: vec![ProtectedBranch {
+                    required_approvals: 1,
                     name: reference("refs/heads/guarded"),
                     reviewers: vec![PrincipalId::from_bytes([9; 16])],
                     required_checks: vec![],

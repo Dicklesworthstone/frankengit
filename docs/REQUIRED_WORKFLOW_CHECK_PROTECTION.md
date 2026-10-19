@@ -98,8 +98,12 @@ in the replacement. `--clear` explicitly disables all branch requirements while
 retaining administrators, and is exclusive with review and check entries.
 
 To require both reviews and CI, also retain the branch's `--require-reviewer`
-options. Every configured independent reviewer remains mandatory. Checks cannot
-replace an approval, satisfy reviewer independence or override a withdrawal.
+options. The default requires every configured independent reviewer; an explicit
+`--require-approvals TARGET_REF:N` requires N approvals from that branch's
+eligible reviewers. See [review quorums](REVIEW_QUORUM_PROTECTION.md) for exact
+candidate binding, latest-vote behavior and unchanged default identities.
+All configured workflow checks remain mandatory alongside that review count.
+Checks cannot count as approvals or satisfy reviewer independence.
 A branch with reviewers still refuses ordinary direct ref updates. A branch
 protected only by checks permits a direct `Set` after all checks pass, including
 creation of a previously unborn protected branch. Deletion is always refused

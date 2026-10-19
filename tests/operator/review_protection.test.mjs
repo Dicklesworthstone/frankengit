@@ -224,10 +224,11 @@ test('review-only v1 intent preserves its historical digest and retry identity w
   // Golden identity from the pre-required-check adapter at 76418fef.
   assert.equal(legacy.request.key, 'fgprotection1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-cf91a370761341bba991918476db7ccf1bc0f69b1ad02c0b0e2065a02194108e');
   assert.equal(legacy.intent_sha256, 'a1cc9de443997ca34304d95718c71950462e1477b4c8926238303633b5c6e6b0');
-  const explicit = structuredClone(POLICY); explicit.branches[0].required_checks = [];
+  const explicit = structuredClone(POLICY); explicit.branches[0].required_checks = []; explicit.branches[0].required_approvals = 1;
   assert.deepEqual(plan({ snapshot: state({ policy: explicit }), replacement: explicit }), legacy);
   assert.deepEqual(validateIntent(JSON.parse(canonical(legacy))), legacy);
   assert.equal(new URLSearchParams(legacy.request.body).has('required_check'), false);
+  assert.equal(new URLSearchParams(legacy.request.body).has('required_approvals'), false);
 });
 test('workflow-only policy changes are reviewable and bound into the original intent', () => {
   const before = checkedPolicy([workflowCheck('old')]), after = checkedPolicy([workflowCheck('new')]);
@@ -241,5 +242,48 @@ test('workflow-only policy changes are reviewable and bound into the original in
     const selected = field === 'source' ? changed.source.policy : changed.replacement;
     selected.branches[0].required_checks[0].job = 'tampered';
     assert.throws(() => validateIntent(changed), /integrity/);
+  }
+});
+
+const quorumReplacement = (required_approvals = 2) => ({
+  administrators: [ACTOR], branches: [{
+    reference_hex: ref('refs/heads/main'), required_reviewers: [REVIEWER, 'c'.repeat(32), 'd'.repeat(32)],
+    required_checks: [workflowCheck()], required_approvals,
+  }],
+});
+test('operator quorum validation retains numeric counts and omits only default unanimity', () => {
+  for (let count = 1; count <= 32; count++) {
+    const reviewers = Array.from({ length: count }, (_, index) => index.toString(16).padStart(32, '0'));
+    for (let required = 1; required <= count; required++) {
+      const value = quorumReplacement(required); value.branches[0].required_reviewers = reviewers;
+      const row = policy(value).branches[0];
+      assert.equal(row.required_approvals ?? row.required_reviewers.length, required);
+      assert.equal(Object.hasOwn(row, 'required_approvals'), required !== count);
+    }
+  }
+  for (const count of [null, undefined, '', '2', false, -0, 0, -1, 4, 33, 1.5, NaN, Infinity, [], {}]) {
+    const invalid = quorumReplacement(); invalid.branches[0].required_approvals = count;
+    assert.throws(() => policy(invalid));
+  }
+  const checks = checkedPolicy(); checks.branches[0].required_approvals = 0;
+  assert.deepEqual(policy(checks), policy(checkedPolicy()));
+  checks.branches[0].required_approvals = 1;
+  assert.throws(() => policy(checks));
+});
+test('quorum-only replacement appears in operator preview and binds body and saved retry identity', () => {
+  const before = quorumReplacement(3), replacement = quorumReplacement(2);
+  for (const object_format of ['sha1', 'sha256']) {
+    const intent = plan({ expectedScope: { ...SCOPE, object_format },
+      snapshot: state({ object_format, policy: before }), replacement });
+    assert.deepEqual(new URLSearchParams(intent.request.body).getAll('required_approvals'), [`${ref('refs/heads/main')}:2`]);
+    assert.deepEqual(validateIntent(JSON.parse(canonical(intent))), intent);
+    const row = intentSummary(intent).branches[0];
+    assert.deepEqual(row.added, []); assert.deepEqual(row.removed, []);
+    assert.equal(row.required_approvals_before, 3); assert.equal(row.required_approvals_after, 2);
+    const altered = structuredClone(intent); altered.replacement.branches[0].required_approvals = 1;
+    assert.throws(() => validateIntent(altered), /integrity/);
+    const other = plan({ expectedScope: { ...SCOPE, object_format },
+      snapshot: state({ object_format, policy: before }), replacement: quorumReplacement(1) });
+    assert.notEqual(other.request.key, intent.request.key);
   }
 });

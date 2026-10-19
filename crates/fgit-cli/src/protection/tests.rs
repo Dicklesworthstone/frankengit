@@ -171,3 +171,105 @@ fn required_check_cli_refuses_malformed_or_ambiguous_selectors() {
         assert!(parse(&args).is_err());
     }
 }
+
+#[test]
+fn quorum_cli_supports_n_of_m_and_preserves_legacy_unanimity() {
+    let mut args = input();
+    for person in ["55", "66"] {
+        args.extend([
+            "--require-reviewer".into(),
+            format!("refs/heads/main:{}", person.repeat(16)),
+        ]);
+    }
+    let Operation::Set {
+        command: legacy, ..
+    } = parse(&args).unwrap().operation
+    else {
+        panic!()
+    };
+    assert_eq!(legacy.protection.branches[0].required_approvals, 3);
+    let mut unanimous = args.clone();
+    unanimous.extend(["--require-approvals".into(), "refs/heads/main:3".into()]);
+    let Operation::Set {
+        command: explicit, ..
+    } = parse(&unanimous).unwrap().operation
+    else {
+        panic!()
+    };
+    assert_eq!(
+        explicit, legacy,
+        "explicit default must preserve the exact sealed command"
+    );
+    args.extend(["--require-approvals".into(), "refs/heads/main:2".into()]);
+    let Operation::Set { command, .. } = parse(&args).unwrap().operation else {
+        panic!()
+    };
+    assert_eq!(command.protection.branches[0].required_approvals, 2);
+    assert_eq!(
+        command.protection.branches[0].reviewers,
+        legacy.protection.branches[0].reviewers
+    );
+    assert!(policy_json(&command.protection).contains("\"required_approvals\":2"));
+    let mut reordered = input();
+    reordered.splice(
+        4..4,
+        ["--require-approvals".into(), "refs/heads/main:1".into()],
+    );
+    let Operation::Set { command, .. } = parse(&reordered).unwrap().operation else {
+        panic!()
+    };
+    assert_eq!(command.protection.branches[0].required_approvals, 1);
+}
+
+#[test]
+fn quorum_cli_rejects_invalid_counts_duplicate_settings_and_unknown_branches() {
+    for count in ["0", "2", "33", "65536", "01", "-1", "+1", "1.0", "1e0", ""] {
+        let mut args = input();
+        args.extend([
+            "--require-approvals".into(),
+            format!("refs/heads/main:{count}"),
+        ]);
+        assert!(parse(&args).is_err(), "{count}");
+    }
+    for branch in ["refs/heads/other", "refs/tags/main"] {
+        let mut args = input();
+        args.extend(["--require-approvals".into(), format!("{branch}:1")]);
+        assert!(parse(&args).is_err(), "{branch}");
+    }
+    let mut args = input();
+    args.extend([
+        "--require-approvals".into(),
+        "refs/heads/main:1".into(),
+        "--require-approvals".into(),
+        "refs/heads/main:1".into(),
+    ]);
+    assert!(parse(&args).is_err());
+}
+
+#[test]
+fn check_only_cli_quorum_is_zero_and_cannot_grant_missing_reviewers() {
+    let mut args = input();
+    args.truncate(args.len() - 2);
+    args.extend([
+        "--require-check".into(),
+        format!(
+            "refs/heads/main:refs/heads/ci:{}:{}:test",
+            "77".repeat(16),
+            "55".repeat(32)
+        ),
+    ]);
+    let Operation::Set {
+        command: legacy, ..
+    } = parse(&args).unwrap().operation
+    else {
+        panic!()
+    };
+    assert_eq!(legacy.protection.branches[0].required_approvals, 0);
+    args.extend(["--require-approvals".into(), "refs/heads/main:0".into()]);
+    let Operation::Set { command, .. } = parse(&args).unwrap().operation else {
+        panic!()
+    };
+    assert_eq!(command, legacy);
+    *args.last_mut().unwrap() = "refs/heads/main:1".into();
+    assert!(parse(&args).is_err());
+}

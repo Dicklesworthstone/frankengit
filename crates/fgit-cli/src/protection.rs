@@ -19,10 +19,13 @@ usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-lo
   --principal <id> --idempotency-key <key> --expected-version <0-for-first-install> --expected-epoch <current-epoch>\n\
   --admin <id> [--admin <id> ...]\n\
   [--require-reviewer <refs/heads/branch>:<id> ...]\n\
+  [--require-approvals <refs/heads/branch>:<count> ...]\n\
   [--require-check <target-ref>:<source-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
   [--clear]\n\
   [--object-format sha1|sha256]\n\
-Set replaces the COMPLETE policy. Every listed reviewer is mandatory for that branch.\n\
+Set replaces the COMPLETE policy. Listed reviewers are eligible approvers; the default requires all.\n\
+--require-approvals selects N approvals from that branch's eligible reviewers (1 through their count).\n\
+A check-only branch has zero required approvals. Opener and submitter cannot contribute votes.\n\
 Every check requires the latest trusted publisher result for the exact NEW commit.\n\
 Its source ref must still name that commit; the workflow graph and UTF-8 job name must match exactly.\n\
 --clear disables branch protection but retains explicit administrators and immutable history.\n\
@@ -74,6 +77,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let (mut trusted, mut clear) = (false, false);
     let mut admins = Vec::new();
     let mut branches = BTreeMap::<RefName, (Vec<PrincipalId>, Vec<RequiredWorkflowCheck>)>::new();
+    let mut quorums = BTreeMap::<RefName, u16>::new();
     let mut i = 4;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -102,6 +106,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "--expected-epoch"
                         | "--admin"
                         | "--require-reviewer"
+                        | "--require-approvals"
                         | "--require-check"
                 ))
         {
@@ -138,6 +143,26 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     return Err("too many branch reviewers".into());
                 }
                 reviewers.push(id);
+            }
+            "--require-approvals" => {
+                let (name, count) = value
+                    .rsplit_once(':')
+                    .ok_or("approval count must be full-branch:count")?;
+                let name =
+                    RefName::try_new(name.as_bytes()).map_err(|_| "invalid quorum branch")?;
+                if !name.as_bytes().starts_with(b"refs/heads/") {
+                    return Err("only full branch names may be protected".into());
+                }
+                let count = u16::try_from(number(count)?).map_err(|_| "invalid approval count")?;
+                if usize::from(count) > MAX_BRANCH_REVIEWERS {
+                    return Err("approval count exceeds the reviewer limit".into());
+                }
+                if quorums.insert(name, count).is_some() {
+                    return Err("duplicate branch approval count".into());
+                }
+                if quorums.len() > MAX_PROTECTED_BRANCHES {
+                    return Err("too many branch approval counts".into());
+                }
             }
             "--require-check" => {
                 let parts: Vec<_> = value.splitn(5, ':').collect();
@@ -210,6 +235,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 "supply review/check requirements OR explicit --clear, never both/neither".into(),
             );
         }
+        if quorums.keys().any(|name| !branches.contains_key(name)) {
+            return Err("approval count requires reviewers or checks for the same branch".into());
+        }
         admins.sort();
         let branches = branches
             .into_iter()
@@ -217,6 +245,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 reviewers.sort();
                 required_checks.sort();
                 ProtectedBranch {
+                    required_approvals: quorums
+                        .get(&name)
+                        .copied()
+                        .unwrap_or(reviewers.len() as u16),
                     required_checks,
                     name,
                     reviewers,
@@ -291,10 +323,11 @@ fn policy_json(policy: &ReviewProtection) -> String {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
                 format!(
-                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_checks\":[{}]}}",
+                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"required_checks\":[{}]}}",
                     name,
                     quote(&hex),
                     ids(&branch.reviewers),
+                    branch.required_approvals,
                     branch.required_checks.iter().map(|check| format!(
                         "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                         quote(&bytes_hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),

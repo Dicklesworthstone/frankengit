@@ -395,6 +395,7 @@ fn current_review_protection_blocks_root_creation_without_weakening_other_branch
             protection: ReviewProtection {
                 administrators: vec![actor(1)],
                 branches: vec![ProtectedBranch {
+                    required_approvals: 1,
                     required_checks: Vec::new(),
                     name: reference("refs/heads/main"),
                     reviewers: vec![actor(3)],

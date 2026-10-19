@@ -22,7 +22,7 @@ HTTPS is required except literal 127.0.0.1 or [::1]. Tokens never appear in argv
 or saved intents. Preparation reads the complete native policy and writes only
 an immutable local intent; it sends no mutation. Remote bootstrap is refused.
 A complete replacement preserves ONLY its explicitly listed administrators and
-branches, including required_checks selectors in the policy file. --clear is mandatory
+branches, including required_checks selectors and any numeric required_approvals quorum.\nOmitted required_approvals requires all eligible reviewers; choose 1 through their count\nfor N-of-M approval, or 0 for a check-only branch. --clear is mandatory
 for removing all branch rules. Every successful
 replacement advances the policy epoch and invalidates earlier approvals.
 Sending requires the original token and digest confirmation. A prior send marker
@@ -82,9 +82,14 @@ export function intentSummary(intent) {
     branches: [...new Set([...old.keys(), ...next.keys()])].sort().map(reference_hex => {
       const before = old.get(reference_hex), after = next.get(reference_hex);
       const checks = checkChanges(before?.required_checks, after?.required_checks);
+      const beforeApprovals = before?.required_approvals ?? before?.required_reviewers.length ?? null;
+      const afterApprovals = after?.required_approvals ?? after?.required_reviewers.length ?? null;
+      const quorumChanged = beforeApprovals !== afterApprovals &&
+        (Object.hasOwn(before ?? {}, 'required_approvals') || Object.hasOwn(after ?? {}, 'required_approvals'));
       return { reference_hex, ...changes(before?.required_reviewers ?? [], after?.required_reviewers ?? []),
-        ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}) };
-    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length),
+        ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}),
+        ...(quorumChanged ? { required_approvals_before: beforeApprovals, required_approvals_after: afterApprovals } : {}) };
+    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || Object.hasOwn(row, 'required_approvals_after')),
     clears_all_branch_protection: intent.clear, replacement_invalidates_earlier_approvals: true,
     mutation_sent_by_this_command: false, original_outcome: 'not_queried' };
 }

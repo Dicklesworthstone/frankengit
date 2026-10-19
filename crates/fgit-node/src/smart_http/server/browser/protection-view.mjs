@@ -35,12 +35,21 @@ export function editorPolicy(administrators, rules, observedBranches = []) {
   };
   return { administrators: lines(administrators, 2048, 32), branches: lines(rules, 256 * 1024, 64).map(line => {
     const fields = line.split(/\s+/u);
-    if (fields.length !== 2) throw new Error('Each rule needs exact reference hex, a space, and comma-separated reviewer IDs.');
+    if (fields.length < 2 || fields.length > 3) throw new Error('Each rule needs reference hex, comma-separated eligible reviewer IDs, and an optional approval count or “all”.');
     const reviewers = fields[1] === '-' ? [] : fields[1].split(',');
     if (reviewers.length > 32 || reviewers.some(person => person === '')) throw new Error('Choose 1 through 32 reviewers for each rule.');
-    const checks = observedBranches.find(branch => branch.reference_hex === fields[0])?.required_checks ?? [];
+    const previous = observedBranches.find(branch => branch.reference_hex === fields[0]);
+    const checks = previous?.required_checks ?? [];
+    const selected = fields[2];
+    if (selected !== undefined && selected !== 'all' && !/^(0|[1-9][0-9]?)$/.test(selected)) throw new Error('Approval count must be a whole number or “all”.');
+    const approvals = selected === 'all' ? reviewers.length : selected !== undefined ? Number(selected)
+      : previous?.required_approvals ?? reviewers.length;
+    if (!Number.isSafeInteger(approvals) || approvals < (reviewers.length ? 1 : 0) || approvals > reviewers.length) {
+      throw new Error('Approval count must be 1 through the reviewer count, or 0 for a check-only branch.');
+    }
     if (!reviewers.length && !checks.length) throw new Error('A protected branch needs reviewers or configured checks.');
-    return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}) };
+    return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}),
+      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
   }) };
 }
 export function mountProtection(doc, { client, events = doc.defaultView } = {}) {
@@ -112,14 +121,14 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     for (const branch of policy.branches) {
       const section = node('article');
       section.append(node('h3', referenceLabel(branch.reference_hex)), node('p', `Exact reference bytes: ${branch.reference_hex}`),
-        node('p', 'Every listed principal must approve the exact candidate. The PR opener and merge submitter cannot satisfy these requirements.'));
+        node('p', `${branch.required_approvals ?? branch.required_reviewers.length} of ${branch.required_reviewers.length} listed reviewers must approve the exact candidate. The PR opener and merge submitter cannot contribute votes. Other reviewers do not veto a satisfied quorum.`));
       for (const person of branch.required_reviewers) section.append(node('p', person));
       for (const check of branch.required_checks ?? []) section.append(node('p',
         `Required check: ${check.job}; publisher ${check.publisher}; workflow ${check.graph_root}; source ${referenceLabel(check.source_ref_hex)}. The latest result must succeed for the exact proposed commit.`));
       ui.policy.append(section);
     }
     ui.administrators.value = policy.administrators.join('\n');
-    ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'}`).join('\n');
+    ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'} ${branch.required_approvals ?? 'all'}`).join('\n');
     if (policy.branches.some(branch => branch.required_checks?.length)) ui.policy.append(node('p',
       'Configured workflow checks are preserved when editing these reviewer rows. Use the protection CLI or API to change check selectors. Removing a branch row removes all its requirements; “-” retains a check-only branch.'));
     ui.clear.checked = false;

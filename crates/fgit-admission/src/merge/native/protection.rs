@@ -1,7 +1,6 @@
 //! Authority-selected required-review protection. The forge frontier commits
 //! the complete policy and ownership, while the head epoch invalidates old votes.
 //! Immutable placement alone never activates a policy.
-use super::pull_request::reviews::gate::{ReviewRequirements, verify_at};
 use super::{
     NativeMergeIntent, NativeMergeProjection, PreparationFailure, metadata, storage, unavailable,
 };
@@ -336,9 +335,18 @@ where
         .and_then(|p| p.branch(&merge.target_ref))
     {
         if !rule.reviewers.is_empty() {
-            let required = ReviewRequirements::new(selected.policy_epoch, rule.reviewers.clone())
-                .map_err(infrastructure)?;
-            verify_at(store, cx, basis, intent, submitter, &required, cancelled).await?;
+            super::pull_request::reviews::gate::verify_quorum_at(
+                store,
+                cx,
+                basis,
+                intent,
+                submitter,
+                selected.policy_epoch,
+                &rule.reviewers,
+                rule.required_approvals,
+                cancelled,
+            )
+            .await?;
         }
         checks::verify_at(
             store,

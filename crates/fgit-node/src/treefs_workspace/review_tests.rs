@@ -677,3 +677,6 @@ mod mandatory_protection {
 
 #[path = "review_snapshot_tests.rs"]
 mod snapshots;
+
+#[path = "review_tests/quorum.rs"]
+mod quorum;

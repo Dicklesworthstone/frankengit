@@ -67,6 +67,15 @@ pub(super) fn tool() -> Tool {
         "required_reviewers".into(),
         principals_schema(MAX_BRANCH_REVIEWERS, 0),
     );
+    branch.insert(
+        "required_approvals".into(),
+        object([
+            ("type", text("integer")),
+            ("minimum", json::number(0)),
+            ("maximum", json::number(MAX_BRANCH_REVIEWERS as u64)),
+            ("description", text("Number of distinct eligible reviewers who must approve the exact candidate. Omitted means all listed reviewers. Use 1 through the reviewer count, or 0 only with no reviewers and at least one required check. The PR opener and merge submitter never contribute votes.")),
+        ]),
+    );
     let mut check = Object::new();
     check.insert("source_ref_hex".into(), branch["reference_hex"].clone());
     check.insert("publisher".into(), principal_schema());
@@ -193,7 +202,12 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             .ok_or(ToolError::invalid("policy_branch_object_required"))?;
         require_fields(
             fields,
-            &["reference_hex", "required_reviewers", "required_checks"],
+            &[
+                "reference_hex",
+                "required_reviewers",
+                "required_checks",
+                "required_approvals",
+            ],
         )?;
         let raw = unhex(mutations::required(fields, "reference_hex")?, MAX_REF_BYTES)?;
         if !raw.starts_with(b"refs/heads/") {
@@ -242,7 +256,17 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             MAX_BRANCH_REVIEWERS,
             !required_checks.is_empty(),
         )?;
+        let required_approvals = match fields.get("required_approvals") {
+            Some(value) => u16::try_from(
+                value
+                    .unsigned()
+                    .ok_or(ToolError::invalid("invalid_required_approvals"))?,
+            )
+            .map_err(|_| ToolError::invalid("invalid_required_approvals"))?,
+            None => reviewers.len() as u16,
+        };
         branches.push(ProtectedBranch {
+            required_approvals,
             required_checks,
             name,
             reviewers,

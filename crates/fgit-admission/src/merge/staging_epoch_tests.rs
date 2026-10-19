@@ -85,6 +85,7 @@ fn fixture(format: GitHashAlgorithm, before: u64, policy: bool) -> PreparedNativ
             protection: ReviewProtection {
                 administrators: vec![actor],
                 branches: vec![ProtectedBranch {
+                    required_approvals: 1,
                     required_checks: Vec::new(),
                     name: name("refs/heads/main"),
                     reviewers: vec![PrincipalId::from_bytes([9; 16])],

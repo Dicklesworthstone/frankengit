@@ -642,6 +642,63 @@ obligation atomically. Derived snapshots expose the sorted `assignees` set at
 their selected authority head, while history retains the original deltas.
 Cancellation and missing evidence cannot become partial successful snapshots.
 
+### 20.3 Native protected-review quorums
+
+Repository review protection binds a sorted set of eligible reviewer principals
+and an explicit `required_approvals: u16` to each protected branch. For a rule
+with (M > 0) reviewers, the count must be in `1..=M`; (M) remains bounded
+by 32. A check-only rule has no reviewers and count zero. A rule with neither
+reviewers nor required checks remains invalid. Administrator and branch limits,
+strictly increasing unique lists, ownership, exact predecessor versions and
+policy-epoch advancement retain their existing contracts.
+
+The canonical owner is `fgit-forge/src/event/protection.rs`. Historical event
+kind **9** (review-only protection) and required kind **13** (protection with
+workflow checks) keep every existing byte. Both infer the approval count from
+the number of reviewers; historical policies therefore remain unanimous.
+Required event kind **14** encodes a policy containing at least one genuinely
+non-unanimous rule. After each branch name and its existing `u32` reviewer
+count plus raw 16-byte IDs, kind 14 writes a big-endian `u16` approval count,
+then the existing `u32` required-check count and selector sequence. These
+fields are present on **every** branch in kind 14, including unanimous and
+check-only branches and branches with zero checks. The aggregate, actor,
+expected epoch and administrator encoding are unchanged.
+
+A kind-14 body with no non-unanimous rule is a redundant alternate encoding
+and must refuse. Unanimous policies use kind 9 when they contain no checks,
+otherwise kind 13. Counts outside the permitted bounds refuse before use.
+Older readers refuse the new required kind; no old event, body identity or
+retry seal is rewritten. Human-facing omission of the count means unanimity;
+explicitly supplying the inferred default produces the same canonical policy
+and sealed intent as omission.
+
+Mandatory admission at each authority-selected publication basis counts each
+eligible principal's **latest** canonical exact `Approve` decision once.
+It must match the PR number and version, source and target ref bytes and native
+tips, policy epoch, merge-base OID and candidate-commit OID. Source-only or
+stale reviews contribute zero. The PR opening actor and merge submitter are
+excluded without reducing the required count. A latest `RequestChanges` or
+`Withdraw` contributes zero for that reviewer; neither introduces a separate
+veto over sufficient approvals from other eligible reviewers. Conversation
+comments are not review votes.
+
+An absent configured review stream contributes zero. Missing or corrupt bytes
+selected by an accepted frontier, invalid frontier ranges or payloads, and
+cancellation remain unavailable failures; they cannot be treated as absent
+votes. True quorum admission authenticates every eligible configured frontier
+even after enough approvals have been counted. Insufficient true-quorum
+approvals produce `ProtectedRefTransitionDenied`. Unanimous rules preserve
+the original named-reviewer refusal behavior. Caller-selected
+`ReviewRequirements` continue to require every named reviewer and retain
+their existing bytes; repository quorum cannot weaken those additional
+sealed requirements.
+
+The native merge CAS retry loop re-evaluates the current policy and votes
+after any competing publication, so a losing attempt cannot reuse an earlier
+quorum. Workflow check requirements remain independently mandatory. Review
+protection continues to deny ordinary direct ref changes. Previously recorded
+terminal decisions retain their original outcomes under their original keys.
+
 ## 21. Graph and search generations
 
 Graph/search generations follow anti-rollback activation and `GRAPH_INTELLIGENCE_ARCHITECTURE.md`.

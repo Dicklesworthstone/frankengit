@@ -55,7 +55,7 @@ function ui({ format = 'sha1', respond = () => null, cryptoImpl = webcrypto, dow
   const stage = async () => { await fire('editor', 'submit'); await fire('stage'); assert.ok(view.client.pending, node('status').textContent); };
   const send = async () => { node('confirm').checked = true; await fire('confirm', 'change'); await fire('send'); };
   const rows = () => node('branches').all('fieldset').map(group => ({ group, reference: group.all('input')[0],
-    reviewers: group.all('textarea')[0], remove: group.all('button')[0] }));
+    reviewers: group.all('textarea')[0], approvals: group.all('input')[1], remove: group.all('button')[0] }));
   return { doc, calls, downloads, client: view.client, node, fire, connect, ready, stage, send, rows };
 }
 
@@ -225,4 +225,47 @@ test('a failed receipt download still prevents unsafe draft discard', async () =
 });
 test('the same page cannot mount duplicate protection authority controls', () => {
   const h = ui(); assert.throws(() => mountProtection(h.doc, { downloadImpl: () => {} }), /mounted once/); assert.equal(h.calls.length, 0);
+});
+
+test('PR protection editor exposes quorum, preserves it through reviewer edits and freezes its exact count', async () => {
+  const selected = { administrators: [ADMIN], branches: [{
+    reference_hex: hex('refs/heads/main'), required_reviewers: [REVIEWER, OTHER, 'd'.repeat(32)],
+    required_approvals: 2, required_checks: [{
+      source_ref_hex: hex('refs/heads/ci'), publisher: OTHER, graph_root: '7'.repeat(64), job: 'test',
+    }],
+  }] };
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready();
+  assert.equal(h.rows()[0].approvals.value, '2');
+  assert.match(h.rows()[0].group.textContent, /2 of 3 listed reviewers/);
+  h.rows()[0].reviewers.value += `\n${'e'.repeat(32)}`; await h.rows()[0].reviewers.emit('input');
+  assert.equal(h.rows()[0].approvals.value, '2'); assert.match(h.rows()[0].group.textContent, /2 of 4 listed reviewers/);
+  await h.stage();
+  assert.equal(h.client.pending.intent.replacement.branches[0].required_approvals, 2);
+  assert.deepEqual(h.client.pending.intent.replacement.branches[0].required_checks, selected.branches[0].required_checks);
+  assert.equal(h.rows()[0].approvals.disabled, true);
+  assert.deepEqual(new URLSearchParams(h.client.pending.intent.body).getAll('required_approvals'), [`${hex('refs/heads/main')}:2`]);
+});
+test('quorum edits invalidate a preview and invalid counts never submit a replacement', async () => {
+  const selected = { administrators: [ADMIN], branches: [{
+    reference_hex: hex('refs/heads/main'), required_reviewers: [REVIEWER, OTHER, 'd'.repeat(32)], required_approvals: 2,
+  }] };
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready(); await h.fire('editor', 'submit');
+  h.rows()[0].approvals.value = '1'; await h.fire('stage');
+  assert.equal(h.client.pending, null); assert.match(h.node('status').textContent, /Preview again/);
+  await h.fire('editor', 'submit'); h.rows()[0].approvals.value = '2'; await h.rows()[0].approvals.emit('input');
+  assert.equal(h.node('stage').disabled, true);
+  for (const value of ['0', '4', '01', '-1', '+1', '1.0', '1e0', '33']) {
+    h.rows()[0].approvals.value = value; await h.fire('editor', 'submit');
+    assert.equal(h.client.pending, null); assert.equal(h.node('stage').disabled, true);
+  }
+  assert.equal(h.calls.length, 1);
+  h.rows()[0].approvals.value = ''; h.rows()[0].approvals.validity = { badInput: true };
+  await h.fire('editor', 'submit');
+  assert.equal(h.node('stage').disabled, true); assert.match(h.node('status').textContent, /whole approval count/);
+  h.rows()[0].approvals.validity = { badInput: false };
+  h.rows()[0].approvals.value = ''; await h.rows()[0].approvals.emit('input'); await h.stage();
+  assert.equal(Object.hasOwn(h.client.pending.intent.replacement.branches[0], 'required_approvals'), false);
+  assert.equal(new URLSearchParams(h.client.pending.intent.body).has('required_approvals'), false);
 });

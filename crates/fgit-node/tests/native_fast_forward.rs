@@ -473,6 +473,7 @@ fn fast_forward_does_not_bypass_mandatory_reviews() {
         protection: ReviewProtection {
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                required_approvals: 1,
                 required_checks: Vec::new(),
                 name: main_ref(),
                 reviewers: vec![actor(3)],

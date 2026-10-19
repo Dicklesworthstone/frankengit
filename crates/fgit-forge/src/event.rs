@@ -39,6 +39,7 @@ const KIND_NATIVE_MERGE_QUEUE_CHANGED: u32 = 10;
 const KIND_WORKFLOW_CHECK_OBSERVED: u32 = 11;
 const KIND_NATIVE_PULL_REQUEST_COMMENTED: u32 = 12;
 const KIND_REQUIRED_CHECK_PROTECTION_CHANGED: u32 = 13;
+const KIND_REVIEW_QUORUM_PROTECTION_CHANGED: u32 = 14;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -121,8 +122,8 @@ const fn invalid_native(field: &'static str) -> CodecRefusal {
 /// remains a native typed value; it is never cast into a legacy Digest field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeEventPayload {
-    /// Canonical protection replacement: historical review-only kind 9, or
-    /// required kind 13 when explicit trusted-workflow requirements are present.
+    /// Canonical protection replacement: historical unanimous-review kind 9,
+    /// required-check kind 13, or explicit review-quorum kind 14.
     ReviewProtectionChanged(protection::NativeProtectionEvent),
     PullRequestOpened {
         source_ref: Vec<u8>,
@@ -173,7 +174,9 @@ impl ForgeEventPayload {
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
             Self::ReviewProtectionChanged(change) => {
-                if change.protection.has_required_checks() {
+                if change.protection.has_review_quorum() {
+                    KIND_REVIEW_QUORUM_PROTECTION_CHANGED
+                } else if change.protection.has_required_checks() {
                     KIND_REQUIRED_CHECK_PROTECTION_CHANGED
                 } else {
                     KIND_REVIEW_PROTECTION_CHANGED
@@ -465,10 +468,13 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
             ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?)
         }
         KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
-            protection::NativeProtectionEvent::read(input, false)?,
+            protection::NativeProtectionEvent::read(input, false, false)?,
         ),
         KIND_REQUIRED_CHECK_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
-            protection::NativeProtectionEvent::read(input, true)?,
+            protection::NativeProtectionEvent::read(input, true, false)?,
+        ),
+        KIND_REVIEW_QUORUM_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
+            protection::NativeProtectionEvent::read(input, true, true)?,
         ),
         KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(
             workflow_check::NativeWorkflowCheck::read(input)?,

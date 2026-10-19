@@ -298,7 +298,7 @@ test('complete policy preview includes check-only additions and removals', () =>
   assert.deepEqual(protectionChanges(before, { administrators: [ADMIN], branches: [] }).branches[0].checks_removed, [workflowGate('old')]);
 });
 test('review-only v1 receipt keeps its historical retry key with explicit empty check defaults', async () => {
-  const selected = policy(); selected.branches[0].required_checks = [];
+  const selected = policy(); selected.branches[0].required_checks = []; selected.branches[0].required_approvals = 1;
   const cryptoImpl = { subtle: webcrypto.subtle, getRandomValues(bytes) { bytes.fill(0xee); return bytes; } };
   const h = harness({ cryptoImpl, respond: call =>
     call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : undefined });
@@ -310,6 +310,7 @@ test('review-only v1 receipt keeps its historical retry key with explicit empty 
   assert.deepEqual(pending.intent.source.policy, policy());
   assert.deepEqual(pending.intent.replacement, policy());
   assert.equal(new URLSearchParams(pending.intent.body).has('required_check'), false);
+  assert.equal(new URLSearchParams(pending.intent.body).has('required_approvals'), false);
   const receipt = h.client.exportReceipt(), restored = harness({ cryptoImpl });
   await restored.client.connect(TOKEN, ADMIN);
   const imported = await restored.client.restoreReceipt(receipt);
@@ -317,4 +318,64 @@ test('review-only v1 receipt keeps its historical retry key with explicit empty 
   assert.equal(imported.intent.body, pending.intent.body);
   assert.equal(imported.sent, true);
   assert.deepEqual(restored.calls, []);
+});
+
+const quorumPolicy = (required_approvals = 2) => ({
+  administrators: [ADMIN], branches: [{
+    reference_hex: hex('refs/heads/main'), required_reviewers: [REVIEWER, OTHER, 'd'.repeat(32)],
+    required_checks: [workflowGate()], required_approvals,
+  }],
+});
+test('approval quorum normalization admits exactly N-of-M and retains legacy defaults', () => {
+  for (let count = 1; count <= 32; count++) {
+    const reviewers = Array.from({ length: count }, (_, i) => i.toString(16).padStart(32, '0'));
+    for (let required = 1; required <= count; required++) {
+      const value = quorumPolicy(required); value.branches[0].required_reviewers = reviewers;
+      const selected = protectionPolicy(value).branches[0];
+      assert.equal(selected.required_approvals ?? selected.required_reviewers.length, required);
+      assert.equal(Object.hasOwn(selected, 'required_approvals'), required !== count);
+    }
+  }
+  for (const count of [null, undefined, '', '2', false, -0, 0, -1, 4, 33, 1.5, NaN, Infinity, [], {}]) {
+    const invalid = quorumPolicy(); invalid.branches[0].required_approvals = count;
+    assert.throws(() => protectionPolicy(invalid), undefined, String(count));
+  }
+  const checks = checkPolicy(); checks.branches[0].required_approvals = 0;
+  assert.deepEqual(protectionPolicy(checks), protectionPolicy(checkPolicy()));
+  checks.branches[0].required_approvals = 1;
+  assert.throws(() => protectionPolicy(checks));
+});
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: quorum survives snapshot, failed publication, exact retry and receipt restoration`, async () => {
+    let writes = 0;
+    const selected = quorumPolicy();
+    const h = harness({ format, respond: call => {
+      if (call.method === 'GET') return response(snapshot(format, { policy: selected }));
+      if (++writes === 1) throw new Error('fixture lost quorum reply');
+    } });
+    await h.ready();
+    assert.equal(h.client.observed.policy.branches[0].required_approvals, 2);
+    const pending = await h.client.stage(selected);
+    assert.deepEqual(new URLSearchParams(pending.intent.body).getAll('required_approvals'), [`${hex('refs/heads/main')}:2`]);
+    await assert.rejects(h.client.send(), error => error.outcomeUnknown);
+    const saved = h.client.exportReceipt();
+    const restored = harness({ format }); await restored.client.connect(TOKEN, ADMIN);
+    const imported = await restored.client.restoreReceipt(saved);
+    assert.deepEqual(imported.intent, pending.intent);
+    await h.client.send();
+    assert.equal(h.calls[1].body, h.calls[2].body);
+    assert.equal(h.calls[1].headers['Idempotency-Key'], h.calls[2].headers['Idempotency-Key']);
+  });
+}
+test('quorum-only changes appear in review preview and cannot mutate a saved receipt', async () => {
+  const before = quorumPolicy(3), after = quorumPolicy(2);
+  const change = protectionChanges(before, after).branches[0];
+  assert.deepEqual(change.added, []); assert.deepEqual(change.removed, []);
+  assert.equal(change.required_approvals_before, 3); assert.equal(change.required_approvals_after, 2);
+  const h = harness(); await h.ready(); await h.client.stage(after);
+  const saved = JSON.parse(h.client.exportReceipt());
+  saved.intent.replacement.branches[0].required_approvals = 1;
+  const restored = harness(); await restored.client.connect(TOKEN, ADMIN);
+  await assert.rejects(restored.client.restoreReceipt(JSON.stringify(saved)));
+  assert.equal(restored.client.pending, null); assert.equal(restored.calls.length, 0);
 });

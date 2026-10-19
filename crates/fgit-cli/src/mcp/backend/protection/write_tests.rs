@@ -329,3 +329,71 @@ fn mcp_required_checks_roundtrip_and_cannot_disappear_through_missing_fields() {
         "a complete replacement must acknowledge the check list"
     );
 }
+
+#[test]
+fn mcp_approval_quorum_is_numeric_optional_and_preserves_default_command_identity() {
+    let mut args = arguments();
+    let legacy = write::parse(&args).unwrap();
+    assert_eq!(legacy.protection.branches[0].required_approvals, 2);
+    fields(&mut args).insert("required_approvals".into(), json::number(2));
+    assert_eq!(write::parse(&args).unwrap(), legacy);
+    fields(&mut args).insert("required_approvals".into(), json::number(1));
+    let command = write::parse(&args).unwrap();
+    assert_eq!(command.protection.branches[0].required_approvals, 1);
+    assert_eq!(
+        command.protection.branches[0].reviewers,
+        legacy.protection.branches[0].reviewers
+    );
+    let Value::Object(policy) = policy_value(&command.protection) else {
+        panic!("policy")
+    };
+    let Value::Array(branches) = policy.get("branches").unwrap() else {
+        panic!("branches")
+    };
+    assert_eq!(
+        branches[0].object().unwrap().get("required_approvals"),
+        Some(&json::number(1))
+    );
+}
+
+#[test]
+fn mcp_approval_quorum_refuses_ineligible_counts_and_ambiguous_json_types() {
+    for value in [
+        json::number(0),
+        json::number(3),
+        json::number(33),
+        json::number(65536),
+        text("1"),
+        Value::Null,
+        Value::Bool(true),
+        Value::Number("-0".into()),
+        Value::Number("1.0".into()),
+        Value::Number("1e0".into()),
+        Value::Array(Vec::new()),
+    ] {
+        let mut args = arguments();
+        fields(&mut args).insert("required_approvals".into(), value.clone());
+        assert!(write::parse(&args).is_err(), "{value:?}");
+    }
+    let mut args = arguments();
+    fields(&mut args).insert("required_reviewers".into(), Value::Array(Vec::new()));
+    fields(&mut args).insert(
+        "required_checks".into(),
+        Value::Array(vec![object([
+            ("source_ref_hex", text(hex(b"refs/heads/ci"))),
+            (
+                "publisher",
+                text(PrincipalId::from_bytes([0x77; 16]).to_string()),
+            ),
+            ("graph_root", text("55".repeat(32))),
+            ("job", text("test")),
+        ])]),
+    );
+    fields(&mut args).insert("required_approvals".into(), json::number(0));
+    assert_eq!(
+        write::parse(&args).unwrap().protection.branches[0].required_approvals,
+        0
+    );
+    fields(&mut args).insert("required_approvals".into(), json::number(1));
+    assert!(write::parse(&args).is_err());
+}

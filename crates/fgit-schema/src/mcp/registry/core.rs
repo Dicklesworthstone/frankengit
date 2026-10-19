@@ -1302,7 +1302,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
                 name: "branches",
                 field_type: "array",
                 classification: FieldClassification::SelectorPosition,
-                description: "Complete sorted list of protected branches, each with reference_hex, required_reviewers and required_checks. Each check binds source_ref_hex, publisher, graph_root and exact job.",
+                description: "Complete sorted list of protected branches, each with reference_hex, required_reviewers, optional numeric required_approvals and required_checks. The approval count defaults to all required_reviewers and is zero for check-only branches. Each check binds source_ref_hex, publisher, graph_root and exact job.",
                 required: true,
                 max_bytes: None,
                 pattern: None,

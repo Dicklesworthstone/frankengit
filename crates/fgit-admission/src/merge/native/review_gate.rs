@@ -277,6 +277,68 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    verify_required_at(
+        store,
+        cx,
+        basis,
+        intent,
+        submitter,
+        required,
+        required.reviewers.len() as u16,
+        cancelled,
+    )
+    .await
+}
+
+/// Enforce the threshold selected by the current canonical branch policy.
+/// Caller-selected ReviewRequirements keep their historical unanimous seal.
+pub(crate) async fn verify_quorum_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    intent: &NativeMergeIntent,
+    submitter: PrincipalId,
+    policy_epoch: PolicyEpoch,
+    reviewers: &[PrincipalId],
+    required_approvals: u16,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    if required_approvals == 0 || usize::from(required_approvals) > reviewers.len() {
+        return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+    }
+    let required =
+        ReviewRequirements::new(policy_epoch, reviewers.to_vec()).map_err(infrastructure)?;
+    verify_required_at(
+        store,
+        cx,
+        basis,
+        intent,
+        submitter,
+        &required,
+        required_approvals,
+        cancelled,
+    )
+    .await
+}
+
+async fn verify_required_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    intent: &NativeMergeIntent,
+    submitter: PrincipalId,
+    required: &ReviewRequirements,
+    required_approvals: u16,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     let ExpectedVersion::Exactly(version) = intent.expected_version() else {
         return Err(ProjectionFailure::Refuse(
             RefusalCode::ProtectedRefTransitionDenied,
@@ -332,10 +394,24 @@ where
     let opener = pr
         .opened_by
         .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+    let unanimous = usize::from(required_approvals) == required.reviewers.len();
+    if unanimous
+        && required
+            .reviewers
+            .iter()
+            .any(|reviewer| *reviewer == opener || *reviewer == submitter)
+    {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::ProtectedRefTransitionDenied,
+        ));
+    }
+    let eligible = |reviewer: &PrincipalId| *reviewer != opener && *reviewer != submitter;
     if required
         .reviewers
         .iter()
-        .any(|reviewer| *reviewer == opener || *reviewer == submitter)
+        .filter(|reviewer| eligible(reviewer))
+        .count()
+        < usize::from(required_approvals)
     {
         return Err(ProjectionFailure::Refuse(
             RefusalCode::ProtectedRefTransitionDenied,
@@ -348,8 +424,12 @@ where
         .await
         .map_err(infrastructure)?;
     super::super::checkpoint(cancelled).map_err(infrastructure)?;
+    let mut approvals = 0_u16;
     for reviewer in &required.reviewers {
         super::super::checkpoint(cancelled).map_err(infrastructure)?;
+        if !eligible(reviewer) {
+            continue;
+        }
         let event = super::review_frontier(
             store,
             cx,
@@ -360,15 +440,51 @@ where
             },
         )
         .await
-        .map_err(infrastructure)?
-        .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?;
+        .map_err(infrastructure)?;
         super::super::checkpoint(cancelled).map_err(infrastructure)?;
+        let Some(event) = event else {
+            if unanimous {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing));
+            }
+            continue;
+        };
         let ForgeEventPayload::PullRequestReviewedNative(review) = event.payload else {
             return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
         };
-        verify_vote(&review, *reviewer, &subject, candidate).map_err(ProjectionFailure::Refuse)?;
+        if unanimous {
+            verify_vote(&review, *reviewer, &subject, candidate)
+                .map_err(ProjectionFailure::Refuse)?;
+        } else if quorum_vote(&review, *reviewer, &subject, candidate)
+            .map_err(ProjectionFailure::Unavailable)?
+        {
+            approvals += 1;
+        }
+        // Authenticate every eligible frontier, even after enough approvals.
+        // Corrupt accepted evidence must not become an ignorable absent vote.
+    }
+    if !unanimous && approvals < required_approvals {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::ProtectedRefTransitionDenied,
+        ));
     }
     Ok(())
+}
+
+fn quorum_vote(
+    review: &NativeReviewEvent,
+    reviewer: PrincipalId,
+    subject: &ReviewSubject,
+    candidate: CandidateBinding,
+) -> Result<bool, RefusalCode> {
+    review
+        .validate()
+        .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if review.reviewer != reviewer {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    Ok(&review.subject == subject
+        && review.candidate == Some(candidate)
+        && review.decision == ReviewDecision::Approve)
 }
 
 fn verify_vote(

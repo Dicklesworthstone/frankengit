@@ -1,19 +1,20 @@
 use super::*;
 use fgit_codec::{DecodeLimits, decode_body, encode_body};
-fn actor(n: u8) -> PrincipalId {
+pub(super) fn actor(n: u8) -> PrincipalId {
     PrincipalId::from_bytes([n; 16])
 }
-fn policy() -> ReviewProtection {
+pub(super) fn policy() -> ReviewProtection {
     ReviewProtection {
         administrators: vec![actor(1)],
         branches: vec![ProtectedBranch {
             required_checks: Vec::new(),
             name: RefName::try_new(b"refs/heads/main").unwrap(),
             reviewers: vec![actor(3), actor(4)],
+            required_approvals: 2,
         }],
     }
 }
-fn initial() -> ForgeEvent {
+pub(super) fn initial() -> ForgeEvent {
     ProtectionCommand {
         expected_version: ExpectedVersion::NewStream,
         expected_epoch: PolicyEpoch::FIRST,
@@ -159,6 +160,7 @@ fn policy_order_duplicates_namespace_and_capacity_are_checked_before_use() {
             required_checks: Vec::new(),
             name: RefName::try_new(format!("refs/heads/b{i:02}").as_bytes()).unwrap(),
             reviewers: vec![actor(2)],
+            required_approvals: 1,
         })
         .collect();
     p.validate().unwrap();
@@ -166,10 +168,12 @@ fn policy_order_duplicates_namespace_and_capacity_are_checked_before_use() {
         required_checks: Vec::new(),
         name: RefName::try_new(b"refs/heads/zz").unwrap(),
         reviewers: vec![actor(2)],
+        required_approvals: 1,
     });
     assert!(p.validate().is_err());
     p = policy();
     p.branches[0].reviewers = (1..=MAX_BRANCH_REVIEWERS).map(|i| actor(i as u8)).collect();
+    p.branches[0].required_approvals = MAX_BRANCH_REVIEWERS as u16;
     p.validate().unwrap();
     p.branches[0].reviewers.push(actor(200));
     assert!(p.validate().is_err());
@@ -209,7 +213,10 @@ fn every_administrator_reviewer_branch_and_epoch_is_identity_material() {
             0 => change.actor = actor(2),
             1 => change.expected_epoch = PolicyEpoch::try_new(2).unwrap(),
             2 => change.protection.administrators = vec![actor(2)],
-            3 => change.protection.branches[0].reviewers = vec![actor(5)],
+            3 => {
+                change.protection.branches[0].reviewers = vec![actor(5)];
+                change.protection.branches[0].required_approvals = 1;
+            }
             _ => {
                 change.protection.branches[0].name = RefName::try_new(b"refs/heads/other").unwrap();
             }
@@ -222,7 +229,7 @@ fn every_administrator_reviewer_branch_and_epoch_is_identity_material() {
     );
 }
 
-fn required_check() -> RequiredWorkflowCheck {
+pub(super) fn required_check() -> RequiredWorkflowCheck {
     RequiredWorkflowCheck {
         source_ref: RefName::try_new(b"refs/heads/ci-candidate").unwrap(),
         publisher: actor(7),
@@ -261,6 +268,7 @@ fn required_checks_have_a_required_wire_kind_and_preserve_review_only_encoding()
 fn check_only_policies_are_explicit_bounded_and_canonical() {
     let mut p = policy();
     p.branches[0].reviewers.clear();
+    p.branches[0].required_approvals = 0;
     assert!(p.validate().is_err());
     p.branches[0].required_checks.push(required_check());
     p.validate().unwrap();

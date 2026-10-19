@@ -25,14 +25,14 @@
     <section id="protection-policy" aria-label="Complete review protection policy"></section>
     <section aria-labelledby="protection-editor-title">
       <h2 id="protection-editor-title">Replace the complete native policy</h2>
-      <p>Inspect first. Existing administrators authorize the replacement; the proposed administrator set cannot authorize itself. These controls manage exact branches and all-required reviewers, not wildcard rules or status checks.</p>
+      <p>Inspect first. Existing administrators authorize the replacement; the proposed administrator set cannot authorize itself. These controls manage exact branches, eligible reviewers, and the number of approvals required. Existing workflow checks are preserved when a branch row is edited.</p>
       <form id="protection-edit">
         <label>Complete administrator set, one principal ID per line<textarea id="protection-administrators" rows="4" maxlength="2048" spellcheck="false" disabled></textarea></label>
-        <label>Complete branch rules: reference hex, a space, comma-separated reviewer IDs<textarea id="protection-rules" rows="8" maxlength="262144" spellcheck="false" disabled></textarea></label>
+        <label>Complete branch rules: reference hex, comma-separated eligible reviewer IDs, approval count or all<textarea id="protection-rules" rows="8" maxlength="262144" spellcheck="false" disabled></textarea></label>
         <label><input id="protection-clear" type="checkbox" disabled>Explicitly clear every branch rule (rules field must be empty)</label>
         <button id="protection-prepare" type="submit" disabled>Freeze full replacement without submitting</button>
       </form>
-      <p class="hint">One rule per line; at most 64 branches and 32 reviewers per branch. Native reference bytes are hex so non-UTF-8 names survive editing. Resource refusals never truncate a policy. Every successful replacement advances the policy epoch and invalidates earlier candidate approvals.</p>
+      <p class="hint">One rule per line; at most 64 branches and 32 reviewers per branch. Use a count such as 2 for two approvals from the listed reviewers, or all to require every eligible reviewer. Separate the three fields with spaces. Use - for the reviewer list of an existing check-only branch. Removing a row removes all its requirements. Native reference bytes are hex so non-UTF-8 names survive editing. Resource refusals never truncate a policy. Every successful replacement advances the policy epoch and invalidates earlier candidate approvals.</p>
       <section id="protection-preview" aria-label="Frozen original policy replacement"></section>
       <label><input id="protection-confirm" type="checkbox" disabled>I reviewed this frozen full replacement and authorize this explicit submission.</label>
       <label><input id="protection-ownership-confirm" type="checkbox" disabled>I acknowledge that this replacement removes the submitting principal as a policy administrator.</label>

@@ -613,7 +613,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       : 'Ordinary protection connection. Connecting locally does not establish an authenticated role or grant.';
     nodes.load.disabled = !ordinary || busy || Boolean(pending);
     for (const input of [administrators, clear, nodes['add-branch'], nodes.preview]) input.disabled = !editable;
-    for (const row of rows) for (const input of [row.reference, row.reviewers, row.remove]) input.disabled = !editable;
+    for (const row of rows) for (const input of [row.reference, row.reviewers, row.approvals, row.remove]) input.disabled = !editable;
     nodes['add-branch'].disabled ||= rows.length >= 64;
     nodes.stage.disabled = !editable || !preview;
     confirm.disabled = !ordinary || busy || !pending;
@@ -640,18 +640,30 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     const reference = item(doc, refLabel, 'input'); reference.type = 'text'; reference.maxLength = 2048;
     reference.autocomplete = 'off'; reference.spellcheck = false; reference.value = data.reference_hex;
     const readable = item(doc, group, 'pre', data.reference_hex ? `Display only: ${displayBytes(data.reference_hex)}` : 'Enter exact branch bytes.');
-    const reviewersLabel = item(doc, group, 'label', 'All required reviewer IDs for this branch, one per line');
+    const reviewersLabel = item(doc, group, 'label', 'Eligible reviewer IDs for this branch, one per line');
     const reviewers = item(doc, reviewersLabel, 'textarea'); reviewers.rows = 3; reviewers.maxLength = 32 * 33;
     reviewers.spellcheck = false; reviewers.value = data.required_reviewers.join('\n');
+    const approvalsLabel = item(doc, group, 'label', 'Approvals needed — leave blank to require all listed reviewers');
+    const approvals = item(doc, approvalsLabel, 'input'); approvals.type = 'number';
+    approvals.min = '0'; approvals.max = '32'; approvals.step = '1'; approvals.autocomplete = 'off';
+    approvals.value = Object.hasOwn(data, 'required_approvals') ? String(data.required_approvals) : '';
+    const quorum = item(doc, group, 'p');
+    const describeQuorum = () => {
+      const count = reviewers.value.split(/[\r\n,]+/u).filter(value => value !== '').length;
+      const needed = approvals.value === '' ? count : approvals.value;
+      quorum.textContent = `${needed} of ${count} listed reviewers must approve the exact candidate. The PR opener and merge submitter cannot contribute votes. Other reviewers do not veto a satisfied quorum.`;
+    };
+    describeQuorum();
     const remove = item(doc, group, 'button', 'Remove this branch rule'); remove.type = 'button';
     const required_checks = data.required_checks ?? [];
     if (required_checks.length) item(doc, group, 'pre',
       `Required workflow checks (preserved by this editor; configure through the protection CLI or API):\n${JSON.stringify(required_checks, null, 2)}`);
-    const row = { reference, reviewers, remove, required_checks }; rows.push(row);
+    const row = { reference, reviewers, approvals, remove, required_checks }; rows.push(row);
     reference.addEventListener('input', () => {
       readable.textContent = 'Edited exact branch bytes; inspect the complete replacement in the preview.'; changed();
     });
-    reviewers.addEventListener('input', changed);
+    reviewers.addEventListener('input', () => { describeQuorum(); changed(); });
+    approvals.addEventListener('input', () => { describeQuorum(); changed(); });
     remove.addEventListener('click', event => {
       event.preventDefault();
       if (operation || client.busy || client.pending || !client.connected || client.recoveryOnly || !client.observed?.policy) return;
@@ -664,11 +676,17 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     // repairs a malformed ID. The wire policy validator remains authoritative.
     return input.value.split(/[\r\n,]+/u).filter(value => value !== '');
   };
+  function approvalCount(value) {
+    if (!/^(0|[1-9][0-9]?)$/.test(value)) fail('Use a whole approval count, or leave it blank for all reviewers.');
+    return Number(value);
+  }
   function draft() {
+    if (rows.some(row => row.approvals.validity?.badInput)) fail('Use a whole approval count, or leave it blank for all reviewers.');
     if (rows.some(row => row.reference.value.length > 2048)) fail('A branch byte string exceeds its editing limit.');
     return { replacement: protectionPolicy({ administrators: people(administrators),
       branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers),
-        ...(row.required_checks.length ? { required_checks: row.required_checks } : {}) })) }), clear: clear.checked };
+        ...(row.required_checks.length ? { required_checks: row.required_checks } : {}),
+        ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}) })) }), clear: clear.checked };
   }
   function requireDraftAccess() {
     if (!client.connected || client.recoveryOnly || client.pending || !client.observed?.policy) fail('Load an installed policy with an ordinary protection connection and no pending request.');

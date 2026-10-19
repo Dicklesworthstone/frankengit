@@ -36,9 +36,12 @@ impl RequiredWorkflowCheck {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectedBranch {
     pub name: RefName,
-    /// Every listed principal must approve the exact candidate. The original
-    /// PR opener and merge submitter cannot satisfy these requirements.
+    /// Eligible principals whose latest exact-candidate votes can count. The
+    /// original PR opener and merge submitter cannot satisfy this requirement.
     pub reviewers: Vec<PrincipalId>,
+    /// Required distinct approvals. Legacy policies decode to reviewers.len();
+    /// review-bearing rules require 1..=reviewers.len(), check-only rules zero.
+    pub required_approvals: u16,
     /// Strictly sorted, unique exact selectors. Empty grants no workflow trust.
     pub required_checks: Vec<RequiredWorkflowCheck>,
 }
@@ -70,6 +73,11 @@ impl ReviewProtection {
             if !branch.reviewers.is_empty() {
                 principals(&branch.reviewers, MAX_BRANCH_REVIEWERS)?;
             }
+            if usize::from(branch.required_approvals) > branch.reviewers.len()
+                || (branch.required_approvals == 0) != branch.reviewers.is_empty()
+            {
+                return Err(invalid_native("review_protection.required_approvals"));
+            }
             if (branch.reviewers.is_empty() && branch.required_checks.is_empty())
                 || branch.required_checks.len() > MAX_BRANCH_REQUIRED_CHECKS
                 || branch
@@ -90,6 +98,14 @@ impl ReviewProtection {
         self.branches
             .iter()
             .any(|branch| !branch.required_checks.is_empty())
+    }
+    /// A non-unanimous rule requires the explicit quorum wire kind. Unanimous
+    /// defaults retain their historical canonical bytes and request identity.
+    #[must_use]
+    pub fn has_review_quorum(&self) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| usize::from(branch.required_approvals) != branch.reviewers.len())
     }
     #[must_use]
     pub fn branch(&self, name: &RefName) -> Option<&ProtectedBranch> {
@@ -130,15 +146,20 @@ impl NativeProtectionEvent {
             out.write_opaque_id(id.as_bytes());
         }
         out.write_scalar(self.protection.branches.len() as u32);
+        let with_quorum = self.protection.has_review_quorum();
+        let with_checks = with_quorum || self.protection.has_required_checks();
         for branch in &self.protection.branches {
             out.write_ref_name(&branch.name)?;
             out.write_scalar(branch.reviewers.len() as u32);
             for id in &branch.reviewers {
                 out.write_opaque_id(id.as_bytes());
             }
-            // Kind 9 retains every historical byte. Kind 13 requires the new
-            // fields on EVERY branch, including branches with only reviewers.
-            if self.protection.has_required_checks() {
+            // Kinds 9 and 13 retain every historical byte. Kind 14 carries
+            // the threshold and check count on EVERY branch, even empty checks.
+            if with_quorum {
+                out.write_scalar(branch.required_approvals);
+            }
+            if with_checks {
                 out.write_scalar(branch.required_checks.len() as u32);
                 for check in &branch.required_checks {
                     out.write_ref_name(&check.source_ref)?;
@@ -150,7 +171,11 @@ impl NativeProtectionEvent {
         }
         Ok(())
     }
-    pub(super) fn read(input: &mut Decoder<'_>, with_checks: bool) -> Result<Self, CodecRefusal> {
+    pub(super) fn read(
+        input: &mut Decoder<'_>,
+        with_checks: bool,
+        with_quorum: bool,
+    ) -> Result<Self, CodecRefusal> {
         fn count(
             input: &mut Decoder<'_>,
             field: &'static str,
@@ -188,6 +213,11 @@ impl NativeProtectionEvent {
         for _ in 0..n {
             let name = input.read_ref_name()?;
             let reviewers = people(input, MAX_BRANCH_REVIEWERS, with_checks)?;
+            let required_approvals = if with_quorum {
+                input.read_scalar::<u16>("review_protection.required_approvals")?
+            } else {
+                reviewers.len() as u16
+            };
             let mut required_checks = Vec::new();
             if with_checks {
                 let n = count(
@@ -220,6 +250,7 @@ impl NativeProtectionEvent {
             branches.push(ProtectedBranch {
                 name,
                 reviewers,
+                required_approvals,
                 required_checks,
             });
         }
@@ -232,8 +263,11 @@ impl NativeProtectionEvent {
             },
         };
         value.validate()?;
-        // There is exactly one canonical spelling for a review-only policy.
-        if value.protection.has_required_checks() != with_checks {
+        // Reject redundant new spellings of historical unanimous policies.
+        if value.protection.has_review_quorum() != with_quorum
+            || (!with_quorum && value.protection.has_required_checks() != with_checks)
+            || (with_quorum && !with_checks)
+        {
             return Err(invalid_native("review_protection.check_kind"));
         }
         Ok(value)
@@ -317,3 +351,6 @@ pub fn validate_transition(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod quorum_tests;

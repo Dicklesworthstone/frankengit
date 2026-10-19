@@ -223,12 +223,18 @@ export function protectionPolicy(value) {
   protectionFields(value, ['administrators', 'branches']);
   if (!Array.isArray(value.branches) || value.branches.length > 64) fail('Select at most 64 protected branches.');
   const branches = value.branches.map(row => {
-    protectionFields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : [])]);
+    protectionFields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
+      ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : [])]);
     const checks = protectionChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
-    // Keep the historical empty-check spelling so saved review-only request
-    // receipts retain their original intent digest and retry identity.
-    return { reference_hex: protectionBranch(row.reference_hex), required_reviewers: protectionPeople(row.required_reviewers, checks.length > 0),
-      ...(checks.length ? { required_checks: checks } : {}) };
+    const reviewers = protectionPeople(row.required_reviewers, checks.length > 0);
+    const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
+    if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
+        approvals > reviewers.length) fail('Required approvals must be 1 through the number of eligible reviewers, or 0 for a check-only branch.');
+    // Preserve the historical spelling of default unanimity and empty checks
+    // so saved v1 receipts retain their original digest and retry identity.
+    return { reference_hex: protectionBranch(row.reference_hex), required_reviewers: reviewers,
+      ...(checks.length ? { required_checks: checks } : {}),
+      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('Duplicate protected branch.');
   return { administrators: protectionPeople(value.administrators), branches };
@@ -263,9 +269,14 @@ export function protectionChanges(before, after) {
     const nextChecks = (next.get(name)?.required_checks ?? []).map(value => JSON.stringify(value));
     const checksAdded = difference(nextChecks, oldChecks).map(value => JSON.parse(value));
     const checksRemoved = difference(oldChecks, nextChecks).map(value => JSON.parse(value));
-    if (added.length || removed.length || checksAdded.length || checksRemoved.length) branches.push({ reference_hex: name,
+    const oldApprovals = old.get(name)?.required_approvals ?? old.get(name)?.required_reviewers.length ?? null;
+    const nextApprovals = next.get(name)?.required_approvals ?? next.get(name)?.required_reviewers.length ?? null;
+    const quorumChanged = oldApprovals !== nextApprovals &&
+      (Object.hasOwn(old.get(name) ?? {}, 'required_approvals') || Object.hasOwn(next.get(name) ?? {}, 'required_approvals'));
+    if (added.length || removed.length || checksAdded.length || checksRemoved.length || quorumChanged) branches.push({ reference_hex: name,
       change: !old.has(name) ? 'added' : !next.has(name) ? 'removed' : 'updated', added, removed,
-      ...(checksAdded.length || checksRemoved.length ? { checks_added: checksAdded, checks_removed: checksRemoved } : {}) });
+      ...(checksAdded.length || checksRemoved.length ? { checks_added: checksAdded, checks_removed: checksRemoved } : {}),
+      ...(quorumChanged ? { required_approvals_before: oldApprovals, required_approvals_after: nextApprovals } : {}) });
   }
   return { administrators_added: difference(after.administrators, before.administrators),
     administrators_removed: difference(before.administrators, after.administrators), branches };
@@ -277,6 +288,8 @@ function protectionBody(source, replacement, clear) {
     required_reviewer: replacement.branches.flatMap(row => row.required_reviewers.map(person => `${row.reference_hex}:${person}`)),
     required_check: replacement.branches.flatMap(row => (row.required_checks ?? []).map(check =>
       `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(utf8.encode(check.job))}`)),
+    required_approvals: replacement.branches.filter(row => Object.hasOwn(row, 'required_approvals'))
+      .map(row => `${row.reference_hex}:${row.required_approvals}`),
     ...(clear ? { clear: 'true' } : {}) });
 }
 async function protectionIntent(value, crypto) {

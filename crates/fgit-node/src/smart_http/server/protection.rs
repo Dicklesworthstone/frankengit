@@ -34,7 +34,7 @@ const MAX_COMMAND_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_FIELDS: usize = 3
     + MAX_POLICY_ADMINISTRATORS
-    + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS);
+    + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS + 1);
 
 /// Recognize the API family before a malformed suffix can fall through to Git.
 pub(super) fn is_route(target: &str) -> bool {
@@ -271,6 +271,7 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
     }
     let (mut expected_version, mut expected_epoch, mut clear) = (None, None, None);
     let mut administrators = BTreeSet::new();
+    let mut quorums = BTreeMap::<RefName, u16>::new();
     let mut branches: BTreeMap<RefName, (BTreeSet<PrincipalId>, BTreeSet<RequiredWorkflowCheck>)> =
         BTreeMap::new();
     for (name, value) in parse_form(bytes, MAX_COMMAND_FIELDS)? {
@@ -302,6 +303,23 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
                 }
                 if reviewers.len() > MAX_BRANCH_REVIEWERS || branches.len() > MAX_PROTECTED_BRANCHES
                 {
+                    return Err(ApiError::too_large());
+                }
+            }
+            "required_approvals" => {
+                let (name, count) = value
+                    .split_once(':')
+                    .ok_or_else(|| ApiError::bad("invalid_required_approvals"))?;
+                let name = reference(name)?;
+                let count = u16::try_from(parse_decimal(count)?)
+                    .map_err(|_| ApiError::bad("invalid_required_approvals"))?;
+                if usize::from(count) > MAX_BRANCH_REVIEWERS {
+                    return Err(ApiError::bad("invalid_required_approvals"));
+                }
+                if quorums.insert(name, count).is_some() {
+                    return Err(ApiError::bad("duplicate_required_approvals"));
+                }
+                if quorums.len() > MAX_PROTECTED_BRANCHES {
                     return Err(ApiError::too_large());
                 }
             }
@@ -364,11 +382,18 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
     if branches.is_empty() != clear.is_some() {
         return Err(ApiError::bad("explicit_protection_replacement_required"));
     }
+    if quorums.keys().any(|name| !branches.contains_key(name)) {
+        return Err(ApiError::bad("approval_count_without_branch"));
+    }
     let protection = ReviewProtection {
         administrators: administrators.into_iter().collect(),
         branches: branches
             .into_iter()
             .map(|(name, (reviewers, required_checks))| ProtectedBranch {
+                required_approvals: quorums
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(reviewers.len() as u16),
                 required_checks: required_checks.into_iter().collect(),
                 name,
                 reviewers: reviewers.into_iter().collect(),
@@ -468,7 +493,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
             .iter()
             .map(|branch| {
                 format!(
-                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_checks\":[{}]}}",
+                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"required_checks\":[{}]}}",
                 quote(&hex(branch.name.as_bytes())),
                 branch
                     .reviewers
@@ -476,6 +501,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
                     .map(|id| quote(&id.to_string()))
                     .collect::<Vec<_>>()
                     .join(","),
+                branch.required_approvals,
                 branch.required_checks.iter().map(|check| format!(
                     "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                     quote(&hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),

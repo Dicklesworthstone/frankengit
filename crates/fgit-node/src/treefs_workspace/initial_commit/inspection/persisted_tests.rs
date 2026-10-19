@@ -249,6 +249,7 @@ fn successful_inspection_grants_no_branch_protection_exception_and_pins_remain_s
                     protection: ReviewProtection {
                         administrators: vec![actor(1)],
                         branches: vec![ProtectedBranch {
+                            required_approvals: 1,
                             required_checks: Vec::new(),
                             name: reference(),
                             reviewers: vec![actor(3)],

@@ -72,6 +72,7 @@ fn install(node: &OneNode, required: &RequiredWorkflowCheck, key: &[u8]) -> Prot
             branches: ["main", "release"]
                 .into_iter()
                 .map(|name| ProtectedBranch {
+                    required_approvals: 0,
                     name: branch(name),
                     reviewers: Vec::new(),
                     required_checks: vec![required.clone()],

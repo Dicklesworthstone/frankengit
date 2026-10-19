@@ -100,11 +100,18 @@ export function policy(value) {
   fields(value, ['administrators', 'branches']);
   if (!Array.isArray(value.branches) || value.branches.length > LIMITS.branches) fail('invalid_branch_count');
   const branches = value.branches.map(row => {
-    fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : [])]);
+    fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
+      ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : [])]);
     const checks = requiredChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
-    // Empty defaults preserve the exact normalized spelling of saved v1 intents.
-    return { reference_hex: branchHex(row.reference_hex), required_reviewers: people(row.required_reviewers, LIMITS.reviewers, checks.length > 0),
-      ...(checks.length ? { required_checks: checks } : {}) };
+    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0);
+    const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
+    if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
+        approvals > reviewers.length) fail('invalid_required_approval_count');
+    // Default unanimity and empty checks preserve saved v1 intent bytes, hashes,
+    // request bodies and retry identities. An explicit smaller quorum survives.
+    return { reference_hex: branchHex(row.reference_hex), required_reviewers: reviewers,
+      ...(checks.length ? { required_checks: checks } : {}),
+      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('duplicate_branch');
   return { administrators: people(value.administrators, LIMITS.administrators), branches };
@@ -133,6 +140,9 @@ function command(source, replacement, clear) {
   for (const row of replacement.branches) for (const person of row.required_reviewers) form.append('required_reviewer', `${row.reference_hex}:${person}`);
   for (const row of replacement.branches) for (const check of row.required_checks ?? []) {
     form.append('required_check', `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${Buffer.from(check.job).toString('hex')}`);
+  }
+  for (const row of replacement.branches) if (Object.hasOwn(row, 'required_approvals')) {
+    form.append('required_approvals', `${row.reference_hex}:${row.required_approvals}`);
   }
   if (clear) form.set('clear', 'true');
   const body = form.toString();

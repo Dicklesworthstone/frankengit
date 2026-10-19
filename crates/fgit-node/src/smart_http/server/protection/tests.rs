@@ -443,3 +443,75 @@ fn check_only_http_commands_preserve_exact_selectors_and_read_representation() {
         assert!(parse_command(malformed.as_bytes()).is_err());
     }
 }
+
+#[test]
+fn approval_quorum_http_is_branch_bound_canonical_and_reported_losslessly() {
+    let main = hex(b"refs/heads/main");
+    let body = format!(
+        "{}&required_reviewer={main}:{}&required_reviewer={main}:{}",
+        form(),
+        person(3),
+        person(4)
+    );
+    let legacy = parse_command(body.as_bytes()).unwrap();
+    assert_eq!(legacy.protection.branches[0].required_approvals, 3);
+    let explicit_default = format!("{body}&required_approvals={main}:3");
+    assert_eq!(parse_command(explicit_default.as_bytes()).unwrap(), legacy);
+    let quorum = format!("{body}&required_approvals={main}:2");
+    let command = parse_command(quorum.as_bytes()).unwrap();
+    assert_eq!(command.protection.branches[0].required_approvals, 2);
+    assert_eq!(
+        command.protection.branches[0].reviewers,
+        legacy.protection.branches[0].reviewers
+    );
+    assert!(
+        policy_json(&command.protection)
+            .unwrap()
+            .contains("\"required_approvals\":2")
+    );
+    let reordered = quorum.split('&').rev().collect::<Vec<_>>().join("&");
+    assert_eq!(parse_command(reordered.as_bytes()).unwrap(), command);
+    assert!(parse_command(format!("{quorum}&required_approvals={main}:2").as_bytes()).is_err());
+}
+
+#[test]
+fn approval_quorum_http_refuses_noncanonical_ineligible_and_unlisted_requirements() {
+    let main = hex(b"refs/heads/main");
+    for count in [
+        "0", "2", "33", "65536", "01", "-1", "%2b1", "1.0", "1e0", "",
+    ] {
+        let body = format!("{}&required_approvals={main}:{count}", form());
+        assert!(parse_command(body.as_bytes()).is_err(), "{count}");
+    }
+    let orphan = format!(
+        "{}&required_approvals={}:1",
+        form(),
+        hex(b"refs/heads/unlisted")
+    );
+    assert!(parse_command(orphan.as_bytes()).is_err());
+    let clear = format!(
+        "expected_version=1&expected_epoch=2&administrator={}&clear=true&required_approvals={main}:0",
+        person(1)
+    );
+    assert!(parse_command(clear.as_bytes()).is_err());
+}
+
+#[test]
+fn check_only_http_accepts_zero_approval_default_and_refuses_positive_quorum() {
+    let main = hex(b"refs/heads/main");
+    let body = format!(
+        "expected_version=1&expected_epoch=2&administrator={}&required_check={main}:{}:{}:{}:{}",
+        person(1),
+        hex(b"refs/heads/ci"),
+        person(7),
+        "55".repeat(32),
+        hex(b"test"),
+    );
+    let legacy = parse_command(body.as_bytes()).unwrap();
+    assert_eq!(legacy.protection.branches[0].required_approvals, 0);
+    assert_eq!(
+        parse_command(format!("{body}&required_approvals={main}:0").as_bytes()).unwrap(),
+        legacy
+    );
+    assert!(parse_command(format!("{body}&required_approvals={main}:1").as_bytes()).is_err());
+}

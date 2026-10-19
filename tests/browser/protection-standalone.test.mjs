@@ -100,3 +100,24 @@ test('reviewer editor preserves exact workflow selectors and check-only rows', (
   assert.throws(() => editorPolicy(actor, `${hex('refs/heads/new')} -`, branches), /configured checks/);
   assert.deepEqual(editorPolicy(actor, '', branches), { administrators: [actor], branches: [] });
 });
+
+test('standalone editor displays N-of-M and preserves quorum while eligible reviewers change', async () => {
+  const reference = hex('refs/heads/main');
+  const members = [reviewer, 'c'.repeat(32), 'd'.repeat(32)];
+  const branches = [{ reference_hex: reference, required_reviewers: members, required_approvals: 2 }];
+  const h = harness({ async load() { const s = snapshot(); s.policy.branches = branches; return s; } });
+  await h.connect();
+  assert.match(h.get('policy').textContent, /2 of 3 listed reviewers/);
+  assert.equal(h.get('rules').value, `${reference} ${members.join(',')} 2`);
+  const edited = editorPolicy(actor, `${reference} ${[...members, 'e'.repeat(32)].join(',')}`, branches);
+  assert.equal(edited.branches[0].required_approvals, 2);
+  assert.equal(edited.branches[0].required_reviewers.length, 4);
+  const all = editorPolicy(actor, `${reference} ${members.join(',')} all`, branches);
+  assert.equal(Object.hasOwn(all.branches[0], 'required_approvals'), false);
+  const one = editorPolicy(actor, `${reference} ${members.join(',')} 1`, branches);
+  assert.equal(one.branches[0].required_approvals, 1);
+  for (const count of ['0', '4', '01', '-1', '+1', '1.0', '1e0', '33']) {
+    assert.throws(() => editorPolicy(actor, `${reference} ${members.join(',')} ${count}`, branches));
+  }
+  assert.throws(() => editorPolicy(actor, `${reference} ${reviewer}`, branches), /Approval count/);
+});
