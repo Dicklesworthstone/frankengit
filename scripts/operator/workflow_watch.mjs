@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { absolute, contains, directory, executable, fail, lock, names, parseJson,
   readPrivate, runNative, writeNew } from './workflow_watch_io.mjs';
 import { artifactArguments, artifactConfiguration, verifyArtifactContract, verifyArtifactWorkflows } from './workflow_watch_artifacts.mjs';
+import { verifyArtifactReceipts } from './workflow_artifact_report.mjs';
 
 const hex = bytes => Buffer.from(bytes).toString('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
@@ -308,6 +309,7 @@ export function dispatchReport(config, intent, report) {
         ['authoritative_check', 'hostile_code_isolated', 'published'].some(key => run[key] !== false) || typeof run.succeeded !== 'boolean') fail('Native child report changed identity or did not finish cleanup.');
     verifyArtifactContract(config.artifacts, run);
     executionReport(run, plan, totals, definition.graph_sha256);
+    verifyArtifactReceipts(config.artifacts, run, totals);
   }
   if (report.succeeded !== (!stopped && report.runs.every(run => run.succeeded))) fail('Native aggregate success disagrees with child observations.');
   return { schema: 'frankengit-workflow-watch-result-v1', intent_sha256: digest(encode(intent)),

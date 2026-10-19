@@ -70,19 +70,54 @@ if (!dispatch) {
   await appendFile(join(storage, 'effects.ndjson'), `${JSON.stringify({ run: batchId, commit: control.commit })}\n`, { mode: 0o600 });
   if (control.dispatch_delay) await sleep(control.dispatch_delay);
   if (control.no_report) { console.error('fixture interrupted after execution marker'); process.exit(2); }
+  // Deliberately synthetic observations with the actual native receipt shape.
+  // Contract-only echoes cannot stand in for producer/consumer completion.
+  const artifactJobs = [], artifactReceipts = [], inputReceipts = [];
+  if (artifactContract) {
+    const captures = artifactContract.selections.filter(row => row.workflow_path_hex === path);
+    const inputs = (artifactContract.input_delivery?.selections ?? []).filter(row => row.workflow_path_hex === path);
+    const ids = [...new Set([...captures.map(row => row.job_id_hex), ...inputs.map(row => row.consumer_job_id_hex)])].sort();
+    const finished = new Map();
+    while (finished.size < ids.length) {
+      const ready = ids.find(id => !finished.has(id) && inputs.filter(row => row.consumer_job_id_hex === id)
+        .every(row => finished.has(row.producer_job_id_hex)));
+      if (!ready) throw new Error('cyclic or absent fixture artifact producer');
+      const incoming = inputs.filter(row => row.consumer_job_id_hex === ready);
+      const skipped = incoming.some(row => finished.get(row.producer_job_id_hex) !== 'succeeded');
+      const outcome = skipped ? 'skipped' : control.job_failure ? 'failed' : 'succeeded';
+      artifactJobs.push({ id: Buffer.from(ready, 'hex').toString(), outcome, failure: null,
+        steps: skipped ? [] : [{ index: 0, name: null, script: 'alg:2:' + 'f'.repeat(64), outcome,
+          exit_code: control.job_failure ? 1 : 0, stdout_hex: '', stderr_hex: '', elapsed_millis: 1,
+          output_complete: true, workspace_retained: false, ...control.step_patch }] });
+      if (!skipped) {
+        if (incoming.length) inputReceipts.push({ job_id_hex: ready, workspace_plan_sha256: hash(`fixture-workspace:${runId}:${ready}`),
+          inputs: incoming.map(row => {
+            const producer = artifactReceipts.find(receipt => receipt.job_id_hex === row.producer_job_id_hex);
+            return { producer_job_id_hex: row.producer_job_id_hex, producer_manifest_id_sha256: producer.manifest_id_sha256,
+              output: { ...producer.outputs.find(output => output.path_hex === row.output_path_hex) },
+              destination_path_hex: hex('.fgit-artifacts/') + row.destination_hex };
+          }) });
+        const selectedOutputs = captures.filter(row => row.job_id_hex === ready);
+        if (selectedOutputs.length) artifactReceipts.push({ job_id_hex: ready, manifest_id_sha256: hash(`fixture-manifest:${runId}:${ready}`),
+          outputs: selectedOutputs.map(row => ({ path_hex: row.output_path_hex, artifact_id_sha256: hash(`fixture-artifact:${runId}:${ready}:${row.output_path_hex}`),
+            payload_sha256: hash('x'), payload_bytes: 1, executable: false })) });
+      }
+      finished.set(ready, outcome);
+    }
+  }
   const run = { type: 'trusted_workflow_run', schema_version: 1, tenant_id: control.tenant, repository_id: control.repository,
     repository_incarnation: control.incarnation, source_head: control.source_head, source_rcr: 'fixture-rcr', source_commit: plan.source_commit,
     source_tree: plan.source_tree, object_format: control.format, source_ref_hex: control.ref_hex, workflow_blob: definition.blob,
     workflow_path_hex: path, read_prefixes_hex: prefixes, run_id: runId, run_directory_hex: hex(join(batch, `workflow-${runId}`)),
     authoritative_check: false, hostile_code_isolated: false, published: false, input_kind: 'canonical', executed_commit: plan.source_commit,
     executed_tree: plan.source_tree, candidate: null, merge: null, succeeded: !control.job_failure, workspaces_closed: true,
-    request_interrupted: false, ...(artifactContract ? { artifact_contract: artifactContract, artifacts: [],
-      ...(artifactContract.input_delivery ? { artifact_inputs: [] } : {}) } : {}),
+    request_interrupted: false, ...(artifactContract ? { artifact_contract: artifactContract, artifacts: artifactReceipts,
+      ...(artifactContract.input_delivery ? { artifact_inputs: inputReceipts } : {}) } : {}),
     execution: { schema_version: 1, profile: 'trusted-local-foreground-v1', authoritative_check: false,
       workflow_source: 'alg:2:' + 'b'.repeat(64), workflow_graph: 'alg:2:' + 'c'.repeat(64),
       shell: '/bin/sh', shell_flags: ['-eu', '-c'], environment: { PATH: '/usr/bin:/bin', LANG: 'C' },
       step_timeout_millis: 60000, run_timeout_millis: 600000, stream_bytes: 262144, total_output_bytes: 16777216,
-      succeeded: !control.job_failure, jobs: [{ id: 'fixture-job', outcome: control.job_failure ? 'failed' : 'succeeded', failure: null,
+      succeeded: !control.job_failure, jobs: artifactContract ? artifactJobs : [{ id: 'fixture-job', outcome: control.job_failure ? 'failed' : 'succeeded', failure: null,
         steps: [{ index: 0, name: null, script: 'alg:2:' + 'f'.repeat(64), outcome: control.job_failure ? 'failed' : 'succeeded',
           exit_code: control.job_failure ? 1 : 0, stdout_hex: '', stderr_hex: '', elapsed_millis: 1, output_complete: true, workspace_retained: false, ...control.step_patch }] }],
       ...control.execution_patch }, ...control.run_patch };
