@@ -474,3 +474,5 @@ fn non_fast_forward_branch_update_is_refused_and_fast_forward_is_admitted() {
         node.shutdown().unwrap();
     }
 }
+
+mod transactions;

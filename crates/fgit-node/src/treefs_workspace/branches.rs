@@ -27,6 +27,8 @@ use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 
+mod transaction;
+
 const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::BranchOperation(reason)
 }
@@ -111,6 +113,32 @@ fn branch_request(
             "one branch update or one two-command rename is required",
         ));
     }
+    if commands.len() == 2 {
+        let deletion = commands.iter().find_map(|command| {
+            match (command.expected_old, command.proposed_new) {
+                (ExpectedOld::Exactly(old), ProposedNew::Delete) => Some(old),
+                _ => None,
+            }
+        });
+        let creation = commands.iter().find_map(|command| {
+            match (command.expected_old, command.proposed_new) {
+                (ExpectedOld::Absent, ProposedNew::Update(new)) => Some(new),
+                _ => None,
+            }
+        });
+        if deletion.is_none() || deletion != creation {
+            return Err(invalid(
+                "rename must atomically delete and create the same exact commit",
+            ));
+        }
+    }
+    branch_commands_request(format, commands)
+}
+
+fn branch_commands_request(
+    format: GitHashAlgorithm,
+    commands: &[RefCommand],
+) -> Result<SemanticRequest, NodeWorkspaceRefusal> {
     for command in commands {
         if !command.name.as_bytes().starts_with(b"refs/heads/") || command.force {
             return Err(invalid("only non-forced branch references are accepted"));
@@ -135,25 +163,6 @@ fn branch_request(
             .any(|oid| oid.is_zero() || oid.algorithm() != format)
         {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
-        }
-    }
-    if commands.len() == 2 {
-        let deletion = commands.iter().find_map(|command| {
-            match (command.expected_old, command.proposed_new) {
-                (ExpectedOld::Exactly(old), ProposedNew::Delete) => Some(old),
-                _ => None,
-            }
-        });
-        let creation = commands.iter().find_map(|command| {
-            match (command.expected_old, command.proposed_new) {
-                (ExpectedOld::Absent, ProposedNew::Update(new)) => Some(new),
-                _ => None,
-            }
-        });
-        if deletion.is_none() || deletion != creation {
-            return Err(invalid(
-                "rename must atomically delete and create the same exact commit",
-            ));
         }
     }
     SemanticRequest::build(
@@ -190,10 +199,25 @@ impl OneNode {
         commands: &[RefCommand],
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
-        let authenticated = session
+        session
             .authenticated_session()
             .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
         let semantic = branch_request(self.object_format, commands)?;
+        self.admit_branch_commands_durable_in(request, session, commands, semantic, limits)
+            .await
+    }
+
+    async fn admit_branch_commands_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        commands: &[RefCommand],
+        semantic: SemanticRequest,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
         let attempt = SealAttempt {
             tenant_id: self.tenant_id,
             repository_id: self.repository_id,
@@ -254,7 +278,7 @@ impl OneNode {
             }
         }
         let mut receive_limits = ReceiveLimits::default();
-        receive_limits.max_commands = 2;
+        receive_limits.max_commands = commands.len();
         receive_limits.pack.max_object_bytes = receive_limits
             .pack
             .max_object_bytes
