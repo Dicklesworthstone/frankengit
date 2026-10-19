@@ -247,3 +247,10 @@ redirects, response bounds, wrong principals, broken/stalled output and strict
 CLI argument refusals have explicit tests. This remains JS operator/HTTP-schema
 and private-file validation, not Rust server/admission/CAS or maximum-capacity
 HTTP performance evidence.
+
+## Coordinated branch changes
+
+[Atomic branch transactions](NATIVE_BRANCH_TRANSACTIONS.md) expose the same native
+admission path for up to 64 distinct creations, fast-forward updates and deletions
+in one authority publication. This native trusted-local command is distinct from
+the create-only external operator above; existing bootstrap behavior is unchanged.

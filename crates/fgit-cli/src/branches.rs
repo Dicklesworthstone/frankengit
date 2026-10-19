@@ -1,6 +1,7 @@
 //! Trusted local branch commands; the node owns validation and publication.
 mod inventory;
 mod options;
+mod transaction;
 pub fn run_inventory(args: &[String]) -> Result<u8, String> {
     inventory::run(args)
 }
@@ -25,6 +26,17 @@ const USAGE: &str =
   delete: --expected-tip <old-oid>
   rename: --expected-tip <old-oid> (--destination <refs/heads/name> | --destination-hex <bytes>)
 
+usage: fg branch transaction <storage-root> <tenant-id> <repository-id>
+  --trusted-local --principal <id> (--idempotency-key <key> | --key-stdin)
+  [--object-format sha1|sha256]
+  --create <full-ref> <target> | --update <full-ref> <expected-tip> <target>
+  | --delete <full-ref> <expected-tip> [repeat for 1..64 distinct branches]
+  Use --create-hex, --update-hex or --delete-hex for exact reference bytes.
+
+A transaction publishes ALL changes together or none; no per-command partial
+success. Reordering distinct commands retains the same sealed request identity.
+No --force, unspecified old tips, implicit branch reads or new object uploads.
+
 usage: fg branch list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--object-format sha1|sha256] [--limit <1..100>]
   [(--after <full-reference> | --after-hex <bytes>) --expected-head <snapshot-token>]
@@ -44,7 +56,7 @@ pub fn run(args: &[String]) -> Result<u8, String> {
             && args[1] == "--help"
             && matches!(
                 args[0].as_str(),
-                "list" | "create" | "update" | "delete" | "rename"
+                "list" | "create" | "update" | "delete" | "rename" | "transaction"
             ))
     {
         emit(&mut std::io::stdout().lock(), USAGE)?;
@@ -74,18 +86,33 @@ pub fn run(args: &[String]) -> Result<u8, String> {
             .map_err(|error| error.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         match &options.operation {
-            Operation::Mutate { commands, .. } => {
+            Operation::Mutate {
+                action, commands, ..
+            } => {
                 let session = session
                     .as_ref()
                     .ok_or("authenticated branch session missing")?;
                 let result = node
                     .runtime()
-                    .block_on(node.admit_branch_updates_durable_in(
-                        &request,
-                        session,
-                        commands,
-                        Default::default(),
-                    ))
+                    .block_on(async {
+                        if action == "transaction" {
+                            node.admit_branch_transaction_durable_in(
+                                &request,
+                                session,
+                                commands,
+                                Default::default(),
+                            )
+                            .await
+                        } else {
+                            node.admit_branch_updates_durable_in(
+                                &request,
+                                session,
+                                commands,
+                                Default::default(),
+                            )
+                            .await
+                        }
+                    })
                     .map_err(|error| match error {
                         // Local validation between the outcome lookup and the
                         // seal: this attempt provably sealed and changed nothing.

@@ -31,6 +31,9 @@ pub(super) enum Operation {
     },
 }
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
+    if args.first().is_some_and(|arg| arg == "transaction") {
+        return super::transaction::parse(args);
+    }
     parse_with_read_prefix(args, b"refs/heads/")
 }
 pub(super) fn parse_inventory(args: &[String]) -> Result<Options, String> {
@@ -253,7 +256,7 @@ fn decimal(value: &str) -> Result<u64, String> {
     }
     value.parse().map_err(|_| "decimal overflow".into())
 }
-fn unhex(value: &str, limit: usize) -> Result<Vec<u8>, String> {
+pub(super) fn unhex(value: &str, limit: usize) -> Result<Vec<u8>, String> {
     if value.is_empty()
         || value.len() > 2 * limit
         || !value.len().is_multiple_of(2)
