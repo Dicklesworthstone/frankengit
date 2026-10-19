@@ -9,6 +9,7 @@ use fgit_types::{DecisionOutcome, GitOid, PrincipalId, RefName, RepositoryAuthor
 use super::super::super::Status;
 use super::super::super::issues::{ApiError, Reply, quote, ref_fields};
 use super::request::{Operation, Page};
+use super::cursor::CursorEncoding;
 use crate::OneNode;
 
 pub(super) const MAX_REPLY_BYTES: usize = 1024 * 1024;
@@ -38,6 +39,13 @@ fn hex(bytes: &[u8]) -> String {
 }
 // The request grammar accepts only UTF-8 `after`, so native byte cursors
 // must refuse the page rather than masquerade as end-of-pagination.
+fn selected_cursor(reference: Option<&RefName>, encoding: CursorEncoding) -> Result<String, ApiError> {
+    if encoding == CursorEncoding::Hex {
+        Ok(reference.map_or_else(|| "null".into(), |name| quote(&hex(name.as_bytes()))))
+    } else {
+        cursor(reference)
+    }
+}
 fn cursor(reference: Option<&RefName>) -> Result<String, ApiError> {
     match reference {
         None => Ok("null".into()),
@@ -98,18 +106,19 @@ pub(super) fn page(
         &mut out,
         &format!(
             concat!(
-                "{{\"type\":\"source_refs\",{},\"namespace\":{},",
+                "{{\"type\":\"source_refs\",{},\"namespace\":{},{}",
                 "\"source_head\":{},\"snapshot_token\":{},\"after\":{},\"limit\":{},\"next_after\":{},",
                 "\"read_only\":true,\"transaction_created\":false,\"published\":false,",
                 "\"direct_refs_only\":true,\"refs\":["
             ),
             metadata(node),
             quote(query.namespace.as_str()),
+            if query.cursor_encoding == CursorEncoding::Hex { "\"cursor_encoding\":\"hex\"," } else { "" },
             quote(&head.to_string()),
             quote(&token),
-            cursor(query.after.as_ref())?,
+            selected_cursor(query.after.as_ref(), query.cursor_encoding)?,
             query.limit,
-            cursor(next)?
+            selected_cursor(next, query.cursor_encoding)?
         ),
         maximum,
     )?;

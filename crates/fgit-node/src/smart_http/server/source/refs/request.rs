@@ -3,6 +3,7 @@
 //! plus absent-destination create; no force or implicit-current-tip option.
 
 use std::collections::BTreeMap;
+use super::cursor::CursorEncoding;
 
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
@@ -59,6 +60,7 @@ impl Namespace {
 
 #[derive(Debug)]
 pub(super) struct Page {
+    pub cursor_encoding: CursorEncoding,
     pub namespace: Namespace,
     pub after: Option<RefName>,
     pub limit: u16,
@@ -165,9 +167,10 @@ impl<'a> Request<'a> {
                     "tags" => Namespace::Tags,
                     _ => return Err(ApiError::bad("invalid_ref_namespace")),
                 };
+                let cursor_encoding = CursorEncoding::parse(fields.remove("cursor_encoding").as_deref())?;
                 let after = fields
                     .remove("after")
-                    .map(|name| reference(&name, namespace.prefix()))
+                    .map(|name| cursor_encoding.reference(&name, namespace.prefix()))
                     .transpose()?;
                 let expected_head = fields
                     .remove("expected_head")
@@ -185,6 +188,7 @@ impl<'a> Request<'a> {
                     return Err(ApiError::bad("snapshot_required"));
                 }
                 Command::List(Page {
+                    cursor_encoding,
                     namespace,
                     after,
                     limit: limit as u16,

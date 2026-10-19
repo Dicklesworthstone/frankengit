@@ -2,6 +2,7 @@
 //! No transport-local refs, object uploads, default-branch rewrite or forge
 //! transitions. The shared source gateway owns authentication and quotas.
 
+mod cursor;
 mod output;
 mod request;
 mod transaction;
