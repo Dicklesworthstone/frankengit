@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 45,
-  "active_count": 41,
+  "total_count": 46,
+  "active_count": 42,
   "unsupported_count": 4,
   "tools": [
     {
@@ -846,6 +846,34 @@
       "refusal_codes": ["pull_not_found", "version_mismatch", "candidate_tip_mismatch", "idempotency_key_reused"],
       "cli_command": "fg pr review",
       "rest_api_path": "POST /repos/{id}/pulls/{number}/reviews"
+    },
+    {
+      "name": "frankengit_pull_reviews",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Read each reviewer's latest decision on a pull request at one retained authority snapshot; never an approval count or merge permission.",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 65536,
+        "max_depth": 16,
+        "max_items": 100,
+        "max_fan_out": 8,
+        "max_duration_ms": 30000
+      },
+      "pagination": "snapshot_bound_cursor",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["positive_pull_number_required", "invalid_reviewer_cursor", "invalid_limit", "snapshot_required", "snapshot_unavailable", "invalid_pull_reviews_page"],
+      "cli_command": "fg pr reviews",
+      "rest_api_path": "GET /repos/{id}/pulls/{number}/reviews"
     },
     {
       "name": "frankengit_pull_show",

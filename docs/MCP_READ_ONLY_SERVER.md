@@ -63,6 +63,18 @@ current canonical hidden-ref filtering even at a retained head; missing and
 hidden PRs are not distinguished. Metadata is not an approval count or merge
 permission (`merge_permission` is explicitly null).
 
+`frankengit_pull_reviews` (granted with PR reads) returns each reviewer's latest
+decision on PR `number` at one retained snapshot, in reviewer-ID order, with
+`limit` (1..20, default 5), `after` (the exact 32-hex `next_after` reviewer ID)
+and `expected_head` (mandatory with `after`). Each row carries the decision,
+the exact subject (PR version, source/target ref bytes as hex, tips, policy
+epoch), the candidate commit and merge base for an exact-candidate review (null
+for a source-only one), `freshness` (`Current`, `Withdrawn`, `SourceMoved`,
+`TargetMoved`, `PolicyChanged`, ...), `reviewer_is_opener` and the reviewer's
+reason as untrusted text. A page is not an approval count:
+`approvals_satisfy_policy` and `merge_permission` are explicitly null, and a
+missing PR is `found: false`, not an empty review list.
+
 `frankengit_source_tree` accepts required `reference` (full UTF-8 ref such as
 `refs/heads/main`), optional `path_hex` (omitted for the root), `limit` (1..100,
 default 50), `after_hex` (one immediate child), `expected_head`, and

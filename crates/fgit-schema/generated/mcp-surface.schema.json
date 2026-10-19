@@ -1179,6 +1179,46 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_reviews": {
+      "title": "frankengit_pull_reviews",
+      "description": "Read each reviewer's latest decision on a pull request at one retained authority snapshot; never an approval count or merge permission.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull-request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "after": {
+              "type": "string",
+              "description": "Reviewer ID cursor from next_after; requires expected_head.",
+              "x-classification": "selector_position",
+              "maxLength": 32,
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page item limit (1..20, default 5).",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Snapshot token pin; required with after.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_show": {
       "title": "frankengit_pull_show",
       "description": "Read pull request metadata from an authenticated repository snapshot. No merge permission implied.",

@@ -610,3 +610,93 @@ fn lost_merge_stdout_is_recovered_by_original_key_with_no_write_grant() {
     );
     recovery.close().unwrap();
 }
+
+#[test]
+fn review_pages_are_readable_through_mcp_after_an_mcp_review_in_both_formats() {
+    use super::pull_reviews::NAME as REVIEWS;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::new(format);
+        let mut reviewer = NodeTools::open(fixture.options(REVIEWER, true, false)).unwrap();
+        // The review page is a PR read: not granted to a review-only session.
+        assert!(!reviewer.tools().iter().any(|tool| tool.name == REVIEWS));
+        let mut server = start(&mut reviewer);
+        let approved = invoke(
+            &mut server,
+            &mut reviewer,
+            2,
+            review_writes::NAME,
+            fixture.review("approve", "0", "approve"),
+        );
+        assert_outcome(&approved, "committed");
+        let after_review = state(&reviewer.node).0;
+        reviewer.close().unwrap();
+
+        let mut options = fixture.options(MERGER, false, false);
+        options.pulls = true;
+        let mut reader = NodeTools::open(options).unwrap();
+        assert!(!reader.is_mutation(REVIEWS));
+        let mut server = start(&mut reader);
+        let page = invoke(
+            &mut server,
+            &mut reader,
+            2,
+            REVIEWS,
+            object([("number", text("7"))]).object().unwrap().clone(),
+        );
+        let page = result(&page);
+        assert_eq!(page["found"], Value::Bool(true));
+        assert_eq!(page["complete"], Value::Bool(true));
+        assert_eq!(page["merge_permission"], Value::Null);
+        assert_eq!(page["approvals_satisfy_policy"], Value::Null);
+        let Value::Array(rows) = &page["reviews"] else {
+            panic!("reviews")
+        };
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].object().unwrap();
+        assert_eq!(
+            row["reviewer"].text(),
+            Some(actor(REVIEWER).to_string().as_str())
+        );
+        assert_eq!(row["decision"].text(), Some("approve"));
+        assert_eq!(row["freshness"].text(), Some("Current"));
+        assert_eq!(
+            row["candidate_commit"].text(),
+            Some(fixture.candidate.to_string().as_str())
+        );
+        // The read published nothing; its snapshot is the review's head.
+        assert_eq!(state(&reader.node).0, after_review);
+        assert_eq!(
+            page["snapshot_token"].text(),
+            Some(head_token(after_review).as_str())
+        );
+        // A continuation pinned to that snapshot past the only reviewer is empty.
+        let tail = invoke(
+            &mut server,
+            &mut reader,
+            3,
+            REVIEWS,
+            object([
+                ("number", text("7")),
+                ("after", text(actor(REVIEWER).to_string())),
+                ("expected_head", page["snapshot_token"].clone()),
+            ])
+            .object()
+            .unwrap()
+            .clone(),
+        );
+        let Value::Array(rest) = &result(&tail)["reviews"] else {
+            panic!("reviews")
+        };
+        assert!(rest.is_empty());
+        // An unknown PR is "not found", not an empty successful review list.
+        let missing = invoke(
+            &mut server,
+            &mut reader,
+            4,
+            REVIEWS,
+            object([("number", text("99"))]).object().unwrap().clone(),
+        );
+        assert_eq!(result(&missing)["found"], Value::Bool(false));
+        reader.close().unwrap();
+    }
+}

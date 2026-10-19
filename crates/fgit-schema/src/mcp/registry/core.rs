@@ -2242,7 +2242,94 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg pr review",
         rest_api_path: "POST /repos/{id}/pulls/{number}/reviews",
     },
-    // 30. frankengit_pull_show
+    // 30. frankengit_pull_reviews
+    McpToolEntry {
+        name: "frankengit_pull_reviews",
+        version: 1,
+        entity_kind: McpEntityKind::Tool,
+        owner_subsystem: "forge",
+        support_profile: SupportProfile::Active,
+        description: "Read each reviewer's latest decision on a pull request at one retained authority snapshot; never an approval count or merge permission.",
+        read_mutation: ReadMutationClass::ReadOnly,
+        capability: CapabilityRequirement::READ_CANONICAL_OBJECT,
+        principal: PrincipalRequirement::None,
+        idempotency: IdempotencyRequirement::NotApplicable,
+        authority_root: InputAuthorityRootRequirement::ExactSnapshotToken,
+        budget: BudgetDimensions::READ_STANDARD,
+        pagination: PaginationRules::SnapshotBoundCursor,
+        disclosure: DisclosureClass::UntrustedContentData,
+        receipt: EvidenceReceiptClass::None,
+        cancellation: CancellationBehavior::ImmediateQuiescent,
+        input_fields: &[
+            McpField {
+                name: "number",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Positive decimal pull-request number.",
+                required: true,
+                max_bytes: Some(20),
+                pattern: Some("^[1-9][0-9]*$"),
+            },
+            McpField {
+                name: "after",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Reviewer ID cursor from next_after; requires expected_head.",
+                required: false,
+                max_bytes: Some(32),
+                pattern: Some("^[0-9a-f]{32}$"),
+            },
+            McpField {
+                name: "limit",
+                field_type: "integer",
+                classification: FieldClassification::SelectorPosition,
+                description: "Page item limit (1..20, default 5).",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+            McpField {
+                name: "expected_head",
+                field_type: "string",
+                classification: FieldClassification::SelectorPosition,
+                description: "Snapshot token pin; required with after.",
+                required: false,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+        ],
+        output_fields: &[
+            McpField {
+                name: "snapshot_token",
+                field_type: "string",
+                classification: FieldClassification::SystemMetadata,
+                description: "Exact repository authority snapshot token.",
+                required: true,
+                max_bytes: Some(140),
+                pattern: None,
+            },
+            McpField {
+                name: "reviews",
+                field_type: "array",
+                classification: FieldClassification::UntrustedContent,
+                description: "Latest decision, subject, candidate, freshness and untrusted reason per reviewer.",
+                required: true,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        refusal_codes: &[
+            "positive_pull_number_required",
+            "invalid_reviewer_cursor",
+            "invalid_limit",
+            "snapshot_required",
+            "snapshot_unavailable",
+            "invalid_pull_reviews_page",
+        ],
+        cli_command: "fg pr reviews",
+        rest_api_path: "GET /repos/{id}/pulls/{number}/reviews",
+    },
+    // 31. frankengit_pull_show
     McpToolEntry {
         name: "frankengit_pull_show",
         version: 1,
@@ -2304,7 +2391,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg pr show",
         rest_api_path: "GET /repos/{id}/pulls/{number}",
     },
-    // 31. frankengit_pull_update
+    // 32. frankengit_pull_update
     McpToolEntry {
         name: "frankengit_pull_update",
         version: 1,
@@ -2398,7 +2485,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg pr update",
         rest_api_path: "PATCH /repos/{id}/pulls/{number}",
     },
-    // 32. frankengit_raw_sql_query (Unsupported sentinel)
+    // 33. frankengit_raw_sql_query (Unsupported sentinel)
     McpToolEntry {
         name: "frankengit_raw_sql_query",
         version: 1,
@@ -2430,7 +2517,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "",
         rest_api_path: "",
     },
-    // 33. frankengit_ref_list
+    // 34. frankengit_ref_list
     McpToolEntry {
         name: "frankengit_ref_list",
         version: 1,
@@ -2517,7 +2604,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg refs",
         rest_api_path: "GET /repos/{id}/refs",
     },
-    // 34. frankengit_source_blame
+    // 35. frankengit_source_blame
     McpToolEntry {
         name: "frankengit_source_blame",
         version: 1,
@@ -2577,7 +2664,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg blame",
         rest_api_path: "GET /repos/{id}/blame",
     },
-    // 35. frankengit_source_blob
+    // 36. frankengit_source_blob
     McpToolEntry {
         name: "frankengit_source_blob",
         version: 1,
@@ -2671,7 +2758,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg show",
         rest_api_path: "GET /repos/{id}/blobs",
     },
-    // 36. frankengit_source_candidate
+    // 37. frankengit_source_candidate
     McpToolEntry {
         name: "frankengit_source_candidate",
         version: 1,
@@ -2736,7 +2823,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg workspace inspect",
         rest_api_path: "POST /repos/{id}/candidates/inspect",
     },
-    // 37. frankengit_source_compare
+    // 38. frankengit_source_compare
     McpToolEntry {
         name: "frankengit_source_compare",
         version: 1,
@@ -2801,7 +2888,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg diff",
         rest_api_path: "GET /repos/{id}/compare",
     },
-    // 38. frankengit_source_log
+    // 39. frankengit_source_log
     McpToolEntry {
         name: "frankengit_source_log",
         version: 1,
@@ -2879,7 +2966,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg log",
         rest_api_path: "GET /repos/{id}/commits",
     },
-    // 39. frankengit_source_publish
+    // 40. frankengit_source_publish
     McpToolEntry {
         name: "frankengit_source_publish",
         version: 1,
@@ -2962,7 +3049,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg workspace apply",
         rest_api_path: "POST /repos/{id}/commits",
     },
-    // 40. frankengit_source_search
+    // 41. frankengit_source_search
     McpToolEntry {
         name: "frankengit_source_search",
         version: 1,
@@ -3038,7 +3125,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search",
         rest_api_path: "GET /repos/{id}/search",
     },
-    // 41. frankengit_source_search_batch
+    // 42. frankengit_source_search_batch
     McpToolEntry {
         name: "frankengit_source_search_batch",
         version: 1,
@@ -3106,7 +3193,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search --batch",
         rest_api_path: "POST /repos/{id}/search/batch",
     },
-    // 42. frankengit_source_symbols
+    // 43. frankengit_source_symbols
     McpToolEntry {
         name: "frankengit_source_symbols",
         version: 1,
@@ -3213,7 +3300,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg search --symbols",
         rest_api_path: "/api/v1/source/search-symbols",
     },
-    // 43. frankengit_source_tree
+    // 44. frankengit_source_tree
     McpToolEntry {
         name: "frankengit_source_tree",
         version: 1,
@@ -3302,7 +3389,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         cli_command: "fg tree",
         rest_api_path: "GET /repos/{id}/trees",
     },
-    // 44. frankengit_transaction_outcome
+    // 45. frankengit_transaction_outcome
     McpToolEntry {
         name: "frankengit_transaction_outcome",
         version: 1,
@@ -3381,7 +3468,7 @@ mod tests {
 
     #[test]
     fn exact_tool_count_and_ordering() {
-        assert_eq!(REGISTRY.len(), 44);
+        assert_eq!(REGISTRY.len(), 45);
         for pair in REGISTRY.windows(2) {
             assert!(
                 (pair[0].name, pair[0].version) < (pair[1].name, pair[1].version),
