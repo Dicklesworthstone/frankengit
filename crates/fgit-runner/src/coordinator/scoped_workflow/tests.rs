@@ -569,6 +569,58 @@ fn admitted_timeouts_are_intersections_and_skipped_jobs_cannot_issue_green_check
     c.verify_quiescence().unwrap();
 }
 
+#[test]
+fn trusted_coordinator_enforces_graph_caps_and_retries_the_same_bound_observation() {
+    let source = "name: capped\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    timeout-minutes: 2\n    steps:\n      - run: echo first\n        timeout-minutes: 1\n      - run: echo second\n        timeout-minutes: 1\n";
+    let mut c = WorkflowCoordinator::new(
+        CoordinatorLimits::default(),
+        ResourceCeilings::new(100_000, 4096, 4096, 0, 16, 300_000).unwrap(),
+        4,
+    )
+    .unwrap();
+    let mut prepared = enqueue(
+        &mut c,
+        source,
+        1,
+        WorkflowLimits {
+            step_timeout: Duration::from_secs(300),
+            ..WorkflowLimits::default()
+        },
+        TriggerContext::trusted_push("alice"),
+    );
+    assert_eq!(prepared.limits().step_timeout, Duration::from_secs(300));
+    let mut worker = Worker::new();
+    let receipt = c
+        .execute_trusted_workflow(&mut prepared, &mut worker, 200, &|| true)
+        .unwrap();
+    assert!(receipt.report().succeeded());
+    assert_eq!(
+        receipt.report().graph,
+        WorkflowPlan::compile(source).unwrap().graph_commitment()
+    );
+    assert_eq!(worker.budgets.len(), 2);
+    assert!(
+        worker
+            .budgets
+            .iter()
+            .all(|budget| !budget.timeout.is_zero() && budget.timeout <= Duration::from_secs(60))
+    );
+    let root = receipt.commitment();
+    let events = worker.events.clone();
+    assert_eq!(
+        c.execute_trusted_workflow(&mut prepared, &mut worker, 201, &|| true)
+            .unwrap()
+            .commitment(),
+        root
+    );
+    assert_eq!(
+        worker.events, events,
+        "retries do not execute again under a new deadline"
+    );
+    c.drain_check_facts();
+    c.verify_quiescence().unwrap();
+}
+
 #[cfg(target_os = "linux")]
 mod live;
 

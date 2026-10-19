@@ -122,8 +122,8 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "job.timeout-minutes",
-        status: ConstructStatus::Unsupported,
-        reason: "a budget belongs to the effect broker's reservation, not to a YAML field the runner may ignore",
+        status: ConstructStatus::Normalized,
+        reason: "a literal integer from 1 through 60 only tightens the operator's absolute run budget; startup, steps and artifact capture share the job deadline, and cleanup remains mandatory",
     },
     Construct {
         key: "step.env",
@@ -144,6 +144,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         key: "step.run",
         status: ConstructStatus::Accepted,
         reason: "the command line, preserved verbatim; the lowering does not interpret shell syntax",
+    },
+    Construct {
+        key: "step.timeout-minutes",
+        status: ConstructStatus::Normalized,
+        reason: "a literal integer from 1 through 60 only tightens operator step, job and remaining run limits; command-only adapters refuse time caps before admission",
     },
     Construct {
         key: "step.uses",

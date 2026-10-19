@@ -4,8 +4,8 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 12,
-  "count_normalized": 8,
-  "count_unsupported": 20,
+  "count_normalized": 10,
+  "count_unsupported": 19,
   "count_ambiguous": 0,
   "constructs": [
     {
@@ -76,9 +76,9 @@
     },
     {
       "key": "job.timeout-minutes",
-      "status": "unsupported",
-      "refuses": true,
-      "reason": "a budget belongs to the effect broker's reservation, not to a YAML field the runner may ignore"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "a literal integer from 1 through 60 only tightens the operator's absolute run budget; startup, steps and artifact capture share the job deadline, and cleanup remains mandatory"
     },
     {
       "key": "step.env",
@@ -103,6 +103,12 @@
       "status": "accepted",
       "refuses": false,
       "reason": "the command line, preserved verbatim; the lowering does not interpret shell syntax"
+    },
+    {
+      "key": "step.timeout-minutes",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "a literal integer from 1 through 60 only tightens operator step, job and remaining run limits; command-only adapters refuse time caps before admission"
     },
     {
       "key": "step.uses",

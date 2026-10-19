@@ -19,7 +19,7 @@
 
 use crate::workflow::registry;
 use crate::workflow::yaml::{Node, Span};
-use crate::workflow::{StepContext, WorkflowRefusal, context, matrix};
+use crate::workflow::{StepContext, TimeoutMinutes, WorkflowRefusal, context, deadline, matrix};
 
 /// Version of the canonical byte form.
 ///
@@ -32,6 +32,9 @@ pub const CONTEXT_CANONICAL_VERSION: &str = "fgit-workflow/v2";
 
 /// Static matrix variants bind origin and all values, even unused axes.
 pub const MATRIX_CANONICAL_VERSION: &str = "fgit-workflow/v3";
+
+/// Explicit job or step deadlines bind caps in addition to context and matrices.
+pub const DEADLINE_CANONICAL_VERSION: &str = "fgit-workflow/v4";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -102,6 +105,8 @@ pub struct Step {
     pub condition: Condition,
     /// Literal process environment and workspace-relative directory.
     pub context: StepContext,
+    /// Optional local cap, intersected with job and operator time ceilings.
+    pub timeout_minutes: Option<TimeoutMinutes>,
     /// Where the step came from.
     pub span: Span,
 }
@@ -119,6 +124,8 @@ pub struct Job {
     pub steps: Vec<Step>,
     /// Dependency terminal-state predicate. Default is success().
     pub condition: Condition,
+    /// Optional absolute job duration from workspace startup through cleanup.
+    pub timeout_minutes: Option<TimeoutMinutes>,
     /// Origin and literal values for a static matrix variant.
     pub matrix: Option<matrix::MatrixBinding>,
     /// Where the job came from.
@@ -164,7 +171,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.jobs.iter().any(|job| job.matrix.is_some()) {
+        let version = if self.has_deadlines() {
+            DEADLINE_CANONICAL_VERSION
+        } else if self.jobs.iter().any(|job| job.matrix.is_some()) {
             MATRIX_CANONICAL_VERSION
         } else if extended {
             CONTEXT_CANONICAL_VERSION
@@ -204,6 +213,13 @@ impl WorkflowGraph {
                     job.condition.token()
                 ));
             }
+            if let Some(timeout) = job.timeout_minutes {
+                lines.push(format!(
+                    "job-timeout-minutes\t{}\t{}",
+                    escape(&job.id),
+                    timeout.minutes()
+                ));
+            }
             for need in &job.needs {
                 lines.push(format!("need\t{}\t{}", escape(&job.id), escape(need)));
             }
@@ -236,6 +252,13 @@ impl WorkflowGraph {
                         step.condition.token()
                     ));
                 }
+                if let Some(timeout) = step.timeout_minutes {
+                    lines.push(format!(
+                        "step-timeout-minutes\t{}\t{index}\t{}",
+                        escape(&job.id),
+                        timeout.minutes()
+                    ));
+                }
             }
         }
         lines.join("\n") + "\n"
@@ -245,6 +268,15 @@ impl WorkflowGraph {
     #[must_use]
     pub fn job_ids(&self) -> Vec<&str> {
         self.jobs.iter().map(|job| job.id.as_str()).collect()
+    }
+
+    /// Whether an execution adapter must implement workflow-authored time caps.
+    #[must_use]
+    pub fn has_deadlines(&self) -> bool {
+        self.jobs.iter().any(|job| {
+            job.timeout_minutes.is_some()
+                || job.steps.iter().any(|step| step.timeout_minutes.is_some())
+        })
     }
 }
 
@@ -330,7 +362,14 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
     check_keys(
         node,
         "a step",
-        &["name", "run", "if", "env", "working-directory"],
+        &[
+            "name",
+            "run",
+            "if",
+            "env",
+            "working-directory",
+            "timeout-minutes",
+        ],
         &[("uses", "step.uses"), ("with", "step.with")],
     )?;
     let Node::Mapping { .. } = node else {
@@ -359,6 +398,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
         condition: condition(node.get("if"), "step.if", node.span())?,
         span: node.span(),
         context: context::lower(node)?,
+        timeout_minutes: deadline::lower(node.get("timeout-minutes"), "step.timeout-minutes")?,
     })
 }
 
@@ -367,7 +407,7 @@ pub(super) fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, Workfl
     check_keys(
         node,
         "a job",
-        &["runs-on", "needs", "steps", "if"],
+        &["runs-on", "needs", "steps", "if", "timeout-minutes"],
         &[
             ("strategy", "job.strategy"),
             ("permissions", "job.permissions"),
@@ -375,7 +415,6 @@ pub(super) fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, Workfl
             ("services", "job.services"),
             ("container", "job.container"),
             ("outputs", "job.outputs"),
-            ("timeout-minutes", "job.timeout-minutes"),
             ("continue-on-error", "job.continue-on-error"),
         ],
     )?;
@@ -424,6 +463,7 @@ pub(super) fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, Workfl
         needs,
         steps,
         condition: condition(node.get("if"), "job.if", span)?,
+        timeout_minutes: deadline::lower(node.get("timeout-minutes"), "job.timeout-minutes")?,
         span,
     })
 }

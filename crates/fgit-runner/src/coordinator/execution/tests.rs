@@ -194,6 +194,32 @@ fn entire_graph_is_preflighted_before_any_run_or_proposal() {
 }
 
 #[test]
+fn deadline_graphs_require_the_job_scoped_profile_before_any_run_or_proposal() {
+    let cap = fgit_schema::workflow::TimeoutMinutes::from_minutes(1).unwrap();
+    for step_cap in [false, true] {
+        let mut g = graph("echo build");
+        let mut later = g.jobs[0].clone();
+        later.id = "test".into();
+        later.needs = vec!["build".into()];
+        if step_cap {
+            later.steps[0].timeout_minutes = Some(cap);
+        } else {
+            later.timeout_minutes = Some(cap);
+        }
+        g.jobs.push(later);
+        let mut c = coordinator();
+        assert!(
+            matches!(enqueue(&mut c, g), Err(CoordinatorRefusal::UnsupportedExecution { job_id, .. }) if job_id == "test")
+        );
+        assert!(c.active_runs.is_empty());
+        assert!(c.idempotency_map.is_empty());
+        assert!(c.outbox_facts.is_empty());
+        assert_eq!(c.obligations, ObligationSummary::default());
+        assert!(enqueue(&mut c, graph("echo build")).is_ok());
+    }
+}
+
+#[test]
 fn multistep_and_unavailable_runner_profiles_fail_explicitly() {
     let mut multi = graph("true");
     let repeated = multi.jobs[0].steps[0].clone();

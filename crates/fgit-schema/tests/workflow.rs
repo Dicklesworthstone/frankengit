@@ -616,7 +616,6 @@ fn every_construct_the_lowerer_names_exists_in_the_registry() {
         "job.permissions",
         "job.services",
         "job.strategy",
-        "job.timeout-minutes",
         "step.uses",
         "step.with",
         "workflow.concurrency",

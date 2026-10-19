@@ -8,6 +8,7 @@
 use crate::Commitment;
 use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
 pub use fgit_schema::workflow::{Job as WorkflowJob, StepContext};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -139,6 +140,19 @@ impl WorkflowPlan {
         executor: &mut E,
         live: &dyn Fn() -> bool,
     ) -> Result<WorkflowReport, WorkflowError> {
+        let started = Instant::now();
+        self.execute_with_elapsed(limits, executor, live, &|| started.elapsed())
+    }
+
+    // One production-owned monotonic clock covers all jobs. The private seam
+    // lets boundary tests advance time without sleeping through minute caps.
+    fn execute_with_elapsed<E: WorkflowExecutor>(
+        &self,
+        limits: WorkflowLimits,
+        executor: &mut E,
+        live: &dyn Fn() -> bool,
+        elapsed: &dyn Fn() -> Duration,
+    ) -> Result<WorkflowReport, WorkflowError> {
         limits.validate()?;
         if self
             .graph
@@ -149,10 +163,18 @@ impl WorkflowPlan {
         {
             return Err(WorkflowError::UnsupportedStepContext);
         }
-        let started = Instant::now();
-        let run_live = || live() && started.elapsed() < limits.run_timeout;
+        let deadlines = self.graph.has_deadlines();
+        let caller_cancelled = Cell::new(false);
+        let caller_live = || {
+            let allowed = live();
+            if deadlines && !allowed {
+                caller_cancelled.set(true);
+            }
+            allowed && !caller_cancelled.get()
+        };
+        let run_live = || caller_live() && elapsed() < limits.run_timeout;
         let stopped = || {
-            if live() && started.elapsed() >= limits.run_timeout {
+            if caller_live() && elapsed() >= limits.run_timeout {
                 JobOutcome::TimedOut
             } else {
                 JobOutcome::Cancelled
@@ -184,18 +206,43 @@ impl WorkflowPlan {
             } else if !job_condition(job.condition, &job.needs, &completed) {
                 result.outcome = JobOutcome::Skipped;
             } else {
-                match executor.begin_job(index, job, &run_live) {
+                // Workspace/custody startup consumes the same absolute job
+                // budget as its steps and output capture. It never resets.
+                let job_started = elapsed();
+                let job_timeout = job
+                    .timeout_minutes
+                    .map(|cap| Duration::from_secs(cap.seconds()));
+                let job_remaining = || {
+                    job_timeout.map(|cap| cap.saturating_sub(elapsed().saturating_sub(job_started)))
+                };
+                let job_live = || run_live() && job_remaining().is_none_or(|left| !left.is_zero());
+                let job_stopped = || {
+                    if caller_live()
+                        && (elapsed() >= limits.run_timeout
+                            || job_remaining().is_some_and(|left| left.is_zero()))
+                    {
+                        JobOutcome::TimedOut
+                    } else {
+                        JobOutcome::Cancelled
+                    }
+                };
+                match executor.begin_job(index, job, &job_live) {
                     Err(failure) => {
                         containment_lost |= failure.retain_workspace;
-                        result.outcome = JobOutcome::Refused;
+                        result.outcome =
+                            if !failure.retain_workspace && job_timeout.is_some() && !job_live() {
+                                job_stopped()
+                            } else {
+                                JobOutcome::Refused
+                            };
                         result.failure =
                             Some(WorkerFailure::new(failure.detail, failure.retain_workspace));
                     }
                     Ok(()) => {
                         let mut ordinary_failed = false;
                         for (step_index, step) in job.steps.iter().enumerate() {
-                            if !run_live() {
-                                result.outcome = stopped();
+                            if !job_live() {
+                                result.outcome = job_stopped();
                                 break;
                             }
                             if !step_condition(step.condition, ordinary_failed) {
@@ -205,23 +252,52 @@ impl WorkflowPlan {
                                 result.outcome = JobOutcome::OutputLimit;
                                 break;
                             }
+                            let step_started = elapsed();
+                            let timeout = limits
+                                .step_timeout
+                                .min(limits.run_timeout.saturating_sub(step_started))
+                                .min(job_remaining().unwrap_or(limits.run_timeout))
+                                .min(step.timeout_minutes.map_or(limits.step_timeout, |cap| {
+                                    Duration::from_secs(cap.seconds())
+                                }));
+                            if timeout.is_zero() {
+                                result.outcome = job_stopped();
+                                break;
+                            }
                             let budget = StepLimits {
-                                timeout: limits
-                                    .step_timeout
-                                    .min(limits.run_timeout.saturating_sub(started.elapsed())),
+                                timeout,
                                 stream_bytes: limits.stream_bytes.min(remaining / 2),
+                            };
+                            let capped = job_timeout.is_some() || step.timeout_minutes.is_some();
+                            let step_expired = || elapsed().saturating_sub(step_started) >= timeout;
+                            let deadline_observed = Cell::new(false);
+                            let step_live = || {
+                                let allowed = job_live() && (!capped || !step_expired());
+                                if !allowed && capped && !caller_cancelled.get() && step_expired() {
+                                    deadline_observed.set(true);
+                                }
+                                allowed
                             };
                             let observed = executor.execute_step_with_context(
                                 step_index,
                                 &step.run,
                                 &step.context,
                                 budget,
-                                &run_live,
+                                &step_live,
                             );
                             match observed {
                                 Err(failure) => {
                                     containment_lost |= failure.retain_workspace;
-                                    result.outcome = JobOutcome::Refused;
+                                    result.outcome =
+                                        if !failure.retain_workspace && capped && !step_live() {
+                                            if caller_live() && step_expired() {
+                                                JobOutcome::TimedOut
+                                            } else {
+                                                job_stopped()
+                                            }
+                                        } else {
+                                            JobOutcome::Refused
+                                        };
                                     result.failure = Some(WorkerFailure::new(
                                         failure.detail,
                                         failure.retain_workspace,
@@ -255,6 +331,18 @@ impl WorkflowPlan {
                                     }
                                     if explicit_failure || invalid_success {
                                         observed.outcome = StepOutcome::ContainmentFailure;
+                                    } else if capped
+                                        && step_expired()
+                                        && caller_live()
+                                        && (observed.outcome != StepOutcome::Cancelled
+                                            || deadline_observed.get())
+                                    {
+                                        // Executors see one liveness predicate. A
+                                        // deadline is not caller cancellation, and
+                                        // cannot cancel independent later jobs.
+                                        // A previously observed caller stop stays
+                                        // latched even if the callback rebounds.
+                                        observed.outcome = StepOutcome::TimedOut;
                                     } else if observed.outcome == StepOutcome::Cancelled {
                                         cancelled = true;
                                     } else if (output_exceeded
@@ -293,8 +381,8 @@ impl WorkflowPlan {
                         }
                         // Do not let a cancelled request turn its final success
                         // into a green result, but still run non-cancellable close.
-                        if result.outcome == JobOutcome::Succeeded && !run_live() {
-                            result.outcome = stopped();
+                        if result.outcome == JobOutcome::Succeeded && !job_live() {
+                            result.outcome = job_stopped();
                         }
                         // Persist required outputs before the quiescent working
                         // copy closes and before durable terminal observation.
@@ -305,14 +393,14 @@ impl WorkflowPlan {
                         {
                             // Latch this observation even if a caller-supplied
                             // liveness predicate later returns true again.
-                            if !run_live() {
-                                result.outcome = stopped();
+                            if !job_live() {
+                                result.outcome = job_stopped();
                             } else if let Err(failure) =
-                                executor.capture_job_outputs(job, &run_live)
+                                executor.capture_job_outputs(job, &job_live)
                             {
                                 containment_lost |= failure.retain_workspace;
-                                result.outcome = if !failure.retain_workspace && !run_live() {
-                                    stopped()
+                                result.outcome = if !failure.retain_workspace && !job_live() {
+                                    job_stopped()
                                 } else {
                                     JobOutcome::Refused
                                 };
@@ -341,8 +429,11 @@ impl WorkflowPlan {
                         }
                         // Cleanup can consume the remaining deadline or observe
                         // cancellation too. Never publish success before it ends.
-                        if result.outcome == JobOutcome::Succeeded && !run_live() {
-                            result.outcome = stopped();
+                        if (result.outcome == JobOutcome::Succeeded
+                            || (job_timeout.is_some() && result.outcome == JobOutcome::Failed))
+                            && !job_live()
+                        {
+                            result.outcome = job_stopped();
                         }
                     }
                 }
@@ -648,3 +739,6 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod settlement_tests;
+
+#[cfg(test)]
+mod deadline_tests;
