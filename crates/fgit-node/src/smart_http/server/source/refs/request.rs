@@ -19,6 +19,7 @@ pub(super) enum Operation {
     Update,
     Delete,
     Rename,
+    Transaction,
 }
 impl Operation {
     pub(super) const fn as_str(self) -> &'static str {
@@ -28,6 +29,7 @@ impl Operation {
             Self::Update => "update",
             Self::Delete => "delete",
             Self::Rename => "rename",
+            Self::Transaction => "transaction",
         }
     }
 }
@@ -89,6 +91,7 @@ impl<'a> Request<'a> {
             "branches/update" => Operation::Update,
             "branches/delete" => Operation::Delete,
             "branches/rename" => Operation::Rename,
+            "branches/transaction" => Operation::Transaction,
             _ if action.starts_with("branches/") || action == "branches" => {
                 return Err(ApiError::not_found());
             }
@@ -142,6 +145,9 @@ impl<'a> Request<'a> {
         bytes: &[u8],
         format: GitHashAlgorithm,
     ) -> Result<Command, ApiError> {
+        if self.operation == Operation::Transaction {
+            return super::transaction::parse(bytes, format).map(Command::Mutate);
+        }
         let mut fields = BTreeMap::new();
         for (name, value) in parse_form(bytes, 6)? {
             if fields.insert(name, value).is_some() {
@@ -245,7 +251,7 @@ fn reference(text: &str, prefix: &[u8]) -> Result<RefName, ApiError> {
     }
     RefName::try_new(text.as_bytes()).map_err(|_| ApiError::bad("invalid_reference"))
 }
-fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
+pub(super) fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
     if text.len() != format.digest_len() * 2
         || !text
             .bytes()
@@ -389,6 +395,7 @@ mod tests {
             ("branches/update", true),
             ("branches/delete", true),
             ("branches/rename", true),
+            ("branches/transaction", true),
         ] {
             let raw = format!(
                 "POST /repo.git/api/v1/source/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n"

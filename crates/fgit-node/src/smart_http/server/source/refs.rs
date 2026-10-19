@@ -4,6 +4,7 @@
 
 mod output;
 mod request;
+mod transaction;
 
 use std::io::Read;
 
@@ -122,12 +123,25 @@ pub(super) fn execute(
             let result = drive_request_while(
                 node,
                 &context,
-                node.admit_branch_updates_durable_in(
-                    &context,
-                    session,
-                    &commands,
-                    Default::default(),
-                ),
+                async {
+                    if request.0.operation == request::Operation::Transaction {
+                        node.admit_branch_transaction_durable_in(
+                            &context,
+                            session,
+                            &commands,
+                            Default::default(),
+                        )
+                        .await
+                    } else {
+                        node.admit_branch_updates_durable_in(
+                            &context,
+                            session,
+                            &commands,
+                            Default::default(),
+                        )
+                        .await
+                    }
+                },
                 &mut live,
             )
             .map_err(publication_error)?;
