@@ -467,15 +467,25 @@ fn an_unknown_event_kind_on_the_wire_is_refused_and_a_known_one_is_not() {
         "the located field must be the tag that says PullRequestClosed"
     );
 
-    // Kinds 1..=13 are assigned (11 = workflow check observed, 94a77dfb;
-    // 12 = native pull-request commented; 13 = required-check protection
-    // changed); 14 is the first unassigned kind. Zero and far-out values stay
-    // refused.
-    for unknown in [0_u32, 14, 99, u32::from(u16::MAX)] {
+    let decode_kind = |kind: u32| {
         let mut corrupted = bytes.clone();
-
-        corrupted[kind_offset..kind_offset + 4].copy_from_slice(&unknown.to_be_bytes());
-        match decode_body::<ForgeEvent>(&corrupted, DecodeLimits::DEFAULT) {
+        corrupted[kind_offset..kind_offset + 4].copy_from_slice(&kind.to_be_bytes());
+        decode_body::<ForgeEvent>(&corrupted, DecodeLimits::DEFAULT)
+    };
+    // Kinds are assigned densely from 1 (14 of them by 7f6d9912). Find the
+    // first one the decoder names unknown rather than hard-coding it: a
+    // hard-coded probe breaks, or silently becomes a known kind, each time a
+    // kind is added. Every kind below it decodes past the tag.
+    let first_unassigned = (1..=1024_u32)
+        .find(|kind| matches!(decode_kind(*kind), Err(CodecRefusal::VariantUnknown { .. })))
+        .expect("a kind at or below 1024 is unassigned");
+    assert!(
+        first_unassigned >= 15,
+        "kinds 1..=14 are assigned; {first_unassigned} must not be unknown"
+    );
+    // Zero, the first unassigned kind and far-out values stay refused.
+    for unknown in [0_u32, first_unassigned, u32::from(u16::MAX), u32::MAX] {
+        match decode_kind(unknown) {
             Err(CodecRefusal::VariantUnknown {
                 field, observed, ..
             }) => {
