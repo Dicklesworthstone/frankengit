@@ -448,6 +448,79 @@ fn a_stored_file_larger_than_the_ceiling_is_refused_at_read_time() {
     );
 }
 
+#[test]
+fn caller_payload_budget_accepts_exact_and_empty_objects_without_changing_identity() {
+    for payload in [b"exact caller budget".as_slice(), b"".as_slice()] {
+        let root = temp_root("caller-payload-exact");
+        let store = fabric(root.clone(), NAMESPACE, 1 << 20);
+        let (id, _) = store_one(&store, &root, payload, NAMESPACE);
+        let bounded = store.read_whole_bounded(id, payload.len() as u64).unwrap();
+        let ordinary = store.read_whole(id).unwrap();
+        assert_eq!(bounded.object, ordinary.object);
+        assert_eq!(bounded.placement, ordinary.placement);
+        assert_eq!(bounded.object.payload(), payload);
+        if !payload.is_empty() {
+            assert_eq!(
+                store.read_whole_bounded(id, payload.len() as u64 - 1),
+                Err(StoreRefusal::StreamingBudgetExceeded {
+                    offered: payload.len() as u64,
+                    maximum: payload.len() as u64 - 1,
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn caller_payload_budget_refuses_sparse_oversize_before_allocating_the_body() {
+    let root = temp_root("caller-payload-sparse");
+    let store = fabric(root.clone(), NAMESPACE, 4 * 1024 * 1024 * 1024);
+    let (id, path) = store_one(&store, &root, b"small original", NAMESPACE);
+    let raw = fs::read(&path).unwrap();
+    let payload_start = 8 + u64::from(u32::from_be_bytes(raw[4..8].try_into().unwrap()));
+    let oversized_payload = 512 * 1024 * 1024;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(payload_start + oversized_payload)
+        .unwrap();
+    // The file has a valid fixed prefix and is within the configured storage
+    // ceiling. Only the caller's actual payload bound prevents a 512MiB read.
+    assert_eq!(
+        store.read_whole_bounded(id, 1024),
+        Err(StoreRefusal::StreamingBudgetExceeded {
+            offered: oversized_payload,
+            maximum: 1024,
+        })
+    );
+}
+
+#[test]
+fn bounded_reads_still_verify_payload_commitments_after_the_size_guard() {
+    let root = temp_root("caller-payload-integrity");
+    let store = fabric(root.clone(), NAMESPACE, 1 << 20);
+    let payload = b"bounded integrity body";
+    let (id, path) = store_one(&store, &root, payload, NAMESPACE);
+    assert_eq!(
+        store
+            .read_whole_bounded(id, payload.len() as u64)
+            .unwrap()
+            .object
+            .payload(),
+        payload
+    );
+    let mut raw = fs::read(&path).unwrap();
+    *raw.last_mut().unwrap() ^= 1;
+    fs::write(&path, raw).unwrap();
+    let ordinary = store.read_whole(id).unwrap_err();
+    assert!(matches!(ordinary, StoreRefusal::PayloadCommitmentMismatch));
+    assert_eq!(
+        store.read_whole_bounded(id, payload.len() as u64),
+        Err(ordinary)
+    );
+}
+
 /// `:121` — constructor validation, which is a different thing from `:262`.
 ///
 /// Asserted separately because they share a variant: a probe that accepted

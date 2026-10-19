@@ -307,7 +307,24 @@ impl LocalFilesystemFabric {
     }
 
     fn load_object(&self, identity: GitOid) -> Result<VerifiedObject, StoreRefusal> {
-        let bytes = self.read_bounded(&self.object_path(identity))?;
+        self.load_object_within(identity, None)
+    }
+
+    fn load_object_within(
+        &self,
+        identity: GitOid,
+        maximum_payload: Option<u64>,
+    ) -> Result<VerifiedObject, StoreRefusal> {
+        let path = self.object_path(identity);
+        let bytes = match maximum_payload {
+            Some(maximum) => bounded_read::read_object(
+                &path,
+                self.max_stored_object_bytes,
+                self.envelope_limits.max_envelope_bytes,
+                maximum,
+            )?,
+            None => self.read_bounded(&path)?,
+        };
         if bytes.len() < 8 || bytes.get(..4) != Some(OBJECT_MAGIC.as_slice()) {
             return Err(StoreRefusal::MalformedStoredObject);
         }
@@ -328,6 +345,13 @@ impl LocalFilesystemFabric {
         if envelope.namespace() != self.namespace {
             return Err(StoreRefusal::NamespaceMismatch);
         }
+        let offered =
+            u64::try_from(bytes.len() - payload_start).map_err(|_| StoreRefusal::LengthOverflow)?;
+        if let Some(maximum) = maximum_payload
+            && offered > maximum
+        {
+            return Err(StoreRefusal::StreamingBudgetExceeded { offered, maximum });
+        }
         let object = VerifiedObject::new(envelope, bytes[payload_start..].to_vec())?;
         let reconstructed = object.identity();
         if reconstructed != identity {
@@ -337,6 +361,21 @@ impl LocalFilesystemFabric {
             });
         }
         Ok(object)
+    }
+
+    /// Read one verified whole object under the caller's payload budget. The
+    /// immutable file's framing is checked before allocating its body; envelope
+    /// bytes are independently bounded by the configured envelope profile.
+    /// A zero budget accepts only an empty payload. No authority is inferred
+    /// from existence, framing, or a size refusal.
+    pub fn read_whole_bounded(
+        &self,
+        identity: GitOid,
+        maximum_payload_bytes: u64,
+    ) -> Result<WholeObjectRead, StoreRefusal> {
+        let object = self.load_object_within(identity, Some(maximum_payload_bytes))?;
+        let placement = self.placement_for(Self::object_envelope_id(&object)?)?;
+        Ok(WholeObjectRead { object, placement })
     }
 
     fn read_bounded(&self, path: &Path) -> Result<Vec<u8>, StoreRefusal> {

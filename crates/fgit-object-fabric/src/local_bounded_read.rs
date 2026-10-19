@@ -7,7 +7,7 @@
 //! operator-owned directory into a hostile-filesystem sandbox.
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::path::Path;
 
 use crate::fabric::{StorageOperation, StoreRefusal};
@@ -32,19 +32,88 @@ fn non_regular_file() -> StoreRefusal {
     }
 }
 
-pub(super) fn read(path: &Path, maximum: u64) -> Result<Vec<u8>, StoreRefusal> {
+fn open_regular(path: &Path) -> Result<(File, u64), StoreRefusal> {
     // Reject persistent symlinks, directories and special files before open.
     // No claim is made about adversarial replacement of path components.
     let path_metadata = fs::symlink_metadata(path).map_err(read_error)?;
     if !path_metadata.file_type().is_file() {
         return Err(non_regular_file());
     }
-    let mut file = File::open(path).map_err(read_error)?;
+    let file = File::open(path).map_err(read_error)?;
     let metadata = file.metadata().map_err(read_error)?;
     if !metadata.is_file() {
         return Err(non_regular_file());
     }
-    read_stream(&mut file, metadata.len(), maximum)
+    Ok((file, metadata.len()))
+}
+
+pub(super) fn read(path: &Path, maximum: u64) -> Result<Vec<u8>, StoreRefusal> {
+    let (mut file, length) = open_regular(path)?;
+    read_stream(&mut file, length, maximum)
+}
+
+/// Bound the payload before reserving a buffer for a stored FGOB body. Read
+/// only the fixed prefix first; its envelope length is bounded independently.
+/// The exact-key owner still verifies the envelope, payload and native identity.
+pub(super) fn read_object(
+    path: &Path,
+    maximum_stored: u64,
+    maximum_envelope: usize,
+    maximum_payload: u64,
+) -> Result<Vec<u8>, StoreRefusal> {
+    let (mut file, length) = open_regular(path)?;
+    if length > maximum_stored {
+        return Err(StoreRefusal::StoredObjectTooLarge {
+            offered: length,
+            maximum: maximum_stored,
+        });
+    }
+    if length < 8 {
+        return Err(StoreRefusal::MalformedStoredObject);
+    }
+    let mut prefix = [0; 8];
+    file.read_exact(&mut prefix).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            StoreRefusal::MalformedStoredObject
+        } else {
+            read_error(error)
+        }
+    })?;
+    if &prefix[..4] != super::OBJECT_MAGIC {
+        return Err(StoreRefusal::MalformedStoredObject);
+    }
+    let envelope = u32::from_be_bytes(
+        prefix[4..]
+            .try_into()
+            .map_err(|_| StoreRefusal::MalformedStoredObject)?,
+    );
+    if u64::from(envelope) > maximum_envelope as u64 {
+        return Err(crate::FabricError::EnvelopeTooLarge.into());
+    }
+    let payload_start = 8 + u64::from(envelope);
+    let offered = length
+        .checked_sub(payload_start)
+        .ok_or(StoreRefusal::MalformedStoredObject)?;
+    if offered > maximum_payload {
+        return Err(StoreRefusal::StreamingBudgetExceeded {
+            offered,
+            maximum: maximum_payload,
+        });
+    }
+    // Reuse this same descriptor and the growth-resistant stream reader. A
+    // changing envelope can alter the payload boundary, so load_object_within
+    // also checks the decoded payload length before copying or verification.
+    file.rewind().map_err(read_error)?;
+    let maximum = maximum_stored.min(payload_start.saturating_add(maximum_payload));
+    read_stream(&mut file, length, maximum).map_err(|error| match error {
+        StoreRefusal::StoredObjectTooLarge { offered, .. } if maximum < maximum_stored => {
+            StoreRefusal::StreamingBudgetExceeded {
+                offered: offered.saturating_sub(payload_start),
+                maximum: maximum_payload,
+            }
+        }
+        other => other,
+    })
 }
 
 fn read_stream<R: Read>(

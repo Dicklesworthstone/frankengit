@@ -3046,7 +3046,9 @@ impl VerifiedFabricPackSource<'_> {
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
-        let read = self.fabric.read_whole(*id);
+        let read = self
+            .fabric
+            .read_whole_bounded(*id, self.maximum_object_bytes as u64);
         if let (Some(ceiling), Ok(verified)) = (ceiling, &read) {
             ceiling.note_read(verified.object.payload().len());
             ceiling.rearm(self.database_context);
@@ -3055,7 +3057,15 @@ impl VerifiedFabricPackSource<'_> {
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
-        let verified = read.map_err(|_| PackWriteError::MissingCanonicalObject(*id))?;
+        let verified = read.map_err(|error| match error {
+            StoreRefusal::StreamingBudgetExceeded { offered, .. } => {
+                PackWriteError::from(PackError::ObjectSizeLimit {
+                    actual: usize::try_from(offered).unwrap_or(usize::MAX),
+                    limit: self.maximum_object_bytes,
+                })
+            }
+            _ => PackWriteError::MissingCanonicalObject(*id),
+        })?;
         let object_type = match verified.object.envelope().object_kind() {
             ObjectKind::Commit => ObjectType::Commit,
             ObjectKind::Tree => ObjectType::Tree,
@@ -9691,6 +9701,7 @@ fn admission_cache_resources() -> ResourceVector {
 mod tests {
     mod admission_projection;
     mod capsule_history;
+    mod fabric_read_budget;
 
     #[test]
     fn git_daemon_server_limits_require_nonzero_session_and_in_flight_bounds() {
