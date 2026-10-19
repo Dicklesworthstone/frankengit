@@ -106,6 +106,14 @@ where
             Err(HistoryStepRefusal::UnboundHead)
         };
     };
+    // Every non-genesis edge is either a decision (the successor names its
+    // decision tail) or a checkpoint (the successor names its capsule). A head
+    // that names a predecessor but neither is structurally unbound; refuse it
+    // before reading anything, rather than reporting whichever predecessor
+    // read happens to fail first.
+    if successor.decision_tail_id.is_none() && successor.last_checkpoint_id.is_none() {
+        return Err(HistoryStepRefusal::UnboundHead);
+    }
     let limit = maximum_steps.min(MAX_REPLAY_BATCHES);
     if *walked >= limit {
         return Err(HistoryStepRefusal::BoundExceeded { limit });

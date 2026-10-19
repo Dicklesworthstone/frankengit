@@ -15,7 +15,7 @@ fg import <storage-root> <tenant-id> <repository-id> <principal-id> <key> <sourc
 ```
 
 Without an explicit timeout, the node reserves its existing bounded import
-profile (512 MiB of expanded object bodies) using the receive session's base,
+profile (512 MiB of reachable expanded object bodies) using the receive session's base,
 per-byte rate and maximum extension. It also uses the existing receive-admission
 poll and cost calculation, rather than the ordinary Database class's flat
 15-second / 50,000-poll allowance. This is an up-front resource reservation,
@@ -44,10 +44,14 @@ command module, as it does for other extended commands.
 
 ## Limits and evidence
 
-The import profile bounds aggregate expanded object bodies and total pack input
-bytes at 512 MiB, individual objects at the node's 32 MiB default ceiling,
-individual packs/indexes at 64 MiB, and object count at 1,000,000. It does not
-claim remote identity integration or a completed multi-node durability profile.
+The default profile bounds the reachable closure's expanded object bodies at
+512 MiB. Eager pack resolution keeps its own smaller bounds: 128 MiB of
+expanded bodies and cache per pack, 128 MiB of total compressed pack input,
+64 MiB per pack and index, the node's 32 MiB default per-object ceiling, and
+1,000,000 objects. Raising the reachable ceiling does not enlarge the
+pack-resolution caches; [LOCAL_SOURCE_IMPORT_PROFILES.md](LOCAL_SOURCE_IMPORT_PROFILES.md)
+owns those numbers. It does not claim remote identity integration or a
+completed multi-node durability profile.
 Source validation and one head CAS remain the publication boundary; local object
 placement is not publication.
 

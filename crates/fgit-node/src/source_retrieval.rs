@@ -514,8 +514,9 @@ pub mod authority_backup;
 pub mod index_cli;
 
 /// Bounded foreground lexical/symbol index maintenance worker CLI entrypoint.
-#[path = "bin/fg-index-maintain.rs"]
-pub mod index_maintain;
+/// This is [`crate::index_maintenance`], which the HTTP service also owns:
+/// one module included once, so its tests and statics are not duplicated.
+pub use crate::index_maintenance as index_maintain;
 
 /// Explicit scoped lexical index build, refresh, search, and recover CLI entrypoint.
 #[path = "bin/fg-index-scope.rs"]

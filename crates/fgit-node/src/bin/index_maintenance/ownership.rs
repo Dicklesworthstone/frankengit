@@ -6,6 +6,24 @@ use super::{File, OpenOptions, Path, PathBuf, Read, Write, fs, invalid, io, priv
 const ANCHOR: &str = "owner.lock";
 const RUN: &str = "run.lock";
 const MAX_MARKER: u64 = 128;
+/// The anchor descriptor is close-on-exec, but a child forked by any sibling
+/// thread holds a copy of it, and so the flock, until that child execs. Wait a
+/// bounded moment for such a transient holder; a live owner still refuses.
+const LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+const LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(2);
+
+fn lock_within_grace(anchor: &File) -> io::Result<()> {
+    let started = std::time::Instant::now();
+    loop {
+        match anchor.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_GRACE => {
+                std::thread::sleep(LOCK_STEP);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 
 fn identity(metadata: &fs::Metadata) -> io::Result<(u64, u64)> {
     #[cfg(unix)]
@@ -55,9 +73,10 @@ impl Owner {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => existing(&path)?,
             Err(error) => return Err(error),
         };
-        // Nonblocking and kernel-owned. No PID, elapsed-time or heartbeat guess
-        // grants ownership; an unsupported lock implementation fails closed.
-        anchor.try_lock()?;
+        // Kernel-owned, with only a bounded wait for a fork-before-exec holder.
+        // No PID, elapsed-time or heartbeat guess grants ownership; an
+        // unsupported lock implementation fails closed.
+        lock_within_grace(&anchor)?;
         same_file(&path, &anchor)?;
         if anchor.metadata()?.len() != 0 {
             return Err(invalid("invalid ownership anchor"));

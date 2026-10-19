@@ -245,3 +245,26 @@ fn ownership_anchor_rejects_symlinks_hardlinks_and_nonprivate_files() {
         .release()
         .unwrap();
 }
+
+#[test]
+#[cfg(unix)]
+fn a_transient_anchor_holder_inside_the_grace_does_not_refuse_the_next_owner() {
+    let scratch = Scratch::new();
+    ProgressFile::open(&scratch.0, true, state())
+        .unwrap()
+        .release()
+        .unwrap();
+    // A second open description of the same anchor stands in for the copy a
+    // child forked by a sibling thread holds until it execs.
+    let holder = fs::File::open(scratch.0.join("owner.lock")).unwrap();
+    holder.try_lock().unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        drop(holder);
+    });
+    let started = Instant::now();
+    let file = ProgressFile::open(&scratch.0, false, state()).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    releaser.join().unwrap();
+    file.release().unwrap();
+}

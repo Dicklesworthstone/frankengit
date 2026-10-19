@@ -2,7 +2,10 @@
 //!
 //! Canonical source chooses the target; the verified index head chooses one
 //! predecessor. Neither observation is refreshed after preparation starts.
-use crate::{ClosureSelectionSource, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
+use crate::{
+    ClosureSelectionSource, NodeRequestContext, NodeWorkspaceRefusal, OneNode,
+    PackContextCheckpoint, checkpoint_pack_context,
+};
 use fgit_forge::source_browse::SourceBrowseError;
 use fgit_forge::source_search::SearchLimits;
 use fgit_graph::lexical::{IndexError, LexicalIndexStore, LexicalReadLimits, LexicalSource};
@@ -11,7 +14,22 @@ use fgit_types::cell::{ReadMode, admits_read, admits_staging_intake};
 use fgit_types::{RefName, RepositoryAuthorityHeadId};
 
 use super::super::super::{search_error, workspace_request_live};
-use super::super::{index_error, live};
+use super::super::index_error;
+
+/// A stop observed before either builder runs, in the workspace's one
+/// cancellation vocabulary. Nothing has been staged or published at these
+/// points, so the attempt drained cleanly: a cancelled authority or index
+/// READ is reported as `Cancelled`, never as an ambiguous store refusal.
+fn stopped(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> {
+    match checkpoint_pack_context(request.authority()) {
+        PackContextCheckpoint::Live => Ok(()),
+        PackContextCheckpoint::Stopped { budget_exhaustion } => {
+            Err(NodeWorkspaceRefusal::Cancelled {
+                exhaustion: budget_exhaustion,
+            })
+        }
+    }
+}
 
 impl OneNode {
     /// Ensure one visible reference has an index for the source selected by
@@ -74,14 +92,17 @@ impl OneNode {
         before_publish: &mut (impl FnMut(GraphGenerationId) -> Result<(), NodeWorkspaceRefusal> + Send),
     ) -> Result<(LexicalSource, GenerationActivation), NodeWorkspaceRefusal> {
         limits.validate().map_err(search_error)?;
-        live(request)?;
+        stopped(request)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         admits_staging_intake(self.cell_state()).map_err(NodeWorkspaceRefusal::Cell)?;
-        let selected = self
-            .materialize_admission_in(request)
-            .await
-            .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
-        live(request)?;
+        let selected = match self.materialize_admission_in(request).await {
+            Ok(selected) => selected,
+            Err(error) => {
+                stopped(request)?;
+                return Err(NodeWorkspaceRefusal::Authority(Box::new(error)));
+            }
+        };
+        stopped(request)?;
         // Current canonical visibility is checked BEFORE any index metadata.
         if selected.snapshot().hidden_refs.hides(reference.as_bytes()) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
@@ -123,9 +144,12 @@ impl OneNode {
             // Only a genuinely uninitialized index, without an unresolved
             // checkpoint, may select genesis. Corruption is never a cache miss.
             Err(IndexError::Uninitialized) if minimum.is_none() => None,
-            Err(error) => return Err(index_error(error)),
+            Err(error) => {
+                stopped(request)?;
+                return Err(index_error(error));
+            }
         };
-        live(request)?;
+        stopped(request)?;
         if let Some(index) = &previous {
             let source = index.source();
             if source.source_head == head

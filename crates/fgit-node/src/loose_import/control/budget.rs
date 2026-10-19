@@ -446,7 +446,7 @@ mod tests {
         assert!(materialized_after_refusal.snapshot().refs.is_empty());
 
         // 2. Positive path: the default import_request_context(None) carries finite
-        // poll, cost, and deadline bounds scaled to MAX_IMPORT_TOTAL_OBJECT_BYTES (512 MiB)
+        // poll, cost, and deadline bounds scaled to MAX_REACHABLE_OBJECT_BYTES (512 MiB)
         // and completes the >200 MiB import cleanly.
         let default_cx = node.import_request_context(None);
         let native = default_cx.authority().attached_native_cx().unwrap();
