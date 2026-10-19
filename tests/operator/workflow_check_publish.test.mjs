@@ -92,8 +92,17 @@ for (const format of ['sha1', 'sha256']) {
     assert.deepEqual(value.artifact_contract, run.report.runs[0].artifact_contract);
     assert.equal(Object.hasOwn(value, 'artifacts'), false);
     assert.equal(Object.hasOwn(value, 'artifact_inputs'), false);
-    assert.deepEqual(run.report.runs[0].artifacts, []);
-    assert.deepEqual(run.report.runs[0].artifact_inputs, []);
+    const [capture] = run.report.runs[0].artifacts;
+    const [delivery] = run.report.runs[0].artifact_inputs;
+    assert.equal(run.report.runs[0].artifacts.length, 1);
+    assert.equal(run.report.runs[0].artifact_inputs.length, 1);
+    assert.equal(capture.job_id_hex, hex('build'));
+    assert.equal(delivery.job_id_hex, hex('test'));
+    assert.equal(capture.outputs.length, 1);
+    assert.equal(delivery.inputs.length, 1);
+    assert.equal(delivery.inputs[0].producer_manifest_id_sha256, capture.manifest_id_sha256);
+    assert.deepEqual(delivery.inputs[0].output, capture.outputs[0]);
+    assert.equal(delivery.inputs[0].destination_path_hex, hex('.fgit-artifacts/build/result'));
     const bad = structuredClone(value); bad.artifact_contract.input_delivery.total_delivery_bytes++;
     await writeFile(markerPath, Buffer.from(JSON.stringify(bad)), { mode: 0o600 });
     await assert.rejects(once(f.config), /Original workflow marker changed/);
@@ -405,3 +414,37 @@ for (const impossible of ['success', 'neutral']) test(`trusted custody cannot ad
   await assert.rejects(once(f.config), /Completed native workflow fact/);
   assert.equal((await f.lines('published.ndjson')).length, 0);
 });
+
+
+// Exercise the publisher's real dispatchReport boundary, not merely a stale
+// outer digest. Consistently rewrite the local report hash as well: missing or
+// substituted artifact evidence must still stop BEFORE a native publication.
+for (const format of ['sha1', 'sha256']) {
+  for (const [name, mutate] of [
+    ['missing capture', run => { run.artifacts = []; }],
+    ['missing delivery', run => { run.artifact_inputs = []; }],
+    ['substituted producer manifest', run => { run.artifact_inputs[0].inputs[0].producer_manifest_id_sha256 = '0'.repeat(64); }],
+  ]) test(`${format}: ${name} cannot reach check publication even with a matching saved report hash`, async t => {
+    const f = await fixture(t, format, {}, true), run = await f.run();
+    const reportPath = join(run.observation.native_directory, 'report.json');
+    const resultPath = join(f.watch.state_directory, `result-${run.observation.id}.json`);
+    const originalReport = await readFile(reportPath), originalResult = await readFile(resultPath);
+    const markerPath = join(run.directory, 'attempt.json'), marker = await readFile(markerPath);
+    const custodyPath = join(run.directory, 'custody.json'), custody = await readFile(custodyPath);
+    const report = JSON.parse(originalReport), completion = JSON.parse(originalResult);
+    mutate(report.runs[0]);
+    completion.report_sha256 = sha256(encode(report));
+    await save(reportPath, report); await save(resultPath, completion);
+    const calls = (await f.lines('calls.ndjson')).length;
+    await assert.rejects(once(f.config), /artifact/i);
+    assert.equal((await f.lines('calls.ndjson')).length, calls, 'refuse before native recovery or publication');
+    assert.equal((await f.lines('published.ndjson')).length, 0);
+    assert.equal((await status(f.config)).runs.length, 0, 'no publishable plan is retained');
+    assert.deepEqual(await readFile(markerPath), marker);
+    assert.deepEqual(await readFile(custodyPath), custody);
+    await writeFile(reportPath, originalReport); await writeFile(resultPath, originalResult);
+    assert.equal((await once(f.config)).publications, 2, 'the unchanged complete attempt remains publishable');
+    assert.equal((await once(f.config)).publications, 0, 'publication never reexecutes the workflow');
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
+}
