@@ -109,21 +109,75 @@ node scripts/fg_source_edit.mjs prepare-verified \
   --output /private/edit/candidate
 ```
 
-This deliberately does **not** derive repository scope, branch, author identity,
-permissions, or publication authority from the package. Those remain explicit
-inputs and native server decisions. The package establishes only that the
-operator independently retained the selected commit/path/blob bytes that the
-edit claims as its base. An edit cannot use this mode to name an unselected path
-or silently switch commits. New-file creation is therefore outside this initial
-verified-package profile; use ordinary `prepare` when an explicit new path is
-intended and independently review that broader effect.
+After native inspection, the verifier checks the reported original tree, old
+blob identities, executable modes, sizes, hunk bytes and line positions against
+that independently verified basis. For text changes it reconstructs the new
+file from verified unchanged gaps and reviewed replacement spans, then checks
+the native after-blob hash. It reuses the existing tree-transition verifier to
+rebuild only affected parent trees and compare the exact candidate root. An
+unreported sibling edit therefore fails even when its candidate commit and
+bundle are genuine Git objects. Raw paths, CRLF, missing final LF, empty files,
+deletions, nested directory removal and mode-only changes keep exact bytes.
 
-The command returns the verified package SHA-256, commit, and selected-path count
-alongside the ordinary saved-candidate receipt. That stdout metadata is a local
-precondition receipt, not an authority token and not part of the native mutation
-request. The saved candidate remains in the unchanged source-edit capture format,
-so existing offline inspection, staging, one-shot apply, and original-key
-recovery continue to use the same validators.
+This is **review-span replay, not independent application of the input patch**.
+A dishonest server could return a different internally consistent change to an
+allowed file. Explicit review of the saved diff and native patch validation
+remain necessary. Binary review omits after bodies, so their paths appear in
+`source_verification.unverified_after_paths_hex`; they are never represented as
+independently checked after bytes. The checked tree still binds their reported
+blob IDs and preserves unrelated entries. The bundle's object closure, native
+admission, current permissions, branch freshness and author identity remain
+separate checks. No package or local receipt grants publication authority.
+
+Repository namespace, branch, author metadata and permissions remain explicit
+inputs or native server decisions. This profile still refuses new-file paths:
+only existing independently selected regular/executable files can be edited.
+Use ordinary `prepare` for explicitly broader effects such as new files, rather
+than converting missing package membership into an absence proof.
+
+### Durable evidence and compatibility
+
+A successful `prepare-verified` saves a **v2 candidate manifest**. Alongside the
+unchanged `capture.json` and `candidate.bundle`, it retains `source-package.json`
+(the exact original package bytes) and `source-expected.json` (the normalized,
+independently supplied expected commit/file selection). The manifest binds all
+four payloads by size and SHA-256 and is written last after synchronization and
+readback. Keep its returned `manifest_sha256` independently. No external source
+package path is needed after a successful export.
+
+`inspect` does not trust saved verification flags. It rehashes the package,
+rechecks the commit/path/blob evidence, replays the candidate's text review and
+rederives the exact tree. Missing, altered, public-mode or symlinked evidence
+refuses; it cannot silently downgrade to ordinary inspection. The returned
+`source_verification` names the profile, package/expectation hashes, source and
+candidate trees, checked path/text counts, and any unverified binary after paths.
+It also explicitly reports `patch_application_verified: false`,
+`bundle_objects_independently_verified: false` and authority/freshness non-claims.
+
+`stage` copies the **same owned, reverified evidence** into its private candidate
+copy. Its original-key intent already binds the candidate manifest hash, so the
+proof is bound to that request without changing the native upload or command.
+`apply`, offline `status`, and original-key `recover` verify this retained evidence
+again; dispatch resyncs it before persisting responsibility and sending anything.
+Deleting the external candidate does not remove the journal's evidence. Damaged
+journal evidence blocks further network operations but never removes a dispatch
+marker or permits resending the original mutation. Restore only the original
+pinned bytes from independently retained custody; do not manufacture a new base.
+
+Ordinary `prepare` keeps the existing v1 manifest and its serialization. Existing
+v1 candidates remain readable but gain no independent-source claim merely because
+they were once created by an older `prepare-verified` command. V2 candidates are
+intentionally refused by old clients; update the reader before using them. No
+automatic migration strips their proof. Both versions retain native scope and
+publication checks, create-only output, and original-key recovery semantics.
+
+Keep these outputs private: the retained package includes full selected original
+file bodies and sibling names/IDs in needed parent trees. It may contain more
+than the changed file set. The original 32 MiB package and 128 KiB expectation
+input bounds remain, with 1–32 selected package files and an 8 MiB logical source
+ceiling. These are buffered resource limits, not an aggregate heap or CPU claim.
+One operation deadline covers verification and network work; already-started
+local publication is drained, and output loss cannot imply its rollback.
 
 ## Stage explicitly, then apply once
 
@@ -240,7 +294,12 @@ only remote publication authority.
 `captureSourceEdit` and `validateSourceEdit` own candidate acquisition/rechecking.
 `saveSourceEdit`/`loadSourceEdit` retain it. `stageSourceApply`,
 `dispatchSourceApply`, `recoverSourceApply` and `inspectSourceApply` expose the
-same explicit lifecycle as the executable. Use these bounded owners rather than
+same explicit lifecycle as the executable. `captureVerifiedSourceEdit` checks
+both independent input evidence and native candidate effects;
+`validateSourceEditEvidence` provides the offline equivalent, and
+`saveVerifiedSourceEdit` publishes a v2 evidence-bound candidate. The original
+`bindVerifiedEditSource` helper remains input preflight only; its receipt does
+not establish anything about a returned candidate. Use these bounded owners rather than
 calling the low-level transport's mutation primitive without a saved request.
 
 ```bash
@@ -256,3 +315,10 @@ The suite covers corrupt/changed receipts, exact budgets, explicit metadata,
 full-width sequences, ownership before HTTP observation, competing processes,
 SIGTERM/SIGKILL after transmission, no-resend recovery and lost stdout. No live
 Rust, native authorization/CAS, complete workspace or release gate is claimed.
+
+The evidence suite also exercises genuine Git candidates with hidden sibling
+changes, corrupt old/new review bytes, wrong modes/line coordinates, caller
+mutation during hashing, v1/v2 custody compatibility, independent manifest pins,
+missing/corrupt proof after dispatch, self-contained staging, concurrent verified
+exporters and fresh CLI recovery after SIGTERM/SIGKILL. The HTTP peer remains an
+explicit native-schema fixture, not a replacement for native patch semantics.

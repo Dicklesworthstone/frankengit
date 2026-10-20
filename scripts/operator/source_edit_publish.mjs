@@ -7,7 +7,8 @@ import { randomBytes } from 'node:crypto';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
 import { validateOutcomeReply } from './transaction_outcome.mjs';
 import { validateSourceEdit, editCoordinates, canonical, identity, oid, CAPTURE_LIMIT, BUNDLE_LIMIT } from './source_edit_candidate.mjs';
-import { hash, fields, fail, parse, clock, upload, exchange } from './source_edit_wire.mjs';
+import { validateSourceEditEvidence, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES, SOURCE_EVIDENCE_PROFILE } from './source_edit_from_package.mjs';
+import { hash, fields, fail, parse, clock, upload, exchange, integer } from './source_edit_wire.mjs';
 
 const SCHEMA = 'frankengit-source-apply-v1', RECORD_LIMIT = 65536;
 const same = (a, b) => canonical(a).equals(canonical(b));
@@ -33,40 +34,83 @@ async function putRecord(path, value) {
   if (!bytes.equals(await readPrivate(path, RECORD_LIMIT))) fail('source_edit_record_changed');
   return hash(bytes);
 }
+const FILES_V1 = 'frankengit-source-edit-files-v1', FILES_V2 = 'frankengit-source-edit-files-v2';
+const PACKAGE_FILE = 'source-package.json', EXPECTED_FILE = 'source-expected.json';
+const evidenceReceipt = checked => checked.source_verification ? { source_verification: checked.source_verification } : {};
 function manifest(capture, bundle) {
-  return { schema: 'frankengit-source-edit-files-v1', capture_sha256: hash(canonical(capture)), capture_bytes: canonical(capture).length,
+  return { schema: FILES_V1, capture_sha256: hash(canonical(capture)), capture_bytes: canonical(capture).length,
     bundle_sha256: hash(bundle), bundle_bytes: bundle.length };
 }
-export async function saveSourceEdit(path, capture, bundle, options = {}) {
-  const time = clock(options); time.check();
-  const checked = validateSourceEdit(capture, bundle), body = canonical(checked.capture), root = manifest(checked.capture, checked.bundle);
-  await absent(path); time.check();
+// Only a fully checked local result enters this private writer. In particular,
+// a caller-provided verification receipt never chooses whether evidence exists.
+async function saveChecked(path, checked, check) {
+  check(); const body = canonical(checked.capture), root = manifest(checked.capture, checked.bundle);
+  const payloads = [['capture.json', body, CAPTURE_LIMIT], ['candidate.bundle', checked.bundle, BUNDLE_LIMIT]];
+  if (checked.source_evidence) {
+    const source = checked.source_evidence, expected = canonical(source.expected);
+    if (!expected.length || expected.length > SOURCE_EXPECTED_BYTES) fail('source_edit_evidence_limit');
+    root.schema = FILES_V2;
+    root.source_evidence = { profile: SOURCE_EVIDENCE_PROFILE,
+      package_sha256: hash(source.package_bytes), package_bytes: source.package_bytes.length,
+      expected_sha256: hash(expected), expected_bytes: expected.length };
+    payloads.push([PACKAGE_FILE, source.package_bytes, SOURCE_PACKAGE_BYTES], [EXPECTED_FILE, expected, SOURCE_EXPECTED_BYTES]);
+  }
+  await absent(path); check();
   const receipt = { type: 'source_edit_saved', directory: path, manifest_sha256: hash(canonical(root)),
-    candidate_commit: checked.candidate_commit, bundle_sha256: root.bundle_sha256, publication_attempted: false };
+    candidate_commit: checked.candidate_commit, bundle_sha256: root.bundle_sha256, publication_attempted: false,
+    ...evidenceReceipt(checked) };
   await mkdir(path, { mode: 0o700 });
   try {
-    // Drain local publication once claimed. Late cancellation is not absence.
+    // Drain publication once claimed. Root-last binding covers the original
+    // native capture, bundle AND exact independent source evidence together.
     await syncDirectory(dirname(path));
-    await writeNew(join(path, 'capture.json'), body); await writeNew(join(path, 'candidate.bundle'), checked.bundle);
-    if (!body.equals(await readPrivate(join(path, 'capture.json'), CAPTURE_LIMIT)) ||
-        !checked.bundle.equals(await readPrivate(join(path, 'candidate.bundle'), BUNDLE_LIMIT))) fail('source_edit_export_readback');
+    for (const [name, bytes, maximum] of payloads) {
+      await writeNew(join(path, name), bytes);
+      if (!bytes.equals(await readPrivate(join(path, name), maximum))) fail('source_edit_export_readback');
+    }
     await putRecord(join(path, 'manifest.json'), root); await syncDirectory(path); await syncDirectory(dirname(path));
     return receipt;
   } catch (error) { error.publication_unconfirmed = receipt; throw error; }
 }
+export async function saveSourceEdit(path, capture, bundle, options = {}) {
+  const time = clock(options); time.check();
+  return saveChecked(path, validateSourceEdit(capture, bundle), time.check);
+}
+export async function saveVerifiedSourceEdit(path, capture, bundle, evidence, options = {}) {
+  const time = clock(options); time.check();
+  const checked = await validateSourceEditEvidence(capture, bundle, evidence, time.check);
+  return saveChecked(path, checked, time.check);
+}
 export async function loadSourceEdit(path, expectedHash, check = () => {}) {
   check(); pin(expectedHash); await directory(absolute(path));
   const root = await readRecord(join(path, 'manifest.json'));
-  fields(root.value, ['schema', 'capture_sha256', 'capture_bytes', 'bundle_sha256', 'bundle_bytes']);
-  if (root.sha256 !== expectedHash || root.value.schema !== 'frankengit-source-edit-files-v1') fail('source_edit_manifest_changed');
+  if (root.sha256 !== expectedHash || ![FILES_V1, FILES_V2].includes(root.value.schema)) fail('source_edit_manifest_changed');
+  const evidenced = root.value.schema === FILES_V2;
+  fields(root.value, ['schema', 'capture_sha256', 'capture_bytes', 'bundle_sha256', 'bundle_bytes', ...(evidenced ? ['source_evidence'] : [])]);
   const captureBytes = await readPrivate(join(path, 'capture.json'), CAPTURE_LIMIT), bundle = await readPrivate(join(path, 'candidate.bundle'), BUNDLE_LIMIT);
   check();
   if (captureBytes.length !== root.value.capture_bytes || hash(captureBytes) !== root.value.capture_sha256 ||
       bundle.length !== root.value.bundle_bytes || hash(bundle) !== root.value.bundle_sha256) fail('source_edit_payload_changed');
   const capture = parse(captureBytes, CAPTURE_LIMIT);
   if (!canonical(capture).equals(captureBytes)) fail('source_edit_capture_encoding');
-  const checked = validateSourceEdit(capture, bundle); check();
-  return { ...checked, manifest_sha256: expectedHash };
+  let checked;
+  if (evidenced) {
+    const r = fields(root.value.source_evidence, ['profile', 'package_sha256', 'package_bytes', 'expected_sha256', 'expected_bytes']);
+    if (r.profile !== SOURCE_EVIDENCE_PROFILE) fail('source_edit_evidence_profile');
+    pin(r.package_sha256); pin(r.expected_sha256);
+    integer(r.package_bytes, 1, SOURCE_PACKAGE_BYTES); integer(r.expected_bytes, 1, SOURCE_EXPECTED_BYTES);
+    const packageBytes = await readPrivate(join(path, PACKAGE_FILE), SOURCE_PACKAGE_BYTES),
+      expectedBytes = await readPrivate(join(path, EXPECTED_FILE), SOURCE_EXPECTED_BYTES);
+    check();
+    if (packageBytes.length !== r.package_bytes || hash(packageBytes) !== r.package_sha256 ||
+        expectedBytes.length !== r.expected_bytes || hash(expectedBytes) !== r.expected_sha256) fail('source_edit_evidence_changed');
+    const expected = parse(expectedBytes, SOURCE_EXPECTED_BYTES);
+    if (!canonical(expected).equals(expectedBytes)) fail('source_edit_evidence_encoding');
+    checked = await validateSourceEditEvidence(capture, bundle, { package_bytes: packageBytes, expected }, check);
+    // Normalization cannot silently rewrite the independently pinned selection.
+    if (!canonical(checked.source_evidence.expected).equals(expectedBytes)) fail('source_edit_evidence_encoding');
+  } else checked = validateSourceEdit(capture, bundle);
+  check(); return { ...checked, manifest_sha256: expectedHash };
 }
 function intentBody(checked, principal, nonce) {
   const request = checked.capture.request, body = upload(editCoordinates(request, checked.candidate_commit), checked.bundle, 'bundle');
@@ -88,12 +132,14 @@ export async function stageSourceApply(path, candidatePath, candidateHash, princ
   const request = { ...intent, key: originalKey(intent) }, requestHash = hash(canonical(request));
   time.check(); await mkdir(path, { mode: 0o700 });
   const receipt = { type: 'source_apply_staged', journal: path, request_sha256: requestHash, key: request.key,
-    principal_id: principal, candidate_commit: request.candidate_commit, transmission_attempted: false };
+    principal_id: principal, candidate_commit: request.candidate_commit, transmission_attempted: false, ...evidenceReceipt(checked) };
   try {
     await syncDirectory(dirname(path));
     // Retain a self-contained copy: dispatch/recovery do not reopen a mutable
     // external candidate path or require its continued existence.
-    const saved = await saveSourceEdit(join(path, 'candidate'), checked.capture, checked.bundle);
+    // Use precisely the owned bytes just verified, including v2 evidence. No
+    // external package path or caller receipt survives into the journal.
+    const saved = await saveChecked(join(path, 'candidate'), checked, () => {});
     if (saved.manifest_sha256 !== candidateHash) fail('source_edit_candidate_changed');
     await putRecord(join(path, 'request.json'), request); await syncDirectory(path); await syncDirectory(dirname(path));
     return receipt;
@@ -171,14 +217,15 @@ async function settle(s, accepted) {
     await syncFile(path); await syncDirectory(s.path); terminalHash = other.sha256;
   }
   return { type: 'source_apply_terminal', journal: s.path, request_sha256: s.hash, key: s.request.key,
-    terminal_sha256: terminalHash, decision: accepted, submission_retried: false, delivery_acknowledged: null };
+    terminal_sha256: terminalHash, decision: accepted, submission_retried: false, delivery_acknowledged: null, ...evidenceReceipt(s.checked) };
 }
 function pending(s, state = 'outcome_unknown') {
   return { type: 'source_apply_pending', journal: s.path, request_sha256: s.hash, key: s.request.key,
-    principal_id: s.request.principal_id, state, submission_retried: false, absence_proves_non_commit: false };
+    principal_id: s.request.principal_id, state, submission_retried: false, absence_proves_non_commit: false, ...evidenceReceipt(s.checked) };
 }
 async function syncCandidate(s) {
-  for (const name of ['capture.json', 'candidate.bundle', 'manifest.json']) await syncFile(join(s.path, 'candidate', name));
+  const files = ['capture.json', 'candidate.bundle', ...(s.checked.source_evidence ? [PACKAGE_FILE, EXPECTED_FILE] : []), 'manifest.json'];
+  for (const name of files) await syncFile(join(s.path, 'candidate', name));
   await syncDirectory(join(s.path, 'candidate')); await syncFile(join(s.path, 'request.json')); await syncDirectory(s.path);
 }
 export async function dispatchSourceApply(path, requestHash, credential, options = {}) {

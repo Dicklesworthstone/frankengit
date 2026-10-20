@@ -4,9 +4,9 @@ import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
 import { captureSourceEdit, oid } from './operator/source_edit_candidate.mjs';
-import { bindVerifiedEditSource, SOURCE_PACKAGE_BYTES } from './operator/source_edit_from_package.mjs';
+import { captureVerifiedSourceEdit, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES } from './operator/source_edit_from_package.mjs';
 import { parse, fail, clock } from './operator/source_edit_wire.mjs';
-import { saveSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply } from './operator/source_edit_publish.mjs';
+import { saveSourceEdit, saveVerifiedSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply } from './operator/source_edit_publish.mjs';
 
 const USAGE = `node scripts/fg_source_edit.mjs prepare --selection PRIVATE_JSON --patch-file PRIVATE_PATCH
   --token-file PRIVATE_TOKEN --output ABSENT_CANDIDATE_DIRECTORY [--ca-file PRIVATE_PEM]
@@ -25,6 +25,7 @@ node scripts/fg_source_edit.mjs status --journal PRIVATE_DIRECTORY --request-sha
 All commands accept --timeout-ms 1..300000 (default 30000). Paths are normalized
 absolute owner-private paths. Inspect the saved capture.json before stage/apply.
 prepare uses native exact-patch and bundle inspection without publication.
+prepare-verified retains source evidence and checks candidate preimages/tree effects.
 stage records the candidate, original principal and recovery key before apply.
 apply submits ONCE. Uncertain replies require recover, never a fresh key or base.
 recover only observes the original key; missing outcomes never permit resend.
@@ -93,7 +94,8 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       result = { type: 'source_edit_inspection', directory: location, manifest_sha256: loaded.manifest_sha256,
         candidate_commit: loaded.candidate_commit, source_commit: loaded.capture.request.expected_commit,
         paths_hex: loaded.capture.request.paths_hex, native_bundle_validation_observed: true,
-        bundle_objects_independently_verified: false, publication_authorized: false, read_only: true };
+        bundle_objects_independently_verified: false, publication_authorized: false, read_only: true,
+        ...(loaded.source_verification ? { source_verification: loaded.source_verification } : {}) };
     } else if (op === 'stage') {
       const loaded = await loadSourceEdit(f.get('--candidate'), f.get('--sha256'), time.check);
       if (oid(f.get('--confirm-candidate'), loaded.capture.request.scope.object_format) !== loaded.candidate_commit) fail('source_edit_candidate_confirmation');
@@ -107,21 +109,23 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       } finally { tokenBytes.fill(0); }
       const ca = f.has('--ca-file') ? await privateFile(f.get('--ca-file'), 131072, time.check) : undefined;
       if (op === 'prepare' || op === 'prepare-verified') {
-        let selection = await json(f.get('--selection'));
-        let packageEvidence = null;
+        const selection = await json(f.get('--selection'));
+        let evidence = null;
         if (op === 'prepare-verified') {
-          const expected = parse(await privateFile(f.get('--expect'), 128 * 1024, time.check), 128 * 1024);
+          const expected = parse(await privateFile(f.get('--expect'), SOURCE_EXPECTED_BYTES, time.check), SOURCE_EXPECTED_BYTES);
           const packageBytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time.check);
-          packageEvidence = await bindVerifiedEditSource(packageBytes, expected, selection, time.check);
-          selection = packageEvidence.request;
+          evidence = { package_bytes: packageBytes, expected };
         }
         const patch = await privateFile(f.get('--patch-file'), 1048576, time.check);
-        const value = await captureSourceEdit(selection, patch, token, { ...local(), ...(ca ? { ca } : {}) });
-        result = await saveSourceEdit(f.get('--output'), value.capture, value.bundle, local());
+        const network = { ...local(), ...(ca ? { ca } : {}) };
+        const value = evidence ? await captureVerifiedSourceEdit(selection, patch, token, evidence, network)
+          : await captureSourceEdit(selection, patch, token, network);
+        result = evidence ? await saveVerifiedSourceEdit(f.get('--output'), value.capture, value.bundle, value.source_evidence, local())
+          : await saveSourceEdit(f.get('--output'), value.capture, value.bundle, local());
         result.metrics = value.metrics;
-        if (packageEvidence) result.source_package = {
-          sha256: packageEvidence.package_sha256, commit: packageEvidence.verified_commit,
-          paths: packageEvidence.verified_paths.length, authority_verified: false, publication_authorized: false };
+        if (evidence) result.source_package = {
+          sha256: value.source_verification.package_sha256, commit: value.source_verification.commit,
+          paths: value.source_verification.verified_paths, authority_verified: false, publication_authorized: false };
       } else {
         const network = { ...local(), ...(ca ? { ca } : {}) };
         result = op === 'apply' ? await dispatchSourceApply(f.get('--journal'), f.get('--request-sha256'), token, network)
