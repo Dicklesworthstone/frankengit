@@ -295,18 +295,23 @@ where
                 stack.push(delta.offset);
                 let base_result =
                     self.resolve_base_typed(&delta.base, next_depth, stack, accounting, deadline);
+                // No `?` before the pop below, as in the cached resolver: an
+                // early return left this offset on the stack, so a refusal
+                // inside a typed chain panicked the caller's pop assertion.
                 let result = match base_result {
                     Ok(base) => {
                         let object_type = base.object_type;
-                        let bytes = apply_delta_with_accounting(
+                        apply_delta_with_accounting(
                             &base.bytes,
                             &delta.program,
                             self.limits,
                             accounting,
                             deadline,
-                        )?;
-                        accounting.add_expanded(bytes.len(), self.limits)?;
-                        Ok(TypedResolution { object_type, bytes })
+                        )
+                        .and_then(|bytes| {
+                            accounting.add_expanded(bytes.len(), self.limits)?;
+                            Ok(TypedResolution { object_type, bytes })
+                        })
                     }
                     Err(error) => Err(error),
                 };
@@ -476,6 +481,9 @@ struct TypedResolution {
 /// [`max_cached_bytes`](crate::PackLimits::max_cached_bytes) is reached and never
 /// evicted, and an object that did not fit is re-resolved -- and its chain
 /// re-charged -- every time it is needed, which is exactly the work done.
+/// Charging the copy also bounds a hot base: a base shared by many deltas is
+/// copied once per delta, and each copy counts, where the old model charged a
+/// base's hit nothing.
 pub struct CachedResolver<'objects, 'lookup, L> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
     entries: Vec<CacheEntry>,
@@ -507,8 +515,9 @@ where
         })
     }
 
-    /// Resolves one offset with base-result caching while preserving scalar
-    /// output and budget semantics.
+    /// Resolves one offset with base-result caching. The output is the scalar
+    /// resolver's; the budget is charged the work this resolver performs (see
+    /// the type documentation), not the scalar resolver's re-resolution.
     pub fn resolve_offset(
         &mut self,
         offset: u64,
@@ -1778,6 +1787,114 @@ mod tests {
             matches!(replay, Err(PackError::DeltaWorkLimit { .. })),
             "{replay:?}"
         );
+    }
+
+    /// One 64 KiB base and `fanout` deltas that each keep a single byte of it.
+    fn hot_base(fanout: usize) -> Vec<PackObject> {
+        let base_len = 64 * 1024;
+        let mut objects = vec![PackObject::TypedBase {
+            offset: 100,
+            id: None,
+            kind: EntryKind::Blob,
+            data: vec![b'z'; base_len],
+        }];
+        for step in 1..=fanout {
+            let mut program = Vec::new();
+            let mut size = base_len;
+            while size >= 0x80 {
+                program.push(u8::try_from(size & 0x7f).expect("seven bits") | 0x80);
+                size >>= 7;
+            }
+            program.push(u8::try_from(size).expect("final seven bits"));
+            program.extend([1, 1, u8::try_from(step).expect("small fanout")]);
+            objects.push(PackObject::Delta(DeltaObject {
+                offset: 100 + 100 * u64::try_from(step).expect("small fanout"),
+                id: None,
+                base: DeltaBase::Ofs(100),
+                program,
+            }));
+        }
+        objects
+    }
+
+    #[test]
+    fn every_copy_of_a_cached_base_is_charged_so_a_hot_base_cannot_amplify_work() {
+        // Each delta keeps one byte, but resolving it copies the whole cached
+        // base. Before frankengit-z6rb a hit on a base charged that base's
+        // reconstruction work, which is zero, so this amplification was free.
+        let mut limits = unlimited();
+        limits.max_delta_fanout = 64;
+        limits.max_delta_work = 1 << 20;
+        let resolve_all = |objects: &[PackObject]| {
+            let mut resolver = CachedResolver::new(objects, &(), &limits, &mut always)?;
+            let mut budget = ResolutionBudget::new();
+            for object in objects {
+                resolver.resolve_offset_typed_with_budget(
+                    object.offset(),
+                    &mut budget,
+                    &mut always,
+                )?;
+            }
+            Ok::<_, PackError>(budget.accounting.work)
+        };
+        // Eight deltas: eight 64 KiB copies fit the 1 MiB work budget, and
+        // every one of them is charged.
+        let charged = resolve_all(&hot_base(8)).expect("eight copies fit");
+        assert!(charged >= 8 * 64 * 1024, "charged {charged}");
+        // Thirty-two would copy 2 MiB for 32 bytes of output: refused.
+        let amplified = resolve_all(&hot_base(32));
+        assert!(
+            matches!(amplified, Err(PackError::DeltaWorkLimit { .. })),
+            "{amplified:?}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_inside_a_typed_chain_is_returned_not_a_stack_panic() {
+        // base <- middle <- top. A bad middle delta must surface its typed
+        // error from both resolvers; before the fix an early `?` left the
+        // middle offset on the stack and the top frame's pop assertion fired.
+        let chain = |middle: Vec<u8>| {
+            vec![
+                PackObject::TypedBase {
+                    offset: 12,
+                    id: None,
+                    kind: EntryKind::Blob,
+                    data: b"abc".to_vec(),
+                },
+                PackObject::Delta(DeltaObject {
+                    offset: 24,
+                    id: None,
+                    base: DeltaBase::Ofs(12),
+                    program: middle,
+                }),
+                PackObject::Delta(DeltaObject {
+                    offset: 36,
+                    id: None,
+                    base: DeltaBase::Ofs(24),
+                    program: vec![3, 3, 0x91, 0, 3],
+                }),
+            ]
+        };
+        let limits = unlimited();
+        // The middle delta declares a four-byte base for a three-byte one.
+        let bad = chain(vec![4, 3, 0x91, 0, 3]);
+        let expected = Err(PackError::DeltaBaseSizeMismatch {
+            declared: 4,
+            actual: 3,
+        });
+        let scalar = ScalarResolver::new(&bad, &(), &limits, &mut always).expect("valid graph");
+        assert_eq!(scalar.resolve_offset_typed(36, &mut always), expected);
+        let mut cached = CachedResolver::new(&bad, &(), &limits, &mut always).expect("valid graph");
+        assert_eq!(cached.resolve_offset_typed(36, &mut always), expected);
+        // Twin: the well-formed middle delta resolves through both.
+        let good = chain(vec![3, 3, 0x91, 0, 3]);
+        let expected = Ok((ObjectType::Blob, b"abc".to_vec()));
+        let scalar = ScalarResolver::new(&good, &(), &limits, &mut always).expect("valid graph");
+        assert_eq!(scalar.resolve_offset_typed(36, &mut always), expected);
+        let mut cached =
+            CachedResolver::new(&good, &(), &limits, &mut always).expect("valid graph");
+        assert_eq!(cached.resolve_offset_typed(36, &mut always), expected);
     }
 
     fn copy_then_insert(base: &[u8], byte: u8) -> Vec<u8> {

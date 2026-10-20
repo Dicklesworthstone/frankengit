@@ -774,6 +774,18 @@ cacheless replay of the same chain still does quadratic work and is refused, by
 the expansion bound under the defaults and by the work bound when that is
 lifted (the twin in `an_ordinary_edit_chain_fits_the_default_work_budget_and_a_cacheless_replay_does_not`).
 
+The old model also under-charged in the other direction. A hit on a base object
+charged that object's reconstruction work, which is zero, so a hot base copied
+once per delta was free. Measured on the old resolver (c9eb8039) with
+`every_copy_of_a_cached_base_is_charged_so_a_hot_base_cannot_amplify_work`:
+eight full copies of a 64 KiB base were charged 233 units in total. The
+real-work charge counts each copy and refuses thirty-two of them under a 1 MiB
+budget. The cost of that fix: a pack in which many deltas each keep a small
+part of one large base is now refused sooner than before, because every copy
+of the base is real work this resolver does. Applying deltas to the cached
+bytes in place, without the copy, would remove that cost; it is not
+implemented.
+
 **Revisit when** a resolver path can do more real work than it charges (for
 example cache eviction that re-resolves without charging), or a pack is shown
 that amplifies real work beyond what the real-work charge refuses.
