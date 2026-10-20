@@ -5,6 +5,7 @@ mod artifacts;
 mod dispatch;
 mod merge;
 mod publish;
+mod publish_run;
 mod recovery;
 mod watch;
 use super::publication_support::quote;
@@ -43,6 +44,7 @@ For event-matched directory dispatch: fg workflow dispatch --help.
 For canonical ref-change polling: fg workflow watch --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
 To record a saved job observation on its canonical branch: fg workflow publish --help.
+To publish all completed jobs in an exact saved snapshot: fg workflow publish-run --help.
 
 Linux only. The run parent must already exist with mode 0700. Review and trust
 ALL scripts before invoking: jobs run as your host user, not inside a hostile-code
@@ -107,6 +109,9 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|action| action == "publish-run") {
+        return publish_run::run(args, &mut std::io::stdout().lock());
+    }
     if args.first().is_some_and(|action| action == "watch") {
         return watch::run(args);
     }

@@ -50,3 +50,54 @@ verified disk custody, complete preflight, both Git formats, cancellation,
 receipt loss, source movement, fresh-node retry, exact decision identity and
 unchanged source/custody. These are focused tests, not full-workspace, release,
 physical power-loss or hostile-runner isolation claims.
+
+## Native CLI
+
+`fg workflow publish-run` exposes that same node implementation, rather than
+parsing a report or running one subprocess per job:
+
+```bash
+fg workflow publish-run /node TENANT REPOSITORY refs/heads/topic \
+  --trusted-local --run-directory /private/workflow-RUN_ID \
+  --journal-id ORIGINAL_ATTEMPT_SHA256 --at-pin BYTES:TAIL_SHA256 \
+  --principal-id PUBLISHER --expected-incarnation INCARNATION --plan-only
+```
+
+Use the original scope and `snapshot` token returned by `fg workflow recover`.
+The required incarnation prevents a restored or replaced repository from silently
+becoming a different publication destination. `--object-format sha256` selects a
+SHA-256 repository; `--ref-hex` preserves raw reference bytes. `--max-checks` and
+`--max-evidence-mib` lower, never widen, the native limits.
+
+Remove `--plan-only` to publish. Optional `--expected-set SET_SHA256` binds the
+whole verified set to its previously reviewed manifest. Both paths completely
+preflight saved evidence before any check submission. Keep the same original
+snapshot, reporting principal and branch on retry. No user-selected replacement
+key, force retry, arbitrary fact selector, workflow execution or automatic check
+publication is accepted through this command.
+
+Output is newline-delimited JSON: the verified set before any submission, each
+canonical terminal decision as it occurs, then a summary after node shutdown.
+The summary distinguishes an operation failure from observer/node cleanup.
+SIGTERM/SIGINT reach the existing runtime-owned request observer; cancellation
+stops later admissions but cannot revoke earlier commits. SIGKILL is abrupt;
+retry recovers original canonical outcomes without a local publication cursor.
+A lost output stream does not imply that the last submitted check did not commit.
+
+Exit 0 means the requested check observations were committed, or a successful
+plan-only/empty selection. It does NOT mean the jobs passed: failures, skipped
+jobs and other non-green outcomes retain their evidence conclusions. Exit 3
+means at least one canonical refusal; exit 2 means invalid input, incomplete
+outcome, output or cleanup failure. A previously manually published check under
+an unrelated key can produce `EvidenceStale`, not an invented successful receipt;
+use that original manual request to resolve its original outcome.
+
+The discovered `scripts/e2e/suites/workflow/publish_run.sh` campaign drives a real
+prebuilt `FG_BIN` with 24 jobs in each hash format. It independently encodes check
+IDs, binary child keys and set fingerprints, kills the publisher after receiving
+a real committed decision, reopens and completes the same set, and checks the
+canonical PR view for exactly the original conclusions. Repeated publication
+adds no authority, source movement preserves historical outcomes, and new stale
+checks refuse. Corrupt snapshots and bad independent pins cause no admission;
+no source checkout or final execution report is required. The campaign creates
+only local native test repositories, not GitHub pull requests.

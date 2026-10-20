@@ -212,7 +212,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     })
 }
 
-fn fixed_hex(value: &str, length: usize) -> Result<Vec<u8>, String> {
+pub(super) fn fixed_hex(value: &str, length: usize) -> Result<Vec<u8>, String> {
     let bytes = super::unhex(value, length)?;
     if bytes.len() != length {
         return Err(format!(
@@ -223,7 +223,7 @@ fn fixed_hex(value: &str, length: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn digest(value: &str) -> Result<Digest, String> {
+pub(super) fn digest(value: &str) -> Result<Digest, String> {
     let bytes = fixed_hex(value, 32)?;
     Ok(Digest::new(
         DigestAlgorithm::Sha256.id(),
@@ -231,14 +231,14 @@ fn digest(value: &str) -> Result<Digest, String> {
     ))
 }
 
-fn pin(value: &str) -> Result<(u64, Digest), String> {
+pub(super) fn pin(value: &str) -> Result<(u64, Digest), String> {
     let (length, tail) = value
         .split_once(':')
         .ok_or("minimum pin must be <byte-length>:<sha256>")?;
     Ok((decimal(length, 72, 4 * 1024 * 1024 * 1024)?, digest(tail)?))
 }
 
-fn decimal(value: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
+pub(super) fn decimal(value: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
     if value.is_empty()
         || !value.bytes().all(|byte| byte.is_ascii_digit())
         || (value.len() > 1 && value.starts_with('0'))
@@ -254,7 +254,7 @@ fn decimal(value: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
     Ok(number)
 }
 
-fn absolute_directory(value: &str) -> Result<PathBuf, String> {
+pub(super) fn absolute_directory(value: &str) -> Result<PathBuf, String> {
     let directory = PathBuf::from(value);
     if value.is_empty()
         || value.ends_with('/')
