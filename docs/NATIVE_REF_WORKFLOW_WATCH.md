@@ -98,3 +98,12 @@ unrelated-update suppression, ordinary failure and unmatched-workflow behavior,
 idle deadlines, repeated signals, real child drain and later-event blocking.
 It is functional trusted-local evidence, not a pinned Git compatibility campaign,
 universal process containment, an all-events queue or a full release gate.
+
+## Native pull-request selection
+
+Optional `--pull-request NUMBER` selects an actual open native PR whose source
+matches the explicit watched branch. It uses separate PR/version-scoped custody
+and `on: pull_request` definitions, while retaining the same execution and opt-in
+check-reporting boundaries. This is current **source-head-only** testing, not a
+synthetic merge. See [`NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md`](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md)
+for lifecycle selection, stale recorded PR coordinates, artifacts and recovery.

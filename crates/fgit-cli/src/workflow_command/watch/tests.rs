@@ -252,3 +252,84 @@ fn publication_decisions_and_incomplete_admission_survive_the_summary() {
         assert!(text.contains(expected));
     }
 }
+
+#[test]
+fn pull_request_selector_is_explicit_exact_and_bounded_before_io() {
+    assert!(options(&args()).unwrap().pull_request.is_none());
+    for valid in ["1", "7", "18446744073709551615"] {
+        let input = [args(), vec!["--pull-request".into(), valid.into()]].concat();
+        assert_eq!(
+            options(&input).unwrap().pull_request,
+            Some(valid.parse().unwrap())
+        );
+    }
+    for invalid in [
+        "0",
+        "01",
+        "-1",
+        "+1",
+        "1.0",
+        "18446744073709551616",
+        "",
+        "7\n",
+    ] {
+        assert!(
+            options(&[args(), vec!["--pull-request".into(), invalid.into()]].concat()).is_err()
+        );
+    }
+    assert!(options(&[args(), vec!["--pull-request".into()]].concat()).is_err());
+    assert!(
+        options(
+            &[
+                args(),
+                vec![
+                    "--pull-request".into(),
+                    "7".into(),
+                    "--pull-request".into(),
+                    "7".into()
+                ]
+            ]
+            .concat()
+        )
+        .is_err()
+    );
+}
+#[test]
+fn pull_request_flag_looking_paths_remain_values_not_trigger_authority() {
+    let mut input = args();
+    input[7] = "--pull-request".into();
+    input[9] = "--pull-request".into();
+    let parsed = options(&input).unwrap();
+    assert!(parsed.pull_request.is_none());
+    assert_eq!(parsed.execution.workflow, b"--pull-request");
+    let mut input = args();
+    input.extend([
+        "--pull-request".into(),
+        "7".into(),
+        "--event".into(),
+        "pull_request".into(),
+    ]);
+    assert!(options(&input).is_err());
+}
+#[test]
+fn pull_request_reporting_preserves_the_original_explicit_publisher_contract() {
+    let mut input = args();
+    input.extend([
+        "--pull-request".into(),
+        "7".into(),
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "77".repeat(16),
+        "--expected-incarnation".into(),
+        "88".repeat(16),
+    ]);
+    let parsed = options(&input).unwrap();
+    assert_eq!(parsed.pull_request, Some(7));
+    assert!(parsed.publisher.is_some());
+    let index = input
+        .iter()
+        .position(|s| s == "--expected-incarnation")
+        .unwrap();
+    input.drain(index..index + 2);
+    assert!(options(&input).is_err());
+}

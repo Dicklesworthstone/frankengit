@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <repository-id> <branch>
   --trusted-local --workflow <repository-directory> --input <top-level-path> [--input ...]
   --run-parent <absolute-private-directory> [--object-format sha1|sha256]
+  [--pull-request <positive-native-pr-number>]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
   Artifact capture/input flags have the same meaning as workflow dispatch.
@@ -28,6 +29,15 @@ No checks are published by default. Opt in with --publish-checks --principal-id
   Missing legacy handoffs, corrupt custody and incomplete admission stop the watch.
   A committed failure/skipped observation is not a passing build. Preserve all
   event custody across restart/restore. No force reset or replacement keys exist.
+Optional --pull-request selects on: pull_request definitions only when the named
+native same-repository PR is open and its source branch matches the explicit branch.
+It executes the current SOURCE HEAD, not a synthetic merge or the recorded old tip.
+PR metadata versions (including reopen), source decisions and observed target tips
+select distinct events; unrelated comments/checks do not. Closed/merged/missing
+PRs execute nothing. Old reporting can recover after closure without rerunning code.
+Push and PR custody namespaces are separate. This is a latest-state trusted-host
+profile, not GitHub event/filter compatibility, fork isolation or an all-events queue.
+
 Exit 0: requested polls settled (not proof of green checks); 1: non-green/stopped/
 unresolved work; 2: input, infrastructure, cleanup or output failure.";
 
@@ -37,6 +47,7 @@ struct WatchOptions {
     polls: u32,
     interval: Duration,
     publisher: Option<fgit_types::PrincipalId>,
+    pull_request: Option<u64>,
 }
 fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
     if text.is_empty()
@@ -53,7 +64,7 @@ fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
 fn options(args: &[String]) -> Result<WatchOptions, String> {
     if args.len() < 5
         || args[0] != "watch"
-        || args.len() > 2107
+        || args.len() > 2109
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -63,11 +74,19 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let (mut polls, mut interval) = (None, None);
     let mut publish = false;
     let mut publisher = None;
+    let mut pull_request = None;
     let mut i = 5;
     while i < args.len() {
         let flag = &args[i];
         i += 1;
-        if flag == "--publish-checks" {
+        if flag == "--pull-request" {
+            let value = args.get(i).ok_or("missing --pull-request number")?;
+            i += 1;
+            let number = super::publish::decimal(value, 1, u64::MAX)?;
+            if pull_request.replace(number).is_some() {
+                return Err("duplicate --pull-request".into());
+            }
+        } else if flag == "--publish-checks" {
             if publish {
                 return Err("duplicate --publish-checks".into());
             }
@@ -112,6 +131,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     }
     Ok(WatchOptions {
         publisher,
+        pull_request,
         execution,
         polls: polls.unwrap_or(1),
         interval: Duration::from_millis(u64::from(interval.unwrap_or(1000))),
@@ -188,19 +208,47 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
                         break;
                     }
                     if let Some(publisher) = options.publisher {
-                        publish_pending(&node, request, opt, publisher, &mut summary, output)?;
+                        publish_pending(
+                            &node,
+                            request,
+                            opt,
+                            publisher,
+                            options.pull_request,
+                            &mut summary,
+                            output,
+                        )?;
                     }
                     let poll = node
                         .runtime()
-                        .block_on(node.poll_trusted_ref_workflows_in(
-                            request,
-                            &opt.reference,
-                            &opt.workflow,
-                            &opt.parent,
-                            &opt.inputs,
-                            Default::default(),
-                            config.as_ref(),
-                        ))
+                        .block_on(async {
+                            match options.pull_request {
+                                Some(number) => {
+                                    node.poll_trusted_pull_request_workflows_in(
+                                        request,
+                                        &opt.reference,
+                                        number,
+                                        &opt.workflow,
+                                        &opt.parent,
+                                        &opt.inputs,
+                                        Default::default(),
+                                        config.as_ref(),
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    node.poll_trusted_ref_workflows_in(
+                                        request,
+                                        &opt.reference,
+                                        &opt.workflow,
+                                        &opt.parent,
+                                        &opt.inputs,
+                                        Default::default(),
+                                        config.as_ref(),
+                                    )
+                                    .await
+                                }
+                            }
+                        })
                         .map_err(|e| e.to_string())?;
                     summary.polls += 1;
                     summary.dispatched += u32::from(poll.dispatch().is_some());
@@ -225,7 +273,15 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
                         break;
                     }
                     if let Some(publisher) = options.publisher {
-                        publish_pending(&node, request, opt, publisher, &mut summary, output)?;
+                        publish_pending(
+                            &node,
+                            request,
+                            opt,
+                            publisher,
+                            options.pull_request,
+                            &mut summary,
+                            output,
+                        )?;
                     }
                     if index + 1 < options.polls
                         && !wait_interval(options.interval, &|| request.checkpoint_is_live())
@@ -253,23 +309,42 @@ fn publish_pending(
     request: &fgit_node::NodeRequestContext,
     options: &Options,
     publisher: fgit_types::PrincipalId,
+    pull_number: Option<u64>,
     summary: &mut Summary,
     output: &mut impl Write,
 ) -> Result<(), String> {
-    let result = node
-        .runtime()
-        .block_on(node.publish_trusted_ref_workflow_checks_in(
-            request,
-            &options.reference,
-            &options.workflow,
-            &options.parent,
-            publisher,
-            |text| {
-                writeln!(output, "{text}")
-                    .and_then(|()| output.flush())
-                    .map_err(|e| e.to_string())
-            },
-        ));
+    let observe = |text: &str| {
+        writeln!(output, "{text}")
+            .and_then(|()| output.flush())
+            .map_err(|e| e.to_string())
+    };
+    let result = node.runtime().block_on(async {
+        match pull_number {
+            Some(number) => {
+                node.publish_trusted_pull_request_workflow_checks_in(
+                    request,
+                    &options.reference,
+                    number,
+                    &options.workflow,
+                    &options.parent,
+                    publisher,
+                    observe,
+                )
+                .await
+            }
+            None => {
+                node.publish_trusted_ref_workflow_checks_in(
+                    request,
+                    &options.reference,
+                    &options.workflow,
+                    &options.parent,
+                    publisher,
+                    observe,
+                )
+                .await
+            }
+        }
+    });
     summary.checks_committed += result.committed;
     summary.checks_refused += result.refused;
     summary.non_green |= result.refused != 0;
