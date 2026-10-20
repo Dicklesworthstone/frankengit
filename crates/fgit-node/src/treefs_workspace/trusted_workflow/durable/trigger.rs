@@ -7,6 +7,7 @@ use fgit_types::RepositoryDecisionBatchId;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
+mod pull_request;
 mod reporting;
 
 const MAX_EVENTS: usize = 1024;
@@ -46,6 +47,7 @@ struct Selected {
     commit: GitOid,
     batch: RepositoryDecisionBatchId,
     event_head: RepositoryAuthorityHeadId,
+    pull: Option<pull_request::PullSelection>,
 }
 
 enum Selection {
@@ -79,6 +81,33 @@ impl OneNode {
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
     ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
+        self.poll_selected_workflows_in(
+            request,
+            reference,
+            directory,
+            parent,
+            read_prefixes,
+            limits,
+            artifacts,
+            None,
+        )
+        .await
+    }
+
+    async fn poll_selected_workflows_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        directory: &[u8],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+        pull_number: Option<u64>,
+    ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
+        if pull_number == Some(0) {
+            return Err(invalid("pull-request number must be positive"));
+        }
         limits
             .validate()
             .map_err(TrustedWorkflowFailure::Workflow)?;
@@ -86,7 +115,14 @@ impl OneNode {
         if !reference.as_bytes().starts_with(b"refs/heads/") {
             return Err(invalid("ref watcher requires a branch"));
         }
-        let selected = match self.select_ref_workflow_event(request, reference).await? {
+        let selection = match pull_number {
+            Some(number) => {
+                self.select_pull_request_workflow_event(request, reference, number)
+                    .await?
+            }
+            None => self.select_ref_workflow_event(request, reference).await?,
+        };
+        let selected = match selection {
             Selection::Absent => None,
             Selection::Ready(selected) => Some(selected),
             Selection::ChangedBeforeReservation => {
@@ -99,7 +135,10 @@ impl OneNode {
                 });
             }
         };
-        let scope = reporting::scope(self, reference, directory);
+        let scope = match pull_number {
+            Some(number) => pull_request::scope(self, reference, directory, number),
+            None => reporting::scope(self, reference, directory),
+        };
         check_directory(parent)?;
         let root = parent.join(format!("watch-{}", hex(&scope)));
         let owner = Owner::open(&root)?;
@@ -130,18 +169,26 @@ impl OneNode {
         }
         let Some(selected) = selected else {
             return Ok(TrustedRefWorkflowPoll {
-                state: "ref_unavailable",
+                state: if pull_number.is_some() {
+                    "pull_request_unavailable"
+                } else {
+                    "ref_unavailable"
+                },
                 event: "null".into(),
                 dispatch: None,
             });
         };
         let batch = selected.batch.as_internal_object_id();
-        let event_id = commitment(&[
+        let push_id = commitment(&[
             b"frankengit/ref-workflow-event/v1",
             &scope,
             &batch.algorithm().code_point().to_be_bytes(),
             batch.digest().as_bytes(),
         ]);
+        let event_id = selected
+            .pull
+            .as_ref()
+            .map_or(push_id, |pull| pull.event_id(&scope, &selected));
         let key = hex(&event_id);
         let event_directory = root.join(format!("event-{key}"));
         let mut run_id = [0; 16];
@@ -149,14 +196,20 @@ impl OneNode {
         if run_id == [0; 16] {
             return Err(invalid("ref workflow execution identity refused"));
         }
-        let event = format!(
+        let profile = if selected.pull.is_some() {
+            "latest-canonical-pull-request-head-v1"
+        } else {
+            "latest-canonical-ref-update-v1"
+        };
+        let mut event = format!(
             concat!(
-                "{{\"profile\":\"latest-canonical-ref-update-v1\",\"tenant_id\":\"{}\",",
+                "{{\"profile\":\"{}\",\"tenant_id\":\"{}\",",
                 "\"repository_id\":\"{}\",\"repository_incarnation\":\"{}\",\"ref_hex\":\"{}\",",
                 "\"decision_batch\":\"{}\",\"event_head\":\"{}\",\"observed_head\":\"{}\",",
                 "\"commit\":\"{}\",\"workflow_directory_hex\":\"{}\",\"event_id\":\"{}\",",
                 "\"dispatch_id\":\"{}\",\"custody_directory_hex\":\"{}\"}}"
             ),
+            profile,
             self.tenant_id(),
             self.repository_id(),
             self.repository_incarnation_id(),
@@ -170,6 +223,10 @@ impl OneNode {
             hex(&run_id),
             hex(event_directory.as_os_str().as_bytes())
         );
+        if let Some(pull) = &selected.pull {
+            event.pop();
+            event.push_str(&format!(",\"pull_request\":{}}}", pull.to_json()));
+        }
         match fs::symlink_metadata(&event_directory) {
             Ok(_) => {
                 return Ok(TrustedRefWorkflowPoll {
@@ -204,7 +261,11 @@ impl OneNode {
                 request,
                 reference,
                 directory,
-                "push",
+                if selected.pull.is_some() {
+                    "pull_request"
+                } else {
+                    "push"
+                },
                 run_id,
                 &event_directory,
                 read_prefixes,
@@ -294,6 +355,7 @@ impl OneNode {
             commit,
             batch: event.batch_id,
             event_head: event.resulting_head_id,
+            pull: None,
         }))
     }
 }

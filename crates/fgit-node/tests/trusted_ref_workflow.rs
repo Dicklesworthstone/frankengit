@@ -375,3 +375,6 @@ fn cancellation_and_invalid_names_do_not_create_execution_custody() {
 
 #[path = "trusted_ref_workflow/check_reporting.rs"]
 mod check_reporting;
+
+#[path = "trusted_ref_workflow/pull_requests.rs"]
+mod pull_requests;

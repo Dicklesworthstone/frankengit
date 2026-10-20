@@ -43,10 +43,51 @@ impl OneNode {
         directory: &[u8],
         parent: &Path,
         publisher: PrincipalId,
+        observe: impl FnMut(&str) -> Result<(), String>,
+    ) -> TrustedRefCheckPublication {
+        self.publish_selected_workflow_checks_in(
+            request, reference, directory, parent, publisher, None, observe,
+        )
+        .await
+    }
+
+    /// Report original settled PR-head runs without executing code or treating
+    /// current PR metadata as permission to replace original journal identities.
+    pub async fn publish_trusted_pull_request_workflow_checks_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        number: u64,
+        directory: &[u8],
+        parent: &Path,
+        publisher: PrincipalId,
+        observe: impl FnMut(&str) -> Result<(), String>,
+    ) -> TrustedRefCheckPublication {
+        self.publish_selected_workflow_checks_in(
+            request,
+            reference,
+            directory,
+            parent,
+            publisher,
+            Some(number),
+            observe,
+        )
+        .await
+    }
+
+    async fn publish_selected_workflow_checks_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        directory: &[u8],
+        parent: &Path,
+        publisher: PrincipalId,
+        pull_number: Option<u64>,
         mut observe: impl FnMut(&str) -> Result<(), String>,
     ) -> TrustedRefCheckPublication {
         let mut result = TrustedRefCheckPublication::default();
         let work: Result<(), TrustedWorkflowFailure> = async {
+            if pull_number == Some(0) { return Err(invalid("pull-request number must be positive")); }
             if !request.checkpoint_is_live() { return Err(invalid("watch check publication cancelled")); }
             if !reference.as_bytes().starts_with(b"refs/heads/") || reference.as_bytes().len() > 4096
                 || directory.is_empty() || directory.len() > 4096 || !parent.is_absolute()
@@ -54,7 +95,10 @@ impl OneNode {
                 return Err(invalid("invalid watch check publication scope"));
             }
             check_directory(parent)?;
-            let scope = scope(self, reference, directory);
+            let scope = match pull_number {
+                Some(number) => super::pull_request::scope(self, reference, directory, number),
+                None => scope(self, reference, directory),
+            };
             let root = parent.join(format!("watch-{}", hex(&scope)));
             let _owner = Owner::open(&root)?;
             let reporter = commitment(&[b"frankengit/watch-reporter/v1", &scope, publisher.as_bytes()]);

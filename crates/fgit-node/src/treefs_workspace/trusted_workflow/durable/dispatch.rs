@@ -74,7 +74,7 @@ impl TrustedWorkflowDispatch {
 }
 
 fn event_supported(event: &str) -> bool {
-    matches!(event, "push" | "workflow_dispatch")
+    matches!(event, "push" | "workflow_dispatch" | "pull_request")
 }
 
 fn workflow_child(path: &[u8], directory: &[u8]) -> bool {
@@ -609,7 +609,8 @@ mod tests {
                 .any(|t| t.name == "workflow_dispatch")
         );
         assert!(event_supported("push") && event_supported("workflow_dispatch"));
-        for event in ["", "pull_request", "schedule", "Push", "push\n"] {
+        assert!(event_supported("pull_request"));
+        for event in ["", "pull_request_target", "schedule", "Push", "push\n"] {
             assert!(!event_supported(event));
         }
     }
