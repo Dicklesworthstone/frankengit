@@ -32,30 +32,46 @@ of `byte_equal`, `semantically_equal_declared`, or `divergent`. Suites source
 `../lib.sh` for their own step-level NDJSON evidence; the oracle itself never
 mutates the shared E2E harness.
 
-## Constrained loopback clone mode
+## Constrained loopback modes
 
-`clone-loopback` is the one deliberate exception to the ordinary runner's
-file-only transport policy. It exists solely for the FG-028b FIRST CLONE E2E
-case, where a pinned upstream Git client must clone from the live local
-`fgit-node` git-daemon. It is not a generic networked Git runner:
+`clone-loopback`, `fetch-loopback` and `push-loopback` are the only exceptions
+to the ordinary runner's file-only transport policy. They exist so a pinned
+upstream Git client can talk to a live local `fg serve` git-daemon (FG-028b
+FIRST CLONE, incremental fetch, and the Tier A differential lane). None of them
+is a generic networked Git runner:
 
 ```bash
 scripts/e2e/oracle/oracle.sh clone-loopback \
   git-2.54.0 <run-directory> <label> \
   127.0.0.1:<port> /<32-lower-hex-repository-id>.git <new-relative-destination>
+scripts/e2e/oracle/oracle.sh fetch-loopback \
+  git-2.54.0 <run-directory> <label> 127.0.0.1:<port> /<id>.git \
+  <relative-repository> v0|v1|v2 'refs/heads/*:refs/remotes/origin/*'
+scripts/e2e/oracle/oracle.sh push-loopback \
+  git-2.54.0 <run-directory> <label> 127.0.0.1:<port> /<id>.git \
+  <relative-repository> plain|atomic <refspec>...
 ```
 
-The command accepts no caller-provided Git arguments. It fixes the remote to
-the numeric loopback `git://` URL, accepts only the `git` transport, clears
-ambient configuration and credentials, and keeps Bubblewrap mount/process
-isolation. Its transcript receipt binds the oracle pin/version/binary digest,
-the `loopback-git-only` profile, the sole endpoint, repository path,
-destination, output digests, and exit status. `--share-net` is used only for
-this closed command so the host-side E2E node listener is reachable; every
-other oracle command remains network-unshared and file-only.
+Each command accepts no caller-provided Git options. It fixes the remote to the
+numeric loopback `git://` URL, accepts only the `git` transport, clears ambient
+configuration and credentials, and keeps Bubblewrap mount/process isolation.
+`fetch-loopback` sets only `protocol.version` and maps `refs/heads/*` to
+`refs/remotes/origin/*` with matching names. `push-loopback` always runs
+`git push --porcelain [--atomic]` and takes 1..16 refspecs from a closed
+grammar: `[+]refs/heads/<name>:refs/heads/<name>`, the same for `refs/tags/`,
+or `:refs/heads/<name>` / `:refs/tags/<name>` to delete. It refuses renaming
+pushes, wildcards, `HEAD`, other namespaces, and `..`, `.lock`, dot-leading or
+empty components. Every transcript receipt binds the oracle
+pin/version/binary digest, the `loopback-git-only` profile, the sole endpoint,
+repository path, the mode-specific arguments, output digests and exit status.
+`--share-net` is used only for these closed commands so the host-side listener
+is reachable; every other oracle command remains network-unshared and
+file-only.
 
 `../suites/oracle/oracle_selftest.sh` is a discovered E2E suite that exercises
 planted refusals for an unknown pin, missing source input, wrong binary version,
-caller configuration leakage, sandbox path escape, and the loopback-only clone
-boundary. Its fake Git/Bubblewrap fixtures prove harness mechanics only, not
+caller configuration leakage, sandbox path escape, the loopback-only clone
+boundary, and the push grammar (non-loopback endpoint, renaming refspec, path
+escape, unknown mode, foreign namespace, unknown fetch protocol), each beside a
+permitted push twin. Its fake Git/Bubblewrap fixtures prove harness mechanics only, not
 Git conformance.

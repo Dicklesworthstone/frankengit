@@ -360,6 +360,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "registries/calm_operations.tsv",
         "registries/claim_classes.tsv",
         "registries/claims.tsv",
+        "registries/compatibility_tiers.tsv",
         "registries/crate_layers.tsv",
         "registries/dependency_policy.tsv",
         "registries/durable_objects.tsv",
@@ -438,6 +439,22 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "non_claims",
                 "revalidation",
                 "fallback_wording",
+            ][..],
+        ),
+        (
+            "compatibility_tiers.tsv",
+            &[
+                "id",
+                "tier",
+                "gcm_surfaces",
+                "service",
+                "transport",
+                "protocol",
+                "object_format",
+                "operation",
+                "oracle_pin",
+                "owning_suite",
+                "status",
             ][..],
         ),
         (
@@ -759,6 +776,7 @@ fn check_registries(root: &Path, report: &mut Report) {
     }
     check_evidence_packs(root, report);
     check_attack_matrix(root, report);
+    check_compatibility_tiers(root, report);
     claims::check(root, report);
 }
 
@@ -1028,6 +1046,130 @@ fn check_attack_matrix(root: &Path, report: &mut Report) {
                 "threat control `{control}` from SECURITY_THREAT_MODEL.md has no mapped attack rows in {display}; \
                  completeness check requires every control to be covered by >= 1 attack row"
             ));
+        }
+    }
+}
+
+/// The first cell of every row of the Git-semantics table in
+/// `docs/GIT_COMPATIBILITY_MATRIX.md`: the surfaces a compatibility tier may
+/// cite. Only the first table is read, so a forge-surface name cannot stand in
+/// for a Git one.
+fn git_compatibility_surfaces(root: &Path, report: &mut Report) -> BTreeSet<String> {
+    let path = root.join("docs/GIT_COMPATIBILITY_MATRIX.md");
+    let Ok(text) = fs::read_to_string(&path) else {
+        report.error(format!("cannot read {}", relative(root, &path)));
+        return BTreeSet::new();
+    };
+    let mut surfaces = BTreeSet::new();
+    let mut in_table = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("| Surface |") {
+            in_table = true;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        if !trimmed.starts_with('|') {
+            if !surfaces.is_empty() {
+                break;
+            }
+            continue;
+        }
+        let Some(first) = trimmed.trim_matches('|').split('|').next() else {
+            continue;
+        };
+        let first = first.trim();
+        if !first.is_empty() && !first.starts_with("---") {
+            surfaces.insert(first.to_owned());
+        }
+    }
+    surfaces
+}
+
+/// Validates that every compatibility-tier row in `registries/compatibility_tiers.tsv`
+/// cites only real Git compatibility-matrix surfaces, names a pinned oracle that
+/// exists, and is owned by an existing pinned-oracle suite that asserts the
+/// row's ID. A row whose suite never asserts it could be reported as passing
+/// without ever having run, which is the defect this check exists to refuse.
+fn check_compatibility_tiers(root: &Path, report: &mut Report) {
+    let path = root.join("registries/compatibility_tiers.tsv");
+    let display = relative(root, &path);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return; // The generic registry gate reports the missing file.
+    };
+    let surfaces = git_compatibility_surfaces(root, report);
+    if surfaces.is_empty() {
+        report.error(
+            "docs/GIT_COMPATIBILITY_MATRIX.md has no Git surface table; \
+             compatibility-tier rows cannot be validated"
+                .to_owned(),
+        );
+        return;
+    }
+    let pins = fs::read_to_string(root.join("scripts/e2e/oracle/pins.tsv")).unwrap_or_default();
+    let known_pins: BTreeSet<&str> = pins
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split('\t').next())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut in_header = true;
+    for (line_index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if in_header {
+            in_header = false;
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 11 {
+            continue; // The generic registry gate reports the column count.
+        }
+        let (id, tier, cited, pin, suite) = (fields[0], fields[1], fields[2], fields[8], fields[9]);
+        let at = line_index + 1;
+        if !id.starts_with("TA-") || tier != "A" {
+            report.error(format!(
+                "compatibility tier row `{id}` at {display}:{at} must be a Tier A row (`TA-` id, tier `A`)"
+            ));
+        }
+        for surface in cited.split(';') {
+            if !surfaces.contains(surface) {
+                report.error(format!(
+                    "compatibility tier row `{id}` at {display}:{at} cites `{surface}`, which is not a \
+                     surface in docs/GIT_COMPATIBILITY_MATRIX.md"
+                ));
+            }
+        }
+        if !known_pins.contains(pin) {
+            report.error(format!(
+                "compatibility tier row `{id}` at {display}:{at} names oracle pin `{pin}`, which \
+                 scripts/e2e/oracle/pins.tsv does not declare"
+            ));
+        }
+        match fs::read_to_string(root.join(suite)) {
+            Err(_) => report.error(format!(
+                "compatibility tier row `{id}` at {display}:{at} names non-existent suite `{suite}`"
+            )),
+            Ok(source) => {
+                if !source
+                    .lines()
+                    .any(|line| line.trim() == "fge_kind pinned-oracle")
+                {
+                    report.error(format!(
+                        "compatibility tier row `{id}` at {display}:{at}: suite `{suite}` is not a \
+                         pinned-oracle suite"
+                    ));
+                }
+                if !source.contains(id) {
+                    report.error(format!(
+                        "compatibility tier row `{id}` at {display}:{at}: suite `{suite}` never \
+                         names the row, so it cannot assert it"
+                    ));
+                }
+            }
         }
     }
 }
@@ -6072,6 +6214,116 @@ impl CanonicalBody for EvidenceRecordBody {
         let mut unknown_class_report = Report::new();
         check_evidence_packs(&unknown_class.root, &mut unknown_class_report);
         assert_error(&unknown_class_report, "must declare exactly replay classes");
+    }
+
+    fn compatibility_tier_fixture(row: &str, suite: &str) -> FixtureWorkspace {
+        let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock precedes epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("fgit-compatibility-tier-{nanos}-{nonce}"));
+        for directory in [
+            "registries",
+            "docs",
+            "scripts/e2e/oracle",
+            "scripts/e2e/suites/tier-a",
+        ] {
+            fs::create_dir_all(root.join(directory)).expect("create compatibility tier fixture");
+        }
+        fs::write(
+            root.join("docs/GIT_COMPATIBILITY_MATRIX.md"),
+            "# Matrix\n\n| Surface | V1 target | Oracle |\n|---|---:|---|\n\
+             | Git protocol v0/v1 fetch | required-v1 | legacy |\n\
+             | SHA-1 repositories | required-v1 | exact |\n\n\
+             | Surface | V1 target | Oracle |\n|---|---:|---|\n| Issues | required-v1 | forge |\n",
+        )
+        .expect("write fixture matrix");
+        fs::write(
+            root.join("scripts/e2e/oracle/pins.tsv"),
+            "# fgit-git-oracle-pins-v1\ngit-2.54.0\t2.54.0\n",
+        )
+        .expect("write fixture pins");
+        fs::write(
+            root.join("registries/compatibility_tiers.tsv"),
+            format!(
+                "# franken-registry-v1\nid\ttier\tgcm_surfaces\tservice\ttransport\tprotocol\t\
+                 object_format\toperation\toracle_pin\towning_suite\tstatus\n{row}\n"
+            ),
+        )
+        .expect("write fixture tier registry");
+        fs::write(
+            root.join("scripts/e2e/suites/tier-a/differential.sh"),
+            suite,
+        )
+        .expect("write fixture suite");
+        FixtureWorkspace { root }
+    }
+
+    #[test]
+    fn compatibility_tier_rows_must_cite_real_surfaces_and_be_asserted_by_an_oracle_suite() {
+        const SUITE: &str = "fge_kind pinned-oracle\nROWS=(TA-FETCH-V0-SHA1)\n";
+        let row = |surfaces: &str, pin: &str| {
+            format!(
+                "TA-FETCH-V0-SHA1\tA\t{surfaces}\tgit-upload-pack\tgit://\tv0\tsha1\tfetch\t\
+                 {pin}\tscripts/e2e/suites/tier-a/differential.sh\tactive"
+            )
+        };
+        let permitted = compatibility_tier_fixture(
+            &row("Git protocol v0/v1 fetch;SHA-1 repositories", "git-2.54.0"),
+            SUITE,
+        );
+        let mut report = Report::new();
+        check_compatibility_tiers(&permitted.root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "a well-formed Tier A row must be admitted: {:?}",
+            report.errors
+        );
+
+        for (surfaces, pin, suite, expected) in [
+            // A forge surface from the matrix's second table is not a Git surface.
+            ("Issues", "git-2.54.0", SUITE, "is not a surface"),
+            (
+                "Git protocol v0/v1 fetch;SHA-2 repositories",
+                "git-2.54.0",
+                SUITE,
+                "is not a surface",
+            ),
+            ("SHA-1 repositories", "git-9.9.9", SUITE, "does not declare"),
+            (
+                "SHA-1 repositories",
+                "git-2.54.0",
+                "fge_kind e2e-binary\nROWS=(TA-FETCH-V0-SHA1)\n",
+                "is not a pinned-oracle suite",
+            ),
+            (
+                "SHA-1 repositories",
+                "git-2.54.0",
+                "fge_kind pinned-oracle\nROWS=(TA-FETCH-V1-SHA1)\n",
+                "never names the row",
+            ),
+        ] {
+            let refused = compatibility_tier_fixture(&row(surfaces, pin), suite);
+            let mut report = Report::new();
+            check_compatibility_tiers(&refused.root, &mut report);
+            assert_error(&report, expected);
+        }
+    }
+
+    #[test]
+    fn live_compatibility_tier_registry_is_consistent() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("registry checker lives under the workspace tools directory");
+        let mut report = Report::new();
+        check_compatibility_tiers(root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "the committed Tier A registry must cite real surfaces and asserting suites: {:?}",
+            report.errors
+        );
     }
 
     #[test]

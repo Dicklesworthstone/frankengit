@@ -1,0 +1,20 @@
+# franken-registry-v1
+id	tier	gcm_surfaces	service	transport	protocol	object_format	operation	oracle_pin	owning_suite	status
+TA-ADV-RECEIVE-SHA1	A	Non-atomic push;Atomic push;SHA-1 repositories	git-receive-pack	git://	v0	sha1	advertisement	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-ADV-RECEIVE-SHA256	A	Non-atomic push;Atomic push;SHA-256 repositories	git-receive-pack	git://	v0	sha256	advertisement	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-ADV-V0-SHA1	A	Git protocol v0/v1 fetch;SHA-1 repositories	git-upload-pack	git://	v0	sha1	advertisement	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-ADV-V0-SHA256	A	Git protocol v0/v1 fetch;SHA-256 repositories	git-upload-pack	git://	v0	sha256	advertisement	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-ADV-V2-SHA1	A	Git protocol v2 `ls-refs`/`fetch`;SHA-1 repositories	git-upload-pack	git://	v2	sha1	advertisement and ls-refs	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-ADV-V2-SHA256	A	Git protocol v2 `ls-refs`/`fetch`;SHA-256 repositories	git-upload-pack	git://	v2	sha256	advertisement and ls-refs	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-CLONE-SHA1	A	Git protocol v2 `ls-refs`/`fetch`;SHA-1 repositories;Pack v2 parsing/writing;Annotated and lightweight tags	git-upload-pack	git://	v2	sha1	clone	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-CLONE-SHA256	A	Git protocol v2 `ls-refs`/`fetch`;SHA-256 repositories;Pack v2 parsing/writing;Annotated and lightweight tags	git-upload-pack	git://	v2	sha256	clone	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-FETCH-V0-SHA1	A	Git protocol v0/v1 fetch;SHA-1 repositories	git-upload-pack	git://	v0	sha1	full and incremental fetch	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-FETCH-V0-SHA256	A	Git protocol v0/v1 fetch;SHA-256 repositories	git-upload-pack	git://	v0	sha256	full and incremental fetch	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-FETCH-V1-SHA1	A	Git protocol v0/v1 fetch;SHA-1 repositories	git-upload-pack	git://	v1	sha1	full and incremental fetch	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-FETCH-V1-SHA256	A	Git protocol v0/v1 fetch;SHA-256 repositories	git-upload-pack	git://	v1	sha256	full and incremental fetch	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-FETCH-V2-SHA1	A	Git protocol v2 `ls-refs`/`fetch`;SHA-1 repositories	git-upload-pack	git://	v2	sha1	full and incremental fetch	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-FETCH-V2-SHA256	A	Git protocol v2 `ls-refs`/`fetch`;SHA-256 repositories	git-upload-pack	git://	v2	sha256	full and incremental fetch	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-IMPORT-SHA1	A	SHA-1 repositories;Pack v2 parsing/writing;Pack delta chains	fg import	local	none	sha1	import of a packed local repository	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-IMPORT-SHA256	A	SHA-256 repositories;Pack v2 parsing/writing;Pack delta chains	fg import	local	none	sha256	import of a packed local repository	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-PUSH-SHA1	A	Non-atomic push;Atomic push;Pack delta chains;Annotated and lightweight tags;SHA-1 repositories	git-receive-pack	git://	v0	sha1	push	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active
+TA-PUSH-SHA256	A	Non-atomic push;Atomic push;Pack delta chains;Annotated and lightweight tags;SHA-256 repositories	git-receive-pack	git://	v0	sha256	push	git-2.54.0	scripts/e2e/suites/tier-a/git_daemon_differential.sh	active

@@ -5,3 +5,4 @@ LANE-002	./scripts/verify.sh constitution	local_or_dsr_act	dependency_layer_unsa
 LANE-003	./scripts/verify.sh fast	local_or_dsr_act	fmt_check_unit_model_report	yes	active
 LANE-004	./scripts/verify.sh full	local_dsr_native_matrix	conformance_lab_fault_evidence	yes	specified
 LANE-005	./scripts/verify.sh release	local_dsr_native_matrix	signed_root_last_release_manifest	yes	specified
+LANE-006	./scripts/verify.sh tier-a	local_or_dsr_act	tier_a_receipt_per_compatibility_tier_row	yes	active

@@ -576,10 +576,58 @@ oracle_require_new_clone_destination() {
 # available to E2E suites, and it fixes the endpoint, repository, protocol,
 # and destination ref namespace before Bubblewrap receives control.
 oracle_validate_loopback_fetch_protocol() {
+    # v0 is the unversioned legacy request Git still sends by default to
+    # servers that predate v1; it is a distinct client behaviour, not an alias.
     case "$1" in
-        v1|v2) ;;
-        *) oracle_die "REFUSED" "loopback fetch protocol must be v1 or v2" ;;
+        v0|v1|v2) ;;
+        *) oracle_die "REFUSED" "loopback fetch protocol must be v0, v1 or v2" ;;
     esac
+}
+
+# A loopback push is the receive-pack counterpart of the loopback fetch, and it
+# is held to the same shape: fixed endpoint, fixed repository path, fixed
+# `git push --porcelain` invocation, and a closed refspec grammar. A refspec
+# names one branch or tag on both sides (create/update), optionally forced, or
+# deletes one with an empty source. Renaming pushes, wildcards, `HEAD`, and
+# anything outside refs/heads/ and refs/tags/ are refused before Bubblewrap.
+oracle_validate_loopback_push_mode() {
+    case "$1" in
+        plain|atomic) ;;
+        *) oracle_die "REFUSED" "loopback push mode must be plain or atomic" ;;
+    esac
+}
+
+oracle_validate_loopback_ref_name() {
+    local name="$1"
+    local component=""
+    local -a components=()
+
+    [[ "${#name}" -le 200 ]] || oracle_die "REFUSED" "loopback push ref name is too long"
+    [[ "${name}" =~ ^refs/(heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || \
+        oracle_die "REFUSED" "loopback push ref must be refs/heads/<name> or refs/tags/<name>"
+    [[ "${name}" != *..* && "${name}" != *'//'* && "${name}" != */ && "${name}" != *.lock && "${name}" != */.* ]] || \
+        oracle_die "REFUSED" "loopback push ref name contains an unsafe component"
+    IFS=/ read -r -a components <<< "${name}"
+    for component in "${components[@]}"; do
+        [[ -n "${component}" && "${component}" != .* ]] || \
+            oracle_die "REFUSED" "loopback push ref name contains an unsafe component"
+    done
+}
+
+oracle_validate_loopback_push_refspec() {
+    local refspec="$1"
+    local source=""
+    local destination=""
+
+    [[ "${refspec}" == *:* && "${refspec#*:}" != *:* ]] || \
+        oracle_die "REFUSED" "loopback push refspec must contain exactly one colon"
+    source="${refspec%%:*}"
+    destination="${refspec#*:}"
+    oracle_validate_loopback_ref_name "${destination}"
+    [[ -z "${source}" ]] && return
+    source="${source#+}"
+    [[ "${source}" == "${destination}" ]] || \
+        oracle_die "REFUSED" "loopback push source and destination must name the same ref"
 }
 
 oracle_validate_loopback_fetch_refspec() {
@@ -894,6 +942,120 @@ oracle_fetch_loopback() {
     return "${exit_code}"
 }
 
+oracle_run_loopback_push() {
+    local requested_id="$1"
+    local supplied_run_directory="$2"
+    local endpoint="$3"
+    local repository_path="$4"
+    local work_directory="$5"
+    local mode="$6"
+    shift 6
+    local run_directory=""
+    local install_dir=""
+    local remote_url=""
+    local -a mode_arguments=()
+
+    oracle_load_pin "${requested_id}"
+    FGIT_ORACLE_QUIET=1 oracle_verify "${requested_id}"
+    oracle_require_bwrap
+    run_directory="$(oracle_validate_run_directory "${supplied_run_directory}")"
+    install_dir="$(oracle_install_dir)"
+    remote_url="git://${endpoint}${repository_path}"
+    [[ "${mode}" == "atomic" ]] && mode_arguments=(--atomic)
+
+    # Same loopback-only network exception as clone/fetch: numeric loopback,
+    # GIT_ALLOW_PROTOCOL=git, no caller-owned Git options. The refspecs were
+    # validated against the closed grammar above before this point.
+    bwrap --die-with-parent --new-session --unshare-all --share-net --clearenv \
+        --ro-bind /usr /usr \
+        --symlink usr/bin /bin \
+        --symlink usr/lib /lib \
+        --symlink usr/lib64 /lib64 \
+        --proc /proc \
+        --dev /dev \
+        --tmpfs /tmp \
+        --dir /home \
+        --bind "${run_directory}/home" /home/oracle \
+        --bind "${run_directory}/work" /work \
+        --ro-bind "${install_dir}" /oracle \
+        --chdir "/work/${work_directory}" \
+        --setenv HOME /home/oracle \
+        --setenv PATH /usr/bin:/bin \
+        --setenv GIT_CONFIG_NOSYSTEM 1 \
+        --setenv GIT_CONFIG_GLOBAL /dev/null \
+        --setenv GIT_TEMPLATE_DIR /home/oracle/template \
+        --setenv GIT_EXEC_PATH /oracle/libexec/git-core \
+        --setenv GIT_CEILING_DIRECTORIES /work \
+        --setenv GIT_ALLOW_PROTOCOL git \
+        --setenv GIT_CONFIG_COUNT 2 \
+        --setenv GIT_CONFIG_KEY_0 core.hooksPath \
+        --setenv GIT_CONFIG_VALUE_0 /home/oracle/empty-hooks \
+        --setenv GIT_CONFIG_KEY_1 credential.helper \
+        --setenv GIT_CONFIG_VALUE_1 '' \
+        --setenv GIT_ASKPASS /bin/false \
+        --setenv GIT_TERMINAL_PROMPT 0 \
+        -- /oracle/bin/git push --porcelain "${mode_arguments[@]}" "${remote_url}" "$@"
+}
+
+oracle_push_loopback() {
+    local requested_id="$1"
+    local supplied_run_directory="$2"
+    local label="$3"
+    local endpoint="$4"
+    local repository_path="$5"
+    local work_directory="$6"
+    local mode="$7"
+    shift 7
+    local run_directory=""
+    local transcript_directory=""
+    local exit_code=0
+    local binary_sha256=""
+    local refspec=""
+
+    [[ "$#" -ge 1 && "$#" -le 16 ]] || oracle_die "REFUSED" "loopback push takes 1..16 refspecs"
+    oracle_load_pin "${requested_id}"
+    oracle_require_safe_token "${label}" "loopback push transcript label"
+    oracle_validate_loopback_endpoint "${endpoint}"
+    oracle_validate_git_daemon_repository_path "${repository_path}"
+    oracle_validate_relative_directory "${work_directory}"
+    oracle_validate_loopback_push_mode "${mode}"
+    for refspec in "$@"; do
+        oracle_validate_loopback_push_refspec "${refspec}"
+    done
+    run_directory="$(oracle_validate_run_directory "${supplied_run_directory}")"
+    oracle_require_work_directory "${run_directory}" "${work_directory}"
+    transcript_directory="${run_directory}/transcripts/${label}"
+    [[ ! -e "${transcript_directory}" ]] || oracle_die "REFUSED" "transcript label already exists: ${label}"
+    mkdir -p "${transcript_directory}"
+
+    set +e
+    oracle_run_loopback_push "${requested_id}" "${run_directory}" "${endpoint}" "${repository_path}" \
+        "${work_directory}" "${mode}" "$@" > "${transcript_directory}/stdout.bin" \
+        2> "${transcript_directory}/stderr.bin"
+    exit_code=$?
+    set -e
+    binary_sha256="$(oracle_receipt_value "$(oracle_receipt_path)" binary_sha256)"
+    [[ "${binary_sha256}" =~ ^[0-9a-f]{64}$ ]] || \
+        oracle_die "REFUSED" "pinned oracle receipt has no valid binary digest for loopback push"
+    {
+        printf 'schema_version=%s\n' "${ORACLE_SCHEMA_VERSION}"
+        printf 'oracle_id=%s\n' "${PIN_ID}"
+        printf 'oracle_version=%s\n' "${PIN_VERSION}"
+        printf 'oracle_binary_sha256=%s\n' "${binary_sha256}"
+        printf 'network_profile=loopback-git-only\n'
+        printf 'allowed_endpoint=%s\n' "${endpoint}"
+        printf 'repository_path=%s\n' "${repository_path}"
+        printf 'work_directory=%s\n' "${work_directory}"
+        printf 'mode=%s\n' "${mode}"
+        printf 'refspecs=%s\n' "$*"
+        printf 'exit_code=%s\n' "${exit_code}"
+        printf 'stdout_sha256=%s\n' "$(oracle_sha256 "${transcript_directory}/stdout.bin")"
+        printf 'stderr_sha256=%s\n' "$(oracle_sha256 "${transcript_directory}/stderr.bin")"
+    } > "${transcript_directory}/receipt.tsv"
+    oracle_note "CAPTURED" "${transcript_directory} exit=${exit_code} loopback=${endpoint} push=${mode}"
+    return "${exit_code}"
+}
+
 oracle_capture() {
     local requested_id="$1"
     local run_directory="$2"
@@ -995,7 +1157,7 @@ oracle_compare() {
 }
 
 usage() {
-    printf 'usage: %s {fetch-source|build|record-installed|verify|create-run|run|capture|clone-loopback|fetch-loopback|compare} ...\n' "$0" >&2
+    printf 'usage: %s {fetch-source|build|record-installed|verify|create-run|run|capture|clone-loopback|fetch-loopback|push-loopback|compare} ...\n' "$0" >&2
     exit "${ORACLE_REFUSED}"
 }
 
@@ -1038,6 +1200,10 @@ main() {
         fetch-loopback)
             [[ "$#" -eq 8 ]] || usage
             oracle_fetch_loopback "$@"
+            ;;
+        push-loopback)
+            [[ "$#" -ge 8 ]] || usage
+            oracle_push_loopback "$@"
             ;;
         compare)
             [[ "$#" -eq 3 || "$#" -eq 4 ]] || usage

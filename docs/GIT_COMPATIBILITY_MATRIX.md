@@ -46,6 +46,64 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
+## Tier A: the declared differential tier
+
+Tier A is the narrow compatibility tier the plan's Phase 2 exit and 1.0
+definition of done (item 2) require to pass differentially. Its rows are
+declared in [`registries/compatibility_tiers.tsv`](../registries/compatibility_tiers.tsv).
+Each row names the surfaces of the table above that it evidences, plus its
+service, transport, protocol, object format, operation, oracle pin and owning
+suite. The registry checker refuses a row that cites a surface not in that
+table, names an undeclared pin, or is owned by a suite that is not a
+pinned-oracle suite or never asserts the row.
+
+`./scripts/verify.sh tier-a` builds `fg` once and runs every owning suite
+against the pinned upstream Git oracle. It writes `tier_a_receipt.json` with one
+status per row, bound to the source revision, the `fg` digest, the registry
+digest and the oracle's install receipt.
+- Exit 0 means every row passed.
+- Exit 3 means the oracle was unavailable and no row ran.
+- Any other exit is a failure.
+- A row with no executed assertion is `not_run`, never passing.
+
+For each row, [`tier_a_differential.py`](../scripts/e2e/helpers/tier_a_differential.py)
+runs the same operation twice: against pinned Git, over file transport inside
+the sandbox, and against `fg serve`, over loopback `git://` through the oracle's
+fixed loopback modes. It runs each operation on SHA-1 and SHA-256 copies of five
+corpora:
+- an empty repository;
+- 1,200 linear commits;
+- a 2,500-file tree with nested, spaced, UTF-8, executable, symlink and empty
+  entries;
+- 80 revisions of a 120 KB file packed at Git's default delta depth;
+- branches, a merge, an octopus merge, an orphan root, an empty tree, and
+  annotated, lightweight and nested tags.
+
+It compares:
+- import of each corpus;
+- v0 and v2 advertisements and capabilities, and `ls-refs`;
+- HEAD, refs, the object set, `fsck --strict` and the checked-out index after a
+  clone;
+- full and incremental fetch over protocol v0, v1 and v2;
+- push report-status and the resulting refs for create, fast-forward, tag,
+  rejected and forced non-fast-forward, atomic multi-ref, an ordinary
+  delta-chained history, delete, and deletion of HEAD's branch.
+
+Declared divergences are capabilities `fg` advertises that upstream advertises
+only under non-default configuration. Both are served inside `fg`'s exact-head
+visible-graph proof:
+- DIV-TA-001: `allow-reachable-sha1-in-want`;
+- DIV-TA-002: `filter`.
+
+Every other capability `fg` advertises must also be advertised by pinned Git,
+and the Tier A capability subset must match exactly.
+
+Non-claims: Tier A covers the `git://` loopback carrier only. Smart HTTP and
+SSH carry the same upload-pack and receive-pack state machines, but they are not
+Tier A rows until the oracle has a constrained mode for them. Shallow and
+partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
+section states no result; the receipt does.
+
 ## Hidden-ref disclosure: implementation status (2026-09-04)
 
 **Source revision:** `0f26c6856896021fd4008e40b917465ee713bd33`. The owning

@@ -101,6 +101,17 @@ if [ "$1" = "clone" ]; then
     printf 'loopback clone accepted\n'
     exit 0
 fi
+if [ "$1" = "push" ]; then
+    [ "${GIT_ALLOW_PROTOCOL}" = git ] || exit 45
+    [ "$2" = "--porcelain" ] || exit 46
+    [ "$3" = "--atomic" ] || exit 47
+    [ "$4" = "git://127.0.0.1:9418/11111111111111111111111111111111.git" ] || exit 48
+    [ "$5" = "+refs/heads/topic:refs/heads/topic" ] || exit 49
+    [ "$6" = ":refs/tags/old" ] || exit 50
+    [ "$#" -eq 6 ] || exit 51
+    printf 'loopback push accepted\n'
+    exit 0
+fi
 printf 'unexpected fake git invocation\n' >&2
 exit 2
 EOF
@@ -236,6 +247,32 @@ fge_assert_exit FG-000B-ORACLE-006 0 "${SECOND_CAPTURE_EXIT}" "near-identical pe
   /11111111111111111111111111111111.git loopback-clone >/dev/null
 LOOPBACK_CAPTURE_EXIT=$?
 
+# push-loopback: every refusal below differs from the permitted twin at the end
+# in exactly one argument.
+mkdir -p "${RUN_DIRECTORY}/work/pushsrc"
+PUSH_REPO=/11111111111111111111111111111111.git
+expect_exit FG-000B-ORACLE-020 64 "loopback push refuses a non-loopback endpoint before Git starts" \
+    "${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-remote 192.0.2.1:9418 "${PUSH_REPO}" pushsrc atomic \
+      +refs/heads/topic:refs/heads/topic :refs/tags/old
+expect_exit FG-000B-ORACLE-021 64 "loopback push refuses a renaming refspec" \
+    "${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-rename 127.0.0.1:9418 "${PUSH_REPO}" pushsrc atomic \
+      +refs/heads/topic:refs/heads/other :refs/tags/old
+expect_exit FG-000B-ORACLE-022 64 "loopback push refuses a path-escaping ref name" \
+    "${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-escape 127.0.0.1:9418 "${PUSH_REPO}" pushsrc atomic \
+      +refs/heads/a/../b:refs/heads/a/../b :refs/tags/old
+expect_exit FG-000B-ORACLE-023 64 "loopback push refuses an unknown mode" \
+    "${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-mode 127.0.0.1:9418 "${PUSH_REPO}" pushsrc force \
+      +refs/heads/topic:refs/heads/topic :refs/tags/old
+expect_exit FG-000B-ORACLE-024 64 "loopback push refuses refs outside refs/heads and refs/tags" \
+    "${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-namespace 127.0.0.1:9418 "${PUSH_REPO}" pushsrc atomic \
+      +refs/notes/topic:refs/notes/topic :refs/tags/old
+expect_exit FG-000B-ORACLE-025 64 "loopback fetch refuses an unknown protocol version" \
+    "${ORACLE}" fetch-loopback testgit "${RUN_DIRECTORY}" fetch-v3 127.0.0.1:9418 "${PUSH_REPO}" pushsrc v3 \
+      'refs/heads/*:refs/remotes/origin/*'
+"${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-permitted 127.0.0.1:9418 "${PUSH_REPO}" pushsrc atomic \
+  +refs/heads/topic:refs/heads/topic :refs/tags/old >/dev/null
+PUSH_CAPTURE_EXIT=$?
+
 fge_phase assert
 expect_file_contains FG-000B-ORACLE-007 '"classification":"byte_equal"' "${TEST_ROOT}/verdict.json" "identical transcripts receive a byte-equal NDJSON verdict"
 expect_file_contains FG-000B-ORACLE-008 --clearenv "${FGIT_ORACLE_BWRAP_LOG}" "Bubblewrap clears inherited environment"
@@ -247,6 +284,11 @@ expect_file_contains FG-000B-ORACLE-016 'GIT_ALLOW_PROTOCOL' "${FGIT_ORACLE_BWRA
 expect_file_contains FG-000B-ORACLE-017 'network_profile=loopback-git-only' "${RUN_DIRECTORY}/transcripts/loopback/receipt.tsv" "loopback transcript records the constrained network profile"
 expect_file_contains FG-000B-ORACLE-018 'allowed_endpoint=127.0.0.1:9418' "${RUN_DIRECTORY}/transcripts/loopback/receipt.tsv" "loopback transcript binds the single allowed endpoint"
 expect_file_contains FG-000B-ORACLE-019 'oracle_id=testgit' "${RUN_DIRECTORY}/transcripts/loopback/receipt.tsv" "loopback transcript binds the pinned Git identity"
+fge_assert_exit FG-000B-ORACLE-026 0 "${PUSH_CAPTURE_EXIT}" "bounded loopback push accepts its fixed atomic porcelain invocation"
+expect_file_contains FG-000B-ORACLE-027 'refspecs=+refs/heads/topic:refs/heads/topic :refs/tags/old' \
+  "${RUN_DIRECTORY}/transcripts/push-permitted/receipt.tsv" "loopback push transcript binds its exact refspecs"
+expect_file_contains FG-000B-ORACLE-028 'network_profile=loopback-git-only' \
+  "${RUN_DIRECTORY}/transcripts/push-permitted/receipt.tsv" "loopback push transcript records the constrained network profile"
 if grep -F --quiet -- "${HOME}" "${FGIT_ORACLE_BWRAP_LOG}"; then
     fge_fail FG-000B-ORACLE-011 "user HOME leaked into the Bubblewrap invocation"
 else
