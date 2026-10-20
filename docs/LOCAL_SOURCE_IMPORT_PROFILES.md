@@ -56,6 +56,25 @@ cleanup or isolation from a malicious local host. Scratch custody is not a
 backup, resumable import or durability receipt. Disk exhaustion, damaged retained
 bytes and failed cleanup refuse rather than publishing partially verified data.
 
+## HEAD and the default branch
+
+As on a Git server, a repository's HEAD is fixed when it is created.
+`fg init` stages an unborn HEAD naming `refs/heads/main`.
+`fg init ... --initial-branch <name>` names `refs/heads/<name>` instead, as
+`git init -b` does. Import and push publish refs only and never change HEAD. A
+source whose default branch is not `main` should therefore be imported into a
+repository initialized with that branch, or clones of it check nothing out:
+
+```sh
+fg init ./fgit-data 11111111111111111111111111111111 22222222222222222222222222222222 \
+  --initial-branch trunk
+```
+
+`--initial-branch` is refused together with `--creation-idempotency-key`. The
+creation record does not seal the branch, so a retry could not detect a changed
+one. A HEAD that names a branch which does not exist yet is served as upstream
+serves it: no HEAD line in protocol v0, and `unborn HEAD symref-target:` in v2.
+
 ## Executable coverage
 
 ```sh

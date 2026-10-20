@@ -453,6 +453,11 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
             Cause::Causeless,
         ),
         (
+            "InvalidInitialBranch",
+            CliRefusal::InvalidInitialBranch("refs/heads/main".to_string()),
+            Cause::Causeless,
+        ),
+        (
             "SampleObjectFormat",
             CliRefusal::SampleObjectFormat {
                 repository: fgit_types::GitHashAlgorithm::Sha256,

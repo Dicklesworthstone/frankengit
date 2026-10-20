@@ -147,3 +147,50 @@ fn creation_refuses_to_resolve_a_caller_supplied_incarnation() {
     .expect_err("creation establishes its incarnation before accepting any resolution input");
     assert!(matches!(refusal, NodeRefusal::CreationWithResolutionInput));
 }
+
+#[test]
+fn genesis_head_names_main_or_the_selected_initial_branch() {
+    let branch = |text: &[u8]| fgit_types::RefName::try_new(text).expect("fixture ref is valid");
+    let genesis_head = |config: NodeConfig| {
+        let (mut node, _) = OneNode::init(config).expect("repository initializes");
+        node.bring_into_service(fgit_types::numeric::HeadGeneration::FIRST)
+            .expect("node enters service");
+        let snapshot = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .expect("genesis materializes")
+            .snapshot()
+            .clone();
+        node.shutdown().expect("node closes cleanly");
+        (snapshot.head_target, snapshot.refs.len())
+    };
+
+    let scratch = ScratchDirectory::new();
+    assert_eq!(
+        genesis_head(config(scratch.0.clone())),
+        (Some(branch(b"refs/heads/main")), 0),
+        "genesis stages an unborn HEAD naming main"
+    );
+    let scratch = ScratchDirectory::new();
+    assert_eq!(
+        genesis_head(config(scratch.0.clone()).with_initial_branch(branch(b"refs/heads/trunk"))),
+        (Some(branch(b"refs/heads/trunk")), 0),
+        "an operator-selected branch replaces main, like git init -b"
+    );
+
+    // Refusal twins: keyed creation recovery does not seal the branch, and a
+    // HEAD must name a branch.
+    let scratch = ScratchDirectory::new();
+    let refusal = OneNode::init(
+        recovery_config(scratch.0.clone(), b"fg-initial-branch-key")
+            .with_initial_branch(branch(b"refs/heads/trunk")),
+    )
+    .expect_err("a keyed creation cannot also select the initial branch");
+    assert!(matches!(refusal, NodeRefusal::CreationKeyWithInitialBranch));
+    let scratch = ScratchDirectory::new();
+    assert!(
+        OneNode::init(config(scratch.0.clone()).with_initial_branch(branch(b"refs/tags/trunk")))
+            .is_err(),
+        "a tag cannot be HEAD's target"
+    );
+}

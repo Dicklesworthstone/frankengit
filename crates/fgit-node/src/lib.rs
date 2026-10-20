@@ -3861,6 +3861,13 @@ pub enum NodeRefusal {
     /// target. Accepting both on one path would let a stale reference select a
     /// namespace before the creation attempt establishes its authority.
     CreationWithResolutionInput,
+    /// Keyed creation recovery cannot also select an initial branch.
+    ///
+    /// The creation-attempt record seals the parameters a retry is checked
+    /// against, and the initial branch is not one of them. A retry with a
+    /// different branch would therefore be silently absorbed instead of
+    /// refused, so the combination is refused until the record carries it.
+    CreationKeyWithInitialBranch,
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -3924,6 +3931,10 @@ impl Display for NodeRefusal {
             ),
             Self::CreationWithResolutionInput => formatter.write_str(
                 "repository creation cannot also resolve a caller-provided incarnation input",
+            ),
+            Self::CreationKeyWithInitialBranch => formatter.write_str(
+                "a creation idempotency key cannot be combined with an initial branch: \
+                 the creation record does not seal the branch a retry would be checked against",
             ),
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
@@ -3992,6 +4003,7 @@ impl Error for NodeRefusal {
             | Self::ObjectFormatMismatch { .. }
             | Self::RepositoryIncarnationMismatch { .. }
             | Self::CreationWithResolutionInput
+            | Self::CreationKeyWithInitialBranch
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -6395,6 +6407,9 @@ pub struct NodeConfig {
     /// configuration. Existing repositories always select their stored layout
     /// when opened; this is never an implicit migration request.
     root_layout: RootLayoutVersion,
+    /// The branch a newly created repository's unborn HEAD names; `None` is
+    /// `refs/heads/main`. Only [`OneNode::init`] reads it.
+    initial_branch: Option<RefName>,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     /// The selected-pack write envelope: the planner/writer bounds applied
@@ -6471,6 +6486,7 @@ impl NodeConfig {
             runtime_budgets: BudgetPolicy::finite_defaults(),
             object_format: None,
             root_layout: RootLayoutVersion::LegacyWholeBody,
+            initial_branch: None,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             selected_pack_limits: PackLimits::default(),
@@ -6534,6 +6550,16 @@ impl NodeConfig {
     #[must_use]
     pub const fn with_root_layout(mut self, root_layout: RootLayoutVersion) -> Self {
         self.root_layout = root_layout;
+        self
+    }
+
+    /// Names the branch a newly created repository's unborn HEAD targets, as
+    /// `git init -b` does. Without it genesis names `refs/heads/main`. Only
+    /// [`OneNode::init`] reads it; an existing repository's HEAD is canonical
+    /// state and is never changed by this caller input.
+    #[must_use]
+    pub fn with_initial_branch(mut self, branch: RefName) -> Self {
+        self.initial_branch = Some(branch);
         self
     }
 
@@ -6861,6 +6887,9 @@ impl OneNode {
         if config.resolution_input.is_some() {
             return Err(NodeRefusal::CreationWithResolutionInput);
         }
+        if config.creation_idempotency_key.is_some() && config.initial_branch.is_some() {
+            return Err(NodeRefusal::CreationKeyWithInitialBranch);
+        }
         let creation_attempt = config
             .creation_idempotency_key
             .as_ref()
@@ -6887,7 +6916,8 @@ impl OneNode {
         let root_layout = config.root_layout;
         let repository_id = config.repository_id;
         // Built before any component opens, so this cannot need a shutdown.
-        let genesis_refs = genesis_ref_state().map_err(NodeRefusal::from)?;
+        let genesis_refs =
+            genesis_ref_state_for(config.initial_branch.clone()).map_err(NodeRefusal::from)?;
         let mut node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
         if let Some((key, requested)) = creation_attempt {
@@ -9634,8 +9664,20 @@ fn default_git_daemon_repository_path(repository_id: RepositoryId) -> GitDaemonR
 const GENESIS_HEAD_TARGET: &[u8] = b"refs/heads/main";
 
 fn genesis_ref_state() -> Result<CanonicalRefState, AdmissionMaterializationRefusal> {
-    let target = RefName::try_new(GENESIS_HEAD_TARGET)
-        .map_err(|_| AdmissionMaterializationRefusal::CanonicalRoot(RefusalCode::RefNameInvalid))?;
+    genesis_ref_state_for(None)
+}
+
+/// The genesis ref state for an operator-selected initial branch, which must
+/// be a `refs/heads/` name; `None` selects [`GENESIS_HEAD_TARGET`].
+fn genesis_ref_state_for(
+    initial_branch: Option<RefName>,
+) -> Result<CanonicalRefState, AdmissionMaterializationRefusal> {
+    let target = match initial_branch {
+        Some(branch) => branch,
+        None => RefName::try_new(GENESIS_HEAD_TARGET).map_err(|_| {
+            AdmissionMaterializationRefusal::CanonicalRoot(RefusalCode::RefNameInvalid)
+        })?,
+    };
     CanonicalRefState::new_with_head_target(BTreeMap::new(), target)
         .map_err(AdmissionMaterializationRefusal::CanonicalRoot)
 }

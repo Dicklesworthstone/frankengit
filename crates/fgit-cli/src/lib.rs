@@ -130,6 +130,8 @@ pub enum CliRefusal {
     UnsupportedObjectFormat(String),
     /// An initialization selected a root layout this command does not support.
     UnsupportedRootLayout(String),
+    /// `--initial-branch` did not name a valid branch (`refs/heads/<name>`).
+    InvalidInitialBranch(String),
     /// The supplied tenant identity was not canonical lowercase hex.
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
@@ -280,7 +282,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -289,6 +291,11 @@ impl Display for CliRefusal {
             Self::UnsupportedRootLayout(token) => write!(
                 formatter,
                 "unsupported root layout `{token}`: expected `legacy` or `ref-merkle-v1`"
+            ),
+            Self::InvalidInitialBranch(name) => write!(
+                formatter,
+                "invalid --initial-branch `{name}`: expected a branch name such as `main`, \
+                 which must form a valid refs/heads/<name>"
             ),
             Self::SampleObjectFormat { repository, sample } => write!(
                 formatter,
@@ -420,6 +427,7 @@ impl Error for CliRefusal {
             Self::Usage
             | Self::UnsupportedObjectFormat(_)
             | Self::UnsupportedRootLayout(_)
+            | Self::InvalidInitialBranch(_)
             | Self::SampleObjectFormat { .. }
             | Self::ExportDestination
             | Self::ExportDestinationExists(_)
@@ -534,6 +542,8 @@ pub enum CliOutcome {
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     let (arguments, init_layout) = extract_init_root_layout(arguments)?;
+    let (arguments, initial_branch) = extract_init_initial_branch(&arguments)?;
+    let initial_branch = initial_branch.as_ref();
     let (arguments, receive_principal) = extract_receive_principal(&arguments)?;
     let (arguments, serve_envelope) = extract_serve_envelope(&arguments)?;
     match &arguments[..] {
@@ -544,6 +554,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             GitHashAlgorithm::Sha1,
             None,
             init_layout,
+            initial_branch,
         ),
         [command, storage_root, tenant, repository, format] if command == "init" => run_init(
             storage_root,
@@ -552,6 +563,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             object_format(format)?,
             None,
             init_layout,
+            initial_branch,
         ),
         [command, storage_root, tenant, repository, flag, key]
             if command == "init" && flag == "--creation-idempotency-key" =>
@@ -563,6 +575,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 GitHashAlgorithm::Sha1,
                 Some(key.as_bytes()),
                 init_layout,
+                initial_branch,
             )
         }
         [command, storage_root, tenant, repository, flag, key, format]
@@ -575,6 +588,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 object_format(format)?,
                 Some(key.as_bytes()),
                 init_layout,
+                initial_branch,
             )
         }
         [
@@ -823,6 +837,41 @@ fn extract_init_root_layout(
     Ok((retained, layout.unwrap_or_default()))
 }
 
+/// `fg init ... --initial-branch <name>`, as `git init -b`: the branch the new
+/// repository's unborn HEAD names. Without it genesis names `main`.
+fn extract_init_initial_branch(
+    arguments: &[String],
+) -> Result<(Vec<String>, Option<fgit_types::RefName>), CliRefusal> {
+    if arguments.first().map(String::as_str) != Some("init") {
+        return Ok((arguments.to_vec(), None));
+    }
+    let mut retained = Vec::with_capacity(arguments.len());
+    let mut branch = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        if cursor >= 4 && arguments[cursor] == "--initial-branch" {
+            let name = arguments.get(cursor + 1).ok_or(CliRefusal::Usage)?;
+            if branch.is_some() {
+                return Err(CliRefusal::Usage);
+            }
+            // A short name only, like `git init -b`: `refs/...` or an option
+            // spelling is refused rather than nested under refs/heads/.
+            if name.starts_with("refs/") || name.starts_with('-') {
+                return Err(CliRefusal::InvalidInitialBranch(name.clone()));
+            }
+            branch = Some(
+                fgit_types::RefName::try_new(format!("refs/heads/{name}").as_bytes())
+                    .map_err(|_| CliRefusal::InvalidInitialBranch(name.clone()))?,
+            );
+            cursor += 2;
+        } else {
+            retained.push(arguments[cursor].clone());
+            cursor += 1;
+        }
+    }
+    Ok((retained, branch))
+}
+
 /// Creates one repository in the explicitly selected object format and layout.
 fn run_init(
     storage_root: &str,
@@ -831,9 +880,14 @@ fn run_init(
     format: GitHashAlgorithm,
     creation_idempotency_key: Option<&[u8]>,
     layout: fgit_types::RootLayoutVersion,
+    initial_branch: Option<&fgit_types::RefName>,
 ) -> Result<CliOutcome, CliRefusal> {
     let configuration =
         node_config(storage_root, tenant, repository, Some(format), None)?.with_root_layout(layout);
+    let configuration = match initial_branch {
+        Some(branch) => configuration.with_initial_branch(branch.clone()),
+        None => configuration,
+    };
     let configuration = match creation_idempotency_key {
         Some(key) => configuration.with_creation_idempotency_key(key.to_vec()),
         None => configuration,
@@ -1937,8 +1991,8 @@ mod tests {
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
     use super::{
-        AtReport, CliOutcome, CliRefusal, encode_derived_id, extract_init_root_layout, node_config,
-        run,
+        AtReport, CliOutcome, CliRefusal, encode_derived_id, extract_init_initial_branch,
+        extract_init_root_layout, node_config, run,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -2193,6 +2247,45 @@ mod tests {
                 "fg init must accept the explicit `{format}` repository format"
             );
         }
+    }
+
+    #[test]
+    fn init_initial_branch_is_a_short_branch_name_and_refused_otherwise() {
+        let init = |extra: &[&str]| {
+            let mut arguments = vec!["init", "root", "11", "22"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            arguments.extend(extra.iter().map(|value| (*value).to_owned()));
+            extract_init_initial_branch(&arguments)
+        };
+        let (retained, branch) = init(&["sha256", "--initial-branch", "trunk"]).unwrap();
+        assert_eq!(retained, ["init", "root", "11", "22", "sha256"]);
+        assert_eq!(
+            branch.map(|name| name.as_bytes().to_vec()),
+            Some(b"refs/heads/trunk".to_vec())
+        );
+        let (_, absent) = init(&["sha1"]).unwrap();
+        assert!(absent.is_none(), "no flag keeps the genesis default");
+        for refused in [
+            &["--initial-branch", "refs/heads/trunk"][..],
+            &["--initial-branch", "-x"],
+            &["--initial-branch", "a..b"],
+            &["--initial-branch", "trunk.lock"],
+        ] {
+            assert!(
+                matches!(init(refused), Err(CliRefusal::InvalidInitialBranch(_))),
+                "{refused:?}"
+            );
+        }
+        assert!(matches!(
+            init(&["--initial-branch", "a", "--initial-branch", "b"]),
+            Err(CliRefusal::Usage)
+        ));
+        assert!(matches!(
+            init(&["--initial-branch"]),
+            Err(CliRefusal::Usage)
+        ));
     }
 
     #[test]
