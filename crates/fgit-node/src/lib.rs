@@ -9663,6 +9663,9 @@ fn default_git_daemon_repository_path(repository_id: RepositoryId) -> GitDaemonR
 /// carry refs only and never change it.
 const GENESIS_HEAD_TARGET: &[u8] = b"refs/heads/main";
 
+/// The default genesis state; production reaches it as
+/// `genesis_ref_state_for(None)` from [`OneNode::init`].
+#[cfg(test)]
 fn genesis_ref_state() -> Result<CanonicalRefState, AdmissionMaterializationRefusal> {
     genesis_ref_state_for(None)
 }
