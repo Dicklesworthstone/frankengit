@@ -27,7 +27,10 @@ SANDBOX = RUN / 'work'
 TENANT, REPOSITORY, PRINCIPAL = '7a' * 16, '7b' * 16, '7c' * 16
 REPOSITORY_PATH = f'/{REPOSITORY}.git'
 FORMATS = ('sha1', 'sha256')
-CORPORA = ('empty', 'deep', 'wide', 'delta', 'shape')
+CORPORA = ('empty', 'deep', 'wide', 'delta', 'shape', 'trunk')
+# A corpus whose default branch is not main: fg is initialized with
+# `--initial-branch` to match, as `git init -b` would be.
+DEFAULT_BRANCH = {'trunk': 'trunk'}
 WORK.mkdir(parents=True, exist_ok=True)
 LOG = open(WORK / 'commands.log', 'a', encoding='utf-8')
 
@@ -198,6 +201,10 @@ def corpus_stream(name):
         annotated = s.tag('v1.0', merged, 'release 1.0\n', mark=True)
         s.tag('nested', annotated, 'tag of a tag\n')
         s.reset('refs/tags/light', release)
+    elif name == 'trunk':
+        tip = s.commit('refs/heads/trunk', 'trunk root\n', [('100644', s.blob('trunk\n'), 'TRUNK')])
+        tip = s.commit('refs/heads/trunk', 'trunk two\n', [('100644', s.blob('two\n'), 'two.txt')], (tip,))
+        s.commit('refs/heads/side', 'side\n', [('100644', s.blob('side\n'), 'side.txt')], (tip,))
     return s.bytes()
 
 
@@ -207,7 +214,7 @@ def build_source(fmt, corpus):
     if (SANDBOX / repository).exists():
         return repository
     git_ok('src', 'init', '-q', '--bare', f'--object-format={fmt}', f'{fmt}-{corpus}.git')
-    git_ok(repository, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+    git_ok(repository, 'symbolic-ref', 'HEAD', f"refs/heads/{DEFAULT_BRANCH.get(corpus, 'main')}")
     if corpus != 'empty':
         stream = SANDBOX / 'streams' / f'{corpus}.fi'
         if not stream.exists():
@@ -230,10 +237,10 @@ def fg(*args, expect=0, timeout=900):
     return result
 
 
-def fg_node(label, fmt, source=None):
+def fg_node(label, fmt, source=None, initial_branch=None):
     node = WORK / 'nodes' / label
     node.parent.mkdir(parents=True, exist_ok=True)
-    fg('init', node, TENANT, REPOSITORY, fmt)
+    fg('init', node, TENANT, REPOSITORY, fmt, *(['--initial-branch', initial_branch] if initial_branch else []))
     if source is not None:
         fg('import', node, TENANT, REPOSITORY, PRINCIPAL, f'tier-a-{label}', SANDBOX / source)
     return node
@@ -461,7 +468,7 @@ def upload_rows(fmt, rows, timings):
         else:
             started = time.monotonic()
             try:
-                node = fg_node(f'{fmt}-{corpus}', fmt, source)
+                node = fg_node(f'{fmt}-{corpus}', fmt, source, DEFAULT_BRANCH.get(corpus))
                 imported.check(corpus)('import', True)
             except RuntimeError as error:
                 imported.check(corpus)('import', False, str(error)[:600])

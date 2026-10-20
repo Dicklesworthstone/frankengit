@@ -78,6 +78,8 @@ corpora:
 - 80 revisions of a 120 KB file packed at Git's default delta depth;
 - branches, a merge, an octopus merge, an orphan root, an empty tree, and
   annotated, lightweight and nested tags.
+- a repository whose default branch is `trunk`, initialized with
+  `fg init --initial-branch trunk` to match.
 
 It compares:
 - import of each corpus;
