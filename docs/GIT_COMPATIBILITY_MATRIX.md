@@ -69,7 +69,7 @@ digest and the oracle's install receipt.
 For each row, [`tier_a_differential.py`](../scripts/e2e/helpers/tier_a_differential.py)
 runs the same operation twice: against pinned Git, over file transport inside
 the sandbox, and against `fg serve`, over loopback `git://` through the oracle's
-fixed loopback modes. It runs each operation on SHA-1 and SHA-256 copies of six
+fixed loopback modes. It runs each operation on SHA-1 and SHA-256 copies of seven
 corpora:
 - an empty repository;
 - 1,200 linear commits;
@@ -79,7 +79,9 @@ corpora:
 - branches, a merge, an octopus merge, an orphan root, an empty tree, and
   annotated, lightweight and nested tags;
 - a repository whose default branch is `trunk`, initialized with
-  `fg init --initial-branch trunk` to match.
+  `fg init --initial-branch trunk` to match;
+- one commit of 20,000 files, about 20,100 objects. Before frankengit-eq4h
+  every pack over about 16,400 objects was refused (NEG-037).
 
 It compares:
 - import of each corpus;
@@ -89,8 +91,8 @@ It compares:
 - full and incremental fetch over protocol v0, v1 and v2;
 - push report-status and the resulting refs for create, fast-forward, tag,
   rejected and forced non-fast-forward, atomic multi-ref, an ordinary
-  delta-chained history, delete, deletion of HEAD's branch, and a
-  directory/file refname conflict.
+  delta-chained history, a push of over 20,000 new objects, delete,
+  deletion of HEAD's branch, and a directory/file refname conflict.
 
 Declared divergences are capabilities `fg` advertises that upstream advertises
 only under non-default configuration. Both are served inside `fg`'s exact-head

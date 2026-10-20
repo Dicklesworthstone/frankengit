@@ -27,7 +27,10 @@ SANDBOX = RUN / 'work'
 TENANT, REPOSITORY, PRINCIPAL = '7a' * 16, '7b' * 16, '7c' * 16
 REPOSITORY_PATH = f'/{REPOSITORY}.git'
 FORMATS = ('sha1', 'sha256')
-CORPORA = ('empty', 'deep', 'wide', 'delta', 'shape', 'trunk')
+CORPORA = ('empty', 'deep', 'wide', 'delta', 'shape', 'trunk', 'many')
+# More objects than the ~16.4k at which per-scan lookup charges refused every
+# import and push (frankengit-eq4h, NEG-037).
+MANY_FILES = 20_000
 # A corpus whose default branch is not main: fg is initialized with
 # `--initial-branch` to match, as `git init -b` would be.
 DEFAULT_BRANCH = {'trunk': 'trunk'}
@@ -201,6 +204,9 @@ def corpus_stream(name):
         annotated = s.tag('v1.0', merged, 'release 1.0\n', mark=True)
         s.tag('nested', annotated, 'tag of a tag\n')
         s.reset('refs/tags/light', release)
+    elif name == 'many':
+        files = [('100644', s.blob(f'file {n}\n'), f'm{n // 200:03d}/f{n % 200:03d}.txt') for n in range(MANY_FILES)]
+        s.commit('refs/heads/main', 'many objects\n', files)
     elif name == 'trunk':
         tip = s.commit('refs/heads/trunk', 'trunk root\n', [('100644', s.blob('trunk\n'), 'TRUNK')])
         tip = s.commit('refs/heads/trunk', 'trunk two\n', [('100644', s.blob('two\n'), 'two.txt')], (tip,))
@@ -633,6 +639,7 @@ PUSH_STEPS = (
     ('forced', 'plain', ('+refs/heads/feature/new:refs/heads/feature/new',)),
     ('atomic-create', 'atomic', ('refs/heads/a1:refs/heads/a1', 'refs/heads/a2:refs/heads/a2')),
     ('delta-history', 'plain', ('refs/heads/delta-history:refs/heads/delta-history',)),
+    ('many-objects', 'plain', ('refs/heads/many-history:refs/heads/many-history',)),
     ('delete', 'plain', (':refs/heads/feature/new',)),
     ('delete-head-target', 'plain', (':refs/heads/main',)),
     # refs/heads/topic/octopus exists, so refs/heads/topic cannot (directory/file).
@@ -644,6 +651,7 @@ def push_rows(fmt, rows, timings):
     push, receive_adv = rows[f'TA-PUSH-{fmt.upper()}'], rows[f'TA-ADV-RECEIVE-{fmt.upper()}']
     source = build_source(fmt, 'shape')
     build_source(fmt, 'delta')
+    build_source(fmt, 'many')
     node = fg_node(f'{fmt}-push', fmt, source)
     target = f'ref/push-target-{fmt}.git'
     git_ok('.', 'clone', '-q', '--bare', '--no-local', source, target)
@@ -744,6 +752,10 @@ def prepare_push(pusher, step, fmt):
     elif step == 'delta-history':
         # Ordinary history: 80 revisions of a 120 KB file, packed at Git's default depth.
         git_ok(pusher, 'fetch', '-q', f'../../src/{fmt}-delta.git', 'refs/heads/main:refs/heads/delta-history')
+        return
+    elif step == 'many-objects':
+        # One push of more than 20,000 new objects through the receive validator.
+        git_ok(pusher, 'fetch', '-q', f'../../src/{fmt}-many.git', 'refs/heads/main:refs/heads/many-history')
         return
     elif step == 'atomic-create':
         s.commit('refs/heads/a1', 'a1\n', [('100644', s.blob('a1\n'), 'a1.txt')], ('refs/heads/main^0',))
