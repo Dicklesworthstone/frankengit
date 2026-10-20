@@ -38,6 +38,9 @@ struct Options {
 }
 
 pub fn run(arguments: &[String]) -> Result<(), String> {
+    if arguments.first().is_some_and(|arg| arg == "recover") {
+        return invocation::recover(arguments);
+    }
     let options = parse(arguments)?;
     match fs::symlink_metadata(&options.destination) {
         Ok(_) => return Err("bundle destination already exists; no tool was run".to_owned()),
@@ -53,6 +56,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     ))
     .map_err(|error| error.to_string())?;
     let mut monitor_cleanup = None;
+    let mut invocation = None;
     let operation = (|| {
         let head = node
             .runtime()
@@ -65,7 +69,8 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
         command.args(&options.arguments);
         let (result, cleanup) = signals
             .run_request(node.runtime(), &request, |request| {
-                let (_invocation, head, commit) = invocation::reserve(&node, request, &options)?;
+                let (claimed, head, commit) = invocation::reserve(&node, request, &options)?;
+                invocation = Some(claimed);
                 node.runtime()
                     .block_on(node.run_trusted_workspace_tool_at_in(
                         request,
@@ -90,7 +95,18 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
         result.map_err(|error| error.to_string())
     })();
     let node_cleanup = node.shutdown().err().map(|error| error.to_string());
-    let result = settled_result(operation, monitor_cleanup, node_cleanup)?;
+    let result = match settled_result(operation, monitor_cleanup, node_cleanup) {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(claimed) = invocation {
+                if let Err(record) = claimed.fail(&error) {
+                    return Err(format!("{error}; terminal custody unresolved: {record}"));
+                }
+            }
+            return Err(error);
+        }
+    };
+    let invocation = invocation.ok_or("workspace completed without invocation custody")?;
     let format = match result.object_format {
         GitHashAlgorithm::Sha1 => "sha1",
         GitHashAlgorithm::Sha256 => "sha256",
@@ -105,14 +121,14 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     .into_bytes();
     header.extend_from_slice(options.reference.as_bytes());
     header.extend_from_slice(b"\n\n");
-    publish_bundle(&options.destination, &header, result.pack_bytes())?;
+
     let changed = result
         .changed_paths
         .iter()
         .map(|path| quote(&hex(path)))
         .collect::<Vec<_>>()
         .join(",");
-    let receipt = format!(
+    let mut receipt = format!(
         "{{\"type\":\"workspace_candidate\",\"published_to_repository\":false,\"object_format\":\"{format}\",\"source_commit\":\"{}\",\"source_rcr\":\"{}\",\"candidate_commit\":\"{}\",\"root_tree\":\"{}\",\"objects\":{},\"changed_paths_hex\":[{}],\"bundle\":{}}}",
         result.source_commit,
         result.source_rcr,
@@ -122,6 +138,18 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
         changed,
         quote(&options.destination.to_string_lossy()),
     );
+    receipt.pop();
+    receipt.push_str(&format!(
+        ",\"invocation_directory\":{},\"request_sha256\":\"{}\"}}",
+        quote(&invocation.directory.to_string_lossy()),
+        hex(&invocation.request_id)
+    ));
+    let terminal = invocation
+        .complete(&header, result.pack_bytes(), receipt.as_bytes())
+        .map_err(|error| format!("candidate custody unresolved; do not rerun the tool: {error}"))?;
+    publish_bundle(&options.destination, &header, result.pack_bytes())?;
+    receipt.pop();
+    receipt.push_str(&format!(",\"terminal_sha256\":\"{}\"}}", hex(&terminal)));
     writeln!(std::io::stdout().lock(), "{receipt}").map_err(|error| {
         format!(
             "bundle is published at {}; receipt output failed: {error}",

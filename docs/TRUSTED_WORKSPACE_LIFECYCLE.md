@@ -45,15 +45,74 @@ retained; a candidate bundle is not written unless execution and cleanup finish.
 Signals arriving after completed execution do not imply rollback of effects.
 SIGKILL and machine failure remain abrupt failures.
 
-## Recovery boundary
+## Durable invocation custody and recovery
 
-Inspect a retained `workspace-<id>` and any external effects before taking a
-new action. Its occupied slot refuses another materialization; an existing
-bundle destination also refuses another execution. These are not an exactly-once
-external-effect protocol: a successfully removed workspace ID is not a persistent
-execution journal, and a missing bundle is not proof that no command ran. Do not
-retry a tool automatically merely because a response was lost. The broader
-IntentRun/effect-broker integration remains a separate obligation.
+The CLI reserves a permanent invocation identity before tool execution. The key
+binds tenant, repository incarnation and workspace ID; the request binds the
+selected authority head and native commit, executable path and literal argv,
+source/output paths, author/message/timestamp, clean environment profile and
+command/tool time budgets. Source pins are checked before reservation, and the
+native execution boundary requires the same selected source again. The ID cannot
+be reused with changed inputs, after successful workspace cleanup, or after a
+missing result. An empty or torn claim is unresolved, not a free execution slot.
+
+Records live under `<node-root>/workspace-invocations/<scope>-<workspace-id>`.
+The original request digest and directory are printed before the tool can run.
+The directory is private (0700); request and result files are private (0600).
+Only one caller can create the directory, and its creation and request bytes are
+synced before execution. Cancellation and failures never delete this reservation.
+
+After the tool, workspace, signal observer and node cleanup all succeed, the CLI
+saves the exact candidate bundle and candidate receipt, syncs those bodies, then
+writes the sole terminal record and syncs its directory. Only afterward does it
+publish the requested destination bundle. A destination collision or lost response
+can therefore be recovered without running the tool again. Failed operations
+retain bounded UTF-8 diagnostics; a failure does not prove absence of external
+effects. Missing or incomplete terminal evidence stays unresolved.
+
+Inspect a saved candidate without opening the repository database or executing
+any source or tool:
+
+```bash
+fg workspace recover /absolute/invocation-directory --trusted-local \
+  --request-id <original-request-sha256>
+```
+
+To export its exact saved bytes, add `--output /private/new-candidate.bundle`.
+The output must be absent and its parent private; recovery never overwrites an
+existing output. An optional `--terminal-id <retained-terminal-sha256>` pins the
+complete original result. Successful recovery returns the verified saved receipt
+as the escaped `receipt_json` field, together with separate request/terminal IDs
+and the actual export path. The receipt's original `bundle` field is the requested
+destination, not evidence that an earlier publication succeeded. Export remains
+candidate-only; applying the bundle still uses ordinary `fg workspace apply`
+authority and expected-source checks. Repeated inspection is byte-stable and
+never acknowledges, erases, or reexecutes the original invocation.
+
+The `FGWIR001` request and `FGWIT001` terminal formats use exact bounded
+length-prefixed fields and SHA-256 framing checks. A ready terminal binds both
+result lengths/digests to its original request. Recovery refuses wrong pins,
+unknown versions/states, trailing/truncated/oversized data, substituted payloads,
+symlinks, nonregular files, hard-linked files and public permissions. Legacy
+request-only records remain unresolved; no migration interprets them as unused.
+
+This is trusted local execution custody, not canonical repository state or a
+complete IntentRun/effect broker. It applies to `fg workspace run`; the embedded
+raw node tool API has no new persistent invocation guarantee. The operator must
+retain these directories along with the node, including across backup/restore,
+and keep filesystem parents stable. Deleting records, rolling back the node or
+choosing a different workspace ID can admit another execution. Digests detect
+corruption; they are not signatures or protection against a malicious local owner.
+Keep the original request and result identities independently. No automatic
+pruning, force-retry or reset is provided. Stored argv/metadata can be sensitive.
+
+A crash before the terminal is durable may leave an unrecoverable candidate and
+an unresolved invocation. That deliberately sacrifices automatic retry rather
+than duplicate an uncertain external effect. SIGKILL cannot perform cooperative
+process cleanup; retained workspaces and any external effects still require
+reconciliation. This is not an exactly-once external-effect or physical power-loss
+claim. Broader agent identity, capability, broker and durable obligation work
+remains separate.
 
 ## Executed-path regression coverage
 
@@ -70,3 +129,17 @@ signals, timeout and orphan rejection, retained-slot and bundle-destination
 replay refusal, and unchanged canonical refs. Descendant liveness is checked
 before test-fixture cleanup. This is Linux trusted-host evidence, not a full
 workspace release gate or proof of hostile isolation.
+
+`scripts/e2e/suites/workspace/invocation_guard.sh` reproduces a completed tool
+followed by failed bundle publication, then verifies retry does not repeat its
+external-effect counter. The same campaign's explicitly labelled baseline mode
+reproduces duplicate effects on the earlier implementation.
+
+`scripts/e2e/suites/workspace/recovery.sh` tests ready-result inspection, exact-byte
+export, ordinary admitted publication, independent pin failures, corruption of
+every saved file, failed results, and recovery with the original node path absent,
+in both native hash domains. It also kills a real execution owner during a tool
+and verifies unresolved recovery plus replay refusal. The test cleans its planted
+child after SIGKILL; that is not evidence of product-side containment. The Rust
+storage/codec tests cover each truncation and corruption boundary, finite limits,
+concurrent reservations and failure-before-terminal behavior.

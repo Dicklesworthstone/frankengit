@@ -1,5 +1,9 @@
 //! Local execution custody, never repository authority or an agent credential.
 //! The operator must keep this node root stable and retain its invocation records.
+mod recovery;
+mod saved;
+pub(super) use recovery::recover;
+
 use super::Options;
 use fgit_crypto::sha256_digest;
 use fgit_node::{NodeRequestContext, OneNode};
