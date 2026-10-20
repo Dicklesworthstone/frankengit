@@ -413,3 +413,7 @@ fn timed_out_tool_reports_retained_workspace_instead_of_claiming_descendant_clea
             .is_dir()
     );
 }
+
+#[cfg(target_os = "linux")]
+#[path = "workspace_edit_export/process_ownership.rs"]
+mod process_ownership;

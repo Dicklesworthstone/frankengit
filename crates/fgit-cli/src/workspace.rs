@@ -1,8 +1,9 @@
 //! The explicit local-operator TreeFS tool workflow. No repository ref write.
 
 use fgit_node::{NodeConfig, OneNode};
-use fgit_types::numeric::HeadGeneration;
-use fgit_types::{GitHashAlgorithm, RefName, RepositoryId, TenantId};
+use fgit_types::{
+    GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryId, TenantId,
+};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -11,7 +12,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg workspace run <storage-root> <tenant-id> <repository-id> <ref> <private-parent> <workspace-id-hex> <new-bundle-name> --trusted-local --read <top-level-path> [--read ...] [--write <exact-output-path> ...] --author 'Name <email>' --timestamp <unix-seconds> --message <text> [--timeout-secs <1..3600>] -- /absolute/tool [args...]";
+const USAGE: &str = "usage: fg workspace run <storage-root> <tenant-id> <repository-id> <ref> <private-parent> <workspace-id-hex> <new-bundle-name> --trusted-local --read <top-level-path> [--read ...] [--write <exact-output-path> ...] --author 'Name <email>' --timestamp <unix-seconds> --message <text> [--timeout-secs <1..3600>] [--expected-head <snapshot-token>] [--expected-commit <native-oid>] -- /absolute/tool [args...]";
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 struct Options {
@@ -19,6 +20,8 @@ struct Options {
     tenant: TenantId,
     repository: RepositoryId,
     reference: RefName,
+    expected_head: Option<RepositoryAuthorityHeadId>,
+    expected_commit: Option<GitOid>,
     parent: PathBuf,
     workspace: [u8; 16],
     destination: PathBuf,
@@ -39,49 +42,51 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("cannot inspect bundle destination: {error}")),
     }
+    let signals = fgit_node::TerminationSignals::install()
+        .map_err(|error| format!("workspace signal registration failed: {error}"))?;
     let mut node = OneNode::open_existing(NodeConfig::new(
         options.storage.clone(),
         options.tenant,
         options.repository,
     ))
     .map_err(|error| error.to_string())?;
+    let mut monitor_cleanup = None;
     let operation = (|| {
-        node.bring_into_service(HeadGeneration::FIRST)
+        let head = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .map_err(|error| error.to_string())?;
+        node.bring_into_service(head.receipt().generation())
             .map_err(|error| error.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         let mut command = Command::new(&options.program);
         command.args(&options.arguments);
-        node.runtime()
-            .block_on(node.run_trusted_workspace_tool_in(
-                &request,
-                &options.reference,
-                options.workspace,
-                &options.parent,
-                &options.reads,
-                &options.writes,
-                &mut command,
-                options.timeout,
-                (
-                    &options.author,
-                    options.timestamp,
-                    options.message.as_bytes(),
-                ),
-            ))
-            .map_err(|error| error.to_string())
+        let (result, cleanup) = signals
+            .run_request(node.runtime(), &request, |request| {
+                node.runtime()
+                    .block_on(node.run_trusted_workspace_tool_at_in(
+                        request,
+                        &options.reference,
+                        (options.expected_head, options.expected_commit),
+                        options.workspace,
+                        &options.parent,
+                        &options.reads,
+                        &options.writes,
+                        &mut command,
+                        options.timeout,
+                        (
+                            &options.author,
+                            options.timestamp,
+                            options.message.as_bytes(),
+                        ),
+                    ))
+            })
+            .map_err(|error| error.to_string())?;
+        monitor_cleanup = cleanup.err().map(|error| error.to_string());
+        result.map_err(|error| error.to_string())
     })();
-    let cleanup = node.shutdown();
-    let result = match (operation, cleanup) {
-        (Ok(result), Ok(())) => result,
-        (Err(error), Ok(())) => return Err(error),
-        (Ok(_), Err(error)) => {
-            return Err(format!(
-                "candidate prepared but node shutdown failed; bundle not published: {error}"
-            ));
-        }
-        (Err(error), Err(cleanup)) => {
-            return Err(format!("{error}; node shutdown also failed: {cleanup}"));
-        }
-    };
+    let node_cleanup = node.shutdown().err().map(|error| error.to_string());
+    let result = settled_result(operation, monitor_cleanup, node_cleanup)?;
     let format = match result.object_format {
         GitHashAlgorithm::Sha1 => "sha1",
         GitHashAlgorithm::Sha256 => "sha256",
@@ -121,6 +126,31 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     })
 }
 
+/// Completion must not conceal observer or node cleanup, nor erase the original
+/// operation refusal. No bundle is written until all three owners have settled.
+fn settled_result<T>(
+    operation: Result<T, String>,
+    monitor: Option<String>,
+    node: Option<String>,
+) -> Result<T, String> {
+    let mut cleanup = Vec::new();
+    if let Some(error) = monitor {
+        cleanup.push(format!("signal observer cleanup failed: {error}"));
+    }
+    if let Some(error) = node {
+        cleanup.push(format!("node shutdown failed: {error}"));
+    }
+    match (operation, cleanup.is_empty()) {
+        (Ok(result), true) => Ok(result),
+        (Err(error), true) => Err(error),
+        (Ok(_), false) => Err(format!(
+            "candidate prepared but bundle not published; {}",
+            cleanup.join("; ")
+        )),
+        (Err(error), false) => Err(format!("{error}; {}", cleanup.join("; "))),
+    }
+}
+
 fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 10 || arguments[0] != "run" {
         return Err(USAGE.to_owned());
@@ -150,6 +180,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let destination = parent.join(name);
     let (mut reads, mut writes) = (Vec::new(), Vec::new());
     let (mut author, mut timestamp, mut message, mut timeout) = (None, None, None, None);
+    let (mut expected_head, mut expected_commit) = (None, None);
     let mut trusted = false;
     let mut cursor = 8;
     while cursor < boundary {
@@ -168,6 +199,16 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             .ok_or_else(|| format!("missing value for {flag}"))?;
         cursor += 1;
         match flag {
+            "--expected-head" => set_once(
+                &mut expected_head,
+                super::commit_replay::parse_head(value)?,
+                flag,
+            )?,
+            "--expected-commit" => set_once(
+                &mut expected_commit,
+                super::publication_support::parse_oid(value)?,
+                flag,
+            )?,
             "--read" => reads.push(value.as_bytes().to_vec()),
             "--write" => writes.push(value.as_bytes().to_vec()),
             "--author" => set_once(&mut author, value.clone(), flag)?,
@@ -192,6 +233,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         tenant,
         repository,
         reference,
+        expected_head,
+        expected_commit,
         parent,
         workspace,
         destination,
@@ -343,6 +386,77 @@ mod tests {
         .map(str::to_owned)
         .collect()
     }
+    #[test]
+    fn exact_source_flags_are_parsed_before_tool_arguments_and_duplicate_pins_refuse() {
+        for width in [40, 64] {
+            let mut input = args();
+            let at = input.iter().position(|s| s == "--").unwrap();
+            input.splice(
+                at..at,
+                [
+                    "--expected-commit".into(),
+                    "a".repeat(width),
+                    "--expected-head".into(),
+                    format!("alg:2:{}", "bb".repeat(32)),
+                ],
+            );
+            let options = parse(&input).unwrap();
+            assert_eq!(
+                options.expected_commit.unwrap().to_string(),
+                "a".repeat(width)
+            );
+            assert!(options.expected_head.is_some());
+            let at = input.iter().position(|s| s == "--").unwrap();
+            input.splice(at..at, ["--expected-commit".into(), "a".repeat(width)]);
+            assert!(parse(&input).is_err());
+        }
+        for (flag, bad) in [
+            ("--expected-commit", "bogus"),
+            ("--expected-head", "alg:2:bad"),
+        ] {
+            let mut input = args();
+            let at = input.iter().position(|s| s == "--").unwrap();
+            input.splice(at..at, [flag.into(), bad.into()]);
+            assert!(parse(&input).is_err());
+        }
+        let mut input = args();
+        input.extend([
+            "--expected-commit".into(),
+            "this-is-a-literal-tool-argument".into(),
+        ]);
+        assert!(parse(&input).unwrap().expected_commit.is_none());
+    }
+
+    #[test]
+    fn no_bundle_result_escapes_failed_monitor_or_node_cleanup() {
+        assert_eq!(settled_result(Ok(7), None, None).unwrap(), 7);
+        assert_eq!(
+            settled_result::<()>(Err("original refusal".into()), None, None).unwrap_err(),
+            "original refusal"
+        );
+        for (monitor, node) in [
+            (Some("monitor".into()), None),
+            (None, Some("node".into())),
+            (Some("monitor".into()), Some("node".into())),
+        ] {
+            let error = settled_result(Ok(7), monitor.clone(), node.clone()).unwrap_err();
+            assert!(error.contains("candidate prepared but bundle not published"));
+            let error = settled_result::<()>(
+                Err("original refusal".into()),
+                monitor.clone(),
+                node.clone(),
+            )
+            .unwrap_err();
+            assert!(error.starts_with("original refusal"));
+            if monitor.is_some() {
+                assert!(error.contains("signal observer cleanup failed: monitor"));
+            }
+            if node.is_some() {
+                assert!(error.contains("node shutdown failed: node"));
+            }
+        }
+    }
+
     #[test]
     fn complete_invocation_parses_without_running_anything() {
         let options = parse(&args()).unwrap();

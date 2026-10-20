@@ -19,7 +19,10 @@ use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, Regio
 use fgit_runner::sparse_workspace::{HostRefusal, SparseWorkspace, SparseWorkspacePlan};
 use fgit_treefs::{BaseView, SparseLimits, SparseManifest, TreeCapability, TreePath, WorkspaceId};
 use fgit_types::numeric::ByteCount;
-use fgit_types::{GitHashAlgorithm as ObjectFormat, GitOid as AnyOid, RefName, RepositoryCommitId};
+use fgit_types::{
+    GitHashAlgorithm as ObjectFormat, GitOid as AnyOid, RefName, RepositoryAuthorityHeadId,
+    RepositoryCommitId,
+};
 use fgit_wire::visibility::RefVisibility;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -54,8 +57,8 @@ impl WorkspaceToolResult {
     }
 }
 
-/// Failures retain cleanup state. Timeout/cancellation kills and waits for the
-/// direct child, but cannot prove descendant quiescence: its workspace is
+/// Failures retain cleanup state. Timeout/cancellation drains the owned process
+/// group, but cannot prove escaped-descendant quiescence: its workspace is
 /// deliberately retained and reported instead of erased underneath a child.
 #[derive(Debug)]
 pub enum WorkspaceToolFailure {
@@ -128,6 +131,45 @@ impl OneNode {
         timeout: Duration,
         commit_metadata: (&str, u64, &[u8]),
     ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
+        self.run_trusted_workspace_tool_at_in(
+            request,
+            reference,
+            (None, None),
+            workspace_id,
+            parent,
+            read_prefixes,
+            output_paths,
+            command,
+            timeout,
+            commit_metadata,
+        )
+        .await
+    }
+
+    /// Execute only when the selected authority head and commit match the
+    /// supplied expectations. Both checks share the same authenticated source
+    /// selection, before workspace creation or tool spawn; no check-then-reread.
+    pub async fn run_trusted_workspace_tool_at_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected: (Option<RepositoryAuthorityHeadId>, Option<AnyOid>),
+        workspace_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        output_paths: &[Vec<u8>],
+        command: &mut Command,
+        timeout: Duration,
+        commit_metadata: (&str, u64, &[u8]),
+    ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
+        if expected
+            .1
+            .is_some_and(|commit| commit.algorithm() != self.object_format || commit.is_zero())
+        {
+            return Err(WorkspaceToolFailure::InvalidInput(
+                "invalid expected workspace commit",
+            ));
+        }
         validate_inputs(
             read_prefixes,
             output_paths,
@@ -140,6 +182,7 @@ impl OneNode {
                 self.run_workspace_format::<Sha1>(
                     request,
                     reference,
+                    expected,
                     workspace_id,
                     parent,
                     read_prefixes,
@@ -154,6 +197,7 @@ impl OneNode {
                 self.run_workspace_format::<Sha256>(
                     request,
                     reference,
+                    expected,
                     workspace_id,
                     parent,
                     read_prefixes,
@@ -171,6 +215,7 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        expected: (Option<RepositoryAuthorityHeadId>, Option<AnyOid>),
         id: [u8; 16],
         parent: &Path,
         reads: &[Vec<u8>],
@@ -207,13 +252,16 @@ impl OneNode {
         // observes cancellation at its final checkpoint afterwards.
         let operation = Mutex::new(None);
         let selection = self
-            .with_workspace_base_in::<A, _>(
+            .with_workspace_snapshot_in::<A, _>(
                 request,
                 reference,
                 &RefVisibility::new(),
                 &mut seed,
                 0,
-                |base, source, seed| {
+                expected.0,
+                expected.1,
+                usize::MAX,
+                |base, source, seed, _head, _metadata_bytes| {
                     let result = run_at_base(
                         base, source, seed, request, parent, &reads, &writes, command, started,
                         timeout, metadata,
@@ -460,7 +508,7 @@ fn run_at_base<A: GitHashAlgorithm>(
         make_pack(source.inner.object_format, exported, metadata, &live)
     })();
     if matches!(&operation, Err(WorkspaceToolFailure::Containment { .. })) {
-        // The leader is reaped, but its descendants may retain filesystem
+        // Group cleanup was attempted; unresolved descendants may retain filesystem
         // access. Never delete the directory or claim that lease close passed.
         drop(workspace);
         let _unsettled = ledger.close();
@@ -491,47 +539,40 @@ fn execute_foreground(
     live: &dyn Fn() -> bool,
     workspace: &Path,
 ) -> Result<(), WorkspaceToolFailure> {
-    if !live() {
-        return Err(WorkspaceToolFailure::InvalidInput(
-            "request expired before tool spawn",
-        ));
+    use fgit_runner::workflow::{TrustedCommandOutcome, run_trusted_command};
+    // The original source/workspace deadline is already included in `live`.
+    // This adapter owns the PID until group observation and signalling finish.
+    let observation =
+        run_trusted_command(command, Duration::from_secs(3600), live).map_err(|failure| {
+            if failure.retain_workspace {
+                WorkspaceToolFailure::Containment {
+                    workspace: workspace.to_owned(),
+                    detail: failure.detail,
+                }
+            } else {
+                WorkspaceToolFailure::Io {
+                    operation: "execute trusted command",
+                    source: std::io::Error::other(failure.detail),
+                }
+            }
+        })?;
+    if observation.retain_workspace {
+        return Err(WorkspaceToolFailure::Containment {
+            workspace: workspace.to_owned(),
+            detail: format!(
+                "trusted command {:?}; status={:?}; workspace retained, escaped-descendant quiescence unproved",
+                observation.outcome, observation.status
+            ),
+        });
     }
-    let mut child = command.spawn().map_err(|source| WorkspaceToolFailure::Io {
-        operation: "spawn tool",
-        source,
-    })?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) if status.code().is_some() => {
-                return Err(WorkspaceToolFailure::ToolExited {
-                    code: status.code(),
-                });
-            }
-            Ok(Some(status)) => {
-                return Err(WorkspaceToolFailure::Containment {
-                    workspace: workspace.to_owned(),
-                    detail: format!(
-                        "tool terminated by signal ({status}); descendant quiescence is unproved, workspace retained"
-                    ),
-                });
-            }
-            Ok(None) if live() => std::thread::sleep(Duration::from_millis(10)),
-            result => {
-                let cause = match result {
-                    Err(error) => error.to_string(),
-                    _ => "deadline or request cancellation".to_owned(),
-                };
-                let killed = child.kill();
-                let waited = child.wait();
-                return Err(WorkspaceToolFailure::Containment {
-                    workspace: workspace.to_owned(),
-                    detail: format!(
-                        "{cause}; direct-child kill={killed:?}, wait={waited:?}; descendant quiescence is unproved, workspace retained"
-                    ),
-                });
-            }
-        }
+    match (observation.outcome, observation.status) {
+        (TrustedCommandOutcome::Exited, Some(status)) if status.success() => Ok(()),
+        (TrustedCommandOutcome::Exited, Some(status)) => Err(WorkspaceToolFailure::ToolExited {
+            code: status.code(),
+        }),
+        _ => Err(WorkspaceToolFailure::InvalidInput(
+            "request expired before candidate import",
+        )),
     }
 }
 
