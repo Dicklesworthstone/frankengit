@@ -142,12 +142,21 @@ function intentFor(input) {
   return result;
 }
 export function preparePull(input, token, bundle = null) {
+  return preparePullWithIdentity(input, { nonce: randomBytes(16).toString('hex'),
+    credential_fingerprint: pullTokenFingerprint(token) }, bundle);
+}
+// Offline preparers can retain a nonce before writing request slots. This uses
+// the very same intent/key encoding, not a second transaction identity. A
+// fingerprint is not authentication: submission still requires the original
+// credential, exact key and the native server's independent authorization.
+export function preparePullWithIdentity(input, identity, bundle = null) {
+  pullFields(identity, ['nonce', 'credential_fingerprint']);
   pullFields(input, ['endpoint', 'scope', 'number', 'action', 'fields']);
   const payload = isPullReview(input.action) && input.action !== 'withdraw';
   if (!payload && bundle !== null) failPull('unexpected_pull_bundle');
   const descriptor = payload ? pullBundleDescriptor(bundle) : null;
-  const intent = intentFor({ ...input, nonce: randomBytes(16).toString('hex'),
-    credential_fingerprint: pullTokenFingerprint(token), ...(isPullReview(input.action) ? { bundle: descriptor } : {}) });
+  const intent = intentFor({ ...input, nonce: identity.nonce,
+    credential_fingerprint: identity.credential_fingerprint, ...(isPullReview(input.action) ? { bundle: descriptor } : {}) });
   // A boundary collision refuses preparation rather than silently changing a
   // saved nonce/key later. No Git object, pack or policy is decoded here.
   if (payload) checkBoundary(intent, bundle);
