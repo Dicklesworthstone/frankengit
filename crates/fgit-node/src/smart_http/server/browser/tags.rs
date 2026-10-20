@@ -13,6 +13,8 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
         b"/ui/tags/tags-protocol.mjs" => include_str!("tags-protocol.mjs"),
         b"/ui/tags/pulls-core.mjs" => include_str!("pulls-core.mjs"),
         b"/ui/tags/pulls-actions.mjs" => include_str!("pulls-actions.mjs"),
+        // pulls-actions.mjs imports it relatively, so it is served beside it.
+        b"/ui/tags/pulls-comments.mjs" => include_str!("pulls-comments.mjs"),
         b"/ui/tags/pulls-candidate.mjs" => include_str!("pulls-candidate.mjs"),
         _ => return None,
     };

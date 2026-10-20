@@ -24,6 +24,11 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
             "text/javascript; charset=utf-8",
             include_str!("pulls-actions.mjs"),
         )),
+        // pulls-actions.mjs imports it relatively, so it is served beside it.
+        b"/ui/branches/pulls-comments.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("pulls-comments.mjs"),
+        )),
         b"/ui/branches/pulls-candidate.mjs" => Some((
             "text/javascript; charset=utf-8",
             include_str!("pulls-candidate.mjs"),
