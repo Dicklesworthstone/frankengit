@@ -16,7 +16,10 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
-pub use process::{run_trusted_step, run_trusted_step_with_context};
+pub use process::{
+    TrustedCommandObservation, TrustedCommandOutcome, run_trusted_command, run_trusted_step,
+    run_trusted_step_with_context,
+};
 
 pub const TRUSTED_RUNNER_LABEL: &str = "fgit-trusted-local";
 pub const PROFILE: &str = "trusted-local-foreground-v1";
