@@ -7,6 +7,8 @@ use fgit_types::RepositoryDecisionBatchId;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
+mod reporting;
+
 const MAX_EVENTS: usize = 1024;
 
 /// A poll observation is not a green check, a push-protocol receipt or a queue.
@@ -97,26 +99,11 @@ impl OneNode {
                 });
             }
         };
-        let scope = commitment(&[
-            b"frankengit/ref-workflow-watch/v1",
-            self.tenant_id().as_bytes(),
-            self.repository_id().as_bytes(),
-            self.repository_incarnation_id().as_bytes(),
-            reference.as_bytes(),
-            directory,
-        ]);
+        let scope = reporting::scope(self, reference, directory);
         check_directory(parent)?;
         let root = parent.join(format!("watch-{}", hex(&scope)));
         let owner = Owner::open(&root)?;
-        let mut entries = fs::read_dir(&root)
-            .map_err(io)?
-            .take(MAX_EVENTS + 2)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io)?;
-        if entries.len() > MAX_EVENTS + 1 {
-            return Err(invalid("ref watcher retained-event limit exceeded"));
-        }
-        entries.sort_by_key(|entry| entry.file_name());
+        let entries = reporting::event_entries(&root)?;
         for entry in &entries {
             if entry.file_name() == "owner.lock" {
                 continue;
@@ -194,7 +181,7 @@ impl OneNode {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(error)),
         }
-        if entries.len() >= MAX_EVENTS + 1 {
+        if entries.len() >= MAX_EVENTS {
             return Err(invalid("ref watcher retained-event limit exceeded"));
         }
         if !workspace_request_live(request) {
@@ -232,6 +219,14 @@ impl OneNode {
                 ))
             })?;
         if closed(&dispatch) && workspace_request_live(request) {
+            reporting::capture(
+                &event_directory,
+                scope,
+                event_id,
+                selected.commit,
+                &dispatch,
+                request,
+            )?;
             write_new(&event_directory.join("settled"), key.as_bytes())
                 .and_then(|()| File::open(&event_directory)?.sync_all())
                 .map_err(|e| retained(e.to_string()))?;

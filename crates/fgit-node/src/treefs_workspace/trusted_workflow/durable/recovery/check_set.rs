@@ -47,6 +47,17 @@ impl TrustedWorkflowCheckSet {
     pub fn len(&self) -> usize {
         self.checks.len()
     }
+    pub(crate) fn evidence_bytes(&self) -> usize {
+        self.checks
+            .iter()
+            .map(|c| c.observation.record.evidence.len())
+            .sum()
+    }
+    pub(crate) fn targets_commit(&self, commit: fgit_types::GitOid) -> bool {
+        self.checks
+            .iter()
+            .all(|c| c.observation.record.source_commit == commit)
+    }
     pub fn is_empty(&self) -> bool {
         self.checks.is_empty()
     }
