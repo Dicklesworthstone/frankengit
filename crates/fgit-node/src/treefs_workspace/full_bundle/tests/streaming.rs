@@ -85,8 +85,11 @@ fn both_formats_stream_exact_source_and_retry_without_changing_authority() {
         );
         assert_eq!(selected.receipt().object_count(), 4);
         let (header, ids) = recover(&bytes, &query.limits);
-        assert!(before.snapshot().head_target.is_none());
-        assert_eq!(header.head(), None, "never infer HEAD from branch spelling");
+        // HEAD comes only from the canonical target (genesis names main),
+        // never from a branch's spelling.
+        let main = reference("refs/heads/main");
+        assert_eq!(before.snapshot().head_target.as_ref(), Some(&main));
+        assert_eq!(header.head(), before.snapshot().refs.get(&main).copied());
         assert_eq!(header.references().len(), 2);
         assert_eq!(&ids, before.selected_closure().closure().objects());
         let (retried, repeated) = stream(&node, &Default::default(), query);
@@ -207,7 +210,7 @@ fn selection_limits_refuse_before_output_and_exact_payload_boundary_succeeds() {
     exact.limits.pack.max_index_entries =
         usize::try_from(baseline.receipt().object_count()).unwrap();
     exact.limits.max_graph_edges = 4; // child tree + parent, base tree, tree blob.
-    exact.limits.envelope.max_references = 1; // main; canonical HEAD is not configured.
+    exact.limits.envelope.max_references = 2; // main and the canonical HEAD naming it.
     let (selected, _) = stream(&node, &Default::default(), exact.clone());
     assert_eq!(selected.receipt(), baseline.receipt());
 
@@ -371,7 +374,8 @@ fn caller_hidden_and_deleted_only_history_are_not_export_roots() {
         let (header, ids) = recover(&filtered, &query.limits);
         assert_eq!(header.references().len(), 1);
         assert_eq!(header.references()[0].name(), &reference("refs/heads/main"));
-        assert_eq!(header.head(), None);
+        // The canonical HEAD (main) is visible here, so the bundle carries it.
+        assert_eq!(header.head(), Some(base));
         assert!(ids.contains(&base));
         assert!(!ids.contains(&child));
         assert_eq!(ids.len(), 3);

@@ -348,7 +348,9 @@ fn upload_capabilities(
     };
     let packets = vec![
         Packet::Data(b"version 2\n".to_vec()),
-        Packet::Data(b"ls-refs\n".to_vec()),
+        // Upstream advertises `unborn`: without it a v2 client never asks for
+        // an empty repository's HEAD, and its clone falls back to its own default.
+        Packet::Data(b"ls-refs=unborn\n".to_vec()),
         Packet::Data(fetch.to_vec()),
         Packet::Data(format!("object-format={object_format}\n").into_bytes()),
         Packet::Flush,

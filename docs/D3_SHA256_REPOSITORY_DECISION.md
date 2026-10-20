@@ -167,6 +167,14 @@ arrival — and deliberately does **not** assert a checked-out worktree. Asserti
 one would be asserting a capability this server does not claim, for either
 format, which is the "test that asserts a defect" shape §16.3 warns about.
 
+**Resolved 2026-10-19 (`frankengit-head-symref-canonical-state-iahh`, reopened
+as a false closure).** Import validated the source HEAD and then dropped it, and
+genesis staged no HEAD target, so no repository ever had one to advertise.
+Genesis now stages the empty repository's unborn HEAD, `refs/heads/main`. Every
+later transition carries it, and `ls-refs=unborn` is advertised as upstream
+does. The Tier A differential (`./scripts/verify.sh tier-a`) now checks HEAD,
+`origin/HEAD`, checkout and index against pinned Git for both formats.
+
 ## What this decision does not settle
 
 - Which pinned upstream Git versions carry SHA-256 support. `registries/` and

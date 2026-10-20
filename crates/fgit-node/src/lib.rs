@@ -312,22 +312,13 @@ impl AdmissionUploadPackRepository {
             // unborn repository produces, which is why the arm below tests the
             // VISIBLE set rather than the raw map.
             Some(target) if hides(target) => None,
-            Some(target) => match snapshot.refs.get(target) {
-                Some(oid) => Some(*oid),
-                // Emptiness over the VISIBLE set. Over the raw map, a principal
-                // who can see nothing in a repository that HAS hidden refs falls
-                // into the refusal arm while a genuinely unborn repository falls
-                // into this one, so the two stay distinguishable even after the
-                // refusal text is fixed. Suppressing the message would not close
-                // it either: the cases would still differ in whether an error
-                // occurred at all.
-                None if visible.is_empty() => None,
-                None => {
-                    return Err(AdmissionUploadPackRefusal::HeadTargetNotAdvertised(
-                        target.clone(),
-                    ));
-                }
-            },
+            // A visible target with no ref is an unborn HEAD: the empty
+            // repository's, or a branch nobody has created yet while others
+            // exist. Upstream upload-pack advertises no HEAD line and no
+            // `symref` for it and reports it only as protocol-v2 `unborn`
+            // metadata; this view does the same in both cases, and that
+            // silence is also exactly what a hidden target produces.
+            Some(target) => snapshot.refs.get(target).copied(),
             None => None,
         };
         let advertised_count = visible.len() + usize::from(head_oid.is_some());
@@ -455,11 +446,16 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     }
 
     fn unborn_symref_target(&self) -> Option<&[u8]> {
-        self.refs
-            .is_empty()
-            .then_some(self.head_target.as_ref())
-            .flatten()
-            .map(RefName::as_bytes)
+        // HEAD is unborn whenever its (visible) target is not advertised: an
+        // empty repository, or a default branch not created yet. Upstream
+        // ls-refs reports both as `unborn HEAD symref-target:<target>`.
+        (!self
+            .refs
+            .first()
+            .is_some_and(|reference| reference.name == b"HEAD"))
+        .then_some(self.head_target.as_ref())
+        .flatten()
+        .map(RefName::as_bytes)
     }
 }
 
@@ -475,8 +471,6 @@ pub enum AdmissionUploadPackRefusal {
         /// The format carried by the canonical ref target.
         observed: GitHashAlgorithm,
     },
-    /// A non-empty canonical snapshot names a `HEAD` target it does not expose.
-    HeadTargetNotAdvertised(RefName),
     /// The wire adapter refused the bounded advertisement representation.
     Wire(WireError),
 }
@@ -494,11 +488,6 @@ impl Display for AdmissionUploadPackRefusal {
                 formatter,
                 "canonical ref object format {observed:?} differs from node format {expected:?}"
             ),
-            Self::HeadTargetNotAdvertised(target) => write!(
-                formatter,
-                "canonical HEAD target {} is absent from a non-empty snapshot",
-                String::from_utf8_lossy(target.as_bytes())
-            ),
             Self::Wire(error) => Display::fmt(error, formatter),
         }
     }
@@ -508,9 +497,7 @@ impl Error for AdmissionUploadPackRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Wire(error) => Some(error),
-            Self::Projection(_)
-            | Self::ObjectFormatMismatch { .. }
-            | Self::HeadTargetNotAdvertised(_) => None,
+            Self::Projection(_) | Self::ObjectFormatMismatch { .. } => None,
         }
     }
 }
@@ -535,8 +522,8 @@ impl Error for AdmissionUploadPackRefusal {
 /// consult; it is now a GAP rather than a design choice, since a repository can
 /// carry hide rules that the fetch path still ignores. Whoever closes it must
 /// count the visible set BEFORE applying the bound, for exactly the reason
-/// below -- and must give the HEAD resolution the same treatment, since
-/// `HeadTargetNotAdvertised` would otherwise disclose a hidden HEAD target.
+/// below -- and must give the HEAD resolution the same treatment, so a hidden
+/// HEAD target stays indistinguishable from an unborn one.
 /// Tracked on `frankengit-jkbo`. Reused verbatim here it would leak: a principal could learn that hidden refs exist by
 /// receiving [`WireError::TooManyAdvertisedRefs`] for a repository whose visible
 /// ref count is far below the limit. The refusal would itself become the
@@ -5838,7 +5825,9 @@ where
     };
     let advertisement_packets = vec![
         Packet::Data(b"version 2\n".to_vec()),
-        Packet::Data(b"ls-refs\n".to_vec()),
+        // Upstream advertises `unborn`: without it a v2 client never asks for
+        // an empty repository's HEAD, and its clone falls back to its own default.
+        Packet::Data(b"ls-refs=unborn\n".to_vec()),
         Packet::Data(match (supports_filter, repository.supports_shallow()) {
             (true, true) => b"fetch=shallow filter\n".to_vec(),
             (true, false) => b"fetch=filter\n".to_vec(),
@@ -6897,6 +6886,8 @@ impl OneNode {
             .transpose()?;
         let root_layout = config.root_layout;
         let repository_id = config.repository_id;
+        // Built before any component opens, so this cannot need a shutdown.
+        let genesis_refs = genesis_ref_state().map_err(NodeRefusal::from)?;
         let mut node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
         if let Some((key, requested)) = creation_attempt {
@@ -6964,7 +6955,7 @@ impl OneNode {
                     &initialization_cx,
                     repository_id,
                     root_layout,
-                    CanonicalRefState::default(),
+                    genesis_refs,
                 )) {
                 Ok(root) => root,
                 Err(staging) => {
@@ -9632,6 +9623,23 @@ fn default_git_daemon_repository_path(repository_id: RepositoryId) -> GitDaemonR
     GitDaemonRepositoryPath(text.into_bytes())
 }
 
+/// The branch a new repository's symbolic `HEAD` names before any ref exists.
+///
+/// As on a Git server, `HEAD` is fixed when the repository is created, not
+/// when its first branch arrives: genesis stages the empty repository's
+/// unborn `HEAD`, every later transition preserves it
+/// ([`CanonicalRefState::apply`]), and upload-pack advertises it from the
+/// authority-selected ref state, so a clone checks it out. Import and push
+/// carry refs only and never change it.
+const GENESIS_HEAD_TARGET: &[u8] = b"refs/heads/main";
+
+fn genesis_ref_state() -> Result<CanonicalRefState, AdmissionMaterializationRefusal> {
+    let target = RefName::try_new(GENESIS_HEAD_TARGET)
+        .map_err(|_| AdmissionMaterializationRefusal::CanonicalRoot(RefusalCode::RefNameInvalid))?;
+    CanonicalRefState::new_with_head_target(BTreeMap::new(), target)
+        .map_err(AdmissionMaterializationRefusal::CanonicalRoot)
+}
+
 fn genesis_head(
     repository_id: RepositoryId,
     ref_root: Digest,
@@ -9719,6 +9727,7 @@ mod tests {
         assert_eq!(limits.max_in_flight(), 1);
     }
 
+    use super::{GENESIS_HEAD_TARGET, genesis_ref_state};
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::convert::Infallible;
@@ -10918,9 +10927,16 @@ mod tests {
                 &validated_closure,
             ))
             .expect("the actual ref fold and all of its evidence stage together");
+        // The fold applies the fixture refs to the predecessor state, which
+        // carries the repository's canonical HEAD target forward.
+        let expected = match materialized.snapshot().head_target.clone() {
+            Some(target) => CanonicalRefState::new_with_head_target(refs.refs().clone(), target)
+                .expect("the predecessor HEAD target is a branch"),
+            None => refs.clone(),
+        };
         assert_eq!(
             committed.roots.ref_root,
-            fgit_admission::ref_state_root(materialized.root_layout(), refs)
+            fgit_admission::ref_state_root(materialized.root_layout(), &expected)
                 .expect("fixture ref root uses the selected layout"),
         );
         assert_eq!(
@@ -11119,30 +11135,57 @@ mod tests {
     }
 
     #[test]
-    fn admission_snapshot_view_refuses_a_dangling_head_for_a_nonempty_repository() {
+    fn admission_snapshot_view_serves_a_dangling_head_like_upstream() {
+        // Upstream upload-pack serves a repository whose HEAD names a branch
+        // that does not exist yet: no HEAD line, no `symref`, and protocol-v2
+        // `unborn` metadata. Genesis fixes HEAD at refs/heads/main, so a
+        // repository whose first branch is anything else is in this state.
         let main = RefName::try_new(b"refs/heads/main").expect("fixed valid branch");
         let topic = RefName::try_new(b"refs/heads/topic").expect("fixed valid branch");
-        let snapshot = AdmissionSnapshot {
-            refs: BTreeMap::from([(
-                topic,
-                GitOid::from_hex(
-                    GitHashAlgorithm::Sha1,
-                    "1111111111111111111111111111111111111111",
-                )
-                .expect("fixed SHA-1 object id"),
-            )]),
+        let oid = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("fixed SHA-1 object id");
+        let dangling = AdmissionSnapshot {
+            refs: BTreeMap::from([(topic.clone(), oid)]),
             head_target: Some(main.clone()),
             ..AdmissionSnapshot::default()
         };
+        let repository = AdmissionUploadPackRepository::from_snapshot(
+            &dangling,
+            GitHashAlgorithm::Sha1,
+            &WireLimits::default(),
+        )
+        .expect("a dangling HEAD is served, not refused");
+        let names = repository
+            .advertised_refs()
+            .iter()
+            .map(|reference| reference.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![b"refs/heads/topic".to_vec()]);
+        assert_eq!(repository.symref_target(b"HEAD"), None);
+        assert_eq!(
+            repository.unborn_symref_target(),
+            Some(main.as_bytes()),
+            "v2 ls-refs reports the dangling target as unborn"
+        );
 
-        assert!(matches!(
-            AdmissionUploadPackRepository::from_snapshot(
-                &snapshot,
-                GitHashAlgorithm::Sha1,
-                &WireLimits::default(),
-            ),
-            Err(AdmissionUploadPackRefusal::HeadTargetNotAdvertised(target)) if target == main
-        ));
+        // Twin: the same refs with HEAD naming the branch that exists.
+        let resolving = AdmissionSnapshot {
+            refs: BTreeMap::from([(topic.clone(), oid)]),
+            head_target: Some(topic.clone()),
+            ..AdmissionSnapshot::default()
+        };
+        let repository = AdmissionUploadPackRepository::from_snapshot(
+            &resolving,
+            GitHashAlgorithm::Sha1,
+            &WireLimits::default(),
+        )
+        .expect("a resolving HEAD is served");
+        assert_eq!(repository.advertised_refs()[0].name, b"HEAD".to_vec());
+        assert_eq!(repository.symref_target(b"HEAD"), Some(topic.as_bytes()));
+        assert_eq!(repository.unborn_symref_target(), None);
     }
 
     #[test]
@@ -11972,7 +12015,7 @@ mod tests {
                 materialized.basis().body().ref_root,
             )
             .expect("only the materialized authority root resolves"),
-            CanonicalRefState::default()
+            genesis_ref_state().expect("genesis ref state is well formed")
         );
         assert_eq!(
             CanonicalAdmissionStore::stage_ref_state(
@@ -12294,10 +12337,15 @@ mod tests {
         let successor: RepositoryAuthorityHeadBody =
             decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
                 .expect("published successor head decodes");
-        let expected_source_refs = CanonicalRefState::new(BTreeMap::from([(
-            RefName::try_new(b"refs/heads/evidence").expect("fixed source-import ref is valid"),
-            stored.identity(),
-        )]));
+        // Import publishes refs only; genesis's unborn HEAD target carries over.
+        let expected_source_refs = CanonicalRefState::new_with_head_target(
+            BTreeMap::from([(
+                RefName::try_new(b"refs/heads/evidence").expect("fixed source-import ref is valid"),
+                stored.identity(),
+            )]),
+            RefName::try_new(GENESIS_HEAD_TARGET).expect("genesis HEAD target is valid"),
+        )
+        .expect("genesis HEAD target is a branch");
         assert_eq!(
             successor.ref_root,
             canonical_ref_state_root(&expected_source_refs)
@@ -12487,7 +12535,7 @@ mod tests {
         );
         assert_eq!(
             after_receive.basis().body().ref_root,
-            canonical_ref_state_root(&CanonicalRefState::default())
+            canonical_ref_state_root(&genesis_ref_state().expect("genesis ref state"))
                 .expect("the empty successor ref state has one canonical root"),
             "the receive-pack successor head carries the shared materializer's ref root"
         );
@@ -12520,7 +12568,12 @@ mod tests {
             RefName::try_new(b"refs/heads/main").expect("fixed ref name is valid"),
             stored,
         );
-        let ref_state = CanonicalRefState::new(refs);
+        // The fold carries genesis's unborn HEAD target into every successor.
+        let ref_state = CanonicalRefState::new_with_head_target(
+            refs,
+            RefName::try_new(GENESIS_HEAD_TARGET).expect("genesis HEAD target is valid"),
+        )
+        .expect("genesis HEAD target is a branch");
         let ref_root = node
             .runtime()
             .block_on(node.admission_materializer.stage_ref_state_in(

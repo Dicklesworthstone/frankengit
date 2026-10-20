@@ -238,12 +238,19 @@ fn commit_pack(format: GitHashAlgorithm) -> (GitOid, Vec<u8>, BTreeSet<Vec<u8>>)
     (commit_id, pack, BTreeSet::from([blob, tree, commit]))
 }
 fn generation(config: &NodeConfig, expected: Option<GitOid>) -> HeadGeneration {
+    branch_generation(config, b"refs/heads/main", expected)
+}
+fn branch_generation(
+    config: &NodeConfig,
+    branch: &[u8],
+    expected: Option<GitOid>,
+) -> HeadGeneration {
     let node = OneNode::open_existing(config.clone()).unwrap();
     let materialized = node
         .runtime()
         .block_on(node.materialize_admission())
         .unwrap();
-    let reference = RefName::try_new(b"refs/heads/main").unwrap();
+    let reference = RefName::try_new(branch).unwrap();
     assert_eq!(
         materialized.snapshot().refs.get(&reference).copied(),
         expected
@@ -253,6 +260,8 @@ fn generation(config: &NodeConfig, expected: Option<GitOid>) -> HeadGeneration {
     generation
 }
 fn round_trip(format: GitHashAlgorithm) {
+    // A non-default branch: genesis names refs/heads/main as HEAD, and
+    // upstream refuses to delete the current branch.
     let scratch = Scratch::new();
     let config = config(&scratch, format);
     let server = Server::start(initialized(config.clone()), 6, true, 2);
@@ -277,7 +286,7 @@ fn round_trip(format: GitHashAlgorithm) {
     let zero = "0".repeat(commit.as_bytes().len() * 2);
     let create = packets(
         format!(
-            "{zero} {commit} refs/heads/main\0report-status object-format={}",
+            "{zero} {commit} refs/heads/topic\0report-status object-format={}",
             format.as_str()
         )
         .into_bytes(),
@@ -307,10 +316,10 @@ fn round_trip(format: GitHashAlgorithm) {
     drop(connection);
     assert!(
         response_body(&response)
-            .windows(b"ok refs/heads/main".len())
-            .any(|b| b == b"ok refs/heads/main")
+            .windows(b"ok refs/heads/topic".len())
+            .any(|b| b == b"ok refs/heads/topic")
     );
-    let published = generation(&config, Some(commit));
+    let published = branch_generation(&config, b"refs/heads/topic", Some(commit));
     assert_ne!(published, HeadGeneration::FIRST);
 
     // The same semantic request/key across a different HTTP framing resolves
@@ -328,10 +337,13 @@ fn round_trip(format: GitHashAlgorithm) {
     );
     assert!(
         response_body(&exchange(&server, &retry, 4096))
-            .windows(b"ok refs/heads/main".len())
-            .any(|b| b == b"ok refs/heads/main")
+            .windows(b"ok refs/heads/topic".len())
+            .any(|b| b == b"ok refs/heads/topic")
     );
-    assert_eq!(generation(&config, Some(commit)), published);
+    assert_eq!(
+        branch_generation(&config, b"refs/heads/topic", Some(commit)),
+        published
+    );
 
     let legacy = request(
         &server,
@@ -398,7 +410,7 @@ fn round_trip(format: GitHashAlgorithm) {
 
     let delete = packets(
         format!(
-            "{commit} {zero} refs/heads/main\0report-status delete-refs object-format={}",
+            "{commit} {zero} refs/heads/topic\0report-status delete-refs object-format={}",
             format.as_str()
         )
         .into_bytes(),
@@ -420,7 +432,7 @@ fn round_trip(format: GitHashAlgorithm) {
     assert_eq!(receipt.accepted_sessions(), 6);
     assert_eq!(receipt.completed_sessions(), 6);
     assert_eq!(receipt.refused_sessions(), 0);
-    assert!(generation(&config, None) > published);
+    assert!(branch_generation(&config, b"refs/heads/topic", None) > published);
 }
 #[test]
 fn sha1_push_fetch_delete_and_retry_cross_the_real_http_listener() {

@@ -121,8 +121,13 @@ fn write_loose_object(root: &Path, kind: GitObjectKind, label: &str, body: &[u8]
 /// A branch whose tip is a real commit: `refs/heads/*` admits commits only
 /// (FG-019, ef9a090e), so the fixture commits blob `hello` in a one-entry tree.
 fn write_loose_commit_repository(root: &Path) -> AnyGitOid {
+    write_loose_commit_repository_on(root, "main")
+}
+
+fn write_loose_commit_repository_on(root: &Path, branch: &str) -> AnyGitOid {
     fs::create_dir_all(root).expect("fixture source directory creates");
-    fs::write(root.join("HEAD"), "ref: refs/heads/main\n").expect("fixture symbolic HEAD writes");
+    fs::write(root.join("HEAD"), format!("ref: refs/heads/{branch}\n"))
+        .expect("fixture symbolic HEAD writes");
     let blob = write_loose_object(root, GitObjectKind::Blob, "blob", b"hello");
     let mut tree = b"100644 hello.txt\0".to_vec();
     tree.extend(decode_hex(&blob.to_string()));
@@ -136,7 +141,7 @@ fn write_loose_commit_repository(root: &Path) -> AnyGitOid {
         )
         .as_bytes(),
     );
-    let ref_path = root.join("refs/heads/main");
+    let ref_path = root.join("refs/heads").join(branch);
     fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
         .expect("ref directory creates");
     fs::write(ref_path, format!("{commit}\n")).expect("fixture ref writes");
@@ -162,7 +167,7 @@ impl QuarantineValidator for DeleteOnlyValidator {
     }
 }
 
-fn validated_delete(old: AnyGitOid) -> fgit_admission::ValidatedReceive {
+fn validated_delete(old: AnyGitOid, ref_name: &[u8]) -> fgit_admission::ValidatedReceive {
     let request = ReceiveRequest {
         commands: vec![ReceiveCommand {
             old,
@@ -171,7 +176,7 @@ fn validated_delete(old: AnyGitOid) -> fgit_admission::ValidatedReceive {
                 "0000000000000000000000000000000000000000",
             )
             .expect("SHA-1 zero identity parses"),
-            ref_name: b"refs/heads/main".to_vec(),
+            ref_name: ref_name.to_vec(),
         }],
         capabilities: Vec::new(),
         push_options: Vec::new(),
@@ -199,7 +204,9 @@ fn authenticated_loopback_session_admits_a_validated_push() {
     let scratch = ScratchDirectory::new();
     let node = serving_node(scratch.path().join("node"));
     let source = scratch.path().join("source");
-    let old = write_loose_commit_repository(&source);
+    // Not refs/heads/main: genesis names main as HEAD, and Git refuses to
+    // delete the current branch (see the twin below).
+    let old = write_loose_commit_repository_on(&source, "topic");
 
     let import_request = node.request_context();
     node.runtime()
@@ -221,7 +228,7 @@ fn authenticated_loopback_session_admits_a_validated_push() {
         .block_on(node.admit_loopback_receive_durable_in(
             &request,
             &session,
-            &validated_delete(old),
+            &validated_delete(old, b"refs/heads/topic"),
             AdmissionLimits::default(),
         ))
         .expect("an authenticated principal and its client retry key admit the validated push");
@@ -242,6 +249,72 @@ fn authenticated_loopback_session_admits_a_validated_push() {
 }
 
 #[test]
+fn deleting_the_canonical_head_branch_is_refused_like_upstream() {
+    // Upstream receive-pack refuses to delete the current branch
+    // ("deletion of the current branch prohibited"). Genesis names
+    // refs/heads/main as HEAD, so the same delete that commits for topic in
+    // `authenticated_loopback_session_admits_a_validated_push` is refused
+    // here, and the branch survives.
+    let scratch = ScratchDirectory::new();
+    let node = serving_node(scratch.path().join("node"));
+    let source = scratch.path().join("source");
+    let old = write_loose_commit_repository(&source);
+    let import_request = node.request_context();
+    node.runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &import_request,
+            &source,
+            PrincipalId::from_bytes([0x01; 16]),
+            b"transport-test-head-branch-import",
+        ))
+        .expect("the real loose-object source establishes refs/heads/main");
+
+    let session = LoopbackReceiveSession::authenticated(
+        PrincipalId::from_bytes([0x73; 16]),
+        IdempotencyKey::new(b"client-push-retry-key-head".to_vec())
+            .expect("bounded client retry key constructs"),
+    );
+    let request = node.request_context();
+    let outcome = node
+        .runtime()
+        .block_on(node.admit_loopback_receive_durable_in(
+            &request,
+            &session,
+            &validated_delete(old, b"refs/heads/main"),
+            AdmissionLimits::default(),
+        ))
+        .expect("the refusal is a terminal decision, not a transport failure");
+    assert_eq!(outcome.commands.len(), 1);
+    assert!(
+        matches!(
+            outcome.commands[0].terminal.outcome,
+            DecisionOutcome::Refused { .. }
+        ),
+        "deleting HEAD's branch must be refused: {:?}",
+        outcome.commands[0].terminal.outcome
+    );
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .expect("the unchanged head materializes");
+    let main = fgit_types::RefName::try_new(b"refs/heads/main").expect("fixed valid ref");
+    assert_eq!(
+        materialized
+            .snapshot()
+            .refs
+            .get(&main)
+            .map(ToString::to_string),
+        Some(old.to_string())
+    );
+    assert_eq!(
+        materialized.snapshot().head_target.as_ref(),
+        Some(&main),
+        "genesis HEAD is carried through import"
+    );
+    node.shutdown().expect("node closes cleanly");
+}
+
+#[test]
 fn anonymous_loopback_session_is_refused_before_admission() {
     // DELIBERATELY NOT `serving_node`: this cell violates the state gate too,
     // so naming `Unauthenticated` is a claim about which guard runs first.
@@ -258,7 +331,7 @@ fn anonymous_loopback_session_is_refused_before_admission() {
         .block_on(node.admit_loopback_receive_durable_in(
             &request,
             &LoopbackReceiveSession::anonymous(),
-            &validated_delete(old),
+            &validated_delete(old, b"refs/heads/topic"),
             AdmissionLimits::default(),
         ));
 

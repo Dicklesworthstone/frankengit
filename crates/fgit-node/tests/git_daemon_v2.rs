@@ -144,7 +144,8 @@ fn expected_v2_advertisement(object_format: &[u8]) -> Vec<u8> {
     let mut advertisement = Vec::new();
     for packet in [
         b"version 2\n".as_slice(),
-        b"ls-refs\n",
+        // As upstream: v2 clients ask for an unborn HEAD only when offered.
+        b"ls-refs=unborn\n",
         b"fetch\n",
         &[b"object-format=".as_slice(), object_format, b"\n"].concat(),
     ] {
