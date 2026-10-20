@@ -69,7 +69,7 @@ digest and the oracle's install receipt.
 For each row, [`tier_a_differential.py`](../scripts/e2e/helpers/tier_a_differential.py)
 runs the same operation twice: against pinned Git, over file transport inside
 the sandbox, and against `fg serve`, over loopback `git://` through the oracle's
-fixed loopback modes. It runs each operation on SHA-1 and SHA-256 copies of five
+fixed loopback modes. It runs each operation on SHA-1 and SHA-256 copies of six
 corpora:
 - an empty repository;
 - 1,200 linear commits;
@@ -77,19 +77,20 @@ corpora:
   entries;
 - 80 revisions of a 120 KB file packed at Git's default delta depth;
 - branches, a merge, an octopus merge, an orphan root, an empty tree, and
-  annotated, lightweight and nested tags.
+  annotated, lightweight and nested tags;
 - a repository whose default branch is `trunk`, initialized with
   `fg init --initial-branch trunk` to match.
 
 It compares:
 - import of each corpus;
-- v0 and v2 advertisements and capabilities, and `ls-refs`;
+- v0 and v2 advertisements and capabilities, and `ls-refs` (with `unborn`);
 - HEAD, refs, the object set, `fsck --strict` and the checked-out index after a
   clone;
 - full and incremental fetch over protocol v0, v1 and v2;
 - push report-status and the resulting refs for create, fast-forward, tag,
   rejected and forced non-fast-forward, atomic multi-ref, an ordinary
-  delta-chained history, delete, and deletion of HEAD's branch.
+  delta-chained history, delete, deletion of HEAD's branch, and a
+  directory/file refname conflict.
 
 Declared divergences are capabilities `fg` advertises that upstream advertises
 only under non-default configuration. Both are served inside `fg`'s exact-head

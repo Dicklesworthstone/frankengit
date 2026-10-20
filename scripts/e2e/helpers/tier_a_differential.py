@@ -209,7 +209,7 @@ def corpus_stream(name):
 
 
 def build_source(fmt, corpus):
-    """A pinned-Git bare repository whose HEAD names refs/heads/main."""
+    """A pinned-Git bare repository whose HEAD names the corpus's default branch."""
     repository = f'src/{fmt}-{corpus}.git'
     if (SANDBOX / repository).exists():
         return repository
@@ -276,6 +276,8 @@ class Serve:
                     time.sleep(0.05)
             self.process.kill()
             self.process.wait()
+            self.out.close()
+            self.err.close()
         raise RuntimeError(f'fg serve never listened for {self.node}')
 
     def __exit__(self, *exc):
@@ -348,8 +350,10 @@ def fg_request(port, service, extra=b'', body=None):
 
 
 def lsrefs_request(fmt):
+    # `unborn` as a v2 clone sends it: an empty or dangling HEAD must then be
+    # reported byte for byte as upstream reports it.
     return (pkt(b'command=ls-refs\n') + pkt(f'object-format={fmt}\n'.encode()) + b'0001'
-            + pkt(b'symrefs\n') + pkt(b'peel\n') + b'0000')
+            + pkt(b'symrefs\n') + pkt(b'peel\n') + pkt(b'unborn\n') + b'0000')
 
 
 def parse_v0(packets):
@@ -786,4 +790,7 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        LOG.close()
