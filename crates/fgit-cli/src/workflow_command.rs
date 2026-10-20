@@ -6,6 +6,7 @@ mod dispatch;
 mod merge;
 mod publish;
 mod recovery;
+mod watch;
 use super::publication_support::quote;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, RefName,
@@ -39,6 +40,7 @@ validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
 For explicit two-parent merge inputs: fg workflow run-merge-candidate --help.
 For event-matched directory dispatch: fg workflow dispatch --help.
+For canonical ref-change polling: fg workflow watch --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
 To record a saved job observation on its canonical branch: fg workflow publish --help.
 
@@ -105,6 +107,9 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|action| action == "watch") {
+        return watch::run(args);
+    }
     if args.first().is_some_and(|action| action == "dispatch") {
         return dispatch::run(args);
     }
@@ -140,12 +145,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 5
         || !matches!(
             args.first().map(String::as_str),
-            Some("run" | "run-candidate")
+            Some("run" | "run-candidate" | "watch")
         )
     {
         return Err(USAGE.into());
     }
     let candidate_mode = args[0] == "run-candidate";
+    let watch_mode = args[0] == "watch";
     if args.len() > 2100
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
@@ -265,9 +271,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
     {
         return Err("bounded explicit inputs must include the workflow path".into());
     }
-    let run_id: [u8; 16] = unhex(value("--run-id")?, 16)?
-        .try_into()
-        .map_err(|_| "run ID must have 32 hex digits")?;
+    // Watch execution IDs come only from authenticated decision history. The
+    // compatibility field is never passed to the native watch dispatcher.
+    let run_id: [u8; 16] = if watch_mode {
+        if ["--run-id", "--expected-head", "--expected-commit"]
+            .iter()
+            .any(|flag| flags.contains_key(flag))
+        {
+            return Err("watch derives event and source identity; run IDs and fixed head/commit flags are not accepted".into());
+        }
+        [1; 16]
+    } else {
+        unhex(value("--run-id")?, 16)?
+            .try_into()
+            .map_err(|_| "run ID must have 32 hex digits")?
+    };
     if run_id == [0; 16] {
         return Err("run ID cannot be zero".into());
     }

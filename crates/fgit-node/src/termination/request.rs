@@ -27,6 +27,18 @@ struct TerminationRequest {
     finished: bool,
 }
 
+impl NodeRequestContext {
+    /// Observe cooperative request liveness, charging the existing runtime
+    /// checkpoint budget. A false result stops NEW work; callers still own
+    /// non-cancellable drain/finalization and cannot infer transaction rollback.
+    pub fn checkpoint_is_live(&self) -> bool {
+        matches!(
+            crate::checkpoint_pack_context(self.authority()),
+            crate::PackContextCheckpoint::Live
+        )
+    }
+}
+
 impl TerminationSignals {
     /// Bind explicitly installed process signals to one derived request.
     ///
@@ -148,6 +160,19 @@ mod tests {
             authority: crate::authority_context_for(&runtime),
         };
         (runtime, parent)
+    }
+
+    #[test]
+    fn public_request_checkpoint_observes_local_stop_without_cancelling_parent() {
+        let (runtime, parent) = setup();
+        assert!(parent.checkpoint_is_live());
+        let owner = bind(&runtime, &parent, || true).unwrap();
+        assert!(!owner.request().checkpoint_is_live());
+        owner.finish().unwrap();
+        assert!(parent.checkpoint_is_live());
+        parent.cancel();
+        assert!(!parent.checkpoint_is_live());
+        assert!(runtime.join_root(Duration::from_secs(5)));
     }
 
     #[test]

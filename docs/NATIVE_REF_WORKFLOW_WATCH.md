@@ -53,3 +53,44 @@ hostile-code containment, and SIGKILL cannot perform cooperative process drain.
 The custody scan is bounded to 1024 retained events; source-history and dispatch
 retain their existing finite work/byte limits. Filesystem parents must remain
 stable and operator-owned. No directory scan or local marker is repository truth.
+
+
+## Native CLI
+
+`fg workflow watch <storage-root> <tenant> <repository> refs/heads/main
+--trusted-local --workflow ci --input ci --run-parent /private/runs` performs
+one native poll. Add `--polls 100 --interval-ms 1000` for a bounded foreground
+watch, or select SHA-256 with `--object-format sha256`. Byte-name and artifact
+capture/input flags match `fg workflow dispatch`. The global leading
+`fg --timeout-secs 300 workflow watch ...` bounds the whole watch, including
+idle waits; no poll resets that request budget. Defaults are one poll, 1000 ms
+between polls, the native workflow limits, and the configured command deadline.
+
+The CLI installs one runtime-owned signal observer for the complete watch.
+SIGTERM/SIGINT stop future polls, reach active synchronous native execution,
+and leave cleanup/retained journals to their existing owners. An idle watcher
+also responds without waiting out its poll interval. Every poll is flushed as
+one `workflow_watch_poll` JSON line; the final `workflow_watch_result` separately
+records node shutdown, non-green execution, interruption, reconciliation and
+operation/cleanup errors. No raw output is accumulated across polls.
+
+A verified source-head race detected BEFORE reservation returns `source_moved`
+without creating an event or executing a script. A later bounded poll can select
+again. Once an event is reserved, source changes or errors remain unresolved;
+this path is never automatically retried. This distinction keeps normal branch
+updates from terminating an idle watcher without weakening replay suppression.
+
+An exit of zero means the requested observations completed, not that all history
+or any unexecuted workflow has passed. Ordinary failed builds return non-green
+and may settle; a restart reports `previously_settled`, not historical success.
+Unresolved events stop the loop and require reconciliation. No event, caller run
+ID, fixed head or commit may be supplied to override canonical selection.
+This command does not publish checks or grant merge authority; completed jobs
+remain available through the native recover/publish boundary.
+
+The discovered `scripts/e2e/suites/workflow/watch.sh` drives the real Rust binary
+in both object formats, including new refs observed during polling, restart and
+unrelated-update suppression, ordinary failure and unmatched-workflow behavior,
+idle deadlines, repeated signals, real child drain and later-event blocking.
+It is functional trusted-local evidence, not a pinned Git compatibility campaign,
+universal process containment, an all-events queue or a full release gate.

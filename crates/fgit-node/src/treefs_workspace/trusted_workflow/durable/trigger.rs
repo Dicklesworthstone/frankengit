@@ -46,6 +46,12 @@ struct Selected {
     event_head: RepositoryAuthorityHeadId,
 }
 
+enum Selection {
+    Absent,
+    ChangedBeforeReservation,
+    Ready(Selected),
+}
+
 impl OneNode {
     /// Observe the latest net change of one visible branch and dispatch its push
     /// definitions once under an exclusive, permanent local custody namespace.
@@ -78,7 +84,19 @@ impl OneNode {
         if !reference.as_bytes().starts_with(b"refs/heads/") {
             return Err(invalid("ref watcher requires a branch"));
         }
-        let selected = self.select_ref_workflow_event(request, reference).await?;
+        let selected = match self.select_ref_workflow_event(request, reference).await? {
+            Selection::Absent => None,
+            Selection::Ready(selected) => Some(selected),
+            Selection::ChangedBeforeReservation => {
+                // No event or execution custody was acquired. Another bounded
+                // poll may select again; failures AFTER reservation stay blocked.
+                return Ok(TrustedRefWorkflowPoll {
+                    state: "source_moved",
+                    event: "null".into(),
+                    dispatch: None,
+                });
+            }
+        };
         let scope = commitment(&[
             b"frankengit/ref-workflow-watch/v1",
             self.tenant_id().as_bytes(),
@@ -230,15 +248,15 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
-    ) -> Result<Option<Selected>, TrustedWorkflowFailure> {
+    ) -> Result<Selection, TrustedWorkflowFailure> {
         let state = self.materialize_admission_in(request).await.map_err(|e| {
             TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Authority(Box::new(e)))
         })?;
         if state.snapshot().hidden_refs.hides(reference.as_bytes()) {
-            return Ok(None);
+            return Ok(Selection::Absent);
         }
         let Some(commit) = state.snapshot().refs.get(reference).copied() else {
-            return Ok(None);
+            return Ok(Selection::Absent);
         };
         let head = state.basis().id();
         let history = self.snapshot_history_in(request).await.map_err(|e| {
@@ -252,7 +270,7 @@ impl OneNode {
             .map_err(|e| invalid_owned(e.to_string()))?
             != head
         {
-            return Err(invalid("ref watcher source moved during history selection"));
+            return Ok(Selection::ChangedBeforeReservation);
         }
         let event = history
             .iter()
@@ -276,7 +294,7 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(invalid("ref watcher source selection cancelled"));
         }
-        Ok(Some(Selected {
+        Ok(Selection::Ready(Selected {
             head,
             commit,
             batch: event.batch_id,
