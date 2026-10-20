@@ -288,7 +288,10 @@ fn deleting_the_canonical_head_branch_is_refused_like_upstream() {
     assert!(
         matches!(
             outcome.commands[0].terminal.outcome,
-            DecisionOutcome::Refused { .. }
+            DecisionOutcome::Refused {
+                code: fgit_types::RefusalCode::ProtectedRefTransitionDenied,
+                ..
+            }
         ),
         "deleting HEAD's branch must be refused: {:?}",
         outcome.commands[0].terminal.outcome

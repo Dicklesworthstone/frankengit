@@ -188,9 +188,19 @@ fn genesis_head_names_main_or_the_selected_initial_branch() {
     .expect_err("a keyed creation cannot also select the initial branch");
     assert!(matches!(refusal, NodeRefusal::CreationKeyWithInitialBranch));
     let scratch = ScratchDirectory::new();
-    assert!(
+    let refusal =
         OneNode::init(config(scratch.0.clone()).with_initial_branch(branch(b"refs/tags/trunk")))
-            .is_err(),
-        "a tag cannot be HEAD's target"
+            .expect_err("a tag cannot be HEAD's target");
+    assert!(
+        matches!(
+            &refusal,
+            NodeRefusal::AdmissionMaterialization(inner) if matches!(
+                **inner,
+                fgit_node::AdmissionMaterializationRefusal::CanonicalRoot(
+                    fgit_types::RefusalCode::RefNameInvalid
+                )
+            )
+        ),
+        "{refusal:?}"
     );
 }

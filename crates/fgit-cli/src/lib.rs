@@ -854,9 +854,12 @@ fn extract_init_initial_branch(
             if branch.is_some() {
                 return Err(CliRefusal::Usage);
             }
-            // A short name only, like `git init -b`: `refs/...` or an option
-            // spelling is refused rather than nested under refs/heads/.
-            if name.starts_with("refs/") || name.starts_with('-') {
+            // A short branch name only. Stricter than `git init -b`, which
+            // accepts any name forming a valid ref (it nests `refs/heads/x`
+            // as refs/heads/refs/heads/x): `HEAD` and a leading `-` are
+            // refused as `git branch` refuses them, and `refs/...` is refused
+            // rather than nested.
+            if name == "HEAD" || name.starts_with("refs/") || name.starts_with('-') {
                 return Err(CliRefusal::InvalidInitialBranch(name.clone()));
             }
             branch = Some(
@@ -2270,6 +2273,7 @@ mod tests {
         for refused in [
             &["--initial-branch", "refs/heads/trunk"][..],
             &["--initial-branch", "-x"],
+            &["--initial-branch", "HEAD"],
             &["--initial-branch", "a..b"],
             &["--initial-branch", "trunk.lock"],
         ] {

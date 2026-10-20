@@ -70,6 +70,11 @@ fg init ./fgit-data 11111111111111111111111111111111 222222222222222222222222222
   --initial-branch trunk
 ```
 
+The name is a short branch name. It is checked more strictly than
+`git init -b` checks it: `HEAD` and a leading `-` are refused, as `git branch`
+refuses them, and a `refs/` prefix is refused rather than nested under
+`refs/heads/`.
+
 `--initial-branch` is refused together with `--creation-idempotency-key`. The
 creation record does not seal the branch, so a retry could not detect a changed
 one. A HEAD that names a branch which does not exist yet is served as upstream
