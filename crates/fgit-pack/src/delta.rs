@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use fgit_git_object::ObjectType;
 
 use crate::{
@@ -23,9 +25,10 @@ pub struct DeltaObject {
     pub program: Vec<u8>,
 }
 
-/// A scalar resolver input. It deliberately uses a linear scan rather than an
-/// unbounded cache, providing the reference semantics that an optimized path
-/// must later prove equivalent to.
+/// A scalar resolver input. The scalar resolver keeps no reconstruction cache,
+/// providing the reference semantics that an optimized path must prove
+/// equivalent to; its lookups are index probes whose answers equal a linear
+/// scan's (see `indexed_lookups_answer_exactly_what_a_linear_scan_answers`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackObject {
     /// A legacy base input that carries bytes but no native object-type
@@ -92,19 +95,54 @@ impl ExternalBaseLookup for () {
 }
 
 /// Bounded scalar delta resolver for pack-local and thin-pack base chains.
+///
+/// Lookups by offset, by id and by shared delta base are binary searches over
+/// indexes sorted once in [`Self::new`], each charged its probe depth against
+/// `max_delta_work`. A linear scan per lookup charged one unit per object in
+/// the pack, so resolving every object of an N-object pack charged N^2, and
+/// any pack over about 16k objects was refused whatever it held
+/// (frankengit-eq4h). The indexes answer exactly what the scan answered: the
+/// same object, and a duplicate offset or id refused when -- and only when --
+/// the duplicated key is looked up.
 pub struct ScalarResolver<'objects, 'lookup, L> {
-    objects: &'objects [PackObject],
     external_bases: &'lookup L,
     limits: &'objects PackLimits,
+    /// Every object, by offset (stable, so equal offsets keep slice order).
+    by_offset: Vec<&'objects PackObject>,
+    /// Every object that carries an id, by id.
+    by_id: Vec<&'objects PackObject>,
+    /// Every delta's base, offset bases before id bases, for fanout counts.
+    by_base: Vec<&'objects DeltaBase>,
+    /// Work charged per index probe: the bit length of the object count.
+    probe_cost: usize,
+}
+
+/// Total order over delta bases for the fanout index. Only equality is
+/// observable: it is exactly `DeltaBase`'s, which is what the fanout counts.
+const fn base_key(base: &DeltaBase) -> (bool, u64, Option<&ObjectId>) {
+    match base {
+        DeltaBase::Ofs(offset) => (false, *offset, None),
+        DeltaBase::Ref(id) => (true, 0, Some(id)),
+    }
+}
+
+/// Reserves exactly `count` entries, refusing rather than aborting.
+fn index_with_capacity<T>(count: usize) -> Result<Vec<T>, PackError> {
+    let mut index = Vec::new();
+    index
+        .try_reserve_exact(count)
+        .map_err(|_| PackError::AllocationFailed { requested: count })?;
+    Ok(index)
 }
 
 impl<'objects, 'lookup, L> ScalarResolver<'objects, 'lookup, L>
 where
     L: ExternalBaseLookup,
 {
-    /// Validates bounded input shape before it is used to surface any object.
-    /// Ambiguous base identities and fanout are checked on the selected chain,
-    /// where their scan work is charged to `max_delta_work`.
+    /// Validates bounded input shape before it is used to surface any object,
+    /// and sorts the lookup indexes once. Ambiguous base identities and fanout
+    /// are still checked on the selected chain, where each index probe is
+    /// charged to `max_delta_work`.
     pub fn new(
         objects: &'objects [PackObject],
         external_bases: &'lookup L,
@@ -122,19 +160,42 @@ where
                 limit: limits.max_entries,
             });
         }
+        let mut by_offset = index_with_capacity(objects.len())?;
+        let mut by_id = index_with_capacity(objects.len())?;
+        let mut by_base = index_with_capacity(objects.len())?;
         for object in objects {
             checkpoint(deadline)?;
             match object {
                 PackObject::Base { data, .. } | PackObject::TypedBase { data, .. } => {
                     limits.object_size(data.len())?;
                 }
-                PackObject::Delta(delta) => limits.input(delta.program.len())?,
+                PackObject::Delta(delta) => {
+                    limits.input(delta.program.len())?;
+                    by_base.push(&delta.base);
+                }
+            }
+            by_offset.push(object);
+            if object.id().is_some() {
+                by_id.push(object);
             }
         }
+        checkpoint(deadline)?;
+        by_offset.sort_by_key(|object| object.offset());
+        by_id.sort_by_key(|object| object.id());
+        by_base.sort_by(|left, right| base_key(left).cmp(&base_key(right)));
+        checkpoint(deadline)?;
+        let probe_cost = usize::try_from(objects.len().bit_width())
+            .map_err(|_| PackError::IntegerOverflow {
+                context: "pack index probe cost",
+            })?
+            .max(1);
         Ok(Self {
-            objects,
             external_bases,
             limits,
+            by_offset,
+            by_id,
+            by_base,
+            probe_cost,
         })
     }
 
@@ -393,17 +454,18 @@ where
         offset: u64,
         accounting: &mut Accounting,
         deadline: &mut impl Deadline,
-    ) -> Result<Option<&PackObject>, PackError> {
-        let mut found = None;
-        for object in self.objects {
-            checkpoint(deadline)?;
-            accounting.add_work(1, self.limits)?;
-            if object.offset() == offset {
-                if found.is_some() {
-                    return Err(PackError::DuplicateObjectOffset(offset));
-                }
-                found = Some(object);
-            }
+    ) -> Result<Option<&'objects PackObject>, PackError> {
+        checkpoint(deadline)?;
+        accounting.add_work(self.probe_cost, self.limits)?;
+        let first = self
+            .by_offset
+            .partition_point(|object| object.offset() < offset);
+        let mut matching = self.by_offset[first..]
+            .iter()
+            .take_while(|object| object.offset() == offset);
+        let found = matching.next().copied();
+        if matching.next().is_some() {
+            return Err(PackError::DuplicateObjectOffset(offset));
         }
         Ok(found)
     }
@@ -413,17 +475,16 @@ where
         id: &ObjectId,
         accounting: &mut Accounting,
         deadline: &mut impl Deadline,
-    ) -> Result<Option<&PackObject>, PackError> {
-        let mut found = None;
-        for object in self.objects {
-            checkpoint(deadline)?;
-            accounting.add_work(1, self.limits)?;
-            if object.id().is_some_and(|candidate| candidate == id) {
-                if found.is_some() {
-                    return Err(PackError::DuplicateObjectId);
-                }
-                found = Some(object);
-            }
+    ) -> Result<Option<&'objects PackObject>, PackError> {
+        checkpoint(deadline)?;
+        accounting.add_work(self.probe_cost, self.limits)?;
+        let first = self.by_id.partition_point(|object| object.id() < Some(id));
+        let mut matching = self.by_id[first..]
+            .iter()
+            .take_while(|object| object.id() == Some(id));
+        let found = matching.next().copied();
+        if matching.next().is_some() {
+            return Err(PackError::DuplicateObjectId);
         }
         Ok(found)
     }
@@ -434,21 +495,24 @@ where
         accounting: &mut Accounting,
         deadline: &mut impl Deadline,
     ) -> Result<(), PackError> {
-        let mut fanout = 0_usize;
-        for candidate in self.objects {
-            checkpoint(deadline)?;
-            accounting.add_work(1, self.limits)?;
-            if has_same_delta_base(candidate, base) {
-                fanout = fanout.checked_add(1).ok_or(PackError::IntegerOverflow {
-                    context: "delta fanout",
-                })?;
-                if fanout > self.limits.max_delta_fanout {
-                    return Err(PackError::DeltaFanoutLimit {
-                        fanout,
-                        limit: self.limits.max_delta_fanout,
-                    });
-                }
-            }
+        checkpoint(deadline)?;
+        accounting.add_work(self.probe_cost, self.limits)?;
+        let key = base_key(base);
+        let first = self
+            .by_base
+            .partition_point(|candidate| base_key(candidate) < key);
+        let fanout = self.by_base[first..].partition_point(|candidate| base_key(candidate) == key);
+        if fanout > self.limits.max_delta_fanout {
+            // The value the scan reported: the count at which it first
+            // exceeded the limit.
+            return Err(PackError::DeltaFanoutLimit {
+                fanout: self.limits.max_delta_fanout.checked_add(1).ok_or(
+                    PackError::IntegerOverflow {
+                        context: "delta fanout",
+                    },
+                )?,
+                limit: self.limits.max_delta_fanout,
+            });
         }
         Ok(())
     }
@@ -486,12 +550,15 @@ struct TypedResolution {
 /// base's hit nothing.
 pub struct CachedResolver<'objects, 'lookup, L> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
-    entries: Vec<CacheEntry>,
+    /// By offset. Only ever probed by key, never iterated, so the hash order
+    /// is unobservable. A sorted Vec shifted half its entries per insert when
+    /// a walk resolves in idx (object id) order, as fg import does, which is
+    /// quadratic in the pack (frankengit-eq4h).
+    entries: HashMap<u64, CacheEntry>,
     cached_bytes: usize,
 }
 
 struct CacheEntry {
-    offset: u64,
     bytes: Vec<u8>,
     object_type: Option<ObjectType>,
 }
@@ -510,7 +577,7 @@ where
     ) -> Result<Self, PackError> {
         Ok(Self {
             scalar: ScalarResolver::new(objects, external_bases, limits, deadline)?,
-            entries: Vec::new(),
+            entries: HashMap::new(),
             cached_bytes: 0,
         })
     }
@@ -826,10 +893,7 @@ where
     }
 
     fn cached(&self, offset: u64) -> Option<&CacheEntry> {
-        self.entries
-            .binary_search_by_key(&offset, |entry| entry.offset)
-            .ok()
-            .and_then(|index| self.entries.get(index))
+        self.entries.get(&offset)
     }
 
     fn cache(
@@ -849,26 +913,19 @@ where
             return Ok(());
         }
         checkpoint(deadline)?;
-        let insertion = match self
-            .entries
-            .binary_search_by_key(&offset, |entry| entry.offset)
-        {
-            Ok(index) => {
-                if self.entries[index].object_type.is_none() {
-                    self.entries[index].object_type = object_type;
-                }
-                return Ok(());
+        if let Some(entry) = self.entries.get_mut(&offset) {
+            if entry.object_type.is_none() {
+                entry.object_type = object_type;
             }
-            Err(index) => index,
-        };
+            return Ok(());
+        }
         self.entries
             .try_reserve(1)
             .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
         let copy = copy_bytes(bytes, deadline)?;
         self.entries.insert(
-            insertion,
+            offset,
             CacheEntry {
-                offset,
                 bytes: copy,
                 object_type,
             },
@@ -906,13 +963,6 @@ fn clone_pack_object(
             program: copy_bytes(&delta.program, deadline)?,
         })),
     }
-}
-
-fn has_same_delta_base(candidate: &PackObject, base: &DeltaBase) -> bool {
-    let PackObject::Delta(delta) = candidate else {
-        return false;
-    };
-    &delta.base == base
 }
 
 #[derive(Default)]
@@ -1770,7 +1820,7 @@ mod tests {
         // Planted twin: no cache, so every object really re-runs its chain. That
         // work IS quadratic, and it is refused: under the defaults the
         // re-expanded bytes trip the expansion bound first ...
-        let mut cacheless = defaults.clone();
+        let mut cacheless = defaults;
         cacheless.max_cached_bytes = 0;
         let replay = resolve_chain(&objects, &cacheless);
         assert!(
@@ -1846,6 +1896,207 @@ mod tests {
         assert!(
             matches!(amplified, Err(PackError::DeltaWorkLimit { .. })),
             "{amplified:?}"
+        );
+    }
+
+    /// The pre-index lookups, kept as the reference: a full scan that refuses
+    /// a second match (frankengit-eq4h).
+    fn scan_by_offset(
+        objects: &[PackObject],
+        offset: u64,
+    ) -> Result<Option<&PackObject>, PackError> {
+        let mut found = None;
+        for object in objects {
+            if object.offset() == offset {
+                if found.is_some() {
+                    return Err(PackError::DuplicateObjectOffset(offset));
+                }
+                found = Some(object);
+            }
+        }
+        Ok(found)
+    }
+
+    fn scan_by_id<'a>(
+        objects: &'a [PackObject],
+        id: &ObjectId,
+    ) -> Result<Option<&'a PackObject>, PackError> {
+        let mut found = None;
+        for object in objects {
+            if object.id() == Some(id) {
+                if found.is_some() {
+                    return Err(PackError::DuplicateObjectId);
+                }
+                found = Some(object);
+            }
+        }
+        Ok(found)
+    }
+
+    fn scan_fanout(
+        objects: &[PackObject],
+        base: &DeltaBase,
+        limit: usize,
+    ) -> Result<(), PackError> {
+        let mut fanout = 0;
+        for object in objects {
+            if matches!(object, PackObject::Delta(delta) if &delta.base == base) {
+                fanout += 1;
+                if fanout > limit {
+                    return Err(PackError::DeltaFanoutLimit { fanout, limit });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn same_object(
+        left: Result<Option<&PackObject>, PackError>,
+        right: Result<Option<&PackObject>, PackError>,
+    ) -> bool {
+        match (left, right) {
+            (Ok(Some(left)), Ok(Some(right))) => std::ptr::eq(left, right),
+            (left, right) => left == right,
+        }
+    }
+
+    #[test]
+    fn indexed_lookups_answer_exactly_what_a_linear_scan_answers() {
+        // Generated slices over few offsets and ids, so duplicate offsets,
+        // duplicate ids, absent keys and fanout collisions all occur.
+        let ids: Vec<ObjectId> = (1..=6_u8)
+            .map(|byte| object_id_from_bytes(ObjectFormat::Sha1, &[byte; 20]).expect("20-byte id"))
+            .collect();
+        let mut state = 0x9e37_79b9_u64;
+        let mut next = |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        let mut limits = unlimited();
+        limits.max_delta_fanout = 2;
+        for _ in 0..200 {
+            let count = 1 + next(24);
+            let objects: Vec<PackObject> = (0..count)
+                .map(|_| {
+                    let offset = next(16);
+                    let id = (next(3) != 0).then(|| ids[usize::try_from(next(6)).expect("small")]);
+                    if next(2) == 0 {
+                        PackObject::Base {
+                            offset,
+                            id,
+                            data: b"x".to_vec(),
+                        }
+                    } else {
+                        let base = if next(2) == 0 {
+                            DeltaBase::Ofs(next(16))
+                        } else {
+                            DeltaBase::Ref(ids[usize::try_from(next(6)).expect("small")])
+                        };
+                        PackObject::Delta(DeltaObject {
+                            offset,
+                            id,
+                            base,
+                            program: vec![1, 1, 0x91, 0, 1],
+                        })
+                    }
+                })
+                .collect();
+            let resolver =
+                ScalarResolver::new(&objects, &(), &limits, &mut always).expect("bounded slice");
+            let mut accounting = Accounting::default();
+            for offset in 0..17 {
+                assert!(
+                    same_object(
+                        resolver.find_by_offset(offset, &mut accounting, &mut always),
+                        scan_by_offset(&objects, offset),
+                    ),
+                    "offset {offset} in {objects:?}"
+                );
+                let base = DeltaBase::Ofs(offset);
+                assert_eq!(
+                    resolver.validate_fanout(&base, &mut accounting, &mut always),
+                    scan_fanout(&objects, &base, limits.max_delta_fanout),
+                    "{base:?} in {objects:?}"
+                );
+            }
+            for id in &ids {
+                assert!(
+                    same_object(
+                        resolver.find_by_id(id, &mut accounting, &mut always),
+                        scan_by_id(&objects, id),
+                    ),
+                    "{id:?} in {objects:?}"
+                );
+                let base = DeltaBase::Ref(*id);
+                assert_eq!(
+                    resolver.validate_fanout(&base, &mut accounting, &mut always),
+                    scan_fanout(&objects, &base, limits.max_delta_fanout),
+                    "{base:?} in {objects:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolving_every_object_of_a_large_pack_charges_n_log_n_not_n_squared() {
+        // 25,000 typed bases and a one-byte-edit delta over each, resolved in
+        // pack order through ONE budget, as fg import and the receive
+        // validator do. A scan per lookup charged 50,000 per probe: about
+        // 3.75e9 for this pack against the 256 MiB default, and fg import
+        // refused an ordinary 18,092-object pack (frankengit-eq4h).
+        let half = 25_000_u64;
+        let mut objects = Vec::new();
+        for n in 0..half {
+            objects.push(PackObject::TypedBase {
+                offset: 100 + 2 * n,
+                id: None,
+                kind: EntryKind::Blob,
+                data: n.to_le_bytes().to_vec(),
+            });
+            objects.push(PackObject::Delta(DeltaObject {
+                offset: 101 + 2 * n,
+                id: None,
+                base: DeltaBase::Ofs(100 + 2 * n),
+                program: copy_all_then_insert(8, 0x2a),
+            }));
+        }
+        let limits = PackLimits::default();
+        let mut resolver =
+            CachedResolver::new(&objects, &(), &limits, &mut always).expect("bounded pack");
+        let mut budget = ResolutionBudget::new();
+        for object in &objects {
+            resolver
+                .resolve_offset_typed_with_budget(object.offset(), &mut budget, &mut always)
+                .expect("every object of an ordinary large pack resolves under the defaults");
+        }
+        let n = objects.len();
+        let log_n = usize::try_from(n.bit_width()).expect("bit count fits");
+        assert!(
+            budget.accounting.work < 10 * n * log_n,
+            "charged {} for {n} objects",
+            budget.accounting.work
+        );
+        assert_eq!(
+            resolver.resolve_offset_typed(101, &mut always),
+            Ok((ObjectType::Blob, [0_u8, 0, 0, 0, 0, 0, 0, 0, 0x2a].to_vec()))
+        );
+        // fg import walks in idx (object id) order, which scatters offsets:
+        // the same pack in a scrambled order resolves within the same bound.
+        let mut resolver =
+            CachedResolver::new(&objects, &(), &limits, &mut always).expect("bounded pack");
+        let mut budget = ResolutionBudget::new();
+        for step in 0..n {
+            let object = &objects[(step * 7_919) % n];
+            resolver
+                .resolve_offset_typed_with_budget(object.offset(), &mut budget, &mut always)
+                .expect("a scrambled walk resolves under the defaults");
+        }
+        assert!(
+            budget.accounting.work < 10 * n * log_n,
+            "charged {} for {n} objects in scrambled order",
+            budget.accounting.work
         );
     }
 

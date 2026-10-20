@@ -418,6 +418,15 @@ impl ProductionQuarantineValidator<'_> {
         let mut verified = BTreeMap::new();
         let mut ids_at_offset = BTreeMap::new();
         let mut budget = ResolutionBudget::new();
+        // Each resolved identity is written back by offset. Finding its object
+        // by scanning made every pass quadratic in the pack (frankengit-eq4h);
+        // the first object at an offset is the one the scan found.
+        let mut positions = BTreeMap::new();
+        for (position, object) in objects.iter().enumerate() {
+            positions
+                .entry(pack_object_offset(object))
+                .or_insert(position);
+        }
 
         for _ in 0..=self.pack_limits.max_delta_depth {
             checkpoint(deadline)?;
@@ -457,9 +466,9 @@ impl ProductionQuarantineValidator<'_> {
                 {
                     return Err(RefusalCode::PackFramingInvalid);
                 }
-                let pack_object = objects
-                    .iter_mut()
-                    .find(|object| pack_object_offset(object) == offset)
+                let pack_object = positions
+                    .get(&offset)
+                    .and_then(|position| objects.get_mut(*position))
                     .ok_or(RefusalCode::PackFramingInvalid)?;
                 set_pack_object_id(pack_object, id);
             }

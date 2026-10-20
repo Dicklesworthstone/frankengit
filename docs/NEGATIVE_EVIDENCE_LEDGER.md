@@ -790,3 +790,31 @@ implemented.
 example cache eviction that re-resolves without charging), or a pack is shown
 that amplifies real work beyond what the real-work charge refuses.
 
+### NEG-037 — charging every lookup's linear scan refuses any pack over ~16k objects (frankengit-eq4h)
+
+**Hypothesis.** Charging `max_delta_work` one unit per pack object scanned, on
+every offset, id and fanout lookup, bounds resolver work without refusing
+ordinary packs.
+
+**Disposition: REFUTED.** Every lookup scanned the whole object list, and it
+continued past a match to detect duplicates. Resolving each object of an
+N-object pack therefore charged at least N^2 through the one operation-wide
+budget that `fg import` and the receive validator share. Measured with a
+release `fg` at d376cb0d, one commit of N one-line files, `git repack -adq`:
+- 14,072 objects imported in 272.8 s;
+- 18,092 objects were refused after 3.8 s with
+  `DeltaWorkLimit { attempted: 268435457, limit: 268435456 }`.
+That shape has no deltas at all, so no repository over about 16.4k objects
+could be imported whatever it held. In unit form, 50,000 objects resolved
+in pack order are refused with the same error on the old resolver.
+
+**Replacement.** `ScalarResolver::new` sorts an offset index, an id index and
+a fanout index once. Each lookup is a binary search charged its bit length
+(16 for 50,000 objects). The answers equal the scan's, checked against it on
+200 generated slices that include duplicate offsets, duplicate ids and fanout
+collisions. A duplicate is still refused only when its key is looked up. The
+receive validator also stopped finding each resolved object by scanning the
+object list, which made every pass quadratic in CPU.
+
+**Revisit when** a lookup path walks the pack per probe again, or a probe is
+shown to charge less than the work it performs.
