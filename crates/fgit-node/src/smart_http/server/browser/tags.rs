@@ -94,6 +94,7 @@ mod tests {
             "tags-protocol.mjs",
             "pulls-core.mjs",
             "pulls-actions.mjs",
+            "pulls-comments.mjs",
             "pulls-candidate.mjs",
         ] {
             let target = format!("/repo.git/ui/tags/{name}");

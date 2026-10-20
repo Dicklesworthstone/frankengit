@@ -122,6 +122,7 @@ mod tests {
             "pulls-core.mjs",
             "pulls-candidate.mjs",
             "pulls-actions.mjs",
+            "pulls-comments.mjs",
             "source-edit-protocol.mjs",
             "source-edit-patch.mjs",
         ] {

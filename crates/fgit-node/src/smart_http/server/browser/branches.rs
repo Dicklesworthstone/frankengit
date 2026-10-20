@@ -109,6 +109,7 @@ mod tests {
             "branches-view.mjs",
             "pulls-core.mjs",
             "pulls-actions.mjs",
+            "pulls-comments.mjs",
             "pulls-candidate.mjs",
         ] {
             let target = format!("/repo.git/ui/branches/{suffix}");

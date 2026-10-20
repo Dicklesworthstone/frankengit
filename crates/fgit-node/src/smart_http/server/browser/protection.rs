@@ -106,6 +106,7 @@ mod tests {
             "",
             "protection-view.mjs",
             "pulls-actions.mjs",
+            "pulls-comments.mjs",
             "pulls-core.mjs",
             "pulls-candidate.mjs",
             "browser.css",

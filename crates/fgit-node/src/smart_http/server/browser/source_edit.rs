@@ -120,6 +120,7 @@ mod tests {
             "pulls-core.mjs",
             "pulls-candidate.mjs",
             "pulls-actions.mjs",
+            "pulls-comments.mjs",
         ] {
             let target = format!("/repo.git/ui/source/{suffix}");
             let bytes = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
