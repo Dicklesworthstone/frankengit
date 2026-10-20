@@ -125,10 +125,17 @@ partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
 section states no result; the receipt does.
 
 Last observed receipt (an observation, not a standing claim): 2026-10-20 at
-`d376cb0d`, clean tree, receipt sha256 `e3b0f3ca…`, `fg` sha256 `62b0049d…`.
-Verdict **pass**: 18 of 18 rows and 544 of 544 checks. Two earlier receipts at
-the same oracle record the defects this lane found and the fixes that cleared
-them:
+`8a992b6e`, clean tree, receipt sha256 `5348774f…`, `fg` sha256 `e841e9e1…`.
+Verdict **pass**: 18 of 18 rows and 624 of 624 checks, over seven corpora,
+including the 20,100-object one. Its import took about 131-143 s, and the
+20,000-object push about 391-396 s. Earlier receipts at the same oracle record
+the defects this lane found and the fixes that cleared them:
+- `f5e1a106`: 16/18 rows; the many-objects push was refused at the 300 s
+  session budget (`frankengit-3gdw`). Every import, clone and fetch row of the
+  new corpus passed.
+- `d376cb0d`: 18/18 rows, 544 checks, over six corpora. Packs over about 16,400
+  objects were still refused at that revision, but no corpus that large existed
+  yet (`frankengit-eq4h`, fixed in `71e1f6fa`).
 - `e2ced51a`: 2/18 rows, every failure in the delta corpus
   (`frankengit-z6rb`, fixed in `d376cb0d`).
 - `8248db67`: 2/18 rows, with
