@@ -766,6 +766,6 @@ fn a_directory_file_branch_conflict_is_refused_and_its_sibling_twin_commits() {
     assert_eq!(receipt.accepted_sessions(), 4);
     let node = reopen(&config);
     // Two commits and one terminal refusal each advance the decision stream.
-    assert!(generation(&node) > before);
+    assert_eq!(generation(&node), before + 3);
     node.shutdown().unwrap();
 }

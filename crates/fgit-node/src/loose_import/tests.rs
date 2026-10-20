@@ -756,6 +756,9 @@ fn import_refuses_a_directory_file_refname_conflict_and_admits_its_twin() {
             .runtime()
             .block_on(node.materialize_admission_in(&request))
             .expect("the decided head materializes");
+        // main, a and the second ref each reach a terminal decision; `all`
+        // over none would be vacuous.
+        assert_eq!(receipt.commands.len(), 3, "{:?}", receipt.commands);
         if conflicting {
             assert!(
                 receipt.commands.iter().all(|command| matches!(
