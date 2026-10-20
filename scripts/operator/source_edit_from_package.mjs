@@ -2,17 +2,19 @@
 // package alone is not evidence that the inspected candidate used those bytes.
 import { createHash, webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
-import { deriveEditedTree } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
+import { deriveEditedTree, verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { editInput, oid, validateSourceEdit, captureSourceEdit } from './source_edit_candidate.mjs';
 import { fail, hash, fields, clock } from './source_edit_wire.mjs';
 
 export { SOURCE_PACKAGE_BYTES };
 export const SOURCE_EXPECTED_BYTES = 128 * 1024;
 export const SOURCE_EVIDENCE_PROFILE = 'frankengit-source-edit-evidence-v1';
+export const SOURCE_CREATION_SELECTION = 'frankengit-source-edit-create-selection-v1';
+export const SOURCE_CREATION_EVIDENCE_PROFILE = 'frankengit-source-edit-evidence-v2';
 
 // Bound primitives before owning an expected selection. Its commit comes from
 // the operator, never from the package or a native preparation response.
-function ownExpected(value) {
+function ownSourceExpected(value) {
   fields(value, ['format', 'commit', 'files']);
   const commit = oid(value.commit, value.format);
   if (!Array.isArray(value.files) || !value.files.length || value.files.length > 32) fail('source_edit_package_selection');
@@ -25,25 +27,55 @@ function ownExpected(value) {
   });
   return { format: value.format, commit, files };
 }
+// Creation intent is independently supplied and distinct from positive file
+// membership. Omission from a source package is NEVER an absence witness.
+function ownExpected(value) {
+  if (!value || !Object.hasOwn(value, 'schema')) return ownSourceExpected(value);
+  fields(value, ['schema', 'source', 'create_paths_hex']);
+  if (value.schema !== SOURCE_CREATION_SELECTION || !Array.isArray(value.create_paths_hex) ||
+      !value.create_paths_hex.length || value.create_paths_hex.length > 32) fail('source_edit_creation_selection');
+  const source = ownSourceExpected(value.source); let total = 0, previous = '';
+  const paths = value.create_paths_hex.map(path => {
+    if (typeof path !== 'string' || !/^(?:[0-9a-f]{2}){1,4096}$/.test(path) ||
+        path <= previous || (total += path.length / 2) > 32768) fail('source_edit_creation_selection');
+    previous = path;
+    const bytes = Buffer.from(path, 'hex'), parts = bytes.toString('latin1').split('/');
+    if (bytes.includes(0) || parts.length > 64 || parts.some(p => !p || p === '.' || p === '..')) fail('source_edit_creation_selection');
+    return path;
+  });
+  const all = [...source.files.map(row => row.pathHex), ...paths];
+  if (new Set(all).size !== all.length || all.some(p => all.some(q => p !== q && p.startsWith(`${q}2f`)))) {
+    fail('source_edit_creation_collision');
+  }
+  return { schema: SOURCE_CREATION_SELECTION, source, create_paths_hex: paths };
+}
 async function basis(packageBytes, expected, selection, check) {
   if (!(packageBytes instanceof Uint8Array) || !packageBytes.length || packageBytes.length > SOURCE_PACKAGE_BYTES ||
       typeof check !== 'function') fail('source_edit_package_input');
   check();
   const request = editInput(selection), expectedOwned = ownExpected(expected), bytes = Buffer.from(packageBytes);
-  const loaded = await readSourcePackage(bytes, expectedOwned, webcrypto, check);
+  const source = expectedOwned.source ?? expectedOwned, created = new Set(expectedOwned.create_paths_hex ?? []);
+  // Mirror the existing tree-effect ceiling before any network request, not
+  // only after the server has already prepared a candidate.
+  if (request.paths_hex.length > 32 || request.paths_hex.reduce((n, p) => n + p.length / 2, 0) > 32768 ||
+      [...created].some(path => !request.paths_hex.includes(path))) fail('source_edit_creation_selection');
+  const loaded = await readSourcePackage(bytes, source, webcrypto, check);
   check();
   if (request.scope.object_format !== loaded.package.membership.objectFormat || request.expected_commit !== loaded.verified.commit) {
     fail('source_edit_package_commit');
   }
   const selected = new Map(loaded.verified.files.map(file => [file.pathHex, file]));
-  for (const path of request.paths_hex) if (!selected.has(path)) fail('source_edit_package_path');
-  return { request, expected: expectedOwned, bytes, loaded, selected };
+  for (const path of request.paths_hex) if (!selected.has(path) && !created.has(path)) fail('source_edit_package_path');
+  const absence = created.size ? await verifyPathAbsence(loaded.package.membership, source, [...created], webcrypto, check) : null;
+  check();
+  return { request, expected: expectedOwned, source, bytes, loaded, selected, created, absence };
 }
 function receipt(b) {
   return Object.freeze({
     request: b.request, package_sha256: hash(b.bytes), verified_commit: b.loaded.verified.commit,
-    verified_paths: b.request.paths_hex.map(path => Object.freeze({ path_hex: path, blob: b.selected.get(path).blob,
+    verified_paths: b.request.paths_hex.filter(path => !b.created.has(path)).map(path => Object.freeze({ path_hex: path, blob: b.selected.get(path).blob,
       kind: b.selected.get(path).kind, source_bytes: b.selected.get(path).sourceBytes })),
+    ...(b.absence ? { verified_absence: b.absence } : {}),
     source_package_verified: true, authority_verified: false, freshness_verified: false, publication_authorized: false,
   });
 }
@@ -98,28 +130,31 @@ async function effects(checked, b, check) {
   const bodies = new Map(b.loaded.package.blobs.map(row => [row.oid, row.bytesHex]));
   const unverifiedAfter = [], transitions = []; let replayed = 0;
   for (const row of c.entries) {
-    check(); const file = b.selected.get(row.path_hex), before = row.before;
-    if (!file || !before || oid(before.oid, format) !== file.blob ||
+    check(); const file = b.selected.get(row.path_hex), before = row.before, created = b.created.has(row.path_hex);
+    if (created) {
+      if (before !== null || row.after === null || row.kind !== 'added') fail('source_edit_creation_effect');
+    } else if (!file || !before || oid(before.oid, format) !== file.blob ||
         before.mode !== (file.kind === 'executable' ? 0o100755 : 0o100644)) fail('source_edit_preimage_identity');
-    const original = Buffer.from(bodies.get(file.blob), 'hex');
+    const original = created ? Buffer.alloc(0) : Buffer.from(bodies.get(file.blob), 'hex');
     if (row.content.type === 'text') { textEffect(row, original, format, check); replayed++; }
     else if (row.content.type === 'binary') {
       if (row.content.before_bytes !== original.length || row.after === null && row.content.after_bytes !== 0) fail('source_edit_preimage_size');
       // A native binary review intentionally omits the new body. Do not turn
       // that omission into a full candidate-blob or patch-application proof.
       if (row.after !== null) unverifiedAfter.push(row.path_hex);
-    } else if (row.content.type !== 'identical') fail('source_edit_preimage_content');
-    transitions.push({ pathHex: row.path_hex, before: { blob: file.blob, kind: file.kind },
+    } else if (created || row.content.type !== 'identical') fail('source_edit_preimage_content');
+    transitions.push({ pathHex: row.path_hex, before: created ? null : { blob: file.blob, kind: file.kind },
       after: row.after === null ? null : { blob: oid(row.after.oid, format), kind: row.after.mode === 0o100755 ? 'executable' : 'file' } });
   }
-  const tree = await deriveEditedTree(b.loaded.package.membership, b.expected, transitions, webcrypto, check);
+  const tree = await deriveEditedTree(b.loaded.package.membership, b.source, transitions, webcrypto, check);
   if (tree.afterTree !== oid(c.after_tree, format)) fail('source_edit_unreported_tree_effect');
   check();
   return { ...checked, source_evidence: { package_bytes: b.bytes, expected: b.expected },
-    source_verification: { profile: SOURCE_EVIDENCE_PROFILE, package_sha256: hash(b.bytes),
+    source_verification: { profile: b.absence ? SOURCE_CREATION_EVIDENCE_PROFILE : SOURCE_EVIDENCE_PROFILE, package_sha256: hash(b.bytes),
       expected_sha256: hash(Buffer.from(`${JSON.stringify(b.expected)}\n`)),
       commit: tree.commit, before_tree: tree.beforeTree, after_tree: tree.afterTree,
       verified_paths: transitions.length, replayed_text_files: replayed, unverified_after_paths_hex: unverifiedAfter,
+      ...(b.absence ? { path_absence_verified: true, created_paths_hex: [...b.created], absence: b.absence } : {}),
       preimages_verified: true, exact_tree_effects_verified: true, unrelated_entries_preserved: true,
       patch_application_verified: false, bundle_objects_independently_verified: false,
       authority_verified: false, freshness_verified: false, publication_authorized: false } };
