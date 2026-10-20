@@ -165,7 +165,8 @@ test('every transitive browser import is served by an exact source-gated route',
     const content = readFileSync(new URL(name, assets), 'utf8');
     for (const match of content.matchAll(/from\s+['"]\.\/([^'"]+)['"]/g)) pending.push(match[1]);
   }
-  assert.equal(seen.size, 6); assert(route.includes('profile.allow_source'));
+  // 7 since 3447fb9a: pulls-actions.mjs imports pulls-comments.mjs.
+  assert.equal(seen.size, 7); assert(route.includes('profile.allow_source'));
   const parent = readFileSync(new URL('../browser.rs', assets), 'utf8');
   assert(parent.includes('mod export_verify;')); assert(parent.includes('export_verify::serve(profile, request, trailing, writer)?'));
   assert(html.includes('src="export-verify.mjs"'));

@@ -124,7 +124,8 @@ test('every transitive browser import is served by the source-gated static modul
     const source = readFileSync(new URL(name, base), 'utf8');
     for (const m of source.matchAll(/from '\.\/([^']+)'/g)) visit(m[1]);
   }
-  visit('tags-view.mjs'); assert.equal(seen.size, 6); assert(rust.includes('profile.allow_source'));
+  // 7 since 3447fb9a: pulls-actions.mjs imports pulls-comments.mjs.
+  visit('tags-view.mjs'); assert.equal(seen.size, 7); assert(rust.includes('profile.allow_source'));
   assert(!html.includes('<script>')); assert(!readFileSync(new URL('tags-view.mjs', base), 'utf8').includes('innerHTML'));
 });
 test('prepared metadata visibly escapes bidi and exposes an annotation preview', async () => {

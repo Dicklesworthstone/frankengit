@@ -192,7 +192,8 @@ test('every module in the replay import graph has an exact source-gated asset ro
     await import(new URL(name, base));
     for (const m of body.matchAll(/(?:from|import)\s*['"]\.\/([^'"]+)['"]/g)) await walk(m[1]);
   }
-  await walk('replay-view.mjs'); assert.equal(visited.size, 8);
+  // 9 since 3447fb9a: pulls-actions.mjs imports pulls-comments.mjs.
+  await walk('replay-view.mjs'); assert.equal(visited.size, 9);
   assert(rust.includes('profile.allow_source')); assert(rust.includes('SECURITY'));
   assert(!rust.includes('profile.allow_pulls')); assert(!rust.includes('profile.allow_issues'));
   const routing = readFileSync(new URL('../browser.rs', base), 'utf8');

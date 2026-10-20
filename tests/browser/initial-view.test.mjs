@@ -196,7 +196,8 @@ test('the source-only static handler exposes the complete transitive module grap
     const code = readFileSync(new URL(name, assets), 'utf8');
     for (const match of code.matchAll(/from\s+['"]\.\/([^'"]+)['"]/g)) todo.push(match[1]);
   }
-  assert.equal(visited.size, 8); assert(rust.includes('profile.allow_source')); assert(!rust.includes('profile.allow_pulls'));
+  // 9 since 3447fb9a: pulls-actions.mjs imports pulls-comments.mjs.
+  assert.equal(visited.size, 9); assert(rust.includes('profile.allow_source')); assert(!rust.includes('profile.allow_pulls'));
   assert(rust.includes('request.method != "GET"')); assert(rust.includes('request.target.contains(\'?\')'));
   assert(rust.includes('request.expect_continue')); assert(rust.includes('Content-Length'));
   assert(routes.has('')); assert(readFileSync(new URL('../browser.rs', assets), 'utf8').includes('initial::serve(profile, request, trailing, writer)?'));
