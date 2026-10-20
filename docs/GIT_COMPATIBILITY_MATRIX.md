@@ -113,6 +113,13 @@ Tier A rows until the oracle has a constrained mode for them. Shallow and
 partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
 section states no result; the receipt does.
 
+Last observed receipt (an observation, not a standing claim): 2026-10-20 at
+`e2ced51a`, clean tree, receipt sha256 `e82d90c8…`, `fg` sha256 `109b5f1e…`.
+Verdict fail: 2 of 18 rows and 460 of 484 checks pass. All 24 failing checks are
+the delta corpus. `fg import` refuses it with `DeltaWorkLimit`, and the same
+history pushed is refused with `DeltaBudgetExceeded`
+(`frankengit-z6rb`).
+
 ## Hidden-ref disclosure: implementation status (2026-09-04)
 
 **Source revision:** `0f26c6856896021fd4008e40b917465ee713bd33`. The owning

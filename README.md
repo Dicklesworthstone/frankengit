@@ -546,6 +546,18 @@ FrankenGit does **not** claim a fictional standardized “protocol v2 push” co
 
 Compatibility is differential against pinned upstream Git versions and source-derived/adversarial corpora. “Clone worked once” is not evidence of compatibility.
 
+Tier A, the declared narrow tier, is the executable form of that rule. Its rows
+are in [`registries/compatibility_tiers.tsv`](registries/compatibility_tiers.tsv)
+(see the [matrix's Tier A section](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier)).
+`./scripts/verify.sh tier-a` runs them against pinned git-2.54.0 over `git://`
+and writes a per-row `tier_a_receipt.json`; the receipt is the claim. Last
+observed receipt (2026-10-20, revision `e2ced51a`, clean tree, receipt sha256
+`e82d90c8…`): verdict **fail**, 2 of 18 rows and 460 of 484 checks pass. Every
+failing check is one defect, the delta-work budget refusing an ordinary
+delta-chained history on import and push (`frankengit-z6rb`). That is an
+observation at that revision, not a standing claim; re-run the lane for the
+current state.
+
 See [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md).
 
 ---
