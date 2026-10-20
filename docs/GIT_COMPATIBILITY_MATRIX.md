@@ -114,11 +114,16 @@ partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
 section states no result; the receipt does.
 
 Last observed receipt (an observation, not a standing claim): 2026-10-20 at
-`e2ced51a`, clean tree, receipt sha256 `e82d90c8…`, `fg` sha256 `109b5f1e…`.
-Verdict fail: 2 of 18 rows and 460 of 484 checks pass. All 24 failing checks are
-the delta corpus. `fg import` refuses it with `DeltaWorkLimit`, and the same
-history pushed is refused with `DeltaBudgetExceeded`
-(`frankengit-z6rb`).
+`d376cb0d`, clean tree, receipt sha256 `e3b0f3ca…`, `fg` sha256 `62b0049d…`.
+Verdict **pass**: 18 of 18 rows and 544 of 544 checks. Two earlier receipts at
+the same oracle record the defects this lane found and the fixes that cleared
+them:
+- `e2ced51a`: 2/18 rows, every failure in the delta corpus
+  (`frankengit-z6rb`, fixed in `d376cb0d`).
+- `8248db67`: 2/18 rows, with
+  - HEAD never published (iahh, fixed in `ee2db3fd`);
+  - the refname-conflict acceptance (`frankengit-vbqe`, fixed in `e2ced51a`);
+  - the delta budget.
 
 ## Hidden-ref disclosure: implementation status (2026-09-04)
 

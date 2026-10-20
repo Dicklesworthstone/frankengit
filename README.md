@@ -551,12 +551,13 @@ are in [`registries/compatibility_tiers.tsv`](registries/compatibility_tiers.tsv
 (see the [matrix's Tier A section](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier)).
 `./scripts/verify.sh tier-a` runs them against pinned git-2.54.0 over `git://`
 and writes a per-row `tier_a_receipt.json`; the receipt is the claim. Last
-observed receipt (2026-10-20, revision `e2ced51a`, clean tree, receipt sha256
-`e82d90c8…`): verdict **fail**, 2 of 18 rows and 460 of 484 checks pass. Every
-failing check is one defect, the delta-work budget refusing an ordinary
-delta-chained history on import and push (`frankengit-z6rb`). That is an
-observation at that revision, not a standing claim; re-run the lane for the
-current state.
+observed receipt (2026-10-20, revision `d376cb0d`, clean tree, receipt sha256
+`e3b0f3ca…`): verdict **pass**, all 18 rows and 544 of 544 checks. Those checks
+cover import, v0 and v2 advertisement, clone, full and incremental fetch over
+v0, v1 and v2, and push, in SHA-1 and SHA-256, against six corpora. Three
+divergences are declared (DIV-TA-001..003). That is an observation at that
+revision for the `git://` carrier only, not a standing claim and not general
+Git compatibility; re-run the lane for the current state.
 
 See [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md).
 
