@@ -713,3 +713,77 @@ fn loose_import_refuses_ref_directories_deeper_than_the_profile_limit() {
     ));
     node.shutdown().expect("node drains");
 }
+
+#[test]
+fn import_refuses_a_directory_file_refname_conflict_and_admits_its_twin() {
+    // A filesystem cannot hold refs/heads/a beside refs/heads/a/b, but
+    // packed-refs can. Import publishes through the same ref-state transition
+    // as push, so it refuses the state upstream refuses ("refname conflict"),
+    // and publishes nothing.
+    for (layout, conflicting) in [("conflict", true), ("twin", false)] {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let oid = write_loose_commit_repository(&source);
+        let second = if conflicting {
+            "refs/heads/a/b"
+        } else {
+            "refs/heads/ab"
+        };
+        fs::write(
+            source.join("packed-refs"),
+            format!("# pack-refs with: sorted\n{oid} refs/heads/a\n{oid} {second}\n"),
+        )
+        .expect("packed refs fixture writes");
+        let mut node = node(scratch.0.join("node"));
+        node.bring_into_service(fgit_types::numeric::HeadGeneration::FIRST)
+            .expect("node enters service");
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .expect("genesis materializes");
+        let receipt = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &request,
+                &source,
+                fgit_types::PrincipalId::from_bytes([0x5a; 16]),
+                layout.as_bytes(),
+            ))
+            .expect("the import reaches a terminal decision");
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .expect("the decided head materializes");
+        if conflicting {
+            assert!(
+                receipt.commands.iter().all(|command| matches!(
+                    command.terminal.outcome,
+                    fgit_types::DecisionOutcome::Refused {
+                        code: fgit_types::RefusalCode::RefNameConflict,
+                        ..
+                    }
+                )),
+                "{:?}",
+                receipt.commands
+            );
+            assert_eq!(
+                after.snapshot().refs,
+                before.snapshot().refs,
+                "nothing published"
+            );
+        } else {
+            assert!(receipt.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                fgit_types::DecisionOutcome::Committed { .. }
+            )));
+            assert_eq!(
+                after.snapshot().refs.len(),
+                3,
+                "main, a and ab are published"
+            );
+        }
+        node.shutdown().expect("node drains");
+    }
+}

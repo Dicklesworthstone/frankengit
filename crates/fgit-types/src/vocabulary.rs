@@ -318,6 +318,10 @@ pub enum RefusalCode {
     /// A canonical body exceeded a declared decode bound: a length, an element
     /// count, or a nesting depth. The bound is checked before allocation.
     CanonicalBoundExceeded,
+    /// The resulting ref set would hold a name that is a path prefix of another
+    /// (`refs/heads/a` beside `refs/heads/a/b`). Git cannot store both, and
+    /// upstream receive-pack refuses with "refname conflict".
+    RefNameConflict,
 }
 
 impl RefusalCode {
@@ -384,6 +388,7 @@ impl RefusalCode {
         Self::InternalInvariantBreach,
         Self::CanonicalFramingInvalid,
         Self::CanonicalBoundExceeded,
+        Self::RefNameConflict,
     ];
 
     /// Compile-time completeness guard for [`RefusalCode::ALL`].
@@ -472,7 +477,8 @@ impl RefusalCode {
             | Self::DurabilityProfileUnavailable
             | Self::InternalInvariantBreach
             | Self::CanonicalFramingInvalid
-            | Self::CanonicalBoundExceeded => (),
+            | Self::CanonicalBoundExceeded
+            | Self::RefNameConflict => (),
         }
     }
 
@@ -541,6 +547,7 @@ impl RefusalCode {
             Self::InternalInvariantBreach => 0x021d,
             Self::CanonicalFramingInvalid => 0x021e,
             Self::CanonicalBoundExceeded => 0x021f,
+            Self::RefNameConflict => 0x0220,
         }
     }
 
@@ -609,6 +616,7 @@ impl RefusalCode {
             Self::InternalInvariantBreach => "InternalInvariantBreach",
             Self::CanonicalFramingInvalid => "CanonicalFramingInvalid",
             Self::CanonicalBoundExceeded => "CanonicalBoundExceeded",
+            Self::RefNameConflict => "RefNameConflict",
         }
     }
 

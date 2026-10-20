@@ -1398,11 +1398,41 @@ impl CanonicalRefState {
                 }
             }
         }
+        // Judged on the RESULTING set, so creating `a` in the transaction that
+        // deletes `a/b` stays legal, as it is upstream.
+        for (name, effect) in effects {
+            if matches!(effect, RefEffect::Set(_)) && ref_namespace_conflict(&refs, name) {
+                return Err(RefusalCode::RefNameConflict);
+            }
+        }
         Ok(Self {
             refs,
             head_target: self.head_target.clone(),
         })
     }
+}
+
+/// Whether `name` and another ref in `refs` are a directory/file pair: one is a
+/// `/`-bounded path prefix of the other. Git can never store both, in any ref
+/// backend, so a state holding them could be served but never cloned.
+fn ref_namespace_conflict(refs: &BTreeMap<RefName, fgit_types::GitOid>, name: &RefName) -> bool {
+    let bytes = name.as_bytes();
+    // A descendant `name/...`. Every key with `name` as a byte prefix sorts in
+    // one contiguous run from `name`; siblings such as `name-x` and `name.x`
+    // sort inside it, before `name/`, so the scan continues past them.
+    let descendant = refs
+        .range(name..)
+        .map(|(key, _)| key.as_bytes())
+        .take_while(|key| key.starts_with(bytes))
+        .any(|key| key.get(bytes.len()) == Some(&b'/'));
+    // An ancestor: any `/`-bounded proper prefix of `name` that is itself a ref.
+    let ancestor = bytes
+        .iter()
+        .enumerate()
+        .filter(|&(_, byte)| *byte == b'/')
+        .filter_map(|(at, _)| RefName::try_new(&bytes[..at]).ok())
+        .any(|prefix| refs.contains_key(&prefix));
+    descendant || ancestor
 }
 
 fn validate_head_target(target: &RefName) -> Result<(), RefusalCode> {
@@ -3499,6 +3529,8 @@ const fn refusal_message(code: RefusalCode) -> &'static [u8] {
         RefusalCode::ForceNotPermitted => b"force not permitted",
         RefusalCode::NonFastForwardRefused => b"non-fast-forward",
         RefusalCode::RefNameInvalid => b"invalid ref name",
+        // Upstream receive-pack's exact wording for a directory/file conflict.
+        RefusalCode::RefNameConflict => b"refname conflict",
         _ => b"admission refused",
     }
 }
@@ -4716,6 +4748,98 @@ mod tests {
         let projection =
             CanonicalAdmissionProjection::new(staging.clone(), CanonicalFixtureEvidence);
         (store, staging, projection)
+    }
+
+    #[test]
+    fn a_directory_file_refname_conflict_is_refused_and_its_twins_are_admitted() {
+        // Upstream receive-pack refuses `a` beside `a/b` ("refname conflict"):
+        // no Git ref backend can hold both, so a clone of such a state fails.
+        let name = |text: &[u8]| RefName::try_new(text).expect("fixture ref name is valid");
+        let set = |text: &[u8], n: u8| (name(text), RefEffect::Set(oid(n)));
+        let delete = |text: &[u8]| (name(text), RefEffect::Delete);
+        let state = |names: &[&[u8]]| {
+            CanonicalRefState::new(names.iter().map(|text| (name(text), oid(40))).collect())
+        };
+        let nested = state(&[b"refs/heads/topic/octopus", b"refs/heads/main"]);
+        let flat = state(&[b"refs/heads/a", b"refs/heads/main"]);
+
+        for (before, effects, why) in [
+            (
+                &nested,
+                vec![set(b"refs/heads/topic", 41)],
+                "a file beside an existing directory",
+            ),
+            (
+                &flat,
+                vec![set(b"refs/heads/a/b", 41)],
+                "a directory beside an existing file",
+            ),
+            (
+                &flat,
+                vec![set(b"refs/heads/a/b/c", 41)],
+                "a deeper directory beside a file",
+            ),
+            (
+                &state(&[b"refs/heads/main"]),
+                vec![set(b"refs/heads/x", 41), set(b"refs/heads/x/y", 42)],
+                "both halves created in one transaction",
+            ),
+        ] {
+            assert_eq!(
+                before.apply(&effects.into_iter().collect()),
+                Err(RefusalCode::RefNameConflict),
+                "{why} must be refused"
+            );
+        }
+
+        // Near-identical permitted twins.
+        for (before, effects, why) in [
+            (
+                &nested,
+                vec![
+                    set(b"refs/heads/topic", 41),
+                    delete(b"refs/heads/topic/octopus"),
+                ],
+                "the file created in the transaction that deletes the directory",
+            ),
+            (
+                &nested,
+                vec![set(b"refs/heads/topicx", 41)],
+                "a sibling sharing a byte prefix",
+            ),
+            (
+                &nested,
+                vec![set(b"refs/heads/topic-x", 41)],
+                "a sibling sorting inside the run",
+            ),
+            (
+                &flat,
+                vec![set(b"refs/heads/ab/c", 41)],
+                "a directory beside a non-prefix file",
+            ),
+            (
+                &flat,
+                vec![set(b"refs/heads/a", 42)],
+                "an update of the existing file",
+            ),
+            (
+                &nested,
+                vec![set(b"refs/heads/topic/other", 41)],
+                "a second file in the directory",
+            ),
+        ] {
+            let effects: BTreeMap<RefName, RefEffect> = effects.into_iter().collect();
+            let after = before
+                .apply(&effects)
+                .unwrap_or_else(|code| panic!("{why} must be admitted, refused {code:?}"));
+            for (ref_name, effect) in &effects {
+                let expected = match effect {
+                    RefEffect::Set(value) => Some(value),
+                    RefEffect::Delete => None,
+                };
+                assert_eq!(after.refs().get(ref_name), expected, "{why}");
+            }
+        }
     }
 
     #[test]

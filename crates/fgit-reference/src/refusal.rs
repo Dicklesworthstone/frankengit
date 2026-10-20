@@ -124,6 +124,7 @@ impl RefusalClass {
             // Structural violations of a body, name, or framing rule.
             RefusalCode::IntentBytesConflict
             | RefusalCode::RefNameInvalid
+            | RefusalCode::RefNameConflict
             | RefusalCode::PackFramingInvalid
             | RefusalCode::TreeEntryOrderingInvalid
             | RefusalCode::CommitOrTagHeaderInvalid
