@@ -98,6 +98,13 @@ visible-graph proof:
 Every other capability `fg` advertises must also be advertised by pinned Git,
 and the Tier A capability subset must match exactly.
 
+Report-status must match byte for byte, except where a declared pair differs
+only in its reason wording. The accept/refuse decision and the ref must still
+match:
+- DIV-TA-003: deleting HEAD's branch. Upstream says `deletion of the current
+  branch prohibited`; `fg` refuses it through its ref-protection policy and says
+  `protected ref denied`.
+
 Non-claims: Tier A covers the `git://` loopback carrier only. Smart HTTP and
 SSH carry the same upload-pack and receive-pack state machines, but they are not
 Tier A rows until the oracle has a constrained mode for them. Shallow and

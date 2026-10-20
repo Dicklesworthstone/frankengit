@@ -39,6 +39,13 @@ DIVERGENCES = {
     'allow-reachable-sha1-in-want': 'DIV-TA-001: fg serves reachable-object wants inside its exact-head visible-graph proof; upstream needs uploadpack.allowReachableSHA1InWant',
     'filter': 'DIV-TA-002: fg serves object filters inside its visibility proof; upstream needs uploadpack.allowFilter',
 }
+# Report-status reasons that differ only in wording, as exact (upstream, fg)
+# pairs. The accept/refuse decision must still match; any other wording
+# difference is a defect.
+REASON_DIVERGENCES = {
+    ('deletion of the current branch prohibited', 'protected ref denied'):
+        'DIV-TA-003: fg refuses deleting HEAD\'s branch through its ref-protection policy and reports that policy\'s reason',
+}
 # The capability subset Tier A requires both servers to advertise identically.
 TIER_A_V0_CAPABILITIES = ('ofs-delta', 'thin-pack', 'side-band-64k', 'include-tag', 'shallow', 'object-format', 'symref')
 TIER_A_V2_COMMANDS = ('ls-refs', 'fetch', 'object-format')
@@ -658,13 +665,20 @@ def push_rows(fmt, rows, timings):
             check = push.check(step)
             check('exit', pushed.returncode == upstream.returncode,
                   f'fg push exit {pushed.returncode} upstream {upstream.returncode}')
-            check('report-status', ours_lines == theirs_lines, f'fg {ours_lines} upstream {theirs_lines}')
+            matched, applied = report_status_matches(ours_lines, theirs_lines)
+            push.divergences.update(applied)
+            check('report-status', matched, f'fg {ours_lines} upstream {theirs_lines}')
+            # Per step, compare exactly the refs the step names, so one
+            # divergence cannot fail every later step; the final clone below
+            # compares the complete state.
+            touched = {refspec.rsplit(':', 1)[1] for refspec in refspecs}
             served, _, _ = fg_request(serve.port, b'git-upload-pack')
             refs_after, _ = parse_v0(served)
-            ours = sorted(r for r in refs_after if r[0] not in ('HEAD', 'capabilities^{}') and not r[0].endswith('^{}'))
+            ours = sorted(r for r in refs_after if r[0] in touched)
             target_refs = git_ok(target, 'for-each-ref', '--format=%(objectname) %(refname)').decode().split('\n')
-            theirs = sorted((name, oid) for oid, _, name in (line.partition(' ') for line in target_refs if line))
-            check('resulting-refs', ours == theirs, f'fg {ours[:6]} upstream {theirs[:6]}')
+            theirs = sorted((name, oid) for oid, _, name in (line.partition(' ') for line in target_refs if line)
+                            if name in touched)
+            check('resulting-refs', ours == theirs, f'fg {ours} upstream {theirs}')
         (SANDBOX / 'cand').mkdir(exist_ok=True)
         cloned = run([ORACLE, 'clone-loopback', PIN, str(RUN), f'clone-after-push-{fmt}', f'127.0.0.1:{serve.port}',
                       REPOSITORY_PATH, f'cand/after-push-{fmt}'])
@@ -675,6 +689,25 @@ def push_rows(fmt, rows, timings):
             ours, theirs = repository_state(f'cand/after-push-{fmt}'), repository_state(f'ref/after-push-{fmt}')
             check('object-set', ours['objects'] == theirs['objects'], f"{len(ours['objects'])} vs {len(theirs['objects'])}")
             check('refs', ours['refs'] == theirs['refs'], f"fg {ours['refs'][:5]} upstream {theirs['refs'][:5]}")
+
+
+def report_status_matches(ours, theirs):
+    """Exact equality, except a rejected line whose reason differs only by a
+    declared (upstream, fg) wording pair. Flags, ref names and every other
+    reason must match byte for byte."""
+    if len(ours) != len(theirs):
+        return False, set()
+    applied = set()
+    for mine, upstream in zip(ours, theirs):
+        if mine == upstream:
+            continue
+        mine_head, _, mine_reason = mine.rpartition('(')
+        upstream_head, _, upstream_reason = upstream.rpartition('(')
+        key = (upstream_reason.rstrip(')'), mine_reason.rstrip(')'))
+        if mine_head != upstream_head or key not in REASON_DIVERGENCES:
+            return False, set()
+        applied.add(REASON_DIVERGENCES[key])
+    return True, applied
 
 
 def porcelain(raw):
