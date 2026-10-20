@@ -14,6 +14,7 @@ mod cancellation_tests;
 mod control;
 pub mod graph;
 mod packed_sources;
+mod placement;
 mod refusal;
 mod source_io;
 pub use refusal::LooseGitImportRefusal;
@@ -250,19 +251,14 @@ impl OneNode {
         let total_object_bytes = validated.total_bytes;
         // All required local edges and object bodies have now verified. Only
         // placement failures or cancellation can leave verified, noncanonical objects.
+        let mut placements = placement::Placements::new(self);
         for (identity, entry) in validated.objects {
-            control.checkpoint()?;
+            // Flush before reading an object that would exceed the chunk budget.
+            placements.prepare(entry.length(), control)?;
             let object = spool.read(identity, entry, control)?;
-            let stored = self
-                .put_git_object(object.object_type, object.body)
-                .map_err(|error| LooseGitImportRefusal::Node(Box::new(error)))?;
-            if stored.identity() != identity {
-                return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
-                    expected: identity,
-                    observed: stored.identity(),
-                });
-            }
+            placements.push(identity, object, control)?;
         }
+        placements.flush(control)?;
 
         spool.finish()?;
         control.checkpoint()?;

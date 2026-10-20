@@ -18,6 +18,12 @@ pub(super) struct Entry {
     kind: ObjectType,
 }
 
+impl Entry {
+    pub(super) const fn length(self) -> usize {
+        self.length
+    }
+}
+
 /// One synchronous import owns one file, not one file per object. On Unix it
 /// is unlinked immediately: cancellation, panic and process death cannot leave
 /// named scratch payloads. Other hosts remove the exclusive name on close.
