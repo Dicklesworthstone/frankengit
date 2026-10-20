@@ -6655,6 +6655,13 @@ impl NodeConfig {
         self.http_protection_admin
     }
 
+    /// The selected git-daemon receive-processing budget (300 s unless an
+    /// operator chose another).
+    #[must_use]
+    pub const fn git_daemon_receive_processing_timeout(&self) -> GitDaemonReceiveProcessingTimeout {
+        self.git_daemon_receive_processing_timeout
+    }
+
     /// Opens the git-daemon receive-pack lane, publishing as `principal`.
     ///
     /// Without this the daemon keeps its compatibility default and refuses

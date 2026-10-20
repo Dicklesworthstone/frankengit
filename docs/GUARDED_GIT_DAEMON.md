@@ -34,6 +34,14 @@ selected-pack and work-scaling options remain explicit; unknown, duplicate,
 incomplete or overflowing options refuse rather than silently select defaults.
 There is no fallback to the old receiver after a guarded-serving failure.
 
+`--processing-timeout-secs <non-zero>` sets the server-work budget a push gets
+after its pack trailer: quarantine, delta resolution, policy and publication.
+The default is 300 s, and the session flags never extend it. Measured with a
+release `fg` at 71e1f6fa, receive costs about 20 ms per object: 6,000 objects in
+119 s and 12,000 in 238 s. A 24,000-object push therefore needs a larger budget,
+and without one it is refused with `CancellationInProgress` before any ref
+decision. Lowering the per-object cost is frankengit-pc9g.
+
 The guarded service supports **1..1,000,000 sessions**, **1..16 concurrent
 connections**, and at most **64 commands per receive**, matching the admission
 limit before retaining a longer command list. Session/concurrency defaults remain

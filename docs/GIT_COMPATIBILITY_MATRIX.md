@@ -110,6 +110,12 @@ match:
   branch prohibited`; `fg` refuses it through its ref-protection policy and says
   `protected ref denied`.
 
+The push node runs with `--processing-timeout-secs 1800`, an operator setting
+like `--initial-branch`. At the 300 s default, `fg serve` refuses a push whose
+server-side processing takes longer. Receive currently costs about 20 ms per
+object, so that is any push of more than roughly 15,000 objects, which pinned
+Git's daemon accepts (frankengit-pc9g). The lane does not compare that default.
+
 Non-claims: Tier A covers the `git://` loopback carrier only. Smart HTTP and
 SSH carry the same upload-pack and receive-pack state machines, but they are not
 Tier A rows until the oracle has a constrained mode for them. Shallow and

@@ -4,8 +4,8 @@
 
 use fgit_cli::CliOutcome;
 use fgit_node::{
-    GitDaemonServerLimits, GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, NodeConfig,
-    OneNode, RepositoryResolutionInput,
+    GitDaemonReceiveProcessingTimeout, GitDaemonServerLimits, GitDaemonSessionTimeout,
+    GitDaemonSessionWorkScaling, NodeConfig, OneNode, RepositoryResolutionInput,
 };
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
 
 struct Prepared {
     /// The operator explicitly accepted that any network peer can push as the
@@ -80,6 +80,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--session-timeout-secs"
                     | "--session-secs-per-mib"
                     | "--session-max-extension-secs"
+                    | "--processing-timeout-secs"
                     | "--receive-max-input-mib"
                     | "--receive-max-expanded-mib"
                     | "--pack-max-expanded-mib"
@@ -169,6 +170,22 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         );
     }
     let configuration = apply_session_and_envelope_flags(configuration, &flags)?;
+    // The server-work budget a push gets once its pack is in: quarantine,
+    // resolution, policy and publication. The session flags never extend it,
+    // so without this flag no push whose processing outlasts the 300 s default
+    // could be admitted (frankengit-eq4h). git-daemon only: SSH receive does not
+    // read this budget, so the flag is not in the list shared with serve-ssh.
+    let configuration = match flags.get("--processing-timeout-secs") {
+        Some(value) => configuration.with_git_daemon_receive_processing_timeout(
+            GitDaemonReceiveProcessingTimeout::try_new(Duration::from_secs(integer(
+                value,
+                "--processing-timeout-secs",
+                false,
+            )?))
+            .map_err(|_| "invalid receive processing timeout".to_owned())?,
+        ),
+        None => configuration,
+    };
     Ok(Prepared {
         unauthenticated_network_push,
         configuration,
@@ -419,6 +436,43 @@ mod tests {
         .unwrap();
         assert_eq!(selected.limits.max_sessions(), 7);
         assert_eq!(selected.limits.max_in_flight(), 2);
+        assert_eq!(
+            default
+                .configuration
+                .git_daemon_receive_processing_timeout(),
+            GitDaemonReceiveProcessingTimeout::DEFAULT
+        );
+    }
+
+    #[test]
+    fn processing_timeout_selects_the_receive_work_budget_and_refuses_zero() {
+        let selected = parse(&arguments(&[
+            "--receive-principal",
+            "33333333333333333333333333333333",
+            "--processing-timeout-secs",
+            "1800",
+        ]))
+        .unwrap();
+        assert_eq!(
+            selected
+                .configuration
+                .git_daemon_receive_processing_timeout()
+                .duration(),
+            Duration::from_secs(1800)
+        );
+        for flags in [
+            vec!["--processing-timeout-secs", "0"],
+            vec!["--processing-timeout-secs", "soon"],
+            vec![
+                "--processing-timeout-secs",
+                "1",
+                "--processing-timeout-secs",
+                "2",
+            ],
+            vec!["--processing-timeout-secs"],
+        ] {
+            assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+        }
     }
     #[test]
     fn continuous_lifetime_is_explicit_without_widening_receive_authority() {

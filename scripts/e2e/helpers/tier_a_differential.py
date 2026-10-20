@@ -268,7 +268,11 @@ class Serve:
             argv = [FG, 'serve', str(self.node), TENANT, REPOSITORY, f'127.0.0.1:{self.port}',
                     '--continuous', '--stop-file', str(self.stop)]
             if self.receive:
-                argv += ['--receive-principal', PRINCIPAL, '--allow-unauthenticated-network-push']
+                # Operator configuration, as --initial-branch is: the 300 s
+                # default processing budget admits pushes of up to ~15k
+                # objects, and the many-objects step pushes more (frankengit-pc9g).
+                argv += ['--receive-principal', PRINCIPAL, '--allow-unauthenticated-network-push',
+                         '--processing-timeout-secs', '1800']
             self.out = open(WORK / f'serve-{self.node.name}-{self.port}.out', 'wb')
             self.err = open(WORK / f'serve-{self.node.name}-{self.port}.err', 'wb')
             self.process = subprocess.Popen(argv, stdout=self.out, stderr=self.err)
