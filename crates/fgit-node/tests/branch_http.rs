@@ -715,3 +715,57 @@ fn a_cross_origin_branch_creation_is_refused_and_its_same_origin_twin_commits() 
     assert_eq!(generation(&node), before + 1);
     node.shutdown().unwrap();
 }
+
+#[test]
+fn a_directory_file_branch_conflict_is_refused_and_its_sibling_twin_commits() {
+    // Upstream refuses refs/heads/topic/x beside refs/heads/topic ("refname
+    // conflict"): no Git client can store both. The HTTP branch surface lowers
+    // to the same ref-state transition as push and import (frankengit-vbqe).
+    let format = GitHashAlgorithm::Sha1;
+    let root = Scratch::new();
+    let config = root.config(format);
+    let (node, tip) = fixture(&root, format);
+    let parent = base(&node, tip);
+    let before = generation(&node);
+    let path = root.0.join("credentials");
+    grants(&node, &path);
+    let server = BranchServer::start(node, &path, 4);
+    accepted(&change(
+        &server.client,
+        "create",
+        "dir-file-topic",
+        &create(format, "refs/heads/topic", parent),
+        false,
+    )); // 1
+    let conflict = change(
+        &server.client,
+        "create",
+        "dir-file-nested",
+        &create(format, "refs/heads/topic/x", parent),
+        false,
+    ); // 2
+    refused(&conflict);
+    assert!(
+        conflict.body.contains("RefNameConflict"),
+        "{}",
+        conflict.raw
+    );
+    accepted(&change(
+        &server.client,
+        "create",
+        "dir-file-sibling",
+        &create(format, "refs/heads/topicx", parent),
+        false,
+    )); // 3
+    let rows = list(&server.client, format, ""); // 4
+    status(&rows, 200);
+    assert!(contains_ref(&rows, "refs/heads/topic", parent));
+    assert!(contains_ref(&rows, "refs/heads/topicx", parent));
+    assert!(!rows.body.contains("\"ref\":\"refs/heads/topic/x\""));
+    let receipt = server.finish();
+    assert_eq!(receipt.accepted_sessions(), 4);
+    let node = reopen(&config);
+    // Two commits and one terminal refusal each advance the decision stream.
+    assert!(generation(&node) > before);
+    node.shutdown().unwrap();
+}
