@@ -462,10 +462,20 @@ struct TypedResolution {
 /// cache hit re-uses those already-counted bytes and charges no further
 /// expansion, so the bomb defence bounds the *unique* inflated size of the pack
 /// rather than the number of times a shared delta base is reconstructed across
-/// a receive (frankengit-rpqx). Reconstruction effort is the separate concern:
-/// a cache hit still charges the entry's `logical_work` against
-/// [`max_delta_work`](crate::PackLimits::max_delta_work), so caching cannot
-/// turn a work refusal into success.
+/// a receive (frankengit-rpqx).
+///
+/// [`max_delta_work`](crate::PackLimits::max_delta_work) is charged the work the
+/// resolver actually performs: every byte a delta copies or inserts when an
+/// object is reconstructed, and every byte copied out of the cache on a hit.
+/// A hit does NOT re-charge the chain that originally built the entry -- that
+/// reconstruction was charged once, when it ran. Re-charging it made the total
+/// quadratic in chain length and refused an ordinary history (80 revisions of a
+/// 120 KB file at Git's default depth 50) whose real work is a few MiB
+/// (frankengit-z6rb). The charge stays a deterministic function of the pack and
+/// the limits: entries are cached in resolution order until
+/// [`max_cached_bytes`](crate::PackLimits::max_cached_bytes) is reached and never
+/// evicted, and an object that did not fit is re-resolved -- and its chain
+/// re-charged -- every time it is needed, which is exactly the work done.
 pub struct CachedResolver<'objects, 'lookup, L> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
     entries: Vec<CacheEntry>,
@@ -476,7 +486,6 @@ struct CacheEntry {
     offset: u64,
     bytes: Vec<u8>,
     object_type: Option<ObjectType>,
-    logical_work: usize,
 }
 
 impl<'objects, 'lookup, L> CachedResolver<'objects, 'lookup, L>
@@ -592,14 +601,12 @@ where
     ) -> Result<Vec<u8>, PackError> {
         checkpoint(deadline)?;
         if let Some(cached) = self.cached(object.offset()) {
-            // The expanded bytes were charged the first time this offset was
-            // resolved; a cache hit re-uses them and charges only reconstruction
-            // work, so the aggregate expansion budget counts each unique object
-            // once (frankengit-rpqx).
-            accounting.add_work(cached.logical_work, self.scalar.limits)?;
+            // Expanded bytes were charged when this offset was first resolved
+            // (frankengit-rpqx); the hit charges only the copy it performs
+            // (frankengit-z6rb).
+            accounting.add_work(cached.bytes.len(), self.scalar.limits)?;
             return copy_bytes(&cached.bytes, deadline);
         }
-        let work_before = accounting.work;
         if stack.contains(&object.offset()) {
             return Err(PackError::DeltaCycle);
         }
@@ -643,14 +650,7 @@ where
                 Ok(result)
             }
         }?;
-        let logical_work =
-            accounting
-                .work
-                .checked_sub(work_before)
-                .ok_or(PackError::IntegerOverflow {
-                    context: "cached delta work accounting",
-                })?;
-        self.cache(object.offset(), &result, None, logical_work, deadline)?;
+        self.cache(object.offset(), &result, None, deadline)?;
         Ok(result)
     }
 
@@ -666,15 +666,14 @@ where
         if let Some(cached) = self.cached(object.offset())
             && let Some(object_type) = cached.object_type
         {
-            // Expanded bytes are charged once, at first resolution; a typed
-            // cache hit charges only reconstruction work (frankengit-rpqx).
-            accounting.add_work(cached.logical_work, self.scalar.limits)?;
+            // Expanded bytes are charged once, at first resolution
+            // (frankengit-rpqx); the hit charges only its copy (frankengit-z6rb).
+            accounting.add_work(cached.bytes.len(), self.scalar.limits)?;
             return Ok(TypedResolution {
                 object_type,
                 bytes: copy_bytes(&cached.bytes, deadline)?,
             });
         }
-        let work_before = accounting.work;
         if stack.contains(&object.offset()) {
             return Err(PackError::DeltaCycle);
         }
@@ -707,18 +706,24 @@ where
                 stack.push(delta.offset);
                 let base =
                     self.resolve_base_typed(&delta.base, next_depth, stack, accounting, deadline);
+                // No `?` before the pop below: an early return here left this
+                // offset on the stack, so any refusal inside a typed chain
+                // (a work limit, a bad copy) tripped the pop assertion and
+                // panicked in debug builds instead of returning its typed error.
                 let resolved = match base {
                     Ok(base) => {
                         let object_type = base.object_type;
-                        let bytes = apply_delta_with_accounting(
+                        apply_delta_with_accounting(
                             &base.bytes,
                             &delta.program,
                             self.scalar.limits,
                             accounting,
                             deadline,
-                        )?;
-                        accounting.add_expanded(bytes.len(), self.scalar.limits)?;
-                        Ok(TypedResolution { object_type, bytes })
+                        )
+                        .and_then(|bytes| {
+                            accounting.add_expanded(bytes.len(), self.scalar.limits)?;
+                            Ok(TypedResolution { object_type, bytes })
+                        })
                     }
                     Err(error) => Err(error),
                 };
@@ -727,18 +732,10 @@ where
                 resolved?
             }
         };
-        let logical_work =
-            accounting
-                .work
-                .checked_sub(work_before)
-                .ok_or(PackError::IntegerOverflow {
-                    context: "cached typed delta work accounting",
-                })?;
         self.cache(
             object.offset(),
             &resolved.bytes,
             Some(resolved.object_type),
-            logical_work,
             deadline,
         )?;
         Ok(resolved)
@@ -831,7 +828,6 @@ where
         offset: u64,
         bytes: &[u8],
         object_type: Option<ObjectType>,
-        logical_work: usize,
         deadline: &mut impl Deadline,
     ) -> Result<(), PackError> {
         let required =
@@ -866,7 +862,6 @@ where
                 offset,
                 bytes: copy,
                 object_type,
-                logical_work,
             },
         );
         self.cached_bytes = required;
@@ -1665,6 +1660,123 @@ mod tests {
             resolver.resolve_offset_typed_with_budget(36, &mut budget, &mut always),
             Ok((ObjectType::Blob, d2_bytes)),
             "the chain's shared prefix is charged once, so twelve unique bytes fit a twelve-byte budget"
+        );
+    }
+
+    /// A Git delta program that copies all of a `base_len`-byte base and then
+    /// inserts one byte: the shape of a file edited once per commit.
+    fn copy_all_then_insert(base_len: usize, byte: u8) -> Vec<u8> {
+        fn varint(mut value: usize, out: &mut Vec<u8>) {
+            loop {
+                let mut part = u8::try_from(value & 0x7f).expect("seven bits fit a byte");
+                value >>= 7;
+                if value != 0 {
+                    part |= 0x80;
+                }
+                out.push(part);
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+        let mut program = Vec::new();
+        varint(base_len, &mut program);
+        varint(base_len + 1, &mut program);
+        let mut instruction = 0x80_u8;
+        let mut sizes = Vec::new();
+        for (flag, shift) in [(0x10_u8, 0), (0x20, 8), (0x40, 16)] {
+            let part = u8::try_from((base_len >> shift) & 0xff).expect("masked byte fits");
+            if part != 0 {
+                instruction |= flag;
+                sizes.push(part);
+            }
+        }
+        program.push(instruction);
+        program.extend(sizes);
+        program.extend([1, byte]);
+        program
+    }
+
+    /// A base and a `depth`-deep chain of deltas over it, each appending one
+    /// byte: what `git repack --depth=50` produces for a long-lived file.
+    fn edit_chain(base_len: usize, depth: usize) -> Vec<PackObject> {
+        let mut objects = vec![PackObject::TypedBase {
+            offset: 100,
+            id: None,
+            kind: EntryKind::Blob,
+            data: (0..base_len).map(|n| b"abcdefgh"[n % 8]).collect(),
+        }];
+        for step in 1..=depth {
+            objects.push(PackObject::Delta(DeltaObject {
+                offset: 100 + 100 * u64::try_from(step).expect("small depth"),
+                id: None,
+                base: DeltaBase::Ofs(100 * u64::try_from(step).expect("small depth")),
+                program: copy_all_then_insert(
+                    base_len + step - 1,
+                    u8::try_from(step % 250).expect("fits"),
+                ),
+            }));
+        }
+        objects
+    }
+
+    /// Resolves every chain member, deepest first (as an idx-ordered walk may),
+    /// through ONE operation-wide budget, and returns the work it charged.
+    fn resolve_chain(objects: &[PackObject], limits: &PackLimits) -> Result<usize, PackError> {
+        let mut resolver = CachedResolver::new(objects, &(), limits, &mut always)?;
+        let mut budget = ResolutionBudget::new();
+        for object in objects.iter().rev() {
+            resolver.resolve_offset_typed_with_budget(object.offset(), &mut budget, &mut always)?;
+        }
+        Ok(budget.accounting.work)
+    }
+
+    #[test]
+    fn an_ordinary_edit_chain_fits_the_default_work_budget_and_a_cacheless_replay_does_not() {
+        // 50 revisions of a 240 KB file at Git's default depth (frankengit-z6rb).
+        let (base_len, depth) = (240_000, 50);
+        let objects = edit_chain(base_len, depth);
+        let defaults = PackLimits::default();
+        // The regime the old model refused: re-charging each cached base's whole
+        // chain on every hit summed depth x size over the chain.
+        let cumulative: usize = (1..=depth).map(|d| d * (base_len + d)).sum();
+        assert!(cumulative > defaults.max_delta_work, "{cumulative}");
+
+        let charged = resolve_chain(&objects, &defaults)
+            .expect("the ordinary history resolves under the default limits");
+        // Real work: every reconstructed byte plus every byte copied from the
+        // cache, a small multiple of the unique expanded bytes.
+        let unique: usize = (0..=depth).map(|d| base_len + d).sum();
+        assert!(
+            charged <= 4 * unique,
+            "charged {charged} for {unique} unique bytes"
+        );
+        assert!(charged < defaults.max_delta_work);
+        assert_eq!(
+            resolve_chain(&objects, &defaults),
+            Ok(charged),
+            "the same pack and limits always charge the same work"
+        );
+
+        // Planted twin: no cache, so every object really re-runs its chain. That
+        // work IS quadratic, and it is refused: under the defaults the
+        // re-expanded bytes trip the expansion bound first ...
+        let mut cacheless = defaults.clone();
+        cacheless.max_cached_bytes = 0;
+        let replay = resolve_chain(&objects, &cacheless);
+        assert!(
+            matches!(
+                replay,
+                Err(PackError::TotalExpandedLimit { .. } | PackError::DeltaWorkLimit { .. })
+            ),
+            "{replay:?}"
+        );
+        // ... and with that bound lifted, the work bound refuses it by itself.
+        cacheless.max_total_expanded_bytes = 1 << 30;
+        let replay = resolve_chain(&objects, &cacheless);
+        assert!(
+            matches!(replay, Err(PackError::DeltaWorkLimit { .. })),
+            "{replay:?}"
         );
     }
 

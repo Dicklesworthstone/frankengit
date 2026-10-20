@@ -746,3 +746,35 @@ available. Measure native fast-forward admission with current object
 availability, cancellation, and all existing verification work included;
 retain raw baseline/candidate/A-A samples and include cold misses as well as
 cache hits. A warm-only microbenchmark does not discharge this condition.
+
+### NEG-036 — charging a cached base's whole chain on every hit refuses ordinary histories (frankengit-z6rb)
+
+**Hypothesis.** Charging each cache hit the entry's cumulative `logical_work`
+(the full chain that originally built it) bounds delta reconstruction work, so
+"caching cannot turn a work refusal into success", without refusing ordinary
+repositories.
+
+**Disposition: REFUTED.** The charge is quadratic in chain length (the sum of
+depth x size), while the resolver's real work with its cache is linear: each
+object is reconstructed once and copied out of the cache on later hits.
+Ordinary histories crossed the 256 MiB `max_delta_work` default:
+- 80 revisions of a 120 KB file repacked at Git's default depth 50: `fg import`
+  refused with `DeltaWorkLimit { attempted: 272720564 }`, and the same history
+  pushed was refused (`DeltaBudgetExceeded`). That is the Tier A delta corpus,
+  in both formats, at 878e4958 and e2ced51a.
+- A 50-deep chain of 240 KB objects: the old model charged 269,417,258 and
+  refused. The real work is a few MiB.
+
+**Replacement.** `max_delta_work` is charged the work actually performed: bytes
+copied or inserted while reconstructing, plus bytes copied out of the cache on a
+hit. The charge stays a deterministic function of the pack and the limits: the
+cache fills in resolution order up to `max_cached_bytes` and never evicts, and
+an object that did not fit is re-resolved, and re-charged, each time. A
+cacheless replay of the same chain still does quadratic work and is refused, by
+the expansion bound under the defaults and by the work bound when that is
+lifted (the twin in `an_ordinary_edit_chain_fits_the_default_work_budget_and_a_cacheless_replay_does_not`).
+
+**Revisit when** a resolver path can do more real work than it charges (for
+example cache eviction that re-resolves without charging), or a pack is shown
+that amplifies real work beyond what the real-work charge refuses.
+
