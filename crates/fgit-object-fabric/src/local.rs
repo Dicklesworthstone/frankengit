@@ -5,6 +5,9 @@
 //! likewise durable before the immutable per-authority-head root file links to
 //! it.  Directory scans never participate in recovery or authority.
 
+#[path = "local_batch.rs"]
+mod batch;
+
 #[path = "local_bounded_read.rs"]
 mod bounded_read;
 
@@ -385,6 +388,11 @@ impl LocalFilesystemFabric {
     fn fresh_stage(&self) -> Result<StageFile, StoreRefusal> {
         let directory = self.staging_dir();
         self.create_directory(&directory)?;
+        self.fresh_stage_prepared()
+    }
+
+    fn fresh_stage_prepared(&self) -> Result<StageFile, StoreRefusal> {
+        let directory = self.staging_dir();
         for _ in 0..MAX_STAGE_ATTEMPTS {
             let sequence = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("{sequence:016x}.stage"));
@@ -403,6 +411,14 @@ impl LocalFilesystemFabric {
     fn write_object_stage(
         &self,
         object: &VerifiedObject,
+    ) -> Result<StageFile, PlacementAttemptError> {
+        self.write_object_stage_in(object, false)
+    }
+
+    fn write_object_stage_in(
+        &self,
+        object: &VerifiedObject,
+        directories_prepared: bool,
     ) -> Result<StageFile, PlacementAttemptError> {
         let envelope = object
             .envelope()
@@ -427,9 +443,12 @@ impl LocalFilesystemFabric {
         }
         let envelope_len = u32::try_from(envelope.len())
             .map_err(|_| PlacementAttemptError::before_write(StoreRefusal::LengthOverflow))?;
-        let mut stage = self
-            .fresh_stage()
-            .map_err(PlacementAttemptError::before_write)?;
+        let mut stage = if directories_prepared {
+            self.fresh_stage_prepared()
+        } else {
+            self.fresh_stage()
+        }
+        .map_err(PlacementAttemptError::before_write)?;
         self.crash_if(LocalCrashPoint::BeforeStageWrite)
             .map_err(PlacementAttemptError::before_write)?;
         stage
@@ -459,18 +478,29 @@ impl LocalFilesystemFabric {
         stage: StageFile,
         object: &VerifiedObject,
     ) -> Result<ImmutableWrite, StoreRefusal> {
-        self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
         let final_path = self.object_path(object.identity());
         let parent = final_path
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
         self.create_directory(parent)?;
-        match fs::hard_link(stage.path(), &final_path) {
+        let result = self.link_object_stage(&stage, object)?;
+        // A competing batch can link this name before its directory fence.
+        // Existing bytes do not prove that the name is durable yet.
+        sync_directory(parent)?;
+        self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
+        self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
+        Ok(result)
+    }
+
+    fn link_object_stage(
+        &self,
+        stage: &StageFile,
+        object: &VerifiedObject,
+    ) -> Result<ImmutableWrite, StoreRefusal> {
+        self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
+        match fs::hard_link(stage.path(), self.object_path(object.identity())) {
             Ok(()) => {
                 self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
-                sync_directory(parent)?;
-                self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
-                self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
                 Ok(ImmutableWrite::Created)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -596,6 +626,11 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
                 if existing != object {
                     return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
+                // Establish our own fence: another writer may have linked a
+                // verified file but not yet synced its immutable directory.
+                let path = self.object_path(object.identity());
+                sync_directory(path.parent().ok_or(StoreRefusal::MalformedStoredObject)?)?;
+                self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
                 return Ok(PutIfAbsent::AlreadyPresent {
                     placement,
                     epochs: PublicationState::new(true, false, true),
