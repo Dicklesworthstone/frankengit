@@ -1,5 +1,7 @@
 //! The explicit local-operator TreeFS tool workflow. No repository ref write.
 
+mod invocation;
+
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{
     GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryId, TenantId,
@@ -63,11 +65,12 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
         command.args(&options.arguments);
         let (result, cleanup) = signals
             .run_request(node.runtime(), &request, |request| {
+                let (_invocation, head, commit) = invocation::reserve(&node, request, &options)?;
                 node.runtime()
                     .block_on(node.run_trusted_workspace_tool_at_in(
                         request,
                         &options.reference,
-                        (options.expected_head, options.expected_commit),
+                        (Some(head), Some(commit)),
                         options.workspace,
                         &options.parent,
                         &options.reads,
@@ -80,6 +83,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
                             options.message.as_bytes(),
                         ),
                     ))
+                    .map_err(|error| error.to_string())
             })
             .map_err(|error| error.to_string())?;
         monitor_cleanup = cleanup.err().map(|error| error.to_string());
