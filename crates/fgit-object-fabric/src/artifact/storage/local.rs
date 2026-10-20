@@ -71,8 +71,21 @@ impl LocalArtifactStore {
     }
     fn source(&self, id: &Digest) -> Result<File, ArtifactStorageError> {
         valid_digest(id)?;
-        private_directory(&self.root)?;
+        private_directory(&self.root).map_err(|error| match error {
+            ArtifactStorageError::NotFound => ArtifactStorageError::Io {
+                operation: "selected artifact root unavailable",
+                kind: std::io::ErrorKind::NotFound,
+            },
+            other => other,
+        })?;
         let directory = self.directory();
+        match fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ArtifactStorageError::NotFound);
+            }
+            Err(error) => return Err(io("inspect artifact namespace", error)),
+            Ok(_) => {}
+        }
         private_directory(&directory)?;
         regular(&directory.join(hex(id)))
     }
@@ -83,7 +96,6 @@ impl LocalArtifactStore {
         op: &ArtifactOperation<'_>,
     ) -> Result<ArtifactPut, ArtifactStorageError> {
         op.admit(identity.payload_len())?;
-        let header = codec::encode(&self.scope, identity)?;
         let metadata = source
             .metadata()
             .map_err(|e| io("inspect upload source", e))?;
@@ -96,6 +108,17 @@ impl LocalArtifactStore {
         source
             .seek(SeekFrom::Start(0))
             .map_err(|e| io("rewind source", e))?;
+        self.put_reader_inner(identity, source, op)
+    }
+
+    pub(super) fn put_reader_inner(
+        &self,
+        identity: &ArtifactIdentity,
+        source: &mut impl Read,
+        op: &ArtifactOperation<'_>,
+    ) -> Result<ArtifactPut, ArtifactStorageError> {
+        op.admit(identity.payload_len())?;
+        let header = codec::encode(&self.scope, identity)?;
         private_directory(&self.root)?;
         let directory = self.directory();
         op.checkpoint()?;
@@ -366,7 +389,7 @@ fn verify(
     Ok(identity)
 }
 fn transfer(
-    source: &mut File,
+    source: &mut impl Read,
     sink: &mut impl Write,
     identity: &ArtifactIdentity,
     op: &ArtifactOperation<'_>,

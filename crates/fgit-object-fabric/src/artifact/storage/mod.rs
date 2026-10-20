@@ -10,6 +10,7 @@ use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, Instant};
 mod codec;
+pub mod lfs;
 mod local;
 pub use local::LocalArtifactStore;
 
@@ -201,6 +202,19 @@ impl LocalArtifactStore {
     ) -> Result<ArtifactPut, ArtifactStorageError> {
         self.put_inner(identity, source, op)
     }
+    /// Stream a finite, already framed input into the same verified root-last
+    /// store as file uploads. Reads exactly the declared length plus one EOF
+    /// probe; callers must supply an HTTP body reader, not an unframed socket.
+    /// A short, long, interrupted or corrupt stream never installs its name.
+    pub fn put_reader(
+        &self,
+        identity: &ArtifactIdentity,
+        source: &mut impl std::io::Read,
+        op: &ArtifactOperation<'_>,
+    ) -> Result<ArtifactPut, ArtifactStorageError> {
+        self.put_reader_inner(identity, source, op)
+    }
+
     /// Verify the complete payload, not just its metadata, without disclosing it.
     pub fn inspect(
         &self,
