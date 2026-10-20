@@ -52,6 +52,8 @@ pub mod descriptor;
 pub mod emit;
 pub mod error;
 pub mod gate;
+/// Bounded exact JSON shared by native API adapters.
+pub mod json;
 pub mod mcp;
 pub mod registry;
 pub mod workflow;
