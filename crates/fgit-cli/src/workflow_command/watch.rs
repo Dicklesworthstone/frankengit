@@ -21,7 +21,13 @@ The engine derives immutable event/run IDs; --event, --run-id, --expected-head a
 An unresolved event blocks later events; no script is automatically retried.
 SIGTERM/SIGINT stop new polls and drain active execution before node shutdown.
 Output: one flushed JSON poll per iteration, followed by a node-close summary.
-No checks are published by this command. Use workflow recover/publish for saved jobs.
+No checks are published by default. Opt in with --publish-checks --principal-id
+  <publisher> --expected-incarnation <id> to report settled events through ordinary
+  canonical check admission. Pending publication reconciles before later polling;
+  source scripts never rerun. The first reporting identity is permanent per scope.
+  Missing legacy handoffs, corrupt custody and incomplete admission stop the watch.
+  A committed failure/skipped observation is not a passing build. Preserve all
+  event custody across restart/restore. No force reset or replacement keys exist.
 Exit 0: requested polls settled (not proof of green checks); 1: non-green/stopped/
 unresolved work; 2: input, infrastructure, cleanup or output failure.";
 
@@ -30,6 +36,7 @@ struct WatchOptions {
     execution: Options,
     polls: u32,
     interval: Duration,
+    publisher: Option<fgit_types::PrincipalId>,
 }
 fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
     if text.is_empty()
@@ -46,7 +53,7 @@ fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
 fn options(args: &[String]) -> Result<WatchOptions, String> {
     if args.len() < 5
         || args[0] != "watch"
-        || args.len() > 2104
+        || args.len() > 2107
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -54,11 +61,27 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     }
     let mut ordinary = args[..5].to_vec();
     let (mut polls, mut interval) = (None, None);
+    let mut publish = false;
+    let mut publisher = None;
     let mut i = 5;
     while i < args.len() {
         let flag = &args[i];
         i += 1;
-        if matches!(flag.as_str(), "--polls" | "--interval-ms") {
+        if flag == "--publish-checks" {
+            if publish {
+                return Err("duplicate --publish-checks".into());
+            }
+            publish = true;
+        } else if flag == "--principal-id" {
+            let value = args.get(i).ok_or("missing --principal-id")?;
+            i += 1;
+            super::publish::fixed_hex(value, 16)?;
+            let id =
+                fgit_types::PrincipalId::from_hex(value).map_err(|_| "invalid check publisher")?;
+            if publisher.replace(id).is_some() {
+                return Err("duplicate --principal-id".into());
+            }
+        } else if matches!(flag.as_str(), "--polls" | "--interval-ms") {
             let value = args.get(i).ok_or("missing watch limit")?;
             i += 1;
             let (slot, value) = if flag == "--polls" {
@@ -81,7 +104,14 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     if !execution.reference.as_bytes().starts_with(b"refs/heads/") {
         return Err("watch requires a branch ref".into());
     }
+    if publish != publisher.is_some() {
+        return Err("--publish-checks and --principal-id must be supplied together".into());
+    }
+    if publish && execution.incarnation.is_none() {
+        return Err("automatic check publication requires --expected-incarnation".into());
+    }
     Ok(WatchOptions {
+        publisher,
         execution,
         polls: polls.unwrap_or(1),
         interval: Duration::from_millis(u64::from(interval.unwrap_or(1000))),
@@ -112,6 +142,9 @@ struct Summary {
     non_green: bool,
     stopped: bool,
     reconcile: bool,
+    publication_enabled: bool,
+    checks_committed: usize,
+    checks_refused: usize,
 }
 #[cfg(target_os = "linux")]
 fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String> {
@@ -129,7 +162,10 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
             .with_object_format(opt.format),
     )
     .map_err(|e| e.to_string())?;
-    let mut summary = Summary::default();
+    let mut summary = Summary {
+        publication_enabled: options.publisher.is_some(),
+        ..Summary::default()
+    };
     let mut monitor = None;
     let operation = (|| {
         if opt
@@ -150,6 +186,9 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
                     if !request.checkpoint_is_live() {
                         summary.stopped = true;
                         break;
+                    }
+                    if let Some(publisher) = options.publisher {
+                        publish_pending(&node, request, opt, publisher, &mut summary, output)?;
                     }
                     let poll = node
                         .runtime()
@@ -185,6 +224,9 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
                     if summary.reconcile {
                         break;
                     }
+                    if let Some(publisher) = options.publisher {
+                        publish_pending(&node, request, opt, publisher, &mut summary, output)?;
+                    }
                     if index + 1 < options.polls
                         && !wait_interval(options.interval, &|| request.checkpoint_is_live())
                     {
@@ -204,6 +246,41 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
         operation.err().as_deref(),
         cleanup.as_deref(),
     )
+}
+#[cfg(target_os = "linux")]
+fn publish_pending(
+    node: &fgit_node::OneNode,
+    request: &fgit_node::NodeRequestContext,
+    options: &Options,
+    publisher: fgit_types::PrincipalId,
+    summary: &mut Summary,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let result = node
+        .runtime()
+        .block_on(node.publish_trusted_ref_workflow_checks_in(
+            request,
+            &options.reference,
+            &options.workflow,
+            &options.parent,
+            publisher,
+            |text| {
+                writeln!(output, "{text}")
+                    .and_then(|()| output.flush())
+                    .map_err(|e| e.to_string())
+            },
+        ));
+    summary.checks_committed += result.committed;
+    summary.checks_refused += result.refused;
+    summary.non_green |= result.refused != 0;
+    summary.reconcile |= result.error.is_some();
+    writeln!(output, "{}", result.to_json())
+        .and_then(|()| output.flush())
+        .map_err(|e| format!("watch publication receipt failed; preserve original custody: {e}"))?;
+    if let Some(error) = result.error {
+        return Err(error);
+    }
+    Ok(())
 }
 fn wait_interval(interval: Duration, live: &dyn Fn() -> bool) -> bool {
     let started = Instant::now();
@@ -226,7 +303,7 @@ fn finish(
     cleanup: Option<&str>,
 ) -> Result<u8, String> {
     let optional = |value: Option<&str>| value.map_or_else(|| "null".into(), super::quote);
-    writeln!(output,"{{\"type\":\"workflow_watch_result\",\"schema_version\":1,\"polls\":{},\"dispatched\":{},\"non_green\":{},\"request_stopped\":{},\"requires_reconciliation\":{},\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}",summary.polls,summary.dispatched,summary.non_green,summary.stopped,summary.reconcile,cleanup.is_none(),optional(operation),optional(cleanup)).and_then(|()|output.flush()).map_err(|e|format!("watch summary output incomplete: {e}"))?;
+    writeln!(output,"{{\"type\":\"workflow_watch_result\",\"schema_version\":1,\"polls\":{},\"dispatched\":{},\"non_green\":{},\"request_stopped\":{},\"requires_reconciliation\":{},\"publication_enabled\":{},\"committed_check_decisions\":{},\"refused_check_decisions\":{},\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}",summary.polls,summary.dispatched,summary.non_green,summary.stopped,summary.reconcile,summary.publication_enabled,summary.checks_committed,summary.checks_refused,cleanup.is_none(),optional(operation),optional(cleanup)).and_then(|()|output.flush()).map_err(|e|format!("watch summary output incomplete: {e}"))?;
     Ok(if operation.is_some() || cleanup.is_some() {
         2
     } else {

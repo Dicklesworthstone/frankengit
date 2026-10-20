@@ -85,8 +85,12 @@ or any unexecuted workflow has passed. Ordinary failed builds return non-green
 and may settle; a restart reports `previously_settled`, not historical success.
 Unresolved events stop the loop and require reconciliation. No event, caller run
 ID, fixed head or commit may be supplied to override canonical selection.
-This command does not publish checks or grant merge authority; completed jobs
-remain available through the native recover/publish boundary.
+By default this command does not publish checks or grant merge authority; completed
+jobs remain available through the native recover/publish boundary. Explicit
+`--publish-checks --principal-id ... --expected-incarnation ...` connects settled
+events to canonical checks without rerunning scripts. See
+[`NATIVE_WATCH_CHECK_PUBLICATION.md`](NATIVE_WATCH_CHECK_PUBLICATION.md) for the
+durable handoff, restart, identity, limits and legacy-state refusal contract.
 
 The discovered `scripts/e2e/suites/workflow/watch.sh` drives the real Rust binary
 in both object formats, including new refs observed during polling, restart and

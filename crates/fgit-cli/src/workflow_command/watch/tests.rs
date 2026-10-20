@@ -171,3 +171,84 @@ fn broken_receipt_output_never_reports_success() {
     }
     assert!(finish(&mut Broken, &Summary::default(), None, None).is_err());
 }
+
+#[test]
+fn check_reporting_requires_explicit_opt_in_publisher_and_incarnation_together() {
+    let original = args();
+    assert!(options(&original).unwrap().publisher.is_none());
+    let complete = [
+        original.clone(),
+        vec![
+            "--publish-checks".into(),
+            "--principal-id".into(),
+            "77".repeat(16),
+            "--expected-incarnation".into(),
+            "88".repeat(16),
+        ],
+    ]
+    .concat();
+    assert!(options(&complete).unwrap().publisher.is_some());
+    for flag in [
+        "--publish-checks",
+        "--principal-id",
+        "--expected-incarnation",
+    ] {
+        let mut bad = complete.clone();
+        let index = bad.iter().position(|s| s == flag).unwrap();
+        let count = if flag == "--publish-checks" { 1 } else { 2 };
+        bad.drain(index..index + count);
+        assert!(options(&bad).is_err(), "{flag}");
+    }
+    for extra in [
+        vec!["--publish-checks".into()],
+        vec!["--principal-id".into(), "77".repeat(16)],
+    ] {
+        assert!(options(&[complete.clone(), extra].concat()).is_err());
+    }
+}
+#[test]
+fn publisher_is_not_parsed_from_an_option_value_or_workflow_name() {
+    let mut input = args();
+    input[7] = "ci/--publish-checks".into();
+    assert!(options(&input).unwrap().publisher.is_none());
+    let mut full = args();
+    full.extend([
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "ZZ".repeat(16),
+        "--expected-incarnation".into(),
+        "88".repeat(16),
+    ]);
+    assert!(options(&full).is_err());
+}
+#[test]
+fn publication_decisions_and_incomplete_admission_survive_the_summary() {
+    let mut output = Vec::new();
+    let summary = Summary {
+        publication_enabled: true,
+        checks_committed: 3,
+        checks_refused: 1,
+        non_green: true,
+        reconcile: true,
+        ..Summary::default()
+    };
+    assert_eq!(
+        finish(
+            &mut output,
+            &summary,
+            Some("saved result requires reconciliation"),
+            None
+        )
+        .unwrap(),
+        2
+    );
+    let text = String::from_utf8(output).unwrap();
+    for expected in [
+        "\"committed_check_decisions\":3",
+        "\"refused_check_decisions\":1",
+        "\"requires_reconciliation\":true",
+        "\"node_closed\":true",
+    ] {
+        assert!(text.contains(expected));
+    }
+}
