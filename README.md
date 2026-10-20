@@ -83,9 +83,10 @@ through report-status, never a silent hangup (see
 [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md)).
 Ingress time cannot consume the independent server-work budget that starts
 after the pack trailer. On `fg serve` that budget defaults to 300 s and is set
-with `--processing-timeout-secs`. Receive currently costs about 20 ms per
-object (frankengit-pc9g), so the default admits pushes of up to roughly 15,000
-objects. `fg serve-http` and `fg serve-ssh` now carry stock
+with `--processing-timeout-secs`. Processing must also finish inside the
+session budget, which runs from accept. Receive currently costs about 20 ms per
+object (frankengit-pc9g), so the defaults admit pushes of up to roughly 15,000
+objects; a larger push needs both budgets raised. `fg serve-http` and `fg serve-ssh` now carry stock
 clone, fetch and push:
 - `fg serve-http` is loopback-only and uses an operator token or a scoped
   credentials file. It has a `--continuous` mode that drains on a stop file,
