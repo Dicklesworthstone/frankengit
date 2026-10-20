@@ -148,3 +148,6 @@ mod inspect;
 
 // Exact saved-job selection for the existing canonical publication boundary.
 mod publish;
+
+// Whole-run snapshot preparation and ordinary per-job canonical publication.
+mod check_set;
