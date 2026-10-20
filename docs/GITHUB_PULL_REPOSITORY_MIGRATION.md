@@ -8,6 +8,67 @@ composes the existing capture validators, PR compiler, private request slots,
 original-key sender and outcome journal. Native authorization and publication
 remain exclusively server-owned.
 
+## Command-line workflow
+
+Use `scripts/migrate_github_pull_collection.mjs` with the completed source
+collection, the existing destination selection JSON shape below, and the native
+PR writer token. Source GitHub credentials are not used by this command:
+
+```sh
+node scripts/migrate_github_pull_collection.mjs prepare \
+  --collection-dir /srv/import/pr-collection \
+  --collection-confirm "$COLLECTION_PLAN_SHA256" \
+  --complete-confirm "$COLLECTION_COMPLETE_SHA256" \
+  --selection /srv/import/destination.json \
+  --workdir /srv/import/repository-migration \
+  --token-file /srv/import/native-pr-writer.token
+
+node scripts/migrate_github_pull_collection.mjs run \
+  --workdir /srv/import/repository-migration --confirm "$MIGRATION_SHA256" \
+  --token-file /srv/import/native-pr-writer.token --max-operations 100
+
+node scripts/migrate_github_pull_collection.mjs status \
+  --workdir /srv/import/repository-migration --confirm "$MIGRATION_SHA256"
+```
+
+`MIGRATION_SHA256` is preparation's new outer `plan_sha256`. Repeat `run` with
+that same pin after a paused result. `inspect` and `status` both perform complete
+offline source, child and journal validation. `recover` uses the same workdir/pin
+and an optional native recovery token, without submitting a successor. Explicit
+resubmission is `run --retry-key "$ORIGINAL_PENDING_KEY"`, never a new plan.
+Network commands accept a private `--ca-file` for the existing HTTPS transport.
+
+Preparation accepts lower `--max-steps` and `--max-request-bytes` ceilings. Every
+command accepts `--timeout-ms` from 1 to 300,000, including file preflight and
+output. Native results still drain to bounded local custody after network
+cancellation. JSON output escapes terminal controls and is bounded to 8 MiB;
+output waits are at most ten seconds within the remaining command allowance.
+A broken output stream retains its completed result and original pins in a
+bounded error diagnostic rather than repeating work.
+
+Exit **0** means a successful selected command or completely committed execution.
+Preparation/inspection/status may succeed while reporting incomplete migration.
+Execution exit **1** is a native refusal, **3** is a ready/paused/unresolved result,
+**2** is argument/preflight refusal, and **4** reports retained/verified custody or
+an uncertain output result. Always inspect `complete`, `state` and the original
+current key; no exit code proves rollback.
+
+The `batch` command returns a selected original child without executing it. To
+emit a private create-only branch selection for that batch instead:
+
+```sh
+node scripts/migrate_github_pull_collection.mjs requirements \
+  --workdir /srv/import/repository-migration --confirm "$MIGRATION_SHA256" \
+  --batch 2 --principal "$BRANCH_PRINCIPAL_HEX32" \
+  --out /srv/import/branches-batch-2.json
+```
+
+Use that file with the existing branch bootstrap `prepare` command and its
+independent writer credential. The diagnostic returns both the outer migration
+pin and original child pin; retain the new branch plan pin separately. Existing
+output files refuse instead of being overwritten. This does not provision Git
+objects, execute any branch request or send a PR implicitly.
+
 ## Prepare once, retain one outer plan
 
 The library entrypoint is `scripts/lib/github-pull-migration.mjs`:
@@ -157,3 +218,12 @@ later children, lost replies, original-key retry, rotated credentials, concurren
 runners, source removal and independent branch requirements. No native Rust
 server, reachability/admission/CAS, deployment, maximum-population throughput,
 full-workspace or completed FG-049 gate is claimed.
+
+The combined suite also drives real Node CLI processes through preparation,
+requirements, bounded execution and offline status. A 101-PR/202-operation HTTP
+case spans five original batches and the default 100-operation boundary. Actual
+SIGTERM/SIGINT/SIGKILL during later-batch committed peer responses recover in fresh
+processes without duplicate mutation POSTs. A SIGTERM during offline preparation
+retains original child keys but cannot produce an executable incomplete outer
+root. Recomputed outer pins do not waive child scope, partition or total checks.
+These are operator consistency tests, not native engine or hardware fault tests.
