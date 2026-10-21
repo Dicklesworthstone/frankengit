@@ -11,6 +11,62 @@ export const SOURCE_EXPECTED_BYTES = 128 * 1024;
 export const SOURCE_EVIDENCE_PROFILE = 'frankengit-source-edit-evidence-v1';
 export const SOURCE_CREATION_SELECTION = 'frankengit-source-edit-create-selection-v1';
 export const SOURCE_CREATION_EVIDENCE_PROFILE = 'frankengit-source-edit-evidence-v2';
+export const SOURCE_RESULT_SELECTION = 'frankengit-source-edit-result-selection-v1';
+export const SOURCE_RESULT_EVIDENCE_PROFILE = 'frankengit-source-edit-evidence-v3';
+const RESULT_FILE_BYTES = 1024 * 1024, RESULT_TOTAL_BYTES = 8 * 1024 * 1024;
+
+function resultPath(value) {
+  if (typeof value !== 'string' || !/^(?:[0-9a-f]{2}){1,4096}$/.test(value)) fail('source_edit_result_path');
+  const bytes = Buffer.from(value, 'hex'), parts = bytes.toString('latin1').split('/');
+  if (bytes.includes(0) || parts.length > 64 || parts.some(p => !p || p === '.' || p === '..' || p.toLowerCase() === '.git')) {
+    fail('source_edit_result_path');
+  }
+  return value;
+}
+function ownAfter(rows, format) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > 32) fail('source_edit_result_selection');
+  let previous = '', pathBytes = 0;
+  return rows.map(row => {
+    fields(row, ['pathHex', 'blob', 'kind']); const path = resultPath(row.pathHex);
+    if (path <= previous || (pathBytes += path.length / 2) > 32768) fail('source_edit_result_selection');
+    previous = path;
+    if (row.blob === null) {
+      if (row.kind !== null) fail('source_edit_result_selection');
+      return { pathHex: path, blob: null, kind: null };
+    }
+    if (!['file', 'executable'].includes(row.kind)) fail('source_edit_result_selection');
+    return { pathHex: path, blob: oid(row.blob, format), kind: row.kind };
+  });
+}
+// Build independent RESULT commitments from caller-owned desired bytes, not a
+// server diff. This is neither patch application nor authorization. A path not
+// in the positive selection becomes an explicit creation intent; basis() must
+// still prove its absence before any native request. Empty bytes are a file;
+// null bytes are a deletion. No shell, checkout, encoding or newline rewrite.
+export function sourceEditResultSelection(source, changes, check = () => {}) {
+  if (typeof check !== 'function') fail('source_edit_result_selection');
+  check(); const original = ownSourceExpected(source);
+  if (!Array.isArray(changes) || !changes.length || changes.length > 32) fail('source_edit_result_selection');
+  let total = 0;
+  const rows = changes.map(row => {
+    check(); fields(row, ['pathHex', 'bytes', 'kind']); const pathHex = resultPath(row.pathHex);
+    if (row.bytes === null) {
+      if (row.kind !== null) fail('source_edit_result_selection');
+      return { pathHex, blob: null, kind: null };
+    }
+    if (!(row.bytes instanceof Uint8Array) || !['file', 'executable'].includes(row.kind) ||
+        row.bytes.length > RESULT_FILE_BYTES || (total += row.bytes.length) > RESULT_TOTAL_BYTES) fail('source_edit_result_bytes');
+    const bytes = Buffer.from(row.bytes);
+    const blob = createHash(original.format).update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    check(); return { pathHex, blob, kind: row.kind };
+  }).sort((a, b) => a.pathHex < b.pathHex ? -1 : a.pathHex > b.pathHex ? 1 : 0);
+  const selected = new Set(original.files.map(row => row.pathHex));
+  const create = rows.filter(row => !selected.has(row.pathHex));
+  if (create.some(row => row.blob === null)) fail('source_edit_result_unselected_deletion');
+  const expected = ownExpected({ schema: SOURCE_RESULT_SELECTION, source: original,
+    create_paths_hex: create.map(row => row.pathHex), after: rows });
+  check(); return expected;
+}
 
 // Bound primitives before owning an expected selection. Its commit comes from
 // the operator, never from the package or a native preparation response.
@@ -31,9 +87,10 @@ function ownSourceExpected(value) {
 // membership. Omission from a source package is NEVER an absence witness.
 function ownExpected(value) {
   if (!value || !Object.hasOwn(value, 'schema')) return ownSourceExpected(value);
-  fields(value, ['schema', 'source', 'create_paths_hex']);
-  if (value.schema !== SOURCE_CREATION_SELECTION || !Array.isArray(value.create_paths_hex) ||
-      !value.create_paths_hex.length || value.create_paths_hex.length > 32) fail('source_edit_creation_selection');
+  const result = value.schema === SOURCE_RESULT_SELECTION;
+  fields(value, ['schema', 'source', 'create_paths_hex', ...(result ? ['after'] : [])]);
+  if ((!result && value.schema !== SOURCE_CREATION_SELECTION) || !Array.isArray(value.create_paths_hex) ||
+      (!result && !value.create_paths_hex.length) || value.create_paths_hex.length > 32) fail('source_edit_creation_selection');
   const source = ownSourceExpected(value.source); let total = 0, previous = '';
   const paths = value.create_paths_hex.map(path => {
     if (typeof path !== 'string' || !/^(?:[0-9a-f]{2}){1,4096}$/.test(path) ||
@@ -47,7 +104,17 @@ function ownExpected(value) {
   if (new Set(all).size !== all.length || all.some(p => all.some(q => p !== q && p.startsWith(`${q}2f`)))) {
     fail('source_edit_creation_collision');
   }
-  return { schema: SOURCE_CREATION_SELECTION, source, create_paths_hex: paths };
+  const expected = { schema: value.schema, source, create_paths_hex: paths,
+    ...(result ? { after: ownAfter(value.after, source.format) } : {}) };
+  if (result) {
+    const targets = expected.after.map(row => row.pathHex);
+    if (targets.some(p => targets.some(q => p !== q && p.startsWith(`${q}2f`))) ||
+        paths.some(p => !targets.includes(p)) ||
+        expected.after.some(row => !source.files.some(file => file.pathHex === row.pathHex) && !paths.includes(row.pathHex)) ||
+        expected.after.some(row => paths.includes(row.pathHex) && row.blob === null) ||
+        Buffer.byteLength(`${JSON.stringify(expected)}\n`) > SOURCE_EXPECTED_BYTES) fail('source_edit_result_selection');
+  }
+  return expected;
 }
 async function basis(packageBytes, expected, selection, check) {
   if (!(packageBytes instanceof Uint8Array) || !packageBytes.length || packageBytes.length > SOURCE_PACKAGE_BYTES ||
@@ -59,6 +126,8 @@ async function basis(packageBytes, expected, selection, check) {
   // only after the server has already prepared a candidate.
   if (request.paths_hex.length > 32 || request.paths_hex.reduce((n, p) => n + p.length / 2, 0) > 32768 ||
       [...created].some(path => !request.paths_hex.includes(path))) fail('source_edit_creation_selection');
+  if (expectedOwned.after && (expectedOwned.after.length !== request.paths_hex.length ||
+      expectedOwned.after.some((row, i) => row.pathHex !== request.paths_hex[i]))) fail('source_edit_result_paths');
   const loaded = await readSourcePackage(bytes, source, webcrypto, check);
   check();
   if (request.scope.object_format !== loaded.package.membership.objectFormat || request.expected_commit !== loaded.verified.commit) {
@@ -68,7 +137,15 @@ async function basis(packageBytes, expected, selection, check) {
   for (const path of request.paths_hex) if (!selected.has(path) && !created.has(path)) fail('source_edit_package_path');
   const absence = created.size ? await verifyPathAbsence(loaded.package.membership, source, [...created], webcrypto, check) : null;
   check();
-  return { request, expected: expectedOwned, source, bytes, loaded, selected, created, absence };
+  // Derive the intended candidate root BEFORE native preparation, from the
+  // authenticated base plus independent after commitments. No server value
+  // participates in this derivation. The existing kernel rejects no-op effects.
+  const intended = expectedOwned.after ? await deriveEditedTree(loaded.package.membership, source,
+    expectedOwned.after.map(row => ({ pathHex: row.pathHex,
+      before: created.has(row.pathHex) ? null : { blob: selected.get(row.pathHex).blob, kind: selected.get(row.pathHex).kind },
+      after: row.blob === null ? null : { blob: row.blob, kind: row.kind } })), webcrypto, check) : null;
+  check();
+  return { request, expected: expectedOwned, source, bytes, loaded, selected, created, absence, intended };
 }
 function receipt(b) {
   return Object.freeze({
@@ -76,6 +153,7 @@ function receipt(b) {
     verified_paths: b.request.paths_hex.filter(path => !b.created.has(path)).map(path => Object.freeze({ path_hex: path, blob: b.selected.get(path).blob,
       kind: b.selected.get(path).kind, source_bytes: b.selected.get(path).sourceBytes })),
     ...(b.absence ? { verified_absence: b.absence } : {}),
+    ...(b.intended ? { intended_tree: b.intended.afterTree, candidate_result_verified: false } : {}),
     source_package_verified: true, authority_verified: false, freshness_verified: false, publication_authorized: false,
   });
 }
@@ -127,6 +205,15 @@ function textEffect(row, original, format, check) {
 async function effects(checked, b, check) {
   const c = checked.capture.inspection.comparison, format = b.request.scope.object_format;
   if (oid(c.before_tree, format) !== b.loaded.verified.rootTree) fail('source_edit_preimage_tree');
+  if (b.intended) {
+    if (oid(c.after_tree, format) !== b.intended.afterTree) fail('source_edit_requested_result');
+    for (let i = 0; i < c.entries.length; i++) {
+      check(); const actual = c.entries[i], wanted = b.expected.after[i];
+      if (actual.path_hex !== wanted.pathHex || (actual.after === null ? wanted.blob !== null :
+          oid(actual.after.oid, format) !== wanted.blob ||
+          (actual.after.mode === 0o100755 ? 'executable' : 'file') !== wanted.kind)) fail('source_edit_requested_result');
+    }
+  }
   const bodies = new Map(b.loaded.package.blobs.map(row => [row.oid, row.bytesHex]));
   const unverifiedAfter = [], transitions = []; let replayed = 0;
   for (const row of c.entries) {
@@ -150,11 +237,13 @@ async function effects(checked, b, check) {
   if (tree.afterTree !== oid(c.after_tree, format)) fail('source_edit_unreported_tree_effect');
   check();
   return { ...checked, source_evidence: { package_bytes: b.bytes, expected: b.expected },
-    source_verification: { profile: b.absence ? SOURCE_CREATION_EVIDENCE_PROFILE : SOURCE_EVIDENCE_PROFILE, package_sha256: hash(b.bytes),
+    source_verification: { profile: b.intended ? SOURCE_RESULT_EVIDENCE_PROFILE : b.absence ? SOURCE_CREATION_EVIDENCE_PROFILE : SOURCE_EVIDENCE_PROFILE, package_sha256: hash(b.bytes),
       expected_sha256: hash(Buffer.from(`${JSON.stringify(b.expected)}\n`)),
       commit: tree.commit, before_tree: tree.beforeTree, after_tree: tree.afterTree,
       verified_paths: transitions.length, replayed_text_files: replayed, unverified_after_paths_hex: unverifiedAfter,
       ...(b.absence ? { path_absence_verified: true, created_paths_hex: [...b.created], absence: b.absence } : {}),
+      ...(b.intended ? { requested_result_verified: true, intended_tree: b.intended.afterTree,
+        result_commitments_from: 'independent-expected-selection' } : {}),
       preimages_verified: true, exact_tree_effects_verified: true, unrelated_entries_preserved: true,
       patch_application_verified: false, bundle_objects_independently_verified: false,
       authority_verified: false, freshness_verified: false, publication_authorized: false } };
