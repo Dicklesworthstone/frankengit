@@ -53,3 +53,9 @@ retain the complete TAP and profile header, and record the exit status.
 Module tests using DOM/fetch doubles or HTTP schema peers remain module/peer
 tests, even when all pass. A browser suite pass does not prove real-browser or
 live-node operation; full/release gates and D10 remain separate obligations.
+
+At the 2026-10-20 qualification snapshot, `x2mv.4.71` remains in progress: the
+whole macOS operator campaign exceeded its ten-minute bound, and the broader
+scripts corpus retained failures. A browser lane pass does not complete those
+obligations. The authoritative bead records the exact tested revisions and
+remaining work; later peer source additions require their own qualification.
