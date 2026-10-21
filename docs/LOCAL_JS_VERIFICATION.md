@@ -24,6 +24,8 @@ operator's existing five-minute operation budget, rather than that exploratory
 short limit. The earlier draft 120-second profile is not a passing result.
 The profile does not remove any test or relax any product assertion. A timeout
 fails. A skip remains a skip in TAP and provides no coverage credit.
+The scripts scope also supplies the existing binary-edit test's required
+`--experimental-vm-modules` flag; the header records whether it is enabled.
 
 The runner creates its own private temporary root under the canonical host temp
 directory and supplies it to fixture processes. On macOS, `/var` commonly aliases

@@ -123,11 +123,30 @@ test('rotated token recovers a pending original principal but cannot submit the 
   const recovered=await executeGithubPullMigration({...f.run,operation:'recover'});assert.equal(recovered.committed_steps,1);assert.equal(f.peer.mutations.length,1);
   await assert.rejects(executeGithubPullMigration(f.run),/original_credential/);assert.equal(f.peer.mutations.length,1);
 });
-test('concurrent wrappers arbitrate existing original request slots without duplicate sends',async t=>{
+test('concurrent wrappers arbitrate existing original request slots without duplicate sends',{timeout:30000},async t=>{
+  let arrived,release,held=false;
+  const arrival=new Promise(resolve=>{arrived=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+  const f=await wholeMigrationFixture(t,{destination:{alter:async c=>{
+    // Both invocations must observe the SAME original slot. Without this
+    // barrier the first may finish before the second loads the journal, in
+    // which case two distinct operations are permitted by the public API.
+    if(!c.recovery&&!held){held=true;arrived();await gate;}
+  }}});
+  const first=executeGithubPullMigration({...f.run,maxOperations:1});
+  try {
+    await Promise.race([arrival,first.then(()=>{throw new Error('sender ended before the held request');})]);
+    const other=await Promise.allSettled([executeGithubPullMigration({...f.run,maxOperations:1})]);
+    release();const results=[...await Promise.allSettled([first]),...other];
+    assert(results.some(r=>r.status==='fulfilled'));assert.equal(f.peer.mutations.length,1);
+    assert.equal(f.peer.calls.filter(c=>!c.recovery).length,1);
+    assert.equal((await status(f)).committed_steps,1);
+  } finally {release();await Promise.allSettled([first]);}
+});
+test('sequential one-operation invocations may advance two distinct original slots',{timeout:30000},async t=>{
   const f=await wholeMigrationFixture(t);
-  const results=await Promise.allSettled([executeGithubPullMigration({...f.run,maxOperations:1}),executeGithubPullMigration({...f.run,maxOperations:1})]);
-  assert(results.some(r=>r.status==='fulfilled'));assert.equal(f.peer.mutations.length,1);
-  assert.equal((await status(f)).committed_steps,1);
+  for(let i=0;i<2;i++)await executeGithubPullMigration({...f.run,maxOperations:1});
+  assert.equal(f.peer.mutations.length,2);assert.equal(new Set(f.peer.mutations.map(c=>c.key)).size,2);
+  assert.equal((await status(f)).committed_steps,2);
 });
 test('batch handoff uses original child pin, exact number window and independent branch principal',async t=>{
   const f=await wholeMigrationFixture(t,{batchSize:2}),principal='77'.repeat(16);

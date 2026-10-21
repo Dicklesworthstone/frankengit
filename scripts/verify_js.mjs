@@ -20,6 +20,8 @@ if (process.versions.node !== expected) {
   process.exit(69);
 }
 const directory = resolve(root, scopes[scope]);
+// The existing binary-edit test loads isolated ES modules through node:vm.
+const runtimeFlags = scope === 'scripts' ? ['--experimental-vm-modules'] : [];
 const files = (await readdir(directory)).filter(name => name.endsWith('.test.mjs')).sort().map(name => join(directory, name));
 if (!files.length) throw new Error('JS verification discovered no test files');
 const metadataEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
@@ -29,7 +31,7 @@ if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(revision)) throw new Error('JS verif
 const dirty = git(['status', '--porcelain', '--untracked-files=normal']) !== '';
 const temporary = await mkdtemp(join(await realpath(tmpdir()), 'fg-js-verification-'));
 await chmod(temporary, 0o700);
-console.error(`JS profile: revision=${revision} dirty=${dirty} node=${expected} host=${process.platform}/${process.arch} scope=${scope} files=${files.length} concurrency=2 test_timeout_ms=300000 campaign_timeout_ms=600000 temporary=${temporary}`);
+console.error(`JS profile: revision=${revision} dirty=${dirty} node=${expected} host=${process.platform}/${process.arch} scope=${scope} files=${files.length} vm_modules=${runtimeFlags.length > 0} concurrency=2 test_timeout_ms=300000 campaign_timeout_ms=600000 temporary=${temporary}`);
 let child, deadline, escalation, requested = null;
 const signalGroup = signal => {
   try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
@@ -45,7 +47,7 @@ const interrupt = () => stop('SIGINT');
 const terminate = () => stop('SIGTERM');
 let code = 1;
 try {
-  child = spawn(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=2', '--test-timeout=300000', ...files], {
+  child = spawn(process.execPath, [...runtimeFlags, '--test', '--test-reporter=tap', '--test-concurrency=2', '--test-timeout=300000', ...files], {
     cwd: root, detached: true, stdio: 'inherit',
     env: { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary },
   });
