@@ -508,22 +508,32 @@ fn continuous_global_budget_rotates_before_retrying_the_first_route() {
     fixture.register(8, &second.url);
     let first_journal = journal_path(&fixture.route(7));
     let second_journal = journal_path(&fixture.route(8));
+    // Both progress conditions need a delivery attempt to reach a journal. If
+    // none does, the continuous controller never stops: under host load this
+    // test once ran for over two hours and held its whole binary
+    // (frankengit-e0eg). The wall-clock bound turns that into a failure.
+    let started = std::time::Instant::now();
+    let bound = std::time::Duration::from_secs(120);
     let stopped = || {
         let first = fs::read_to_string(&first_journal).unwrap_or_default();
         let second = fs::read_to_string(&second_journal).unwrap_or_default();
         // The second condition also bounds the failure case: a scheduling
         // regression cannot keep this test's continuous controller running.
-        Ok(second.contains("accepted") || first.matches("in-flight").count() > 1)
+        Ok(second.contains("accepted")
+            || first.matches("in-flight").count() > 1
+            || started.elapsed() > bound)
     };
     let mut options = fixture.options(1);
     for route in &mut options.routes {
         route.continuous = true;
     }
     let mut output = Vec::new();
-    assert_eq!(
-        execute(options, &stopped, &|| Ok(10_000), &mut output).unwrap(),
-        1
+    let delivered = execute(options, &stopped, &|| Ok(10_000), &mut output).unwrap();
+    assert!(
+        started.elapsed() <= bound,
+        "the continuous dispatcher made no delivery progress within {bound:?}"
     );
+    assert_eq!(delivered, 1);
     assert_eq!(
         fs::read_to_string(&first_journal)
             .unwrap()
