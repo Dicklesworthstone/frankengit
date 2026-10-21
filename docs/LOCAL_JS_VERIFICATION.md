@@ -24,6 +24,8 @@ operator's existing five-minute operation budget, rather than that exploratory
 short limit. The earlier draft 120-second profile is not a passing result.
 The profile does not remove any test or relax any product assertion. A timeout
 fails. A skip remains a skip in TAP and provides no coverage credit.
+The scripts scope also supplies the existing binary-edit test's required
+`--experimental-vm-modules` flag; the header records whether it is enabled.
 
 The runner creates its own private temporary root under the canonical host temp
 directory and supplies it to fixture processes. On macOS, `/var` commonly aliases
@@ -32,7 +34,10 @@ checks still reject an explicitly aliased, replaced, public or unowned parent.
 The root is removed on success and retained on failure. Cancellation terminates
 the owned process group and escalates after five seconds. Descendants that
 deliberately detach from this group are outside this test-runner boundary; this
-is not hostile-code isolation.
+is not hostile-code isolation. A successful leader that leaves descendants fails
+the profile. Cleanup kills those descendants and waits at most five seconds for
+group quiescence; failure to establish it remains a containment failure. The
+campaign deadline is also checked against a monotonic clock at child closure.
 
 Patch encoder tests retain ordinary worktree application, byte/mode assertions,
 and reverse application. Arbitrary non-UTF-8 filename cases use independently
