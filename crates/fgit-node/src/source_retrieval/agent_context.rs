@@ -16,6 +16,7 @@ pub enum AgentContextRefusal {
     RunAuthorityReceiptRequired,
     ReadOperationOutsideRun,
     ControlScopeOutsideRun,
+    NodeRepositoryMismatch,
     RepositoryMismatch,
     AuthorityHeadMismatch,
     RepositoryCommitMissing,
@@ -60,6 +61,27 @@ fn channel_for_file(file: &super::context::ContextFile) -> RetrievalChannel {
         RetrievalChannel::Exact
     } else {
         RetrievalChannel::Exact
+    }
+}
+
+impl crate::OneNode {
+    /// Product-host entrypoint for turning native hydrated source into a real
+    /// Agent Protocol ContextPacket. The node repository is checked separately
+    /// from the run/source equality checks so a packet cannot be assembled by
+    /// calling the wrong open repository instance.
+    pub fn agent_context_packet(
+        &self,
+        run: &IntentRun,
+        context: &InitialContext,
+        control: ContextControl,
+    ) -> Result<ContextPacket, AgentContextRefusal> {
+        let receipt = run
+            .authority_read_receipt()
+            .ok_or(AgentContextRefusal::RunAuthorityReceiptRequired)?;
+        if receipt.repository_id() != self.repository_id {
+            return Err(AgentContextRefusal::NodeRepositoryMismatch);
+        }
+        context_packet_for_run(run, context, control)
     }
 }
 
