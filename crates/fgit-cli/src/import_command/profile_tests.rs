@@ -60,3 +60,41 @@ fn explicit_size_timeout_incarnation_and_json_coexist_without_changing_identity(
     assert_eq!(parsed.key, b"key");
     assert!(parse(&args("1024")[..6]).unwrap().maximum_bytes.is_none());
 }
+
+#[test]
+fn import_deadline_meets_global_and_local_budgets_without_resetting_defaults() {
+    let timeout =
+        |seconds| Some(GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds)).unwrap());
+    for (local, global, expected) in [
+        (None, None, None),
+        (timeout(7), None, Some(Duration::from_secs(7))),
+        (
+            None,
+            Some(Duration::from_secs(7200)),
+            Some(Duration::from_secs(7200)),
+        ),
+        (
+            timeout(7),
+            Some(Duration::from_secs(7200)),
+            Some(Duration::from_secs(7)),
+        ),
+        (
+            timeout(7200),
+            Some(Duration::from_secs(7)),
+            Some(Duration::from_secs(7)),
+        ),
+        (
+            timeout(7200),
+            Some(Duration::from_nanos(1)),
+            Some(Duration::from_nanos(1)),
+        ),
+    ] {
+        assert_eq!(
+            effective_timeout(local, global)
+                .unwrap()
+                .map(GitDaemonSessionTimeout::duration),
+            expected
+        );
+    }
+    assert!(effective_timeout(None, Some(Duration::ZERO)).is_err());
+}

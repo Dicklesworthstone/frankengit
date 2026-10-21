@@ -13,6 +13,7 @@
 mod cancellation_tests;
 mod control;
 pub mod graph;
+mod metadata;
 mod packed_sources;
 mod placement;
 mod refusal;
@@ -248,6 +249,16 @@ impl OneNode {
             control.checkpoint()?;
             closure.insert(*identity);
         }
+        // The validated graph also needs a persistable, readable authority
+        // closure. Refuse an oversized metadata frame before any durable object
+        // placement; extra elapsed-time/expanded-payload allowance cannot fix it.
+        metadata::preflight(
+            self.object_format,
+            closure.len(),
+            &refs,
+            self.authority.limits().body_bytes,
+            control,
+        )?;
         let total_object_bytes = validated.total_bytes;
         // All required local edges and object bodies have now verified. Only
         // placement failures or cancellation can leave verified, noncanonical objects.

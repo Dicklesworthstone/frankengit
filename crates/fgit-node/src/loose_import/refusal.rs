@@ -11,6 +11,18 @@ pub enum LooseGitImportRefusal {
         code: fgit_types::RefusalCode,
         exhaustion: Option<fgit_runtime::Exhaustion>,
     },
+    /// Canonical metadata cannot fit both the store and its readers. Detected
+    /// after graph validation but before durable object placement/publication.
+    PublicationMetadataTooLarge {
+        body: &'static str,
+        observed: u64,
+        limit: u64,
+    },
+    /// The canonical metadata encoder refused a verified source description.
+    PublicationMetadataInvalid {
+        body: &'static str,
+        source: Box<fgit_codec::CodecRefusal>,
+    },
     /// The source path or one required child could not be inspected or read.
     Io {
         /// Operation that refused.
@@ -156,6 +168,18 @@ impl Display for LooseGitImportRefusal {
             Self::Interrupted { code, exhaustion } => write!(
                 formatter,
                 "source import interrupted: {code:?}; exhaustion={exhaustion:?}"
+            ),
+            Self::PublicationMetadataTooLarge {
+                body,
+                observed,
+                limit,
+            } => write!(
+                formatter,
+                "source import publication metadata {body} needs {observed} bytes; limit is {limit}; refused before object placement; increasing the timeout or expanded-byte limit cannot change this metadata bound"
+            ),
+            Self::PublicationMetadataInvalid { body, source } => write!(
+                formatter,
+                "source import publication metadata {body} is invalid before object placement: {source}"
             ),
             Self::Io {
                 operation,
@@ -324,6 +348,7 @@ impl Display for LooseGitImportRefusal {
 impl Error for LooseGitImportRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::PublicationMetadataInvalid { source, .. } => Some(source.as_ref()),
             Self::Io { source, .. } => Some(source.as_ref()),
             Self::RefName { source, .. } | Self::ObjectIdentity { source, .. } => {
                 Some(source.as_ref())
@@ -332,7 +357,8 @@ impl Error for LooseGitImportRefusal {
             Self::ObjectStructure(source) => Some(source.as_ref()),
             Self::PackedObject { source, .. } => Some(source.as_ref()),
             Self::Node(source) => Some(source.as_ref()),
-            Self::Interrupted { .. }
+            Self::PublicationMetadataTooLarge { .. }
+            | Self::Interrupted { .. }
             | Self::SymbolicLink(_)
             | Self::GitDirectoryMissing(_)
             | Self::GitDirectoryFileUnsupported(_)

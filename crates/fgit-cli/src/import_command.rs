@@ -13,8 +13,8 @@ use std::time::Duration;
 
 const USAGE: &str = "usage: fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>\n\
   [--expected-incarnation <id>] [--timeout-secs <positive-integer>] [--max-expanded-mib <1..16384>] [--json]\n\
-Without --timeout-secs, reserve the bounded import profile using the node's receive work budget.\n\
-With --timeout-secs, use that strict ceiling for source reading, validation, staging and publication.\n\
+Without a local or leading global --timeout-secs, reserve the bounded import profile using the node's receive work budget.\n\
+A local or leading global --timeout-secs bounds source reading, validation, staging and publication; when both are supplied, the smaller ceiling wins.\n\
 The default reachable-body limit is 512 MiB; --max-expanded-mib selects a bounded disk-backed profile.\n\
 Packed-source, per-object and graph-work bounds remain independent.\n\
 No timeout changes the import's byte/object limits or proves that an interrupted publication did not commit.\n\
@@ -111,13 +111,31 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
+fn effective_timeout(
+    local: Option<GitDaemonSessionTimeout>,
+    global: Option<Duration>,
+) -> Result<Option<GitDaemonSessionTimeout>, String> {
+    let duration = match (local.map(GitDaemonSessionTimeout::duration), global) {
+        (Some(local), Some(global)) => Some(local.min(global)),
+        (local, global) => local.or(global),
+    };
+    duration
+        .map(GitDaemonSessionTimeout::try_new)
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
 pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
         return writeln!(io::stdout().lock(), "{USAGE}")
             .map(|()| 0)
             .map_err(|e| e.to_string());
     }
-    let options = parse(args)?;
+    let mut options = parse(args)?;
+    options.timeout = effective_timeout(
+        options.timeout,
+        fgit_cli::command_timeout_override_duration(),
+    )?;
     let mut config = NodeConfig::new(options.storage.clone(), options.tenant, options.repository);
     if let Some(incarnation) = options.incarnation {
         config =
