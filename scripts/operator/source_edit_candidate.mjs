@@ -4,6 +4,11 @@ import { createHash } from 'node:crypto';
 import { SourceEditError, hash, fail, fields, integer, endpoint, parse, clock, upload, exchange } from './source_edit_wire.mjs';
 export { SourceEditError, hash, parse } from './source_edit_wire.mjs';
 export const EDIT_CAPTURE = 'frankengit-source-edit-capture-v1';
+// An independently selected result root is retained as intent, never inferred
+// from a preparation reply. A new capture profile prevents older readers from
+// silently dropping that constraint; ordinary v1 captures keep their bytes.
+export const EDIT_RESULT_CAPTURE = 'frankengit-source-edit-capture-v2';
+const captureProfile = request => Object.hasOwn(request, 'expected_result_tree') ? EDIT_RESULT_CAPTURE : EDIT_CAPTURE;
 export const BUNDLE_LIMIT = 8 * 1024 * 1024, CAPTURE_LIMIT = 10 * 1024 * 1024;
 const PREPARE_LIMIT = BUNDLE_LIMIT + 1024 * 1024 + 16384;
 export const canonical = value => Buffer.from(`${JSON.stringify(value)}\n`);
@@ -28,7 +33,8 @@ function path(value) {
   return value;
 }
 export function editInput(value) {
-  fields(value, ['endpoint', 'scope', 'ref', 'expected_commit', 'metadata', 'paths_hex']);
+  const required = ['endpoint', 'scope', 'ref', 'expected_commit', 'metadata', 'paths_hex'];
+  fields(value, [...required, 'expected_result_tree'], required);
   fields(value.scope, ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format']);
   const scope = { tenant_id: identity(value.scope.tenant_id), repository_id: identity(value.scope.repository_id),
     repository_incarnation: identity(value.scope.repository_incarnation), object_format: value.scope.object_format };
@@ -46,8 +52,14 @@ export function editInput(value) {
   if (!Array.isArray(value.paths_hex) || !value.paths_hex.length || value.paths_hex.length > 64) fail('source_edit_paths');
   const paths = value.paths_hex.map(path).sort();
   if (new Set(paths).size !== paths.length || paths.some(p => paths.some(q => q !== p && p.startsWith(`${q}2f`)))) fail('source_edit_paths');
-  return { endpoint: endpoint(value.endpoint), scope, ref, expected_commit: oid(value.expected_commit, scope.object_format), metadata, paths_hex: paths };
+  // Copy and validate the optional primitive before any asynchronous I/O. Null,
+  // undefined, the wrong hash domain and zero are refusals, not an opt-out.
+  const result = Object.hasOwn(value, 'expected_result_tree')
+    ? { expected_result_tree: oid(value.expected_result_tree, scope.object_format) } : {};
+  return { endpoint: endpoint(value.endpoint), scope, ref, expected_commit: oid(value.expected_commit, scope.object_format), metadata, paths_hex: paths, ...result };
 }
+// The result constraint belongs to local intent/custody, not a new native form
+// field. Preserve the existing server's closed grammar and publication rules.
 export function editCoordinates(request, candidate) {
   return { object_format: request.scope.object_format, ref: request.ref, expected_commit: request.expected_commit,
     ...(candidate === undefined ? {} : { candidate_commit: candidate }) };
@@ -80,6 +92,10 @@ function prepared(reply, bundle, request, patchHash) {
   if (oid(reply.source_commit, format) !== request.expected_commit || reply.patch_sha256 !== patchHash) fail('source_edit_patch_binding');
   opaque(reply.source_rcr); integer(reply.object_count, 1, 10000);
   const candidate = oid(reply.candidate_commit, format), tree = oid(reply.root_tree, format);
+  // A well-formed, genuine Git candidate can still be the wrong requested
+  // result. Refuse it before inspection/upload; offline replay checks this same
+  // predicate before any candidate is eligible for staging or dispatch.
+  if (Object.hasOwn(request, 'expected_result_tree') && tree !== request.expected_result_tree) fail('source_edit_result_tree_mismatch');
   if (candidate === request.expected_commit || !Buffer.isBuffer(bundle) || !bundle.length || bundle.length > BUNDLE_LIMIT) fail('source_edit_candidate');
   fields(reply.bundle, ['bytes', 'sha256']);
   if (reply.bundle.bytes !== bundle.length || reply.bundle.sha256 !== hash(bundle)) fail('source_edit_bundle_hash');
@@ -162,11 +178,11 @@ function inspection(reply, request, preparation, bundle, artifact) {
 }
 export function validateSourceEdit(value, suppliedBundle) {
   fields(value, ['schema', 'request', 'patch_sha256', 'patch_bytes', 'preparation', 'inspection']);
-  if (value.schema !== EDIT_CAPTURE || !/^[0-9a-f]{64}$/.test(value.patch_sha256)) fail('source_edit_capture');
+  if (![EDIT_CAPTURE, EDIT_RESULT_CAPTURE].includes(value.schema) || !/^[0-9a-f]{64}$/.test(value.patch_sha256)) fail('source_edit_capture');
   integer(value.patch_bytes, 1, 1048576);
   if (!Buffer.isBuffer(suppliedBundle) || suppliedBundle.length > BUNDLE_LIMIT) fail('source_edit_bundle_limit');
   const request = editInput(value.request), bytes = canonical(value);
-  if (bytes.length > CAPTURE_LIMIT || !equal(request, value.request)) fail('source_edit_capture');
+  if (value.schema !== captureProfile(request) || bytes.length > CAPTURE_LIMIT || !equal(request, value.request)) fail('source_edit_capture');
   const capture = parse(bytes, CAPTURE_LIMIT), bundle = Buffer.from(suppliedBundle);
   const artifact = prepared(capture.preparation, bundle, request, capture.patch_sha256);
   inspection(capture.inspection, request, capture.preparation, bundle, artifact);
@@ -184,7 +200,7 @@ export async function captureSourceEdit(value, patch, credential, options = {}) 
   if (remaining < 1) fail('source_edit_wire_budget');
   const second = await exchange(request.endpoint, credential, 'inspect', upload(editCoordinates(request, artifact.candidate), bundle, 'bundle'), time, Math.min(8388608, remaining));
   time.check();
-  const capture = { schema: EDIT_CAPTURE, request, patch_sha256: patchHash, patch_bytes: bytes.length,
+  const capture = { schema: captureProfile(request), request, patch_sha256: patchHash, patch_bytes: bytes.length,
     preparation, inspection: parse(second.bytes, 8388608) };
   const verified = validateSourceEdit(capture, bundle); time.check();
   return { ...verified, metrics: { requests: 2, response_bytes: first.bytes.length + second.bytes.length } };
