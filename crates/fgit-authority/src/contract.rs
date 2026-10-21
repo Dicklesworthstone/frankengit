@@ -57,7 +57,12 @@ pub struct AuthorityLimits {
 impl Default for AuthorityLimits {
     fn default() -> Self {
         Self {
-            body_bytes: 1 << 20,
+            // Canonical metadata readers admit frames up to 16 MiB. A smaller
+            // storage profile stranded otherwise valid object closures at
+            // publication (47,658 SHA-1 / 30,837 SHA-256 objects at 1 MiB).
+            // Keep this finite default aligned with DecodeLimits::DEFAULT;
+            // explicitly configured smaller backend profiles remain enforced.
+            body_bytes: 16 * 1024 * 1024,
             immutable_slots: 1 << 16,
             head_slots: 1 << 12,
             version_tokens: 1 << 20,
