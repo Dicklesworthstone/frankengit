@@ -9,7 +9,7 @@ import { compileSourceReplacements, REPLACEMENT_PROFILE, REPLACEMENT_LIMITS } fr
 import { compileSourceSplices, SPLICE_PROFILE, SPLICE_LIMITS } from './operator/source_edit_splices.mjs';
 import { compileCompactSourceSplices, SPLICE_PATCH_PROFILES } from './operator/source_edit_compact_splices.mjs';
 const PLAN_BYTES = 512 * 1024;
-const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]\nnode scripts/fg_source_patch.mjs splice --splices-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta | --patch-profile trim-common-lines-v1|bounded-line-hunks-v1] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
+const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta|delta-runs] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]\nnode scripts/fg_source_patch.mjs splice --splices-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta | --patch-profile trim-common-lines-v1|bounded-line-hunks-v1] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
 function argumentsFor(args) {
   if (!Array.isArray(args) || args.length > 13 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || !['compile', 'splice'].includes(args[0])) fail('source_patch_arguments');
   const inputFlag = args[0] === 'splice' ? '--splices-file' : '--changes-file';
@@ -25,7 +25,7 @@ function argumentsFor(args) {
     if (!/^[1-9][0-9]{0,8}$/.test(value) || Number(value) > maximum) fail('source_patch_limit');
     return Number(value);
   };
-  if (found.has('--binary') && !['literal', 'delta'].includes(found.get('--binary'))) fail('source_patch_binary_profile');
+  if (found.has('--binary') && !['literal', 'delta', 'delta-runs'].includes(found.get('--binary'))) fail('source_patch_binary_profile');
   if (found.has('--patch-profile') && (found.has('--binary') || !SPLICE_PATCH_PROFILES.includes(found.get('--patch-profile')))) fail('source_splice_patch_profile');
   return { operation: args[0], input: absolute(found.get(inputFlag)), output: absolute(found.get('--output')),
     ...(found.has('--binary') ? { binary: found.get('--binary') } : {}),
@@ -123,7 +123,8 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       object_format: plan.format, patch_sha256: hash(compiled.patch), patch_bytes: compiled.patch.length,
       changed_paths: compiled.changes.length, source_bytes: compiled.source_bytes, result_bytes: compiled.result_bytes,
       ...(options.binary ? { binary_files: compiled.binary_files } : {}),
-      ...(options.binary === 'delta' ? { delta_members: compiled.delta_members, literal_members: compiled.literal_members } : {}),
+      ...(['delta', 'delta-runs'].includes(options.binary) ? { delta_members: compiled.delta_members, literal_members: compiled.literal_members } : {}),
+      ...(options.binary === 'delta-runs' ? { aligned_copy_regions: compiled.aligned_copy_regions } : {}),
       ...(options.patchProfile ? { patch_profile: compiled.patch_profile, hunks: compiled.hunks } : {}),
       ...(splice ? { splice_profile: compiled.splice_profile, splice_count: compiled.splice_count,
         expected_bytes: compiled.expected_bytes, inserted_bytes: compiled.inserted_bytes, preimages_verified: true } : {}),

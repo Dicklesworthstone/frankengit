@@ -5,14 +5,15 @@ import { createHash } from 'node:crypto';
 import { editInput, captureSourceEdit } from './source_edit_candidate.mjs';
 import { fail, fields, integer, clock } from './source_edit_wire.mjs';
 import { binaryLiteralCost, emitBinaryLiteral, emitBinaryMember } from './source_edit_binary_literal.mjs';
-import { planBinaryMember } from './source_edit_binary_delta.mjs';
+import { planBinaryMember, planBinaryRunMember } from './source_edit_binary_delta.mjs';
 
 export const REPLACEMENT_PROFILE = 'frankengit-source-replacements-v1';
 export const BINARY_REPLACEMENT_PROFILE = 'frankengit-source-replacements-binary-v1';
 export const DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-v1';
+export const RUN_DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-runs-v1';
 function binaryMode(options) {
   if (!Object.hasOwn(options, 'binary')) return false;
-  if (!['literal', 'delta'].includes(options.binary)) fail('source_replacement_binary_profile');
+  if (!['literal', 'delta', 'delta-runs'].includes(options.binary)) fail('source_replacement_binary_profile');
   return options.binary;
 }
 export const REPLACEMENT_LIMITS = Object.freeze({ maxPatchBytes: 1048576,
@@ -90,7 +91,7 @@ export function compileSourceReplacements(format, changes, options = {}, check =
       fail('source_replacement_collision');
     }
   }
-  const chunks = []; let size = 0, records = 0, binaryFiles = 0, deltaMembers = 0;
+  const chunks = []; let size = 0, records = 0, binaryFiles = 0, deltaMembers = 0, alignedCopyRegions = 0;
   const put = (data, record = true) => {
     check(); const bytes = typeof data === 'string' ? Buffer.from(data) : data;
     if (size + bytes.length > limits.maxPatchBytes || record && ++records > limits.maxRecords) fail('source_replacement_patch_limit');
@@ -112,14 +113,18 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     if ((before?.blob ?? null) === (after?.blob ?? null) || !(before?.bytes.length || after?.bytes.length)) continue;
     if (binary && (before?.bytes.includes(0) || after?.bytes.includes(0))) {
       const old = before?.bytes ?? Buffer.alloc(0), next = after?.bytes ?? Buffer.alloc(0);
-      const plans = binary === 'delta' ? [planBinaryMember(old, next, check), planBinaryMember(next, old, check)] : null;
+      const planner = binary === 'delta-runs' ? planBinaryRunMember : planBinaryMember;
+      const plans = binary !== 'literal' ? [planner(old, next, check), planner(next, old, check)] : null;
       const forward = plans?.[0].cost ?? binaryLiteralCost(next.length), reverse = plans?.[1].cost ?? binaryLiteralCost(old.length);
       const marker = 'GIT binary patch\n';
       if (size + marker.length + forward.bytes + reverse.bytes > limits.maxPatchBytes ||
           records + 1 + forward.records + reverse.records > limits.maxRecords) fail('source_replacement_patch_limit');
       put(marker);
       if (plans) {
-        for (const plan of plans) { emitBinaryMember(plan.kind, plan.body, put, check); deltaMembers += Number(plan.kind === 'delta'); }
+        for (const plan of plans) {
+          emitBinaryMember(plan.kind, plan.body, put, check); deltaMembers += Number(plan.kind === 'delta');
+          alignedCopyRegions += plan.aligned_copy_regions ?? 0;
+        }
       } else { emitBinaryLiteral(next, put, check); emitBinaryLiteral(old, put, check); }
       binaryFiles++; continue;
     }
@@ -131,8 +136,10 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     for (const line of newLines) emitLine('+', line);
   }
   check(); const patch = Buffer.concat(chunks, size);
-  return { profile: binary === 'delta' ? DELTA_REPLACEMENT_PROFILE : binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
-    ...(binary === 'delta' ? { delta_members: deltaMembers, literal_members: 2 * binaryFiles - deltaMembers } : {}),
+  return { profile: binary === 'delta-runs' ? RUN_DELTA_REPLACEMENT_PROFILE
+      : binary === 'delta' ? DELTA_REPLACEMENT_PROFILE : binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
+    ...(['delta', 'delta-runs'].includes(binary) ? { delta_members: deltaMembers, literal_members: 2 * binaryFiles - deltaMembers } : {}),
+    ...(binary === 'delta-runs' ? { aligned_copy_regions: alignedCopyRegions } : {}),
     ...(binary ? { binary_files: binaryFiles } : {}), patch, source_bytes: sourceBytes, result_bytes: resultBytes, records,
     changes: owned.map(row => ({ path_hex: row.path_hex, before_blob: row.before?.blob ?? null,
       after_blob: row.after?.blob ?? null, before_mode: row.before?.mode ?? null, after_mode: row.after?.mode ?? null })),
@@ -162,5 +169,6 @@ export async function captureSourceReplacements(selection, changes, credential, 
       fail('source_replacement_effect_mismatch');
     }
   }
-  return { ...captured, replacement_profile: compiled.profile };
+  return { ...captured, replacement_profile: compiled.profile,
+    ...(binary === 'delta-runs' ? { aligned_copy_regions: compiled.aligned_copy_regions } : {}) };
 }

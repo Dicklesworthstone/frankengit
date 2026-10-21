@@ -66,3 +66,57 @@ export function planBinaryMember(base, target, check) {
   if (at !== length) fail('source_replacement_delta_accounting');
   check(); return { kind: 'delta', body: program, cost };
 }
+
+// An explicitly selected alternative, not a change to the legacy delta bytes.
+// Compare only SAME-OFFSET runs; never search for moved blocks or trust a hash
+// collision as byte equality. Small separated edits can reuse unchanged middle
+// regions that the common-ends plan would retransmit in both directions.
+export const BINARY_RUN_LIMITS = Object.freeze({ minCopyBytes: 16, maxCopyRegions: 4096 });
+export function planBinaryRunMember(base, target, check) {
+  const legacy = planBinaryMember(base, target, check);
+  const fallback = () => ({ ...legacy, aligned_copy_regions: 0 });
+  const regions = [], common = Math.min(base.length, target.length);
+  let start = -1;
+  for (let at = 0; at <= common; at++) {
+    if (at % CHECK_INTERVAL === 0) check();
+    if (at < common && base[at] === target[at]) {
+      if (start < 0) start = at;
+    } else if (start >= 0) {
+      if (at - start >= BINARY_RUN_LIMITS.minCopyBytes) {
+        if (regions.length === BINARY_RUN_LIMITS.maxCopyRegions) fail('source_replacement_delta_regions_limit');
+        regions.push({ start, end: at, instruction: copyBytes(start, at - start) });
+      }
+      start = -1;
+    }
+  }
+  check();
+  if (!regions.length) return fallback();
+  const header = Buffer.concat([sizeBytes(base.length), sizeBytes(target.length)]);
+  const insertionCost = length => length + Math.ceil(length / 127);
+  let length = header.length, end = 0;
+  for (const region of regions) {
+    check(); length += insertionCost(region.start - end) + region.instruction.length;
+    end = region.end;
+  }
+  length += insertionCost(target.length - end);
+  if (length > MAX_BYTES) return fallback();
+  const cost = binaryMemberCost('delta', length);
+  if (cost.bytes >= legacy.cost.bytes || cost.records > legacy.cost.records) return fallback();
+  const program = Buffer.alloc(length);
+  header.copy(program); let cursor = header.length;
+  const insert = (from, to) => {
+    for (let at = from; at < to;) {
+      check(); const count = Math.min(127, to - at);
+      program[cursor++] = count;
+      target.copy(program, cursor, at, at + count); cursor += count; at += count;
+    }
+  };
+  end = 0;
+  for (const region of regions) {
+    check(); insert(end, region.start);
+    region.instruction.copy(program, cursor); cursor += region.instruction.length; end = region.end;
+  }
+  insert(end, target.length);
+  if (cursor !== length) fail('source_replacement_delta_accounting');
+  check(); return { kind: 'delta', body: program, cost, aligned_copy_regions: regions.length };
+}
