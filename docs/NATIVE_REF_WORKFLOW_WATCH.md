@@ -1,5 +1,8 @@
 # Native latest-ref workflow triggering
 
+Branch-selected execution is documented in [native branch filters](NATIVE_WORKFLOW_BRANCH_FILTERS.md).
+
+
 The native node `poll_trusted_ref_workflows_in` composes authenticated decision
 history with the existing trusted workflow dispatcher. It is not a wire-push
 receipt, a canonical event queue, an authorization service, or a green-check

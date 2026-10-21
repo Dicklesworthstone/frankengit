@@ -13,6 +13,10 @@ pub(super) struct PullSelection {
     recorded_target: GitOid,
 }
 impl PullSelection {
+    pub(super) fn target_reference(&self) -> &RefName {
+        &self.target
+    }
+
     pub(super) fn event_id(&self, scope: &[u8; 32], source: &Selected) -> [u8; 32] {
         let batch = source.batch.as_internal_object_id();
         commitment(&[

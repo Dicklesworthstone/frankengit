@@ -1,5 +1,8 @@
 # Native pull-request source-head CI
 
+Branch-selected execution is documented in [native branch filters](NATIVE_WORKFLOW_BRANCH_FILTERS.md).
+
+
 The native watcher can select `on: pull_request` workflows from an actual open,
 same-repository pull request. It reuses the existing trusted-host executor,
 artifact capture/delivery, cancellation owner and durable check publisher. It

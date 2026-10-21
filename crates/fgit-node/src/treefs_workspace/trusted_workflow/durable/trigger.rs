@@ -257,7 +257,7 @@ impl OneNode {
             .and_then(|()| File::open(&root)?.sync_all())
             .map_err(|e| retained(e.to_string()))?;
         let dispatch = self
-            .dispatch_trusted_workflows_with_artifacts_in(
+            .dispatch_trusted_workflows_with_trigger_branch_in(
                 request,
                 reference,
                 directory,
@@ -272,6 +272,7 @@ impl OneNode {
                 (selected.head, selected.commit),
                 limits,
                 artifacts,
+                selected.pull.as_ref().map(|pull| pull.target_reference()),
             )
             .await
             .map_err(|e| {
