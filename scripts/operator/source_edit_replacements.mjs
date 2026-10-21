@@ -4,8 +4,15 @@
 import { createHash } from 'node:crypto';
 import { editInput, captureSourceEdit } from './source_edit_candidate.mjs';
 import { fail, fields, integer, clock } from './source_edit_wire.mjs';
+import { binaryLiteralCost, emitBinaryLiteral } from './source_edit_binary_literal.mjs';
 
 export const REPLACEMENT_PROFILE = 'frankengit-source-replacements-v1';
+export const BINARY_REPLACEMENT_PROFILE = 'frankengit-source-replacements-binary-v1';
+function binaryMode(options) {
+  if (!Object.hasOwn(options, 'binary')) return false;
+  if (options.binary !== 'literal') fail('source_replacement_binary_profile');
+  return true;
+}
 export const REPLACEMENT_LIMITS = Object.freeze({ maxPatchBytes: 1048576,
   maxSourceBytes: 8388608, maxResultBytes: 8388608, maxRecords: 131072 });
 const FILE_BYTES = 1048576, MODES = [0o100644, 0o100755];
@@ -26,7 +33,7 @@ function quoted(prefix, value) {
   }
   return text + '"';
 }
-function body(value, format, original) {
+function body(value, format, original, binary) {
   if (value === null) return null;
   fields(value, original ? ['mode', 'blob', 'bytes'] : ['mode', 'bytes']);
   if (!MODES.includes(value.mode) || !(value.bytes instanceof Uint8Array) || value.bytes.length > FILE_BYTES) {
@@ -35,7 +42,7 @@ function body(value, format, original) {
   const bytes = Buffer.from(value.bytes);
   // Unified text records can preserve arbitrary non-NUL bytes. Binary patches
   // are a separate grammar; never truncate or transcode one into text.
-  if (bytes.includes(0)) fail('source_replacement_binary');
+  if (!binary && bytes.includes(0)) fail('source_replacement_binary');
   const id = blob(bytes, format);
   if (original && value.blob !== id) fail('source_replacement_preimage');
   return { mode: value.mode, blob: id, bytes };
@@ -58,7 +65,8 @@ function lines(bytes, check, maximum) {
 
 export function compileSourceReplacements(format, changes, options = {}, check = () => {}) {
   if (!['sha1', 'sha256'].includes(format) || typeof check !== 'function') fail('source_replacement_input');
-  check(); fields(options, Object.keys(REPLACEMENT_LIMITS), []);
+  check(); fields(options, [...Object.keys(REPLACEMENT_LIMITS), 'binary'], []);
+  const binary = binaryMode(options);
   const limits = Object.fromEntries(Object.entries(REPLACEMENT_LIMITS).map(([key, maximum]) =>
     [key, integer(options[key] ?? maximum, 1, maximum)]));
   if (!Array.isArray(changes) || !changes.length || changes.length > 32) fail('source_replacement_changes');
@@ -67,7 +75,7 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     check(); fields(row, ['path_hex', 'before', 'after']); const name = path(row.path_hex);
     pathBytes += name.length / 2;
     if (pathBytes > 32768) fail('source_replacement_paths');
-    const before = body(row.before, format, true), after = body(row.after, format, false);
+    const before = body(row.before, format, true, binary), after = body(row.after, format, false, binary);
     if (!before && !after || before && after && before.mode === after.mode && before.blob === after.blob) {
       fail('source_replacement_no_effect');
     }
@@ -80,7 +88,7 @@ export function compileSourceReplacements(format, changes, options = {}, check =
       fail('source_replacement_collision');
     }
   }
-  const chunks = []; let size = 0, records = 0;
+  const chunks = []; let size = 0, records = 0, binaryFiles = 0;
   const put = (data, record = true) => {
     check(); const bytes = typeof data === 'string' ? Buffer.from(data) : data;
     if (size + bytes.length > limits.maxPatchBytes || record && ++records > limits.maxRecords) fail('source_replacement_patch_limit');
@@ -100,6 +108,15 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     put(`index ${before?.blob ?? zero}..${after?.blob ?? zero}${before && after && before.mode === after.mode ? ` ${before.mode.toString(8)}` : ''}\n`);
     // Empty additions/deletions and pure executable-bit changes need no hunk.
     if ((before?.blob ?? null) === (after?.blob ?? null) || !(before?.bytes.length || after?.bytes.length)) continue;
+    if (binary && (before?.bytes.includes(0) || after?.bytes.includes(0))) {
+      const old = before?.bytes ?? Buffer.alloc(0), next = after?.bytes ?? Buffer.alloc(0);
+      const forward = binaryLiteralCost(next.length), reverse = binaryLiteralCost(old.length);
+      const marker = 'GIT binary patch\n';
+      if (size + marker.length + forward.bytes + reverse.bytes > limits.maxPatchBytes ||
+          records + 1 + forward.records + reverse.records > limits.maxRecords) fail('source_replacement_patch_limit');
+      put(marker); emitBinaryLiteral(next, put, check); emitBinaryLiteral(old, put, check);
+      binaryFiles++; continue;
+    }
     const oldLines = lines(before?.bytes ?? Buffer.alloc(0), check, limits.maxRecords - records);
     const newLines = lines(after?.bytes ?? Buffer.alloc(0), check, limits.maxRecords - records - oldLines.length);
     put(`--- ${before ? a : '/dev/null'}\n`); put(`+++ ${after ? b : '/dev/null'}\n`);
@@ -108,7 +125,8 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     for (const line of newLines) emitLine('+', line);
   }
   check(); const patch = Buffer.concat(chunks, size);
-  return { profile: REPLACEMENT_PROFILE, patch, source_bytes: sourceBytes, result_bytes: resultBytes, records,
+  return { profile: binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
+    ...(binary ? { binary_files: binaryFiles } : {}), patch, source_bytes: sourceBytes, result_bytes: resultBytes, records,
     changes: owned.map(row => ({ path_hex: row.path_hex, before_blob: row.before?.blob ?? null,
       after_blob: row.after?.blob ?? null, before_mode: row.before?.mode ?? null, after_mode: row.after?.mode ?? null })),
     source_membership_verified: false, publication_authorized: false };
@@ -118,9 +136,11 @@ export function compileSourceReplacements(format, changes, options = {}, check =
 // A root chosen independently of that reader is mandatory for this convenience
 // path. The compiler never derives it from a server reply or silently retries.
 export async function captureSourceReplacements(selection, changes, credential, options = {}) {
-  const time = clock(options), request = editInput(selection); time.check();
+  fields(options, ['signal', 'timeoutMs', 'ca', 'maxWireBytes', 'binary'], []);
+  const binary = binaryMode(options), { binary: _binary, ...network } = options;
+  const time = clock(network), request = editInput(selection); time.check();
   if (!Object.hasOwn(request, 'expected_result_tree')) fail('source_replacement_result_required');
-  const compiled = compileSourceReplacements(request.scope.object_format, changes, {}, time.check);
+  const compiled = compileSourceReplacements(request.scope.object_format, changes, binary ? { binary: 'literal' } : {}, time.check);
   if (compiled.changes.length !== request.paths_hex.length || compiled.changes.some((row, i) => row.path_hex !== request.paths_hex[i])) {
     fail('source_replacement_paths');
   }
@@ -135,5 +155,5 @@ export async function captureSourceReplacements(selection, changes, credential, 
       fail('source_replacement_effect_mismatch');
     }
   }
-  return { ...captured, replacement_profile: REPLACEMENT_PROFILE };
+  return { ...captured, replacement_profile: compiled.profile };
 }
