@@ -4,7 +4,7 @@
 //! model. It accepts only an authenticated IntentRun, proves that the hydrated
 //! source context is from that run's exact repository/head/RCR/forge position,
 //! and keeps repository bytes in ContextSource's visibly-untrusted field.
-use super::context::{ContextChannel, InitialContext};
+use super::context::InitialContext;
 use fgit_agent::{
     ContextControl, ContextPacket, ContextSource, IntentRun, OperationClass, ProtocolRefusal,
     RetrievalChannel,
@@ -52,38 +52,6 @@ fn source_commitment(
     sha256_digest(&input)
 }
 
-fn channel_for_file(file: &super::context::ContextFile) -> RetrievalChannel {
-    // Hydrated excerpts are exact immutable blob bytes. Their search channels
-    // remain visible in the retrieval evidence/control receipt, but a merged
-    // excerpt may cover anchors from several channels and must not be mislabeled
-    // as having been produced by only one of them.
-    if file.anchors().iter().all(|anchor| anchor.channel == ContextChannel::Symbol) {
-        RetrievalChannel::Exact
-    } else {
-        RetrievalChannel::Exact
-    }
-}
-
-impl crate::OneNode {
-    /// Product-host entrypoint for turning native hydrated source into a real
-    /// Agent Protocol ContextPacket. The node repository is checked separately
-    /// from the run/source equality checks so a packet cannot be assembled by
-    /// calling the wrong open repository instance.
-    pub fn agent_context_packet(
-        &self,
-        run: &IntentRun,
-        context: &InitialContext,
-        control: ContextControl,
-    ) -> Result<ContextPacket, AgentContextRefusal> {
-        let receipt = run
-            .authority_read_receipt()
-            .ok_or(AgentContextRefusal::RunAuthorityReceiptRequired)?;
-        if receipt.repository_id() != self.repository_id {
-            return Err(AgentContextRefusal::NodeRepositoryMismatch);
-        }
-        context_packet_for_run(run, context, control)
-    }
-}
 
 /// Bind one native InitialContext to an authenticated agent run.
 ///
@@ -130,7 +98,7 @@ pub fn context_packet_for_run(
             let body = excerpt.untrusted_bytes().to_vec();
             let commitment = source_commitment(file.path(), file.blob(), excerpt.offset(), &body);
             sources.push(
-                ContextSource::new(commitment, channel_for_file(file), body)
+                ContextSource::new(commitment, RetrievalChannel::Exact, body)
                     .map_err(AgentContextRefusal::Protocol)?,
             );
         }
