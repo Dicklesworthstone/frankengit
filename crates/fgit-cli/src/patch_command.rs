@@ -11,7 +11,7 @@ use options::{Operation, Options, hex};
 use std::io::{Read, Write};
 
 const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <repository-id> <branch-ref> <patch-file> <new-bundle>
-  --trusted-local --profile <exact-v1|exact-binary-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
+  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>
   (--message <text> | --message-file <raw-file>) [--ref-hex]
   [--max-files <n>] [--max-hunks <n>] [--max-input-bytes <n>] [--max-output-bytes <n>]
@@ -32,6 +32,12 @@ exact-binary-v1 additionally accepts compressed Git binary literal/delta members
 It reuses native old/new object verification, reverse-image checks and bounded
 shared decoding. Full native index IDs are required for binary changes. Rename,
 copy and non-regular modes remain refused. exact-v1 never silently admits binary.
+
+exact-tree-v1 additionally accepts explicit regular-file rename records, with
+optional exact text edits and executable-mode changes. Both endpoints are checked
+against the original tree; occupied destinations, chains, cycles, copies and
+compressed edited renames refuse. Pure binary moves preserve their original bytes.
+All changes form one candidate or no bundle. Old profiles never admit rename.
 
 Preparation never moves refs; its bundle is incremental against expected-base.
 Inspect it with fg workspace inspect before applying. Apply consumes the saved
