@@ -9410,32 +9410,10 @@ impl OneNode {
     where
         Fabric: ImmutableObjectFabric,
     {
-        let offered = u64::try_from(body.len()).map_err(|_| NodeRefusal::ObjectLengthOverflow)?;
-        if offered > self.max_object_bytes {
-            return Err(NodeRefusal::ObjectTooLarge {
-                offered,
-                maximum: self.max_object_bytes,
-            });
-        }
-        let object_kind = fabric_object_kind(object_type);
-        let crypto_kind = crypto_object_kind(object_type);
-        let identity = git_object_id(self.object_format, crypto_kind, &body);
-        let commitment = git_payload_commitment(crypto_kind, &body, CANONICAL_CODEC_VERSION);
-        let mut commitment_bytes = [0_u8; 32];
-        commitment_bytes.copy_from_slice(commitment.digest().as_bytes());
-        let envelope = ObjectEnvelope::new(
-            self.namespace.clone(),
-            identity,
-            object_kind,
-            offered,
-            commitment_bytes,
-            OBJECT_CODEC_NAMESPACE.to_vec(),
-            commitment_bytes,
-            None,
-            &self.segment_limits,
-        )
-        .map_err(|error| NodeRefusal::from(StoreRefusal::Fabric(error)))?;
-        let verified = VerifiedObject::new(envelope, body).map_err(NodeRefusal::from)?;
+        let verified = self.verified_git_object(object_type, body)?;
+        let identity = verified.identity();
+        let offered = u64::try_from(verified.payload().len())
+            .map_err(|_| NodeRefusal::ObjectLengthOverflow)?;
         let ledger = ObligationLedger::root(
             RegionId::new(1),
             LeakDisposition::RecordAndContinue,
@@ -9486,6 +9464,93 @@ impl OneNode {
             PutIfAbsent::Created { .. } => Ok(StoredObject::Created(identity)),
             PutIfAbsent::AlreadyPresent { .. } => Ok(StoredObject::AlreadyPresent(identity)),
         }
+    }
+
+    /// The verified fabric envelope [`Self::put_git_object`] places, built
+    /// without placing it: the size bound, native identity and payload
+    /// commitment of one Git object in this node's format and namespace.
+    pub(crate) fn verified_git_object(
+        &self,
+        object_type: ObjectType,
+        body: Vec<u8>,
+    ) -> Result<VerifiedObject, NodeRefusal> {
+        let offered = u64::try_from(body.len()).map_err(|_| NodeRefusal::ObjectLengthOverflow)?;
+        if offered > self.max_object_bytes {
+            return Err(NodeRefusal::ObjectTooLarge {
+                offered,
+                maximum: self.max_object_bytes,
+            });
+        }
+        let object_kind = fabric_object_kind(object_type);
+        let crypto_kind = crypto_object_kind(object_type);
+        let identity = git_object_id(self.object_format, crypto_kind, &body);
+        let commitment = git_payload_commitment(crypto_kind, &body, CANONICAL_CODEC_VERSION);
+        let mut commitment_bytes = [0_u8; 32];
+        commitment_bytes.copy_from_slice(commitment.digest().as_bytes());
+        let envelope = ObjectEnvelope::new(
+            self.namespace.clone(),
+            identity,
+            object_kind,
+            offered,
+            commitment_bytes,
+            OBJECT_CODEC_NAMESPACE.to_vec(),
+            commitment_bytes,
+            None,
+            &self.segment_limits,
+        )
+        .map_err(|error| NodeRefusal::from(StoreRefusal::Fabric(error)))?;
+        VerifiedObject::new(envelope, body).map_err(NodeRefusal::from)
+    }
+
+    /// Places identity-sorted verified objects under one durability fence:
+    /// each file is synced before its name is linked, and each object
+    /// directory once per batch rather than once per object
+    /// (frankengit-pc9g). At most 256 objects and 64 MiB per call. Nothing is
+    /// returned until every object is placed and settled; a refusal may leave
+    /// verified unreferenced objects, never canonical visibility.
+    pub(crate) fn put_verified_git_objects(
+        &self,
+        objects: &[VerifiedObject],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), NodeRefusal> {
+        if objects.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = 0_u64;
+        for object in objects {
+            let length = u64::try_from(object.payload().len())
+                .map_err(|_| NodeRefusal::ObjectLengthOverflow)?;
+            bytes = bytes
+                .checked_add(length.max(1))
+                .ok_or(NodeRefusal::ObjectLengthOverflow)?;
+        }
+        let count = u64::try_from(objects.len()).map_err(|_| NodeRefusal::ObjectLengthOverflow)?;
+        let resources =
+            ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::Objects, count)]);
+        let ledger = ObligationLedger::root(
+            RegionId::new(1),
+            LeakDisposition::RecordAndContinue,
+            resources,
+        );
+        let grant = match ledger.grant(resources) {
+            Ok(grant) => grant,
+            Err(error) => {
+                return if ledger.close().is_quiescent() {
+                    Err(NodeRefusal::from(error))
+                } else {
+                    Err(NodeRefusal::ResourceContainment)
+                };
+            }
+        };
+        let outcome =
+            self.fabric
+                .put_batch_if_absent(objects, PlacementAdmission::new(&ledger, grant), live);
+        // As for a single placement: a leaked region outranks the fabric's own
+        // refusal.
+        if !ledger.close().is_quiescent() {
+            return Err(NodeRefusal::ResourceContainment);
+        }
+        outcome.map(|_| ()).map_err(NodeRefusal::from)
     }
 
     /// Reads one exact immutable Git object from the local fabric.

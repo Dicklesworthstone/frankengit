@@ -19,6 +19,7 @@ use fgit_admission::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
+use fgit_object_fabric::fabric::{StoreRefusal, VerifiedObject as FabricObject};
 use fgit_pack::{
     CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, PackObject,
     ParsedDeltaBase, QuarantinedPack, ResolutionBudget, verify_native_object,
@@ -494,16 +495,80 @@ impl ProductionQuarantineValidator<'_> {
         let stored = self
             .node
             .put_git_object(object_type, body)
-            .map_err(|error| match error {
-                NodeRefusal::ObjectTooLarge { .. }
-                | NodeRefusal::ObjectLengthOverflow
-                | NodeRefusal::Resource(_) => RefusalCode::ResourceBudgetExceeded,
-                _ => RefusalCode::EvidenceInvalid,
-            })?;
+            .map_err(staging_refusal)?;
         if stored.identity() != id {
             return Err(RefusalCode::NativeObjectIdMismatch);
         }
         Ok(())
+    }
+
+    /// Stages every newly uploaded member of the validated closure, in
+    /// identity order, through batched placement. One directory sync per
+    /// batch replaces one per object, which dominated receive time: a 3,000
+    /// object push spent most of its samples in per-object directory and file
+    /// syncs (frankengit-pc9g). Reused roots were independently verified by
+    /// the closure walk; they stay in the admission witness and are never
+    /// restaged.
+    fn stage_closure(
+        &self,
+        closure: &BTreeSet<GitOid>,
+        verified: &mut BTreeMap<GitOid, VerifiedObject>,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), RefusalCode> {
+        let mut batch = StagingBatch::default();
+        for id in closure {
+            checkpoint(deadline)?;
+            if let Some(object) = verified.remove(id) {
+                if object.body.len() > STAGING_BATCH_BYTES {
+                    // Alone, as import places a large object. The batch stays
+                    // identity-sorted because nothing is inserted into it.
+                    self.stage(*id, object.object_type, object.body, deadline)?;
+                    continue;
+                }
+                if batch.objects.len() == STAGING_BATCH_OBJECTS
+                    || object.body.len() > STAGING_BATCH_BYTES - batch.bytes
+                {
+                    self.flush_staging(&mut batch, deadline)?;
+                }
+                let placed = self
+                    .node
+                    .verified_git_object(object.object_type, object.body)
+                    .map_err(staging_refusal)?;
+                if placed.identity() != *id {
+                    return Err(RefusalCode::NativeObjectIdMismatch);
+                }
+                batch.bytes += placed.payload().len();
+                batch
+                    .objects
+                    .try_reserve(1)
+                    .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+                batch.objects.push(placed);
+            } else if !self.selected_closure.closure().objects().contains(id) {
+                return Err(RefusalCode::ObjectClosureIncomplete);
+            }
+        }
+        self.flush_staging(&mut batch, deadline)
+    }
+
+    fn flush_staging(
+        &self,
+        batch: &mut StagingBatch,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), RefusalCode> {
+        checkpoint(deadline)?;
+        let placed = self
+            .node
+            .put_verified_git_objects(&batch.objects, &mut || deadline.checkpoint());
+        batch.objects.clear();
+        batch.bytes = 0;
+        placed.map_err(|error| match error {
+            NodeRefusal::Fabric(refusal)
+                if matches!(*refusal, StoreRefusal::RuntimeCheckpointRejected) =>
+            {
+                RefusalCode::CancellationInProgress
+            }
+            other => staging_refusal(other),
+        })
     }
 
     /// Maps each reconstructed in-pack object to the verified pack-local
@@ -673,22 +738,33 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         // reachable objects in fabric.  Immutable placement remains
         // non-authority, but only the fully validated exact closure may
         // acquire that responsibility.
-        for id in &closure {
-            checkpoint(deadline)?;
-            if let Some(object) = verified.remove(id) {
-                self.stage(*id, object.object_type, object.body, deadline)?;
-            } else if !self.selected_closure.closure().objects().contains(id) {
-                return Err(RefusalCode::ObjectClosureIncomplete);
-            }
-            // Reused roots were independently verified by the closure walk.
-            // They remain in the admission witness but are never restaged.
-        }
+        self.stage_closure(&closure, &mut verified, deadline)?;
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
                 closure.clone(),
             ))?,
             objects: closure,
         })
+    }
+}
+
+/// At most 256 objects and 8 MiB per placement batch, as import places them.
+const STAGING_BATCH_OBJECTS: usize = 256;
+const STAGING_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct StagingBatch {
+    objects: Vec<FabricObject>,
+    bytes: usize,
+}
+
+/// One placement refusal vocabulary for single and batched staging.
+fn staging_refusal(error: NodeRefusal) -> RefusalCode {
+    match error {
+        NodeRefusal::ObjectTooLarge { .. }
+        | NodeRefusal::ObjectLengthOverflow
+        | NodeRefusal::Resource(_) => RefusalCode::ResourceBudgetExceeded,
+        _ => RefusalCode::EvidenceInvalid,
     }
 }
 

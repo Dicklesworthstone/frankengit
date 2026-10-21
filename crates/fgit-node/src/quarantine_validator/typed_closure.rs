@@ -288,14 +288,7 @@ impl ProductionQuarantineValidator<'_> {
                 deadline,
             )?;
         }
-        for id in &closure {
-            checkpoint(deadline)?;
-            if let Some(object) = verified.remove(id) {
-                validator.stage(*id, object.object_type, object.body, deadline)?;
-            } else if !validator.selected_closure.closure().objects().contains(id) {
-                return Err(RefusalCode::ObjectClosureIncomplete);
-            }
-        }
+        validator.stage_closure(&closure, &mut verified, deadline)?;
         checkpoint(deadline)?;
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(

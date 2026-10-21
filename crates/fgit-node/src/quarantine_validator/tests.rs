@@ -411,6 +411,84 @@ fn object_bearing_pack_is_verified_staged_and_reported_as_its_exact_closure() {
 }
 
 #[test]
+fn a_closure_larger_than_one_placement_batch_is_staged_completely() {
+    // 600 blobs under one tree: 601 objects, so staging crosses the 256-object
+    // batch boundary twice (frankengit-pc9g). Every member must be placed and
+    // readable, and the reported closure must be exactly the uploaded graph.
+    let scratch = ScratchDirectory::new();
+    let node = test_node(scratch.path().to_path_buf());
+    let mut objects = BTreeMap::new();
+    let mut tree_body = Vec::new();
+    for n in 0..600 {
+        let body = format!("batched blob {n}\n").into_bytes();
+        let id = fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &body);
+        tree_body.extend_from_slice(format!("100644 f{n:03}\0").as_bytes());
+        tree_body.extend_from_slice(id.as_bytes());
+        objects.insert(
+            id,
+            CanonicalPackObject::new(id, ObjectType::Blob, body, Vec::new(), 0, 0),
+        );
+    }
+    let tree_id =
+        fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, &tree_body);
+    objects.insert(
+        tree_id,
+        CanonicalPackObject::new(tree_id, ObjectType::Tree, tree_body, Vec::new(), 0, 0),
+    );
+    let ids: Vec<ObjectId> = objects.keys().copied().collect();
+    let source = SelectedObjectsSource { objects };
+    let limits = PackLimits::default();
+    let mut live = || true;
+    let plan = PackPlanner::new(
+        GitHashAlgorithm::Sha1,
+        PackWriteProfile::STORED_V1,
+        limits.clone(),
+    )
+    .plan_selected(&source, &ids, &mut live)
+    .expect("the fixed graph plans into a native pack");
+    let (pack_bytes, receipt) = PackWriter::new(limits.clone())
+        .write(&plan, &mut live)
+        .expect("fixed pack writes");
+    let pack = read_verified_pack(
+        &pack_bytes,
+        GitHashAlgorithm::Sha1,
+        &limits,
+        &mut live,
+        &NativeChecksumVerifier,
+    )
+    .expect("writer output returns through the verified quarantine reader");
+    let request = create_request(tree_id);
+    let quarantine = QuarantineReceipt {
+        object_format: GitObjectFormat::Sha1,
+        object_count: receipt.object_count,
+        pack_bytes: pack_bytes.len(),
+        delete_only: false,
+    };
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .expect("the initialized head materializes before receive validation");
+    let validator = node
+        .production_quarantine_validator(&materialized, limits, ParseLimits::default())
+        .expect("the exact authenticated materialization supplies a validator");
+    let closure = validator
+        .validate(&request, Some(&pack), &quarantine, &mut live)
+        .expect("a 601-object closure is validated and staged");
+    assert_eq!(closure.objects.len(), 601);
+    assert_eq!(
+        closure.objects,
+        ids.iter().copied().collect::<BTreeSet<_>>()
+    );
+    for id in &ids {
+        assert!(
+            node.read_git_object(*id).is_ok(),
+            "{id} was staged in a batch and is readable"
+        );
+    }
+    node.shutdown().expect("node shuts down after test");
+}
+
+#[test]
 fn graph_rooted_closure_stages_only_reachable_uploaded_objects() {
     let scratch = ScratchDirectory::new();
     let node = test_node(scratch.path().to_path_buf());
