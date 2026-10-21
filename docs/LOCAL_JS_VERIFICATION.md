@@ -34,7 +34,10 @@ checks still reject an explicitly aliased, replaced, public or unowned parent.
 The root is removed on success and retained on failure. Cancellation terminates
 the owned process group and escalates after five seconds. Descendants that
 deliberately detach from this group are outside this test-runner boundary; this
-is not hostile-code isolation.
+is not hostile-code isolation. A successful leader that leaves descendants fails
+the profile. Cleanup kills those descendants and waits at most five seconds for
+group quiescence; failure to establish it remains a containment failure. The
+campaign deadline is also checked against a monotonic clock at child closure.
 
 Patch encoder tests retain ordinary worktree application, byte/mode assertions,
 and reverse application. Arbitrary non-UTF-8 filename cases use independently
