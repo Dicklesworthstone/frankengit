@@ -211,9 +211,9 @@ mutation, noncooperating writers and multi-host fencing remain outside this
 local profile. A process crash may leave private staging residue; it is never
 selected on reopen and is not a delivery source.
 
-The migration and checkpoint Rust tests still require native execution before
-an operational upgrade. Source inspection and a checksum match are not evidence
-of crash durability on an untested filesystem.
+The focused native result below includes the migration and checkpoint Rust
+tests. Their injected filesystem boundaries do not establish crash durability
+on an untested filesystem.
 ## Inspect status without pausing a worker
 
 ```sh
@@ -263,7 +263,7 @@ not that the displayed deliveries succeeded. It never clears failures or resets
 attempt counters. Native status tests cover reads during checkpoint replacement,
 pinned pagination, missing/corrupt state, full-width values, SHA-1/SHA-256 native
 node bindings, disabled/changed/unavailable configuration, and output failure.
-These Rust tests remain unexecuted in this environment.
+These Rust tests are included in the focused native result below.
 
 ## Source selection and limits
 
@@ -309,11 +309,16 @@ cargo test -p fgit-cli --bin fg webhook_commands::dispatcher
 They include real-file journal locking/restart/corruption tests and real-node,
 loopback-HTTP campaigns with SHA-1/SHA-256 authority, signed payload preservation,
 retry after lost acknowledgement, output failure, cancellation, bounded scans,
-and endpoint/subscription refusal. The original implementation environment could
-not execute them. A later strict remote run at native source
-`b186a43a87d29c86a4996fe59b53ce4486674bc8` executed the dispatcher filter:
+and endpoint/subscription refusal. A strict remote run at clean native source
+`c37f7f7c0e38326a7dc4ed9a4f4ce370769a5325` executed the dispatcher filter:
 72 passed, 0 failed, 0 ignored, 744 unrelated tests filtered. This is a focused
 Rust result, not an independent batch, full-workspace, or release gate.
+In an isolated clone, restoring only the original malformed 34-character
+tenant/repository fixture IDs made
+`routes_are_explicit_sorted_and_keep_single_worker_defaults` fail at
+`fanout.rs:344:10` with `invalid tenant ID` (0 passed, 1 failed, exit 101).
+Restoring the committed fixture preceded the clean 72-test result. This is a
+causal regression control by the same implementer, not independent review.
 
 The separate product campaign uses an already built native binary:
 
@@ -348,8 +353,17 @@ tree; these identities remain distinct. The first run refused the campaign's
 incorrect `init --object-format` syntax; the correction uses the documented
 positional format. Both runs are retained under
 `/data/tmp/frankengit-peachhorse-webhook-d9cf96e9-20261021T2016` on `csd`.
-The native original-fixture planted regression remains outstanding under
-`frankengit-root-doctrine-x2mv.4.57`; this result does not close that bead.
+The clean `c37f7f7c0e38326a7dc4ed9a4f4ce370769a5325` campaign subsequently
+ran against the release binary compiled from that same tracked revision:
+15 passed, 0 failed, 0 skipped, 60 native commands and 12 actual HTTP requests,
+with containment reported `ok`. The binary's SHA-256 is
+`6becb907a60087228f2c19f325bdd28daafe4b0c068d2721ccec4893e34ad819`;
+receipts are in `result-c37` under the same retained `csd` root. The strict
+remote build itself exited 0; RCH's subsequent Mac artifact transfer refused
+the Linux target (RCH-E327, overall exit 102). The binary was separately copied,
+hash-checked and executed on Linux. No local target was replaced, no transfer
+gate was bypassed, and this is not a successful RCH artifact-transfer gate.
+Independent batch verification and bead closure remain separate.
 
 `DEP-264` admits Python 3 only as this campaign's external tooling. The helper
 uses the supplied standard library for HTTP, JSON, HMAC, and child-process
@@ -372,8 +386,8 @@ Additional native tests cover deterministic checkpoint/reopen equivalence,
 interruption before and after rename and after directory sync, repeated automatic
 compaction, preservation of exhausted/unknown/accepted entries, maximum-key
 snapshots, missing data or fences, inode replacement, hard links, legacy refusal,
-and checksum-valid malformed checkpoints. These tests are authored but have not
-been executed in this environment; no Cargo, rustc or rustfmt is available.
+and checksum-valid malformed checkpoints. These tests are included in the
+focused native result above.
 This change removes the local append-history stop, not the canonical outbox's
 16,384-entry ceiling, canonical retention requirements, or whole-history read cost.
 
@@ -381,4 +395,5 @@ Migration regressions also cover stopped-file preview, original-checksum changes
 all 2..16 retry ceilings, exact uncertainty preservation, old/new live-owner
 exclusion, interrupted fence/backup/checkpoint boundaries, idempotent recovery,
 corrupt or progressed v2 without backup fallback, conflicting backups, and lost
-stdout. These are authored Rust tests, not an executed gate result.
+stdout. These are included in the focused native result above, not a whole
+workspace or operational upgrade certification.
