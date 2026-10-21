@@ -1,12 +1,10 @@
 //! Bounded local import through the existing native admission path.
+mod lifecycle;
 mod receipt;
 
-use crate::publication_support::{describe, write_terminal_receipt};
 use fgit_authority::IdempotencyKey;
 use fgit_node::{GitDaemonSessionTimeout, NodeConfig, OneNode, RepositoryResolutionInput};
-use fgit_types::{
-    DecisionOutcome, HeadGeneration, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId,
-};
+use fgit_types::{HeadGeneration, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,6 +16,8 @@ A local or leading global --timeout-secs bounds source reading, validation, stag
 The default reachable-body limit is 512 MiB; --max-expanded-mib selects a bounded disk-backed profile.\n\
 Packed-source, per-object and graph-work bounds remain independent.\n\
 No timeout changes the import's byte/object limits or proves that an interrupted publication did not commit.\n\
+On Unix, SIGTERM/SIGINT request cooperative cancellation under that same budget, then join the observer and shut down the node.\n\
+Repeated signals do not skip cleanup. Already-entered OS I/O is not preemptible; SIGKILL cannot drain.\n\
 With --json, emit the exact atomic terminal decision and transaction ID; refusal exits 3, errors exit 2.\n\
 The original principal and key also recover the decision through fg outcome without rereading the source.\n\
 The principal is supplied by the trusted local operator, not authenticated by this CLI.";
@@ -136,6 +136,9 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         options.timeout,
         fgit_cli::command_timeout_override_duration(),
     )?;
+    #[cfg(unix)]
+    let signals = fgit_node::TerminationSignals::install()
+        .map_err(|error| format!("cannot own import interruption: {error}; source not read"))?;
     let mut config = NodeConfig::new(options.storage.clone(), options.tenant, options.repository);
     if let Some(incarnation) = options.incarnation {
         config =
@@ -153,99 +156,26 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     // Mint ONCE before any source I/O. In particular, do not replace this with
     // request_context() after the expensive staging half has spent its budget.
     let incarnation = node.repository_incarnation_id();
-    let result = match options.maximum_bytes {
-        None => {
-            let request = node.import_request_context(options.timeout);
-            node.runtime()
-                .block_on(node.import_loose_git_directory_durable_in(
-                    &request,
-                    &options.source,
-                    options.principal,
-                    &options.key,
-                ))
-        }
-        Some(maximum) => {
-            match node.import_request_context_with_byte_limit(options.timeout, maximum) {
-                Ok(request) => node.runtime().block_on(
-                    node.import_loose_git_directory_with_byte_limit_durable_in(
-                        &request,
-                        &options.source,
-                        options.principal,
-                        &options.key,
-                        maximum,
-                    ),
-                ),
-                Err(error) => Err(fgit_node::NodeSourceImportRefusal::Staging(Box::new(error))),
-            }
-        }
-    };
+    let (result, observer_error) = lifecycle::execute(
+        &node,
+        &options,
+        #[cfg(unix)]
+        signals,
+    );
     let cleanup = node.shutdown().err().map(|e| e.to_string());
-    let admission = result.map_err(|error| {
+    let decision = result.map_err(|error| {
         format!(
-            "{error}; shutdown error: {cleanup:?}. An interrupted publication is not proof of non-commit; retry the identical source refs and key or use fg outcome."
+            "{error}; signal observer error: {observer_error:?}; shutdown error: {cleanup:?}. An interrupted publication is not proof of non-commit; retry the identical source refs and key or use fg outcome."
         )
     })?;
-    // Native source import is atomic. Verify the complete returned mapping
-    // before reducing it to one receipt; never infer success from an empty or
-    // mixed command list. This is output validation, not a publication gate.
-    let decision = receipt::checked_atomic(
-        admission.session.atomic,
-        &admission.session.tx_ids,
-        &admission
-            .commands
-            .iter()
-            .map(|command| (command.tx_id, command.terminal))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| {
-        format!(
-            "{error}; shutdown error: {cleanup:?}; publication may already have occurred; recover with fg outcome"
-        )
-    })?;
-    if options.json {
-        let report = receipt::render(&options, incarnation, &decision, cleanup.as_deref());
-        write_terminal_receipt(
-            &mut io::stdout().lock(),
-            &report,
-            decision.tx_id,
-            &decision.terminal,
-        )
-        .map_err(|error| format!("{error}; shutdown error: {cleanup:?}"))?;
-        if let Some(error) = cleanup {
-            return Err(format!(
-                "{}; node shutdown failed: {error}",
-                describe(decision.tx_id, &decision.terminal)
-            ));
-        }
-        return Ok(match decision.terminal.outcome {
-            DecisionOutcome::Committed { .. } => 0,
-            DecisionOutcome::Refused { .. } => 3,
-        });
-    }
-    if let DecisionOutcome::Refused { code, .. } = decision.terminal.outcome {
-        return Err(format!(
-            "source import reached terminal refusal: {code:?}; {}; shutdown error: {cleanup:?}",
-            describe(decision.tx_id, &decision.terminal)
-        ));
-    }
-    if let Some(error) = cleanup {
-        return Err(format!(
-            "{}; node shutdown failed: {error}; do not assume rollback",
-            describe(decision.tx_id, &decision.terminal)
-        ));
-    }
-    // Preserve the old text output. The shared writer retains the exact
-    // transaction and terminal record even if stdout fails after publication.
-    write_terminal_receipt(
+    lifecycle::finish(
         &mut io::stdout().lock(),
-        &format!(
-            "published {} source-import ref commands",
-            decision.command_count
-        ),
-        decision.tx_id,
-        &decision.terminal,
-    )?;
-    Ok(0)
+        &options,
+        incarnation,
+        &decision,
+        cleanup.as_deref(),
+        observer_error.as_deref(),
+    )
 }
 
 #[cfg(test)]
