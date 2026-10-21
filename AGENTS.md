@@ -313,7 +313,7 @@ product.
   `git add -A`/`git add .`; never `reset`/`checkout --`/`stash`/`rebase`/
   `commit --amend` shared state. Commit early and often with the bead ID.
 - Registry rows (`registries/dependency_policy.tsv`) are appended under
-  reservation with the next free `DEP-NNN`, all ten columns filled, sorted
+  reservation with the next free `DEP-NNN`, all twelve columns filled, sorted
   IDs, and a recorded rationale/unsafe/FFI policy — never by guessing.
 - A crate owner publishes its public surface by Agent Mail; consumers build
   against it and request changes by mail. Contracts are frozen per wave; no
