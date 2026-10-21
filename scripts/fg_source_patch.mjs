@@ -7,10 +7,10 @@ import { absolute, directory, readPrivate, writeNew, syncDirectory } from './ope
 import { fields, parse, fail, clock, hash } from './operator/source_edit_wire.mjs';
 import { compileSourceReplacements, REPLACEMENT_PROFILE, REPLACEMENT_LIMITS } from './operator/source_edit_replacements.mjs';
 const PLAN_BYTES = 512 * 1024;
-const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
+const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
 function argumentsFor(args) {
-  if (!Array.isArray(args) || args.length > 9 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || args[0] !== 'compile') fail('source_patch_arguments');
-  const found = new Map(), allowed = ['--changes-file', '--output', '--max-patch-bytes', '--timeout-ms'];
+  if (!Array.isArray(args) || args.length > 11 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || args[0] !== 'compile') fail('source_patch_arguments');
+  const found = new Map(), allowed = ['--changes-file', '--output', '--max-patch-bytes', '--timeout-ms', '--binary'];
   for (let at = 1; at < args.length; at += 2) {
     const key = args[at], value = args[at + 1];
     if (!allowed.includes(key) || found.has(key) || !value || value.startsWith('--')) fail('source_patch_arguments');
@@ -22,7 +22,9 @@ function argumentsFor(args) {
     if (!/^[1-9][0-9]{0,8}$/.test(value) || Number(value) > maximum) fail('source_patch_limit');
     return Number(value);
   };
+  if (found.has('--binary') && found.get('--binary') !== 'literal') fail('source_patch_binary_profile');
   return { input: absolute(found.get('--changes-file')), output: absolute(found.get('--output')),
+    ...(found.has('--binary') ? { binary: 'literal' } : {}),
     maxPatchBytes: positive('--max-patch-bytes', REPLACEMENT_LIMITS.maxPatchBytes, REPLACEMENT_LIMITS.maxPatchBytes),
     timeoutMs: positive('--timeout-ms', 30000, 300000) };
 }
@@ -77,10 +79,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     try { await lstat(options.output); fail('source_patch_destination_exists'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     const plan = await changesFromFile(options.input, time.check);
-    const compiled = compileSourceReplacements(plan.format, plan.changes, { maxPatchBytes: options.maxPatchBytes }, time.check);
+    const compiled = compileSourceReplacements(plan.format, plan.changes, { maxPatchBytes: options.maxPatchBytes,
+      ...(options.binary ? { binary: options.binary } : {}) }, time.check);
     const candidate = { type: 'source_patch_compiled', profile: compiled.profile, output: options.output,
       object_format: plan.format, patch_sha256: hash(compiled.patch), patch_bytes: compiled.patch.length,
       changed_paths: compiled.changes.length, source_bytes: compiled.source_bytes, result_bytes: compiled.result_bytes,
+      ...(options.binary ? { binary_files: compiled.binary_files } : {}),
       source_membership_verified: false, publication_attempted: false };
     time.check();
     try {

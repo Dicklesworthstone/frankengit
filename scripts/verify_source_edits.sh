@@ -15,4 +15,5 @@ node --test tests/operator/source_edit_candidate.test.mjs \
   tests/operator/source_edit_creations.test.mjs tests/operator/source_edit_creations_publish.test.mjs \
   tests/operator/source_edit_results.test.mjs tests/operator/source_edit_results_custody.test.mjs \
   tests/operator/source_edit_result_tree.test.mjs \
-  tests/operator/source_edit_replacements.test.mjs tests/operator/source_edit_replacements_cli.test.mjs
+  tests/operator/source_edit_replacements.test.mjs tests/operator/source_edit_replacements_cli.test.mjs \
+  tests/operator/source_edit_binary.test.mjs tests/operator/source_edit_binary_cli.test.mjs
