@@ -195,3 +195,20 @@ test('later damaged review cannot yield a successful prepared-only prefix', asyn
   f.control.mutate = (reply, call) => { normal(reply, call); if (call.operation === 'inspect') reply.comparison.entries[0].content.hunks[0].before_hex = hex('tampered'); };
   await assert.rejects(acquire(f)); assert.deepEqual(f.calls.map(c => c.operation), ['prepare', 'inspect']);
 });
+
+
+for (const format of ['sha1', 'sha256']) test(`${format}: verified delta-runs preserves source evidence and derived result root`, async () => {
+  const before = Buffer.alloc(800000, 97); before[0] = 0;
+  const after = Buffer.from(before); after[64] = 98; after[after.length - 100] = 99;
+  const f = fixture(format, before, after, {
+    edits: [edit(64, [97], [98]), edit(before.length - 100, [97], [99])],
+  });
+  await assert.rejects(compile(f, { binary: 'delta' }), /patch_limit/);
+  const result = await compile(f, { binary: 'delta-runs' });
+  assert.equal(result.request.expected_result_tree, f.nextTree.oid);
+  assert.equal(result.receipt.source_membership_verified, true);
+  assert.equal(result.receipt.candidate_result_verified, false);
+  assert.equal(result.receipt.encoding_profile, 'frankengit-source-replacements-delta-runs-v1');
+  assert.ok(result.receipt.aligned_copy_regions >= 4);
+  assert.ok(result.patch.length < 1024);
+});

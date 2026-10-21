@@ -490,6 +490,9 @@ fn symbol_unavailable(
 #[cfg(test)]
 mod tests;
 
+/// Agent Protocol bridge from authenticated native source context.
+pub mod agent_context;
+
 /// Complete authority-selected native graph inspection under a node request.
 pub mod integrity;
 

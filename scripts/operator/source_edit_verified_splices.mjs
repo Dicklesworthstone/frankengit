@@ -64,7 +64,7 @@ function compileOptions(options) {
     out[key] = integer(options[key], 1, REPLACEMENT_LIMITS[key] ?? SPLICE_LIMITS[key]);
   }
   if (Object.hasOwn(options, 'binary')) {
-    if (!['literal', 'delta'].includes(options.binary)) fail('source_replacement_binary_profile');
+    if (!['literal', 'delta', 'delta-runs'].includes(options.binary)) fail('source_replacement_binary_profile');
     out.binary = options.binary;
   }
   if (Object.hasOwn(options, 'patchProfile')) {
@@ -123,6 +123,7 @@ export async function planVerifiedSourceSplices(selection, plan, evidence, optio
       changed_paths: compiled.changes.length, splice_count: result.splice_count,
       expected_bytes: result.expected_bytes, inserted_bytes: result.inserted_bytes,
       encoding_profile: compiled.profile, ...(compiled.patch_profile ? { patch_profile: compiled.patch_profile } : {}),
+      ...(compiled.aligned_copy_regions !== undefined ? { aligned_copy_regions: compiled.aligned_copy_regions } : {}),
       source_membership_verified: true, candidate_result_verified: false, publication_authorized: false } };
 }
 

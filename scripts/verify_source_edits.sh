@@ -20,4 +20,6 @@ node --test tests/operator/source_edit_candidate.test.mjs \
   tests/operator/source_edit_delta.test.mjs tests/operator/source_edit_delta_cli.test.mjs \
   tests/operator/source_edit_delta_runs.test.mjs \
   tests/operator/source_edit_splices.test.mjs tests/operator/source_edit_splices_cli.test.mjs \
-  tests/operator/source_edit_compact_splices.test.mjs tests/operator/source_edit_compact_splices_cli.test.mjs
+  tests/operator/source_edit_verified_splices.test.mjs \
+  tests/operator/source_edit_compact_splices.test.mjs tests/operator/source_edit_compact_splices_cli.test.mjs \
+  tests/operator/source_edit_splice_files_cli.test.mjs
