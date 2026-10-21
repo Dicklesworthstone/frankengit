@@ -1,6 +1,7 @@
 // A trusted-local editing materialization, not a Git checkout or an authority.
 // The independently retained root pins the immutable inputs; files/ is mutable.
 import { constants as F } from 'node:fs';
+import { isUtf8 } from 'node:buffer';
 import { lstat, realpath, open, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { webcrypto } from 'node:crypto';
@@ -106,6 +107,11 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
 // are private owned snapshots from the predecessor, never caller-minted source.
 async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null, refresh = null) {
   const value = manifest(bytes, expected, loaded.verified), encoded = canonical(value);
+  // This macOS sparse-directory profile cannot materialize invalid UTF-8 names.
+  // Validate the original bytes without decoding/normalizing them, before any
+  // destination is acquired. Linux retains its arbitrary-byte path profile.
+  if (process.platform === 'darwin' && value.files.some(f => !isUtf8(Buffer.from(f.path_hex, 'hex'))))
+    fail('source_workspace_host_path_unrepresentable');
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
   const hash = sha256(encoded), answer = { ...receipt(root, hash, value), ...(expansion ? {
     type: 'source_workspace_expanded', expansion, original_workspace_changed: false,

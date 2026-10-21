@@ -2,7 +2,7 @@
 // The tests execute the complete production workspace module and unchanged
 // POSIX custody helper. Only its existing source/codec service imports change.
 import { createHash } from 'node:crypto';
-import { readFile, mkdtemp, rm, writeFile, chmod, unlink } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, writeFile, chmod, unlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -76,7 +76,7 @@ export async function loadWorkspaceModule() {
 export let workspace, WORKSPACE_LIMITS;
 export async function initWorkspace() { workspace = await loadWorkspaceModule(); WORKSPACE_LIMITS = workspace.WORKSPACE_LIMITS; return workspace; }
 export async function setup(t, rows = [{ bytes: 'base' }], format = 'sha1') {
-  const parent = await mkdtemp(join(tmpdir(), 'fg-refresh-')); await chmod(parent, 0o700);
+  const parent = await realpath(await mkdtemp(join(tmpdir(), 'fg-refresh-'))); await chmod(parent, 0o700);
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = join(parent, 'original'), output = join(parent, 'refreshed'), original = source(rows, format);
   const created = await workspace.createSourceWorkspace(root, original.bytes, original.expected);

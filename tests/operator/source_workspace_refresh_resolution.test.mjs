@@ -31,20 +31,29 @@ for (const format of ['sha1', 'sha256']) for (const choice of ['local', 'selecte
     assert.deepEqual((await workspace.readWorkspaceFiles(f.root, ['61'])).files.get('61')?.bytes ?? null, ours);
   });
 }
-test('partial explicit resolutions still block all materialization; input order is canonical', async t => {
-  const f = await setup(t, [{ path: '61', bytes: 'base' }, { path: '622fff', bytes: 'base' }]);
-  await local(f, '61', 'A'); await local(f, '622fff', 'B');
-  const next = source([{ path: '61', bytes: 'source A' }, { path: '622fff', bytes: 'source B' }], 'sha1', 'next');
+for (const format of ['sha1', 'sha256']) for (const path of ['622ff09f98800a', '622fff']) test(`partial explicit resolutions still block all materialization; input order is canonical; ${format}; path=${path}${process.platform === 'darwin' && path === '622fff' ? ' (typed host refusal)' : ''}`, async t => {
+  if (process.platform === 'darwin' && path === '622fff') {
+    const f = await setup(t, undefined, format), raw = source([{ path: '61', bytes: 'valid first' }, { path, bytes: 'raw source' }], format);
+    const output = join(f.parent, 'raw-name-output');
+    await assert.rejects(workspace.createSourceWorkspace(output, raw.bytes, raw.expected),
+      { code: 'source_workspace_host_path_unrepresentable' });
+    assert.equal(existsSync(output), false);
+    t.diagnostic('UNSUPPORTED_HOST_PATH: invalid UTF-8 refused before destination acquisition; identical raw-name semantics run on Linux, representable byte twin runs here.');
+    return;
+  }
+  const f = await setup(t, [{ path: '61', bytes: 'base' }, { path, bytes: 'base' }], format);
+  await local(f, '61', 'A'); await local(f, path, 'B');
+  const next = source([{ path: '61', bytes: 'source A' }, { path, bytes: 'source B' }], format, 'next');
   const original = await f.preview(next), partial = resolve(original, [['61', 'selected']]);
   const plan = await f.preview(next, { resolutions: partial }); assert.equal(plan.conflict_count, 1); assert.equal(plan.ready, false);
   await assert.rejects(f.apply(next, plan.refresh_sha256, { resolutions: partial }), { code: 'source_workspace_refresh_conflict' });
   assert(!existsSync(f.output));
-  const all = resolve(original, [['622fff', 'local'], ['61', 'selected']]);
+  const all = resolve(original, [[path, 'local'], ['61', 'selected']]);
   const completed = await f.preview(next, { resolutions: all });
-  assert.deepEqual(completed, await f.preview(next, { resolutions: resolve(original, [['61', 'selected'], ['622fff', 'local']]) }));
+  assert.deepEqual(completed, await f.preview(next, { resolutions: resolve(original, [['61', 'selected'], [path, 'local']]) }));
   await f.apply(next, completed.refresh_sha256, { resolutions: all });
   assert.equal((await readFile(workspace.localPath(f.output, '61'))).toString(), 'source A');
-  assert.equal((await readFile(workspace.localPath(f.output, '622fff'))).toString(), 'B');
+  assert.equal((await readFile(workspace.localPath(f.output, path))).toString(), 'B');
 });
 for (const [name, change] of [
   ['local bytes', async (f, _next) => local(f, '61', 'different local')],

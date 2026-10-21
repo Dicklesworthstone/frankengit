@@ -49,10 +49,21 @@ test('mode-only changes are discovered; identical replacement bytes preserve rev
   await f.put('temp', 'old\n', 0o700); await rename(f.local('temp'), f.local('src/a'));
   const b = await f.scan(); assert.deepEqual(a, b);
 });
-test('byte paths remain exact through directory enumeration and hashing', async t => {
-  const path = Buffer.from([0xff, 47, 0xfe]); const f = await fixture(t, [{ path, body: Buffer.from([255, 0]) }]);
+for (const path of [Buffer.from('😀/🦀\n'), Buffer.from([0xff, 47, 0xfe])]) test(`byte paths remain exact through directory enumeration and hashing: ${path.toString('hex')}${process.platform === 'darwin' && path[0] === 0xff ? ' (typed host refusal)' : ''}`, async t => {
+  if (process.platform === 'darwin' && path[0] === 0xff) {
+    const f = await fixture(t);
+    await assert.rejects(f.scan({ roots_hex: [path.toString('hex')] }),
+      { code: 'source_workspace_scan_host_path_unrepresentable' });
+    // The scope check must precede I/O: an absent root cannot turn the raw
+    // request into an ENOENT or an apparently complete empty scan.
+    await assert.rejects(scanSourceWorkspace(join(f.parent,'absent'), f.pin, { roots_hex: [path.toString('hex')] }),
+      { code: 'source_workspace_scan_host_path_unrepresentable' });
+    t.diagnostic('UNSUPPORTED_HOST_PATH: typed scope refusal before scan; exact raw-path scan runs on Linux, representable byte twin runs here.');
+    return;
+  }
+  const f = await fixture(t, [{ path, body: Buffer.from([255, 0]) }]);
   await f.put(path, Buffer.from([254, 0])); const r = await f.scan();
-  assert.equal(r.scan.entries[0].path_hex, 'ff2ffe'); assert.equal(r.scan.entries[0].after.sha256, hash(Buffer.from([254, 0])));
+  assert.equal(r.scan.entries[0].path_hex, path.toString('hex')); assert.equal(r.scan.entries[0].after.sha256, hash(Buffer.from([254, 0])));
 });
 for (const [name, setup] of [
   ['file symlink', async f => { await rm(f.local('src/a')); await symlink('/etc/passwd', f.local('src/a')); }],

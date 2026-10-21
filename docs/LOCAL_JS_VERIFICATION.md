@@ -69,3 +69,25 @@ whole macOS operator campaign exceeded its ten-minute bound, and the broader
 scripts corpus retained failures. A browser lane pass does not complete those
 obligations. The authoritative bead records the exact tested revisions and
 remaining work; later peer source additions require their own qualification.
+
+The macOS sparse-directory workspace profile refuses invalid UTF-8 repository
+path bytes with `source_workspace_host_path_unrepresentable` before acquiring
+a materialization destination. Its scanner refuses such requested scope bytes
+with `source_workspace_scan_host_path_unrepresentable` before filesystem I/O;
+an OS `ENOENT` must not become a complete empty scan. These checks use the
+original bytes and do not decode or normalize Git names. They are platform
+refusals, not evidence that macOS materialized or scanned those names. Linux
+retains the original arbitrary-byte conflict/resolution/scan cases; both hosts
+execute the near-identical UTF-8 emoji/newline byte-path twins. Native package
+membership/authority verification is separate from the source-service fixtures.
+
+The custody regressions execute both default and canonical temporary parents
+in SHA-1 and SHA-256, a real replaced-inode negative with stable-identity twins,
+and the owner-check axis with explicit identity-reader fault injection over
+real `lstat` data. That last cell is a guard unit test, not OS UID switching.
+The witness descriptor closure assertion reads `/dev/fd` on macOS and
+`/proc/self/fd` on Linux; its before/after equality remains unchanged.
+
+Workflow execution remains the explicit trusted-local Linux profile. A macOS
+operator aggregate that reaches that guard remains a failed qualification;
+none of those tests is suppressed by the portable fixture repairs above.

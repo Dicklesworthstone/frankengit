@@ -36,8 +36,13 @@ Edit `files/` using your own trusted editor. Regular files have mode `0600` and
 executable files `0700`; directories have mode `0700`. New/replacement files
 must remain private. The tool never runs an editor, executable file, Git hook,
 source script, build command, or Git subprocess. Arbitrary file bytes, including
-binary bytes and non-UTF-8 POSIX filenames, are preserved in the materialization;
-binary change capture requires the explicit profile described below.
+binary bytes, are preserved in the materialization. Linux also preserves
+non-UTF-8 filename bytes. The macOS sparse-directory profile refuses invalid
+UTF-8 names with `source_workspace_host_path_unrepresentable` before acquiring
+an output directory, including when a later selected path is unrepresentable.
+It checks the original bytes without decoding or normalizing them; no escaped
+materialization profile is implied. Other host alias/collision checks still
+apply to representable names. Binary change capture requires the explicit profile described below.
 
 ```bash
 node scripts/fg_source_workspace.mjs status \

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, readdir, unlink, lstat, link, symlink, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, unlink, lstat, link, symlink, mkdir, rename, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { directory } from '../../scripts/lib/branch-bootstrap-store.mjs';
 import { prepareBootstrap, bootstrapStatus, runBootstrap } from '../../scripts/lib/branch-bootstrap.mjs';
 import { BOOTSTRAP_LIMITS as L, selection, createRequest, checkedRequest, canonical, encode, hash, parse, publication, operateBranch }
   from '../../scripts/lib/branch-bootstrap-protocol.mjs';
@@ -12,6 +14,40 @@ const status=f=>bootstrapStatus({workdir:f.p.workdir,confirm:f.p.plan_sha256});
 const requestFile=(f,n=1)=>join(f.p.workdir,'requests',`request-${String(n).padStart(6,'0')}.json`);
 const request=async(f,n=1)=>canonical(await readFile(requestFile(f,n)));
 const attemptFile=(f,n,file)=>join(f.p.workdir,'journal',`attempt-${String(n).padStart(6,'0')}`,file);
+
+// Test-only filesystem custody, not fg or native authority proof.
+for(const format of ['sha1','sha256'])test(`default and canonical temporary parents preserve ${format} request semantics`,async t=>{
+  for(const temporaryParent of [tmpdir(),await realpath(tmpdir())]){
+    const f=await fixture(t,{format,branches:1,temporaryParent});
+    assert.equal(await realpath(f.root),f.root);
+    const p=await prepareBootstrap(f.prepare);
+    const r=await runBootstrap({workdir:p.workdir,confirm:p.plan_sha256,tokenFile:f.tokenFile});
+    assert.equal(r.complete,true);assert.equal(r.committed,1);assert.equal(f.posts(),1);
+    assert.equal(f.requests.find(r=>r.path.endsWith('/create')).body,
+      new URLSearchParams({object_format:format,ref:'refs/heads/import/0001',new_commit:'1'.repeat(format==='sha1'?40:64)}).toString());
+    await f.close();
+  }
+});
+
+test('custody directory identity rejects replacement but admits the original inode',async t=>{
+  const f=await fixture(t),original=await directory(f.root),root=f.root,held=join(root,'held');
+  const slot=join(root,'slot');await mkdir(slot,{mode:0o700});const identity=await directory(slot);
+  await directory(slot,identity);await rename(slot,held);await mkdir(slot,{mode:0o700});
+  const replacement=await lstat(slot,{bigint:true});assert.notEqual(replacement.ino,identity.ino);
+  await assert.rejects(directory(slot,identity),error=>error.code==='branch_bootstrap_directory_changed_or_unsafe');
+  await directory(slot,replacement);await directory(held,identity);await directory(root,original);
+});
+
+test('custody directory owner check refuses a mismatched identity reader with a permitted twin',async t=>{
+  const f=await fixture(t),uid=process.getuid(),stat=await directory(f.root);
+  assert.equal(stat.uid,BigInt(uid));
+  // Narrow identity-reader fault injection: OS lstat/realpath are real, but this
+  // is a guard unit test, not evidence of changing the OS process or file UID.
+  const identity=t.mock.method(process,'getuid',()=>uid===0?1:0);
+  try{await assert.rejects(directory(f.root),error=>error.code==='branch_bootstrap_directory_changed_or_unsafe');}
+  finally{identity.mock.restore();}
+  assert.equal(process.getuid(),uid);await directory(f.root,stat);
+});
 
 test('canonical fixture roots do not authorize an explicitly aliased custody parent',async t=>{
   const f=await fixture(t),alias=join(f.root,'alias');await symlink(f.root,alias);

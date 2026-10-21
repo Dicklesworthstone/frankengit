@@ -13,6 +13,11 @@ workflow's existing explicit-file capture command is unchanged.
 
 Use Node 22.16 or later on POSIX and retain the workspace hash returned by the
 existing `fg_source_workspace.mjs create` or `expand` command independently.
+On macOS, invalid UTF-8 scope paths refuse with
+`source_workspace_scan_host_path_unrepresentable` before filesystem I/O. Such a
+name cannot be reported as absent merely because the host returns `ENOENT`.
+Linux retains the arbitrary-byte profile, and no path is normalized or decoded
+to make it representable.
 Create an owner-private scope file; its parent must be a real `0700` directory:
 
 ```json

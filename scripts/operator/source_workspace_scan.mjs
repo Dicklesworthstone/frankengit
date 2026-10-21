@@ -1,6 +1,7 @@
 // Opt-in local discovery over an independently pinned sparse workspace.
 // This verifies retained custody, NOT native membership or mutation authority.
 import { constants as F } from 'node:fs';
+import { isUtf8 } from 'node:buffer';
 import { lstat, realpath, open, opendir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -30,6 +31,8 @@ function pathBytes(value, root = false) {
   if (typeof value !== 'string' || !value.length || value.length > 8192 || value.length % 2 || /[^0-9a-f]/.test(value)) error('source_workspace_scan_path');
   const bytes = Buffer.from(value, 'hex'), parts = bytes.toString('latin1').split('/');
   if (bytes.includes(0) || parts.length > 64 || parts.some(p => !p || p.length > 255 || ['.', '..', '.git'].includes(p.toLowerCase()))) error('source_workspace_scan_path');
+  // Do not interpret the host's ENOENT for unrepresentable names as absence.
+  if (process.platform === 'darwin' && !isUtf8(bytes)) error('source_workspace_scan_host_path_unrepresentable');
   return bytes;
 }
 const within = (parent, child) => parent === '' || parent === child || child.startsWith(`${parent}2f`);
