@@ -878,6 +878,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fgit-admission",
+ "fgit-agent",
  "fgit-authority",
  "fgit-authority-fsqlite",
  "fgit-chronicle",
