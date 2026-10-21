@@ -7,7 +7,7 @@ import { absolute, directory, readPrivate, writeNew, syncDirectory } from './ope
 import { fields, parse, fail, clock, hash } from './operator/source_edit_wire.mjs';
 import { compileSourceReplacements, REPLACEMENT_PROFILE, REPLACEMENT_LIMITS } from './operator/source_edit_replacements.mjs';
 const PLAN_BYTES = 512 * 1024;
-const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
+const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
 function argumentsFor(args) {
   if (!Array.isArray(args) || args.length > 11 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || args[0] !== 'compile') fail('source_patch_arguments');
   const found = new Map(), allowed = ['--changes-file', '--output', '--max-patch-bytes', '--timeout-ms', '--binary'];
@@ -22,9 +22,9 @@ function argumentsFor(args) {
     if (!/^[1-9][0-9]{0,8}$/.test(value) || Number(value) > maximum) fail('source_patch_limit');
     return Number(value);
   };
-  if (found.has('--binary') && found.get('--binary') !== 'literal') fail('source_patch_binary_profile');
+  if (found.has('--binary') && !['literal', 'delta'].includes(found.get('--binary'))) fail('source_patch_binary_profile');
   return { input: absolute(found.get('--changes-file')), output: absolute(found.get('--output')),
-    ...(found.has('--binary') ? { binary: 'literal' } : {}),
+    ...(found.has('--binary') ? { binary: found.get('--binary') } : {}),
     maxPatchBytes: positive('--max-patch-bytes', REPLACEMENT_LIMITS.maxPatchBytes, REPLACEMENT_LIMITS.maxPatchBytes),
     timeoutMs: positive('--timeout-ms', 30000, 300000) };
 }
@@ -85,6 +85,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       object_format: plan.format, patch_sha256: hash(compiled.patch), patch_bytes: compiled.patch.length,
       changed_paths: compiled.changes.length, source_bytes: compiled.source_bytes, result_bytes: compiled.result_bytes,
       ...(options.binary ? { binary_files: compiled.binary_files } : {}),
+      ...(options.binary === 'delta' ? { delta_members: compiled.delta_members, literal_members: compiled.literal_members } : {}),
       source_membership_verified: false, publication_attempted: false };
     time.check();
     try {
