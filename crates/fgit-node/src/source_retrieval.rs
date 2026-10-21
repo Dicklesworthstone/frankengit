@@ -325,10 +325,6 @@ impl OneNode {
     /// Optional unbuilt/stale symbols leave lexical results useful and carry a
     /// typed unavailable status, never a successful empty symbol result. All
     /// other failures abort the response. No channel builds or scans source.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, independent generation floors and shared read budgets are distinct"
-    )]
     pub async fn search_source_initial_local_in(
         &self,
         request: &NodeRequestContext,

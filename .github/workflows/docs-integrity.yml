@@ -7,8 +7,6 @@ jobs:
   docs-integrity:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
       - name: Execute repository-owned docs verification lane

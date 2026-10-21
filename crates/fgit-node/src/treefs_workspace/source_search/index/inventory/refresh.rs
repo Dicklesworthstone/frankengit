@@ -224,10 +224,6 @@ impl OneNode {
     /// The receipt names the source selected for the build, which may become
     /// stale while it runs. Publication ambiguity retains the original candidate;
     /// no post-confirmation cancellation probe converts success into an error.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, required index predecessor and independent build/read budgets are separate contracts"
-    )]
     pub async fn refresh_source_index_local_in(
         &self,
         request: &NodeRequestContext,
@@ -257,10 +253,6 @@ impl OneNode {
     /// new inventory are checked before the original candidate is handed out.
     /// A failed barrier stages nothing; after it succeeds, only recovery can
     /// determine publication. Existing explicit-predecessor APIs remain intact.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "write-ahead barrier, source pins, predecessor and resource budgets are independent"
-    )]
     pub async fn refresh_source_index_guarded_local_in(
         &self,
         request: &NodeRequestContext,

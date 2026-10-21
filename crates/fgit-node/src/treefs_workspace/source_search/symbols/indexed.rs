@@ -254,10 +254,6 @@ impl OneNode {
     /// Persisted read only. Current source and hidden-ref policy precede index
     /// metadata. Staleness, missing backing and failed checkpoints never scan
     /// source, rebuild, fall back, or disclose a different generation.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, checkpoint, query, read limits and explicit source mode are independent"
-    )]
     async fn read_source_symbols_index_local_in(
         &self,
         request: &NodeRequestContext,
