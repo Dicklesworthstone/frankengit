@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, chmod, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -9,7 +9,7 @@ const nativeHash = (type, body, format) => createHash(format).update(`${type} ${
 // This builds inputs independently; these tests cover filesystem discovery and
 // pinned custody, not the shared native membership verifier or Rust admission.
 export async function fixture(t, initial = [{ path: 'src/a', body: 'old\n' }, { path: 'README', body: 'read\n' }], format = 'sha1') {
-  const parent = await mkdtemp(join(tmpdir(), 'fg-scan-')); await chmod(parent, 0o700);
+  const parent = await realpath(await mkdtemp(join(tmpdir(), 'fg-scan-'))); await chmod(parent, 0o700);
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = join(parent, 'work'); await mkdir(root, { mode: 0o700 }); await mkdir(join(root, 'files'), { mode: 0o700 });
   const input = initial.map(f => ({ path: Buffer.from(f.path), body: Buffer.from(f.body), executable: f.executable ?? false })).sort((a, b) => Buffer.compare(a.path, b.path));

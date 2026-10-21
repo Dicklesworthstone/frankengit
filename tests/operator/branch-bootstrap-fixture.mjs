@@ -12,9 +12,9 @@ export const wire=value=>JSON.stringify(value).replace(/"decision_sequence":"([0
 export function absent(scope=SCOPE){return {type:'transaction_outcome',schema_version:1,...outcomeBinding(scope),selector:'transaction',command_index:null,
   state:'key_not_observed',terminal:false,transaction:null,decision:null,read_only:true,request_reexecuted:false,
   absence_proves_non_commit:false,session_completeness_established:false};}
-export async function fixture(t,{format='sha1',branches=3,behavior={},existing=[]}={}){
+export async function fixture(t,{format='sha1',branches=3,behavior={},existing=[],temporaryParent=tmpdir()}={}){
   // Custody paths are canonical by contract; macOS's default TMPDIR is an alias.
-  const root=await realpath(await mkdtemp(join(tmpdir(),'fg-bootstrap-')));await chmod(root,0o700);
+  const root=await realpath(await mkdtemp(join(temporaryParent,'fg-bootstrap-')));await chmod(root,0o700);
   const tokenFile=join(root,'token');await writeFile(tokenFile,`${TOKEN}\n`,{mode:0o600});
   const scope={...SCOPE,object_format:format},requests=[],outcomes=new Map(),publications=new Map(),refs=new Map(existing),sockets=new Set();
   let sequence=9007199254740991n,posts=0;

@@ -1,6 +1,7 @@
 // A trusted-local editing materialization, not a Git checkout or an authority.
 // The independently retained root pins the immutable inputs; files/ is mutable.
 import { constants as F } from 'node:fs';
+import { isUtf8 } from 'node:buffer';
 import { lstat, realpath, open, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { webcrypto } from 'node:crypto';
@@ -71,6 +72,10 @@ function manifest(bytes, expected, verified) {
 }
 export const localPath = (root, hex = null) => Buffer.concat([Buffer.from(`${root}/files`),
   ...(hex === null ? [] : [Buffer.from('/'), Buffer.from(hex, 'hex')])]);
+function hostPaths(paths) {
+  if (process.platform === 'darwin' && paths.some(hex => !isUtf8(Buffer.from(hex, 'hex'))))
+    fail('source_workspace_host_path_unrepresentable');
+}
 const same = (a, b) => ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(k => a[k] === b[k]);
 async function privateDirectory(path) {
   const stat = await lstat(path, { bigint: true });
@@ -106,6 +111,10 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
 // are private owned snapshots from the predecessor, never caller-minted source.
 async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null, refresh = null) {
   const value = manifest(bytes, expected, loaded.verified), encoded = canonical(value);
+  // This macOS sparse-directory profile cannot materialize invalid UTF-8 names.
+  // Validate the original bytes without decoding/normalizing them, before any
+  // destination is acquired. Linux retains its arbitrary-byte path profile.
+  hostPaths(value.files.map(f => f.path_hex));
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
   const hash = sha256(encoded), answer = { ...receipt(root, hash, value), ...(expansion ? {
     type: 'source_workspace_expanded', expansion, original_workspace_changed: false,
@@ -374,6 +383,7 @@ export async function loadSourceWorkspace(root, expectedHash, options = {}) {
 // repository content can widen the selection. Every name stays a byte path.
 export async function readWorkspaceFiles(root, inputPaths, options = {}) {
   const time = lifetime(options), paths = selectedPaths(inputPaths); absolute(root);
+  hostPaths(paths);
   await directory(root); time.check();
   const observations = new Map(), files = new Map(); let total = 0;
   const remember = (path, stat) => {

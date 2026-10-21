@@ -56,13 +56,22 @@ for (const format of ['sha1', 'sha256']) {
   });
 }
 
-test('preview collects all conflicts in deterministic byte-path order and creates nothing', async t => {
-  const f = await setup(t, [{ path: '622fff', bytes: 'B' }, { path: '61', bytes: 'A' }]);
-  await local(f, '61', 'local A'); await local(f, '622fff', null);
-  const next = source([{ path: '622fff', bytes: 'other B' }, { path: '61', bytes: 'other A' }], 'sha1', 'next');
+for (const format of ['sha1', 'sha256']) for (const path of ['622ff09f98800a', '622fff']) test(`preview collects all conflicts in deterministic byte-path order and creates nothing; ${format}; path=${path}${process.platform === 'darwin' && path === '622fff' ? ' (typed host refusal)' : ''}`, async t => {
+  if (process.platform === 'darwin' && path === '622fff') {
+    const f = await setup(t, undefined, format), raw = source([{ path: '61', bytes: 'valid first' }, { path, bytes: 'raw source' }], format);
+    const output = join(f.parent, 'raw-name-output');
+    await assert.rejects(workspace.createSourceWorkspace(output, raw.bytes, raw.expected),
+      { code: 'source_workspace_host_path_unrepresentable' });
+    assert.equal(existsSync(output), false);
+    t.diagnostic('UNSUPPORTED_HOST_PATH: invalid UTF-8 refused before destination acquisition; identical raw-name semantics run on Linux, representable byte twin runs here.');
+    return;
+  }
+  const f = await setup(t, [{ path, bytes: 'B' }, { path: '61', bytes: 'A' }], format);
+  await local(f, '61', 'local A'); await local(f, path, null);
+  const next = source([{ path, bytes: 'other B' }, { path: '61', bytes: 'other A' }], format, 'next');
   const a = await f.preview(next), b = await f.preview(next);
   assert.deepEqual(a, b); assert.equal(a.conflict_count, 2); assert.equal(a.result_bytes, 0);
-  assert.deepEqual(a.entries.map(e => e.path_hex), ['61', '622fff']);
+  assert.deepEqual(a.entries.map(e => e.path_hex), ['61', path]);
   assert.deepEqual(await readdir(f.parent), ['original']);
 });
 for (const [name, change] of [
@@ -182,4 +191,19 @@ test('original root replacement during publication is refused', async t => {
   };
   try { await assert.rejects(f.apply(next, plan.refresh_sha256)); } finally { hooks.verify = null; }
   assert(replaced); assert(!existsSync(f.output));
+});
+
+for (const format of ['sha1', 'sha256']) test(`${format}: unrepresentable host reads refuse before I/O; representable absence remains available`, async t => {
+  const f = await setup(t, undefined, format);
+  const ordinary = await workspace.readWorkspaceFiles(f.root, ['6d697373696e67']);
+  assert.equal(ordinary.files.get('6d697373696e67'), null);
+  if (process.platform === 'darwin') {
+    await assert.rejects(workspace.readWorkspaceFiles(f.root, ['ff']),
+      { code: 'source_workspace_host_path_unrepresentable' });
+    await assert.rejects(workspace.readWorkspaceFiles(join(f.parent, 'absent'), ['ff']),
+      { code: 'source_workspace_host_path_unrepresentable' });
+  } else {
+    const raw = await workspace.readWorkspaceFiles(f.root, ['ff']);
+    assert.equal(raw.files.get('ff'), null);
+  }
 });

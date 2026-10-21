@@ -1,4 +1,5 @@
-// Non-production differential observations against the installed Git executable.
+// Non-production patch-oracle observations against the installed Git executable.
+// This is not pinned upstream differential/conformance evidence.
 // No hosted/network access, user checkout, hook, filter, or global Git config.
 import test from 'node:test';
 import assert from 'node:assert/strict';

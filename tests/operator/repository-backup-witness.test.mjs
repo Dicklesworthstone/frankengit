@@ -118,11 +118,12 @@ test('exclusive ownership spans the entire consumer, not only selection', async 
   release(); assert.equal((await active).state, 'complete'); await f.select([a]);
 });
 test('failed native containment retains lock but closes file descriptors', async t => {
-  const f = await fixture(t); await f.create(); const before = (await readdir('/proc/self/fd')).length;
+  const f = await fixture(t); await f.create(); const descriptorDirectory = process.platform === 'darwin' ? '/dev/fd' : '/proc/self/fd';
+  const before = (await readdir(descriptorDirectory)).length;
   await assert.rejects(f.withWitness(() => { throw Object.assign(new Error('uncontained child'), { code: 'native_import_containment_failed' }); }), error => {
     assert.equal(error.witness_lock_retained, true); return true;
   });
-  assert.equal((await readdir('/proc/self/fd')).length, before);
+  assert.equal((await readdir(descriptorDirectory)).length, before);
   await assert.rejects(f.withWitness(() => {}), code('backup_witness_locked'));
 });
 test('callback exceptions release ordinary leases, and confirmed completion survives late cancellation', async t => {
