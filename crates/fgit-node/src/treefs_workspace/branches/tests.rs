@@ -475,4 +475,116 @@ fn non_fast_forward_branch_update_is_refused_and_fast_forward_is_admitted() {
     }
 }
 
+/// A node holding one linear history of `commits` commits on `main`, all
+/// sharing one tree. Returns the commits oldest first.
+fn linear_fixture(
+    scratch: &Scratch,
+    format: GitHashAlgorithm,
+    commits: usize,
+) -> (OneNode, Vec<GitOid>) {
+    let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let root = scratch.0.join("source");
+    fs::create_dir_all(root.join("refs/heads")).unwrap();
+    fs::write(root.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    fs::write(root.join("config"),match format {
+        GitHashAlgorithm::Sha1=>"[core]\nrepositoryformatversion = 0\nbare = true\n",
+        GitHashAlgorithm::Sha256=>"[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n",
+    }).unwrap();
+    let blob = loose(&root, format, GitObjectKind::Blob, "blob", b"history\n");
+    let tree = loose(
+        &root,
+        format,
+        GitObjectKind::Tree,
+        "tree",
+        &[b"100644 file\0".as_slice(), blob.as_bytes()].concat(),
+    );
+    let mut chain: Vec<GitOid> = Vec::with_capacity(commits);
+    for index in 0..commits {
+        let parent = chain
+            .last()
+            .map(|parent| format!("parent {parent}\n"))
+            .unwrap_or_default();
+        let body = format!(
+            "tree {tree}\n{parent}author Fixture <fixture@example.invalid> {index} +0000\ncommitter Fixture <fixture@example.invalid> {index} +0000\n\ncommit {index}\n"
+        );
+        chain.push(loose(
+            &root,
+            format,
+            GitObjectKind::Commit,
+            "commit",
+            body.as_bytes(),
+        ));
+    }
+    fs::write(
+        root.join("refs/heads/main"),
+        format!("{}\n", chain[commits - 1]),
+    )
+    .unwrap();
+    let request = node.request_context();
+    let imported = node
+        .runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &request,
+            &root,
+            principal(),
+            b"linear-fixture",
+        ))
+        .unwrap();
+    assert!(
+        imported
+            .commands
+            .iter()
+            .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. }))
+    );
+    (node, chain)
+}
+
+/// frankengit-gvm5: the fast-forward check is exact on histories longer than
+/// any fixed walk budget. A 4,096-commit cap refused the long fast-forward
+/// below and reported the non-fast-forward as a budget refusal.
+#[test]
+fn fast_forward_checks_stay_exact_beyond_four_thousand_ninety_six_commits() {
+    const COMMITS: usize = 4_200;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, chain) = linear_fixture(&scratch, format, COMMITS);
+        let (first, near, tip) = (chain[0], chain[COMMITS - 4], chain[COMMITS - 1]);
+        accepted(apply(&node, &[create("refs/heads/old", first)], "old"));
+        let across_the_history = RefCommand {
+            name: reference("refs/heads/old"),
+            expected_old: ExpectedOld::Exactly(first),
+            proposed_new: ProposedNew::Update(tip),
+            force: false,
+        };
+        accepted(apply(&node, &[across_the_history], "ff-across"));
+        let backwards = RefCommand {
+            name: reference("refs/heads/main"),
+            expected_old: ExpectedOld::Exactly(tip),
+            proposed_new: ProposedNew::Update(near),
+            force: false,
+        };
+        let refusal = apply(&node, &[backwards], "non-ff-long").unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                NodeWorkspaceRefusal::BranchOperation(
+                    "non-fast-forward branch update is not permitted"
+                )
+            ),
+            "{format:?}: {refusal:?}"
+        );
+        // The short fast-forward twin still admits.
+        accepted(apply(&node, &[create("refs/heads/near", near)], "near"));
+        let short = RefCommand {
+            name: reference("refs/heads/near"),
+            expected_old: ExpectedOld::Exactly(near),
+            proposed_new: ProposedNew::Update(tip),
+            force: false,
+        };
+        accepted(apply(&node, &[short], "ff-short"));
+        node.shutdown().unwrap();
+    }
+}
+
 mod transactions;

@@ -47,29 +47,33 @@ fn parse_commit_oid(
     Ok(id)
 }
 
+/// Exact ancestry within the authority-selected closure (frankengit-gvm5).
+///
+/// Every commit reachable from `tip` lies in `closure`, so the walk is bounded
+/// by the history the node actually holds rather than by a fixed constant: a
+/// fast-forward across any number of commits is found, and a non-fast-forward
+/// is reported as one after the whole history below `tip` is seen. A parent
+/// outside the closure is an integrity refusal, never a guess. The walk stops
+/// at the first sighting of `ancestor`, so a short fast-forward reads only the
+/// new commits; cancellation is checked before every read.
 fn is_fast_forward(
     source: &VerifiedFabricPackSource,
     format: GitHashAlgorithm,
     ancestor: GitOid,
     tip: GitOid,
+    closure: &BTreeSet<GitOid>,
     parse_limits: &ParseLimits,
     mut live: impl FnMut() -> bool,
 ) -> Result<bool, NodeWorkspaceRefusal> {
     if ancestor == tip {
         return Ok(true);
     }
-    const MAX_VISITED_COMMITS: usize = 4096;
     let mut queue = VecDeque::from([tip]);
     let mut visited = BTreeSet::from([tip]);
 
     while let Some(id) = queue.pop_front() {
         if !live() {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
-        }
-        if visited.len() > MAX_VISITED_COMMITS {
-            return Err(invalid(
-                "commit traversal budget exceeded during fast-forward check",
-            ));
         }
         let (kind, body) = source
             .read_object(&id)
@@ -93,6 +97,11 @@ fn is_fast_forward(
                 return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
             }
             let parent_oid = parse_commit_oid(parent_bytes, format)?;
+            if !closure.contains(&parent_oid) {
+                return Err(invalid(
+                    "commit ancestry leaves the authority-selected closure during fast-forward check",
+                ));
+            }
             if parent_oid == ancestor {
                 return Ok(true);
             }
@@ -333,6 +342,7 @@ impl OneNode {
                         self.object_format,
                         old_oid,
                         oid,
+                        materialized.selected_closure().closure().objects(),
                         &parse_limits,
                         &mut live,
                     )?
