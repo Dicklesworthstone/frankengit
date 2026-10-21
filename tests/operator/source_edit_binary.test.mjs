@@ -76,7 +76,7 @@ test('every short input length covers all row prefixes and base85 tail widths', 
 test('binary encoding requires explicit literal opt-in; unknown modes cannot fall back', async t => {
   const f = await binaryPeer(t);
   assert.throws(() => compileSourceReplacements('sha1', f.rows), /source_replacement_binary/);
-  for (const binary of [true, null, undefined, 'delta', 'auto', 'literal-v2', 'Literal']) {
+  for (const binary of [true, null, undefined, 'delta-v2', 'auto', 'literal-v2', 'Literal']) {
     assert.throws(() => compileSourceReplacements('sha1', f.rows, { binary }), /binary_profile/);
     await assert.rejects(captureSourceReplacements(f.request, f.rows, TOKEN, { binary }), /binary_profile/);
   }

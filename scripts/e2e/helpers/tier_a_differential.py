@@ -268,13 +268,9 @@ class Serve:
             argv = [FG, 'serve', str(self.node), TENANT, REPOSITORY, f'127.0.0.1:{self.port}',
                     '--continuous', '--stop-file', str(self.stop)]
             if self.receive:
-                # Operator configuration, as --initial-branch is. A push must
-                # fit both the session budget (from accept) and the processing
-                # budget (from the pack trailer), 300 s each by default, which
-                # admits up to ~15k objects; many-objects pushes more
-                # (frankengit-pc9g).
-                argv += ['--receive-principal', PRINCIPAL, '--allow-unauthenticated-network-push',
-                         '--session-timeout-secs', '1800', '--processing-timeout-secs', '1800']
+                # Default session and processing budgets: the many-objects push
+                # must fit fg as shipped (frankengit-pc9g).
+                argv += ['--receive-principal', PRINCIPAL, '--allow-unauthenticated-network-push']
             self.out = open(WORK / f'serve-{self.node.name}-{self.port}.out', 'wb')
             self.err = open(WORK / f'serve-{self.node.name}-{self.port}.err', 'wb')
             self.process = subprocess.Popen(argv, stdout=self.out, stderr=self.err)

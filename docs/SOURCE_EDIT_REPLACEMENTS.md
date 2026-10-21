@@ -4,7 +4,7 @@ Related: FG-032, `NATIVE_EXACT_PATCH.md`, `REMOTE_SOURCE_EDITING.md`,
 `SOURCE_EDIT_RESULT_TREES.md`, and `SOURCE_EDIT_RESULT_PLANS.md`.
 
 `scripts/fg_source_patch.mjs` converts explicit full original/desired file bytes
-into a bounded native-compatible patch: unified text or explicit binary literals.
+into a bounded native-compatible patch: unified text or explicit binary members.
 It is an offline encoder, not a Git engine, diff heuristic, repository reader,
 authorization check or publisher.
 It never invokes Git, a shell, hooks, external encoders or a network endpoint.
@@ -107,6 +107,58 @@ publication and original-key recovery remain separate operations. Binary bodies
 omitted by native review are still reported as omitted: compiler output does not
 prove the returned pack's full object closure or grant publication authority.
 
+## Explicit bounded delta encoding
+
+For localized edits to large binary files, select the separate delta profile:
+
+```bash
+node scripts/fg_source_patch.mjs compile \
+  --changes-file /private/edit/replacements.json \
+  --output /private/edit/change.patch \
+  --binary delta
+```
+
+The receipt names `frankengit-source-replacements-delta-v1`, retains
+`binary_files` and adds `delta_members` and `literal_members`. The member counts
+cover both directions; mode-only and empty-file sections add no members. Neither
+the changes file nor repository text can enable a profile. Existing text-only
+and `--binary literal` output bytes and receipt fields remain unchanged.
+
+The deterministic planner compares equal prefixes and nonoverlapping equal
+suffixes, then inserts the changed middle. Comparison and program construction
+are linear in the bounded input/output sizes, with cancellation checkpoints.
+The program uses Git's source/result size varints, exact source-copy offsets,
+127-byte insert chunks and the special 65536-byte copy-size encoding. The delta
+member header names the inflated **program** size, not the reconstructed size.
+Framing reuses the existing stored-DEFLATE, Adler-32 and base85 encoder.
+
+Each direction independently selects a delta only when its COMPLETE encoded
+wire size is strictly smaller than the literal and its record count does not
+increase. Ties use literals. A patch may therefore mix literal and delta members,
+including for very small files where header length and base85 padding matter.
+This is an explicit deterministic representation choice, not error recovery:
+invalid inputs, cancellation and insufficient budgets refuse the operation.
+
+The original 1 MiB body limit, 8 MiB source/result aggregate limits, 1 MiB patch
+limit and 131072-record allowance are unchanged. Both directions are reserved
+before either member is framed. A small delta cannot admit an oversized source,
+omit the reverse image or weaken a preimage/result identity. Whole-file creation
+or unrelated binary data may still exceed the patch limit. This common-end
+profile is not a general optimal delta search or a DEFLATE compression policy;
+scattered edits may retain a large inserted middle.
+
+A reproduced one-byte edit halfway through a 1 MiB NUL-bearing file was refused
+by the literal profile but produces 246 patch bytes in SHA-1 and 294 in SHA-256
+for path `asset.bin`, with two delta members. These are exact fixture sizes, not
+a general latency or compression-ratio guarantee. The full-file byte counts
+remain visible in the receipt. Keep patches private even when unchanged bytes
+are represented by source-copy instructions.
+
+The native binary patch reader already recognizes both member kinds. No native
+HTTP option, applying service, admission rule or dependency is added. Native
+preparation still owns decoding, original/result checks and authorization;
+compiler or installed-Git success does not establish native service acceptance.
+
 ## Library path
 
 `compileSourceReplacements(format, changes, limits, check)` accepts the same
@@ -114,8 +166,8 @@ raw paths but uses owned `Uint8Array`/Buffer body values instead of filenames:
 `before: { mode, blob, bytes }` and `after: { mode, bytes }`. It returns the exact
 patch and per-path old/new native IDs and modes. Limits can only narrow the
 profile. Input buffers and returned patch storage are detached. Passing
-`{ binary: 'literal' }` as a compiler option enables the binary profile; other
-values refuse. `captureSourceReplacements` accepts the same option while
+`{ binary: 'literal' }` enables full literals and `{ binary: 'delta' }` selects
+the bounded delta profile above; other values refuse. `captureSourceReplacements` accepts the same option while
 retaining one deadline, aggregate response allowance and mandatory independent
 result-tree constraint. No binary option is added to native HTTP form fields.
 
@@ -140,7 +192,7 @@ The profile admits at most 32 disjoint effects, 32768 aggregate path bytes,
 4096 bytes per path, 64 path components, 1 MiB per body, 8 MiB total original
 bytes, 8 MiB total result bytes, 1 MiB patch output and 131072 emitted records.
 These are buffered resource ceilings, not a total heap/latency guarantee.
-NUL-bearing bodies refuse unless binary literals were explicitly selected.
+NUL-bearing bodies refuse unless a binary profile was explicitly selected.
 Symlinks, gitlinks, rename/copy records, unsafe paths and no-op changes always
 refuse. There is no automatic binary opt-in, newline normalization, offset
 search or interpretation of body text.
@@ -151,7 +203,8 @@ search or interpretation of body text.
 node --test tests/operator/source_edit_replacements.test.mjs \
   tests/operator/source_edit_replacements_cli.test.mjs \
   tests/operator/source_edit_binary.test.mjs \
-  tests/operator/source_edit_binary_cli.test.mjs
+  tests/operator/source_edit_binary_cli.test.mjs \
+  tests/operator/source_edit_delta.test.mjs tests/operator/source_edit_delta_cli.test.mjs
 bash scripts/verify_source_edits.sh
 ```
 
@@ -174,3 +227,12 @@ for every short length and larger boundaries. Production does not import those
 test helpers. Native-schema HTTP peers exercise the real preparation client,
 not the Rust service. A local test pass is not a live native interoperability,
 full-custody, full-workspace, release or power-loss campaign.
+
+The delta campaigns add an independent bigint instruction interpreter and test-only
+zlib decoder. Cold-object Git fixtures start each direction in a separate repository
+and prove the wanted blobs are absent before applying the patch, preventing cached
+objects from hiding a broken delta. The actual offline executable exercises private
+files, mixed raw paths/modes/empty files, exact byte-limit twins, competing writers,
+pre-cancellation and lost stdout. Loopback HTTP tests use native-schema fixtures,
+not Rust `fg`. Rust/native service, full-workspace, release and physical power-loss
+gates have not been run for this delta slice.

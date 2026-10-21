@@ -6,20 +6,27 @@ use super::{
     AdmissionAbortReason, AdmittedObject, GitOid, Grade, ImmutableWrite, LocalCrashPoint,
     LocalFilesystemFabric, ObjectAdmission, ObjectAdmissionPermit, ObjectClass, PlacementAdmission,
     PlacementReceipt, PublicationState, PutIfAbsent, ReservedObligation, ResourceVector, StageFile,
-    StoreRefusal, StructureVerdict, VerifiedObject, payload_identity, settle_admission_abort,
-    sync_directory,
+    StorageOperation, StoreRefusal, StructureVerdict, VerifiedObject, payload_identity,
+    settle_admission_abort, storage_error, sync_directory,
 };
 use fgit_resource::{BudgetGrant, ObligationLedger};
 use std::collections::BTreeSet;
 
 const MAX_BATCH_OBJECTS: usize = 256;
 const MAX_BATCH_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// Upper bound on the scoped threads that sync one batch's staged files.
+const MAX_SYNC_THREADS: usize = 32;
 
 impl LocalFilesystemFabric {
     /// Place up to 256 identity-sorted objects and 64 MiB of payloads with one
     /// final directory sync per native hash domain, rather than per object.
-    /// Each file is still synced before its immutable name is linked. The
-    /// caller must keep the storage root and ancestors stable during the call.
+    /// Each file is still synced before its immutable name is linked: every
+    /// staged file is written first, then all are synced concurrently, then
+    /// the names are linked. One fsync at a time paid a journal commit per
+    /// file (about 6 ms each on ext4/NVMe); concurrent fsyncs share commits
+    /// (frankengit-pc9g). The caller must keep the storage root and ancestors
+    /// stable during the call. A failed batch links no name it staged after
+    /// the failure point and may have linked none at all.
     ///
     /// All objects and the complete resource grant are preflighted before I/O.
     /// Success receipts are returned together, after the durability fence and
@@ -57,6 +64,13 @@ impl LocalFilesystemFabric {
                 let amount = batch_resources((object.payload().len() as u64).max(1), 1);
                 let grant = budget.split_off(&amount).map_err(StoreRefusal::Resource)?;
                 pending.push(self.stage_batch_object(object, ledger, grant)?);
+            }
+            batch_checkpoint(live)?;
+            sync_staged(&pending)?;
+            self.crash_if(LocalCrashPoint::AfterStageSync)?;
+            for (entry, object) in pending.iter_mut().zip(objects) {
+                batch_checkpoint(live)?;
+                entry.link(self, object)?;
             }
             for directory in directories {
                 batch_checkpoint(live)?;
@@ -200,7 +214,7 @@ impl LocalFilesystemFabric {
             )?;
             return Err(StoreRefusal::Settlement(error));
         }
-        let stage = match self.write_object_stage_in(object, true) {
+        let stage = match self.write_object_stage_unsynced(object, true) {
             Ok(stage) => stage,
             Err(failure) => {
                 let spent = if failure.body_write_started {
@@ -216,24 +230,13 @@ impl LocalFilesystemFabric {
                 return Err(failure.refusal);
             }
         };
-        let created = match self.link_object_stage(&stage, object) {
-            Ok(ImmutableWrite::Created) => true,
-            Ok(ImmutableWrite::AlreadyPresent) => false,
-            Err(error) => {
-                settle_admission_abort(
-                    reserved,
-                    AdmissionAbortReason::PlacementWriteFailed,
-                    &actual,
-                )?;
-                return Err(error);
-            }
-        };
+        // Synced and linked by the caller once every staged file is written.
         Ok(PendingPlacement::Written {
             reserved,
             evidence,
             actual,
             placement,
-            created,
+            created: None,
             stage,
         })
     }
@@ -242,6 +245,47 @@ impl LocalFilesystemFabric {
 fn batch_resources(bytes: u64, count: u64) -> ResourceVector {
     ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::Objects, count)])
 }
+/// Syncs every staged file of one batch, concurrently on up to
+/// [`MAX_SYNC_THREADS`] scoped threads that all finish before this returns.
+/// A thread that cannot be started syncs its share inline instead.
+fn sync_staged(pending: &[PendingPlacement]) -> Result<(), StoreRefusal> {
+    let stages: Vec<&StageFile> = pending
+        .iter()
+        .filter_map(|entry| match entry {
+            PendingPlacement::Written { stage, .. } => Some(stage),
+            PendingPlacement::Existing(_) => None,
+        })
+        .collect();
+    let sync_all = |chunk: &[&StageFile]| chunk.iter().try_for_each(|stage| stage.sync_all());
+    let result = if stages.len() <= 1 {
+        sync_all(&stages)
+    } else {
+        let per_thread = stages.len().div_ceil(stages.len().min(MAX_SYNC_THREADS));
+        std::thread::scope(|scope| {
+            let mut first = Ok(());
+            let mut workers = Vec::new();
+            for chunk in stages.chunks(per_thread) {
+                match std::thread::Builder::new().spawn_scoped(scope, move || sync_all(chunk)) {
+                    Ok(worker) => workers.push(worker),
+                    Err(_) => {
+                        if let Err(error) = sync_all(chunk) {
+                            first = first.and(Err(error));
+                        }
+                    }
+                }
+            }
+            for worker in workers {
+                let synced = worker.join().unwrap_or_else(|_| {
+                    Err(std::io::Error::other("a staged-file sync thread panicked"))
+                });
+                first = first.and(synced);
+            }
+            first
+        })
+    };
+    result.map_err(|error| storage_error(StorageOperation::SyncStage, error))
+}
+
 fn batch_checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), StoreRefusal> {
     if live() {
         Ok(())
@@ -257,11 +301,29 @@ enum PendingPlacement {
         evidence: AdmittedObject,
         actual: ResourceVector,
         placement: PlacementReceipt,
-        created: bool,
+        /// `None` until the synced stage is linked; then whether this batch
+        /// created the immutable name.
+        created: Option<bool>,
         stage: StageFile,
     },
 }
 impl PendingPlacement {
+    /// Links one synced staged file under its immutable name.
+    fn link(
+        &mut self,
+        fabric: &LocalFilesystemFabric,
+        object: &VerifiedObject,
+    ) -> Result<(), StoreRefusal> {
+        if let Self::Written { stage, created, .. } = self {
+            stage.close();
+            *created = Some(matches!(
+                fabric.link_object_stage(stage, object)?,
+                ImmutableWrite::Created
+            ));
+        }
+        Ok(())
+    }
+
     fn abort(self) -> Result<(), StoreRefusal> {
         if let Self::Written {
             reserved,
@@ -293,6 +355,18 @@ impl PendingPlacement {
                 created,
                 stage,
             } => {
+                let Some(created) = created else {
+                    // Unreachable: commit runs only after every entry linked.
+                    settle_admission_abort(
+                        reserved,
+                        AdmissionAbortReason::PlacementWriteFailed,
+                        &actual,
+                    )?;
+                    return Err(StoreRefusal::StorageIo {
+                        operation: StorageOperation::PublishImmutableBody,
+                        kind: std::io::ErrorKind::Other,
+                    });
+                };
                 let result = if created {
                     match reserved.commit_internal(evidence, &actual) {
                         Ok(_) => Ok(PutIfAbsent::Created { placement, epochs }),

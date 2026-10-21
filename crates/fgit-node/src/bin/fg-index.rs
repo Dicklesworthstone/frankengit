@@ -5,7 +5,9 @@ use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_forge::source_search::SearchLimits;
 use fgit_graph::lexical::{LexicalChannel, LexicalQuery, OMISSION_PROFILE};
 use fgit_graph::{GenerationActivation, GenerationRecovery, GraphGenerationId};
+use fgit_node::source_retrieval::command_budget::OperatorDeadline;
 use fgit_node::{NodeConfig, NodeWorkspaceRefusal, OneNode};
+use fgit_runtime::BudgetClass;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, InternalObjectId, RefName,
     RepositoryId, TenantId,
@@ -14,6 +16,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 const USAGE: &str = "fg-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF build genesis|INDEX_TOKEN\n\
 fg-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF refresh INDEX_TOKEN\n\
@@ -149,8 +152,11 @@ fn activation_fields(activation: &GenerationActivation) -> String {
         activation.authority_generation.get()
     )
 }
-fn execute(node: &OneNode, command: &Command) -> Result<String, NodeWorkspaceRefusal> {
-    let context = node.request_context();
+fn execute(
+    node: &OneNode,
+    command: &Command,
+    context: &fgit_node::NodeRequestContext,
+) -> Result<String, NodeWorkspaceRefusal> {
     match &command.action {
         Action::Build(predecessor) => {
             let (source, activation) =
@@ -295,11 +301,25 @@ pub fn main() -> ExitCode {
 }
 #[must_use]
 pub fn run_cli(args: &[String]) -> ExitCode {
+    run_cli_with_timeout(args, None)
+}
+#[must_use]
+pub fn run_cli_with_timeout(args: &[String], timeout: Option<Duration>) -> ExitCode {
     let args: Vec<OsString> = args.iter().take(40).map(OsString::from).collect();
-    run_os_cli(&args)
+    run_os_cli_with_timeout(&args, timeout)
 }
 #[must_use]
 pub fn run_os_cli(args: &[OsString]) -> ExitCode {
+    run_os_cli_with_timeout(args, None)
+}
+fn run_os_cli_with_timeout(args: &[OsString], timeout: Option<Duration>) -> ExitCode {
+    let budget = match OperatorDeadline::new(timeout) {
+        Ok(budget) => budget,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let command = match parse(args) {
         Ok(c) => c,
         Err(e) => {
@@ -317,14 +337,16 @@ pub fn run_os_cli(args: &[OsString]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let ready = node
-        .runtime()
-        .block_on(node.authenticate_authority_head())
-        .map_err(|e| e.to_string())
-        .and_then(|selected| {
-            node.bring_into_service(selected.receipt().generation())
-                .map_err(|e| e.to_string())
-        });
+    let request = budget.request(&node, BudgetClass::Database);
+    let ready = request.as_ref().map_err(Clone::clone).and_then(|request| {
+        node.runtime()
+            .block_on(node.authenticate_authority_head_in(request))
+            .map_err(|e| e.to_string())
+            .and_then(|selected| {
+                node.bring_into_service(selected.receipt().generation())
+                    .map_err(|e| e.to_string())
+            })
+    });
     if let Err(error) = ready {
         eprintln!("Source authority unavailable: {error}");
         if let Err(close) = node.shutdown() {
@@ -332,7 +354,11 @@ pub fn run_os_cli(args: &[OsString]) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    let result = execute(&node, &command);
+    let result = execute(
+        &node,
+        &command,
+        &request.expect("readiness requires the original request"),
+    );
     let shutdown = node.shutdown(); // Explicit even when the operation fails.
     let output_ok = match result {
         Ok(body) => match writeln!(io::stdout().lock(), "{body}") {

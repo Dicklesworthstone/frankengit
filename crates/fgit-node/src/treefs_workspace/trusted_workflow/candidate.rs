@@ -3,6 +3,7 @@
 mod merge;
 use super::*;
 use fgit_forge::event::NativeMerge;
+use fgit_forge::preparation::MergeCommitStyle;
 use fgit_treefs::{SparseCandidateManifest, SparseEntry};
 
 pub(super) enum WorkflowInputs<A: GitHashAlgorithm> {
@@ -10,7 +11,7 @@ pub(super) enum WorkflowInputs<A: GitHashAlgorithm> {
     Candidate {
         manifest: Arc<SparseCandidateManifest<A>>,
         bundle_sha256: [u8; 32],
-        merge: Option<NativeMerge>,
+        merge: Option<(NativeMerge, MergeCommitStyle)>,
     },
 }
 impl<A: GitHashAlgorithm> WorkflowInputs<A> {
@@ -45,7 +46,19 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
     pub(super) const fn merge(&self) -> Option<&NativeMerge> {
         match self {
             Self::Canonical(_) => None,
-            Self::Candidate { merge, .. } => merge.as_ref(),
+            Self::Candidate { merge, .. } => match merge {
+                Some((m, _)) => Some(m),
+                None => None,
+            },
+        }
+    }
+    pub(super) fn merge_style(&self) -> MergeCommitStyle {
+        match self {
+            Self::Candidate {
+                merge: Some((_, style)),
+                ..
+            } => *style,
+            _ => MergeCommitStyle::TwoParent,
         }
     }
     pub(super) fn coordinates(
@@ -84,10 +97,15 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
                     .map(|id| native(id.digest_bytes()))
                     .collect::<Result<Vec<_>, _>>()?;
                 match merge {
-                    Some(merge)
+                    Some((merge, style))
                         if base == merge.target_tip_before
                             && commit == merge.merge_commit
-                            && parents == [merge.target_tip_before, merge.source_tip] => {}
+                            && match style {
+                                MergeCommitStyle::TwoParent => {
+                                    parents == [merge.target_tip_before, merge.source_tip]
+                                }
+                                MergeCommitStyle::Squash => parents == [merge.target_tip_before],
+                            } => {}
                     None if parents == [base] => {}
                     _ => {
                         return Err(TrustedWorkflowFailure::InvalidInput(
@@ -109,15 +127,27 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
         }
     }
 }
-pub(super) fn merge_json(merge: Option<&NativeMerge>) -> String {
+pub(super) fn merge_json(merge: Option<&NativeMerge>, style: MergeCommitStyle) -> String {
     merge.map_or_else(
         || "null".to_owned(),
         |m| {
+            // Preserve the complete historical two-parent identity byte-for-byte.
+            let parents = match style {
+                MergeCommitStyle::TwoParent => {
+                    format!("\"{}\",\"{}\"", m.target_tip_before, m.source_tip)
+                }
+                MergeCommitStyle::Squash => format!("\"{}\"", m.target_tip_before),
+            };
+            let method = if style == MergeCommitStyle::Squash {
+                "\"method\":\"squash\","
+            } else {
+                ""
+            };
             format!(
                 concat!(
                     "{{\"target_ref_hex\":\"{}\",\"target_tip\":\"{}\",\"source_ref_hex\":\"{}\",",
                     "\"source_tip\":\"{}\",\"merge_base\":\"{}\",\"candidate_commit\":\"{}\",",
-                    "\"parents\":[\"{}\",\"{}\"],\"published\":false,\"approval_created\":false}}"
+                    "{}\"parents\":[{}],\"published\":false,\"approval_created\":false}}"
                 ),
                 hex(m.target_ref.as_bytes()),
                 m.target_tip_before,
@@ -125,8 +155,8 @@ pub(super) fn merge_json(merge: Option<&NativeMerge>) -> String {
                 m.source_tip,
                 m.base_tip,
                 m.merge_commit,
-                m.target_tip_before,
-                m.source_tip
+                method,
+                parents
             )
         },
     )

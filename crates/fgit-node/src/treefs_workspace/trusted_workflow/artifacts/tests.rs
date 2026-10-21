@@ -42,6 +42,7 @@ fn report() -> TrustedWorkflowRun {
         source_reference: b"refs/heads/main".to_vec(),
         candidate: None,
         merge: None,
+        merge_style: Default::default(),
         workflow_blob: GitOid::Sha1(GitOidSha1::from_bytes([6; 20])),
         workflow_path: b"workflow.yml".to_vec(),
         read_prefixes: vec![b"workflow.yml".to_vec()],

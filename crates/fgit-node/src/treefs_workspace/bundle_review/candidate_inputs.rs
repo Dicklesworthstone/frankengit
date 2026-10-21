@@ -5,6 +5,7 @@
 use super::*;
 use crate::ClosureSelectionSource;
 use fgit_crypto::{GitHashAlgorithm as Hash, NativeObjectIdentity};
+use fgit_forge::preparation::MergeCommitStyle;
 use fgit_treefs::{
     BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant, SparseCandidateManifest,
     SparseLimits, TreeCapability, WorkspaceId,
@@ -78,6 +79,43 @@ impl OneNode {
         ),
         BundleInspectionRefusal,
     > {
+        self.sparse_merge_candidate_manifest_with_style_in::<A>(
+            request,
+            merge,
+            input,
+            visibility,
+            expected_head,
+            capability,
+            now,
+            sparse,
+            MergeCommitStyle::TwoParent,
+        )
+        .await
+    }
+
+    /// Select an explicit native parent shape while retaining BOTH authenticated
+    /// source closures and exact prerequisites. Squash has one target parent;
+    /// the incoming source still supplies objects and common-base evidence.
+    /// This does not stage or publish the candidate, or attest merge correctness.
+    pub async fn sparse_merge_candidate_manifest_with_style_in<A: Hash>(
+        &self,
+        request: &NodeRequestContext,
+        merge: &NativeMerge,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        capability: &mut TreeCapability,
+        now: u64,
+        sparse: SparseLimits,
+        style: MergeCommitStyle,
+    ) -> Result<
+        (
+            RepositoryAuthorityHeadId,
+            SparseCandidateManifest<A>,
+            [u8; 32],
+        ),
+        BundleInspectionRefusal,
+    > {
         merge
             .validate()
             .map_err(|_| invalid("invalid merge input coordinates"))?;
@@ -95,7 +133,7 @@ impl OneNode {
             &merge.target_ref,
             merge.target_tip_before,
             merge.merge_commit,
-            Some(merge),
+            Some((merge, style)),
             input,
             visibility,
             expected_head,
@@ -112,7 +150,7 @@ impl OneNode {
         reference: &RefName,
         expected_base: GitOid,
         candidate: GitOid,
-        merge: Option<&NativeMerge>,
+        merge: Option<(&NativeMerge, MergeCommitStyle)>,
         input: &[u8],
         visibility: &RefVisibility,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -147,7 +185,7 @@ impl OneNode {
         envelope
             .bind(self.object_format, reference, expected_base, candidate)
             .map_err(|e| BundleInspectionRefusal::Envelope(Box::new(e)))?;
-        if merge.is_some_and(|m| {
+        if merge.is_some_and(|(m, _)| {
             envelope.prerequisites.len() != 2 || !envelope.prerequisites.contains(&m.source_tip)
         }) {
             return Err(invalid(
@@ -156,7 +194,7 @@ impl OneNode {
         }
         admits_read(self.cell_state(), ReadMode::Current).map_err(BundleInspectionRefusal::Cell)?;
         let mut selections = vec![(reference, expected_base)];
-        if let Some(m) = merge {
+        if let Some((m, _)) = merge {
             selections.push((&m.source_ref, m.source_tip));
         }
         if selections
@@ -266,7 +304,12 @@ impl OneNode {
             },
         };
         let verified = match merge {
-            Some(m) => validate_merge_objects(&source, m, limits, &mut || original.live().is_ok()),
+            Some((m, MergeCommitStyle::TwoParent)) => {
+                validate_merge_objects(&source, m, limits, &mut || original.live().is_ok())
+            }
+            Some((m, MergeCommitStyle::Squash)) => {
+                validate_squash_objects(&source, m, limits, &mut || original.live().is_ok())
+            }
             None => {
                 validate_workspace_objects(&source, candidate, expected_base, limits, &mut || {
                     original.live().is_ok()
@@ -295,7 +338,7 @@ impl OneNode {
             workspace: capability.workspace_id(),
         };
         let manifest = match merge {
-            Some(m) => SparseCandidateManifest::build_merge(
+            Some((m, MergeCommitStyle::TwoParent)) => SparseCandidateManifest::build_merge(
                 &base_view,
                 &tree_source,
                 typed(candidate)?,
@@ -305,7 +348,7 @@ impl OneNode {
                 source.parse_limits.clone(),
                 sparse,
             ),
-            None => SparseCandidateManifest::build(
+            None | Some((_, MergeCommitStyle::Squash)) => SparseCandidateManifest::build(
                 &base_view,
                 &tree_source,
                 typed(candidate)?,

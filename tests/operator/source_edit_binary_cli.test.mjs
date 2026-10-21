@@ -87,7 +87,7 @@ test('opt-in does not rewrite text-only patch bytes or legacy receipt fields', a
   assert.deepEqual(ar, br);
 });
 test('unknown or repeated binary profiles and credential flags never create output', async t => {
-  for (const extra of [['--binary', 'auto'], ['--binary', 'delta'], ['--binary', 'true'], ['--binary', 'Literal'],
+  for (const extra of [['--binary', 'auto'], ['--binary', 'delta-v2'], ['--binary', 'true'], ['--binary', 'Literal'],
     ['--binary'], ['--binary', 'literal', '--binary', 'literal'], ['--binary', 'literal', '--token-file', '/not/read']]) {
     const f = await fixture(t); assert.equal((await run([...f.base, ...extra])).code, 2);
     await assert.rejects(readFile(f.output), { code: 'ENOENT' });

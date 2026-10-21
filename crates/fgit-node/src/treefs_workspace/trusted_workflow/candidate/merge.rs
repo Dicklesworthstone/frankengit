@@ -1,5 +1,6 @@
 //! Explicit trusted execution of the actual reviewed merge result.
 use super::*;
+use fgit_forge::preparation::MergeCommitStyle;
 
 impl OneNode {
     /// Run checks on a two-parent candidate WITHOUT publishing it or creating a
@@ -58,6 +59,41 @@ impl OneNode {
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
+        self.run_trusted_merge_workflow_with_options_in(
+            request,
+            merge,
+            bundle,
+            workflow_path,
+            run_id,
+            parent,
+            read_prefixes,
+            expected_head,
+            limits,
+            artifacts,
+            MergeCommitStyle::TwoParent,
+        )
+        .await
+    }
+
+    /// Execute an explicitly selected squash or two-parent candidate. The method
+    /// is verified before any attempt is reserved; it is never guessed from a
+    /// rejected bundle. Squash keeps both branch/base pins and input closures,
+    /// and records its actual single parent in the journal and artifact provenance.
+    /// Existing entry points retain their strict two-parent contract and bytes.
+    pub async fn run_trusted_merge_workflow_with_options_in(
+        &self,
+        request: &NodeRequestContext,
+        merge: &NativeMerge,
+        bundle: &[u8],
+        workflow_path: &[u8],
+        run_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+        style: MergeCommitStyle,
+    ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
         if artifacts.is_some_and(|config| {
             config
                 .selections()
@@ -87,6 +123,7 @@ impl OneNode {
                     limits,
                     started,
                     artifacts,
+                    style,
                 )
                 .await
             }
@@ -103,6 +140,7 @@ impl OneNode {
                     limits,
                     started,
                     artifacts,
+                    style,
                 )
                 .await
             }
@@ -122,6 +160,7 @@ impl OneNode {
         limits: WorkflowLimits,
         started: Instant,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
+        style: MergeCommitStyle,
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("merge workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -138,7 +177,7 @@ impl OneNode {
         .with_fetch_budget(bytes)
         .with_file_budget(FETCH_OBJECTS);
         let (head, manifest, bundle_sha256) = self
-            .sparse_merge_candidate_manifest_in::<A>(
+            .sparse_merge_candidate_manifest_with_style_in::<A>(
                 request,
                 merge,
                 bundle,
@@ -147,6 +186,7 @@ impl OneNode {
                 &mut capability,
                 0,
                 SOURCE_LIMITS,
+                style,
             )
             .await
             .map_err(|error| TrustedWorkflowFailure::Candidate(Box::new(error)))?;
@@ -164,7 +204,7 @@ impl OneNode {
             WorkflowInputs::Candidate {
                 manifest: Arc::new(manifest),
                 bundle_sha256,
-                merge: Some(merge.clone()),
+                merge: Some((merge.clone(), style)),
             },
             &capability,
             head,

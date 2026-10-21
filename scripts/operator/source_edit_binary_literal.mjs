@@ -1,17 +1,19 @@
-// Deterministic Git literal members. Stored DEFLATE blocks need no compression
-// engine, subprocess or native library. Not a decoder, delta selector or packer.
+// Deterministic Git binary members. Stored DEFLATE blocks need no compression
+// engine, subprocess or native library. Delta selection belongs to its caller.
 import { fail, integer } from './source_edit_wire.mjs';
 const MAX_FILE_BYTES = 1048576, BLOCK_BYTES = 65535, ROW_BYTES = 52;
 const BASE85 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~';
 
 // Exact wire/record cost before allocating a framed body. Include the empty
 // stored block, zlib header, Adler-32, length prefixes, padding and blank line.
-export function binaryLiteralCost(length) {
+export function binaryLiteralCost(length) { return binaryMemberCost('literal', length); }
+export function binaryMemberCost(kind, length) {
+  if (!['literal', 'delta'].includes(kind)) fail('source_replacement_binary_kind');
   integer(length, 0, MAX_FILE_BYTES);
   const framed = length + 6 + 5 * Math.max(1, Math.ceil(length / BLOCK_BYTES));
   const full = Math.floor(framed / ROW_BYTES), tail = framed % ROW_BYTES;
   return { framed_bytes: framed,
-    bytes: 9 + String(length).length + full * 67 + (tail ? 2 + Math.ceil(tail / 4) * 5 : 0) + 1,
+    bytes: kind.length + 2 + String(length).length + full * 67 + (tail ? 2 + Math.ceil(tail / 4) * 5 : 0) + 1,
     records: 2 + Math.ceil(framed / ROW_BYTES) };
 }
 function frame(bytes, check) {
@@ -35,10 +37,14 @@ function frame(bytes, check) {
 // Caller reserves BOTH complete members against the shared patch budget first.
 // Each emitted value is exactly one ASCII line, including its terminating LF.
 export function emitBinaryLiteral(bytes, put, check) {
+  return emitBinaryMember('literal', bytes, put, check);
+}
+export function emitBinaryMember(kind, bytes, put, check) {
+  if (!['literal', 'delta'].includes(kind)) fail('source_replacement_binary_kind');
   if (!Buffer.isBuffer(bytes) || bytes.length > MAX_FILE_BYTES ||
       typeof put !== 'function' || typeof check !== 'function') fail('source_replacement_binary_input');
   check(); const encoded = frame(bytes, check);
-  put(`literal ${bytes.length}\n`);
+  put(`${kind} ${bytes.length}\n`);
   for (let start = 0; start < encoded.length; start += ROW_BYTES) {
     check(); const length = Math.min(ROW_BYTES, encoded.length - start), end = start + length;
     let line = String.fromCharCode(length <= 26 ? 64 + length : 70 + length);

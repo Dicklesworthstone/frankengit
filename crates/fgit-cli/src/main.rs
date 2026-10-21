@@ -132,34 +132,57 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
     {
         match arguments.get(1).map(String::as_str) {
             Some("maintain") => {
-                return fgit_node::source_retrieval::index_maintain::run_cli(&arguments[2..]);
+                return fgit_node::source_retrieval::index_maintain::run_cli_with_timeout(
+                    &arguments[2..],
+                    fgit_cli::command_timeout_override_duration(),
+                );
             }
             Some("scope") => {
-                return fgit_node::source_retrieval::index_scope::run_cli(&arguments[2..]);
+                return fgit_node::source_retrieval::index_scope::run_cli_with_timeout(
+                    &arguments[2..],
+                    fgit_cli::command_timeout_override_duration(),
+                );
             }
             Some("symbols") => {
-                return fgit_node::source_retrieval::symbol_index::run_cli(&arguments[2..]);
+                return fgit_node::source_retrieval::symbol_index::run_cli_with_timeout(
+                    &arguments[2..],
+                    fgit_cli::command_timeout_override_duration(),
+                );
             }
-            _ => return fgit_node::source_retrieval::index_cli::run_cli(&arguments[1..]),
+            _ => {
+                return fgit_node::source_retrieval::index_cli::run_cli_with_timeout(
+                    &arguments[1..],
+                    fgit_cli::command_timeout_override_duration(),
+                );
+            }
         }
     }
     if arguments
         .first()
         .is_some_and(|argument| argument == "index-maintain")
     {
-        return fgit_node::source_retrieval::index_maintain::run_cli(&arguments[1..]);
+        return fgit_node::source_retrieval::index_maintain::run_cli_with_timeout(
+            &arguments[1..],
+            fgit_cli::command_timeout_override_duration(),
+        );
     }
     if arguments
         .first()
         .is_some_and(|argument| argument == "index-scope")
     {
-        return fgit_node::source_retrieval::index_scope::run_cli(&arguments[1..]);
+        return fgit_node::source_retrieval::index_scope::run_cli_with_timeout(
+            &arguments[1..],
+            fgit_cli::command_timeout_override_duration(),
+        );
     }
     if arguments
         .first()
         .is_some_and(|argument| argument == "symbol-index")
     {
-        return fgit_node::source_retrieval::symbol_index::run_cli(&arguments[1..]);
+        return fgit_node::source_retrieval::symbol_index::run_cli_with_timeout(
+            &arguments[1..],
+            fgit_cli::command_timeout_override_duration(),
+        );
     }
     if arguments
         .first()

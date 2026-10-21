@@ -39,7 +39,7 @@ supported. Workflow scripts AND copied inputs come from the candidate, not the
 base. Review and trust those candidate scripts before invoking. The bundle is
 validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
-For explicit two-parent merge inputs: fg workflow run-merge-candidate --help.
+For explicit merge-commit or squash inputs: fg workflow run-merge-candidate --help.
 For event-matched directory dispatch: fg workflow dispatch --help.
 For canonical ref-change polling: fg workflow watch --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
@@ -420,7 +420,13 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> Result<u8, String> {
+fn execute(
+    options: Options,
+    merge: Option<(
+        fgit_forge::event::NativeMerge,
+        fgit_forge::preparation::MergeCommitStyle,
+    )>,
+) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
     let artifact_config = options
         .artifacts
@@ -459,9 +465,9 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
             .map_err(|e| e.to_string())?;
         let (result, cleanup) = with_signal_request(&node, signals, |request| {
             match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
-                (Some(merge), Some(_), Some(bytes)) => {
+                (Some((merge, style)), Some(_), Some(bytes)) => {
                     node.runtime()
-                        .block_on(node.run_trusted_merge_workflow_with_artifacts_in(
+                        .block_on(node.run_trusted_merge_workflow_with_options_in(
                             request,
                             merge,
                             bytes,
@@ -472,6 +478,7 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
                             options.head,
                             Default::default(),
                             artifact_config.as_ref(),
+                            *style,
                         ))
                 }
                 (None, Some(candidate), Some(bytes)) => {
