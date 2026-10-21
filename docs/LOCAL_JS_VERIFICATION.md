@@ -38,6 +38,16 @@ is not hostile-code isolation. A successful leader that leaves descendants fails
 the profile. Cleanup kills those descendants and waits at most five seconds for
 group quiescence; failure to establish it remains a containment failure. The
 campaign deadline is also checked against a monotonic clock at child closure.
+Initialization installs cancellation handling before acquiring subprocess or
+temporary-directory responsibility. Source metadata uses `/usr/bin/git` through
+the existing native-process owner, with a five-second execution bound and its
+separate drain bound. Git configuration and environment are isolated for those
+read-only calls; cancellation stays latched across the test-process handoff.
+Each test process starts a fresh Node test-runner context. An inherited internal
+`NODE_TEST_CONTEXT` is removed so invoking the profile from a test cannot turn
+the inner corpus into Node's recursive-run warning and an empty success.
+The behavior is defined by Node 26.8.1's
+[recursive-run check](https://github.com/nodejs/node/blob/v26.8.1/lib/internal/test_runner/runner.js#L1057).
 
 Patch encoder tests retain ordinary worktree application, byte/mode assertions,
 and reverse application. Arbitrary non-UTF-8 filename cases use independently
