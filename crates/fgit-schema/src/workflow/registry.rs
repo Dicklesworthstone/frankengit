@@ -166,6 +166,16 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "workspace-relative directory; leading dot slash is normalized and dot selects the root; parent traversal, absolute paths, expressions and symlink traversal refuse",
     },
     Construct {
+        key: "trigger.branches",
+        status: ConstructStatus::Accepted,
+        reason: "ordered bounded literal, *, ** and leading ! patterns match push source or canonical PR target branches; other pattern operators refuse",
+    },
+    Construct {
+        key: "trigger.branches-ignore",
+        status: ConstructStatus::Accepted,
+        reason: "bounded exclusion-only branch patterns; mutually exclusive with branches and never a passing check",
+    },
+    Construct {
         key: "workflow.concurrency",
         status: ConstructStatus::Unsupported,
         reason: "a concurrency group cancels in-flight runs, and cancellation semantics are request-drain-finalize rather than a YAML string",
@@ -188,7 +198,7 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "workflow.on",
         status: ConstructStatus::Accepted,
-        reason: "accepted as a scalar or a sequence of trigger names, normalized to a sorted deduplicated list",
+        reason: "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch filters and explicitly empty event scalars",
     },
     Construct {
         key: "workflow.secrets",

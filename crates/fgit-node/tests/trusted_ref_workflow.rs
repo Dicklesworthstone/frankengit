@@ -378,3 +378,95 @@ mod check_reporting;
 
 #[path = "trusted_ref_workflow/pull_requests.rs"]
 mod pull_requests;
+
+#[test]
+fn branch_filters_execute_matching_pushes_once_and_retain_exact_selection() {
+    for fmt in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for (on, execute) in [
+            ("\n  push:\n    branches:\n      - 'ma*'", true),
+            ("\n  push:\n    branches:\n      - 'topic/**'", false),
+            (
+                "\n  push:\n    branches:\n      - '**'\n      - '!main'",
+                false,
+            ),
+            (
+                "\n  push:\n    branches:\n      - '**'\n      - '!main'\n      - main",
+                true,
+            ),
+            ("\n  push:\n    branches-ignore:\n      - main", false),
+            (
+                "\n  push:\n    branches-ignore:\n      - 'archive/**'",
+                true,
+            ),
+        ] {
+            let mut f = Fixture::new(fmt, on, "true");
+            let first = poll!(f).unwrap();
+            assert_eq!(first.dispatch().unwrap().runs().len(), usize::from(execute));
+            assert_eq!(f.count(), if execute { "x" } else { "" });
+            assert!(
+                first
+                    .dispatch()
+                    .unwrap()
+                    .to_json()
+                    .contains("\"trigger_ref_hex\":\"726566732f68656164732f6d61696e\"")
+            );
+            f.reopen();
+            assert_eq!(poll!(f).unwrap().state(), "previously_settled");
+            assert_eq!(f.count(), if execute { "x" } else { "" });
+        }
+    }
+}
+#[test]
+fn filtered_pr_dispatch_without_canonical_target_refuses_before_batch_or_script() {
+    for fmt in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(
+            fmt,
+            "\n  pull_request:\n    branches:\n      - main",
+            "true",
+        );
+        let n = f.node();
+        let request = n.command_request_context(None);
+        let state = n
+            .runtime()
+            .block_on(n.materialize_admission_in(&request))
+            .unwrap();
+        let result = n.runtime().block_on(n.dispatch_trusted_workflows_in(
+            &request,
+            &reference(),
+            b"ci",
+            "pull_request",
+            [0x72; 16],
+            &f.parent(),
+            &[b"ci".to_vec()],
+            (state.basis().id(), f.tip),
+            WorkflowLimits::default(),
+        ));
+        assert!(result.unwrap_err().to_string().contains("canonical target"));
+        assert_eq!(f.count(), "");
+        assert_eq!(fs::read_dir(f.parent()).unwrap().count(), 0);
+        // Near-identical unfiltered PR declarations retain explicit dispatch.
+        let g = Fixture::new(fmt, "pull_request", "true");
+        let n = g.node();
+        let request = n.command_request_context(None);
+        let state = n
+            .runtime()
+            .block_on(n.materialize_admission_in(&request))
+            .unwrap();
+        let report = n
+            .runtime()
+            .block_on(n.dispatch_trusted_workflows_in(
+                &request,
+                &reference(),
+                b"ci",
+                "pull_request",
+                [0x73; 16],
+                &g.parent(),
+                &[b"ci".to_vec()],
+                (state.basis().id(), g.tip),
+                WorkflowLimits::default(),
+            ))
+            .unwrap();
+        assert!(report.succeeded());
+        assert_eq!(g.count(), "x");
+    }
+}

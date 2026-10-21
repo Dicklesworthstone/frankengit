@@ -36,9 +36,14 @@ pub const MATRIX_CANONICAL_VERSION: &str = "fgit-workflow/v3";
 /// Explicit job or step deadlines bind caps in addition to context and matrices.
 pub const DEADLINE_CANONICAL_VERSION: &str = "fgit-workflow/v4";
 
+/// Ordered branch filters are committed execution-selection inputs.
+pub const TRIGGER_CANONICAL_VERSION: &str = "fgit-workflow/v5";
+
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Trigger {
+    /// Optional ordered branch filter.
+    pub branch_filter: Option<super::triggers::BranchFilter>,
     /// Trigger name as written.
     pub name: String,
     /// Where it came from.
@@ -171,7 +176,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_deadlines() {
+        let version = if self.has_branch_filters() {
+            TRIGGER_CANONICAL_VERSION
+        } else if self.has_deadlines() {
             DEADLINE_CANONICAL_VERSION
         } else if self.jobs.iter().any(|job| job.matrix.is_some()) {
             MATRIX_CANONICAL_VERSION
@@ -184,6 +191,16 @@ impl WorkflowGraph {
         lines.push(format!("name\t{}", escape(&self.name)));
         for trigger in &self.triggers {
             lines.push(format!("trigger\t{}", escape(&trigger.name)));
+            if let Some(filter) = &trigger.branch_filter {
+                for pattern in filter.patterns() {
+                    lines.push(format!(
+                        "trigger-branch\t{}\t{}\t{}",
+                        escape(&trigger.name),
+                        filter.field(),
+                        escape(pattern)
+                    ));
+                }
+            }
         }
         for job in &self.jobs {
             lines.push(format!(
@@ -548,14 +565,7 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
     let on = document
         .get("on")
         .ok_or(WorkflowRefusal::FieldMissing { path: "on", span })?;
-    let mut triggers: Vec<Trigger> = scalar_or_sequence(on, "on")?
-        .into_iter()
-        .map(|(name, span)| Trigger { name, span })
-        .collect();
-    // Sorted and deduplicated by name. The span kept is the first occurrence's,
-    // which is the one an author would edit.
-    triggers.sort_by(|left, right| left.name.cmp(&right.name));
-    triggers.dedup_by(|left, right| left.name == right.name);
+    let triggers = super::triggers::lower(on)?;
 
     let jobs_node = document
         .get("jobs")

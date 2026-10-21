@@ -154,6 +154,38 @@ impl OneNode {
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
+        self.dispatch_trusted_workflows_with_trigger_branch_in(
+            request,
+            reference,
+            directory,
+            event,
+            run_id,
+            parent,
+            read_prefixes,
+            expected,
+            limits,
+            artifacts,
+            None,
+        )
+        .await
+    }
+
+    // Only the canonical PR watcher supplies a target. Explicit local PR
+    // dispatch has no authenticated target and refuses branch-filtered graphs.
+    pub(super) async fn dispatch_trusted_workflows_with_trigger_branch_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        directory: &[u8],
+        event: &str,
+        run_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        expected: (RepositoryAuthorityHeadId, GitOid),
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+        pull_target: Option<&RefName>,
+    ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         if !event_supported(event) {
             return Err(TrustedWorkflowFailure::InvalidInput(
                 "unsupported dispatch event",
@@ -164,18 +196,43 @@ impl OneNode {
             .map_err(TrustedWorkflowFailure::Workflow)?;
         let paths = validate_inputs(directory, run_id, parent, read_prefixes)?;
         let started = Instant::now();
+        let trigger_reference = match event {
+            "push" => Some(reference),
+            "pull_request" => pull_target,
+            _ => None,
+        };
         match self.object_format {
             Format::Sha1 => {
                 self.dispatch_workflow_format::<Sha1>(
-                    request, reference, directory, event, run_id, parent, paths, expected, limits,
-                    started, artifacts,
+                    request,
+                    reference,
+                    directory,
+                    event,
+                    run_id,
+                    parent,
+                    paths,
+                    expected,
+                    limits,
+                    started,
+                    artifacts,
+                    trigger_reference,
                 )
                 .await
             }
             Format::Sha256 => {
                 self.dispatch_workflow_format::<Sha256>(
-                    request, reference, directory, event, run_id, parent, paths, expected, limits,
-                    started, artifacts,
+                    request,
+                    reference,
+                    directory,
+                    event,
+                    run_id,
+                    parent,
+                    paths,
+                    expected,
+                    limits,
+                    started,
+                    artifacts,
+                    trigger_reference,
                 )
                 .await
             }
@@ -195,6 +252,7 @@ impl OneNode {
         limits: WorkflowLimits,
         started: Instant,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
+        trigger_reference: Option<&RefName>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -239,8 +297,21 @@ impl OneNode {
                                 })?,
                         );
                         dispatch_at(
-                            self, request, manifest, capability, head, reference, directory, event,
-                            run_id, parent, &declared, limits, started, artifacts,
+                            self,
+                            request,
+                            manifest,
+                            capability,
+                            head,
+                            reference,
+                            directory,
+                            event,
+                            run_id,
+                            parent,
+                            &declared,
+                            limits,
+                            started,
+                            artifacts,
+                            trigger_reference,
                         )
                     })();
                     *observed
@@ -286,6 +357,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     limits: WorkflowLimits,
     started: Instant,
     artifacts: Option<&TrustedWorkflowArtifactConfig>,
+    trigger_reference: Option<&RefName>,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
@@ -303,6 +375,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     let mut definitions = Vec::new();
     let mut ids = BTreeSet::new();
     let (mut source_bytes, mut jobs, mut steps) = (0usize, 0usize, 0usize);
+    let mut branch_filtered = false;
     for entry in entries {
         if !live() {
             return Err(invalid("dispatch stopped during definition preflight"));
@@ -318,11 +391,21 @@ fn dispatch_at<A: GitHashAlgorithm>(
             std::str::from_utf8(body).map_err(|_| invalid("workflow is not UTF-8"))?,
         )
         .map_err(TrustedWorkflowFailure::Workflow)?;
-        let selected = plan
+        branch_filtered |= plan
             .graph()
             .triggers
             .iter()
-            .any(|trigger| trigger.name == event);
+            .any(|trigger| trigger.name == event && trigger.branch_filter.is_some());
+        let selected = plan.graph().selects_event(
+            event, trigger_reference.map(RefName::as_bytes), &|| !live(),
+        ).map_err(|error| match error {
+            fgit_runner::workflow::TriggerSelectionError::MissingBranchReference =>
+                invalid("filtered pull_request dispatch requires a canonical target; use workflow watch --pull-request"),
+            fgit_runner::workflow::TriggerSelectionError::ReferenceTooLong =>
+                invalid("workflow trigger reference exceeds profile"),
+            fgit_runner::workflow::TriggerSelectionError::Cancelled =>
+                invalid("dispatch stopped during branch selection"),
+        })?;
         if let Some(config) = artifacts {
             config.validate_workflow(entry.path().as_bytes(), &plan)?;
             if !selected
@@ -442,6 +525,14 @@ fn dispatch_at<A: GitHashAlgorithm>(
         limits.run_timeout.as_millis(),
         limits.total_output_bytes,
     );
+    if branch_filtered {
+        let selected_ref = trigger_reference.ok_or_else(|| invalid("missing trigger branch"))?;
+        identity.push_str(&format!(
+            ",\"trigger_ref_hex\":\"{}\"",
+            hex(selected_ref.as_bytes())
+        ));
+    }
+
     if let Some(config) = artifacts {
         identity.push_str(&format!(",\"artifact_contract\":{}", config.to_json()));
     }

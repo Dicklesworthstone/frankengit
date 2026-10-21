@@ -31,6 +31,7 @@ pub mod deadline;
 pub mod graph;
 pub mod matrix;
 pub mod registry;
+pub mod triggers;
 pub mod yaml;
 
 pub use context::{ContextRefusal, StepContext};

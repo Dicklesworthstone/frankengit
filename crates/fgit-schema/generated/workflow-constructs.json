@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/workflow-constructs.json",
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
-  "count_accepted": 12,
+  "count_accepted": 14,
   "count_normalized": 10,
   "count_unsupported": 19,
   "count_ambiguous": 0,
@@ -129,6 +129,18 @@
       "reason": "workspace-relative directory; leading dot slash is normalized and dot selects the root; parent traversal, absolute paths, expressions and symlink traversal refuse"
     },
     {
+      "key": "trigger.branches",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "ordered bounded literal, *, ** and leading ! patterns match push source or canonical PR target branches; other pattern operators refuse"
+    },
+    {
+      "key": "trigger.branches-ignore",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "bounded exclusion-only branch patterns; mutually exclusive with branches and never a passing check"
+    },
+    {
       "key": "workflow.concurrency",
       "status": "unsupported",
       "refuses": true,
@@ -156,7 +168,7 @@
       "key": "workflow.on",
       "status": "accepted",
       "refuses": false,
-      "reason": "accepted as a scalar or a sequence of trigger names, normalized to a sorted deduplicated list"
+      "reason": "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch filters and explicitly empty event scalars"
     },
     {
       "key": "workflow.secrets",

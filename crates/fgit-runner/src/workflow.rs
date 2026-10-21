@@ -6,6 +6,7 @@
 //! This is not a hostile-code sandbox or an authoritative green-check issuer.
 
 use crate::Commitment;
+pub use fgit_schema::workflow::triggers::TriggerSelectionError;
 use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
 pub use fgit_schema::workflow::{Job as WorkflowJob, StepContext};
 use std::cell::Cell;
