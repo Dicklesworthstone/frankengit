@@ -285,3 +285,6 @@ fn merge_timeout_retains_provenance_and_workspace_and_stops_later_jobs() {
     assert_eq!(generation(f.node()), before);
     assert!(f.node().read_git_object(merge.merge_commit).is_err());
 }
+
+#[path = "trusted_merge_workflow/squash.rs"]
+mod squash;

@@ -98,6 +98,8 @@ pub struct TrustedWorkflowRun {
     /// Both branch selections and native ancestry checked before merge execution.
     /// This is not a PR-version attestation or authorization to publish.
     pub merge: Option<fgit_forge::event::NativeMerge>,
+    /// Verified parent shape for `merge`; ignored for non-merge runs.
+    pub merge_style: fgit_forge::preparation::MergeCommitStyle,
     pub workflow_blob: GitOid,
     pub workflow_path: Vec<u8>,
     pub read_prefixes: Vec<Vec<u8>>,
@@ -165,7 +167,7 @@ impl TrustedWorkflowRun {
             self.executed_commit(),
             self.executed_tree(),
             candidate,
-            candidate::merge_json(self.merge.as_ref())
+            candidate::merge_json(self.merge.as_ref(), self.merge_style)
         );
         if let Some(contract) = &self.artifact_contract {
             identity.push_str(&format!(",\"artifact_contract\":{}", contract.to_json()));
@@ -604,6 +606,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         source_tree,
         candidate,
         merge: inputs.merge().cloned(),
+        merge_style: inputs.merge_style(),
         source_reference: reference.as_bytes().to_vec(),
         workflow_blob: native(entry.source_oid().digest_bytes())?,
         workflow_path: workflow_path.to_vec(),
