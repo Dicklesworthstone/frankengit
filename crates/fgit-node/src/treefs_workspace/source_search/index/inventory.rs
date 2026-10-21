@@ -158,7 +158,6 @@ impl LocalSearch for InventoryRequest {
 }
 
 // Full refresh keeps its existing, unscoped coverage and call contract.
-#[expect(clippy::too_many_arguments, reason = "shared native inventory inputs")]
 fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
     base: &BaseView<A>,
     source: &S,
@@ -184,10 +183,6 @@ fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one capability and one shared discovery budget span recursive tree traversal"
-)]
 fn discover_selected<A: GitHashAlgorithm, S: ObjectSource<A>>(
     prefixes: &[TreePath],
     base: &BaseView<A>,

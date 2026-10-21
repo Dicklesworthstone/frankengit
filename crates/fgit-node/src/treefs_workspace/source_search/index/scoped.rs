@@ -12,10 +12,6 @@ impl OneNode {
     /// Separate scope identity prevents replacement of an unscoped index.
     /// None requires an uninitialized scoped head; a rebuild requires its exact
     /// predecessor. Source pins and finite build budgets retain their meaning.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "explicit coverage, source pins and predecessor"
-    )]
     pub async fn build_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,
@@ -49,10 +45,6 @@ impl OneNode {
     /// local callback must be bounded; it is not a remote authorization grant.
     /// After Ok, interruptions require original-candidate recovery, even when
     /// cancellation or a backend refusal happens before the root write.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "write-ahead barrier is independent of source pins and build budgets"
-    )]
     pub async fn build_scoped_source_index_guarded_local_in(
         &self,
         request: &NodeRequestContext,
@@ -157,10 +149,6 @@ impl OneNode {
     /// and visibility. An old generation is usable only when it describes that
     /// same exact source head/commit/RCR/forge position. No rebuild, old-source
     /// fallback, substring scan, arbitrary object read or repository write.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, index pins, pagination and independent resource budgets are distinct contracts"
-    )]
     pub async fn search_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,

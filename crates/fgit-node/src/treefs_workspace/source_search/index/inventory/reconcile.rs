@@ -77,10 +77,6 @@ impl OneNode {
     /// guarded native builders; neither can publish before the callback returns
     /// Ok. Source/index pins, minimum checkpoints, and cancellation retain the
     /// unguarded entrypoint's semantics. No callback follows confirmed success.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "publication barrier is separate from source selection and maintenance budgets"
-    )]
     pub async fn reconcile_source_index_guarded_local_in(
         &self,
         request: &NodeRequestContext,

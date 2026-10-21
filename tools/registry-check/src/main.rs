@@ -2289,7 +2289,10 @@ fn find_forbidden_lint_relaxation(text: &str) -> Option<String> {
         };
         let attribute = &attribute[..=close];
         remaining = &remaining[open + close + 1..];
-        if !attribute.contains("allow") {
+        // `expect(` relaxes a lint exactly as `allow(` does; only the workspace lint
+        // table may widen a lint (x2mv.4.15). `should_panic(expected = ...)` has no
+        // `expect(` and stays out of scope.
+        if !attribute.contains("allow") && !attribute.contains("expect(") {
             continue;
         }
         if attribute.contains("unsafe_code") {
@@ -6378,6 +6381,9 @@ impl CanonicalBody for EvidenceRecordBody {
             ("placeholders", "placeholder `unreachable!(\"TODO…\")`"),
             ("cfg_test_only", "contains only cfg(test)-gated behavior"),
             ("lint_relaxation", "clippy::too_many_arguments"),
+            // `#[expect(...)]` relaxes a lint as surely as `#[allow(...)]`; a reason string
+            // and a multi-line layout do not make it a workspace lint (x2mv.4.15).
+            ("lint_relaxation_expect", "clippy::manual_async_fn"),
         ] {
             let workspace = fixture_workspace_in("crate_graph", fixture);
             let mut report = Report::new();

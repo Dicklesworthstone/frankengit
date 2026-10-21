@@ -472,213 +472,200 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         self.workspace_live()
     }
 
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "explicit Send is the resolution contract"
-    )]
-    fn resolve_merge_basis_async<'a>(
+    async fn resolve_merge_basis_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a Cx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
-        async move {
-            if authenticated
-                .body()
-                .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid))?
-                != *basis.body()
-            {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::AuthorityReceiptStale,
-                ));
-            }
-            let prepared = self
-                .inner
-                .prepared
-                .lock()
-                .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
-                .take()
-                .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
-            if prepared.basis != *basis {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::AuthorityReceiptStale,
-                ));
-            }
-            let delivery =
-                fgit_admission::merge::native::delivery::read_in(authority, cx, basis, &|| {
-                    self.merge_checkpoint(cx).is_err()
-                })
-                .await
-                .map_err(|error| {
-                    async_projection_unavailable(crate::AdmissionMaterializationRefusal::Delivery(
-                        Box::new(error),
-                    ))
-                })?;
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            Ok(NativeMergeBasis {
-                refs: prepared.ref_state,
-                root_layout: prepared.root_layout,
-                forge: delivery.forge,
-                outbox: delivery.outbox,
-            })
+    ) -> Result<NativeMergeBasis, ProjectionFailure> {
+        if authenticated
+            .body()
+            .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid))?
+            != *basis.body()
+        {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
         }
+        let prepared = self
+            .inner
+            .prepared
+            .lock()
+            .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
+            .take()
+            .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+        if prepared.basis != *basis {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
+        }
+        let delivery =
+            fgit_admission::merge::native::delivery::read_in(authority, cx, basis, &|| {
+                self.merge_checkpoint(cx).is_err()
+            })
+            .await
+            .map_err(|error| {
+                async_projection_unavailable(crate::AdmissionMaterializationRefusal::Delivery(
+                    Box::new(error),
+                ))
+            })?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(NativeMergeBasis {
+            refs: prepared.ref_state,
+            root_layout: prepared.root_layout,
+            forge: delivery.forge,
+            outbox: delivery.outbox,
+        })
     }
 
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "explicit Send is the native validator's cross-thread contract"
-    )]
-    fn validate_merge_async<'a>(
+    async fn validate_merge_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a Cx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
-    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
-        async move {
-            let selected = self
-                .inner
-                .materializer
-                .materialize_exact_in(
-                    authority,
-                    cx,
-                    self.node.repository_id,
-                    basis,
-                    authenticated,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-                .map_err(async_projection_unavailable)?;
-            let merge = intent
-                .merge()
-                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
-            if [merge.source_tip, merge.target_tip_before, merge.base_tip]
-                .iter()
-                .any(|oid| {
-                    !selected
-                        .selected_closure()
-                        .closure()
-                        .objects()
-                        .contains(oid)
-                })
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        let selected = self
+            .inner
+            .materializer
+            .materialize_exact_in(
+                authority,
+                cx,
+                self.node.repository_id,
+                basis,
+                authenticated,
+                &|| self.merge_checkpoint(cx).is_err(),
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        let merge = intent
+            .merge()
+            .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
+        if [merge.source_tip, merge.target_tip_before, merge.base_tip]
+            .iter()
+            .any(|oid| {
+                !selected
+                    .selected_closure()
+                    .closure()
+                    .objects()
+                    .contains(oid)
+            })
+        {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete,
+            ));
+        }
+        // Finish all synchronous object reads before awaiting policy:
+        // neither the reader nor its thread-local budget cell may cross
+        // an asynchronous authority operation.
+        let closure = {
+            let exhaustion = Cell::new(None);
+            let source = VerifiedFabricPackSource {
+                fabric: &self.node.fabric,
+                object_format: self.node.object_format,
+                maximum_object_bytes: self
+                    .object_limits
+                    .max_object_bytes
+                    .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
+                database_context: cx,
+                database_exhaustion: &exhaustion,
+                session_is_live: None,
+            };
+            let mut live = || match checkpoint_pack_context(cx) {
+                PackContextCheckpoint::Live => true,
+                PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                    if let Some(dimension) = budget_exhaustion {
+                        exhaustion.set(Some(dimension));
+                    }
+                    false
+                }
+            };
+            let result = match intent.method() {
+                NativeMergeMethod::MergeCommit => {
+                    validate_merge_objects(&source, merge, self.object_limits, &mut live)
+                }
+                NativeMergeMethod::FastForwardOnly => {
+                    validate_fast_forward_objects(&source, merge, self.object_limits, &mut live)
+                }
+                NativeMergeMethod::Squash => {
+                    validate_squash_objects(&source, merge, self.object_limits, &mut live)
+                }
+            };
+            if exhaustion.get().is_some() {
+                return Err(ProjectionFailure::Unavailable(
+                    RefusalCode::ResourceBudgetExceeded,
+                ));
+            }
+            let closure = result?;
+            if intent.method() == NativeMergeMethod::FastForwardOnly
+                && !closure
+                    .objects
+                    .is_subset(selected.selected_closure().closure().objects())
             {
+                // A fast-forward cannot admit merely staged dependencies.
                 return Err(ProjectionFailure::Refuse(
                     RefusalCode::ObjectClosureIncomplete,
                 ));
             }
-            // Finish all synchronous object reads before awaiting policy:
-            // neither the reader nor its thread-local budget cell may cross
-            // an asynchronous authority operation.
-            let closure = {
-                let exhaustion = Cell::new(None);
-                let source = VerifiedFabricPackSource {
-                    fabric: &self.node.fabric,
-                    object_format: self.node.object_format,
-                    maximum_object_bytes: self
-                        .object_limits
-                        .max_object_bytes
-                        .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
-                    database_context: cx,
-                    database_exhaustion: &exhaustion,
-                    session_is_live: None,
+            if let Some((_, expected_tree, expected_base)) = self.workspace {
+                if merge.target_tip_before != expected_base {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
+                }
+                use fgit_git_object::{
+                    AcceptanceProfile, ObjectType, ParsedObject, parse_object_body,
                 };
-                let mut live = || match checkpoint_pack_context(cx) {
-                    PackContextCheckpoint::Live => true,
-                    PackContextCheckpoint::Stopped { budget_exhaustion } => {
-                        if let Some(dimension) = budget_exhaustion {
-                            exhaustion.set(Some(dimension));
-                        }
-                        false
-                    }
-                };
-                let result = match intent.method() {
-                    NativeMergeMethod::MergeCommit => {
-                        validate_merge_objects(&source, merge, self.object_limits, &mut live)
-                    }
-                    NativeMergeMethod::FastForwardOnly => {
-                        validate_fast_forward_objects(&source, merge, self.object_limits, &mut live)
-                    }
-                    NativeMergeMethod::Squash => {
-                        validate_squash_objects(&source, merge, self.object_limits, &mut live)
-                    }
-                };
+                let read = source.read_object(&merge.merge_commit);
                 if exhaustion.get().is_some() {
                     return Err(ProjectionFailure::Unavailable(
                         RefusalCode::ResourceBudgetExceeded,
                     ));
                 }
-                let closure = result?;
-                if intent.method() == NativeMergeMethod::FastForwardOnly
-                    && !closure
-                        .objects
-                        .is_subset(selected.selected_closure().closure().objects())
-                {
-                    // A fast-forward cannot admit merely staged dependencies.
-                    return Err(ProjectionFailure::Refuse(
-                        RefusalCode::ObjectClosureIncomplete,
-                    ));
+                self.merge_checkpoint(cx)
+                    .map_err(ProjectionFailure::Unavailable)?;
+                let (kind, body) =
+                    read.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+                let ParsedObject::Commit(commit) = parse_object_body(
+                    ObjectType::Commit,
+                    &body,
+                    AcceptanceProfile::GitCompatibleImport,
+                    &source.parse_limits(),
+                )
+                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
+                else {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+                };
+                let actual_tree = commit
+                    .tree_reference()
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(|text| {
+                        fgit_types::GitOid::from_hex(
+                            self.node.object_format,
+                            &text.to_ascii_lowercase(),
+                        )
+                        .ok()
+                    });
+                if kind != ObjectType::Commit || actual_tree != Some(expected_tree) {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
                 }
-                if let Some((_, expected_tree, expected_base)) = self.workspace {
-                    if merge.target_tip_before != expected_base {
-                        return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
-                    }
-                    use fgit_git_object::{
-                        AcceptanceProfile, ObjectType, ParsedObject, parse_object_body,
-                    };
-                    let read = source.read_object(&merge.merge_commit);
-                    if exhaustion.get().is_some() {
-                        return Err(ProjectionFailure::Unavailable(
-                            RefusalCode::ResourceBudgetExceeded,
-                        ));
-                    }
-                    self.merge_checkpoint(cx)
-                        .map_err(ProjectionFailure::Unavailable)?;
-                    let (kind, body) = read.map_err(|_| {
-                        ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing)
-                    })?;
-                    let ParsedObject::Commit(commit) = parse_object_body(
-                        ObjectType::Commit,
-                        &body,
-                        AcceptanceProfile::GitCompatibleImport,
-                        &source.parse_limits(),
-                    )
-                    .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
-                    else {
-                        return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-                    };
-                    let actual_tree = commit
-                        .tree_reference()
-                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                        .and_then(|text| {
-                            fgit_types::GitOid::from_hex(
-                                self.node.object_format,
-                                &text.to_ascii_lowercase(),
-                            )
-                            .ok()
-                        });
-                    if kind != ObjectType::Commit || actual_tree != Some(expected_tree) {
-                        return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
-                    }
-                }
-                closure
-            };
-            fgit_admission::merge::native::protection::enforce_merge_at(
-                authority,
-                cx,
-                basis,
-                &selected.snapshot().refs,
-                intent,
-                self.inner.context.principal_id,
-                &|| self.merge_checkpoint(cx).is_err(),
-            )
-            .await?;
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            Ok(closure)
-        }
+            }
+            closure
+        };
+        fgit_admission::merge::native::protection::enforce_merge_at(
+            authority,
+            cx,
+            basis,
+            &selected.snapshot().refs,
+            intent,
+            self.inner.context.principal_id,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(closure)
     }
 }
 

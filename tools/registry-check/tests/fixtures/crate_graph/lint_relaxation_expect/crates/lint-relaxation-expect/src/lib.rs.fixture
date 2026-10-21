@@ -1,0 +1,9 @@
+#![forbid(unsafe_code)]
+
+#[expect(
+    clippy::manual_async_fn,
+    reason = "a reasoned, multi-line expectation is still a local lint relaxation"
+)]
+pub fn widened_surface<'a>(value: &'a u8) -> impl core::future::Future<Output = u8> + Send + 'a {
+    async move { *value }
+}

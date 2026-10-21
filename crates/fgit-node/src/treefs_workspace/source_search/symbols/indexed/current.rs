@@ -27,10 +27,6 @@ pub(super) fn revalidates(indexed: &data::Source, current: &data::Source) -> boo
 impl OneNode {
     /// Exact-source persisted read. This retains the original strict contract:
     /// repository metadata changes require an explicit refresh or another mode.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, generation floor, query and independent read budgets are distinct contracts"
-    )]
     pub async fn search_source_symbols_index_snapshot_local_in(
         &self,
         request: &NodeRequestContext,
@@ -65,10 +61,6 @@ impl OneNode {
     /// Native commit/root-tree metadata reads use the existing bounded browser
     /// reader under this same request context. No source blob scan, publication,
     /// implicit refresh, generation fallback or renewed cancellation budget.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, generation floor, query and independent read budgets are distinct contracts"
-    )]
     pub async fn search_source_symbols_index_revalidated_local_in(
         &self,
         request: &NodeRequestContext,

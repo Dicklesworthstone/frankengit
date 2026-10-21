@@ -32,10 +32,6 @@ impl LocalSearch for SymbolQuery {
 impl OneNode {
     /// Caller-owned sparse capability and explicit visibility can only narrow
     /// canonical source. The name/kind/language filters confer no authority.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "caller capability, visibility and source budgets are independent"
-    )]
     pub async fn search_source_symbols_in<A: GitHashAlgorithm>(
         &self,
         request: &NodeRequestContext,

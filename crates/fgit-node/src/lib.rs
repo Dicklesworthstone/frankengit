@@ -25,7 +25,6 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::future::Future;
 use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -2349,59 +2348,47 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             .map(|prepared| prepared.validation_authority)
     }
 
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "the explicit + Send future is the cross-thread async projection contract"
-    )]
-    fn snapshot_async<'a>(
+    async fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a FsqliteCx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a {
-        async move {
-            let catch_up = cx.create_child();
-            let is_cancelled = || catch_up.checkpoint().is_err();
-            let materialized = self
-                .materializer
-                .materialize_exact_in(
-                    authority,
-                    &catch_up,
-                    self.context.repository_id,
-                    basis,
-                    authenticated,
-                    &is_cancelled,
+    ) -> Result<AdmissionSnapshot, AsyncProjectionFailure> {
+        let catch_up = cx.create_child();
+        let is_cancelled = || catch_up.checkpoint().is_err();
+        let materialized = self
+            .materializer
+            .materialize_exact_in(
+                authority,
+                &catch_up,
+                self.context.repository_id,
+                basis,
+                authenticated,
+                &is_cancelled,
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        let prepared = AsyncMaterializedBasis {
+            basis: basis.clone(),
+            ref_state: match materialized.snapshot().head_target.clone() {
+                Some(target) => CanonicalRefState::new_with_head_target(
+                    materialized.snapshot().refs.clone(),
+                    target,
                 )
-                .await
-                .map_err(async_projection_unavailable)?;
-            let prepared = AsyncMaterializedBasis {
-                basis: basis.clone(),
-                ref_state: match materialized.snapshot().head_target.clone() {
-                    Some(target) => CanonicalRefState::new_with_head_target(
-                        materialized.snapshot().refs.clone(),
-                        target,
-                    )
-                    .map_err(AsyncProjectionFailure::Unavailable)?,
-                    None => CanonicalRefState::new(materialized.snapshot().refs.clone()),
-                },
-                root_layout: materialized.root_layout(),
-                validation_authority: quarantine_validator::receive_validation_authority(
-                    &materialized,
-                ),
-            };
-            *self.prepared.lock().map_err(|_| {
-                AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)
-            })? = Some(prepared);
-            Ok(materialized.snapshot().clone())
-        }
+                .map_err(AsyncProjectionFailure::Unavailable)?,
+                None => CanonicalRefState::new(materialized.snapshot().refs.clone()),
+            },
+            root_layout: materialized.root_layout(),
+            validation_authority: quarantine_validator::receive_validation_authority(&materialized),
+        };
+        *self.prepared.lock().map_err(|_| {
+            AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)
+        })? = Some(prepared);
+        Ok(materialized.snapshot().clone())
     }
 
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "the explicit + Send future is the cross-thread async projection contract"
-    )]
-    fn materialize_commit_async<'a>(
+    async fn materialize_commit_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a FsqliteCx,
@@ -2409,94 +2396,89 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
-    {
-        async move {
-            let prepared_basis = self
-                .prepared
-                .lock()
-                .map_err(|_| {
-                    AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)
-                })?
-                .take()
-                .ok_or(AsyncProjectionFailure::Unavailable(
-                    RefusalCode::EvidenceMissing,
-                ))?;
-            if prepared_basis.basis != *basis {
-                return Err(AsyncProjectionFailure::Unavailable(
-                    RefusalCode::AuthorityReceiptStale,
-                ));
-            }
-            fgit_admission::merge::native::protection::enforce_direct_at(
+    ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
+        let prepared_basis = self
+            .prepared
+            .lock()
+            .map_err(|_| AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
+            .take()
+            .ok_or(AsyncProjectionFailure::Unavailable(
+                RefusalCode::EvidenceMissing,
+            ))?;
+        if prepared_basis.basis != *basis {
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
+        }
+        fgit_admission::merge::native::protection::enforce_direct_at(
+            authority,
+            cx,
+            basis,
+            prepared_basis.ref_state.refs(),
+            fold,
+            &|| cx.checkpoint().is_err(),
+        )
+        .await?;
+        let stage_context = cx.create_child();
+        let is_cancelled = || stage_context.checkpoint().is_err();
+        let provider = self
+            .materializer
+            .stage_decision_evidence_in(
                 authority,
-                cx,
-                basis,
-                prepared_basis.ref_state.refs(),
-                fold,
-                &|| cx.checkpoint().is_err(),
-            )
-            .await?;
-            let stage_context = cx.create_child();
-            let is_cancelled = || stage_context.checkpoint().is_err();
-            let provider = self
-                .materializer
-                .stage_decision_evidence_in(
-                    authority,
-                    &stage_context,
-                    self.context.clone(),
-                    basis,
-                    request,
-                    fold,
-                    &is_cancelled,
-                )
-                .await
-                .map_err(async_projection_unavailable)?;
-            let evidence = provider
-                .commit_evidence(basis, request, fold)
-                .map_err(AsyncProjectionFailure::Unavailable)?;
-            let prepared = prepare_canonical_commit(
+                &stage_context,
+                self.context.clone(),
                 basis,
                 request,
                 fold,
-                closure,
-                prepared_basis.ref_state,
-                prepared_basis.root_layout,
-                evidence,
+                &is_cancelled,
             )
-            .map_err(AsyncProjectionFailure::Refuse)?;
-            let ref_root = self
-                .materializer
-                .stage_ref_state_for_layout_in(
-                    authority,
-                    cx,
-                    self.context.repository_id,
-                    prepared_basis.root_layout,
-                    prepared.next_ref_state().clone(),
-                )
-                .await
-                .map_err(async_projection_unavailable)?;
-            if ref_root != prepared.ref_root() {
-                return Err(AsyncProjectionFailure::Unavailable(
-                    RefusalCode::InternalInvariantBreach,
-                ));
-            }
-            let closure_root = self
-                .materializer
-                .stage_permitted_object_closure_in(
-                    authority,
-                    cx,
-                    self.context.repository_id,
-                    prepared.object_closure().clone(),
-                )
-                .await
-                .map_err(async_projection_unavailable)?;
-            if closure_root != prepared.object_closure_root() {
-                return Err(AsyncProjectionFailure::Unavailable(
-                    RefusalCode::InternalInvariantBreach,
-                ));
-            }
-            Ok(prepared.into_materialization())
+            .await
+            .map_err(async_projection_unavailable)?;
+        let evidence = provider
+            .commit_evidence(basis, request, fold)
+            .map_err(AsyncProjectionFailure::Unavailable)?;
+        let prepared = prepare_canonical_commit(
+            basis,
+            request,
+            fold,
+            closure,
+            prepared_basis.ref_state,
+            prepared_basis.root_layout,
+            evidence,
+        )
+        .map_err(AsyncProjectionFailure::Refuse)?;
+        let ref_root = self
+            .materializer
+            .stage_ref_state_for_layout_in(
+                authority,
+                cx,
+                self.context.repository_id,
+                prepared_basis.root_layout,
+                prepared.next_ref_state().clone(),
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        if ref_root != prepared.ref_root() {
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::InternalInvariantBreach,
+            ));
         }
+        let closure_root = self
+            .materializer
+            .stage_permitted_object_closure_in(
+                authority,
+                cx,
+                self.context.repository_id,
+                prepared.object_closure().clone(),
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        if closure_root != prepared.object_closure_root() {
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::InternalInvariantBreach,
+            ));
+        }
+        Ok(prepared.into_materialization())
     }
 
     async fn materialize_refusal_async<'a>(

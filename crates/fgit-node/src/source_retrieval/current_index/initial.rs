@@ -112,10 +112,6 @@ impl OneNode {
     /// All phases share the request context. Work/payload allowances are split
     /// before I/O, including optional failures, and never borrowed or renewed.
     /// The existing exact-source Initial reader remains unchanged.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "source pins, independent index floors and shared budgets are distinct"
-    )]
     pub async fn search_source_initial_revalidated_local_in(
         &self,
         request: &NodeRequestContext,

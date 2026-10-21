@@ -284,10 +284,6 @@ impl Fixture {
                 .unwrap()
         }
     }
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the test varies both independent budgets and both reader implementations"
-    )]
     fn run(
         &self,
         asynchronous: bool,

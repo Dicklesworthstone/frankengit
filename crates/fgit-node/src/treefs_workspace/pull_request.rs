@@ -14,7 +14,6 @@ mod preparation;
 mod reviews;
 
 use std::cell::Cell;
-use std::future::Future;
 
 use fgit_admission::merge::native::NativeMergeProjection;
 use fgit_admission::merge::native::objects::MergeObjectLimits;
@@ -213,107 +212,101 @@ impl std::fmt::Display for PullRequestReadRefusal {
 impl std::error::Error for PullRequestReadRefusal {}
 
 impl PullRequestProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "explicit Send is the native projection contract"
-    )]
-    fn validate_pull_request_async<'a>(
+    async fn validate_pull_request_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a Cx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         command: &'a PullRequestCommand,
-    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
-        async move {
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let selected = self
+            .inner
+            .materializer
+            .materialize_exact_in(
+                authority,
+                cx,
+                self.node.repository_id,
+                basis,
+                authenticated,
+                &|| self.merge_checkpoint(cx).is_err(),
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        let closure = selected.selected_closure().closure();
+        if closure.objects().len() > self.object_limits.max_objects {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::ResourceBudgetExceeded,
+            ));
+        }
+        let exhaustion = Cell::new(None);
+        let source = VerifiedFabricPackSource {
+            fabric: &self.node.fabric,
+            object_format: self.node.object_format,
+            maximum_object_bytes: self
+                .object_limits
+                .max_object_bytes
+                .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
+            database_context: cx,
+            database_exhaustion: &exhaustion,
+            session_is_live: None,
+        };
+        for tip in [command.data.source_tip, command.data.target_tip] {
             self.merge_checkpoint(cx)
                 .map_err(ProjectionFailure::Unavailable)?;
-            let selected = self
-                .inner
-                .materializer
-                .materialize_exact_in(
-                    authority,
-                    cx,
-                    self.node.repository_id,
-                    basis,
-                    authenticated,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-                .map_err(async_projection_unavailable)?;
-            let closure = selected.selected_closure().closure();
-            if closure.objects().len() > self.object_limits.max_objects {
+            if tip.is_zero() || tip.algorithm() != self.node.object_format {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+            }
+            if !closure.objects().contains(&tip) {
+                return Err(ProjectionFailure::Refuse(
+                    RefusalCode::ObjectClosureIncomplete,
+                ));
+            }
+            let result = source.read_object(&tip);
+            self.merge_checkpoint(cx)
+                .map_err(ProjectionFailure::Unavailable)?;
+            if exhaustion.get().is_some() {
                 return Err(ProjectionFailure::Unavailable(
                     RefusalCode::ResourceBudgetExceeded,
                 ));
             }
-            let exhaustion = Cell::new(None);
-            let source = VerifiedFabricPackSource {
-                fabric: &self.node.fabric,
-                object_format: self.node.object_format,
-                maximum_object_bytes: self
-                    .object_limits
-                    .max_object_bytes
-                    .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
-                database_context: cx,
-                database_exhaustion: &exhaustion,
-                session_is_live: None,
-            };
-            for tip in [command.data.source_tip, command.data.target_tip] {
-                self.merge_checkpoint(cx)
-                    .map_err(ProjectionFailure::Unavailable)?;
-                if tip.is_zero() || tip.algorithm() != self.node.object_format {
-                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-                }
-                if !closure.objects().contains(&tip) {
-                    return Err(ProjectionFailure::Refuse(
-                        RefusalCode::ObjectClosureIncomplete,
-                    ));
-                }
-                let result = source.read_object(&tip);
-                self.merge_checkpoint(cx)
-                    .map_err(ProjectionFailure::Unavailable)?;
-                if exhaustion.get().is_some() {
-                    return Err(ProjectionFailure::Unavailable(
-                        RefusalCode::ResourceBudgetExceeded,
-                    ));
-                }
-                let (kind, body) = result
-                    .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
-                if kind != ObjectType::Commit {
-                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-                }
-                let ParsedObject::Commit(commit) = parse_object_body(
-                    kind,
-                    &body,
-                    AcceptanceProfile::GitCompatibleImport,
-                    &source.parse_limits(),
-                )
-                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
-                else {
-                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-                };
-                let tree = commit
-                    .tree_reference()
-                    .and_then(|value| std::str::from_utf8(value).ok())
-                    .and_then(|value| {
-                        GitOid::from_hex(self.node.object_format, &value.to_ascii_lowercase()).ok()
-                    })
-                    .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
-                if !closure.objects().contains(&tree) {
-                    return Err(ProjectionFailure::Refuse(
-                        RefusalCode::ObjectClosureIncomplete,
-                    ));
-                }
+            let (kind, body) =
+                result.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+            if kind != ObjectType::Commit {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
             }
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            Ok(ValidatedClosure {
-                object_closure_root: fgit_admission::permitted_object_closure_root(closure)
-                    .map_err(ProjectionFailure::Unavailable)?,
-                objects: closure.objects().clone(),
-            })
+            let ParsedObject::Commit(commit) = parse_object_body(
+                kind,
+                &body,
+                AcceptanceProfile::GitCompatibleImport,
+                &source.parse_limits(),
+            )
+            .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
+            else {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+            };
+            let tree = commit
+                .tree_reference()
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| {
+                    GitOid::from_hex(self.node.object_format, &value.to_ascii_lowercase()).ok()
+                })
+                .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
+            if !closure.objects().contains(&tree) {
+                return Err(ProjectionFailure::Refuse(
+                    RefusalCode::ObjectClosureIncomplete,
+                ));
+            }
         }
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(ValidatedClosure {
+            object_closure_root: fgit_admission::permitted_object_closure_root(closure)
+                .map_err(ProjectionFailure::Unavailable)?,
+            objects: closure.objects().clone(),
+        })
     }
 }
 
