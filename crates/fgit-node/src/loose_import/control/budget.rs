@@ -208,12 +208,10 @@ mod tests {
     }
 
     fn temp_root(prefix: &str) -> std::path::PathBuf {
-        let base = if std::path::Path::new("/dev/shm").is_dir() {
-            std::path::PathBuf::from("/dev/shm")
-        } else {
-            std::env::temp_dir()
-        };
-        let root = base.join(format!(
+        // Honor the runner's filesystem selection. A small /dev/shm can hold
+        // the packed fixture yet run out of space when its >200 MiB of native
+        // bodies are spooled, testing tmpfs capacity instead of import budgets.
+        let root = std::env::temp_dir().join(format!(
             "{prefix}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),
