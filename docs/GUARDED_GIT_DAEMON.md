@@ -38,11 +38,13 @@ There is no fallback to the old receiver after a guarded-serving failure.
 after its pack trailer: quarantine, delta resolution, policy and publication.
 The default is 300 s, and the session flags never extend it. Processing must
 also finish inside the session budget (`--session-timeout-secs`, which runs from
-accept), so a long push needs both raised. Measured with a release `fg` at
-71e1f6fa, receive costs about 20 ms per object: 6,000 objects in 119 s and
-12,000 in 238 s. A 24,000-object push is refused at about 300 s with
-`CancellationInProgress`, before any ref decision, when either budget is left at
-its default. Lowering the per-object cost is frankengit-pc9g.
+accept), so a long push needs both raised. Receive used to place each object
+with its own file and directory fsync, about 20 ms per object, so at the
+defaults a 24,000-object push was refused at about 300 s with
+`CancellationInProgress`. It now stages through batched placement, and syncs
+each batch's staged files concurrently (frankengit-pc9g). A 6,000-object push
+takes about 5 s, and a 24,000-object push 17.5 s at the defaults (release-perf
+`fg`, development host).
 
 The guarded service supports **1..1,000,000 sessions**, **1..16 concurrent
 connections**, and at most **64 commands per receive**, matching the admission

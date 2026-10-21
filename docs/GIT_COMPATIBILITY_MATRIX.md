@@ -110,13 +110,10 @@ match:
   branch prohibited`; `fg` refuses it through its ref-protection policy and says
   `protected ref denied`.
 
-The push node runs with `--session-timeout-secs 1800` and
-`--processing-timeout-secs 1800`, operator settings like `--initial-branch`. A
-push must fit both budgets: the session budget runs from accept and the
-processing budget from the pack trailer. At their 300 s defaults, `fg serve`
-refuses a push whose server-side processing takes longer. Receive currently costs about 20 ms per
-object, so that is any push of more than roughly 15,000 objects, which pinned
-Git's daemon accepts (frankengit-pc9g). The lane does not compare that default.
+The push node runs at `fg serve`'s default session and processing budgets, so
+the many-objects push is checked against fg as shipped. Before batched receive
+placement (frankengit-pc9g), those defaults refused any push of more than about
+15,000 objects, and the lane had to raise both budgets.
 
 Non-claims: Tier A covers the `git://` loopback carrier only. Smart HTTP and
 SSH carry the same upload-pack and receive-pack state machines, but they are not
