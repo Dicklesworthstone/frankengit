@@ -8,6 +8,7 @@ import { fields, parse, fail, clock, hash } from './operator/source_edit_wire.mj
 import { compileSourceReplacements, REPLACEMENT_PROFILE, REPLACEMENT_LIMITS } from './operator/source_edit_replacements.mjs';
 import { compileSourceSplices, SPLICE_PROFILE, SPLICE_LIMITS } from './operator/source_edit_splices.mjs';
 import { compileCompactSourceSplices, SPLICE_PATCH_PROFILES } from './operator/source_edit_compact_splices.mjs';
+import { loadSourceSpliceFiles, SPLICE_FILE_PROFILE } from './operator/source_edit_splice_files.mjs';
 const PLAN_BYTES = 512 * 1024;
 const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta|delta-runs] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]\nnode scripts/fg_source_patch.mjs splice --splices-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta | --patch-profile trim-common-lines-v1|bounded-line-hunks-v1] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
 function argumentsFor(args) {
@@ -63,7 +64,8 @@ async function changesFromFile(path, check) {
 // Read whole originals privately; the core checks their independent Git IDs and
 // matches every range before any result or final patch is published.
 async function splicesFromFile(path, check) {
-  const plan = parse(await read(path, PLAN_BYTES, check), PLAN_BYTES);
+  const raw = await read(path, PLAN_BYTES, check), plan = parse(raw, PLAN_BYTES);
+  if (plan?.schema === SPLICE_FILE_PROFILE) return { ...await loadSourceSpliceFiles(plan, check), plan_sha256: hash(raw) };
   fields(plan, ['schema', 'object_format', 'files']);
   if (plan.schema !== SPLICE_PROFILE || !['sha1', 'sha256'].includes(plan.object_format) ||
       !Array.isArray(plan.files) || !plan.files.length || plan.files.length > 32) fail('source_splice_plan');
@@ -128,6 +130,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       ...(options.patchProfile ? { patch_profile: compiled.patch_profile, hunks: compiled.hunks } : {}),
       ...(splice ? { splice_profile: compiled.splice_profile, splice_count: compiled.splice_count,
         expected_bytes: compiled.expected_bytes, inserted_bytes: compiled.inserted_bytes, preimages_verified: true } : {}),
+      ...(plan.plan_sha256 ? { splice_plan_profile: SPLICE_FILE_PROFILE, splice_plan_sha256: plan.plan_sha256 } : {}),
       source_membership_verified: false, publication_attempted: false };
     time.check();
     try {

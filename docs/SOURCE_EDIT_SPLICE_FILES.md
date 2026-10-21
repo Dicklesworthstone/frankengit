@@ -1,0 +1,13 @@
+# Private-file operands for exact source splices
+
+`node scripts/fg_source_patch.mjs splice --splices-file /private/edit/plan.json --output /private/edit/change.patch` additionally accepts the `frankengit-source-splice-files-v1` plan. This is an additive adapter over the existing original-coordinate splice and patch compilers. Old inline plans, compact text profiles, and all binary profiles retain their behavior.
+
+The file-plan schema is `{schema, object_format, files}`. Each file has `path_hex`, `before: {file, blob, mode}`, `after_mode`, and `edits`. Each edit has `byte_start`, `before`, and `after`; both operands are exactly one of `{hex: "lowercase even hex"}` or `{file: "/absolute/private/path"}`. Empty hex means zero bytes. Offsets always name ORIGINAL bytes. The independently retained full native blob ID and every expected range are verified, not guessed from a server response or fuzzy search. Removing all bytes produces an empty file, not file deletion.
+
+Large operands no longer have to fit as doubled hexadecimal text inside the 512 KiB JSON plan. File-backed operands still share the existing independent 8 MiB original/expected/inserted allowances and 1 MiB per-file limit. The remaining category allowance is passed into the bounded private read before allocation. Patch output remains at most 1 MiB; this does not enlarge native admission limits. Compact text and binary encoding require their usual explicit flags.
+
+All descriptors are validated and copied before payload awaits. Paths cannot be widened by later caller mutation. Files and parents must satisfy the existing owner-private, no-alias custody contract. Ordinary concurrent file changes are detected; this is not an atomic multi-file snapshot or hostile same-user sandbox. Quiesce editors first. No source, hook, shell or network operation is executed by this adapter.
+
+The new-plan receipt adds `splice_plan_profile` and the SHA-256 of the EXACT input plan bytes as `splice_plan_sha256`. The patch hash, source/range counts and original failure semantics remain. Creation-only output is synced and read back. A lost stdout reply retains the result and hash; do not overwrite or rerun publication under another identity. Compilation never claims repository membership or admission authority.
+
+`bash scripts/verify_source_edits.sh` includes real private-file and CLI cases alongside the existing authoring suite. Those tests are client/module tests, not native Rust publication evidence. Related: SOURCE_EDIT_SPLICES.md, COMPACT_SOURCE_SPLICES.md, and the live-native operator obligation frankengit-root-doctrine-x2mv.4.59.
