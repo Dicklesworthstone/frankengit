@@ -5251,6 +5251,13 @@ pub enum GitDaemonTransportRefusal {
         /// Bytes observed past the trailer.
         excess: usize,
     },
+    /// The pack request named a partial-clone filter this node does not
+    /// serve. The client was answered with upstream's `ERR filter '<name>'
+    /// not supported` before any negotiation output for that pack.
+    UnservedFilter {
+        /// Upstream configuration name of the refused filter term.
+        filter: &'static str,
+    },
 }
 
 impl Display for GitDaemonTransportRefusal {
@@ -5312,6 +5319,10 @@ impl Display for GitDaemonTransportRefusal {
                 formatter,
                 "git-daemon receive-pack client sent {excess} bytes after its pack trailer"
             ),
+            Self::UnservedFilter { filter } => write!(
+                formatter,
+                "upload-pack request names filter '{filter}', which this node does not serve"
+            ),
         }
     }
 }
@@ -5335,6 +5346,7 @@ impl Error for GitDaemonTransportRefusal {
             | Self::DuplicateProtocolVersion
             | Self::ReceivePackFraming(_)
             | Self::ReceiveTrailingBytes { .. }
+            | Self::UnservedFilter { .. }
             | Self::IncompleteNegotiation => None,
         }
     }
@@ -5752,6 +5764,9 @@ where
             .map_err(|error| {
                 GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
             })?;
+        if let Some(refusal) = refuse_unserved_filter(writer, &transition.events, &limits) {
+            return Err(GitDaemonServeError::Transport(refusal));
+        }
         write_packet_group(writer, &transition.output, &limits)
             .map_err(GitDaemonServeError::Transport)?;
 
@@ -5890,6 +5905,9 @@ where
             .map_err(|error| {
                 GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
             })?;
+        if let Some(refusal) = refuse_unserved_filter(writer, &transition.events, &limits) {
+            return Err(GitDaemonServeError::Transport(refusal));
+        }
         write_packet_group(writer, &transition.output, &limits)
             .map_err(GitDaemonServeError::Transport)?;
 
@@ -6303,6 +6321,39 @@ fn emit_pack_payload(
         write_packet_group(writer, &[Packet::Flush], limits)?;
     }
     Ok(())
+}
+
+/// The upstream-worded `ERR` line a stock client reports as a remote error
+/// when a pack request names a filter this node does not serve.
+fn unserved_filter_error(filter: &str) -> Vec<u8> {
+    format!("ERR filter '{filter}' not supported\n").into_bytes()
+}
+
+/// Refuses a pack request whose filter this node does not serve, the way
+/// upstream upload-pack does: one `ERR` packet in place of the transition's
+/// negotiation output, so the client reports "remote error: filter '<name>'
+/// not supported" rather than a hang-up or a truncated pack. `None` when
+/// every requested filter term is served.
+fn refuse_unserved_filter(
+    writer: &mut impl Write,
+    events: &[WireEvent],
+    limits: &WireLimits,
+) -> Option<GitDaemonTransportRefusal> {
+    let filter = events.iter().find_map(|event| match event {
+        WireEvent::PackRequested(request) => request
+            .filter
+            .as_ref()
+            .and_then(upload_visibility::unserved_filter_name),
+        WireEvent::LsRefs { .. } | WireEvent::Common(_) => None,
+    })?;
+    // The typed refusal is the outcome; a client that is already gone
+    // changes nothing about it.
+    let _ = write_packet_group(
+        writer,
+        &[Packet::Data(unserved_filter_error(filter))],
+        limits,
+    );
+    Some(GitDaemonTransportRefusal::UnservedFilter { filter })
 }
 
 /// Surfaces a selected-pack build refusal to a sideband-negotiated client as

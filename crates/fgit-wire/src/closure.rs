@@ -902,7 +902,8 @@ fn tree_depth_permits(filter: &ObjectFilter, depth: u32) -> bool {
         ObjectFilter::BlobNone
         | ObjectFilter::BlobLimit(_)
         | ObjectFilter::SparsePath(_)
-        | ObjectFilter::SparseObject(_) => true,
+        | ObjectFilter::SparseObject(_)
+        | ObjectFilter::SparseObjectName(_) => true,
     }
 }
 
@@ -915,7 +916,8 @@ fn blob_permits(filter: &ObjectFilter, object: &ClosureObject) -> bool {
         ObjectFilter::BlobLimit(limit) => *size < *limit,
         ObjectFilter::TreeDepth(_)
         | ObjectFilter::SparsePath(_)
-        | ObjectFilter::SparseObject(_) => true,
+        | ObjectFilter::SparseObject(_)
+        | ObjectFilter::SparseObjectName(_) => true,
         ObjectFilter::Combine(parts) => parts.iter().all(|part| blob_permits(part, object)),
     }
 }

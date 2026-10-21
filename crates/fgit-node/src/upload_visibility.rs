@@ -6,6 +6,7 @@
 //! rewrite the canonical per-decision closure or the trusted local exporter.
 use super::*;
 mod partial_clone;
+pub(crate) use partial_clone::unserved_filter_name;
 pub mod shallow;
 pub mod tags;
 

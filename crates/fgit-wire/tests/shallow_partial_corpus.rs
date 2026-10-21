@@ -450,7 +450,8 @@ fn reference_tree_depth_permits(filter: &ObjectFilter, depth: u32) -> bool {
         ObjectFilter::BlobNone
         | ObjectFilter::BlobLimit(_)
         | ObjectFilter::SparsePath(_)
-        | ObjectFilter::SparseObject(_) => true,
+        | ObjectFilter::SparseObject(_)
+        | ObjectFilter::SparseObjectName(_) => true,
     }
 }
 
@@ -466,7 +467,8 @@ fn reference_blob_permits(filter: &ObjectFilter, object: &ClosureObject) -> bool
             .all(|part| reference_blob_permits(part, object)),
         ObjectFilter::TreeDepth(_)
         | ObjectFilter::SparsePath(_)
-        | ObjectFilter::SparseObject(_) => true,
+        | ObjectFilter::SparseObject(_)
+        | ObjectFilter::SparseObjectName(_) => true,
     }
 }
 

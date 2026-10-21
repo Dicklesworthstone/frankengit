@@ -574,6 +574,33 @@ impl OneNode {
         )?;
         body.consume(cancellation, |bytes, live| rpc.push(bytes, live))?;
         let reply = rpc.finish(cancellation)?;
+        if let Some(filter) = reply
+            .pack_request()
+            .and_then(|pack_request| pack_request.filter.as_ref())
+            .and_then(crate::upload_visibility::unserved_filter_name)
+        {
+            // Upstream's stateless upload-pack answers a filter it does not
+            // serve with one `ERR` packet in a 200 body, which a stock client
+            // reports as a remote error. The negotiation prefix is withheld.
+            let body = fgit_wire::encode_packets(
+                &[Packet::Data(crate::unserved_filter_error(filter))],
+                &wire_limits,
+            )?;
+            let head = success_head(request, None);
+            let mut encoder =
+                ResponseEncoder::new(request.http_version, None, maximum_response_bytes)?;
+            let framed = encoder.push(&body)?;
+            write_response_part(writer, head.as_bytes(), "write smart HTTP head")?;
+            write_response_part(writer, framed.prefix.as_bytes(), "write HTTP chunk prefix")?;
+            write_response_part(writer, framed.data, "write smart HTTP body")?;
+            write_response_part(writer, framed.suffix, "write HTTP chunk suffix")?;
+            let terminal = encoder.finish()?;
+            write_response_part(writer, terminal, "finish smart HTTP response")?;
+            return Err(NodeGitDaemonServeRefusal::from(
+                GitDaemonTransportRefusal::UnservedFilter { filter },
+            )
+            .into());
+        }
         let pack_requested = reply.pack_request().is_some();
 
         // The network peer must not spend the budget reserved for selecting

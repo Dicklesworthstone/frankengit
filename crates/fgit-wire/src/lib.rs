@@ -1073,6 +1073,11 @@ pub enum ObjectFilter {
     SparsePath(Vec<u8>),
     /// Request a sparse specification object.
     SparseObject(AnyGitOid),
+    /// Request a sparse specification named by an object expression such as
+    /// `<rev>:<path>`, which upstream resolves on the server. Kept verbatim and
+    /// never resolved here: a server that serves no sparse filter refuses it
+    /// by name instead of failing the request grammar.
+    SparseObjectName(Vec<u8>),
     /// Conjunction of filter terms.
     Combine(Vec<Self>),
 }

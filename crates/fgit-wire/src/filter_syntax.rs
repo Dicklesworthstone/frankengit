@@ -82,7 +82,14 @@ fn parse_part(
             .ok_or_else(|| invalid(text));
     }
     if let Some(value) = text.strip_prefix(b"sparse:oid=") {
-        return parse_object_id(value, format).map(ObjectFilter::SparseObject);
+        // Clients send the value as typed (`--filter=sparse:oid=main:.sparse`);
+        // only a full object id of this format is an object, anything else is
+        // the expression upstream would resolve.
+        if let Ok(object) = parse_object_id(value, format) {
+            return Ok(ObjectFilter::SparseObject(object));
+        }
+        validate_opaque_path(value, limits)?;
+        return Ok(ObjectFilter::SparseObjectName(value.to_vec()));
     }
     if let Some(value) = text.strip_prefix(b"sparse:path=") {
         validate_opaque_path(value, limits)?;

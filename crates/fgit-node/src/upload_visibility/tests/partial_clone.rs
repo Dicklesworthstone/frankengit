@@ -245,6 +245,7 @@ fn unsupported_controls_fail_instead_of_silently_returning_an_unfiltered_pack() 
     for filter in [
         ObjectFilter::SparsePath(b"secret".to_vec()),
         ObjectFilter::SparseObject(blob),
+        ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
         ObjectFilter::Combine(vec![
             ObjectFilter::BlobNone,
             ObjectFilter::SparseObject(blob),
@@ -547,5 +548,46 @@ fn actual_partial_clones_and_lazy_fetches_preserve_native_bytes_current_visibili
         }
         node.shutdown().unwrap();
         drop(scratch);
+    }
+}
+
+#[test]
+fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
+    let mut source = MemorySource::new(GitHashAlgorithm::Sha1);
+    let blob = source.put(ObjectType::Blob, b"body".to_vec());
+    for served in [
+        ObjectFilter::BlobNone,
+        ObjectFilter::BlobLimit(1024),
+        ObjectFilter::TreeDepth(0),
+        ObjectFilter::Combine(vec![
+            ObjectFilter::BlobLimit(1),
+            ObjectFilter::Combine(vec![ObjectFilter::TreeDepth(2), ObjectFilter::BlobNone]),
+        ]),
+    ] {
+        assert_eq!(engine::unserved_filter_name(&served), None, "{served:?}");
+    }
+    for (refused, name) in [
+        (ObjectFilter::SparseObject(blob), "sparse:oid"),
+        (
+            ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
+            "sparse:oid",
+        ),
+        (ObjectFilter::SparsePath(b"secret".to_vec()), "sparse:path"),
+        (
+            ObjectFilter::Combine(vec![
+                ObjectFilter::BlobNone,
+                ObjectFilter::Combine(vec![
+                    ObjectFilter::TreeDepth(1),
+                    ObjectFilter::SparseObjectName(b"HEAD:.sparse".to_vec()),
+                ]),
+            ]),
+            "sparse:oid",
+        ),
+    ] {
+        assert_eq!(
+            engine::unserved_filter_name(&refused),
+            Some(name),
+            "{refused:?}"
+        );
     }
 }

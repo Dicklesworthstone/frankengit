@@ -194,3 +194,67 @@ fn unadvertised_legacy_wants_require_both_server_capability_and_repository_permi
         }
     }
 }
+
+#[test]
+fn sparse_object_filters_keep_an_object_id_or_the_clients_expression_verbatim() {
+    let limits = WireLimits::default();
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let hex = "a".repeat(format.digest_len() * 2);
+        assert_eq!(
+            parse_filter(format!("sparse:oid={hex}").as_bytes(), format, &limits).unwrap(),
+            ObjectFilter::SparseObject(AnyGitOid::from_hex(format, &hex).unwrap())
+        );
+        // `git clone --filter=sparse:oid=main:.sparse` sends the expression as
+        // typed; a short or other-format hex string is an expression too.
+        let other_format = "a".repeat(if format == GitObjectFormat::Sha1 {
+            64
+        } else {
+            40
+        });
+        for expression in [
+            "main:.sparse",
+            "HEAD~1:dir/.sparse",
+            "abc1234",
+            other_format.as_str(),
+        ] {
+            assert_eq!(
+                parse_filter(
+                    format!("sparse:oid={expression}").as_bytes(),
+                    format,
+                    &limits
+                )
+                .unwrap(),
+                ObjectFilter::SparseObjectName(expression.as_bytes().to_vec()),
+                "{format:?} {expression}"
+            );
+        }
+        assert_eq!(
+            parse_filter(
+                b"combine:blob:none+sparse%3Aoid%3Dmain%3A.sparse",
+                format,
+                &limits
+            )
+            .unwrap(),
+            ObjectFilter::Combine(vec![
+                ObjectFilter::BlobNone,
+                ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
+            ])
+        );
+        let too_long = format!("sparse:oid={}", "m".repeat(limits.max_ref_name_bytes + 1));
+        for refused in [
+            b"sparse:oid=".to_vec(),
+            b"sparse:oid=main\0:.sparse".to_vec(),
+            b"sparse:oid=main\n".to_vec(),
+            too_long.into_bytes(),
+        ] {
+            assert!(
+                matches!(
+                    parse_filter(&refused, format, &limits),
+                    Err(WireError::InvalidFilter { .. })
+                ),
+                "{format:?} {}",
+                String::from_utf8_lossy(&refused)
+            );
+        }
+    }
+}

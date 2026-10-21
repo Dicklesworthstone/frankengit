@@ -3,6 +3,29 @@
 use super::*;
 use fgit_wire::ObjectFilter;
 
+/// The upstream configuration name (`uploadpackfilter.<name>.allow`) of the
+/// first filter term this node does not serve, if any.
+///
+/// Upload-pack refuses such a request before negotiation answers it, with
+/// upstream's `ERR filter '<name>' not supported`, so a stock client reports a
+/// typed remote error instead of a hang-up. The pack-time refusal in
+/// [`Predicate::compile`] stays as the backstop for callers that skip this.
+pub(crate) fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
+    let mut pending = vec![filter];
+    while let Some(filter) = pending.pop() {
+        match filter {
+            ObjectFilter::SparseObject(_) | ObjectFilter::SparseObjectName(_) => {
+                return Some("sparse:oid");
+            }
+            ObjectFilter::SparsePath(_) => return Some("sparse:path"),
+            // The wire grammar bounds both nesting and the total term count.
+            ObjectFilter::Combine(parts) => pending.extend(parts.iter().rev()),
+            ObjectFilter::BlobNone | ObjectFilter::BlobLimit(_) | ObjectFilter::TreeDepth(_) => {}
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub(super) struct FilterObject {
     pub(super) kind: ObjectType,
@@ -72,7 +95,9 @@ impl Predicate {
                         .map_err(|_| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
                     pending.extend(parts.iter().rev());
                 }
-                ObjectFilter::SparseObject(_) | ObjectFilter::SparsePath(_) => {
+                ObjectFilter::SparseObject(_)
+                | ObjectFilter::SparseObjectName(_)
+                | ObjectFilter::SparsePath(_) => {
                     return Err(NodePackMaterializationRefusal::UnsupportedFetch(
                         "sparse filters",
                     ));
