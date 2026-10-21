@@ -163,8 +163,9 @@ assesses source `7eaf1df8`, supersedes the October 17 snapshot in place, and map
 **Material progress since October 17:**
 
 - Tier A is now declared and has historical pinned-Git receipts. The latest
-  README-cited result is 18/18 rows and 624/624 checks at `8a992b6e`, for
-  `git://`; see the compatibility section below for scope and divergences.
+  README-cited result is 18/18 rows and 624/624 checks at `18f77336`, for
+  `git://`, with `fg serve` at its default receive budgets; see the
+  compatibility section below for scope and divergences.
 - Required workflow checks and review quorums now have real native admission
   callers. The check gate binds the exact candidate, source ref, publisher,
   workflow graph and job, selects the latest canonical result, and rechecks
@@ -546,12 +547,12 @@ are in [`registries/compatibility_tiers.tsv`](registries/compatibility_tiers.tsv
 (see the [matrix's Tier A section](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier)).
 `./scripts/verify.sh tier-a` runs them against pinned git-2.54.0 over `git://`
 and writes a per-row `tier_a_receipt.json`; the receipt is the claim. Last
-observed receipt (2026-10-20, revision `8a992b6e`, clean tree, receipt sha256
-`5348774f…`): verdict **pass**, all 18 rows and 624 of 624 checks. Those checks
+observed receipt (2026-10-21, revision `18f77336`, clean tree, receipt sha256
+`b98bfaa2…`): verdict **pass**, all 18 rows and 624 of 624 checks. Those checks
 cover import, v0 and v2 advertisement, clone, full and incremental fetch over
 v0, v1 and v2, and push, in SHA-1 and SHA-256, against seven corpora. The
-largest is about 20,100 objects. Its push needs raised `fg serve` budgets,
-which the lane sets as an operator would (see the matrix). Three
+largest is about 20,100 objects, and the push node runs at `fg serve`'s default
+budgets: that push took about 17 s and that import about 15 s. Three
 divergences are declared (DIV-TA-001..003). That is an observation at that
 revision for the `git://` carrier only, not a standing claim and not general
 Git compatibility; re-run the lane for the current state.

@@ -121,12 +121,17 @@ Tier A rows until the oracle has a constrained mode for them. Shallow and
 partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
 section states no result; the receipt does.
 
-Last observed receipt (an observation, not a standing claim): 2026-10-20 at
-`8a992b6e`, clean tree, receipt sha256 `5348774f…`, `fg` sha256 `e841e9e1…`.
+Last observed receipt (an observation, not a standing claim): 2026-10-21 at
+`18f77336`, clean tree, receipt sha256 `b98bfaa2…`, `fg` sha256 `a298e9ce…`.
 Verdict **pass**: 18 of 18 rows and 624 of 624 checks, over seven corpora,
-including the 20,100-object one. Its import took about 131-143 s, and the
-20,000-object push about 391-396 s. Earlier receipts at the same oracle record
-the defects this lane found and the fixes that cleared them:
+with the push node at `fg serve`'s default budgets. The 20,100-object import
+took about 15 s, the 20,000-object push about 17 s, and the 1,200-commit
+import 4.0 s. Pinned git-2.54.0 clones that 1,200-commit corpus in 0.08 s on
+the same host, so import is still about 50 times slower (frankengit-pc9g).
+Earlier receipts at the same oracle record the defects this lane found and the
+fixes that cleared them:
+- `8a992b6e`: 18/18 rows; the push node needed both receive budgets raised to
+  1800 s, and the 20,000-object push took about 391-396 s.
 - `f5e1a106`: 16/18 rows; the many-objects push was refused at the 300 s
   session budget (`frankengit-3gdw`). Every import, clone and fetch row of the
   new corpus passed.
