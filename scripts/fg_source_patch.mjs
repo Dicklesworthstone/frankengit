@@ -6,24 +6,26 @@ import { lstat } from 'node:fs/promises';
 import { absolute, directory, readPrivate, writeNew, syncDirectory } from './operator/workflow_watch_io.mjs';
 import { fields, parse, fail, clock, hash } from './operator/source_edit_wire.mjs';
 import { compileSourceReplacements, REPLACEMENT_PROFILE, REPLACEMENT_LIMITS } from './operator/source_edit_replacements.mjs';
+import { compileSourceSplices, SPLICE_PROFILE, SPLICE_LIMITS } from './operator/source_edit_splices.mjs';
 const PLAN_BYTES = 512 * 1024;
-const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
+const USAGE = 'node scripts/fg_source_patch.mjs compile --changes-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]\nnode scripts/fg_source_patch.mjs splice --splices-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
 function argumentsFor(args) {
-  if (!Array.isArray(args) || args.length > 11 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || args[0] !== 'compile') fail('source_patch_arguments');
-  const found = new Map(), allowed = ['--changes-file', '--output', '--max-patch-bytes', '--timeout-ms', '--binary'];
+  if (!Array.isArray(args) || args.length > 11 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || !['compile', 'splice'].includes(args[0])) fail('source_patch_arguments');
+  const inputFlag = args[0] === 'splice' ? '--splices-file' : '--changes-file';
+  const found = new Map(), allowed = [inputFlag, '--output', '--max-patch-bytes', '--timeout-ms', '--binary'];
   for (let at = 1; at < args.length; at += 2) {
     const key = args[at], value = args[at + 1];
     if (!allowed.includes(key) || found.has(key) || !value || value.startsWith('--')) fail('source_patch_arguments');
     found.set(key, value);
   }
-  for (const name of ['--changes-file', '--output']) if (!found.has(name)) fail('source_patch_arguments');
+  for (const name of [inputFlag, '--output']) if (!found.has(name)) fail('source_patch_arguments');
   const positive = (key, fallback, maximum) => {
     const value = found.get(key) ?? String(fallback);
     if (!/^[1-9][0-9]{0,8}$/.test(value) || Number(value) > maximum) fail('source_patch_limit');
     return Number(value);
   };
   if (found.has('--binary') && !['literal', 'delta'].includes(found.get('--binary'))) fail('source_patch_binary_profile');
-  return { input: absolute(found.get('--changes-file')), output: absolute(found.get('--output')),
+  return { operation: args[0], input: absolute(found.get(inputFlag)), output: absolute(found.get('--output')),
     ...(found.has('--binary') ? { binary: found.get('--binary') } : {}),
     maxPatchBytes: positive('--max-patch-bytes', REPLACEMENT_LIMITS.maxPatchBytes, REPLACEMENT_LIMITS.maxPatchBytes),
     timeoutMs: positive('--timeout-ms', 30000, 300000) };
@@ -54,6 +56,36 @@ async function changesFromFile(path, check) {
   }
   return { format: plan.object_format, changes };
 }
+// Instructions and offsets are data, never strings to execute or a search rule.
+// Read whole originals privately; the core checks their independent Git IDs and
+// matches every range before any result or final patch is published.
+async function splicesFromFile(path, check) {
+  const plan = parse(await read(path, PLAN_BYTES, check), PLAN_BYTES);
+  fields(plan, ['schema', 'object_format', 'files']);
+  if (plan.schema !== SPLICE_PROFILE || !['sha1', 'sha256'].includes(plan.object_format) ||
+      !Array.isArray(plan.files) || !plan.files.length || plan.files.length > 32) fail('source_splice_plan');
+  const files = []; let sourceBytes = 0, count = 0;
+  const decode = value => {
+    if (typeof value !== 'string' || value.length > 2 * 1048576 || !/^(?:[0-9a-f]{2})*$/.test(value)) fail('source_splice_hex');
+    return Buffer.from(value, 'hex');
+  };
+  for (const row of plan.files) {
+    check(); fields(row, ['path_hex', 'before', 'after_mode', 'edits']);
+    const before = fields(row.before, ['file', 'blob', 'mode']);
+    if (![0o100644, 0o100755].includes(before.mode) || ![0o100644, 0o100755].includes(row.after_mode)) fail('source_patch_mode');
+    if (!Array.isArray(row.edits) || row.edits.length > SPLICE_LIMITS.maxSplices - count) fail('source_splice_count');
+    count += row.edits.length;
+    const edits = row.edits.map(edit => {
+      check(); fields(edit, ['byte_start', 'before_hex', 'after_hex']);
+      if (!Number.isSafeInteger(edit.byte_start) || edit.byte_start < 0 || edit.byte_start > 1048576) fail('source_splice_range');
+      return { byte_start: edit.byte_start, before: decode(edit.before_hex), after: decode(edit.after_hex) };
+    });
+    const bytes = await read(before.file, Math.min(1048576, REPLACEMENT_LIMITS.maxSourceBytes - sourceBytes), check);
+    sourceBytes += bytes.length;
+    files.push({ path_hex: row.path_hex, before: { bytes, blob: before.blob, mode: before.mode }, after_mode: row.after_mode, edits });
+  }
+  return { format: plan.object_format, files };
+}
 async function emit(stream, value) {
   const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
   if (bytes.length > 65536) fail('source_patch_output_limit');
@@ -78,14 +110,17 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     time.check(); await directory(dirname(options.output));
     try { await lstat(options.output); fail('source_patch_destination_exists'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const plan = await changesFromFile(options.input, time.check);
-    const compiled = compileSourceReplacements(plan.format, plan.changes, { maxPatchBytes: options.maxPatchBytes,
-      ...(options.binary ? { binary: options.binary } : {}) }, time.check);
+    const splice = options.operation === 'splice';
+    const plan = await (splice ? splicesFromFile : changesFromFile)(options.input, time.check);
+    const compiled = (splice ? compileSourceSplices : compileSourceReplacements)(plan.format, splice ? plan.files : plan.changes,
+      { maxPatchBytes: options.maxPatchBytes, ...(options.binary ? { binary: options.binary } : {}) }, time.check);
     const candidate = { type: 'source_patch_compiled', profile: compiled.profile, output: options.output,
       object_format: plan.format, patch_sha256: hash(compiled.patch), patch_bytes: compiled.patch.length,
       changed_paths: compiled.changes.length, source_bytes: compiled.source_bytes, result_bytes: compiled.result_bytes,
       ...(options.binary ? { binary_files: compiled.binary_files } : {}),
       ...(options.binary === 'delta' ? { delta_members: compiled.delta_members, literal_members: compiled.literal_members } : {}),
+      ...(splice ? { splice_profile: compiled.splice_profile, splice_count: compiled.splice_count,
+        expected_bytes: compiled.expected_bytes, inserted_bytes: compiled.inserted_bytes, preimages_verified: true } : {}),
       source_membership_verified: false, publication_attempted: false };
     time.check();
     try {
