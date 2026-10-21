@@ -118,7 +118,7 @@ class Campaign:
                      "--id", identifier, "--url", url, "--secret", SECRET.hex(),
                      *(["--permissive-for-tests"] if permissive else [])], expected)
 
-        self.run(f"{fmt}-init", ["init", storage, TENANT, REPOSITORY, *format_args])
+        self.run(f"{fmt}-init", ["init", storage, TENANT, REPOSITORY, fmt])
         self.run(f"{fmt}-issue", ["issue", "open", *scope[:3], "1", "--trusted-local",
                  "--principal", PRINCIPAL, "--idempotency-key", f"webhook-{fmt}",
                  "--expected-version", "0", "--title", "A committed issue",

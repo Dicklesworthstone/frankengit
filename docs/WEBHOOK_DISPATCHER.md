@@ -309,15 +309,17 @@ cargo test -p fgit-cli --bin fg webhook_commands::dispatcher
 They include real-file journal locking/restart/corruption tests and real-node,
 loopback-HTTP campaigns with SHA-1/SHA-256 authority, signed payload preservation,
 retry after lost acknowledgement, output failure, cancellation, bounded scans,
-and endpoint/subscription refusal. These tests were **authored, not executed**
-in the implementation environment: Cargo, rustc and rustfmt were unavailable.
-No bead closure, native test pass, real-binary campaign, or production-readiness
-claim is made by this document.
+and endpoint/subscription refusal. The original implementation environment could
+not execute them. A later strict remote run at native source
+`b186a43a87d29c86a4996fe59b53ce4486674bc8` executed the dispatcher filter:
+72 passed, 0 failed, 0 ignored, 744 unrelated tests filtered. This is a focused
+Rust result, not an independent batch, full-workspace, or release gate.
 
 The separate product campaign uses an already built native binary:
 
 ```sh
-FG_BIN=/absolute/path/to/fg bash scripts/e2e/suites/forge/webhook_delivery.sh
+FG_BIN=/absolute/path/to/fg FGE_PROFILE=release \
+  bash scripts/e2e/suites/forge/webhook_delivery.sh
 ```
 
 It never invokes Cargo or selects a target directory. In SHA-1 and SHA-256
@@ -335,6 +337,19 @@ execution evidence; the binary campaign uses `FG-046-NATIVE-*` identifiers.
 Automatic backoff timing, dual-secret verification windows, and crash injection
 remain separate Rust test obligations. Authored campaign code alone earns no
 executed result or bead completion.
+
+On October 21, the campaign at `d9cf96e9` plus the positional `fg init` format
+correction executed 60 native commands and all 15 acceptance assertions on
+Linux, with no failures or skips. It used the retained `05e29b11` release binary,
+SHA-256 `e7e4daa3bd424ca9aafa7466d0377ca796974bbd52a940fc1c6fb95c2e4ee8c8`.
+Every crate, Cargo manifest/lockfile, and toolchain byte matches the Rust test
+revision above. The binary was not rebuilt from the campaign's whole source
+tree; these identities remain distinct. The first run refused the campaign's
+incorrect `init --object-format` syntax; the correction uses the documented
+positional format. Both runs are retained under
+`/data/tmp/frankengit-peachhorse-webhook-d9cf96e9-20261021T2016` on `csd`.
+The native original-fixture planted regression remains outstanding under
+`frankengit-root-doctrine-x2mv.4.57`; this result does not close that bead.
 
 `DEP-264` admits Python 3 only as this campaign's external tooling. The helper
 uses the supplied standard library for HTTP, JSON, HMAC, and child-process
