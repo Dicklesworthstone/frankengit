@@ -1,7 +1,7 @@
 // Actual private files and complete shared source verifiers, not native TreeFS.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, unlink, chmod, mkdir, lstat, symlink, link } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile, readFile, unlink, chmod, mkdir, lstat, symlink, link } from 'node:fs/promises';
 import { existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +23,7 @@ function split(format = 'sha1', input = rows, left = originalPaths, right = more
 const merge = (s, options) => mergeSelectedSourcePackages(s.left.bytes, s.left.expected, s.right.bytes, s.right.expected, options);
 const absent = path => assert.rejects(lstat(path), { code: 'ENOENT' });
 async function setup(t, format = 'sha1', input, left, right) {
-  const s = split(format, input, left, right), root = await mkdtemp(join(tmpdir(), 'fg-expand-'));
+  const s = split(format, input, left, right), root = await realpath(await mkdtemp(join(tmpdir(), 'fg-expand-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const original = join(root, 'original'), output = join(root, 'expanded');
   const first = await createSourceWorkspace(original, s.left.bytes, s.left.expected);
@@ -70,17 +70,33 @@ for (const format of ['sha1', 'sha256']) {
     await rm(s.original, { recursive: true });
     assert.equal((await loadSourceWorkspace(s.output, result.workspace_sha256)).expected.files.length, 5);
   });
-  test(`${format}: preserve raw POSIX names and binary bodies while deduplicating identical subtrees`, async t => {
-    const raw = Buffer.from([0xff,47,0xfe]), s = await setup(t, format,
-      [{ path: raw, bytes: Buffer.from([0,1,255]), mode: 0o100755 }, { path: 'a/x', bytes: 'same' }, { path: 'b/x', bytes: 'same' }],
-      [raw, 'a/x'], ['b/x']);
-    const result = await s.expand(), loaded = await loadSourceWorkspace(s.output, result.workspace_sha256);
-    assert.equal(loaded.verified.uniqueSourceBytes, 7); assert.equal(loaded.verified.logicalSourceBytes, 11);
-    assert.deepEqual(await readFile(localPath(s.output, raw.toString('hex'))), Buffer.from([0,1,255]));
-    const pkg = JSON.parse(loaded.packageBytes); const a = pkg.membership.trees.find(t => t.pathHex === hexPath('a'));
-    assert.equal(a.oid, pkg.membership.trees.find(t => t.pathHex === hexPath('b')).oid);
-    assert.equal(pkg.membership.trees.length, 4);
-  });
+  for (const [names, raw] of [['UTF-8', Buffer.from('🌱/file\n')], ['raw-byte', Buffer.from([0xff,47,0xfe])]]) {
+    const unsupported = names === 'raw-byte' && process.platform === 'darwin';
+    test(`${format}: ${names} expansion ${unsupported ? 'refuses before output ownership' : 'preserves binary bodies and deduplicates identical subtrees'}`, async t => {
+      const input = [{ path: raw, bytes: Buffer.from([0,1,255]), mode: 0o100755 }, { path: 'a/x', bytes: 'same' }, { path: 'b/x', bytes: 'same' }];
+      if (unsupported) {
+        const s = await setup(t, format, input, ['a/x'], [raw, 'b/x']);
+        // Package union still preserves the original raw path and deduplication;
+        // only host materialization is unsupported. The old workspace survives.
+        const merged = await merge(s), loaded = await readSourcePackage(merged.packageBytes, merged.expected);
+        assert.equal(loaded.verified.uniqueSourceBytes, 7);assert.equal(loaded.verified.logicalSourceBytes, 11);
+        assert(merged.expected.files.some(f => f.pathHex === raw.toString('hex')));
+        await assert.rejects(s.expand(), { code: 'source_workspace_host_path_unrepresentable' });
+        await absent(s.output);
+        assert.deepEqual((await loadSourceWorkspace(s.original, s.first.workspace_sha256)).packageBytes, s.left.bytes);
+        assert.equal((await readFile(localPath(s.original, hexPath('a/x')))).toString(), 'same');
+        t.diagnostic('raw-name expansion unsupported on macOS; mandatory Linux materialization and UTF-8 twin retained');
+        return;
+      }
+      const s = await setup(t, format, input, [raw, 'a/x'], ['b/x']);
+      const result = await s.expand(), loaded = await loadSourceWorkspace(s.output, result.workspace_sha256);
+      assert.equal(loaded.verified.uniqueSourceBytes, 7); assert.equal(loaded.verified.logicalSourceBytes, 11);
+      assert.deepEqual(await readFile(localPath(s.output, raw.toString('hex'))), Buffer.from([0,1,255]));
+      const pkg = JSON.parse(loaded.packageBytes); const a = pkg.membership.trees.find(t => t.pathHex === hexPath('a'));
+      assert.equal(a.oid, pkg.membership.trees.find(t => t.pathHex === hexPath('b')).oid);
+      assert.equal(pkg.membership.trees.length, 4);
+    });
+  }
   test(`${format}: altered commit or hash domain cannot refresh the workspace base`, async t => {
     const s = await setup(t, format), next = selectSource(withParent(s.full, s.full.commit), morePaths);
     await assert.rejects(expandSourceWorkspace(s.original, s.first.workspace_sha256, next.bytes, next.expected, s.output), /source_union_basis/);

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { buildSourceChanges, CHANGE_LIMITS, CHANGES_SCHEMA, sha256 } from '../operator/source_changes.mjs';
 import { changeFixture, intent, replace, hexPath, objectId } from './source_changes_fixture.mjs';
+import { installIndex } from '../../tests/browser/git-index-fixture.mjs';
 const clone = structuredClone;
 const draft = (f, changes, options) => buildSourceChanges(f.bytes, f.expected, intent(changes), options);
 const code = expected => error => error.code === expected;
@@ -76,39 +77,68 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(result.manifest.package_sha256, sha256(f.bytes));
     assert.equal(result.manifest.effects[0].new_blob, objectId('blob', Buffer.from('fn main() { new(); }\n'), format));
   });
-  test(`${format}: generated patches apply with installed Git to the exact independently expected whole tree`, async () => {
-    // Installed Git is a non-production oracle, not the pinned conformance lane.
-    const raw = Buffer.from([0x7a, 0xff, 0x22, 0x5c, 0x0a]);
-    const input = [{ path: 'a', bytes: 'one\r\ntwo', mode: 0o100644 }, { path: raw, bytes: Buffer.from([255, 10, 128]), mode: 0o100644 },
-      { path: 'dir/script', bytes: '#!/bin/sh\nold\n', mode: 0o100755 }, { path: 'empty', bytes: '', mode: 0o100644 },
-      { path: 'unchanged', bytes: 'preserve me\n', mode: 0o100644 }];
-    const f = changeFixture(format, input), output = await draft(f, [once('a', 'two', 'THREE'),
-      { path_hex: raw.toString('hex'), operation: 'replace', content_hex: 'fe0a81' },
-      { path_hex: hexPath('dir/script'), operation: 'mode', executable: false }, { path_hex: hexPath('empty'), operation: 'delete' }]);
-    const root = await mkdtemp(join(tmpdir(), 'fg-changes-oracle-'));
-    const env = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_COUNT: '0', LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' };
-    const git = (...args) => execFileSync('git', ['-C', root, ...args], { env, timeout: 15000 });
-    try {
-      git('init', '--quiet', `--object-format=${format}`);
-      for (const file of f.files) {
-        const full = Buffer.concat([Buffer.from(root + '/'), file.path]), slash = full.lastIndexOf(47);
-        await mkdir(full.subarray(0, slash), { recursive: true }); await writeFile(full, file.bytes); await chmod(full, file.mode & 0o777);
-      }
-      git('add', '--all'); assert.equal(git('write-tree').toString().trim(), f.tree);
-      execFileSync('git', ['-C', root, 'apply', '--index', '--whitespace=nowarn', '-'], { env, input: output.bytes, timeout: 15000 });
-      const final = changeFixture(format, [
-        { ...input[0], bytes: 'one\r\nTHREE' }, { ...input[1], bytes: Buffer.from([254, 10, 129]) },
-        { ...input[2], mode: 0o100644 }, input[4],
-      ]);
-      assert.equal(git('write-tree').toString().trim(), final.tree);
-      for (const file of final.files) {
-        const full = Buffer.concat([Buffer.from(root + '/'), file.path]); assert.deepEqual(await readFile(full), file.bytes);
-        assert.equal((await stat(full)).mode & 0o111, file.mode & 0o111);
-      }
-      await assert.rejects(stat(join(root, 'empty')), { code: 'ENOENT' });
-    } finally { await rm(root, { recursive: true, force: true }); }
-  });
+  for (const [names, raw] of [['UTF-8', Buffer.from('z🌱"\\\n')], ['raw-byte', Buffer.from([0x7a, 0xff, 0x22, 0x5c, 0x0a])]]) {
+    test(`${format}: ${names} patches have exact whole-tree Git index identity and supported worktree effects`, async t => {
+      // Installed Git is a non-production oracle, not the pinned conformance lane.
+      const input = [{ path: 'a', bytes: 'one\r\ntwo', mode: 0o100644 }, { path: raw, bytes: Buffer.from([255, 10, 128]), mode: 0o100644 },
+        { path: 'dir/script', bytes: '#!/bin/sh\nold\n', mode: 0o100755 }, { path: 'empty', bytes: '', mode: 0o100644 },
+        { path: 'unchanged', bytes: 'preserve me\n', mode: 0o100644 }];
+      const f = changeFixture(format, input), output = await draft(f, [once('a', 'two', 'THREE'),
+        { path_hex: raw.toString('hex'), operation: 'replace', content_hex: 'fe0a81' },
+        { path_hex: hexPath('dir/script'), operation: 'mode', executable: false }, { path_hex: hexPath('empty'), operation: 'delete' }]);
+      const root = await mkdtemp(join(tmpdir(), 'fg-changes-oracle-'));
+      const env = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_COUNT: '0', LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' };
+      const git = (args, input) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.filemode=true', '-C', root, ...args], { env, input, timeout: 15000 });
+      try {
+        t.diagnostic(git(['--version']).toString().trim());
+        git(['init', '--quiet', `--object-format=${format}`]);
+        const final = changeFixture(format, [
+          { ...input[0], bytes: 'one\r\nTHREE' }, { ...input[1], bytes: Buffer.from([254, 10, 129]) },
+          { ...input[2], mode: 0o100644 }, input[4],
+        ]);
+        const before = new Map(f.files.map(file => [hexPath(file.path), file]));
+        const after = new Map(final.files.map(file => [hexPath(file.path), file]));
+        const edits = [...new Set([...before.keys(), ...after.keys()])].map(path_hex => ({
+          path_hex, before: before.get(path_hex) ?? null, after: after.get(path_hex) ?? null,
+        }));
+        // Original bytes cross stdin, never the host filesystem or UTF-8 decoding.
+        // Both independent fixture trees must also equal upstream Git's objects.
+        assert.equal(installIndex(git, edits, 'before'), f.tree);
+        assert.equal(installIndex(git, edits, 'after'), final.tree);
+        git(['read-tree', f.tree]);
+        git(['apply', '--check', '--cached', '--whitespace=nowarn', '-'], output.bytes);
+        git(['apply', '--cached', '--whitespace=nowarn', '-'], output.bytes);
+        assert.equal(git(['write-tree']).toString().trim(), final.tree);
+        git(['apply', '--cached', '--reverse', '--whitespace=nowarn', '-'], output.bytes);
+        assert.equal(git(['write-tree']).toString().trim(), f.tree);
+        assert.throws(() => git(['apply', '--cached', '--reverse', '-'], output.bytes), 'wrong-base application refuses');
+        if (names === 'raw-byte' && process.platform === 'darwin') {
+          t.diagnostic('raw-byte Git index identity exercised; macOS raw-name worktree unsupported, mandatory Linux worktree twin remains');
+          return;
+        }
+        for (const file of f.files) {
+          const full = Buffer.concat([Buffer.from(root + '/'), file.path]), slash = full.lastIndexOf(47);
+          await mkdir(full.subarray(0, slash), { recursive: true }); await writeFile(full, file.bytes); await chmod(full, file.mode & 0o777);
+        }
+        git(['add', '--all']); assert.equal(git(['write-tree']).toString().trim(), f.tree);
+        git(['apply', '--index', '--whitespace=nowarn', '-'], output.bytes);
+        assert.equal(git(['write-tree']).toString().trim(), final.tree);
+        for (const file of final.files) {
+          const full = Buffer.concat([Buffer.from(root + '/'), file.path]); assert.deepEqual(await readFile(full), file.bytes);
+          assert.equal((await stat(full)).mode & 0o111, file.mode & 0o111);
+        }
+        await assert.rejects(stat(join(root, 'empty')), { code: 'ENOENT' });
+        git(['apply', '--index', '--reverse', '--whitespace=nowarn', '-'], output.bytes);
+        assert.equal(git(['write-tree']).toString().trim(), f.tree);
+        for (const file of f.files) {
+          const full = Buffer.concat([Buffer.from(root + '/'), file.path]);
+          assert.deepEqual(await readFile(full), file.bytes);
+          assert.equal((await stat(full)).mode & 0o111, file.mode & 0o111);
+        }
+      } finally { await rm(root, { recursive: true, force: true }); }
+    });
+  }
 }
 
 test('ambiguous including overlapping matches and missing matches are refused beside a permitted twin', async () => {

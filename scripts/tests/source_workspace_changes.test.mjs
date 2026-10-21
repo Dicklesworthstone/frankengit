@@ -2,7 +2,7 @@
 // modules. Native-schema HTTP peers are not a Rust server or authority proof.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, chmod, unlink, mkdir, symlink, lstat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile, readFile, chmod, unlink, mkdir, symlink, lstat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,7 +20,7 @@ const CLI = new URL('../fg_source_workspace.mjs', import.meta.url).pathname;
 const AUTHOR = new URL('../fg_source_changes.mjs', import.meta.url).pathname;
 const missing = p => assert.rejects(lstat(p), {code:'ENOENT'});
 async function setup(t, format='sha1', files) {
-  const f=changeFixture(format,files), root=await mkdtemp(join(tmpdir(),'fg-workspace-changes-')), path=join(root,'workspace');
+  const f=changeFixture(format,files), root=await realpath(await mkdtemp(join(tmpdir(),'fg-workspace-changes-'))), path=join(root,'workspace');
   t.after(()=>rm(root,{recursive:true,force:true}));
   const saved=await createSourceWorkspace(path,f.bytes,f.expected), hash=saved.workspace_sha256;
   return {f,root,path,hash, output:join(root,'capture'),
@@ -61,7 +61,7 @@ for(const format of ['sha1','sha256']) {
   });
   test(`${format}: captured workspace -> native candidate -> stage -> lost-reply recovery`,async t=>{
     const peer=await nativePeer(format,{tls:format==='sha256'});t.after(()=>peer.close());
-    const root=await mkdtemp(join(tmpdir(),'fg-workspace-pipeline-'));t.after(()=>rm(root,{recursive:true,force:true}));
+    const root=await realpath(await mkdtemp(join(tmpdir(),'fg-workspace-pipeline-')));t.after(()=>rm(root,{recursive:true,force:true}));
     const path=join(root,'workspace'),f=peer.fixture,saved=await createSourceWorkspace(path,f.bytes,f.expected);
     await writeFile(localPath(path,hexPath('src/main.rs')),'fn main() { captured(); }\n');
     await mkdir(localPath(path,hexPath('generated')),{mode:0o700});await writeFile(localPath(path,hexPath('generated/new.rs')),'// new\n',{mode:0o600});
@@ -89,12 +89,25 @@ for(const format of ['sha1','sha256']) {
     const r=await s.collect(['src/main.rs']);assert.equal(r.draft.manifest.effects.length,1);
     assert.ok(!r.draft.bytes.includes(Buffer.from('NOT SELECTED SECRET')));assert.equal(r.manifest.unselected_paths_examined,false);
   });
-  test(`${format}: raw byte paths capture without UTF-8 normalization`,async t=>{
-    const raw=Buffer.from([0xff,47,0xfe,10]),s=await setup(t,format,[{path:raw,bytes:'old\r\n'}]);
-    await writeFile(localPath(s.path,raw.toString('hex')),Buffer.from([255,10,65]));
-    const r=await collectWorkspaceChanges(s.path,s.hash,{paths_hex:[raw.toString('hex')]});
-    assert.equal(r.changes.changes[0].path_hex,raw.toString('hex'));assert.equal(r.changes.changes[0].content_hex,'ff0a41');
-  });
+  for (const [names, raw] of [['UTF-8', Buffer.from('🌱/file\n')], ['raw-byte', Buffer.from([0xff,47,0xfe,10])]]) {
+    const unsupported = names === 'raw-byte' && process.platform === 'darwin';
+    test(`${format}: ${names} capture ${unsupported ? 'refuses unrepresentable host paths before publication' : 'preserves exact path and content bytes'}`,async t=>{
+      if (unsupported) {
+        // A root-level new path has a complete committed-absence proof. The
+        // refusal must be the host boundary, not missing context or local ENOENT.
+        const s=await setup(t,format,[{path:'plain',bytes:'old\r\n'}]);
+        await assert.rejects(s.capture([Buffer.from([0xff])]), {code:'source_workspace_host_path_unrepresentable'});
+        await missing(s.output);
+        await loadSourceWorkspace(s.path,s.hash);
+        t.diagnostic('raw-name capture unsupported on macOS; mandatory Linux capture and UTF-8 twin retained');
+        return;
+      }
+      const s=await setup(t,format,[{path:raw,bytes:'old\r\n'}]);
+      await writeFile(localPath(s.path,raw.toString('hex')),Buffer.from([255,10,65]));
+      const r=await collectWorkspaceChanges(s.path,s.hash,{paths_hex:[raw.toString('hex')]});
+      assert.equal(r.changes.changes[0].path_hex,raw.toString('hex'));assert.equal(r.changes.changes[0].content_hex,'ff0a41');
+    });
+  }
 }
 test('no-change and missing new-file selections refuse without a capture directory',async t=>{
   const s=await setup(t);await assert.rejects(s.capture(['run.sh']),/no_changes/);await missing(s.output);
@@ -197,7 +210,7 @@ for(const format of ['sha1','sha256']) test(`${format}: a physical move captures
   const [add,remove]=r.draft.manifest.effects;assert.equal(add.new_blob,remove.old_blob);
 });
 test('end-to-end CLI capture/prepare/stage uses the frozen capture, not later editor changes',async t=>{
-  const peer=await nativePeer();t.after(()=>peer.close());const root=await mkdtemp(join(tmpdir(),'fg-workspace-cli-pipeline-'));
+  const peer=await nativePeer();t.after(()=>peer.close());const root=await realpath(await mkdtemp(join(tmpdir(),'fg-workspace-cli-pipeline-')));
   t.after(()=>rm(root,{recursive:true,force:true}));const path=join(root,'workspace'),f=peer.fixture;
   const saved=await createSourceWorkspace(path,f.bytes,f.expected);await writeFile(localPath(path,hexPath('src/main.rs')),'captured\n');
   const selected=join(root,'paths.json');await writeFile(selected,canonical({paths_hex:[hexPath('src/main.rs')]}),{mode:0o600});
@@ -217,7 +230,7 @@ test('end-to-end CLI capture/prepare/stage uses the frozen capture, not later ed
   assert.equal(peer.applies,0);assert.deepEqual(peer.failures,[]);
 });
 test('self-consistent hidden candidate changes are still refused for captured workspace edits',async t=>{
-  const peer=await nativePeer();t.after(()=>peer.close());const root=await mkdtemp(join(tmpdir(),'fg-workspace-hidden-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const peer=await nativePeer();t.after(()=>peer.close());const root=await realpath(await mkdtemp(join(tmpdir(),'fg-workspace-hidden-')));t.after(()=>rm(root,{recursive:true,force:true}));
   const path=join(root,'workspace'),f=peer.fixture,saved=await createSourceWorkspace(path,f.bytes,f.expected);
   await writeFile(localPath(path,hexPath('src/main.rs')),'captured\n');const r=await collectWorkspaceChanges(path,saved.workspace_sha256,{paths_hex:[hexPath('src/main.rs')]});
   const selection=peer.selection(r.draft.manifest.effects.map(e=>e.path_hex));peer.fault='unreported-addition';

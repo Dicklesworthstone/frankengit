@@ -1,7 +1,7 @@
 // Complete production modules and actual POSIX files, not native Rust TreeFS.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, lstat, chmod, symlink, link, mkdir, unlink, rename } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, readFile, writeFile, lstat, chmod, symlink, link, mkdir, unlink, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +14,7 @@ import { main } from '../fg_source_workspace.mjs';
 const CLI = new URL('../fg_source_workspace.mjs', import.meta.url).pathname;
 const missing = p => assert.rejects(lstat(p), { code: 'ENOENT' });
 async function setup(t, format = 'sha1', input) {
-  const root = await mkdtemp(join(tmpdir(), 'fg-local-workspace-')), path = join(root, 'workspace');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fg-local-workspace-'))), path = join(root, 'workspace');
   t.after(() => rm(root, { recursive: true, force: true }));
   const f = changeFixture(format, input);
   return { root, path, f, create: options => createSourceWorkspace(path, f.bytes, f.expected, options) };
@@ -54,14 +54,24 @@ for (const format of ['sha1', 'sha256']) {
     const saved = await createSourceWorkspace(s.path, canonical(p), expected);
     assert.equal(saved.files, 1); await missing(localPath(s.path, hexPath('src')));
   });
-  test(`${format}: raw names, binary bytes, CRLF and missing newline survive materialization`, async t => {
-    const s = await setup(t, format, [
-      { path: Buffer.from([0xff,47,0xfe,10]), bytes: Buffer.from([0,255,10,13]) },
-      { path: 'notes.txt', bytes: 'a\r\nb', mode: 0o100755 }, { path: 'empty', bytes: '' },
-    ]), result = await s.create();
-    for (const f of s.f.files) assert.deepEqual(await readFile(localPath(s.path, f.path.toString('hex'))), f.bytes);
-    assert.ok((await inspectSourceWorkspace(s.path, result.workspace_sha256)).entries.every(f => f.state === 'unchanged'));
-  });
+  for (const [names, path] of [['UTF-8', Buffer.from('🌱/file\n')], ['raw-byte', Buffer.from([0xff,47,0xfe,10])]]) {
+    const unsupported = names === 'raw-byte' && process.platform === 'darwin';
+    test(`${format}: ${names} materialization ${unsupported ? 'refuses before destination acquisition on macOS' : 'preserves binary bytes, CRLF and missing newline'}`, async t => {
+      const s = await setup(t, format, [
+        { path, bytes: Buffer.from([0,255,10,13]) },
+        { path: 'notes.txt', bytes: 'a\r\nb', mode: 0o100755 }, { path: 'empty', bytes: '' },
+      ]);
+      if (unsupported) {
+        await assert.rejects(s.create(), { code: 'source_workspace_host_path_unrepresentable' });
+        await missing(s.path);
+        t.diagnostic('typed macOS host refusal; raw-name materialization must execute on Linux');
+        return;
+      }
+      const result = await s.create();
+      for (const f of s.f.files) assert.deepEqual(await readFile(localPath(s.path, f.path.toString('hex'))), f.bytes);
+      assert.ok((await inspectSourceWorkspace(s.path, result.workspace_sha256)).entries.every(f => f.state === 'unchanged'));
+    });
+  }
   test(`${format}: edits/deletion/mode are observed without touching original evidence`, async t => {
     const s = await setup(t, format), r = await s.create();
     await writeFile(localPath(s.path, hexPath('src/main.rs')), 'replacement\n');
