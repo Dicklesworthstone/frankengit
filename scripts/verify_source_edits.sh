@@ -11,4 +11,6 @@ node --test tests/operator/source_edit_candidate.test.mjs \
   tests/operator/source_edit_from_package.test.mjs \
   tests/operator/source_edit_publish.test.mjs tests/operator/source_edit_cli.test.mjs \
   tests/operator/source_edit_evidence.test.mjs \
-  tests/operator/source_edit_evidence_publish.test.mjs tests/operator/source_edit_evidence_cli.test.mjs
+  tests/operator/source_edit_evidence_publish.test.mjs tests/operator/source_edit_evidence_cli.test.mjs \
+  tests/operator/source_edit_creations.test.mjs tests/operator/source_edit_creations_publish.test.mjs \
+  tests/operator/source_edit_results.test.mjs tests/operator/source_edit_results_custody.test.mjs

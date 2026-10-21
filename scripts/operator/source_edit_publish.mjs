@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
 import { validateOutcomeReply } from './transaction_outcome.mjs';
 import { validateSourceEdit, editCoordinates, canonical, identity, oid, CAPTURE_LIMIT, BUNDLE_LIMIT } from './source_edit_candidate.mjs';
-import { validateSourceEditEvidence, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES, SOURCE_EVIDENCE_PROFILE, SOURCE_CREATION_EVIDENCE_PROFILE } from './source_edit_from_package.mjs';
+import { validateSourceEditEvidence, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES, SOURCE_EVIDENCE_PROFILE, SOURCE_CREATION_EVIDENCE_PROFILE, SOURCE_RESULT_EVIDENCE_PROFILE } from './source_edit_from_package.mjs';
 import { hash, fields, fail, parse, clock, upload, exchange, integer } from './source_edit_wire.mjs';
 
 const SCHEMA = 'frankengit-source-apply-v1', RECORD_LIMIT = 65536;
@@ -35,7 +35,7 @@ async function putRecord(path, value) {
   return hash(bytes);
 }
 const FILES_V1 = 'frankengit-source-edit-files-v1', FILES_V2 = 'frankengit-source-edit-files-v2';
-const FILES_V3 = 'frankengit-source-edit-files-v3';
+const FILES_V3 = 'frankengit-source-edit-files-v3', FILES_V4 = 'frankengit-source-edit-files-v4';
 const PACKAGE_FILE = 'source-package.json', EXPECTED_FILE = 'source-expected.json';
 const evidenceReceipt = checked => checked.source_verification ? { source_verification: checked.source_verification } : {};
 function manifest(capture, bundle) {
@@ -51,8 +51,8 @@ async function saveChecked(path, checked, check) {
     const source = checked.source_evidence, expected = canonical(source.expected);
     if (!expected.length || expected.length > SOURCE_EXPECTED_BYTES) fail('source_edit_evidence_limit');
     const profile = checked.source_verification.profile;
-    if (![SOURCE_EVIDENCE_PROFILE, SOURCE_CREATION_EVIDENCE_PROFILE].includes(profile)) fail('source_edit_evidence_profile');
-    root.schema = profile === SOURCE_CREATION_EVIDENCE_PROFILE ? FILES_V3 : FILES_V2;
+    if (![SOURCE_EVIDENCE_PROFILE, SOURCE_CREATION_EVIDENCE_PROFILE, SOURCE_RESULT_EVIDENCE_PROFILE].includes(profile)) fail('source_edit_evidence_profile');
+    root.schema = profile === SOURCE_RESULT_EVIDENCE_PROFILE ? FILES_V4 : profile === SOURCE_CREATION_EVIDENCE_PROFILE ? FILES_V3 : FILES_V2;
     root.source_evidence = { profile,
       package_sha256: hash(source.package_bytes), package_bytes: source.package_bytes.length,
       expected_sha256: hash(expected), expected_bytes: expected.length };
@@ -87,7 +87,7 @@ export async function saveVerifiedSourceEdit(path, capture, bundle, evidence, op
 export async function loadSourceEdit(path, expectedHash, check = () => {}) {
   check(); pin(expectedHash); await directory(absolute(path));
   const root = await readRecord(join(path, 'manifest.json'));
-  if (root.sha256 !== expectedHash || ![FILES_V1, FILES_V2, FILES_V3].includes(root.value.schema)) fail('source_edit_manifest_changed');
+  if (root.sha256 !== expectedHash || ![FILES_V1, FILES_V2, FILES_V3, FILES_V4].includes(root.value.schema)) fail('source_edit_manifest_changed');
   const evidenced = root.value.schema !== FILES_V1;
   fields(root.value, ['schema', 'capture_sha256', 'capture_bytes', 'bundle_sha256', 'bundle_bytes', ...(evidenced ? ['source_evidence'] : [])]);
   const captureBytes = await readPrivate(join(path, 'capture.json'), CAPTURE_LIMIT), bundle = await readPrivate(join(path, 'candidate.bundle'), BUNDLE_LIMIT);
@@ -99,7 +99,8 @@ export async function loadSourceEdit(path, expectedHash, check = () => {}) {
   let checked;
   if (evidenced) {
     const r = fields(root.value.source_evidence, ['profile', 'package_sha256', 'package_bytes', 'expected_sha256', 'expected_bytes']);
-    const profile = root.value.schema === FILES_V3 ? SOURCE_CREATION_EVIDENCE_PROFILE : SOURCE_EVIDENCE_PROFILE;
+    const profile = root.value.schema === FILES_V4 ? SOURCE_RESULT_EVIDENCE_PROFILE :
+      root.value.schema === FILES_V3 ? SOURCE_CREATION_EVIDENCE_PROFILE : SOURCE_EVIDENCE_PROFILE;
     if (r.profile !== profile) fail('source_edit_evidence_profile');
     pin(r.package_sha256); pin(r.expected_sha256);
     integer(r.package_bytes, 1, SOURCE_PACKAGE_BYTES); integer(r.expected_bytes, 1, SOURCE_EXPECTED_BYTES);

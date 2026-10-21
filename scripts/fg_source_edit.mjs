@@ -5,10 +5,13 @@ import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
 import { captureSourceEdit, oid } from './operator/source_edit_candidate.mjs';
 import { captureVerifiedSourceEdit, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES } from './operator/source_edit_from_package.mjs';
+import { saveSourceEditResultPlan } from './operator/source_edit_result_plan.mjs';
 import { parse, fail, clock } from './operator/source_edit_wire.mjs';
 import { saveSourceEdit, saveVerifiedSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply } from './operator/source_edit_publish.mjs';
 
-const USAGE = `node scripts/fg_source_edit.mjs prepare --selection PRIVATE_JSON --patch-file PRIVATE_PATCH
+const USAGE = `node scripts/fg_source_edit.mjs plan-results --source-expected PRIVATE_SOURCE_JSON
+  --files PRIVATE_FILE_SPEC --output ABSENT_EXPECTATION_JSON
+node scripts/fg_source_edit.mjs prepare --selection PRIVATE_JSON --patch-file PRIVATE_PATCH
   --token-file PRIVATE_TOKEN --output ABSENT_CANDIDATE_DIRECTORY [--ca-file PRIVATE_PEM]
 node scripts/fg_source_edit.mjs prepare-verified --selection PRIVATE_JSON --package PRIVATE_SOURCE_PACKAGE
   --expect PRIVATE_INDEPENDENT_SELECTION --patch-file PRIVATE_PATCH --token-file PRIVATE_TOKEN
@@ -24,6 +27,7 @@ node scripts/fg_source_edit.mjs status --journal PRIVATE_DIRECTORY --request-sha
 
 All commands accept --timeout-ms 1..300000 (default 30000). Paths are normalized
 absolute owner-private paths. Inspect the saved capture.json before stage/apply.
+plan-results commits to desired local file bytes without credentials or network.
 prepare uses native exact-patch and bundle inspection without publication.
 prepare-verified retains source evidence and checks candidate preimages/tree effects.
 stage records the candidate, original principal and recovery key before apply.
@@ -35,6 +39,7 @@ No PR, checkout, Git subprocess, token persistence, force, redirect or retry.`;
 function options(args) {
   if (!Array.isArray(args) || args.length > 23 || args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_edit_cli_arguments');
   const op = args[0], profiles = {
+    'plan-results': [['--source-expected', '--files', '--output'], []],
     prepare: [['--selection', '--patch-file', '--token-file', '--output'], ['--ca-file']],
     'prepare-verified': [['--selection', '--package', '--expect', '--patch-file', '--token-file', '--output'], ['--ca-file']],
     inspect: [['--candidate', '--sha256'], []],
@@ -54,7 +59,7 @@ function options(args) {
   const timeout = f.get('--timeout-ms') ?? '30000';
   if (!/^[1-9][0-9]{0,5}$/.test(timeout) || Number(timeout) > 300000) fail('source_edit_cli_timeout');
   for (const [k, value] of f) {
-    if (['--selection', '--package', '--expect', '--patch-file', '--token-file', '--output', '--candidate', '--journal', '--ca-file'].includes(k)) absolute(value);
+    if (['--source-expected', '--files', '--selection', '--package', '--expect', '--patch-file', '--token-file', '--output', '--candidate', '--journal', '--ca-file'].includes(k)) absolute(value);
     if (['--sha256', '--request-sha256'].includes(k) && !/^[0-9a-f]{64}$/.test(value)) fail('source_edit_pin');
   }
   return { op, f, timeout: Number(timeout) };
@@ -89,7 +94,11 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     location = f.get('--journal') ?? f.get('--output') ?? f.get('--candidate');
     const local = () => ({ timeoutMs: time.remaining(), signal: stop.signal });
     const json = async path => parse(await privateFile(path, 512 * 1024, time.check), 512 * 1024);
-    if (op === 'inspect') {
+    if (op === 'plan-results') {
+      const sourceBytes = await privateFile(f.get('--source-expected'), SOURCE_EXPECTED_BYTES, time.check);
+      const fileSpecBytes = await privateFile(f.get('--files'), SOURCE_EXPECTED_BYTES, time.check);
+      result = await saveSourceEditResultPlan(f.get('--output'), sourceBytes, fileSpecBytes, local());
+    } else if (op === 'inspect') {
       const loaded = await loadSourceEdit(f.get('--candidate'), f.get('--sha256'), time.check);
       result = { type: 'source_edit_inspection', directory: location, manifest_sha256: loaded.manifest_sha256,
         candidate_commit: loaded.candidate_commit, source_commit: loaded.capture.request.expected_commit,

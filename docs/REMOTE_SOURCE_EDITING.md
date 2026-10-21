@@ -96,8 +96,10 @@ For agent-driven edits, the stronger `prepare-verified` entry point requires the
 ordinary explicit source-edit selection **plus** a portable selected-source
 package and its independently retained expected selection. The package is
 verified before any source-change request is sent. Its native hash format and
-commit must match the edit base, and every edited path must be one of the files
-independently selected in that package.
+commit must match the edit base. Existing paths must be independently selected
+in that package; new paths require explicit creation intent and verified absence
+in complete authenticated parent trees. To also prescribe the exact resulting
+contents and modes, use [independent result plans](SOURCE_EDIT_RESULT_PLANS.md).
 
 ```bash
 node scripts/fg_source_edit.mjs prepare-verified \
@@ -130,14 +132,20 @@ admission, current permissions, branch freshness and author identity remain
 separate checks. No package or local receipt grants publication authority.
 
 Repository namespace, branch, author metadata and permissions remain explicit
-inputs or native server decisions. This profile still refuses new-file paths:
-only existing independently selected regular/executable files can be edited.
-Use ordinary `prepare` for explicitly broader effects such as new files, rather
-than converting missing package membership into an absence proof.
+inputs or native server decisions. New-file intent uses a versioned expectation:
+`{"schema":"frankengit-source-edit-create-selection-v1","source":<original
+positive expectation>,"create_paths_hex":[<sorted raw paths>]}`. Every creation
+must be one of the requested changes and provably absent under the retained
+complete parent trees. An unselected existing directory is not evidence about
+its children; symlinks and gitlinks are never traversed. This profile requires
+at least one existing selected source file, not an empty-repository bootstrap.
+Independent result plans can combine that absence requirement with prescribed
+after-blob identities, modes, and deletions.
 
 ### Durable evidence and compatibility
 
-A successful `prepare-verified` saves a **v2 candidate manifest**. Alongside the
+A positive-source `prepare-verified` saves a **v2 candidate manifest**;
+creation evidence uses **v3**, and independent result plans use **v4**. Alongside the
 unchanged `capture.json` and `candidate.bundle`, it retains `source-package.json`
 (the exact original package bytes) and `source-expected.json` (the normalized,
 independently supplied expected commit/file selection). The manifest binds all
@@ -166,8 +174,8 @@ pinned bytes from independently retained custody; do not manufacture a new base.
 
 Ordinary `prepare` keeps the existing v1 manifest and its serialization. Existing
 v1 candidates remain readable but gain no independent-source claim merely because
-they were once created by an older `prepare-verified` command. V2 candidates are
-intentionally refused by old clients; update the reader before using them. No
+they were once created by an older `prepare-verified` command. Newer candidate versions are
+intentionally refused by older clients; update the reader before using them. No
 automatic migration strips their proof. Both versions retain native scope and
 publication checks, create-only output, and original-key recovery semantics.
 
