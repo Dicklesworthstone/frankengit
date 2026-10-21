@@ -38,6 +38,28 @@ binary edits but still refuses rename records. Only the explicit new profile
 admits moves. Existing unfiltered receipt fields and the apply API are unchanged;
 the preparation receipt names the selected profile.
 
+## Independently pin the whole result
+
+Optional `--expected-result-tree NATIVE_TREE_ID` works with all three preparation
+profiles. Choose this complete tree independently from the preparation response.
+It binds every file name, byte identity, executable mode, nested tree and unchanged
+sibling in the intended result. A valid patch which also changes an unintended
+file is refused when its complete root differs. A mismatching pin produces no
+bundle or successful receipt and does not change canonical state.
+
+The ID must be nonzero full lowercase hexadecimal in the base commit's hash
+domain. The comparison runs only after normal native preparation and node
+shutdown succeed, but before creation-only output publication. A matching pin
+adds `expected_result_tree` to the receipt; without the option all previous
+receipt bytes and candidate semantics are unchanged. The pin does not authorize
+publication or validate the source of the caller's expectation. Existing source
+freshness, profile, capability and limit checks cannot be bypassed by it.
+
+Apply continues to require the reviewed commit, which already binds its tree.
+It rejects a result-tree option rather than replacing commit-level review with
+an assertion. Lost stdout retains the exact pinned bundle; never overwrite it
+or change an ambiguous publication's original bundle/principal/idempotency key.
+
 ## Publication and recovery
 
 Preparation does not move any ref, publish a forge event, or authorize a merge.
@@ -60,6 +82,8 @@ With prebuilt `FG_BIN`, `scripts/e2e/suites/smokes/patch_refactor_native.sh` dri
 actual fresh fg processes in SHA-1 and SHA-256. Independent Python encoders and
 bundle inspection verify the whole tree, byte-exact moves, modes and siblings;
 negative cases cover occupied destinations, bad identities, late-file failures,
-chains, exact resource boundaries, wrong reviewed commits and stale source.
+chains, exact resource boundaries, wrong reviewed commits and stale source. Complete-result tests pair a valid
+but unintended extra edit with its separately permitted expected root; they also
+check all three profiles, wrong hash domains, lost output and no overwrite.
 No mock node or Git subprocess participates. These are focused functional
 checks, not full-workspace, release, physical-power-loss or hostile-isolation gates.
