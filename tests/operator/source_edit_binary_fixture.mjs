@@ -47,9 +47,8 @@ export function oracle(format, changes, options = { binary: 'literal' }) {
   });
   return compiled;
 }
-export async function binaryPeer(t, format = 'sha1') {
+export async function binaryPeer(t, format = 'sha1', rows = [change(format, 'file', Buffer.from([0, 255, 1, 10]), Buffer.from([0, 254, 2, 13, 10]))], options = { binary: 'literal' }) {
   const transport = await peer(t, format);
-  const rows = [change(format, 'file', Buffer.from([0, 255, 1, 10]), Buffer.from([0, 254, 2, 13, 10]))];
   const objects = withOracle(format, rows, ({ git, id, before, after, dir }) => {
     const meta = transport.request.metadata;
     const baseBody = Buffer.from(`tree ${before}\nauthor ${meta.author} 1 +0000\ncommitter ${meta.committer} 1 +0000\n\nbase\n`);
@@ -60,7 +59,7 @@ export async function binaryPeer(t, format = 'sha1') {
     git(['bundle', 'create', join(dir, 'candidate.bundle'), 'refs/heads/main', `^${base}`]);
     return { base, body, candidate, beforeTree: before, tree: after, bundle: readFileSync(join(dir, 'candidate.bundle')) };
   });
-  const compiled = compileSourceReplacements(format, rows, { binary: 'literal' });
+  const compiled = compileSourceReplacements(format, rows, options);
   const request = { ...transport.request, expected_commit: objects.base, expected_result_tree: objects.tree };
   const p = structuredClone(transport.preparation), i = structuredClone(transport.inspection);
   Object.assign(p, { source_commit: objects.base, candidate_commit: objects.candidate, root_tree: objects.tree,

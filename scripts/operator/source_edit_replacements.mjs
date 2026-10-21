@@ -4,14 +4,16 @@
 import { createHash } from 'node:crypto';
 import { editInput, captureSourceEdit } from './source_edit_candidate.mjs';
 import { fail, fields, integer, clock } from './source_edit_wire.mjs';
-import { binaryLiteralCost, emitBinaryLiteral } from './source_edit_binary_literal.mjs';
+import { binaryLiteralCost, emitBinaryLiteral, emitBinaryMember } from './source_edit_binary_literal.mjs';
+import { planBinaryMember } from './source_edit_binary_delta.mjs';
 
 export const REPLACEMENT_PROFILE = 'frankengit-source-replacements-v1';
 export const BINARY_REPLACEMENT_PROFILE = 'frankengit-source-replacements-binary-v1';
+export const DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-v1';
 function binaryMode(options) {
   if (!Object.hasOwn(options, 'binary')) return false;
-  if (options.binary !== 'literal') fail('source_replacement_binary_profile');
-  return true;
+  if (!['literal', 'delta'].includes(options.binary)) fail('source_replacement_binary_profile');
+  return options.binary;
 }
 export const REPLACEMENT_LIMITS = Object.freeze({ maxPatchBytes: 1048576,
   maxSourceBytes: 8388608, maxResultBytes: 8388608, maxRecords: 131072 });
@@ -88,7 +90,7 @@ export function compileSourceReplacements(format, changes, options = {}, check =
       fail('source_replacement_collision');
     }
   }
-  const chunks = []; let size = 0, records = 0, binaryFiles = 0;
+  const chunks = []; let size = 0, records = 0, binaryFiles = 0, deltaMembers = 0;
   const put = (data, record = true) => {
     check(); const bytes = typeof data === 'string' ? Buffer.from(data) : data;
     if (size + bytes.length > limits.maxPatchBytes || record && ++records > limits.maxRecords) fail('source_replacement_patch_limit');
@@ -110,11 +112,15 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     if ((before?.blob ?? null) === (after?.blob ?? null) || !(before?.bytes.length || after?.bytes.length)) continue;
     if (binary && (before?.bytes.includes(0) || after?.bytes.includes(0))) {
       const old = before?.bytes ?? Buffer.alloc(0), next = after?.bytes ?? Buffer.alloc(0);
-      const forward = binaryLiteralCost(next.length), reverse = binaryLiteralCost(old.length);
+      const plans = binary === 'delta' ? [planBinaryMember(old, next, check), planBinaryMember(next, old, check)] : null;
+      const forward = plans?.[0].cost ?? binaryLiteralCost(next.length), reverse = plans?.[1].cost ?? binaryLiteralCost(old.length);
       const marker = 'GIT binary patch\n';
       if (size + marker.length + forward.bytes + reverse.bytes > limits.maxPatchBytes ||
           records + 1 + forward.records + reverse.records > limits.maxRecords) fail('source_replacement_patch_limit');
-      put(marker); emitBinaryLiteral(next, put, check); emitBinaryLiteral(old, put, check);
+      put(marker);
+      if (plans) {
+        for (const plan of plans) { emitBinaryMember(plan.kind, plan.body, put, check); deltaMembers += Number(plan.kind === 'delta'); }
+      } else { emitBinaryLiteral(next, put, check); emitBinaryLiteral(old, put, check); }
       binaryFiles++; continue;
     }
     const oldLines = lines(before?.bytes ?? Buffer.alloc(0), check, limits.maxRecords - records);
@@ -125,7 +131,8 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     for (const line of newLines) emitLine('+', line);
   }
   check(); const patch = Buffer.concat(chunks, size);
-  return { profile: binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
+  return { profile: binary === 'delta' ? DELTA_REPLACEMENT_PROFILE : binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
+    ...(binary === 'delta' ? { delta_members: deltaMembers, literal_members: 2 * binaryFiles - deltaMembers } : {}),
     ...(binary ? { binary_files: binaryFiles } : {}), patch, source_bytes: sourceBytes, result_bytes: resultBytes, records,
     changes: owned.map(row => ({ path_hex: row.path_hex, before_blob: row.before?.blob ?? null,
       after_blob: row.after?.blob ?? null, before_mode: row.before?.mode ?? null, after_mode: row.after?.mode ?? null })),
@@ -140,7 +147,7 @@ export async function captureSourceReplacements(selection, changes, credential, 
   const binary = binaryMode(options), { binary: _binary, ...network } = options;
   const time = clock(network), request = editInput(selection); time.check();
   if (!Object.hasOwn(request, 'expected_result_tree')) fail('source_replacement_result_required');
-  const compiled = compileSourceReplacements(request.scope.object_format, changes, binary ? { binary: 'literal' } : {}, time.check);
+  const compiled = compileSourceReplacements(request.scope.object_format, changes, binary ? { binary } : {}, time.check);
   if (compiled.changes.length !== request.paths_hex.length || compiled.changes.some((row, i) => row.path_hex !== request.paths_hex[i])) {
     fail('source_replacement_paths');
   }
