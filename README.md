@@ -20,7 +20,12 @@ FrankenGit is not “GitHub rewritten in Rust.” It is a forge designed around 
 
 The project is a synthesis of concrete machinery from Asupersync, FrankenSQLite, FrankenFS, FrankenSearch, franken_markdown, FrankenGraphDB, FrankenNetworkX, and Doodlestein Self-Releaser — with the gateway/API on fastapi_rust, projection read-models on sqlmodel_rust's FrankenSQLite backend, a familiar GitHub-like web UI (DOM-oriented pure-Rust/WASM, Leptos or Dioxus with SSR and Tailwind, native source-spanned rendering and trustless verified reads; a generated TypeScript client and React reference are the supported alternative), plus a terminal TUI (and an optional parallel terminal-style web surface) on the frankentui (ftui) kernel — combined with the object-store-native insight in Cursor’s “Git at Any Scale.” The detailed source-to-design map is in [`docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md`](docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md); the concrete defects found in the first-cut architecture and their dispositions are in [`docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md`](docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md).
 
-Those product-stack choices are settled, while integration is deliberately gated on their owned sibling repositories converging to one Asupersync 0.4.x constellation and registry-resolvable FrankenSQLite dependencies. The exact runtime, cancellation, connection, retry, shutdown, and verification contract is in [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
+Those product-stack choices remain the accepted architecture. The integration
+profile still names Asupersync 0.4.x, while the current admitted
+`constellation.lock` selects 0.5.0; this documented mismatch remains owned by
+`frankengit-root-doctrine-x2mv.4.15`. The exact runtime, cancellation, connection,
+retry, shutdown and verification obligations are in
+[`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
 
 ## Current one-node integration boundary
 
@@ -30,9 +35,9 @@ abstractions the finished system will use. It does not consult a configuration
 file: callers supply the storage directory, tenant ID, and repository ID
 explicitly. The final `fg` binary exposes this surface: the `CliOutcome::At`
 rendering arm (missing at the 2026-08-25 snapshot, repaired in `0f6a81b7`) is
-landed, and `cargo check -p fgit-cli --all-targets` passes at the current
-revision. The surface remains an implementation and conformance boundary
-rather than a complete server profile, and it will not by itself prove that a
+landed. Historical checks are recorded below; no build result is implied for
+the current revision. The surface remains an implementation and conformance
+boundary rather than a complete server profile, and it will not by itself prove that a
 selected durability epoch or broader compatibility matrix has completed.
 
 ```bash
@@ -107,7 +112,7 @@ Neither is yet a multi-user production deployment:
 - `fg serve-http` refuses non-loopback addresses;
 - writes from the CLI and MCP carry a self-asserted principal;
 
-See the [reality snapshot](#reality-snapshot-2026-10-17). The raw
+See the [reality snapshot](#reality-snapshot-2026-10-20). The raw
 git-daemon receive lane is the composition slice the `first_push.sh` E2E suite
 exercises with a real `git` client. No command
 treats local object placement, a routing hint, or a connection-local ref map
@@ -146,86 +151,73 @@ then verifies that the authoritative tracker hash did not change. Graph scores
 remain advisory: an agent may claim a bead only when the exact ID appears in
 `br ready --unassigned --no-db --json`.
 
-### Reality snapshot: 2026-10-17
+### Reality snapshot: 2026-10-20
 
-FrankenGit has a real, bounded, pure-Rust Git node and an atomic forge core. It
-is still not a forge a team can rely on. The
-[reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) binds
-this snapshot to source and executed evidence at `f73a3cca` (`origin/main`,
-2026-10-17) and at the landing merge that joined it with the shared checkout's
-unpushed line. Its bridge work is tracked under
-`frankengit-root-doctrine-x2mv.4`. No bridge result replaces an independent batch
-gate.
+FrankenGit has a substantial bounded Git node and a growing native forge core.
+It remains an integration-stage product, without a current independent gate for
+production readiness, a complete agent workflow, extreme scale, or release.
+The [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
+assesses source `7eaf1df8`, supersedes the October 17 snapshot in place, and maps
+30 vision goals to existing work under `frankengit-root-doctrine-x2mv.4`.
 
-- **Ten days, 249 commits, nothing verified.**
-  - 239 commits (152,198 added lines) landed on `origin/main` after `6deda35c`.
-    About 73,000 of those lines are JavaScript.
-  - 192 of the 239 messages say Rust/Cargo was not run.
-  - From 2026-10-11 (`dad1b3ff`, `dcbf4cbf`) to 2026-10-16 (`4194a463`,
-    `a3b9e94b`), 182 commits landed while `fg` did not build.
-  - Ten more commits sat unpushed in the shared checkout for four days. Three of
-    their fixes were duplicated on origin, and one of them (`da1943de`) never
-    compiled. The landing merge joins both lines and repairs them forward.
-  - No bead has closed since 2026-09-29. Verification debt is 35 of the policy's
-    hard limit of 36.
-- **Working through the `fg` binary with real clients:**
-  - raw git-daemon, SSH and smart-HTTP clone, fetch and push with stock Git
-    (protocol v0/v1/v2 upload, thin packs, `COMPRESSED_V3`, per-ref
-    report-status);
-  - SHA-256 repositories, `fg at` time travel, and `fg bisect` over
-    authenticated forge history;
-  - `fg verify-read`: a ref-and-path blob proof served over loopback HTTP and
-    checked against an independently supplied head;
-  - the atomic PR merge (ref, PR state and outbox in one RCR through one head
-    CAS), squash merges, PR conversation comments, issue assignment, and
-    protection administration over MCP and HTTP;
-  - cursor-paged forge events over CLI, MCP, HTTP and browser;
-  - streaming bundle export and recovery, and a disk-spooled `fg import` up to
-    512 MiB;
-  - continuous serve modes with SIGTERM/SIGINT drain, and deterministic
-    concurrent-writer refusals;
-  - all 13 served browser pages in real Chrome.
-- **Present, but with known defects:**
-  - Lanes at `f73a3cca`: `verify.sh docs` fails on a broken link; the schema
-    generator refuses an undescribed `source-lexical-manifest`; rustfmt reports
-    179 files. The landing merge fixes the first two.
-  - Webhook delivery is a local sidecar journal (`"canonical_settled":false`).
-    The new fan-out extends it, and 10 of its tests fail.
-  - Squash and conflict-resolved merges fail 7 restart/recovery tests across
-    the node library, HTTP and MCP. Trusted workflow check publication fails 5
-    tests. In all, 46 of 8,959 workspace tests fail at `f73a3cca`, and the
-    product e2e lane passes 62 of 69 suites.
-  - Forge publication stops at 16,384 events, and writers are serialized (one
-    per process).
-  - Required checks never gate a merge. `evaluate_protected_ref` has no
-    production caller, and a successful trusted check is displayed "without
-    granting merge authority".
-  - CLI and MCP writes carry a self-asserted principal. No transport terminates
-    TLS, and `fg serve-http` refuses non-loopback addresses.
-  - Default search modes go stale after forge writes.
-- **A second product plane in JavaScript (237 production modules, 43,039
-  lines):**
-  - GitHub issue and PR migration exists only as Node scripts. So do most of
-    backup signing, replication, scrub and recovery, source-authoring
-    workspaces, and the workflow supervisor.
-  - Their tests run against stand-in "native-schema" peers rather than a live
-    `fg`, and no lane runs them. Their failures move with the Node version (13
-    failing tests on Node 22.22.1, 240 on 22.2.0), and no version is pinned.
-  - A hand-written JavaScript pack/DEFLATE/delta/idx engine is served by `fg`.
-    It is the default bundle verifier and recovery engine.
-  - The constitution assigns Git semantics to Rust. No ADR or registry row
-    admits this plane. Owner decisions D2 (browser) and the new D10 (operator
-    plane) are open.
-- **Library-only (no production caller): 10 crates, 61,736 `src/` lines** —
-  `fgit-agent`, `fgit-atp-git`, `fgit-raptorq`, `fgit-repair`,
-  `fgit-compaction`, `fgit-projection`, `fgit-statistics`, `fgit-witness`,
-  `fgit-exchange`, `fgit-object-store`. Admission's per-core lanes and combiner,
-  and the typed graph views, are also unused.
-- **Open scope decisions.**
-  [Plan §4.2.1](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#421-unresolved-10-scope-contradiction)
-  records the merge-queue/package 1.0 contradiction. Owner decisions D1–D11 are
-  collected in `frankengit-root-doctrine-x2mv.4.14`.
+**Material progress since October 17:**
 
+- Tier A is now declared and has historical pinned-Git receipts. The latest
+  README-cited result is 18/18 rows and 624/624 checks at `8a992b6e`, for
+  `git://`; see the compatibility section below for scope and divergences.
+- Required workflow checks and review quorums now have real native admission
+  callers. The check gate binds the exact candidate, source ref, publisher,
+  workflow graph and job, selects the latest canonical result, and rechecks
+  after CAS loss. The earlier blanket statement that checks never gate merges
+  is obsolete; current native acceptance still needs independent execution.
+- Native canonical-ref and PR source-head workflow watchers can execute and
+  recover canonical check publication. They retain the trusted-host profile;
+  source-head PR runs do not establish synthetic-merge correctness.
+- Pack lookups are indexed, imports can batch immutable placement behind a
+  directory durability fence, and the 1 MiB authority-metadata refusal has a
+  wider finite profile with pre-placement size checks. The leading global
+  import timeout is now honored. Broad scale/performance acceptance remains open.
+- Two beads closed October 19. Formatting passes freshly at `7eaf1df8`.
+
+**What still blocks the product:**
+
+- Verification debt is 36/36: 28 `batch_pending` and 8 `in_progress` at intake.
+  Twenty-one pending items belong to the sole recorded appointed verifier.
+  There is still no observed one-SHA end-to-end `fast` success in the owning
+  record; the latest recorded remainder includes Clippy.
+- Forge-position and outbox state still have 16,384-entry bounds; the node
+  admits one concurrent writer. Required-check history scans are also bounded.
+  These are explicit limits, not evidence of extreme-scale operation.
+- CLI/MCP principals remain operator-asserted. HTTP is loopback-only; native
+  TLS, general identity/policy integration and hostile-runner isolation remain
+  incomplete. The webhook dispatcher still reports `canonical_settled:false`.
+- Nine product crates remain outside `fg`'s normal dependency closure:
+  agent, ATP-Git, compaction, exchange, object-store, projection, RaptorQ,
+  repair and witness. Statistics is linked, but its retry controller is
+  constructed without being consulted by the retry loop.
+- The JS browser/operator plane still diverges from accepted gateway/WASM and
+  Rust Git-engine decisions. Native verification is selectable for some
+  clients; the default legacy JS decoder has not been retired or ratified.
+- The full verification lane deliberately exits 3; the release path and native
+  target matrix remain incomplete. The public GitHub Releases API returns no
+  releases on October 20; no live deployment is established by this assessment.
+
+**Fresh execution limits:** the macOS browser JS suite reports 3,626 passed,
+5 failed and 1 skipped at `7eaf1df8`; observed failures involve canonical temp
+paths and filesystem filename representability. A focused default-temp failure
+passes with a canonical temp path, without changing security checks. The
+operator suite hit the audit's 180-second bound. These are JS/harness results,
+not native-server or real-browser evidence. Current native execution was not
+performed: no current local `fg`, a non-passing storage gate, an unavailable
+prescribed target volume and no local pinned-Git oracle receipt. Older Rust
+and E2E results remain historical rather than being carried forward as passes.
+
+The bridge prioritizes an independent verification drain, an authenticated
+deployment profile, a complete protected team PR workflow, canonical outbox
+settlement, predictable imports, sustained-state bounds and an independently
+executed restore. ATP, TreeFS, agents, graphs and the full 1.0 scope remain in
+the plan. Owner decisions are recorded as unresolved rather than silently
+amended by implementation.
 
 The claims registry remains the public proof boundary. Its verified rows cover
 narrow artifact identity and contained Lean-model theorems; they do not prove
@@ -475,9 +467,8 @@ Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
 heuristic over mutable tables. `fg at <decision>` will open a complete read-only
 forge snapshot, and bisection will generalize from commits to forge state.
-The [dated reality snapshot](#reality-snapshot-2026-10-17) above identifies the
-bounded implementation and its historical evidence. It records history loading,
-two-ended diff projection, consistency checks, and binary rendering as landed.
+The [dated reality snapshot](#reality-snapshot-2026-10-20) above identifies the
+bounded `at` and `bisect` implementation and its historical evidence.
 The remaining historical projection work requires non-empty durable-history
 coverage and verification of the production checkpoint path, not just parser
 coverage or an older passing revision. A complete time-travel product is not yet
@@ -738,23 +729,23 @@ Machine-validated registries live under [`registries/`](registries/README.md).
 The next integration work will prioritize capability gaps rather than crate
 count:
 
-1. The raw git-daemon receive-pack slice will be extended into smart HTTP and
-   production SSH, while the pinned-client compatibility campaign grows its
-   restart, fault, and larger-repository evidence without weakening finite
-   resource bounds.
+1. The existing raw Git, smart-HTTP and SSH adapters need a supported
+   authenticated deployment profile and current cross-transport, restart, fault
+   and larger-repository evidence without weakening finite resource bounds.
 2. The existing snapshot/history and two-ended diff paths will gain non-empty
    durable-history coverage through the actual `fg` binary, including authority
    consistency and refusal cases. Production checkpoint behavior and the wider
    snapshot contract must have revision-bound evidence before `fg at` is
    described as a complete product capability.
-3. Forge merges will move from real computation plus an incomplete durable
-   composition to the same asynchronous materialization and exactly-one-head-CAS
-   path used by admitted receive operations.
+3. The existing atomic forge-merge path, required checks and review quorums
+   need a complete protected-team workflow with current restart, race and
+   original-outcome recovery evidence.
 4. Identity and policy will be wired into receive, merge, transport, and
    disclosure boundaries before broader multi-tenant surfaces open.
-5. fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI will converge on the one
-   runtime/dependency constellation before smart HTTP, native REST,
-   projections/search, web, and TUI product layers are admitted.
+5. Gateway, projection, web and TUI integration must reconcile the accepted
+   sibling/framework contracts with the current admitted constellation and
+   implemented adapters. Continued implementation does not resolve the open
+   architecture decisions.
 6. Workflow coordination and production hostile-execution isolation will land
    before CI is described as deployable; release publication will remain
    refused until the full/release gates and native target matrix are real.
@@ -778,8 +769,8 @@ The phase plan is in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMP
 - not graph/model output used as hidden policy authority;
 - not agent text interpreted as capabilities;
 - not GitHub-hosted Actions used as release truth;
-- not yet a complete network push service, smart-HTTP/SSH forge, native API,
-  hosted multi-region service, or releasable product;
+- not yet a complete multi-user production forge, hosted multi-region service,
+  or releasable product;
 - not yet supported by evidence broad enough to claim general Git
   compatibility, performance leadership, production readiness, or complete
   Rust-level formal verification;
