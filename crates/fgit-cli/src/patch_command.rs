@@ -11,7 +11,7 @@ use options::{Operation, Options, hex};
 use std::io::{Read, Write};
 
 const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <repository-id> <branch-ref> <patch-file> <new-bundle>
-  --trusted-local --profile exact-v1 --workspace-id <32-hex> --expected-base <native-commit-id>
+  --trusted-local --profile <exact-v1|exact-binary-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>
   (--message <text> | --message-file <raw-file>) [--ref-hex]
   [--max-files <n>] [--max-hunks <n>] [--max-input-bytes <n>] [--max-output-bytes <n>]
@@ -27,6 +27,11 @@ blob identities. No fuzzy matching, strip option, rename/copy, binary patch,
 symlink/gitlink, hook, host tool or external driver is run. All files succeed
 or no bundle is produced. No-change input refuses instead of making an empty
 commit. Unmodified siblings and all unrelated refs/forge state are preserved.
+
+exact-binary-v1 additionally accepts compressed Git binary literal/delta members.
+It reuses native old/new object verification, reverse-image checks and bounded
+shared decoding. Full native index IDs are required for binary changes. Rename,
+copy and non-regular modes remain refused. exact-v1 never silently admits binary.
 
 Preparation never moves refs; its bundle is incremental against expected-base.
 Inspect it with fg workspace inspect before applying. Apply consumes the saved
@@ -52,6 +57,7 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     let mut options = options::parse(args)?;
     let (input, key) = match &mut options.operation {
         Operation::Prepare {
+            profile,
             patch,
             output,
             metadata,
@@ -65,8 +71,7 @@ pub fn run(args: &[String]) -> Result<u8, String> {
             metadata.validate().map_err(|error| error.to_string())?;
             let input = read_bundle(patch, limits.max_patch_bytes)?;
             // Syntax/path/aggregate limits are checked before opening the node.
-            fgit_forge::patch::UnifiedPatch::parse(&input, *limits, &|| false)
-                .map_err(|error| error.to_string())?;
+            profile.preflight(&input, *limits)?;
             require_absent(output)?;
             (input, None)
         }
@@ -200,6 +205,9 @@ fn prepared_receipt(
     options: &Options,
     candidate: &WorkspacePatchCandidate,
 ) -> Result<String, String> {
+    let Operation::Prepare { profile, .. } = options.operation else {
+        return Err("patch preparation receipt operation mismatch".into());
+    };
     if options.base != candidate.source_commit
         || options.base.algorithm() != candidate.object_format
         || candidate.candidate_commit.algorithm() != candidate.object_format
@@ -217,12 +225,13 @@ fn prepared_receipt(
     }).collect::<Vec<_>>().join(",");
     Ok(format!(
         concat!(
-            "{{\"type\":\"patch_preparation\",\"schema_version\":1,\"profile\":\"exact-v1\",",
+            "{{\"type\":\"patch_preparation\",\"schema_version\":1,\"profile\":{},",
             "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"reference_hex\":{},",
             "\"source_commit\":{},\"source_rcr\":{},\"candidate_commit\":{},\"root_tree\":{},",
             "\"patch_sha256\":{},\"bundle_sha256\":{},\"bundle_bytes\":{},\"pack_objects\":{},",
             "\"paths\":[{}],\"published_to_repository\":false,\"node_closed\":true}}"
         ),
+        quote(profile.token()),
         quote(&options.tenant.to_string()),
         quote(&options.repository.to_string()),
         quote(candidate.object_format.as_str()),

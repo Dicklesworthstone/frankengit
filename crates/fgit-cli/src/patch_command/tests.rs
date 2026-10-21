@@ -253,3 +253,45 @@ fn terminal_decisions_survive_broken_output_and_cleanup_without_key_disclosure()
     assert!(text.contains("\"published_to_repository\":false"));
     assert!(text.contains("ExpectedOldRefMismatch"));
 }
+
+#[test]
+fn binary_profile_is_explicit_and_never_changes_text_profile_selection() {
+    for width in [40, 64] {
+        for (text, wanted) in [
+            ("exact-v1", options::Profile::Exact),
+            ("exact-binary-v1", options::Profile::ExactBinary),
+        ] {
+            let mut args = prepare_args(width);
+            replace(&mut args, "--profile", text);
+            let Operation::Prepare { profile, .. } = options::parse(&args).unwrap().operation
+            else {
+                panic!("prepare");
+            };
+            assert_eq!(profile, wanted);
+            assert_eq!(profile.token(), text);
+        }
+        let mut args = prepare_args(width);
+        replace(&mut args, "--profile", "binary");
+        assert!(options::parse(&args).is_err());
+        let mut args = apply_args(width);
+        args.extend(["--profile".into(), "exact-binary-v1".into()]);
+        assert!(options::parse(&args).is_err());
+    }
+}
+#[test]
+fn binary_profile_preserves_text_semantics_and_refuses_unsupported_modes_and_renames() {
+    let text = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+    for profile in [options::Profile::Exact, options::Profile::ExactBinary] {
+        assert!(profile.preflight(text, Default::default()).is_ok());
+        for unsupported in [
+            b"diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n".as_slice(),
+            b"diff --git a/a b/a\nnew file mode 120000\n--- /dev/null\n+++ b/a\n@@ -0,0 +1 @@\n+target\n",
+            b"diff --git a/a b/a\nGIT binary patch\nliteral 1\nbroken\n\n",
+        ] { assert!(profile.preflight(unsupported, Default::default()).is_err()); }
+        let limits = fgit_forge::patch::PatchLimits {
+            max_patch_bytes: text.len() - 1,
+            ..Default::default()
+        };
+        assert!(profile.preflight(text, limits).is_err());
+    }
+}

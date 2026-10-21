@@ -7,8 +7,31 @@ pub(super) enum Key {
     Bytes(Vec<u8>),
     Stdin,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Profile {
+    Exact,
+    ExactBinary,
+}
+impl Profile {
+    pub(super) const fn token(self) -> &'static str {
+        match self {
+            Self::Exact => "exact-v1",
+            Self::ExactBinary => "exact-binary-v1",
+        }
+    }
+    pub(super) fn preflight(self, bytes: &[u8], limits: PatchLimits) -> Result<(), String> {
+        let parsed = match self {
+            Self::Exact => fgit_forge::patch::UnifiedPatch::parse(bytes, limits, &|| false),
+            Self::ExactBinary => {
+                fgit_forge::patch::UnifiedPatch::parse_with_binary(bytes, limits, &|| false)
+            }
+        };
+        parsed.map(|_| ()).map_err(|error| error.to_string())
+    }
+}
 pub(super) enum Operation {
     Prepare {
+        profile: Profile,
         patch: PathBuf,
         output: PathBuf,
         workspace_id: [u8; 16],
@@ -152,9 +175,11 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let reference = RefName::try_new(&bytes).map_err(|_| "invalid branch reference")?;
     let base = parse_oid(required("--expected-base")?)?;
     let operation = if prepare {
-        if required("--profile")? != "exact-v1" {
-            return Err("explicit --profile exact-v1 is required".into());
-        }
+        let profile = match required("--profile")? {
+            "exact-v1" => Profile::Exact,
+            "exact-binary-v1" => Profile::ExactBinary,
+            _ => return Err("explicit --profile exact-v1 or exact-binary-v1 is required".into()),
+        };
         let workspace_id = unhex(required("--workspace-id")?, 16)?
             .try_into()
             .map_err(|_| "workspace ID must contain 16 bytes")?;
@@ -193,6 +218,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             return Err("output must name a new regular file".into());
         }
         Operation::Prepare {
+            profile,
             patch: path(&args[5])?,
             output,
             workspace_id,
