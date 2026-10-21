@@ -14,7 +14,9 @@ use fgit_graph::lexical::{IndexError, LexicalError};
 use fgit_graph::{
     GenerationActivation, GenerationAuthorityError, GenerationRecovery, GraphGenerationId,
 };
+use fgit_node::source_retrieval::command_budget::OperatorDeadline;
 use fgit_node::{NodeConfig, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
+use fgit_runtime::BudgetClass;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, HeadGeneration, InternalObjectId,
     RefName, RepositoryId, TenantId,
@@ -158,12 +160,18 @@ fn token(id: &InternalObjectId) -> String {
 }
 #[derive(Default)]
 struct Stop {
+    budget: OperatorDeadline,
+    deadline_expired: bool,
     control: Option<MaintenanceControl>,
     requested: bool,
     error: Option<String>,
 }
 impl Stop {
     fn observe(&mut self, directory: &Path) {
+        if self.budget.checkpoint().is_err() {
+            self.deadline_expired = true;
+            self.requested = true;
+        }
         if self
             .control
             .as_ref()
@@ -272,8 +280,26 @@ fn run_controlled(
     control: Option<MaintenanceControl>,
     receipt: &mut MaintenanceReceipt,
 ) -> io::Result<bool> {
+    run_controlled_with_budget(
+        node,
+        options,
+        progress,
+        control,
+        receipt,
+        OperatorDeadline::default(),
+    )
+}
+fn run_controlled_with_budget(
+    node: &OneNode,
+    options: &Options,
+    progress: &mut ProgressFile,
+    control: Option<MaintenanceControl>,
+    receipt: &mut MaintenanceReceipt,
+    budget: OperatorDeadline,
+) -> io::Result<bool> {
     let mut stop = Stop {
         control,
+        budget,
         ..Stop::default()
     };
     let mut healthy = true;
@@ -310,7 +336,14 @@ fn run_controlled(
             // One finite background-controller budget per independent attempt.
             // Never replace the context of an in-flight or draining attempt.
             service::increment(&mut receipt.attempts)?;
-            let request = node.outbox_delivery_context();
+            let request = match budget.request(node, BudgetClass::BackgroundController) {
+                Ok(request) => request,
+                Err(error) => {
+                    stop.observe(&options.directory);
+                    eprintln!("{error}");
+                    break 'passes;
+                }
+            };
             if let Some(candidate) = row.pending {
                 let result = drive(
                     node,
@@ -477,24 +510,22 @@ fn run_controlled(
             wait(node, &options.directory, options.interval, &mut stop);
         }
     }
+    stop.observe(&options.directory);
     if let Some(error) = stop.error {
         return Err(invalid(format!("Stop control failed after drain: {error}")));
     }
+    if stop.deadline_expired {
+        eprintln!(
+            "ResourceBudgetExceeded: operator command deadline expired; native work drained; preserve recorded candidates"
+        );
+    }
     Ok(healthy
+        && !stop.deadline_expired
         && progress
             .state
             .rows
             .values()
             .all(|row| !row.running && !row.preparing && row.pending.is_none()))
-}
-fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Result<bool> {
-    run_controlled(
-        node,
-        options,
-        progress,
-        None,
-        &mut MaintenanceReceipt::default(),
-    )
 }
 
 #[must_use]
@@ -507,15 +538,29 @@ pub fn main() -> ExitCode {
 }
 #[must_use]
 pub fn run_cli(args: &[String]) -> ExitCode {
+    run_cli_with_timeout(args, None)
+}
+#[must_use]
+pub fn run_cli_with_timeout(args: &[String], timeout: Option<Duration>) -> ExitCode {
     let args: Vec<OsString> = args
         .iter()
         .take(8 + state::MAX_REFS + 2)
         .map(OsString::from)
         .collect();
-    run_os_cli(&args)
+    run_os_cli_with_timeout(&args, timeout)
 }
 #[must_use]
 pub fn run_os_cli(args: &[OsString]) -> ExitCode {
+    run_os_cli_with_timeout(args, None)
+}
+fn run_os_cli_with_timeout(args: &[OsString], timeout: Option<Duration>) -> ExitCode {
+    let budget = match OperatorDeadline::new(timeout) {
+        Ok(budget) => budget,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let options = match parse(args) {
         Ok(value) => value,
         Err(e) => {
@@ -540,13 +585,16 @@ pub fn run_os_cli(args: &[OsString]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let ready = node
-        .runtime()
-        .block_on(node.authenticate_authority_head())
-        .map_err(|e| e.to_string())
-        .and_then(|head| {
-            node.bring_into_service(head.receipt().generation())
+    let ready = budget
+        .request(&node, BudgetClass::Database)
+        .and_then(|request| {
+            node.runtime()
+                .block_on(node.authenticate_authority_head_in(&request))
                 .map_err(|e| e.to_string())
+                .and_then(|head| {
+                    node.bring_into_service(head.receipt().generation())
+                        .map_err(|e| e.to_string())
+                })
         });
     if let Err(error) = ready {
         eprintln!("Authority unavailable: {error}");
@@ -579,7 +627,14 @@ pub fn run_os_cli(args: &[OsString]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = run(&node, &options, &mut progress);
+    let result = run_controlled_with_budget(
+        &node,
+        &options,
+        &mut progress,
+        None,
+        &mut MaintenanceReceipt::default(),
+        budget,
+    );
     let shutdown = node.shutdown(); // Explicit after success, refusal or stop; no live future is dropped.
     if let Err(error) = shutdown {
         eprintln!("Shutdown failed; run.lock retained: {error}. No rollback is implied.");

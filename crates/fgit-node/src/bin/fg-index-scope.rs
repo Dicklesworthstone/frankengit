@@ -7,13 +7,20 @@ mod checkpoint;
 mod options;
 #[path = "index_scope/output.rs"]
 mod output;
+use fgit_node::source_retrieval::command_budget::OperatorDeadline;
 use fgit_node::{NodeConfig, NodeWorkspaceRefusal, OneNode};
+use fgit_runtime::BudgetClass;
 use options::{Command, Options, failure};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
-fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
+fn execute(
+    node: &OneNode,
+    options: &Options,
+    request: &fgit_node::NodeRequestContext,
+) -> io::Result<(String, bool)> {
     let incarnation = node.repository_incarnation_id();
     match &options.command {
         Command::Build {
@@ -21,7 +28,6 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
             record,
             limits,
         } => {
-            let request = node.outbox_delivery_context();
             let mut saved = None;
             let mut recording_error = None;
             let result = node
@@ -72,7 +78,6 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
             limits,
             reads,
         } => {
-            let request = node.outbox_delivery_context();
             let mut saved = None;
             let mut recording_error = None;
             let result =
@@ -133,7 +138,7 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
             let report = node
                 .runtime()
                 .block_on(node.search_scoped_source_index_local_in(
-                    &node.request_context(),
+                    request,
                     &options.reference,
                     &options.scope,
                     options.head,
@@ -155,7 +160,7 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
             let result = node
                 .runtime()
                 .block_on(node.recover_scoped_source_index_local_in(
-                    &node.request_context(),
+                    request,
                     &options.reference,
                     &options.scope,
                     *candidate,
@@ -167,7 +172,8 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
         }
     }
 }
-fn run(options: &Options) -> io::Result<(String, bool)> {
+fn run(options: &Options, budget: OperatorDeadline) -> io::Result<(String, bool)> {
+    budget.checkpoint().map_err(failure)?;
     if let Command::Build { record, .. } | Command::Refresh { record, .. } = &options.command {
         checkpoint::preflight(record)?;
     }
@@ -178,13 +184,18 @@ fn run(options: &Options) -> io::Result<(String, bool)> {
     )
     .map_err(failure)?;
     let outcome = (|| {
+        let class = match options.command {
+            Command::Build { .. } | Command::Refresh { .. } => BudgetClass::BackgroundController,
+            _ => BudgetClass::Database,
+        };
+        let request = budget.request(&node, class).map_err(failure)?;
         let selected = node
             .runtime()
-            .block_on(node.authenticate_authority_head())
+            .block_on(node.authenticate_authority_head_in(&request))
             .map_err(failure)?;
         node.bring_into_service(selected.receipt().generation())
             .map_err(failure)?;
-        execute(&node, options)
+        execute(&node, options, &request)
     })();
     // Always finish node shutdown after the native future settles. Do not
     // report a committed index as rolled back when output or shutdown fails.
@@ -208,16 +219,30 @@ pub fn main() -> ExitCode {
 }
 #[must_use]
 pub fn run_cli(args: &[String]) -> ExitCode {
+    run_cli_with_timeout(args, None)
+}
+#[must_use]
+pub fn run_cli_with_timeout(args: &[String], timeout: Option<Duration>) -> ExitCode {
     let args: Vec<OsString> = args.iter().take(701).map(OsString::from).collect();
-    run_os_cli(&args)
+    run_os_cli_with_timeout(&args, timeout)
 }
 #[must_use]
 pub fn run_os_cli(args: &[OsString]) -> ExitCode {
+    run_os_cli_with_timeout(args, None)
+}
+fn run_os_cli_with_timeout(args: &[OsString], timeout: Option<Duration>) -> ExitCode {
+    let budget = match OperatorDeadline::new(timeout) {
+        Ok(budget) => budget,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     if args.len() == 1 && args[0] == "--help" {
         println!("{}", options::USAGE);
         return ExitCode::SUCCESS;
     }
-    let result = options::parse(args).and_then(|options| run(&options));
+    let result = options::parse(args).and_then(|options| run(&options, budget));
     match result {
         Ok((json, resolved)) => {
             let mut stdout = io::stdout().lock();

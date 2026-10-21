@@ -525,3 +525,6 @@ pub mod index_scope;
 /// Trusted-local symbol index build, refresh, recover, and query CLI entrypoint.
 #[path = "bin/fg-symbol-index.rs"]
 pub mod symbol_index;
+
+/// Absolute time policy for trusted-local operator entrypoints.
+pub mod command_budget;
