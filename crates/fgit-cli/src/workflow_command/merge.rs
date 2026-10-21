@@ -2,6 +2,7 @@
 //! Extra fields are consumed only as option names, never from another value.
 use super::*;
 use fgit_forge::event::NativeMerge;
+use fgit_forge::preparation::MergeCommitStyle;
 
 const USAGE: &str =
     "usage: fg workflow run-merge-candidate <storage-root> <tenant-id> <repository-id> <target-ref>
@@ -10,6 +11,7 @@ const USAGE: &str =
   --expected-source <incoming-tip-oid> --merge-base <common-ancestor-oid>
   --workflow <candidate-path> --input <top-level-path> [--input <path> ...]
   --run-id <32-lowercase-hex> --run-parent <absolute-private-0700-directory>
+  [--method merge-commit|squash]
   [--object-format sha1|sha256] [--expected-head <snapshot-token>]
   [--expected-incarnation <id>] [--ref-hex]
   [--source-ref-hex <hex> instead of --source-ref]
@@ -23,13 +25,15 @@ const USAGE: &str =
 
 Linux trusted-local execution only: review and trust the ACTUAL candidate's
 workflow/scripts. They run with host-user privileges, not in a hostile sandbox.
-Both branches are pinned under one authority snapshot. The native merge has
-ordered target/source parents and exactly those two bundle prerequisites.
+Both branches are pinned under one authority snapshot. The default merge-commit
+method requires ordered target/source parents. Explicit --method squash requires
+one target parent. BOTH profiles require the exact target/source prerequisites
+and verify both original histories and common-base ancestry. No method fallback.
 
 All inputs and workflow scripts come from the verified merged tree. No objects
 are staged, no temporary ref is created, no PR approval or canonical check is
 published. Optional artifact capture binds the exact merged input and both
-parents; durable output custody does not authorize a check or cache reuse.
+branch selections and the actual parent shape; durable output custody does not authorize a check or cache reuse.
 Explicit artifact inputs deliver verified current-run outputs from successful
 direct dependencies into .fgit-artifacts/ before the consumer's first script.
 Delivery shares its own cumulative byte limit. See fg workflow run --help.
@@ -44,14 +48,14 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
         return Ok(0);
     }
-    let (options, merge) = parse(args)?;
+    let (options, merge, style) = parse(args)?;
     #[cfg(target_os = "linux")]
     {
-        super::execute(options, Some(merge))
+        super::execute(options, Some((merge, style)))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (options, merge);
+        let _ = (options, merge, style);
         Err(
             "trusted merge workflow execution requires Linux; no alternative runner is selected"
                 .into(),
@@ -59,11 +63,11 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     }
 }
 
-fn parse(args: &[String]) -> Result<(Options, NativeMerge), String> {
+fn parse(args: &[String]) -> Result<(Options, NativeMerge, MergeCommitStyle), String> {
     if args.len() < 5 || args[0] != "run-merge-candidate" {
         return Err(USAGE.into());
     }
-    if args.len() > 2108
+    if args.len() > 2110
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -88,7 +92,7 @@ fn parse(args: &[String]) -> Result<(Options, NativeMerge), String> {
         cursor += 1;
         if matches!(
             flag,
-            "--source-ref" | "--source-ref-hex" | "--expected-source" | "--merge-base"
+            "--source-ref" | "--source-ref-hex" | "--expected-source" | "--merge-base" | "--method"
         ) {
             if fields.insert(flag, value.as_str()).is_some() {
                 return Err(format!("duplicate {flag}"));
@@ -98,6 +102,11 @@ fn parse(args: &[String]) -> Result<(Options, NativeMerge), String> {
             common.push(value.clone());
         }
     }
+    let style = match fields.get("--method").copied().unwrap_or("merge-commit") {
+        "merge-commit" => MergeCommitStyle::TwoParent,
+        "squash" => MergeCommitStyle::Squash,
+        _ => return Err("workflow method must be merge-commit or squash".into()),
+    };
     let options = super::parse(&common)?;
     let source = match (fields.get("--source-ref"), fields.get("--source-ref-hex")) {
         (Some(text), None) => text.as_bytes().to_vec(),
@@ -136,7 +145,7 @@ fn parse(args: &[String]) -> Result<(Options, NativeMerge), String> {
     merge
         .validate()
         .map_err(|_| "invalid native merge coordinates")?;
-    Ok((options, merge))
+    Ok((options, merge, style))
 }
 
 #[cfg(test)]
@@ -178,7 +187,8 @@ mod tests {
     fn exact_merge_coordinates_and_byte_refs_parse_without_io_in_both_formats() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let input = args(format);
-            let (options, merge) = parse(&input).unwrap();
+            let (options, merge, style) = parse(&input).unwrap();
+            assert_eq!(style, MergeCommitStyle::TwoParent);
             assert_eq!(
                 merge.target_tip_before,
                 options.candidate.as_ref().unwrap().base
@@ -242,7 +252,7 @@ mod tests {
         let mut input = args(GitHashAlgorithm::Sha1);
         let at = input.iter().position(|s| s == "--bundle").unwrap();
         input[at + 1] = "--source-ref".into();
-        let (options, merge) = parse(&input).unwrap();
+        let (options, merge, _) = parse(&input).unwrap();
         assert_eq!(
             options.candidate.unwrap().bundle,
             PathBuf::from("--source-ref")
@@ -251,5 +261,61 @@ mod tests {
         let at = input.iter().position(|s| s == "--expected-source").unwrap();
         input[at + 1] = "a".repeat(64);
         assert!(parse(&input).is_err());
+    }
+    #[test]
+    fn method_is_explicit_bounded_and_never_inferred_from_argument_values() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for (method, style) in [
+                ("merge-commit", MergeCommitStyle::TwoParent),
+                ("squash", MergeCommitStyle::Squash),
+            ] {
+                let mut input = args(format);
+                input.extend(["--method".into(), method.into()]);
+                assert_eq!(parse(&input).unwrap().2, style);
+                input.extend(["--method".into(), method.into()]);
+                assert!(parse(&input).is_err());
+            }
+            for method in [
+                "",
+                "rebase",
+                "fast-forward-only",
+                "Squash",
+                "squash\n",
+                "auto",
+            ] {
+                let mut input = args(format);
+                input.extend(["--method".into(), method.into()]);
+                assert!(parse(&input).is_err());
+            }
+            let mut input = args(format);
+            input.push("--method".into());
+            assert!(parse(&input).is_err());
+            let mut input = args(format);
+            let at = input.iter().position(|s| s == "--bundle").unwrap();
+            input[at + 1] = "--method".into();
+            assert_eq!(parse(&input).unwrap().2, MergeCommitStyle::TwoParent);
+        }
+    }
+    #[test]
+    fn squash_does_not_relax_branch_or_trust_preconditions() {
+        let mut input = args(GitHashAlgorithm::Sha256);
+        input.extend(["--method".into(), "squash".into()]);
+        for flag in [
+            "--expected-source",
+            "--source-ref",
+            "--merge-base",
+            "--expected-commit",
+        ] {
+            let mut bad = input.clone();
+            let at = bad.iter().position(|s| s == flag).unwrap();
+            bad.drain(at..at + 2);
+            assert!(parse(&bad).is_err());
+        }
+        let mut bad = input.clone();
+        bad.retain(|s| s != "--trusted-local");
+        assert!(parse(&bad).is_err());
+        let mut ordinary = input;
+        ordinary[0] = "run-candidate".into();
+        assert!(super::super::parse(&ordinary).is_err());
     }
 }
