@@ -800,14 +800,17 @@ fn checkpoint(deadline: &mut impl Deadline) -> Result<(), RefusalCode> {
     }
 }
 
+/// Copies one bounded body, polling cancellation once per MiB. A poll per
+/// byte made a 32 MiB thin-pack base cost 33 million cancellation probes.
 fn copy_bytes(bytes: &[u8], deadline: &mut impl Deadline) -> Result<Vec<u8>, RefusalCode> {
     let mut copied = Vec::new();
     copied
         .try_reserve_exact(bytes.len())
         .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
-    for byte in bytes {
+    checkpoint(deadline)?;
+    for chunk in bytes.chunks(1024 * 1024) {
         checkpoint(deadline)?;
-        copied.push(*byte);
+        copied.extend_from_slice(chunk);
     }
     Ok(copied)
 }
