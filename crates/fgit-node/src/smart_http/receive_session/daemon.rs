@@ -387,18 +387,15 @@ impl OneNode {
             }
             // Client upload time cannot consume the independent server-work
             // allowance. The advertisement never supplies a validation witness.
-            let work = GitDaemonSessionDeadline::new(
-                self.git_daemon_session_timeout,
-                self.git_daemon_session_work_scaling,
-            );
             let processing = crate::GitDaemonReceiveProcessingDeadline::new(
                 self.git_daemon_receive_processing_timeout,
             );
-            let _writer = crate::admit_writer(writers, &work)?;
+            let _writer = crate::admit_writer(writers, processing.deadline())?;
             let request = NodeRequestContext {
-                authority: self.receive_admission_authority_context(input_bytes, &work),
+                authority: self
+                    .receive_admission_authority_context(input_bytes, processing.deadline()),
             };
-            let mut live = || !work.expired() && !processing.expired();
+            let mut live = || !processing.expired();
             let selected = drive_request_while(
                 self,
                 &request,

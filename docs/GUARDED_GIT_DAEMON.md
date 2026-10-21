@@ -36,9 +36,16 @@ There is no fallback to the old receiver after a guarded-serving failure.
 
 `--processing-timeout-secs <non-zero>` sets the server-work budget a push gets
 after its pack trailer: quarantine, delta resolution, policy and publication.
-The default is 300 s, and the session flags never extend it. Processing must
-also finish inside the session budget (`--session-timeout-secs`, which runs from
-accept), so a long push needs both raised. Receive used to place each object
+The default is 300 s, and the session flags never extend it. The ingress clock
+(`--session-timeout-secs` plus its bounded admitted-byte extension) ends at the
+complete trailer. Processing then gets its own full finite allowance, including
+writer-capacity wait, quarantine, policy and authority work. Database contexts
+inherit the remaining processing time rather than restarting it. A long upload
+needs enough ingress time; a long admission needs enough processing time.
+The final response has one fresh finite network allowance. Expiry after
+admission starts preserves an unknown outcome unless authority supplies the
+actual terminal result; retry identical commands or recover their original key.
+Receive used to place each object
 with its own file and directory fsync, about 20 ms per object, so at the
 defaults a 24,000-object push was refused at about 300 s with
 `CancellationInProgress`. It now stages through batched placement, and syncs

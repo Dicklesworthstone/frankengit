@@ -317,19 +317,23 @@ Measured:
 These are two corpora, not a general performance claim.
 
 `fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
-`--session-secs-per-mib`, `--session-max-extension-secs`,
+`--session-secs-per-mib`, `--session-max-extension-secs`, `--processing-timeout-secs`,
 `--receive-max-input-mib`, `--receive-max-expanded-mib`; `fg serve` and
 `fg export` select the write-side envelope with `--pack-max-expanded-mib`.
 
 Refusal behavior by phase: a deadline that fires while the client is still
 sending (greeting, command section, pack stream) is a typed serve error and
 the connection ends, matching upstream mid-transfer failure behavior; a
-deadline that fires during admission — after the client has finished sending —
-is delivered through report-status with the notice "push outcome unknown:
-retry the identical push to resolve it idempotently" (cancellation never
-proves non-commit, normative contract section 5.2), written inside one bounded
-30 s terminal report grace. The committed report is likewise always
-deliverable when the envelope fires after the verdict exists.
+processing deadline starts after the complete trailer, independently of the
+elapsed ingress clock. Writer admission and native database work share its
+remaining time. Expiry during admission preserves outcome uncertainty
+(cancellation never proves non-commit, normative contract section 5.2): the
+guarded receiver emits an unknown-outcome `ERR`; the legacy receiver emits an
+unknown-outcome report-status notice. A known terminal result is reported as
+such even after a late cancellation. Each final response gets one fresh finite
+session allowance, with no byte extension or unbounded delivery guarantee.
+Tier A's push node uses the default finite ingress and processing flags; this
+contract update is not a new execution of that differential lane.
 
 ## Native ATP-Git transport
 

@@ -316,6 +316,21 @@ Maintain a versioned upstream-Git matrix and source-derived/adversarial corpus.
 
 Fetch and push are tested as distinct services. A standardized “protocol v2 push” does not exist; push compatibility is tested through receive-pack.
 
+Receive-pack timeout coverage must distinguish complete ingress, processing,
+and terminal response. Processing starts after the complete pack trailer and
+shares one finite allowance across writer-capacity wait and authority work;
+an elapsed ingress clock cannot cancel it. In `fgit-node`,
+`receive_processing_can_outlast_ingress_and_expiry_recovers_with_the_same_key`
+uses real TCP, quarantine, admission and canonical reopen in both hash domains,
+with a bounded post-quarantine stall and permitted/expired processing twins.
+The expired twin retries the identical command key after restart; a timeout
+alone is never evidence of non-commit.
+`receive_authority_inherits_remaining_processing_time_not_a_fresh_allowance`
+checks that native database work cannot restart spent processing time.
+Legacy processing refusal and the guarded interrupted-prefix tests retain the
+report/recovery boundary. These named tests are coverage requirements, not a
+claim that a current full or differential lane has passed.
+
 ### 11.4 Migration/export
 
 Import/export round trips preserve declared Git-visible objects/refs and accepted divergences. Upstream Git runs only as external oracle/tool against exported bytes.

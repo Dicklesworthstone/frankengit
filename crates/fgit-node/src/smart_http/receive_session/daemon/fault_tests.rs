@@ -321,3 +321,249 @@ fn interrupted_raw_push_reports_unknown_and_recovers_its_committed_prefix_after_
         node.shutdown().unwrap();
     }
 }
+
+// The only injected operation is a bounded server-work stall AFTER real
+// quarantine. Both twins still run the real admission/CAS and wire response.
+fn timed_push(
+    node: OneNode,
+    path: String,
+    body: Vec<u8>,
+    delay: Option<Duration>,
+) -> (
+    OneNode,
+    Result<Option<fgit_admission::AdmissionResult>, NodeSmartHttpRefusal>,
+    Vec<u8>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let ingress = GitDaemonSessionDeadline::new(
+            node.git_daemon_session_timeout,
+            node.git_daemon_session_work_scaling,
+        );
+        let mut reached = false;
+        let result = node.serve_guarded_git_daemon_stream_with_admission(
+            stream,
+            ingress,
+            None,
+            None,
+            |request, session, validated, live| {
+                reached = true;
+                if let Some(delay) = delay {
+                    let start = Instant::now();
+                    std::thread::sleep(delay);
+                    assert!(start.elapsed() > node.git_daemon_session_timeout.duration());
+                }
+                node.admit_guarded_receive(request, session, validated, live)
+            },
+        );
+        assert!(
+            reached,
+            "the real post-quarantine admission must be reached"
+        );
+        (node, result)
+    });
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    socket
+        .write_all(
+            &encode_packets(
+                &[Packet::Data(
+                    format!("git-receive-pack {path}\0host=localhost\0").into_bytes(),
+                )],
+                &WireLimits::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    while let Some(row) = packet(&mut socket) {
+        assert!(!row.starts_with(b"ERR "));
+    }
+    socket.write_all(&body).unwrap();
+    let mut report = Vec::new();
+    while let Some(row) = packet(&mut socket) {
+        let fatal = row.starts_with(b"ERR ");
+        report.extend_from_slice(&row);
+        if fatal {
+            break;
+        }
+    }
+    socket.shutdown(Shutdown::Write).unwrap();
+    let (node, result) = worker.join().unwrap();
+    (node, result, report)
+}
+
+#[test]
+fn receive_processing_can_outlast_ingress_and_expiry_recovers_with_the_same_key() {
+    for format in [Format::Sha1, Format::Sha256] {
+        for allowed in [true, false] {
+            let root = Scratch(std::env::temp_dir().join(format!(
+                "fg-independent-receive-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )));
+            let principal = PrincipalId::from_bytes([0xa3; 16]);
+            let config = NodeConfig::new(
+                root.0.clone(),
+                TenantId::from_bytes([0xa1; 16]),
+                RepositoryId::from_bytes([0xa2; 16]),
+            )
+            .with_object_format(format)
+            .with_worker_threads(2)
+            .with_git_daemon_receive_principal(principal)
+            .with_git_daemon_session_timeout(
+                crate::GitDaemonSessionTimeout::try_new(Duration::from_secs(5)).unwrap(),
+            )
+            .with_git_daemon_session_work_scaling(GitDaemonSessionWorkScaling::FLAT)
+            .with_git_daemon_receive_processing_timeout(
+                crate::GitDaemonReceiveProcessingTimeout::try_new(Duration::from_secs(
+                    if allowed { 30 } else { 1 },
+                ))
+                .unwrap(),
+            );
+            let (mut node, _) = OneNode::init(config.clone()).unwrap();
+            let selected = node
+                .runtime()
+                .block_on(node.authenticate_authority_head())
+                .unwrap();
+            let before = selected.receipt().generation();
+            node.bring_into_service(before).unwrap();
+            let path = std::str::from_utf8(node.git_daemon_repository_path().as_bytes())
+                .unwrap()
+                .to_owned();
+            let oid = git_object_id(format, GitObjectKind::Blob, b"x");
+            let name = RefName::try_new(b"refs/tags/independent-budget").unwrap();
+            let prefix = encode_packets(
+                &[
+                    Packet::Data(
+                        format!(
+                            "{} {oid} refs/tags/independent-budget\0report-status object-format={}",
+                            "0".repeat(format.digest_len() * 2),
+                            format.as_str()
+                        )
+                        .into_bytes(),
+                    ),
+                    Packet::Flush,
+                ],
+                &WireLimits::default(),
+            )
+            .unwrap();
+            let session = LoopbackReceiveSession::authenticated(
+                principal,
+                retry_key(path.as_bytes(), &prefix).unwrap(),
+            );
+            let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+            pack.extend_from_slice(&[
+                0x31, 0x78, 0x01, 0x01, 1, 0, 0xfe, 0xff, b'x', 0, 121, 0, 121,
+            ]);
+            let checksum = match format {
+                Format::Sha1 => sha1_digest(&pack).to_vec(),
+                Format::Sha256 => sha256_digest(&pack).to_vec(),
+            };
+            pack.extend_from_slice(&checksum);
+            let body = [prefix, pack].concat();
+            let (node, first, report) = timed_push(
+                node,
+                path.clone(),
+                body.clone(),
+                Some(Duration::from_secs(6)),
+            );
+            let original = if allowed {
+                let outcome = first.unwrap().unwrap();
+                assert_eq!(outcome.commands.len(), 1);
+                assert!(matches!(
+                    outcome.commands[0].terminal.outcome,
+                    DecisionOutcome::Committed { .. }
+                ));
+                assert!(report.starts_with(b"unpack ok"), "{report:?}");
+                assert!(
+                    report
+                        .windows(b"ok refs/tags/independent-budget".len())
+                        .any(|w| w == b"ok refs/tags/independent-budget")
+                );
+                Some(outcome.commands[0])
+            } else {
+                assert!(matches!(
+                    first,
+                    Err(NodeSmartHttpRefusal::ReceiveInterrupted(_))
+                ));
+                assert!(
+                    report.starts_with(b"ERR receive outcome unknown"),
+                    "{report:?}"
+                );
+                assert!(!report.windows(3).any(|w| w == b"ng "));
+                None
+            };
+            node.shutdown().unwrap();
+            // Inspect authenticated canonical state after a real cold reopen;
+            // the negative is known pre-CAS here, not a general timeout claim.
+            let retry_config = config.with_git_daemon_receive_processing_timeout(
+                crate::GitDaemonReceiveProcessingTimeout::try_new(Duration::from_secs(30)).unwrap(),
+            );
+            let mut node = OneNode::open_existing(retry_config.clone()).unwrap();
+            let selected = node
+                .runtime()
+                .block_on(node.authenticate_authority_head())
+                .unwrap();
+            node.bring_into_service(selected.receipt().generation())
+                .unwrap();
+            let snapshot = node
+                .runtime()
+                .block_on(node.materialize_admission())
+                .unwrap();
+            assert_eq!(
+                snapshot.basis().generation().get(),
+                before.get() + u64::from(allowed)
+            );
+            assert_eq!(
+                snapshot.snapshot().refs.get(&name).copied(),
+                allowed.then_some(oid)
+            );
+            let (node, retry, report) = timed_push(node, path, body, None);
+            let retry = retry.unwrap().unwrap();
+            assert!(report.starts_with(b"unpack ok"));
+            assert_eq!(retry.commands.len(), 1);
+            assert!(matches!(
+                retry.commands[0].terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ));
+            if let Some(original) = original {
+                assert_eq!(
+                    retry.commands[0], original,
+                    "identical retry retains its original transaction"
+                );
+            }
+            let SessionRecovery::Recovered(recovered) = node
+                .runtime()
+                .block_on(node.recover_receive_session_in(&node.request_context(), &session))
+                .unwrap()
+            else {
+                panic!("same persisted session key")
+            };
+            assert!(recovered.all_terminal());
+            assert_eq!(
+                recovered.commands()[0].recovery().terminal(),
+                Some(retry.commands[0].terminal)
+            );
+            node.shutdown().unwrap();
+            let node = OneNode::open_existing(retry_config).unwrap();
+            let snapshot = node
+                .runtime()
+                .block_on(node.materialize_admission())
+                .unwrap();
+            assert_eq!(
+                snapshot.basis().generation().get(),
+                before.get() + 1,
+                "one canonical publication across restart and identical retry"
+            );
+            assert_eq!(snapshot.snapshot().refs.get(&name), Some(&oid));
+            node.shutdown().unwrap();
+        }
+    }
+}

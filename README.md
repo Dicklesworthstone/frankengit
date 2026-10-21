@@ -81,15 +81,18 @@ session and one in-flight client; callers explicitly opt into larger non-zero
 deliberately names the one-session bound. One pushed pack is bounded by the
 documented receive session envelope — size ceilings
 (`--receive-max-input-mib`, `--receive-max-expanded-mib`) and a
-work-proportional session budget, `base + admitted bytes x rate` clamped to a
+work-proportional ingress budget, `base + admitted bytes x rate` clamped to a
 hard ceiling (`--session-timeout-secs`, `--session-secs-per-mib`,
-`--session-max-extension-secs`) — and an over-budget verdict is delivered
-through report-status, never a silent hangup (see
+`--session-max-extension-secs`). Processing expiry is reported within a fresh
+bounded response phase; ingress expiry ends the incomplete transfer (see
 [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md)).
 Ingress time cannot consume the independent server-work budget that starts
 after the pack trailer. On `fg serve` that budget defaults to 300 s and is set
-with `--processing-timeout-secs`. Processing must also finish inside the
-session budget, which runs from accept. With batched placement and concurrent
+with `--processing-timeout-secs`. Once ingress completes, its clock no longer
+bounds processing. Waiting for a writer and database admission share the
+remaining processing allowance; response delivery gets one fresh finite
+session allowance. A timeout cannot establish non-commit: retry the identical
+commands to recover the original outcome. With batched placement and concurrent
 staged-file sync (frankengit-pc9g), a 24,000-object push took 17.5 s at the
 default budgets on the development host. `fg serve-http` and `fg serve-ssh` now carry stock
 clone, fetch and push:

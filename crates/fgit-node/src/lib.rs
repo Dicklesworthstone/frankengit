@@ -4463,13 +4463,15 @@ pub struct GitDaemonRequest {
     service: GitDaemonService,
 }
 
-/// A finite wall-clock budget for one accepted git-daemon session.
+/// A finite wall-clock budget for a git-daemon network phase.
 ///
 /// The value is an absolute session budget, not a per-read idle interval: a
 /// peer that drips one byte before each socket timeout still reaches the same
 /// deadline.  It is part of the node configuration so a deployment chooses
 /// its compatibility/resource profile explicitly rather than inheriting an
 /// unbounded socket default.
+/// Receive-pack uses separate ingress and terminal-response phases; processing
+/// between them has its own [`GitDaemonReceiveProcessingTimeout`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitDaemonSessionTimeout(Duration);
 
@@ -4524,7 +4526,8 @@ impl Error for GitDaemonSessionTimeoutRefusal {}
 /// still-admissible upload from consuming the time reserved for quarantine,
 /// delta resolution, policy evaluation, and authority publication. The two
 /// limits remain independently finite and operator-selected; no untrusted pack
-/// declaration can enlarge either one automatically.
+/// declaration can enlarge either one automatically. Writer-capacity waits and
+/// native database work share its remaining time; they do not restart it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitDaemonReceiveProcessingTimeout(Duration);
 
@@ -4823,10 +4826,8 @@ impl Error for NodeGitDaemonServerRefusal {
 /// one fixed wall-clock value, while a peer that stops delivering bytes still
 /// reaches the same deadline.
 ///
-/// Once a terminal admission verdict exists the deadline grants one bounded
-/// [`Self::TERMINAL_REPORT_GRACE`] so the verdict — a committed report or the
-/// over-budget refusal itself — is always deliverable through report-status
-/// instead of a bare socket close (frankengit-asb8 acceptance 3).
+/// Receive processing and the terminal report each select a fresh finite
+/// deadline after ingress completes. Neither reopens this ingress clock.
 #[derive(Clone, Debug)]
 struct GitDaemonSessionDeadline {
     started: Instant,
@@ -4841,17 +4842,9 @@ struct GitDaemonSessionDeadline {
 struct GitDaemonSessionDeadlineShared {
     /// Every byte received from the client on this connection.
     admitted_bytes: AtomicU64,
-    /// Set once a terminal admission verdict exists and must be delivered.
-    report_grace_granted: AtomicBool,
 }
 
 impl GitDaemonSessionDeadline {
-    /// Bounded write window granted past the exhausted envelope so a reached
-    /// terminal verdict is delivered through report-status rather than lost to
-    /// a socket close. Client-driven phases never observe the grace: it is
-    /// granted exactly once, after the verdict exists.
-    const TERMINAL_REPORT_GRACE: Duration = Duration::from_secs(30);
-
     fn new(timeout: GitDaemonSessionTimeout, scaling: GitDaemonSessionWorkScaling) -> Self {
         Self {
             started: Instant::now(),
@@ -4859,7 +4852,6 @@ impl GitDaemonSessionDeadline {
             scaling,
             shared: Arc::new(GitDaemonSessionDeadlineShared {
                 admitted_bytes: AtomicU64::new(0),
-                report_grace_granted: AtomicBool::new(false),
             }),
         }
     }
@@ -4871,26 +4863,13 @@ impl GitDaemonSessionDeadline {
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
-    /// Grants the one terminal report grace after a verdict exists.
-    fn grant_terminal_report_grace(&self) {
-        self.shared
-            .report_grace_granted
-            .store(true, Ordering::Relaxed);
-    }
-
     /// The current total session budget: base plus the extension earned by
-    /// admitted client bytes (clamped to the configured ceiling), plus the
-    /// terminal report grace once granted.
+    /// admitted client bytes (clamped to the configured ceiling).
     fn budget(&self) -> Duration {
         let admitted = self.shared.admitted_bytes.load(Ordering::Relaxed);
-        let mut budget = self
-            .timeout
+        self.timeout
             .duration()
-            .saturating_add(self.scaling.extension(admitted));
-        if self.shared.report_grace_granted.load(Ordering::Relaxed) {
-            budget = budget.saturating_add(Self::TERMINAL_REPORT_GRACE);
-        }
-        budget
+            .saturating_add(self.scaling.extension(admitted))
     }
 
     fn remaining(&self) -> io::Result<Duration> {
@@ -4925,22 +4904,27 @@ fn check_session_deadline(
 /// Absolute elapsed-time accounting for the server-work phase of one received
 /// push. It is created only after the command section and complete pack trailer
 /// have arrived, so client upload time cannot consume the processing budget.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct GitDaemonReceiveProcessingDeadline {
-    started: Instant,
-    timeout: GitDaemonReceiveProcessingTimeout,
+    work: GitDaemonSessionDeadline,
 }
 
 impl GitDaemonReceiveProcessingDeadline {
     fn new(timeout: GitDaemonReceiveProcessingTimeout) -> Self {
         Self {
-            started: Instant::now(),
-            timeout,
+            work: GitDaemonSessionDeadline::new(
+                GitDaemonSessionTimeout(timeout.duration()),
+                GitDaemonSessionWorkScaling::FLAT,
+            ),
         }
     }
 
-    fn expired(self) -> bool {
-        self.started.elapsed() >= self.timeout.duration()
+    fn expired(&self) -> bool {
+        self.work.expired()
+    }
+
+    fn deadline(&self) -> &GitDaemonSessionDeadline {
+        &self.work
     }
 }
 
@@ -6209,7 +6193,7 @@ fn read_receive_frame(
 /// (section 5.2) — so the notice names the idempotent resolution rather than
 /// claiming the push failed. ASCII, control-free, and far under the
 /// report-status message ceiling.
-const RECEIVE_ENVELOPE_EXHAUSTED_MESSAGE: &[u8] = b"receive session envelope exhausted before admission completed; push outcome unknown: retry the identical push to resolve it idempotently";
+const RECEIVE_PROCESSING_EXHAUSTED_MESSAGE: &[u8] = b"receive processing deadline exceeded; push outcome unknown: retry the identical push to resolve it idempotently";
 
 /// Builds a bounded, wire-safe report-status message from a receive refusal.
 ///
@@ -8864,21 +8848,17 @@ impl OneNode {
         let processing_timeout = self.git_daemon_receive_processing_timeout;
         let processing_deadline = GitDaemonReceiveProcessingDeadline::new(processing_timeout);
         let processing_deadline_expired = AtomicBool::new(false);
-        // The admission's database budget scales with the admitted request
-        // bytes: its deadline is this session's own envelope value, so the
-        // seal of a large-but-legitimate push is bounded by its work rather
-        // than by the generic database class default (frankengit-asb8).
+        // Database work shares the processing clock, including time already
+        // consumed in this phase. Ingress no longer limits or funds admission.
         let admission_request = NodeRequestContext {
-            authority: self.receive_admission_authority_context(captured.len() as u64, &deadline),
+            authority: self.receive_admission_authority_context(
+                captured.len() as u64,
+                processing_deadline.deadline(),
+            ),
         };
-        let admission_deadline_expired = AtomicBool::new(false);
         let mut cancellation = || {
             if processing_deadline.expired() {
                 processing_deadline_expired.store(true, Ordering::Relaxed);
-                return false;
-            }
-            if deadline.expired() {
-                admission_deadline_expired.store(true, Ordering::Relaxed);
                 return false;
             }
             true
@@ -8895,7 +8875,9 @@ impl OneNode {
         )) {
             Ok(outcome) => outcome,
             Err(refusal) => {
-                let refusal = if processing_deadline_expired.load(Ordering::Relaxed) {
+                let processing_expired = processing_deadline_expired.load(Ordering::Relaxed)
+                    || processing_deadline.expired();
+                let refusal = if processing_expired {
                     NodeReceiveTransportRefusal::ReceiveProcessingDeadlineExceeded {
                         timeout: processing_timeout,
                         source: Box::new(refusal),
@@ -8903,64 +8885,50 @@ impl OneNode {
                 } else {
                     refusal
                 };
-                // A deadline that fired during admission leaves the push
-                // outcome genuinely unknown: cancellation never proves
-                // non-commit (section 5.2). Deliver through report-status,
-                // never a bare socket close (frankengit-xefn, frankengit-asb8).
-                if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
-                    deadline.grant_terminal_report_grace();
-                    Self::write_receive_rejection_message_report(
-                        writer,
-                        &ready,
-                        RECEIVE_ENVELOPE_EXHAUSTED_MESSAGE.to_owned(),
-                        limits,
-                        &receive_limits,
-                    )?;
-                    return Ok(GitDaemonSessionOutcome::Receive(GitDaemonReceiveReceipt {
-                        request: greeting,
-                        commands: 0,
-                    }));
-                }
                 // The complete pack is already present and the client is now
                 // reading. Give report-status its own fresh, finite network
                 // phase so an elapsed ingress deadline can never turn a typed
                 // processing refusal into a socket hangup (frankengit-xefn).
                 let report_deadline = GitDaemonSessionDeadline::new(
                     self.git_daemon_session_timeout,
-                    self.git_daemon_session_work_scaling,
+                    GitDaemonSessionWorkScaling::FLAT,
                 );
                 writer.restart_deadline(report_deadline.clone());
                 report_deadline
                     .check("prepare receive-pack rejection report")
                     .map_err(NodeGitDaemonServeRefusal::from)?;
-                Self::write_receive_rejection_report(
-                    writer,
-                    &ready,
-                    &refusal,
-                    limits,
-                    &receive_limits,
-                )?;
+                if processing_expired {
+                    // Cancellation cannot prove non-commit, even after the
+                    // ingress clock has elapsed (xefn/asb8, contract §5.2).
+                    Self::write_receive_rejection_message_report(
+                        writer,
+                        &ready,
+                        RECEIVE_PROCESSING_EXHAUSTED_MESSAGE.to_owned(),
+                        limits,
+                        &receive_limits,
+                    )?;
+                } else {
+                    Self::write_receive_rejection_report(
+                        writer,
+                        &ready,
+                        &refusal,
+                        limits,
+                        &receive_limits,
+                    )?;
+                }
                 return Ok(GitDaemonSessionOutcome::Receive(GitDaemonReceiveReceipt {
                     request: greeting,
                     commands: 0,
                 }));
             }
         };
-        if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
-            // Admission completed but the envelope fired during it: the
-            // terminal outcome is real, so the client must receive the actual
-            // report rather than a socket close. Grant the one bounded
-            // terminal grace and fall through to the ordinary report write.
-            deadline.grant_terminal_report_grace();
-        }
-
         // An authenticated success is canonical even when a cancellation probe
         // fired near the commit boundary. Report that success; never overwrite
         // it with a local timeout inference. The response itself receives one
         // new finite network phase, exactly like the rejection path above.
         let report_deadline = GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
-            self.git_daemon_session_work_scaling,
+            GitDaemonSessionWorkScaling::FLAT,
         );
         writer.restart_deadline(report_deadline.clone());
         report_deadline
@@ -9363,8 +9331,8 @@ impl OneNode {
     /// The class defaults fund an ordinary push; a large first push would
     /// exhaust the 15 s database deadline mid-seal no matter how healthy the
     /// work is (frankengit-asb8). Seal work is proportional to the admitted
-    /// bytes, so its budget is too: the deadline is this session's own
-    /// envelope value — one time policy rather than a second wall-clock bound
+    /// bytes, so its budget is too: the deadline is the remaining phase
+    /// allowance — one time policy rather than a second wall-clock bound
     /// — and the poll and cost quotas scale at documented per-byte rates
     /// above the class floors (one poll per 64 admitted bytes, one cost unit
     /// per 8 admitted bytes), keeping a finite liveness backstop for stuck
@@ -9383,7 +9351,7 @@ impl OneNode {
             .min(u64::from(u32::MAX) / 2) as u32;
         let cost_quota = floors.cost_quota.unwrap_or(0).max(admitted_bytes / 8);
         let scaled = ClassLimits {
-            timeout: Some(deadline.budget()),
+            timeout: Some(deadline.remaining().unwrap_or(Duration::ZERO)),
             poll_quota,
             cost_quota: Some(cost_quota),
             priority: floors.priority,
@@ -10763,6 +10731,52 @@ mod tests {
         ));
         drop((idle, working, stalled));
         node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn receive_authority_inherits_remaining_processing_time_not_a_fresh_allowance() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf())).expect("node initializes");
+        let mut processing = super::GitDaemonReceiveProcessingDeadline::new(
+            super::GitDaemonReceiveProcessingTimeout::try_new(Duration::from_secs(20)).unwrap(),
+        );
+        // Deterministically model time spent waiting for the writer permit.
+        // The real TCP test supplies the separate elapsed-work regression.
+        processing.work.started -= Duration::from_secs(10);
+        let authority = node.receive_admission_authority_context(1_048_576, processing.deadline());
+        let native = authority.attached_native_cx().unwrap();
+        let remaining = native.budget().remaining(node.runtime.now());
+        assert!(
+            remaining.deadline.is_some_and(
+                |left| left > Duration::from_secs(5) && left <= Duration::from_secs(10)
+            ),
+            "{remaining:?}"
+        );
+        let permitted = NodeRequestContext { authority };
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&permitted))
+                .is_ok()
+        );
+
+        processing.work.started -= Duration::from_secs(30);
+        let expired = NodeRequestContext {
+            authority: node.receive_admission_authority_context(1_048_576, processing.deadline()),
+        };
+        assert!(matches!(
+            checkpoint_pack_context(expired.authority()),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&expired))
+                .is_err()
+        );
+        drop((permitted, expired));
+        node.shutdown().unwrap();
     }
 
     #[test]
@@ -14075,7 +14089,7 @@ mod session_envelope_tests {
     }
 
     #[test]
-    fn the_terminal_report_grace_reopens_an_exhausted_envelope_exactly_once() {
+    fn receive_phases_do_not_reopen_or_share_an_exhausted_ingress_clock() {
         let deadline = GitDaemonSessionDeadline::new(
             GitDaemonSessionTimeout::try_new(Duration::from_millis(1)).expect("a non-zero budget"),
             GitDaemonSessionWorkScaling::FLAT,
@@ -14083,23 +14097,23 @@ mod session_envelope_tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(deadline.expired(), "the tiny envelope has elapsed");
 
-        deadline.grant_terminal_report_grace();
-        let remaining = deadline
-            .remaining()
-            .expect("the granted grace reopens the budget for the verdict write");
-        assert!(
-            remaining > Duration::ZERO
-                && remaining <= GitDaemonSessionDeadline::TERMINAL_REPORT_GRACE,
-            "the grace is bounded by the terminal report window: {remaining:?}"
+        let processing = GitDaemonReceiveProcessingDeadline::new(
+            GitDaemonReceiveProcessingTimeout::try_new(Duration::from_secs(60)).unwrap(),
         );
-
-        // The grace composes with the (here flat) work-scaled envelope rather
-        // than replacing it: admitted bytes still earn nothing.
-        deadline.note_admitted(1_048_576);
-        let after = deadline.remaining().expect("the grace still holds");
+        let report =
+            GitDaemonSessionDeadline::new(timeout_seconds(10), GitDaemonSessionWorkScaling::FLAT);
+        let remaining = report.remaining().expect("fresh bounded report clock");
         assert!(
-            after <= GitDaemonSessionDeadline::TERMINAL_REPORT_GRACE,
-            "the flat envelope contributes no extension under the grace: {after:?}"
+            remaining > Duration::ZERO && remaining <= Duration::from_secs(10),
+            "the report uses its selected finite network allowance: {remaining:?}"
+        );
+        assert!(deadline.expired(), "ingress remains expired");
+        assert!(!processing.expired(), "processing gets its own allowance");
+        processing.deadline().note_admitted(usize::MAX / 2);
+        assert_eq!(
+            processing.deadline().budget(),
+            Duration::from_secs(60),
+            "untrusted bytes cannot extend the processing budget"
         );
     }
 

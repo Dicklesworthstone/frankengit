@@ -205,6 +205,11 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - clean-room pure-Rust codecs/state machines with checked arithmetic;
 - quarantine before reachability/retention;
 - declared byte/object/depth/fanout/work/memory/time limits;
+- receive ingress and processing have independent finite clocks; processing
+  starts only after the complete trailer and includes writer-capacity waits.
+  Authority contexts inherit remaining phase time, so queueing cannot mint
+  another full allowance. Response delivery gets one bounded network phase;
+  expiry never establishes non-commit or erases a known canonical outcome;
 - native typed hash domains and collision-defense profile;
 - exact hidden-ref authorization and advertisement policy;
 - protocol/service/capability matrix; no fictional protocol-v2 push assumption;
