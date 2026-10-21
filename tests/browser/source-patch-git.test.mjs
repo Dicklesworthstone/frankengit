@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { installIndex } from './git-index-fixture.mjs';
 import { buildPatch, bytesHex, pathBytes } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
 const raw = value => Buffer.isBuffer(value) ? value : Buffer.from(value);
 const side = (bytes, mode = 0o100644) => ({ bytes: new Uint8Array(raw(bytes)), mode });
@@ -16,10 +17,10 @@ for (const algorithm of ['sha1', 'sha256']) test(`installed Git applies exact br
   const root = mkdtempSync(join(tmpdir(), 'fg-browser-patch-'));
   const priorUmask = process.umask(0o022);
   try {
-    const git = (args, input) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.filemode=true', ...args], { cwd: root, env: environment(root), input, stdio: ['pipe', 'pipe', 'pipe'] });
+    const git = (args, input) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.filemode=true', ...args], { cwd: root, env: environment(root), input, timeout: 30_000, maxBuffer: 2 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
     t.diagnostic(git(['--version']).toString().trim()); git(['init', '-q', `--object-format=${algorithm}`]);
     const edits = [edit('normal', 'old\n', 'new\n'), edit('space name ', 'a\r\nb', 'c\r\nd'),
-      edit('quote"tab\tback\\', 'hello', 'héllo'), edit(Buffer.from([110, 97, 109, 101, 255]), Buffer.from([255,10]), Buffer.from([254,10])),
+      edit('quote"tab\tback\\', 'hello', 'héllo'), edit('name-é', Buffer.from([255,10]), Buffer.from([254,10])),
       edit('new-empty', null, ''), edit('delete-empty', '', null), edit('new-exe', null, '#!/bin/sh\n', 0o100644, 0o100755),
       edit('delete', 'gone\nlast', null), edit('mode-only', 'unchanged', 'unchanged', 0o100644, 0o100755),
       edit('mode-content', 'before', 'after', 0o100755, 0o100644), edit('to-empty', 'old\n', ''), edit('from-empty', '', '\n')];
@@ -43,4 +44,34 @@ for (const algorithm of ['sha1', 'sha256']) test(`installed Git applies exact br
     }
     assert.throws(() => git(['apply', '--index', '--reverse', '-'], patch.bytes), 'wrong-base application refuses');
   } finally { process.umask(priorUmask); rmSync(root, { recursive: true, force: true }); }
+});
+
+// Keep the arbitrary-byte obligation on every host, including hosts whose
+// working tree cannot hold the name. Independent complete trees bind bytes,
+// modes, insertion/deletion and reversal without normalizing path bytes.
+for (const algorithm of ['sha1', 'sha256']) test(`Git index applies exact arbitrary filename bytes in ${algorithm}`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'fg-browser-patch-index-'));
+  try {
+    const git = (args, input) => execFileSync('git', ['-c', 'core.autocrlf=false', ...args], {
+      cwd: root, env: environment(root), input, timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
+    });
+    t.diagnostic(git(['--version']).toString().trim());
+    git(['init', '-q', `--object-format=${algorithm}`]);
+    const edits = [
+      edit(Buffer.from([110, 97, 109, 101, 255]), Buffer.from([255, 10]), Buffer.from([254, 10]), 0o100644, 0o100755),
+      edit(Buffer.from([110, 101, 119, 254]), null, ''),
+      edit(Buffer.from([111, 108, 100, 253]), 'gone\n', null),
+      edit('permitted-é', 'old\n', 'new\n'),
+    ];
+    const beforeTree = installIndex(git, edits, 'before');
+    const afterTree = installIndex(git, edits, 'after');
+    git(['read-tree', beforeTree]);
+    const patch = await buildPatch(edits, algorithm);
+    git(['apply', '--check', '--cached', '--whitespace=nowarn', '-'], patch.bytes);
+    git(['apply', '--cached', '--whitespace=nowarn', '-'], patch.bytes);
+    assert.equal(String(git(['write-tree'])).trim(), afterTree);
+    git(['apply', '--cached', '--reverse', '--whitespace=nowarn', '-'], patch.bytes);
+    assert.equal(String(git(['write-tree'])).trim(), beforeTree);
+    assert.throws(() => git(['apply', '--cached', '--reverse', '-'], patch.bytes), 'wrong-base application refuses');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

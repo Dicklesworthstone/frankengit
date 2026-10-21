@@ -32,11 +32,18 @@ fge_assert_ne JS-CONTRACT-002 0 "${#tests[@]}" 'the browser contract test files 
 
 fge_phase action
 test_exit=0
-fge_capture node-test "$NODE" --test "${tests[@]}" || test_exit=$?
+fge_capture node-test "$NODE" "$REPO_ROOT/scripts/verify_js.mjs" browser || test_exit=$?
 summary=''
 if [ -n "${FGE_LAST_STDOUT_FILE:-}" ] && [ -f "$FGE_LAST_STDOUT_FILE" ]; then
   summary=$(grep -E '^# (tests|pass|fail|cancelled|skipped|todo) ' "$FGE_LAST_STDOUT_FILE" | tr '\n' ' ')
-  failing=$(grep -E '^not ok ' "$FGE_LAST_STDOUT_FILE" | head -40 | tr '\n' ';')
+  # grep's ordinary no-match status must not abort a completely passing lane.
+  # Preserve real read errors, and bound matches without a SIGPIPE-prone head.
+  if failing=$(grep -m40 -E '^not ok ' "$FGE_LAST_STDOUT_FILE"); then
+    failing=${failing//$'\n'/;}
+  else
+    grep_exit=$?
+    [ "$grep_exit" -eq 1 ] || fge_die 'cannot read browser TAP failures'
+  fi
   fge_context tap_summary "$summary"
   fge_context failing_tests "$failing"
 fi

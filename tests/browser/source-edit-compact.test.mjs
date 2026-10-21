@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { installIndex } from './git-index-fixture.mjs';
 import { fullFilePatch, normalizeEdits, FILE_LIMIT, PATCH_LIMIT, INPUT_LIMIT, renameEdits } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit-patch.mjs';
 
 const bytes = value => typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);
@@ -38,21 +39,25 @@ function install(root, edits, selected) {
   git(root, ['add', '--all']);
   return git(root, ['write-tree']);
 }
-function roundTrip(edits, algorithm, options = {}) {
+function roundTrip(edits, algorithm, options = {}, indexOnly = false) {
   const root = mkdtempSync(join(tmpdir(), 'fgit-browser-patch-'));
   try {
     const actual = join(root, 'actual'), expected = join(root, 'expected');
     for (const path of [actual, expected]) { mkdirSync(path); git(path, ['init', '-q', `--object-format=${algorithm}`]); }
-    const beforeTree = install(actual, edits, 'before'), afterTree = install(expected, edits, 'after');
+    const installSide = (root, side) => indexOnly
+      ? installIndex((args, input) => git(root, args, input), edits, side)
+      : install(root, edits, side);
+    const beforeTree = installSide(actual, 'before'), afterTree = installSide(expected, 'after');
     const patch = fullFilePatch(edits, options);
-    git(actual, ['apply', '--check', '--index', '--whitespace=nowarn', '-'], patch.bytes);
-    git(actual, ['apply', '--verbose', '--index', '--whitespace=nowarn', '-'], patch.bytes);
+    const target = indexOnly ? '--cached' : '--index';
+    git(actual, ['apply', '--check', target, '--whitespace=nowarn', '-'], patch.bytes);
+    git(actual, ['apply', '--verbose', target, '--whitespace=nowarn', '-'], patch.bytes);
     assert.equal(git(actual, ['write-tree']), afterTree, 'forward patch must produce the independently built complete tree');
-    for (const row of edits) if (row.after !== null) {
+    for (const row of edits) if (!indexOnly && row.after !== null) {
       const path = Buffer.concat([Buffer.from(`${actual}/`), Buffer.from(row.path_hex, 'hex')]);
       assert.deepEqual(new Uint8Array(readFileSync(path)), row.after.bytes);
     }
-    git(actual, ['apply', '--reverse', '--verbose', '--index', '--whitespace=nowarn', '-'], patch.bytes);
+    git(actual, ['apply', '--reverse', '--verbose', target, '--whitespace=nowarn', '-'], patch.bytes);
     assert.equal(git(actual, ['write-tree']), beforeTree, 'reverse patch must restore the original complete tree');
     return patch;
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -122,14 +127,15 @@ for (const algorithm of ['sha1', 'sha256']) {
   ];
   for (const [name, row] of cases) test(`${algorithm}: ${name} preserves forward and reverse trees`, () => roundTrip([row], algorithm));
 
-  test(`${algorithm}: mode changes, raw byte names, binary opt-in and renames compose`, () => {
+  for (const indexOnly of [false, true]) test(`${algorithm}: mode changes, ${indexOnly ? 'arbitrary byte names in Git objects' : 'host-representable names'}, binary opt-in and renames compose`, () => {
     const before = Buffer.concat([Buffer.from(original.join('')), Buffer.from([0, 255, 13, 10])]);
     const after = Buffer.from(before); after[65] ^= 1;
-    const raw = edit(before, after, Buffer.from([97, 32, 34, 92, 10, 255])); raw.after.mode = 0o100755;
+    const name = indexOnly ? Buffer.from([97, 32, 34, 92, 10, 255]) : Buffer.from('a "\\\né');
+    const raw = edit(before, after, name); raw.after.mode = 0o100755;
     const mode = edit(original.join(''), original.join(''), 'script'); mode.after.mode = 0o100755;
     const moving = renameEdits(Buffer.from('old-name').toString('hex'), Buffer.from('new-name').toString('hex'), side('rename\n'));
     const rows = [...moving, mode, raw];
-    const first = roundTrip(rows, algorithm, { allowBinary: true });
+    const first = roundTrip(rows, algorithm, { allowBinary: true }, indexOnly);
     assert.deepEqual(first.bytes, fullFilePatch([...rows].reverse(), { allowBinary: true }).bytes);
     assert.deepEqual(first.edits.find(e => e.path_hex === raw.path_hex).after.bytes, new Uint8Array(after));
   });

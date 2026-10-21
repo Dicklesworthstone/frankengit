@@ -1,7 +1,7 @@
 // An HTTP response-schema peer, not Rust fg, native Git or an authority proof.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, chmod, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hash, outcomeBinding } from '../../scripts/lib/branch-bootstrap-protocol.mjs';
@@ -13,7 +13,8 @@ export function absent(scope=SCOPE){return {type:'transaction_outcome',schema_ve
   state:'key_not_observed',terminal:false,transaction:null,decision:null,read_only:true,request_reexecuted:false,
   absence_proves_non_commit:false,session_completeness_established:false};}
 export async function fixture(t,{format='sha1',branches=3,behavior={},existing=[]}={}){
-  const root=await mkdtemp(join(tmpdir(),'fg-bootstrap-'));await chmod(root,0o700);
+  // Custody paths are canonical by contract; macOS's default TMPDIR is an alias.
+  const root=await realpath(await mkdtemp(join(tmpdir(),'fg-bootstrap-')));await chmod(root,0o700);
   const tokenFile=join(root,'token');await writeFile(tokenFile,`${TOKEN}\n`,{mode:0o600});
   const scope={...SCOPE,object_format:format},requests=[],outcomes=new Map(),publications=new Map(),refs=new Map(existing),sockets=new Set();
   let sequence=9007199254740991n,posts=0;
