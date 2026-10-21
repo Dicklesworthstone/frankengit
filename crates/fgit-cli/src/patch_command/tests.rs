@@ -295,3 +295,58 @@ fn binary_profile_preserves_text_semantics_and_refuses_unsupported_modes_and_ren
         assert!(profile.preflight(text, limits).is_err());
     }
 }
+
+#[test]
+fn tree_profile_requires_explicit_selection_and_preserves_old_rename_refusals() {
+    let rename = b"diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n";
+    for width in [40, 64] {
+        let mut args = prepare_args(width);
+        replace(&mut args, "--profile", "exact-tree-v1");
+        let Operation::Prepare { profile, .. } = options::parse(&args).unwrap().operation else {
+            panic!("prepare");
+        };
+        assert_eq!(profile, options::Profile::ExactTree);
+        assert_eq!(profile.token(), "exact-tree-v1");
+        assert!(profile.preflight(rename, Default::default()).is_ok());
+    }
+    for profile in [options::Profile::Exact, options::Profile::ExactBinary] {
+        assert!(profile.preflight(rename, Default::default()).is_err());
+    }
+    let mut args = apply_args(40);
+    args.extend(["--profile".into(), "exact-tree-v1".into()]);
+    assert!(options::parse(&args).is_err());
+}
+
+#[test]
+fn tree_profile_refuses_ambiguous_or_unsupported_refactorings_and_keeps_limits() {
+    let profile = options::Profile::ExactTree;
+    let rename = "diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n";
+    for bad in [
+        rename
+            .replace("rename from", "copy from")
+            .replace("rename to", "copy to"),
+        rename.to_owned()
+            + "diff --git a/b b/c\nsimilarity index 100%\nrename from b\nrename to c\n",
+        rename.to_owned()
+            + "diff --git a/b b/a\nsimilarity index 100%\nrename from b\nrename to a\n",
+        rename.replace("rename to b", "rename to ../b"),
+        rename.replace(
+            "similarity index 100%",
+            "old mode 120000\nnew mode 120000\nsimilarity index 100%",
+        ),
+    ] {
+        assert!(
+            profile
+                .preflight(bad.as_bytes(), Default::default())
+                .is_err(),
+            "{bad}"
+        );
+    }
+    let limits = fgit_forge::patch::PatchLimits {
+        max_patch_bytes: rename.len() - 1,
+        ..Default::default()
+    };
+    assert!(profile.preflight(rename.as_bytes(), limits).is_err());
+    let text = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+    assert!(profile.preflight(text, Default::default()).is_ok());
+}

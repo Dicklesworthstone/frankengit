@@ -11,12 +11,14 @@ pub(super) enum Key {
 pub(super) enum Profile {
     Exact,
     ExactBinary,
+    ExactTree,
 }
 impl Profile {
     pub(super) const fn token(self) -> &'static str {
         match self {
             Self::Exact => "exact-v1",
             Self::ExactBinary => "exact-binary-v1",
+            Self::ExactTree => "exact-tree-v1",
         }
     }
     pub(super) fn preflight(self, bytes: &[u8], limits: PatchLimits) -> Result<(), String> {
@@ -25,6 +27,11 @@ impl Profile {
             Self::ExactBinary => {
                 fgit_forge::patch::UnifiedPatch::parse_with_binary(bytes, limits, &|| false)
             }
+            Self::ExactTree => fgit_forge::patch::UnifiedPatch::parse_with_binary_and_renames(
+                bytes,
+                limits,
+                &|| false,
+            ),
         };
         parsed.map(|_| ()).map_err(|error| error.to_string())
     }
@@ -178,7 +185,13 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         let profile = match required("--profile")? {
             "exact-v1" => Profile::Exact,
             "exact-binary-v1" => Profile::ExactBinary,
-            _ => return Err("explicit --profile exact-v1 or exact-binary-v1 is required".into()),
+            "exact-tree-v1" => Profile::ExactTree,
+            _ => {
+                return Err(
+                    "explicit --profile exact-v1, exact-binary-v1 or exact-tree-v1 is required"
+                        .into(),
+                );
+            }
         };
         let workspace_id = unhex(required("--workspace-id")?, 16)?
             .try_into()
