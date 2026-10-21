@@ -13,6 +13,14 @@ const requestFile=(f,n=1)=>join(f.p.workdir,'requests',`request-${String(n).padS
 const request=async(f,n=1)=>canonical(await readFile(requestFile(f,n)));
 const attemptFile=(f,n,file)=>join(f.p.workdir,'journal',`attempt-${String(n).padStart(6,'0')}`,file);
 
+test('canonical fixture roots do not authorize an explicitly aliased custody parent',async t=>{
+  const f=await fixture(t),alias=join(f.root,'alias');await symlink(f.root,alias);
+  await assert.rejects(prepareBootstrap({...f.prepare,workdir:join(alias,'job')}),
+    error=>error.code==='branch_bootstrap_directory_changed_or_unsafe');
+  assert.equal(f.requests.length,0);
+  await assert.rejects(lstat(join(f.root,'job')),error=>error.code==='ENOENT');
+});
+
 for(const format of ['sha1','sha256'])test(`prepare and execute actual native-schema HTTP batch in ${format}`,async t=>{
   const f=await prepared(t,{format});assert.equal(f.requests.length,0);assert.equal(f.p.mutation_submitted,false);
   const r=await runBootstrap(f.run);assert.equal(r.complete,true);assert.equal(r.committed,3);assert.equal(r.operations,3);assert.equal(f.posts(),3);

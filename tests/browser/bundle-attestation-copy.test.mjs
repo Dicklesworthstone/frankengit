@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createHash } from 'node:crypto';
-import { open, mkdtemp, writeFile, readFile, rename, symlink, chmod, mkdir, rm, readdir, lstat } from 'node:fs/promises';
+import { open, mkdtemp, writeFile, readFile, rename, symlink, chmod, mkdir, rm, readdir, lstat, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync, fork } from 'node:child_process';
@@ -20,7 +20,7 @@ const body = Buffer.from(Array.from({ length: 200003 }, (_, i) => i % 251));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const rejected = code => error => error.code === code;
 async function fixture(work) {
-  const directory = await mkdtemp(join(tmpdir(), 'fg-authenticated-copy-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'fg-authenticated-copy-')));
   const input = join(directory, 'input.bundle'), destination = join(directory, 'ready.bundle');
   const envelope = join(directory, 'input.dsse.json'), pub = join(directory, 'public.pem');
   const signed = await signSourceBackup(body, privatePem, meta, options);
