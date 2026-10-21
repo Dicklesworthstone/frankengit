@@ -327,6 +327,9 @@ The expired twin retries the identical command key after restart; a timeout
 alone is never evidence of non-commit.
 `receive_authority_inherits_remaining_processing_time_not_a_fresh_allowance`
 checks that native database work cannot restart spent processing time.
+`late_quarantine_verdict_uses_a_fresh_bounded_response_clock` checks the actual
+TCP report-status bytes after an expired ingress clock, preserves the
+non-verdict cancellation twin, and bounds the response independently.
 Legacy processing refusal and the guarded interrupted-prefix tests retain the
 report/recovery boundary. These named tests are coverage requirements, not a
 claim that a current full or differential lane has passed.

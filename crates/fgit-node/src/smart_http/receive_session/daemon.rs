@@ -128,6 +128,32 @@ fn fatal(writer: &mut impl Write, admission_started: bool, limits: &WireLimits) 
     writer.flush()
 }
 
+/// A verdict reached during quarantine has the same finite response phase as
+/// a terminal admission result. The earlier upload clock may already be spent.
+fn write_command_verdict(
+    writer: &mut impl crate::ReceiveResponseWriter,
+    ready: &fgit_wire::receive::ReceiveRequest,
+    code: fgit_types::RefusalCode,
+    limits: &fgit_wire::receive::ReceiveLimits,
+    timeout: crate::GitDaemonSessionTimeout,
+) -> Result<bool, NodeSmartHttpRefusal> {
+    let Some(report) = command_verdict_report(ready, code, limits) else {
+        return Ok(false);
+    };
+    let bytes = encode_packets(&report?, &limits.wire)?;
+    writer.restart_deadline(GitDaemonSessionDeadline::new(
+        timeout,
+        GitDaemonSessionWorkScaling::FLAT,
+    ));
+    writer
+        .write_all(&bytes)
+        .map_err(|e| io_error("write guarded receive verdict", e))?;
+    writer
+        .flush()
+        .map_err(|e| io_error("flush guarded receive verdict", e))?;
+    Ok(true)
+}
+
 impl OneNode {
     /// Serve one accepted raw Git stream with guarded receive admission.
     ///
@@ -420,16 +446,13 @@ impl OneNode {
                     // A verdict on the received commands is reported to the
                     // client per ref; the refusal itself is still returned, so
                     // the session counts as refused and nothing is admitted.
-                    if let Some(report) = command_verdict_report(&ready, code, &receive_limits) {
-                        let bytes = encode_packets(&report?, &receive_limits.wire)?;
-                        writer
-                            .write_all(&bytes)
-                            .map_err(|e| io_error("write guarded receive verdict", e))?;
-                        writer
-                            .flush()
-                            .map_err(|e| io_error("flush guarded receive verdict", e))?;
-                        verdict_reported = true;
-                    }
+                    verdict_reported = write_command_verdict(
+                        writer,
+                        &ready,
+                        code,
+                        &receive_limits,
+                        self.git_daemon_session_timeout,
+                    )?;
                     return Err(ReceiveError::AuthoritativeRefusal(code).into());
                 }
                 completion => completion?,
@@ -502,6 +525,98 @@ impl OneNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_quarantine_verdict_uses_a_fresh_bounded_response_clock() {
+        use fgit_types::RefusalCode;
+        use fgit_wire::receive::{ReceiveCommand, ReceiveLimits, ReceiveRequest};
+
+        for format in [
+            fgit_types::GitHashAlgorithm::Sha1,
+            fgit_types::GitHashAlgorithm::Sha256,
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let timeout = crate::GitDaemonSessionTimeout::try_new(Duration::from_secs(5)).unwrap();
+            let mut ingress =
+                GitDaemonSessionDeadline::new(timeout, GitDaemonSessionWorkScaling::FLAT);
+            // Model time spent processing after a completed upload without a
+            // wall-clock race. Only the real socket's response phase is tested.
+            ingress.started -= Duration::from_secs(10);
+            let mut writer = DeadlineTcpStream::new(&mut server, ingress.clone());
+            assert!(writer.write_all(b"expired").is_err());
+            let limits = ReceiveLimits::default();
+            let request = ReceiveRequest {
+                commands: vec![ReceiveCommand {
+                    old: fgit_wire::AnyGitOid::from_hex(
+                        format,
+                        &"0".repeat(format.digest_len() * 2),
+                    )
+                    .unwrap(),
+                    new: fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Blob, b"x"),
+                    ref_name: b"refs/tags/late-verdict".to_vec(),
+                }],
+                capabilities: vec![
+                    fgit_wire::Capability::parse(b"report-status", &limits.wire).unwrap(),
+                ],
+                push_options: Vec::new(),
+                certificate: None,
+            };
+            // The near-identical interruption is still UNKNOWN, never an ng
+            // verdict or a response budget granted by this verdict-only path.
+            assert!(
+                !write_command_verdict(
+                    &mut writer,
+                    &request,
+                    RefusalCode::CancellationInProgress,
+                    &limits,
+                    timeout
+                )
+                .unwrap()
+            );
+            assert!(writer.deadline.expired());
+            assert!(
+                write_command_verdict(
+                    &mut writer,
+                    &request,
+                    RefusalCode::ObjectClosureIncomplete,
+                    &limits,
+                    timeout
+                )
+                .unwrap()
+            );
+            let mut received = Vec::new();
+            // Decode pkt-lines rather than comparing a derived encoding.
+            let mut payloads = Vec::new();
+            loop {
+                let mut header = [0; 4];
+                client.read_exact(&mut header).unwrap();
+                let size =
+                    usize::from_str_radix(std::str::from_utf8(&header).unwrap(), 16).unwrap();
+                if size == 0 {
+                    break;
+                }
+                assert!((4..=65_520).contains(&size));
+                received.resize(size - 4, 0);
+                client.read_exact(&mut received).unwrap();
+                payloads.push(received.clone());
+            }
+            assert_eq!(payloads, vec![b"unpack ok\n".to_vec(), b"ng refs/tags/late-verdict missing necessary objects (ObjectClosureIncomplete)\n".to_vec()]);
+            assert!(ingress.expired(), "a response never reopens upload");
+            assert!(writer.deadline.remaining().unwrap() <= Duration::from_secs(5));
+            writer.deadline.note_admitted(usize::MAX / 2);
+            assert_eq!(writer.deadline.budget(), Duration::from_secs(5));
+            writer.deadline.started -= Duration::from_secs(10);
+            assert_eq!(
+                writer.write_all(b"late").unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
+        }
+    }
     #[test]
     fn fatal_interruption_never_fabricates_per_ref_rejection() {
         let mut bytes = Vec::new();
