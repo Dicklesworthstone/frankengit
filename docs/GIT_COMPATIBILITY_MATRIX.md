@@ -46,6 +46,35 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
+## Executed stock-client rows: partial clone, notes, gitlinks, atomic push
+
+These rows come from one discovered suite, `suites-transport-stock_transport_capabilities`
+(`scripts/e2e/suites/transport/stock_transport_capabilities.sh`, helper
+`scripts/e2e/helpers/stock_transport_capabilities.py`; frankengit-root-doctrine-x2mv.4.33).
+It passed **375/375** at **05e29b11** with a release `fg` built there
+(sha256 `e7e4daa3bd424ca9…`), run twice: host git 2.55.0 and the pinned oracle
+git 2.54.0. Each run covers SHA-1 and SHA-256 repositories over
+`fg serve-http`, `fg serve` (git://) and `fg serve-ssh` (OpenSSH 10.2p1), with
+one fresh node per transport. Assertion ids are
+`TCAP-{host,pinned}-{sha1,sha256}-{http,git,ssh}-<check>`.
+
+| Capability | Check ids (`<check>`) | Result at 05e29b11 |
+|---|---|---|
+| Partial clone, `blob:none` and `blob:limit=1k` (v2; `blob:none` also v0) | `filter-blob-none-*`, `filter-blob-limit-*`, `filter-blob-none-v0` | pass; the clone's missing set equals the source's own `rev-list --filter-print-omitted` |
+| Partial clone, `tree:0`, `tree:1`, `combine:blob:none+tree:2` | `filter-tree-0-*`, `filter-tree-1-*`, `filter-combine-*` | pass; omission observed, promisor recorded |
+| Lazy fetch from the promisor remote | `lazy-object`, `filter-*-lazy-checkout` | pass; one object byte-equal, and a checkout restores the source tree exactly |
+| Sparse filters (`sparse:oid=<rev>:<path>`, `sparse:oid=<oid>`, v0 and v2) | `sparse-{expression,object-id}-v{0,2}-refused` | refused, deliberately: the client's first fatal line is upstream's `fatal: remote error: filter 'sparse:oid' not supported`, beside the served `blob:none` twin. Before 05e29b11 it was a hang-up, an HTTP 400/503 or sideband noise (24 failing checks at ebd8e04b). Over HTTP v0 the client adds "remote end hung up" after the error, exactly as it does against upstream `git-http-backend` |
+| Git notes (`refs/notes/commits`) | `notes-fetch`, `notes-push`, `notes-roundtrip` | pass |
+| Submodule gitlinks, submodule objects absent by design | `gitlink-clone`, `gitlink-push` | pass; a push moving the gitlink publishes, and a fetch reads it back |
+| Atomic push | `atomic-success`, `atomic-all-or-nothing` | pass; a refname-conflict refusal of one update rejects both and leaves every ref unchanged |
+| Non-atomic push | `non-atomic-per-ref` | pass; the valid ref publishes, the conflicting one gets per-ref `[remote rejected]` |
+
+Divergence: fg serves filters without an `uploadpack.allowFilter` switch
+(DIV-TA-002). Non-claims: loopback only, one node per transport, filter
+correctness judged by omission and lazy-fetch content rather than by pack
+bytes, and no claim about `object:type` or other filters stock git does not
+send by default.
+
 ## Tier A: the declared differential tier
 
 Tier A is the narrow compatibility tier the plan's Phase 2 exit and 1.0
