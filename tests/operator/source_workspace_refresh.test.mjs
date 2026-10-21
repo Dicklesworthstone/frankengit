@@ -192,3 +192,18 @@ test('original root replacement during publication is refused', async t => {
   try { await assert.rejects(f.apply(next, plan.refresh_sha256)); } finally { hooks.verify = null; }
   assert(replaced); assert(!existsSync(f.output));
 });
+
+for (const format of ['sha1', 'sha256']) test(`${format}: unrepresentable host reads refuse before I/O; representable absence remains available`, async t => {
+  const f = await setup(t, undefined, format);
+  const ordinary = await workspace.readWorkspaceFiles(f.root, ['6d697373696e67']);
+  assert.equal(ordinary.files.get('6d697373696e67'), null);
+  if (process.platform === 'darwin') {
+    await assert.rejects(workspace.readWorkspaceFiles(f.root, ['ff']),
+      { code: 'source_workspace_host_path_unrepresentable' });
+    await assert.rejects(workspace.readWorkspaceFiles(join(f.parent, 'absent'), ['ff']),
+      { code: 'source_workspace_host_path_unrepresentable' });
+  } else {
+    const raw = await workspace.readWorkspaceFiles(f.root, ['ff']);
+    assert.equal(raw.files.get('ff'), null);
+  }
+});

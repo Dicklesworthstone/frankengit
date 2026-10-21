@@ -40,6 +40,8 @@ binary bytes, are preserved in the materialization. Linux also preserves
 non-UTF-8 filename bytes. The macOS sparse-directory profile refuses invalid
 UTF-8 names with `source_workspace_host_path_unrepresentable` before acquiring
 an output directory, including when a later selected path is unrepresentable.
+The same refusal applies before workspace file reads; an unrepresentable name
+cannot become an apparently missing local file.
 It checks the original bytes without decoding or normalizing them; no escaped
 materialization profile is implied. Other host alias/collision checks still
 apply to representable names. Binary change capture requires the explicit profile described below.

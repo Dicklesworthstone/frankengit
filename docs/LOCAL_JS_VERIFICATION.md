@@ -91,3 +91,12 @@ The witness descriptor closure assertion reads `/dev/fd` on macOS and
 Workflow execution remains the explicit trusted-local Linux profile. A macOS
 operator aggregate that reaches that guard remains a failed qualification;
 none of those tests is suppressed by the portable fixture repairs above.
+
+The same macOS path refusal applies to workspace file reads, including requests
+against an absent local root; representable missing paths retain their ordinary
+local-absence result. A process-group observation or signal failure is classified
+as `js_profile_containment_failed` (exit 1), even during deadline or signal
+cancellation. It is never downgraded to an ordinary timeout/interruption. Stop
+escalates after five seconds and allows at most another five seconds for leader
+closure; inability to establish closure retires the local child handle and
+reports containment failure, without claiming the child was reaped.

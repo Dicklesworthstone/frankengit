@@ -43,11 +43,11 @@ async function fixture(t, body = "import test from 'node:test';import assert fro
   });
   git(['init', '-q']);git(['add', 'scripts', 'tests']);
   git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'controller fixture']);
-  const start = () => {
+  const start = (extraEnvironment = {}) => {
     const child = spawn(process.execPath, [join(root, 'scripts/verify_js.mjs'), 'browser'], {
       // Retain the enclosing test's group so its cancellation reaches this
       // controller; the controller itself owns its detached metadata/test groups.
-      env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root, GIT_DIR: '/nonexistent-fixture-git-dir' },
+      env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root, GIT_DIR: '/nonexistent-fixture-git-dir', ...extraEnvironment },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const r = { child, stdout: '', stderr: '', ownedPids: new Set(), ownedGroups: new Set() };
@@ -111,4 +111,78 @@ test('runtime identity mismatch refuses before a corpus is launched', { timeout:
   const f = await fixture(t);await writeFile(join(f.root, 'tests/node-version'), '0.0.0\n');
   const r = f.start(), result = await r.closed;
   assert.equal(result.code, 69);assert.doesNotMatch(r.stdout, /TAP version/);
+});
+
+test('a denied process-group probe during cancellation is containment failure, not ordinary interruption', { timeout: 15000 }, async t => {
+  const f = await fixture(t, "import test from 'node:test';import {writeFileSync} from 'node:fs';test('held corpus',async()=>{writeFileSync(new URL('../../entered',import.meta.url),'ready');await new Promise(r=>setTimeout(r,60000));});\n");
+  const loader = join(f.root, 'denied-probe.mjs');
+  // Fault only the controller's OS liveness observation, after the real corpus
+  // starts. Git initialization and actual TERM/KILL calls remain unchanged.
+  // This is explicit fault injection, not proof of OS credential separation.
+  await writeFile(loader, "import {existsSync} from 'node:fs';const original=process.kill.bind(process);process.kill=(pid,signal)=>{if(pid<0&&signal===0&&existsSync(new URL('./entered',import.meta.url)))throw Object.assign(new Error('planted denied group probe'),{code:'EPERM'});return original(pid,signal);};\n");
+  const r = f.start({ NODE_OPTIONS: `--import=${loader}` });
+  const until = performance.now() + 5000;
+  while (true) {
+    try { await readFile(join(f.root, 'entered'));break; }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    assert(performance.now() < until, r.stderr);await sleep(10);
+  }
+  const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,command='], { encoding: 'utf8', timeout: 1000 });
+  let group;
+  for (const line of rows.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if (m && Number(m[2]) === r.child.pid && Number(m[1]) === Number(m[3]) && m[4].includes(f.root) && m[4].includes('--test')) {
+      group = Number(m[3]);r.ownedPids.add(group);r.ownedGroups.add(group);break;
+    }
+  }
+  assert(group, 'actual owned test-runner group was not observed');
+  r.child.kill('SIGTERM');const result = await r.closed;
+  assert.equal(result.code, 1, r.stderr);assert.equal(result.signal, null);
+  assert.match(r.stderr, /js_profile_containment_failed.*cause=EPERM/);
+  assert.doesNotMatch(r.stderr, /owned process group is quiescent/);
+  // Independent unmodified observer, with a finite reap wait. Do not let the
+  // injected inability to observe liveness become an untracked fixture leak.
+  const drained = performance.now() + 3000;
+  while (true) {
+    try { process.kill(-group, 0); }
+    catch (e) { if (e.code === 'ESRCH') break;throw e; }
+    assert(performance.now() < drained, 'fixture group survived controller stop');await sleep(10);
+  }
+  r.ownedPids.delete(group);
+});
+
+test('denied stop signals bound controller retirement and report unproved containment', { timeout: 18000 }, async t => {
+  const f = await fixture(t, "import test from 'node:test';import {writeFileSync} from 'node:fs';test('held corpus',async()=>{writeFileSync(new URL('../../entered',import.meta.url),'ready');await new Promise(r=>setTimeout(r,60000));});\n");
+  const loader = join(f.root, 'denied-signals.mjs');
+  await writeFile(loader, "import {existsSync} from 'node:fs';const original=process.kill.bind(process);process.kill=(pid,signal)=>{if(pid<0&&signal!==0&&existsSync(new URL('./entered',import.meta.url)))throw Object.assign(new Error('planted denied signal'),{code:'EPERM'});return original(pid,signal);};\n");
+  const r = f.start({ NODE_OPTIONS: `--import=${loader}` });
+  const exited = new Promise(resolve => r.child.once('exit', (code,signal) => resolve({code,signal})));
+  const until = performance.now()+5000;
+  while (true) {
+    try { await readFile(join(f.root,'entered'));break; }
+    catch(e) { if(e.code!=='ENOENT')throw e; }
+    assert(performance.now()<until,r.stderr);await sleep(10);
+  }
+  const rows=execFileSync('ps',['-axo','pid=,ppid=,pgid=,command='],{encoding:'utf8',timeout:1000});
+  let group;
+  for(const line of rows.split('\n')) {
+    const m=/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if(m&&Number(m[2])===r.child.pid&&Number(m[1])===Number(m[3])&&m[4].includes(f.root)&&m[4].includes('--test')){group=Number(m[3]);break;}
+  }
+  assert(group,'actual owned runner group not observed');r.ownedPids.add(group);r.ownedGroups.add(group);
+  try {
+    r.child.kill('SIGTERM');const result=await exited;
+    assert.equal(result.code,1,r.stderr);assert.equal(result.signal,null);
+    assert.match(r.stderr,/js_profile_containment_failed.*cause=EPERM/);
+    assert.doesNotMatch(r.stderr,/owned process group is quiescent/);
+    assert.doesNotThrow(()=>process.kill(-group,0),'the planted denied signals must leave a real group for the external test owner');
+  } finally {
+    // The injected controller cannot signal this group. Its independent fixture
+    // owner can, and must reap the exact group it just observed before teardown.
+    try{process.kill(-group,'SIGKILL');}catch(e){if(e.code!=='ESRCH')throw e;}
+    await r.closed;
+    const end=performance.now()+3000;
+    while(true){try{process.kill(-group,0);}catch(e){if(e.code==='ESRCH')break;throw e;}assert(performance.now()<end,'fixture group did not drain');await sleep(10);}
+    r.ownedPids.delete(group);
+  }
 });

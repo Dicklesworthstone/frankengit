@@ -11,14 +11,19 @@ import { runNativeProcess } from './lib/native-process-owner.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const scopes = { browser: 'tests/browser', operator: 'tests/operator', scripts: 'scripts/tests' };
 const scope = process.argv[2];
-let child, temporary, deadline, escalation, requested = null;
+let child, temporary, deadline, escalation, finalizer, rejectRun, containmentFailure, requested = null;
 const initialization = new AbortController();
 const until = performance.now() + 600000;
+const containment = cause => Object.assign(new Error('JS verification process-group containment failed'), {
+  code: 'js_profile_containment_failed', cause,
+});
 const signalGroup = signal => {
-  try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  try { process.kill(-child.pid, signal); }
+  catch (error) { if (error.code !== 'ESRCH') containmentFailure ??= containment(error); }
 };
 const groupPresent = () => {
-  try { process.kill(-child.pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  try { process.kill(-child.pid, 0); return true; }
+  catch (error) { if (error.code === 'ESRCH') return false; throw containment(error); }
 };
 const stop = reason => {
   if (requested !== null) return;
@@ -27,7 +32,15 @@ const stop = reason => {
   initialization.abort();
   if (child?.pid) {
     signalGroup('SIGTERM');
-    escalation = setTimeout(() => signalGroup('SIGKILL'), 5000);
+    escalation = setTimeout(() => {
+      signalGroup('SIGKILL');
+      finalizer = setTimeout(() => {
+        // Pipe/leader closure may never arrive after a denied signal. Retire
+        // only our local handle and report uncertainty; do not claim cleanup.
+        child.unref();
+        rejectRun?.(containmentFailure ?? containment(new Error('leader did not close after stop')));
+      }, 5000);
+    }, 5000);
   }
 };
 const interrupt = () => stop('SIGINT');
@@ -89,28 +102,32 @@ try {
     env: testEnvironment,
   });
   code = await new Promise((resolve, reject) => {
+    rejectRun = reject;
     child.once('error', reject);
     child.once('close', (status, signal) => {
       if (requested === null && performance.now() >= until) requested = 'campaign_deadline';
       resolve(requested === 'campaign_deadline' ? 124 : requested ? 130 : status ?? (signal ? 1 : 0));
     });
   });
+  if (containmentFailure) throw containmentFailure;
   if (groupPresent()) {
     console.error('JS verification runner exited with descendants remaining');
     if (code === 0) code = 1;
     signalGroup('SIGKILL');
     const drainUntil = performance.now() + 5000;
     while (groupPresent()) {
-      if (performance.now() >= drainUntil) throw new Error('JS verification process group did not reach quiescence');
+      if (containmentFailure) throw containmentFailure;
+      if (performance.now() >= drainUntil) throw containment(new Error('process group did not reach quiescence'));
       await new Promise(resolve => setTimeout(resolve, 25));
     }
   }
   console.error('JS verification owned process group is quiescent');
 } catch (error) {
-  code = error.code === 'native_process_containment_failed' ? 1 : requested === 'campaign_deadline' ? 124 : requested ? 130 : 1;
-  console.error(`JS verification failed: ${error.code ?? error.message}`);
+  if (error.code === 'js_profile_containment_failed' && child?.pid) signalGroup('SIGKILL');
+  code = ['native_process_containment_failed', 'js_profile_containment_failed'].includes(error.code) ? 1 : requested === 'campaign_deadline' ? 124 : requested ? 130 : 1;
+  console.error(`JS verification failed: ${error.code ?? error.message}${error.cause?.code ? ` cause=${error.cause.code}` : ''}`);
 } finally {
-  clearTimeout(deadline);clearTimeout(escalation);
+  clearTimeout(deadline);clearTimeout(escalation);clearTimeout(finalizer);
   process.off('SIGINT', interrupt);process.off('SIGTERM', terminate);
   if (temporary) {
     if (code === 0) await rm(temporary, { recursive: true, force: true });
