@@ -18,4 +18,5 @@ node --test tests/operator/source_edit_candidate.test.mjs \
   tests/operator/source_edit_replacements.test.mjs tests/operator/source_edit_replacements_cli.test.mjs \
   tests/operator/source_edit_binary.test.mjs tests/operator/source_edit_binary_cli.test.mjs \
   tests/operator/source_edit_delta.test.mjs tests/operator/source_edit_delta_cli.test.mjs \
-  tests/operator/source_edit_splices.test.mjs tests/operator/source_edit_splices_cli.test.mjs
+  tests/operator/source_edit_splices.test.mjs tests/operator/source_edit_splices_cli.test.mjs \
+  tests/operator/source_edit_compact_splices.test.mjs tests/operator/source_edit_compact_splices_cli.test.mjs
