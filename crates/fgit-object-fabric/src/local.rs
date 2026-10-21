@@ -420,6 +420,24 @@ impl LocalFilesystemFabric {
         object: &VerifiedObject,
         directories_prepared: bool,
     ) -> Result<StageFile, PlacementAttemptError> {
+        let mut stage = self.write_object_stage_unsynced(object, directories_prepared)?;
+        stage.sync_all().map_err(|error| {
+            PlacementAttemptError::after_write(storage_error(StorageOperation::SyncStage, error))
+        })?;
+        self.crash_if(LocalCrashPoint::AfterStageSync)
+            .map_err(PlacementAttemptError::after_write)?;
+        stage.close();
+        Ok(stage)
+    }
+
+    /// Writes one object's complete staged file and leaves it open and NOT
+    /// yet synced. The caller must sync it before linking its immutable name;
+    /// a batch uses this to sync many staged files concurrently.
+    fn write_object_stage_unsynced(
+        &self,
+        object: &VerifiedObject,
+        directories_prepared: bool,
+    ) -> Result<StageFile, PlacementAttemptError> {
         let envelope = object
             .envelope()
             .encode()
@@ -464,12 +482,6 @@ impl LocalFilesystemFabric {
             })?;
         self.crash_if(LocalCrashPoint::AfterStageWrite)
             .map_err(PlacementAttemptError::after_write)?;
-        stage.sync_all().map_err(|error| {
-            PlacementAttemptError::after_write(storage_error(StorageOperation::SyncStage, error))
-        })?;
-        self.crash_if(LocalCrashPoint::AfterStageSync)
-            .map_err(PlacementAttemptError::after_write)?;
-        stage.close();
         Ok(stage)
     }
 

@@ -262,6 +262,40 @@ fn every_publication_fault_aborts_custody_and_can_be_reopened_without_overwrite(
 }
 
 #[test]
+fn a_refusal_while_staging_links_no_name_of_the_batch() {
+    // The batch writes every staged file, syncs them all, and only then links
+    // names (frankengit-pc9g). A refusal at the third of four objects (a
+    // corrupt existing copy) therefore leaves the two staged before it
+    // unlinked; one-object-at-a-time placement had already linked them.
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha1, 4);
+    run(&store, &input[2..3], &mut || true).unwrap();
+    let path = root.path(&input[2]);
+    let mut poisoned = fs::read(&path).unwrap();
+    *poisoned.last_mut().unwrap() ^= 1;
+    fs::write(&path, &poisoned).unwrap();
+    assert!(run(&store, &input, &mut || true).is_err());
+    root.clean();
+    for o in [&input[0], &input[1], &input[3]] {
+        assert!(
+            matches!(
+                store.read_whole(o.identity()),
+                Err(StoreRefusal::ObjectAbsent)
+            ),
+            "no name of the refused batch is linked"
+        );
+    }
+    // Twin: the same batch without the corrupt member places everything.
+    let clean = [input[0].clone(), input[1].clone(), input[3].clone()];
+    assert_eq!(run(&store, &clean, &mut || true).unwrap().len(), 3);
+    for o in &clean {
+        assert_eq!(store.read_whole(o.identity()).unwrap().object, *o);
+    }
+    root.clean();
+}
+
+#[test]
 fn cancellation_at_every_checkpoint_aborts_all_pending_obligations() {
     let input = objects(GitHashAlgorithm::Sha1, 4);
     for stop_at in 0..=12 {
@@ -299,8 +333,15 @@ fn corrupt_existing_objects_never_get_healed_and_earlier_placements_settle() {
     ));
     assert_eq!(fs::read(path).unwrap(), poisoned);
     root.clean();
+    // The batch syncs every staged file before it links any name
+    // (frankengit-pc9g), so objects staged before the refusal may or may not be
+    // linked. Whatever is present is exact; nothing is partial.
     for o in &input[..2] {
-        assert_eq!(store.read_whole(o.identity()).unwrap().object, *o);
+        match store.read_whole(o.identity()) {
+            Ok(read) => assert_eq!(read.object, *o),
+            Err(StoreRefusal::ObjectAbsent) => {}
+            Err(e) => panic!("partial object: {e}"),
+        }
     }
     assert!(matches!(
         store.read_whole(input[3].identity()),
