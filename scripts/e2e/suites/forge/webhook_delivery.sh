@@ -14,6 +14,7 @@ if [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ]; then
     fge_die 'FG_BIN must name a prebuilt native fg; this suite never runs Cargo'
 fi
 command -v python3 >/dev/null || fge_die 'Python 3 is required for the independent receiver'
+fge_context python "$(python3 --version 2>&1)"
 fge_context fg_sha256 "$(fge_digest_file "$FG_BIN")"
 work="$(fge_tempdir fg046-webhook)"
 summary="$work/summary.json"

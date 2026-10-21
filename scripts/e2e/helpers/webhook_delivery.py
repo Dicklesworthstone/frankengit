@@ -52,10 +52,6 @@ class Receiver:
                 self.end_headers()
                 self.wfile.write(b"ok")
 
-            def log_message(self, *_args):
-                # Actual headers, bodies and status are retained as artifacts.
-                pass
-
         self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_port}/hook"
         self.worker = threading.Thread(target=self.server.serve_forever,

@@ -336,6 +336,21 @@ Automatic backoff timing, dual-secret verification windows, and crash injection
 remain separate Rust test obligations. Authored campaign code alone earns no
 executed result or bead completion.
 
+`DEP-264` admits Python 3 only as this campaign's external tooling. The helper
+uses the supplied standard library for HTTP, JSON, HMAC, and child-process
+ownership, with no package installation or network dependency. Each run records
+the exact interpreter version alongside the binary digest. Python's interpreter
+and native extension implementation, including any crypto backend, stay outside
+the production binaries and their Rust dependency graph. The interpreter's
+PSF-2.0 license and bundled third-party notices remain its licensing boundary;
+the campaign does not redistribute it. The audit surface is the small helper,
+its standard-library calls, and the selected interpreter. A Bash receiver would
+require a second HTTP/JSON parser and platform-specific signing helpers; a Rust
+test receiver would restore a build prerequisite to this prebuilt-binary lane.
+Remove this tooling admission when no campaign needs it, after an equivalent
+native receiver/oracle replaces these checks. This is not an exception for
+Python, C libraries, or another runtime inside FrankenGit production.
+
 ### Checkpoint continuation validation
 
 Additional native tests cover deterministic checkpoint/reopen equivalence,
