@@ -52,10 +52,15 @@ export async function runNativeRecoveryPeer(configPath, args) {
   await lstat(join(config.witness, '.witness-lock')); // must be held through BOTH native commands
   const record = { operation, input, output, pid: process.pid, resume: Boolean(flags['--resume']),
     approval: flags['--approval'], trustKey: flags['--trust-key'], envelope_sha256: digest(envelope) };
+  // Publishing the entered-operation record lets the parent send SIGTERM.
+  // Own that signal before exposing readiness, including while append drains.
+  const stopped = config.mode === `hold_${operation}` ? new Promise(resolve => {
+    const timer = setInterval(() => {}, 1000);
+    process.once('SIGTERM', () => { clearInterval(timer);resolve(); });
+  }) : null;
   await appendFile(config.log, JSON.stringify(record) + '\n');
-  if (config.mode === `hold_${operation}`) {
-    await new Promise(resolve => { process.once('SIGTERM', resolve); const timer = setInterval(() => {}, 1000);
-      process.once('SIGTERM', () => clearInterval(timer)); });
+  if (stopped) {
+    await stopped;
     await appendFile(config.log, JSON.stringify({ stopped: operation, pid: process.pid }) + '\n');
     process.exit(92);
   }

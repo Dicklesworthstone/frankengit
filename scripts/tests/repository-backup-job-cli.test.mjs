@@ -3,8 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { watch } from 'node:fs';
-import { readFile, readdir, lstat, unlink } from 'node:fs/promises';
+import { readFile, writeFile, readdir, lstat, unlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { runJobCommand, jobArguments } from '../repository_backup_job.mjs';
@@ -25,8 +24,8 @@ function args(f, operation, intent, options = {}) {
   if (options.progress) values.push('--progress-json');
   return values;
 }
-function launch(t, argv, onProgress = () => {}) {
-  const child = spawn(process.execPath, [SCRIPT, ...argv], { stdio: ['ignore', 'pipe', 'pipe'] });
+function launch(t, argv, onProgress = () => {}, nodeArguments = []) {
+  const child = spawn(process.execPath, [...nodeArguments, SCRIPT, ...argv], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', err = '', pending = '';
   const timer = setTimeout(() => child.kill('SIGKILL'), 25000);
   const done = new Promise((resolve, reject) => {
@@ -120,16 +119,44 @@ test('SIGTERM drains with partial receipts and resumes after original loss', asy
 test('kill during streaming preserves private scratch and exact restart never claims or deletes it', async t => {
   const f = await jobFixture(t), data = Buffer.alloc(8 * 1024 * 1024 + 19, 0x37);
   f.source = await f.sign('large', data); const job = await sealed(t, f, { maximumBytes: data.length });
-  let killed = false, scratch;
-  const proc = launch(t, args(f, 'run', job.intent, { maximumBytes: data.length }));
-  const watcher = watch(f.destinations[0], async (_event, name) => {
-    if (killed || !name?.startsWith('.fg-backup-replica-')) return;
-    const path = join(f.destinations[0], name);
-    let stat; try { stat = await lstat(path); } catch { return; }
-    if (!killed && stat.size > 0 && stat.size < data.length) { scratch = path; killed = true; proc.child.kill('SIGKILL'); }
-  });
-  t.after(() => watcher.close());
-  const interrupted = await proc.done; watcher.close(); assert.equal(killed, true); assert.equal(interrupted.signal, 'SIGKILL');
+  const entered = join(f.root, 'partial-copy.json'), loader = join(f.root, 'hold-partial-copy.mjs');
+  // Explicit fault injection after a REAL scratch write. Filesystem watch
+  // events can coalesce until after the entire copy, so they cannot identify
+  // this interruption boundary. The real CLI, handles and bytes stay in use.
+  await writeFile(loader, `import fs from 'node:fs/promises';
+import {writeFileSync,renameSync} from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const original = fs.open;let held = false;
+fs.open = async function(path, ...args) {
+  const handle = await original(path, ...args);
+  if (typeof path === 'string' && path.startsWith(${JSON.stringify(f.destinations[0] + '/.fg-backup-replica-')})) {
+    const write = handle.write.bind(handle);
+    handle.write = async (...args) => {
+      const result = await write(...args);
+      if (!held && result.bytesWritten > 0) {
+        held = true;writeFileSync(${JSON.stringify(entered + '.partial')}, JSON.stringify({path, bytes:result.bytesWritten}), {mode:0o600,flag:'wx'});
+        renameSync(${JSON.stringify(entered + '.partial')}, ${JSON.stringify(entered)});
+        await new Promise(() => {setInterval(() => {}, 1000);});
+      }
+      return result;
+    };
+  }
+  return handle;
+};syncBuiltinESMExports();
+`, {mode: 0o600});
+  const proc = launch(t, args(f, 'run', job.intent, { maximumBytes: data.length }), undefined, ['--import', loader]);
+  let partial;const until = performance.now() + 10000;
+  while (!partial) {
+    try { partial = JSON.parse(await readFile(entered, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (proc.child.exitCode !== null || proc.child.signalCode !== null) assert.fail(`CLI exited before partial-write fault: ${JSON.stringify(await proc.done)}`);
+    assert(performance.now() < until, 'CLI did not reach actual partial write');
+    if (!partial) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const scratch = partial.path, staged = await readFile(scratch);
+  assert(partial.bytes > 0 && partial.bytes < data.length);
+  assert.equal(staged.length, partial.bytes);assert.deepEqual(staged, data.subarray(0, partial.bytes));
+  assert.equal(proc.child.kill('SIGKILL'), true);
+  const interrupted = await proc.done;assert.equal(interrupted.signal, 'SIGKILL');
   const before = await lstat(scratch, { bigint: true }); assert.equal(before.mode & 0o777n, 0o600n);
   const resumed = await command(t, args(f, 'run', job.intent, { maximumBytes: data.length })); assert.equal(resumed.code, 0, resumed.err);
   assert.equal((await lstat(scratch, { bigint: true })).ino, before.ino);

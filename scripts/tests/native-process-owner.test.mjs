@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { getEventListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runNativeProcess } from '../lib/native-process-owner.mjs';
@@ -31,6 +32,16 @@ async function liveProcess(pid) {
     if (process.platform === 'linux') {
       const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
       if (stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z ')) return false;
+    }
+    if (process.platform === 'darwin') {
+      const result = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'stat='], {encoding: 'utf8', timeout: 1000, maxBuffer: 4096});
+      if (result.error) throw result.error;
+      if (result.status === 1 && result.stdout === '' && result.stderr === '') return false;
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout.trim(), /^[A-Z][A-Za-z+<NEsWX-]*$/);
+      // Same live-process distinction as procfs above, not a claim of reaping
+      // the orphan or of the native owner's process-group quiescence.
+      if (result.stdout.trim().startsWith('Z')) return false;
     }
     return true;
   } catch (error) { if (['ESRCH', 'ENOENT'].includes(error.code)) return false; throw error; }
@@ -100,11 +111,42 @@ test('deadline escalates when the running child ignores SIGTERM', {skip: !posix}
   const pid = Number(await waitFile(marker)); await observed;
   assert.equal(await liveProcess(pid), false);
 }));
-test('a late close cannot bypass a starved deadline callback', async () => {
-  const result = execute('', {timeoutMs: 50});
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120);
+test('a late close cannot bypass a starved deadline callback', async t => {
+  const originalTimeout = globalThis.setTimeout; let deferred = false, deadlineRan = false;
+  // Defer only the parent's execution-deadline callback. Blocking the entire
+  // event loop also delays OS child reaping; macOS may then correctly report
+  // uncertain group containment (EPERM) instead of the intended deadline axis.
+  // The real child keeps its own clock and exits after the unchanged 50ms budget.
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+    if (ms > 50) return originalTimeout(callback, ms, ...args);
+    deferred = true;
+    return originalTimeout(() => { deadlineRan = true;callback(...args); }, 2000);
+  });
+  const result = execute('setTimeout(() => {}, 100)', {timeoutMs: 50});
   await assert.rejects(result, code('native_process_deadline'));
+  assert.equal(deferred, true);assert.equal(deadlineRan, false, 'close must detect expiration without the timer callback');
 });
+test('an unknown group observation remains containment failure after deadline cleanup', {skip: !posix, timeout: 8000}, async t => withDirectory(async dir => {
+  const marker = join(dir, 'pid'), originalKill = process.kill.bind(process); let pid;
+  // Fault only liveness observation. Actual child creation, signals and reap
+  // remain real; the unmodified direct-PID observer checks the cleanup result.
+  t.mock.method(process, 'kill', (target, signal) => {
+    if (target < 0 && signal === 0) throw Object.assign(new Error('denied group observation'), {code: 'EPERM'});
+    return originalKill(target, signal);
+  });
+  const pending = execute(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`, {timeoutMs: 500});
+  const observed = assert.rejects(pending, error => {
+    assert.equal(error.code, 'native_process_containment_failed');
+    assert.equal(error.details.reason, 'native_process_deadline');
+    assert.equal(error.details.process_group, 'unknown');
+    assert.equal(error.details.leader_exited, true);assert.equal(error.details.output_closed, true);
+    return true;
+  });
+  try {
+    pid = Number(await waitFile(marker));await observed;
+    assert.throws(() => originalKill(pid, 0), {code: 'ESRCH'});
+  } finally { killOwned(pid); }
+}));
 test('signal exit is not fabricated as ordinary success', {skip: !posix}, async () => {
   const result = await execute('process.kill(process.pid, "SIGKILL")');
   assert.equal(result.code, null); assert.equal(result.signal, 'SIGKILL');

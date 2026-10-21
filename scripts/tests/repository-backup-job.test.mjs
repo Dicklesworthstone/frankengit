@@ -234,10 +234,13 @@ test('seal refuses a candidate approval whose parent alias resolves inside a des
   const nested = join(f.destinations[0], 'source.approval');
   await writeFile(nested, await readFile(f.source.approval), { mode: 0o600 });
   await symlink(f.destinations[0], alias);
+  const before = await Promise.all([f.jobDirectory, ...f.destinations].map(path => readdir(path)));
+  const inode = (await lstat(nested, {bigint: true})).ino;
   await assert.rejects(f.seal({ candidates: [{ input: f.source.input, approval: join(alias, 'source.approval') }] }),
     code('backup_job_separate_path_required'));
   assert.deepEqual(await readFile(nested), await readFile(f.source.approval));
-  await emptyTargets(f);
+  assert.equal((await lstat(nested, {bigint: true})).ino, inode);
+  assert.deepEqual(await Promise.all([f.jobDirectory, ...f.destinations].map(path => readdir(path))), before);
 });
 
 test('selected approval is rechecked after an observer retargets its parent alias', async t => {
@@ -246,6 +249,8 @@ test('selected approval is rechecked after an observer retargets its parent alia
   await writeFile(join(external, 'source.approval'), await readFile(f.source.approval), { mode: 0o600 });
   await writeFile(join(f.destinations[0], 'source.approval'), await readFile(f.source.approval), { mode: 0o600 });
   await symlink(external, alias); let moved = false;
+  const before = await Promise.all([f.jobDirectory, ...f.destinations].map(path => readdir(path)));
+  const inode = (await lstat(join(f.destinations[0], 'source.approval'), {bigint: true})).ino;
   await assert.rejects(f.seal({
     candidates: [{ input: f.source.input, approval: join(alias, 'source.approval') }],
     async onProgress(event) {
@@ -254,7 +259,10 @@ test('selected approval is rechecked after an observer retargets its parent alia
       }
     },
   }), code('backup_job_separate_path_required'));
-  assert(moved); await emptyTargets(f);
+  assert(moved);
+  assert.deepEqual(await readFile(join(f.destinations[0], 'source.approval')), await readFile(f.source.approval));
+  assert.equal((await lstat(join(f.destinations[0], 'source.approval'), {bigint: true})).ino, inode);
+  assert.deepEqual(await Promise.all([f.jobDirectory, ...f.destinations].map(path => readdir(path))), before);
 });
 
 test('seal refuses a source whose parent alias resolves inside a destination', async t => {
