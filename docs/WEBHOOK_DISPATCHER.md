@@ -314,6 +314,28 @@ in the implementation environment: Cargo, rustc and rustfmt were unavailable.
 No bead closure, native test pass, real-binary campaign, or production-readiness
 claim is made by this document.
 
+The separate product campaign uses an already built native binary:
+
+```sh
+FG_BIN=/absolute/path/to/fg bash scripts/e2e/suites/forge/webhook_delivery.sh
+```
+
+It never invokes Cargo or selects a target directory. In SHA-1 and SHA-256
+repositories it opens a real issue, compares received payloads with canonical
+outbox inspection, independently checks HMAC before and after rotation, exercises
+connection refusal and HTTP rejection, replays a retained dead letter, and
+resumes bounded two-route fan-out in new processes. It checks that accepted
+observations suppress local resends while the canonical outbox stays unchanged.
+Missing `FG_BIN` is an error. Command transcripts and actual HTTP requests are
+retained; a partial campaign cannot supply successful acceptance facts.
+
+This campaign does not replace the Rust dispatcher test gate above. The older
+`FG-046-E2E-*` assertions that matched Cargo test transcripts were not product
+execution evidence; the binary campaign uses `FG-046-NATIVE-*` identifiers.
+Automatic backoff timing, dual-secret verification windows, and crash injection
+remain separate Rust test obligations. Authored campaign code alone earns no
+executed result or bead completion.
+
 ### Checkpoint continuation validation
 
 Additional native tests cover deterministic checkpoint/reopen equivalence,
