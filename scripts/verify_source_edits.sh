@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 node --version
 git rev-parse HEAD
-for file in scripts/operator/source_edit_*.mjs scripts/fg_source_edit.mjs scripts/fg_source_patch.mjs; do
+for file in scripts/operator/source_edit_*.mjs scripts/fg_source_edit.mjs scripts/fg_source_patch.mjs scripts/fg_source_refactor.mjs; do
   node --check "$file"
 done
 node --test tests/operator/source_edit_candidate.test.mjs \
@@ -22,4 +22,6 @@ node --test tests/operator/source_edit_candidate.test.mjs \
   tests/operator/source_edit_splices.test.mjs tests/operator/source_edit_splices_cli.test.mjs \
   tests/operator/source_edit_verified_splices.test.mjs \
   tests/operator/source_edit_compact_splices.test.mjs tests/operator/source_edit_compact_splices_cli.test.mjs \
-  tests/operator/source_edit_splice_files_cli.test.mjs
+  tests/operator/source_edit_splice_files_cli.test.mjs \
+  tests/operator/source_edit_refactoring.test.mjs tests/operator/source_edit_refactoring_cli.test.mjs \
+  tests/operator/source_edit_refactoring_git_oracle.test.mjs
