@@ -386,7 +386,7 @@ impl<'a> UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, false, false)
+        Self::parse_profile(input, limits, cancelled, false, false, false)
     }
 
     /// Opt into explicit renames. Callers MUST read `source_path()` from the
@@ -400,7 +400,7 @@ impl<'a> UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, true, false)
+        Self::parse_profile(input, limits, cancelled, true, false, false)
     }
 
     /// Opt into full-index compressed binary patches without enabling renames.
@@ -412,7 +412,7 @@ impl<'a> UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, false, true)
+        Self::parse_profile(input, limits, cancelled, false, true, false)
     }
 
     fn parse_profile(
@@ -421,6 +421,7 @@ impl<'a> UnifiedPatch<'a> {
         cancelled: &dyn Fn() -> bool,
         allow_renames: bool,
         allow_binary: bool,
+        allow_binary_renames: bool,
     ) -> Result<Self, PatchError> {
         limits.validate()?;
         checkpoint(cancelled)?;
@@ -484,10 +485,19 @@ impl<'a> UnifiedPatch<'a> {
                 checkpoint(cancelled)?;
                 let text = metadata(records[pos], pos)?;
                 if allow_binary && text == b"GIT binary patch" {
-                    if headers || !file.hunks.is_empty() || file.renamed_from.is_some() {
+                    if headers
+                        || !file.hunks.is_empty()
+                        || file.renamed_from.is_some() && !allow_binary_renames
+                    {
                         return Err(syntax(pos, "binary and text/rename payloads cannot mix"));
                     }
                     let payload = binary::scan(&input[offsets[pos]..], pos, limits, cancelled)?;
+                    if file.renamed_from.is_some() && payload.member_count() != 2 {
+                        return Err(syntax(
+                            pos,
+                            "binary rename requires forward and reverse members",
+                        ));
+                    }
                     hunk_count = hunk_count
                         .checked_add(payload.member_count())
                         .filter(|count| *count <= limits.max_hunks)
@@ -648,7 +658,10 @@ impl<'a> UnifiedPatch<'a> {
                         "rename cannot create or delete a file side",
                     ));
                 }
-                if file.hunks.is_empty() && similarity.is_some_and(|score| score != 100) {
+                if file.hunks.is_empty()
+                    && file.binary.is_none()
+                    && similarity.is_some_and(|score| score != 100)
+                {
                     return Err(syntax(
                         pos.saturating_sub(1),
                         "nonidentical rename needs exact hunks",
@@ -828,6 +841,9 @@ impl FilePatch<'_> {
             let index = binary::check_index(self.index.as_ref(), self.change)?;
             let output = decoder(binary.bytes(), index, body)?;
             checkpoint(cancelled)?;
+            if self.identical_content && output != body {
+                return Err(syntax(0, "identical rename changed file content"));
+            }
             if output.len() > limits.max_file_bytes.min(limits.max_output_bytes) {
                 return Err(PatchError::Budget("result file bytes"));
             }

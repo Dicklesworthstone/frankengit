@@ -186,9 +186,27 @@ impl<'a> super::UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, true, true)
+        Self::parse_profile(input, limits, cancelled, true, true, false)
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+impl<'a> super::UnifiedPatch<'a> {
+    /// Explicit binary relocation profile. Both endpoints remain disjoint and
+    /// original-coordinate; every binary move requires full native identities
+    /// and both forward/reverse members. No older intake profile is widened.
+    /// Consumers must enforce both path capabilities and destination absence
+    /// before decoding, and publish all effects atomically through admission.
+    pub fn parse_with_binary_renames(
+        input: &'a [u8],
+        limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, true, true, true)
+    }
+}
+#[cfg(test)]
+#[path = "binary/rename_tests.rs"]
+mod rename_tests;

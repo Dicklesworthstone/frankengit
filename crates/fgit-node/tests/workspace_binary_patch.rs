@@ -591,3 +591,6 @@ fn capabilities_hidden_refs_and_request_cancellation_still_precede_binary_disclo
     );
     assert_eq!(f.observed(), before);
 }
+
+#[path = "workspace_binary_patch/refactoring.rs"]
+mod refactoring;

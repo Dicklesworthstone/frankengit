@@ -162,10 +162,70 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_workspace_patch_profile_in::<A>(
+            request,
+            reference,
+            expected_commit,
+            visibility,
+            capability,
+            patch_bytes,
+            now,
+            metadata,
+            limits,
+            false,
+        )
+        .await
+    }
+
+    /// Opt into verified compressed binary moves with the caller's existing
+    /// capability. Both paths are authorized before reading either file body.
+    pub async fn prepare_workspace_binary_refactor_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        patch_bytes: &[u8],
+        now: u64,
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_workspace_patch_profile_in::<A>(
+            request,
+            reference,
+            expected_commit,
+            visibility,
+            capability,
+            patch_bytes,
+            now,
+            metadata,
+            limits,
+            true,
+        )
+        .await
+    }
+
+    async fn prepare_workspace_patch_profile_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        patch_bytes: &[u8],
+        now: u64,
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+        binary_renames: bool,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
-        let patch = UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &|| {
-            !workspace_request_live(request)
-        })
+        let cancelled = || !workspace_request_live(request);
+        let patch = if binary_renames {
+            UnifiedPatch::parse_with_binary_renames(patch_bytes, limits, &cancelled)
+        } else {
+            UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &cancelled)
+        }
         .map_err(patch_error)?;
         let paths = paths(&patch)?;
         authorize_patch(&patch, capability, now)?;
@@ -210,6 +270,55 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_trusted_patch_profile_in(
+            request,
+            reference,
+            expected_commit,
+            workspace_id,
+            patch_bytes,
+            metadata,
+            limits,
+            false,
+        )
+        .await
+    }
+
+    /// Trusted-owner opt-in for atomic binary edits with explicit relocation.
+    /// Not remote authentication; old entrypoints retain their original grammar.
+    pub async fn prepare_trusted_binary_refactor_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        workspace_id: [u8; 16],
+        patch_bytes: &[u8],
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_trusted_patch_profile_in(
+            request,
+            reference,
+            expected_commit,
+            workspace_id,
+            patch_bytes,
+            metadata,
+            limits,
+            true,
+        )
+        .await
+    }
+
+    async fn prepare_trusted_patch_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        workspace_id: [u8; 16],
+        patch_bytes: &[u8],
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+        binary_renames: bool,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         match self.object_format {
             ObjectFormat::Sha1 => {
                 self.prepare_trusted_patch_format::<Sha1>(
@@ -220,6 +329,7 @@ impl OneNode {
                     patch_bytes,
                     metadata,
                     limits,
+                    binary_renames,
                 )
                 .await
             }
@@ -232,6 +342,7 @@ impl OneNode {
                     patch_bytes,
                     metadata,
                     limits,
+                    binary_renames,
                 )
                 .await
             }
@@ -247,11 +358,15 @@ impl OneNode {
         patch_bytes: &[u8],
         metadata: &MergeMetadata,
         limits: PatchLimits,
+        binary_renames: bool,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
-        let patch = UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &|| {
-            !workspace_request_live(request)
-        })
+        let cancelled = || !workspace_request_live(request);
+        let patch = if binary_renames {
+            UnifiedPatch::parse_with_binary_renames(patch_bytes, limits, &cancelled)
+        } else {
+            UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &cancelled)
+        }
         .map_err(patch_error)?;
         let paths = paths(&patch)?;
         let touched = touched_paths(&patch)?;

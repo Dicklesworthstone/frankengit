@@ -71,6 +71,7 @@ pub(super) fn scan(
         if record.starts_with(b"diff --git ")
             || record.starts_with(b"--- ")
             || record.starts_with(b"@@ ")
+            || record.starts_with(b"GIT binary patch")
         {
             break;
         }
