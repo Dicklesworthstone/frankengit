@@ -39,6 +39,7 @@ impl Profile {
 pub(super) enum Operation {
     Prepare {
         profile: Profile,
+        expected_result_tree: Option<super::expected_tree::ExpectedTree>,
         patch: PathBuf,
         output: PathBuf,
         workspace_id: [u8; 16],
@@ -129,6 +130,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 matches!(
                     name,
                     "--profile"
+                        | "--expected-result-tree"
                         | "--workspace-id"
                         | "--author"
                         | "--committer"
@@ -193,6 +195,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 );
             }
         };
+        let expected_result_tree = flags
+            .get("--expected-result-tree")
+            .map(|text| super::expected_tree::ExpectedTree::parse(text, base.algorithm()))
+            .transpose()?;
         let workspace_id = unhex(required("--workspace-id")?, 16)?
             .try_into()
             .map_err(|_| "workspace ID must contain 16 bytes")?;
@@ -232,6 +238,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         }
         Operation::Prepare {
             profile,
+            expected_result_tree,
             patch: path(&args[5])?,
             output,
             workspace_id,

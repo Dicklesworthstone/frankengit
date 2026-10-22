@@ -69,7 +69,6 @@ for fmt in ('sha1','sha256'):
             rejected=list(args);rejected[rejected.index('--profile')+1]=profile
             run('legacy-profile',rejected,2);assert not output.exists() and run('basis',listing)==authority
             record(fmt,scenario,'legacy-profile-refuses-relocation',profile=profile)
-        prepared=json.loads(run('prepare',args))
         lib_body=tree([(b'data.bin',b'100644',blobs['binary']),(b'tool.txt',b'100755',new)])
         lib=oid(fmt,'tree',lib_body)
         result_rows=[(b'README.md',b'100644',readme),(b'keep.bin',b'100644',blobs['keep']),(b'lib',b'40000',lib)]
@@ -79,6 +78,7 @@ for fmt in ('sha1','sha256'):
         root_body=tree(result_rows);result_tree=oid(fmt,'tree',root_body)
         body=f'tree {result_tree}\nparent {base}\nauthor {author} 2 +0000\ncommitter {author} 2 +0000\n\nrefactor\n'.encode()
         candidate=oid(fmt,'commit',body)
+        prepared=json.loads(run('prepare',args))
         assert prepared['profile']=='exact-tree-v1' and prepared['root_tree']==result_tree and prepared['candidate_commit']==candidate
         assert not prepared['published_to_repository'] and prepared['node_closed']
         assert prepared['patch_sha256']==hashlib.sha256(patch_bytes).hexdigest()
@@ -95,6 +95,48 @@ for fmt in ('sha1','sha256'):
         again=list(args);again[7]=home/'again.bundle';again+=['--max-files','4','--max-input-bytes',str(len(patch_bytes))]
         assert json.loads(run('reopen',again))==prepared and again[7].read_bytes()==output.read_bytes()
         record(fmt,scenario,'exact-budget-and-reopen-determinism')
+        # The expected root is derived above from fixture intent, never a server reply.
+        pinned=list(args);pinned[7]=home/'pinned.bundle';pinned+=['--expected-result-tree',result_tree]
+        pinned_receipt=json.loads(run('pinned-prepare',pinned))
+        assert pinned_receipt.pop('expected_result_tree')==result_tree and pinned_receipt==prepared
+        assert pinned[7].read_bytes()==output.read_bytes() and run('basis',listing)==authority
+        record(fmt,scenario,'independent-result-pin-preserves-identical-candidate')
+        for name,badroot in [('wrong-tree',root),('wrong-kind',blobs['keep']),('wrong-domain','c'*(64 if fmt=='sha1' else 40))]:
+            bad=list(pinned);bad[-1]=badroot;bad[7]=home/(name+'.bundle')
+            run(name,bad,2);assert not bad[7].exists() and run('basis',listing)==authority
+            record(fmt,scenario,name+'-pin-refuses-before-output')
+        # An internally valid extra executable-bit change is NOT the requested result.
+        extra=(f'diff --git a/keep.bin b/keep.bin\nold mode 100644\nnew mode 100755\nindex {blobs["keep"]}..{blobs["keep"]}\n').encode()
+        extra_patch=home/'extra.patch';extra_patch.write_bytes(patch_bytes+extra)
+        alternate=list(args);alternate[6]=extra_patch;alternate[7]=home/'alternate.bundle'
+        alternate_root=oid(fmt,'tree',tree([(name,b'100755' if name==b'keep.bin' else mode,identity)for name,mode,identity in result_rows]))
+        alt=json.loads(run('valid-extra-change',alternate));assert alt['root_tree']==alternate_root and alternate_root!=result_tree
+        rejected=list(alternate);rejected[7]=home/'unexpected.bundle';rejected+=['--expected-result-tree',result_tree]
+        run('reject-unintended-sibling-mode',rejected,2);assert not rejected[7].exists() and run('basis',listing)==authority
+        permitted=list(rejected);permitted[7]=home/'approved-extra.bundle';permitted[-1]=alternate_root
+        accepted=json.loads(run('approve-exact-extra-tree',permitted));assert accepted.pop('expected_result_tree')==alternate_root and accepted==alt
+        assert permitted[7].read_bytes()==alternate[7].read_bytes()
+        record(fmt,scenario,'valid-but-unintended-extra-effect-refused-beside-correct-pin')
+        # Both historical profiles can independently pin ordinary mode-only edits.
+        ordinary=home/'mode.patch';ordinary.write_bytes(extra)
+        ordinary_root=oid(fmt,'tree',tree([(b'keep.bin',b'100755',blobs['keep']),
+            (b'obsolete.txt',b'100644',blobs['obsolete']),(b'src',b'40000',src)]))
+        for profile in ('exact-v1','exact-binary-v1'):
+            requested=list(args);requested[6]=ordinary;requested[7]=home/(profile+'.bundle')
+            requested[requested.index('--profile')+1]=profile;requested+=['--expected-result-tree',ordinary_root]
+            result=json.loads(run('old-profile-result-pin',requested))
+            assert result['profile']==profile and result['root_tree']==result['expected_result_tree']==ordinary_root
+            assert run('basis',listing)==authority
+            record(fmt,scenario,'legacy-profile-complete-result-pin',profile=profile)
+        # Broken stdout does not discard a fully published pinned bundle.
+        lost=list(pinned);lost[7]=home/'lost.bundle';diagnostics=home/'lost.err'
+        with diagnostics.open('wb') as err:
+            process=subprocess.Popen([FG,*map(str,lost)],stdout=subprocess.PIPE,stderr=err)
+            process.stdout.close();assert process.wait(timeout=90)==2
+        sys.stderr.buffer.write(diagnostics.read_bytes());sys.stderr.buffer.flush()
+        assert lost[7].read_bytes()==output.read_bytes() and run('basis',listing)==authority
+        run('existing-pinned-output',lost,2);assert lost[7].read_bytes()==output.read_bytes()
+        record(fmt,scenario,'lost-stdout-retains-exact-pinned-bundle-without-overwrite')
         occupied=patch_bytes.replace(b'lib/tool.txt',b'keep.bin')
         wrong_old=patch_bytes.replace(blobs['old'].encode(),blobs['keep'].encode())
         late_bad=patch_bytes.replace(b'+refactored\n',b'+wrong\n')

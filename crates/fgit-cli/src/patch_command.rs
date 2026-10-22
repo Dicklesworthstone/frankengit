@@ -1,4 +1,5 @@
 //! Native patch preparation and separately reviewed ordinary workspace admission.
+mod expected_tree;
 mod initial;
 mod options;
 
@@ -14,6 +15,7 @@ const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <reposit
   --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>
   (--message <text> | --message-file <raw-file>) [--ref-hex]
+  [--expected-result-tree <independently-chosen-native-tree-id>]
   [--max-files <n>] [--max-hunks <n>] [--max-input-bytes <n>] [--max-output-bytes <n>]
 
 usage: fg patch apply <storage-root> <tenant-id> <repository-id> <branch-ref> <reviewed-bundle>
@@ -38,6 +40,10 @@ optional exact text edits and executable-mode changes. Both endpoints are checke
 against the original tree; occupied destinations, chains, cycles, copies and
 compressed edited renames refuse. Pure binary moves preserve their original bytes.
 All changes form one candidate or no bundle. Old profiles never admit rename.
+
+Optional --expected-result-tree binds the complete intended root, including
+unchanged siblings and file modes. A mismatch refuses before publishing a bundle.
+This expectation is caller-supplied intent, not approval or a new authority store.
 
 Preparation never moves refs; its bundle is incremental against expected-base.
 Inspect it with fg workspace inspect before applying. Apply consumes the saved
@@ -211,7 +217,12 @@ fn prepared_receipt(
     options: &Options,
     candidate: &WorkspacePatchCandidate,
 ) -> Result<String, String> {
-    let Operation::Prepare { profile, .. } = options.operation else {
+    let Operation::Prepare {
+        profile,
+        expected_result_tree,
+        ..
+    } = options.operation
+    else {
         return Err("patch preparation receipt operation mismatch".into());
     };
     if options.base != candidate.source_commit
@@ -223,6 +234,10 @@ fn prepared_receipt(
     {
         return Err("inconsistent patch candidate; no bundle was published".into());
     }
+    let expected_tree_field = expected_result_tree
+        .map(|pin| pin.receipt_field(candidate.root_tree))
+        .transpose()?
+        .unwrap_or_default();
     let paths = candidate.paths.iter().map(|path| {
         let old = path.old_blob.map_or_else(|| "null".into(), |id| quote(&id.to_string()));
         let new = path.new_blob.map_or_else(|| "null".into(), |id| quote(&id.to_string()));
@@ -235,7 +250,7 @@ fn prepared_receipt(
             "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"reference_hex\":{},",
             "\"source_commit\":{},\"source_rcr\":{},\"candidate_commit\":{},\"root_tree\":{},",
             "\"patch_sha256\":{},\"bundle_sha256\":{},\"bundle_bytes\":{},\"pack_objects\":{},",
-            "\"paths\":[{}],\"published_to_repository\":false,\"node_closed\":true}}"
+            "\"paths\":[{}],\"published_to_repository\":false,\"node_closed\":true{}}}"
         ),
         quote(profile.token()),
         quote(&options.tenant.to_string()),
@@ -250,7 +265,8 @@ fn prepared_receipt(
         quote(&hex(&fgit_crypto::sha256_digest(candidate.bundle_bytes()))),
         candidate.bundle_bytes().len(),
         candidate.object_count,
-        paths
+        paths,
+        expected_tree_field
     ))
 }
 fn finish_applied(
