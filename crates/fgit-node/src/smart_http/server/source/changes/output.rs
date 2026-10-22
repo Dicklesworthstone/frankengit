@@ -133,6 +133,7 @@ pub(super) fn prepared(
     reference: &RefName,
     base: GitOid,
     candidate: WorkspacePatchCandidate,
+    expected_result_tree: Option<GitOid>,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<PatchReply, ApiError> {
@@ -144,6 +145,14 @@ pub(super) fn prepared(
         || candidate.paths.len() > 1024
     {
         return Err(ApiError::unavailable());
+    }
+    // Caller intent is not authorization. Check the COMPLETE native result,
+    // including untouched siblings, before any response can disclose its bundle.
+    if expected_result_tree.is_some_and(|expected| expected != candidate.root_tree) {
+        return Err(ApiError::new(
+            Status::Conflict,
+            "patch_result_tree_mismatch",
+        ));
     }
     let bytes = candidate.bundle_bytes();
     if bytes.is_empty() || bytes.len() > MAX_BUNDLE {
@@ -188,7 +197,15 @@ pub(super) fn prepared(
             MAX_METADATA,
         )?;
     }
-    append(&mut metadata, "]}", MAX_METADATA)?;
+    append(&mut metadata, "]", MAX_METADATA)?;
+    if let Some(expected) = expected_result_tree {
+        append(
+            &mut metadata,
+            &format!(",\"expected_result_tree\":{}", quote(&expected.to_string())),
+            MAX_METADATA,
+        )?;
+    }
+    append(&mut metadata, "}", MAX_METADATA)?;
     let mut boundary = None;
     for attempt in 0..16 {
         let value = format!("fg-source-{}-{attempt:x}", &digest[..48]);

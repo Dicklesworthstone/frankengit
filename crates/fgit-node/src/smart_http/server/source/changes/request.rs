@@ -85,12 +85,17 @@ impl<'a> Request<'a> {
         format: GitHashAlgorithm,
     ) -> Result<Command, ApiError> {
         let mut fields = BTreeMap::new();
-        for (name, value) in parse_form(bytes, 7)? {
+        let maximum_fields = if self.operation == Operation::Prepare {
+            8
+        } else {
+            7
+        };
+        for (name, value) in parse_form(bytes, maximum_fields)? {
             let common = matches!(name.as_str(), "ref" | "object_format" | "expected_commit");
             let applicable = match self.operation {
                 Operation::Prepare => matches!(
                     name.as_str(),
-                    "author" | "committer" | "timestamp" | "message"
+                    "author" | "committer" | "timestamp" | "message" | "expected_result_tree"
                 ),
                 Operation::Inspect | Operation::Apply => name == "candidate_commit",
             };
@@ -112,6 +117,10 @@ impl<'a> Request<'a> {
         let base = oid(&take(&mut fields, "expected_commit")?, format)?;
         match self.operation {
             Operation::Prepare => {
+                let expected_result_tree = fields
+                    .remove("expected_result_tree")
+                    .map(|value| oid(&value, format))
+                    .transpose()?;
                 let metadata = MergeMetadata {
                     author: take(&mut fields, "author")?,
                     committer: take(&mut fields, "committer")?,
@@ -124,6 +133,7 @@ impl<'a> Request<'a> {
                 Ok(Command::Prepare {
                     reference,
                     base,
+                    expected_result_tree,
                     metadata,
                 })
             }
@@ -146,6 +156,7 @@ pub(super) enum Command {
     Prepare {
         reference: RefName,
         base: GitOid,
+        expected_result_tree: Option<GitOid>,
         metadata: MergeMetadata,
     },
     Candidate {
@@ -268,6 +279,76 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert!(Request::parse(&head).is_err());
+            }
+        }
+    }
+    #[test]
+    fn optional_result_tree_is_exact_and_preparation_only() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let width = format.digest_len() * 2;
+            let body = form(format)
+                + "&author=A+%3Ca%40example.invalid%3E&committer=A+%3Ca%40example.invalid%3E&timestamp=1&message=change";
+            assert!(matches!(
+                request(Operation::Prepare)
+                    .command(body.as_bytes(), format)
+                    .unwrap(),
+                Command::Prepare {
+                    expected_result_tree: None,
+                    ..
+                }
+            ));
+            let pinned = format!("{body}&expected_result_tree={}", "b".repeat(width));
+            let Command::Prepare {
+                expected_result_tree: Some(root),
+                ..
+            } = request(Operation::Prepare)
+                .command(pinned.as_bytes(), format)
+                .unwrap()
+            else {
+                panic!("missing result pin")
+            };
+            assert_eq!(root, GitOid::from_hex(format, &"b".repeat(width)).unwrap());
+            for invalid in [
+                "".to_owned(),
+                "0".repeat(width),
+                "B".repeat(width),
+                "g".repeat(width),
+                "b".repeat(width - 1),
+                "b".repeat(if width == 40 { 64 } else { 40 }),
+            ] {
+                assert!(
+                    request(Operation::Prepare)
+                        .command(
+                            format!("{body}&expected_result_tree={invalid}").as_bytes(),
+                            format
+                        )
+                        .is_err()
+                );
+            }
+            assert!(
+                request(Operation::Prepare)
+                    .command(
+                        format!("{pinned}&expected_result_tree={}", "b".repeat(width)).as_bytes(),
+                        format
+                    )
+                    .is_err()
+            );
+            for operation in [Operation::Inspect, Operation::Apply] {
+                let candidate = form(format) + "&candidate_commit=" + &"b".repeat(width);
+                assert!(
+                    request(operation)
+                        .command(candidate.as_bytes(), format)
+                        .is_ok()
+                );
+                assert!(
+                    request(operation)
+                        .command(
+                            format!("{candidate}&expected_result_tree={}", "c".repeat(width))
+                                .as_bytes(),
+                            format
+                        )
+                        .is_err()
+                );
             }
         }
     }

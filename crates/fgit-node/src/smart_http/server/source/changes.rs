@@ -53,6 +53,7 @@ pub(super) fn execute(
         Command::Prepare {
             reference,
             base,
+            expected_result_tree,
             metadata,
         } => {
             let candidate = drive_request_while(
@@ -73,8 +74,16 @@ pub(super) fn execute(
             // The input lifetime ends before output framing. The native bundle
             // stays owned by its candidate, not copied into a response buffer.
             drop(bytes);
-            output::prepared(node, &reference, base, candidate, maximum, &mut live)
-                .map(Reply::patch)
+            output::prepared(
+                node,
+                &reference,
+                base,
+                candidate,
+                expected_result_tree,
+                maximum,
+                &mut live,
+            )
+            .map(Reply::patch)
         }
         Command::Candidate {
             reference,
