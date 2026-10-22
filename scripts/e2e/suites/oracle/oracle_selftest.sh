@@ -233,6 +233,16 @@ export PATH="${TEST_ROOT}/bin:/usr/bin:/bin"
 RUN_DIRECTORY="$("${ORACLE}" create-run testgit reproducible)"
 expect_exit FG-000B-ORACLE-004 64 "sandbox path-steering argument is refused" \
     "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . escape -- --git-dir=/etc
+# frankengit-mey1: global options before the subcommand stay refused, and so
+# does an escape after it; the subcommand's own -p is permitted.
+expect_exit FG-000B-ORACLE-029 64 "a global option before the subcommand is refused (-p pages)" \
+    "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . global-p -- -p emit
+expect_exit FG-000B-ORACLE-030 64 "global -c configuration before the subcommand is refused" \
+    "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . global-c -- -c core.pager=cat emit
+expect_exit FG-000B-ORACLE-031 64 "an absolute path after the subcommand is still refused" \
+    "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . absolute -- emit /etc/passwd
+expect_exit FG-000B-ORACLE-032 0 "a subcommand's own -p (merge-file -p prints) is permitted" \
+    "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . subcommand-p -- emit -p
 expect_exit FG-000B-ORACLE-013 64 "loopback mode refuses a non-loopback endpoint before Git starts" \
     "${ORACLE}" clone-loopback testgit "${RUN_DIRECTORY}" nonloopback 192.0.2.1:9418 \
       /11111111111111111111111111111111.git loopback-clone
