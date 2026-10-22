@@ -189,7 +189,7 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn finish(
+pub(super) fn finish(
     output: &mut impl Write,
     report: &str,
     succeeded: bool,

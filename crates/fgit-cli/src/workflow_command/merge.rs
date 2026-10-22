@@ -63,7 +63,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     }
 }
 
-fn parse(args: &[String]) -> Result<(Options, NativeMerge, MergeCommitStyle), String> {
+pub(super) fn parse(args: &[String]) -> Result<(Options, NativeMerge, MergeCommitStyle), String> {
     if args.len() < 5 || args[0] != "run-merge-candidate" {
         return Err(USAGE.into());
     }

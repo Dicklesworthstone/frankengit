@@ -4,6 +4,7 @@
 mod artifacts;
 mod dispatch;
 mod merge;
+mod merge_dispatch;
 mod publish;
 mod publish_run;
 mod recovery;
@@ -31,6 +32,8 @@ const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <reposito
   [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
   [--max-artifact-input-total-mib <1..512>]
 
+Batch merge/squash candidate: fg workflow dispatch-merge-candidate --help.
+
 Unpublished candidate: replace run with run-candidate and also supply
   --bundle <stable-local-file> --candidate-commit <reviewed-native-oid>
   --expected-commit <canonical-base-oid> (mandatory for run-candidate).
@@ -40,6 +43,7 @@ base. Review and trust those candidate scripts before invoking. The bundle is
 validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
 For explicit merge-commit or squash inputs: fg workflow run-merge-candidate --help.
+For all selected candidate workflows: fg workflow dispatch-merge-candidate --help.
 For event-matched directory dispatch: fg workflow dispatch --help.
 For canonical ref-change polling: fg workflow watch --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
@@ -109,6 +113,12 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args
+        .first()
+        .is_some_and(|action| action == "dispatch-merge-candidate")
+    {
+        return merge_dispatch::run(args);
+    }
     if args.first().is_some_and(|action| action == "publish-run") {
         return publish_run::run(args, &mut std::io::stdout().lock());
     }
@@ -427,6 +437,18 @@ fn execute(
         fgit_forge::preparation::MergeCommitStyle,
     )>,
 ) -> Result<u8, String> {
+    execute_selected(options, merge, None)
+}
+
+#[cfg(target_os = "linux")]
+fn execute_selected(
+    options: Options,
+    merge: Option<(
+        fgit_forge::event::NativeMerge,
+        fgit_forge::preparation::MergeCommitStyle,
+    )>,
+    dispatch_event: Option<&str>,
+) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
     let artifact_config = options
         .artifacts
@@ -464,6 +486,28 @@ fn execute(
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
         let (result, cleanup) = with_signal_request(&node, signals, |request| {
+            if let Some(event) = dispatch_event {
+                let (merge, style) = merge.as_ref().ok_or("merge dispatch coordinates missing")?;
+                let bytes = bundle.as_deref().ok_or("merge dispatch bundle missing")?;
+                return node
+                    .runtime()
+                    .block_on(node.dispatch_trusted_merge_workflows_in(
+                        request,
+                        merge,
+                        bytes,
+                        *style,
+                        &options.workflow,
+                        event,
+                        options.run_id,
+                        &options.parent,
+                        &options.inputs,
+                        options.head,
+                        Default::default(),
+                        artifact_config.as_ref(),
+                    ))
+                    .map(|report| (report.to_json(), report.succeeded(), report.run_directory))
+                    .map_err(|e| e.to_string());
+            }
             match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
                 (Some((merge, style)), Some(_), Some(bytes)) => {
                     node.runtime()
@@ -513,29 +557,40 @@ fn execute(
                 }
                 _ => return Err("candidate input was not loaded; no workflow started".into()),
             }
+            .map(|report| (report.to_json(), report.succeeded(), report.run_directory))
             .map_err(|e| e.to_string())
         })?;
         monitor_cleanup = cleanup;
-        let result = result?;
-        Ok((result.to_json(), result.succeeded(), result.run_directory))
+        result
     })();
     let cleanup = workflow_cleanup(
         monitor_cleanup,
         node.shutdown().err().map(|e| e.to_string()),
     );
     match operation {
-        Ok((report, succeeded, directory)) => finish(
-            &mut std::io::stdout().lock(),
-            &report,
-            succeeded,
-            cleanup.as_deref(),
-        )
-        .map_err(|e| {
-            format!(
-                "{e}; completed report remains at {}; do not replay the attempt",
-                directory.join("report.json").display()
-            )
-        }),
+        Ok((report, succeeded, directory)) => {
+            let result = if dispatch_event.is_some() {
+                dispatch::finish(
+                    &mut std::io::stdout().lock(),
+                    &report,
+                    succeeded,
+                    cleanup.as_deref(),
+                )
+            } else {
+                finish(
+                    &mut std::io::stdout().lock(),
+                    &report,
+                    succeeded,
+                    cleanup.as_deref(),
+                )
+            };
+            result.map_err(|e| {
+                format!(
+                    "{e}; completed report remains at {}; do not replay the attempt",
+                    directory.join("report.json").display()
+                )
+            })
+        }
         Err(error) => Err(format!(
             "{error}{}; inspect any existing attempt directory before retrying; an error is not proof that no command ran",
             cleanup.map_or_else(String::new, |e| format!("; node shutdown also failed: {e}"))

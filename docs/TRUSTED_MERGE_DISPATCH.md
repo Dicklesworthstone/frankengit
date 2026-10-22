@@ -33,6 +33,42 @@ batch always refuses, even if a process died before its first child. Recover
 original child journals without rerunning scripts; retain custody across restore.
 Existing check-publication policy is not relaxed by these observations.
 
+## Native command
+
+```
+fg workflow dispatch-merge-candidate NODE TENANT REPOSITORY refs/heads/main \
+  --trusted-local --event pull_request --method merge-commit \
+  --bundle reviewed.bundle --candidate-commit CANDIDATE \
+  --expected-commit TARGET_TIP --source-ref refs/heads/topic \
+  --expected-source SOURCE_TIP --merge-base COMMON_BASE \
+  --workflow ci --input ci --input src \
+  --run-parent /private/runs --run-id RUN_ID
+```
+
+Use `--method squash` only for an independently reviewed single-parent squash
+bundle. Nothing infers a style or silently reconstructs a stale candidate.
+`--expected-head`, incarnation pins, SHA-256, raw-byte paths, artifact selectors
+and producer-to-consumer delivery use the existing single-workflow options.
+The directory rather than an individual YAML file is selected by `--workflow`.
+
+The command uses the same request-owned signal monitor and node shutdown path as
+single-workflow execution. SIGTERM/SIGINT stop later work and drain the active
+process group. Cleanup failures retain the original outcome. Stdout contains the
+existing `workflow_dispatch_result` envelope only after shutdown, with the whole
+saved batch; a lost output stream does not undo completion or authorize replay.
+Child attempts can be inspected with `fg workflow recover` and their original
+marker hash. Check-publication prerequisites still apply: these observations do
+not authorize publishing an unpublished candidate's checks under a parent tip.
+
+The native campaign `scripts/e2e/suites/workflow/merge_dispatch.sh` requires a
+prebuilt `FG_BIN`. It uses actual Rust commands and host processes, independent
+Python native-object identities, both hash formats and parent styles, parent-only
+failure twins, candidate artifact export, journal recovery without final reports,
+occupied batch/report-loss refusal, manual-event filtering and repeated SIGTERM
+and SIGINT. Child liveness is checked before fixture cleanup. The wrapper emits
+repository-owned E2E records and retains diagnostics. No mock node or Git engine
+participates. This does not change source-head watcher behavior.
+
 Tests in `trusted_merge_dispatch` execute the real node and host processes across
 SHA-1/SHA-256, merge/squash, correct and excluded filters, malformed late definitions,
 corrupt and stale candidate pins, fresh-process replay refusal, failed independent
