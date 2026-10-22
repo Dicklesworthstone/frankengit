@@ -1,6 +1,8 @@
 //! One explicit local dispatch, not an unattended or remotely trusted trigger.
 //! All definitions and inputs come from one immutable authenticated snapshot.
 
+mod merge_candidate;
+
 use super::super::*;
 use fgit_crypto::sha256_digest;
 use fgit_forge::review::{ComparisonMode, SourcePathChanges};
@@ -306,7 +308,7 @@ impl OneNode {
                         dispatch_at(
                             self,
                             request,
-                            manifest,
+                            WorkflowInputs::Canonical(manifest),
                             capability,
                             head,
                             reference,
@@ -354,7 +356,7 @@ impl OneNode {
 fn dispatch_at<A: GitHashAlgorithm>(
     node: &OneNode,
     request: &NodeRequestContext,
-    manifest: Arc<SparseManifest<A>>,
+    inputs: WorkflowInputs<A>,
     capability: &TreeCapability,
     head: RepositoryAuthorityHeadId,
     reference: &RefName,
@@ -372,7 +374,6 @@ fn dispatch_at<A: GitHashAlgorithm>(
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
-    let inputs = WorkflowInputs::Canonical(Arc::clone(&manifest));
     let mut entries = inputs
         .entries()
         .iter()
@@ -382,7 +383,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
         return Err(invalid("dispatch exceeds 32 workflow definitions"));
     }
     entries.sort_by(|a, b| a.path().as_bytes().cmp(b.path().as_bytes()));
-    let (source_rcr, source_commit, source_tree, _) = inputs.coordinates(node.object_format)?;
+    let (source_rcr, source_commit, source_tree, candidate) =
+        inputs.coordinates(node.object_format)?;
     let mut definitions = Vec::new();
     let mut ids = BTreeSet::new();
     let (mut source_bytes, mut jobs, mut steps) = (0usize, 0usize, 0usize);
@@ -420,7 +422,9 @@ fn dispatch_at<A: GitHashAlgorithm>(
                 crate::treefs_workspace::merge_prepare::changed_paths(
                     source,
                     before,
-                    source_commit,
+                    inputs
+                        .merge()
+                        .map_or(source_commit, |merge| merge.source_tip),
                     mode,
                 )
                 .map_err(|_| invalid("complete canonical changed-path comparison unavailable"))?,
@@ -559,6 +563,14 @@ fn dispatch_at<A: GitHashAlgorithm>(
         limits.run_timeout.as_millis(),
         limits.total_output_bytes,
     );
+    if let Some(candidate) = candidate {
+        identity.push_str(&format!(
+            ",\"input_kind\":\"unpublished_candidate\",\"executed_commit\":\"{}\",\"executed_tree\":\"{}\",\"candidate\":{{\"commit\":\"{}\",\"tree\":\"{}\",\"bundle_sha256\":\"{}\",\"admitted\":false}},\"merge\":{}",
+            candidate.commit, candidate.tree, candidate.commit, candidate.tree,
+            hex(&candidate.bundle_sha256),
+            candidate::merge_json(inputs.merge(), inputs.merge_style())
+        ));
+    }
     if let Some(changes) = &path_changes {
         let mut bytes = b"frankengit/workflow-changed-paths/v1\0".to_vec();
         for path in &changes.paths {
@@ -648,7 +660,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
             total_output_bytes: remaining,
             ..limits
         };
-        let run = run_inputs(node, request, WorkflowInputs::Canonical(Arc::clone(&manifest)), capability, head, reference,
+        let run = run_inputs(node, request, inputs.shared(), capability, head, reference,
             &definition.path, declared, definition.run_id, &batch_directory, child_limits, started, artifact_session.as_ref())
             .map_err(|e| failed(format!("dispatch child {} failed: {e}; retain the batch and inspect its child journals, do not replay", hex(&definition.run_id))))?;
         let captured = run
