@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/workflow-constructs.json",
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
-  "count_accepted": 14,
+  "count_accepted": 16,
   "count_normalized": 10,
   "count_unsupported": 19,
   "count_ambiguous": 0,
@@ -139,6 +139,18 @@
       "status": "accepted",
       "refuses": false,
       "reason": "bounded exclusion-only branch patterns; mutually exclusive with branches and never a passing check"
+    },
+    {
+      "key": "trigger.paths",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "ordered bounded path patterns select complete canonical PR merge-base changes; missing, incomplete or over-budget evidence refuses"
+    },
+    {
+      "key": "trigger.paths-ignore",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "PR execution requires at least one changed path outside the exclusions; empty changes create no jobs or passing checks"
     },
     {
       "key": "workflow.concurrency",

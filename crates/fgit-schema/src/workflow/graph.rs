@@ -38,12 +38,16 @@ pub const DEADLINE_CANONICAL_VERSION: &str = "fgit-workflow/v4";
 
 /// Ordered branch filters are committed execution-selection inputs.
 pub const TRIGGER_CANONICAL_VERSION: &str = "fgit-workflow/v5";
+/// Complete changed-path selection bound to exact event coordinates.
+pub const PATH_CANONICAL_VERSION: &str = "fgit-workflow/v6";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Trigger {
     /// Optional ordered branch filter.
     pub branch_filter: Option<super::triggers::BranchFilter>,
+    /// Optional complete changed-path selection.
+    pub path_filter: Option<super::triggers::PathFilter>,
     /// Trigger name as written.
     pub name: String,
     /// Where it came from.
@@ -176,7 +180,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_branch_filters() {
+        let version = if self.has_path_filters() {
+            PATH_CANONICAL_VERSION
+        } else if self.has_branch_filters() {
             TRIGGER_CANONICAL_VERSION
         } else if self.has_deadlines() {
             DEADLINE_CANONICAL_VERSION
@@ -195,6 +201,16 @@ impl WorkflowGraph {
                 for pattern in filter.patterns() {
                     lines.push(format!(
                         "trigger-branch\t{}\t{}\t{}",
+                        escape(&trigger.name),
+                        filter.field(),
+                        escape(pattern)
+                    ));
+                }
+            }
+            if let Some(filter) = &trigger.path_filter {
+                for pattern in filter.patterns() {
+                    lines.push(format!(
+                        "trigger-path\t{}\t{}\t{}",
                         escape(&trigger.name),
                         filter.field(),
                         escape(pattern)

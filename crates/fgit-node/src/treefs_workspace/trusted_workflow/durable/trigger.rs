@@ -273,6 +273,12 @@ impl OneNode {
                 limits,
                 artifacts,
                 selected.pull.as_ref().map(|pull| pull.target_reference()),
+                selected.pull.as_ref().map(|pull| {
+                    (
+                        Some(pull.path_comparison_base()),
+                        fgit_forge::review::ComparisonMode::MergeBase,
+                    )
+                }),
             )
             .await
             .map_err(|e| {

@@ -176,6 +176,16 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "bounded exclusion-only branch patterns; mutually exclusive with branches and never a passing check",
     },
     Construct {
+        key: "trigger.paths",
+        status: ConstructStatus::Accepted,
+        reason: "ordered bounded path patterns select complete canonical PR merge-base changes; missing, incomplete or over-budget evidence refuses",
+    },
+    Construct {
+        key: "trigger.paths-ignore",
+        status: ConstructStatus::Accepted,
+        reason: "PR execution requires at least one changed path outside the exclusions; empty changes create no jobs or passing checks",
+    },
+    Construct {
         key: "workflow.concurrency",
         status: ConstructStatus::Unsupported,
         reason: "a concurrency group cancels in-flight runs, and cancellation semantics are request-drain-finalize rather than a YAML string",

@@ -2,7 +2,9 @@
 //! approval, patch application, or authorization mechanism. The object owner
 //! supplies the same identity-verified source used by native merge preparation.
 
+mod paths;
 mod series;
+pub use paths::{SourcePathChanges, compare_source_paths};
 pub use series::{MAX_SERIES_COMPARISONS, compare_source_series};
 
 use crate::aggregate::{AggregateVersion, PullRequestNumber};
@@ -279,6 +281,7 @@ pub fn compare_source<S: MergeObjectSource>(
         entries: Vec::new(),
         trees: 0,
         text_files: 0,
+        identities_only: false,
         output_bytes: 0,
         hunks: 0,
     };
@@ -310,6 +313,7 @@ struct Walker<'a, S> {
     entries: Vec<ReviewedEntry>,
     trees: usize,
     text_files: usize,
+    identities_only: bool,
     output_bytes: usize,
     hunks: usize,
 }
@@ -483,7 +487,9 @@ impl<S: MergeObjectSource> Walker<'_, S> {
             (Some(_), Some(_)) => ChangeKind::Modified,
             _ => return Err(ReviewError::InvalidTree),
         };
-        let content = if before
+        let content = if self.identities_only {
+            ReviewContent::ObjectOnly
+        } else if before
             .zip(after)
             .is_some_and(|(a, b)| a.oid == b.oid && is_blob(a.mode) && is_blob(b.mode))
         {

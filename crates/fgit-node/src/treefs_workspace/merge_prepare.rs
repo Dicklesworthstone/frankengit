@@ -14,6 +14,9 @@ mod source_history;
 #[path = "source_review.rs"]
 mod source_review;
 
+mod workflow_paths;
+pub(super) use workflow_paths::changed_paths;
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 

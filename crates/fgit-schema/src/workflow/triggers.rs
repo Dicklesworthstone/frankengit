@@ -1,6 +1,9 @@
 //! Bounded branch selection over exact reference bytes. No regex, branch lookup,
 //! scheduling or authorization. The caller supplies authenticated coordinates.
 use super::{Node, Span, Trigger, WorkflowGraph, WorkflowRefusal};
+mod paths;
+pub use paths::PathFilter;
+const MAX_MATCH_BYTES: usize = 4096;
 pub const MAX_PATTERNS: usize = 32;
 pub const MAX_PATTERN_BYTES: usize = 256;
 pub const MAX_TOTAL_PATTERN_BYTES: usize = 4096;
@@ -48,6 +51,9 @@ pub enum TriggerSelectionError {
     MissingBranchReference,
     ReferenceTooLong,
     Cancelled,
+    MissingChangedPaths,
+    InvalidChangedPaths,
+    PathMatchBudget,
 }
 impl std::fmt::Display for TriggerSelectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,30 +70,55 @@ impl WorkflowGraph {
         reference: Option<&[u8]>,
         cancelled: &impl Fn() -> bool,
     ) -> Result<bool, TriggerSelectionError> {
+        self.selects_event_with_paths(event, reference, None, cancelled)
+    }
+    /// None means unavailable evidence; Some(empty) means a complete empty diff.
+    /// The caller authenticates the exact source of the complete changed paths.
+    pub fn selects_event_with_paths(
+        &self,
+        event: &str,
+        reference: Option<&[u8]>,
+        paths: Option<&[Vec<u8>]>,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<bool, TriggerSelectionError> {
         if cancelled() {
             return Err(TriggerSelectionError::Cancelled);
         }
         let mut selected = false;
         for trigger in self.triggers.iter().filter(|trigger| trigger.name == event) {
-            let Some(filter) = &trigger.branch_filter else {
-                selected = true;
-                continue;
+            let path_selected = match &trigger.path_filter {
+                Some(filter) => filter.selects(
+                    paths.ok_or(TriggerSelectionError::MissingChangedPaths)?,
+                    cancelled,
+                )?,
+                None => true,
             };
-            let reference = reference.ok_or(TriggerSelectionError::MissingBranchReference)?;
-            if reference.len() > MAX_REFERENCE_BYTES {
-                return Err(TriggerSelectionError::ReferenceTooLong);
-            }
-            let Some(branch) = reference.strip_prefix(b"refs/heads/") else {
-                continue;
+            let branch_selected = match &trigger.branch_filter {
+                None => true,
+                Some(filter) => {
+                    let reference =
+                        reference.ok_or(TriggerSelectionError::MissingBranchReference)?;
+                    if reference.len() > MAX_REFERENCE_BYTES {
+                        return Err(TriggerSelectionError::ReferenceTooLong);
+                    }
+                    match reference.strip_prefix(b"refs/heads/") {
+                        Some(branch) if !branch.is_empty() => filter.matches(branch, cancelled)?,
+                        _ => false,
+                    }
+                }
             };
-            if !branch.is_empty() && filter.matches(branch, cancelled)? {
-                selected = true;
-            }
+            selected |= branch_selected && path_selected;
         }
         if cancelled() {
             return Err(TriggerSelectionError::Cancelled);
         }
         Ok(selected)
+    }
+    #[must_use]
+    pub fn has_path_filters(&self) -> bool {
+        self.triggers
+            .iter()
+            .any(|trigger| trigger.path_filter.is_some())
     }
     #[must_use]
     pub fn has_branch_filters(&self) -> bool {
@@ -117,18 +148,36 @@ fn bounded(
     }
 }
 
-fn pattern(text: &str, span: Span, ignore: bool) -> Result<(bool, Vec<Token>), WorkflowRefusal> {
+fn pattern(
+    text: &str,
+    span: Span,
+    ignore: bool,
+    path: bool,
+) -> Result<(bool, Vec<Token>), WorkflowRefusal> {
     bounded(text.len(), MAX_PATTERN_BYTES, "branch pattern bytes", span)?;
     let negative = text.starts_with('!');
     let body = if negative { &text[1..] } else { text };
     if body.is_empty()
         || negative && ignore
-        || body.chars().any(|c| c.is_control() || c.is_whitespace())
+        || body
+            .chars()
+            .any(|c| c.is_control() || !path && c.is_whitespace())
         || body.bytes().any(|b| b"!?+[]{}\\".contains(&b))
     {
         return Err(malformed(
             span,
             "a literal branch pattern with *, **, or a leading ! in branches",
+        ));
+    }
+    if path
+        && (body.starts_with('/')
+            || body
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == ".."))
+    {
+        return Err(malformed(
+            span,
+            "a workspace-relative path pattern without dot components",
         ));
     }
     let bytes = body.as_bytes();
@@ -158,10 +207,10 @@ fn pattern(text: &str, span: Span, ignore: bool) -> Result<(bool, Vec<Token>), W
     }
     Ok((negative, tokens))
 }
-fn filter(node: &Node, ignore: bool) -> Result<BranchFilter, WorkflowRefusal> {
+fn filter(node: &Node, ignore: bool, path: bool) -> Result<BranchFilter, WorkflowRefusal> {
     let Node::Sequence { items, span } = node else {
         return Err(WorkflowRefusal::FieldShape {
-            path: "on.branches",
+            path: if path { "on.paths" } else { "on.branches" },
             expected: "a nonempty sequence of patterns",
             observed: node.shape(),
             span: node.span(),
@@ -176,7 +225,7 @@ fn filter(node: &Node, ignore: bool) -> Result<BranchFilter, WorkflowRefusal> {
     for item in items {
         let Node::Scalar { value, span } = item else {
             return Err(WorkflowRefusal::FieldShape {
-                path: "on.branches",
+                path: if path { "on.paths" } else { "on.branches" },
                 expected: "a scalar pattern",
                 observed: item.shape(),
                 span: item.span(),
@@ -189,7 +238,7 @@ fn filter(node: &Node, ignore: bool) -> Result<BranchFilter, WorkflowRefusal> {
             "aggregate branch pattern bytes",
             *span,
         )?;
-        let (negative, tokens) = pattern(value, *span, ignore)?;
+        let (negative, tokens) = pattern(value, *span, ignore, path)?;
         patterns.push((value.clone(), negative, tokens));
     }
     if !ignore && patterns.iter().all(|(_, negative, _)| *negative) {
@@ -203,6 +252,7 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
         name: name.to_owned(),
         span,
         branch_filter: None,
+        path_filter: None,
     };
     let mut triggers = match node {
         Node::Scalar { value, span } => vec![unfiltered(value, *span)],
@@ -234,6 +284,19 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
                     Node::Scalar { value, .. } if value.is_empty() => {}
                     Node::Mapping { entries, .. } => {
                         for (key, value, span) in entries {
+                            if matches!(key.as_str(), "paths" | "paths-ignore")
+                                && name == "pull_request"
+                            {
+                                if trigger.path_filter.is_some() {
+                                    return Err(malformed(
+                                        *span,
+                                        "paths or paths-ignore, never both",
+                                    ));
+                                }
+                                trigger.path_filter =
+                                    Some(PathFilter(filter(value, key == "paths-ignore", true)?));
+                                continue;
+                            }
                             if name == "workflow_dispatch"
                                 || !matches!(key.as_str(), "branches" | "branches-ignore")
                             {
@@ -249,7 +312,8 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
                                     "branches or branches-ignore, never both",
                                 ));
                             }
-                            trigger.branch_filter = Some(filter(value, key == "branches-ignore")?);
+                            trigger.branch_filter =
+                                Some(filter(value, key == "branches-ignore", false)?);
                         }
                     }
                     other => {
@@ -279,13 +343,14 @@ fn matches_pattern(
     branch: &[u8],
     cancelled: &impl Fn() -> bool,
 ) -> Result<bool, TriggerSelectionError> {
-    let mut state = [false; MAX_REFERENCE_BYTES + 1];
+    let mut state = [false; MAX_MATCH_BYTES + 1];
     state[0] = true;
+    let mut next = [false; MAX_MATCH_BYTES + 1];
     for token in tokens {
         if cancelled() {
             return Err(TriggerSelectionError::Cancelled);
         }
-        let mut next = [false; MAX_REFERENCE_BYTES + 1];
+        next[..=branch.len()].fill(false);
         match token {
             Token::Byte(byte) => {
                 for (i, observed) in branch.iter().enumerate() {
@@ -307,7 +372,7 @@ fn matches_pattern(
                 }
             }
         }
-        state = next;
+        std::mem::swap(&mut state, &mut next);
     }
     Ok(state[branch.len()])
 }

@@ -64,6 +64,7 @@ pub fn compare_source_series<S: MergeObjectSource>(
             entries: Vec::new(),
             trees,
             text_files,
+            identities_only: false,
             output_bytes,
             hunks,
         };

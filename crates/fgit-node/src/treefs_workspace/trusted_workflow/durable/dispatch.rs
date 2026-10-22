@@ -3,6 +3,8 @@
 
 use super::super::*;
 use fgit_crypto::sha256_digest;
+use fgit_forge::review::{ComparisonMode, SourcePathChanges};
+type PathBasis = (Option<GitOid>, ComparisonMode);
 use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS};
 
 const MAX_WORKFLOWS: usize = 32;
@@ -166,6 +168,7 @@ impl OneNode {
             limits,
             artifacts,
             None,
+            None,
         )
         .await
     }
@@ -185,6 +188,7 @@ impl OneNode {
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         pull_target: Option<&RefName>,
+        path_basis: Option<PathBasis>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         if !event_supported(event) {
             return Err(TrustedWorkflowFailure::InvalidInput(
@@ -216,6 +220,7 @@ impl OneNode {
                     started,
                     artifacts,
                     trigger_reference,
+                    path_basis,
                 )
                 .await
             }
@@ -233,6 +238,7 @@ impl OneNode {
                     started,
                     artifacts,
                     trigger_reference,
+                    path_basis,
                 )
                 .await
             }
@@ -253,6 +259,7 @@ impl OneNode {
         started: Instant,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         trigger_reference: Option<&RefName>,
+        path_basis: Option<PathBasis>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -312,6 +319,8 @@ impl OneNode {
                             started,
                             artifacts,
                             trigger_reference,
+                            source,
+                            path_basis,
                         )
                     })();
                     *observed
@@ -358,6 +367,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
     started: Instant,
     artifacts: Option<&TrustedWorkflowArtifactConfig>,
     trigger_reference: Option<&RefName>,
+    source: &crate::treefs_workspace::NodeTreeSource<'_>,
+    path_basis: Option<PathBasis>,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
@@ -376,6 +387,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     let mut ids = BTreeSet::new();
     let (mut source_bytes, mut jobs, mut steps) = (0usize, 0usize, 0usize);
     let mut branch_filtered = false;
+    let mut path_changes: Option<SourcePathChanges> = None;
     for entry in entries {
         if !live() {
             return Err(invalid("dispatch stopped during definition preflight"));
@@ -396,13 +408,35 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .triggers
             .iter()
             .any(|trigger| trigger.name == event && trigger.branch_filter.is_some());
-        let selected = plan.graph().selects_event(
-            event, trigger_reference.map(RefName::as_bytes), &|| !live(),
+        if plan
+            .graph()
+            .triggers
+            .iter()
+            .any(|t| t.name == event && t.path_filter.is_some())
+            && path_changes.is_none()
+        {
+            let (before, mode) = path_basis.ok_or_else(|| invalid("path-filtered dispatch requires canonical event coordinates; use workflow watch"))?;
+            path_changes = Some(
+                crate::treefs_workspace::merge_prepare::changed_paths(
+                    source,
+                    before,
+                    source_commit,
+                    mode,
+                )
+                .map_err(|_| invalid("complete canonical changed-path comparison unavailable"))?,
+            );
+        }
+        let selected = plan.graph().selects_event_with_paths(
+            event, trigger_reference.map(RefName::as_bytes), path_changes.as_ref().map(|c| c.paths.as_slice()), &|| !live(),
         ).map_err(|error| match error {
             fgit_runner::workflow::TriggerSelectionError::MissingBranchReference =>
                 invalid("filtered pull_request dispatch requires a canonical target; use workflow watch --pull-request"),
             fgit_runner::workflow::TriggerSelectionError::ReferenceTooLong =>
                 invalid("workflow trigger reference exceeds profile"),
+            fgit_runner::workflow::TriggerSelectionError::MissingChangedPaths |
+            fgit_runner::workflow::TriggerSelectionError::InvalidChangedPaths |
+            fgit_runner::workflow::TriggerSelectionError::PathMatchBudget =>
+                invalid("workflow changed-path evidence missing, invalid or over budget"),
             fgit_runner::workflow::TriggerSelectionError::Cancelled =>
                 invalid("dispatch stopped during branch selection"),
         })?;
@@ -525,6 +559,20 @@ fn dispatch_at<A: GitHashAlgorithm>(
         limits.run_timeout.as_millis(),
         limits.total_output_bytes,
     );
+    if let Some(changes) = &path_changes {
+        let mut bytes = b"frankengit/workflow-changed-paths/v1\0".to_vec();
+        for path in &changes.paths {
+            bytes.extend_from_slice(&(path.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(path);
+        }
+        let oid =
+            |id: Option<GitOid>| id.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
+        identity.push_str(&format!(
+            ",\"changed_paths\":{{\"profile\":\"unique-merge-base-v1\",\"requested_before\":{},\"compared_before\":{},\"after\":\"{}\",\"before_tree\":{},\"after_tree\":\"{}\",\"count\":{},\"sha256\":\"{}\",\"complete\":true}}",
+            oid(changes.requested_before), oid(changes.compared_before), changes.after,
+            oid(changes.before_tree), changes.after_tree, changes.paths.len(), hex(&sha256_digest(&bytes))
+        ));
+    }
     if branch_filtered {
         let selected_ref = trigger_reference.ok_or_else(|| invalid("missing trigger branch"))?;
         identity.push_str(&format!(
