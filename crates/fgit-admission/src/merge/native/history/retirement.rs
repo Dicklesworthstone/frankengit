@@ -35,7 +35,21 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    retired_effect_in_class(store, cx, basis, key, destination, None, cancelled).await
+    // Own the history scan once instead of embedding its state in every
+    // receipt/driver future and synchronous runtime bridge. Debug poll frames
+    // and runtime bridges otherwise reserve repeated copies of the full scan
+    // on the caller stack. The same scan is awaited to completion with its
+    // original cancellation checkpoints and provenance checks.
+    Box::pin(retired_effect_in_class(
+        store,
+        cx,
+        basis,
+        key,
+        destination,
+        None,
+        cancelled,
+    ))
+    .await
 }
 
 pub(in crate::merge::native) async fn retired_effect_in_class<S, C>(
