@@ -132,16 +132,22 @@ fn omitted_lexical_files_keep_completed_initial_pages_incomplete() {
         path.query = query().path;
         path.results.hits[0].spans[0].byte_offset = 4;
         check_lexical_join(&content, &path).unwrap();
-        let mut initial = InitialReport {
-            vector: GenerationVector {
-                lexical: content.generation.clone(),
-                symbols: None,
-            },
+        let vector = GenerationVector {
+            lexical: content.generation.clone(),
+            symbols: None,
+        };
+        let read = authorization::model_context(content.source.namespace);
+        let mut initial = InitialReport::from_channels(
+            &read,
             content,
             path,
-            symbols: SymbolChannel::NotRequested,
-            result_bytes: 0,
-        };
+            SymbolChannel::NotRequested,
+            vector,
+            0,
+            MAX_RESULT_BYTES,
+            &mut || Ok(()),
+        )
+        .unwrap();
         assert!(initial.content.results.complete && initial.path.results.complete);
         assert_eq!(initial.content.results.hits.len(), 1);
         assert_eq!(initial.path.results.hits.len(), 1);
@@ -475,17 +481,24 @@ fn optional_symbols_never_swallow_integrity_cancellation_or_retained_checkpoints
 #[test]
 fn optional_unavailability_is_incomplete_and_retained_bytes_are_shared() {
     let content = report();
-    let path = content.clone();
-    let mut report = InitialReport {
-        vector: GenerationVector {
-            lexical: content.generation.clone(),
-            symbols: None,
-        },
+    let mut path = content.clone();
+    path.query = query().path;
+    let vector = GenerationVector {
+        lexical: content.generation.clone(),
+        symbols: None,
+    };
+    let read = authorization::model_context(content.source.namespace);
+    let mut report = InitialReport::from_channels(
+        &read,
         content,
         path,
-        symbols: SymbolChannel::NotRequested,
-        result_bytes: 0,
-    };
+        SymbolChannel::NotRequested,
+        vector,
+        0,
+        MAX_RESULT_BYTES,
+        &mut || Ok(()),
+    )
+    .unwrap();
     assert!(report.complete());
     report.symbols = SymbolChannel::Unavailable(SymbolUnavailable::Stale);
     assert!(!report.complete());

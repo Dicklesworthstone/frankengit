@@ -549,6 +549,12 @@ Event aggregates, projections, APIs, and merge queue test:
 - `Initial` remains valid if refinement fails;
 - stable result IDs/order/tie-breaks;
 - source spans and authority/generation receipts;
+- Initial exact/revalidated reports retain one saved read label per row,
+  distinct host/principal and original index provenance; changed contexts,
+  sources, generations, positions and rows refuse beside permitted originals;
+- native hydration and HTTP/CLI/MCP preserve original row membership through
+  file/anchor/excerpt lineage; saved path/blob/span/bytes substitutions refuse,
+  and added metadata remains under the original Initial result allowance;
 - lexical/path/symbol/semantic/graph channel explanations;
 - bounded candidate/rerank/context budgets;
 - offline/missing-model graceful behavior.

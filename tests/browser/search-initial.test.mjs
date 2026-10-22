@@ -3,7 +3,45 @@ import assert from 'node:assert/strict';
 import { initialQuery, initialCommand, initialReply, indexQuery, symbolQuery } from '../../crates/fgit-node/src/smart_http/server/browser/search-index.mjs';
 import { Transport } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { clone, fixture, harness, hex, token, selected, response, fileReply, webcrypto } from './search-initial-fixtures.mjs';
+import { labelledInitialFixture } from './search-label-fixtures.mjs';
 const accepted = f => initialReply(f.reply, selected(f.format), initialQuery(f.input));
+
+for (const format of ['sha1', 'sha256']) test(`retains declared native read-result labels without a browser proof claim (${format})`, async () => {
+  const f = labelledInitialFixture({ format }), saved = clone(f.reply), result = accepted(f);
+  assert.equal(result.authorization.state, 'labelled');
+  assert.equal(result.authorization.profile, f.reply.authorization.profile);
+  assert.equal(result.authorization.binding, f.reply.authorization.binding);
+  assert.equal(result.authorization.reusableCapability, false);
+  for (const [rows, originals] of [[result.content.hits, f.reply.content.hits], [result.path.hits, f.reply.path.hits],
+    [result.symbols.result.hits, f.reply.symbols.result.matches]]) for (let i = 0; i < rows.length; i++) {
+    assert.equal(rows[i].authorizationLabel, originals[i].authorization_label);
+    assert.equal(rows[i].positionDomain, originals[i].position_domain);
+  }
+  assert.deepEqual(f.reply, saved);
+  const h = harness(f); await h.connect();
+  assert.deepEqual((await h.client.search(f.input)).authorization, result.authorization);
+  assert.equal(h.client.state.result.content.hits[0].authorizationLabel, f.reply.content.hits[0].authorization_label);
+  h.client.disconnect();
+});
+test('legacy Initial responses explicitly remain unlabelled', () => {
+  assert.deepEqual(accepted(fixture()).authorization, { state: 'legacy-unlabelled' });
+});
+test('declared profiles reject malformed, missing, mixed or incorrectly typed row labels', () => {
+  const original = labelledInitialFixture(); accepted(original);
+  for (const mutate of [r => { r.authorization.profile = 'unknown'; }, r => { delete r.authorization.binding; },
+    r => { r.authorization.reusable_capability = true; }, r => { r.authorization.principal = null; },
+    r => { r.authorization.scope = 'sparse'; }, r => { r.authorization.host = 'caller-approved'; },
+    r => { delete r.content.hits[0].authorization_label; }, r => { r.path.hits[0].authorization_label = 'A'.repeat(64); },
+    r => { r.symbols.result.matches[0].authorization_label = 'f'.repeat(63); },
+    r => { r.content.hits[0].position_domain = 'raw-path-bytes'; }, r => { delete r.path.hits[0].position_domain; },
+    r => { r.symbols.result.matches[0].position_domain = 'source-blob-bytes'; },
+    r => { delete r.authorization; }, r => { r.retained_result_bytes--; }]) {
+    const f = labelledInitialFixture(); mutate(f.reply); assert.throws(() => accepted(f));
+    accepted(original);
+  }
+  const legacy = fixture(); legacy.reply.content.hits[0].position_domain = 'source-blob-bytes';
+  assert.throws(() => accepted(legacy));
+});
 
 test('normalization keeps two lexical channels and case-sensitive symbols distinct', () => {
   const input = fixture().input;

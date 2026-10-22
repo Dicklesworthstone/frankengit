@@ -104,7 +104,7 @@ fn live(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> {
 // Equality of a bare tree or repository ID is insufficient. In particular a
 // recreated repository, another ref or another native hash domain cannot reuse
 // the generation. Both sources have already been verified by their owners.
-fn same_native_source(
+pub(crate) fn same_native_source(
     indexed: &LexicalSource,
     current: &LexicalSource,
 ) -> Result<(), NodeWorkspaceRefusal> {

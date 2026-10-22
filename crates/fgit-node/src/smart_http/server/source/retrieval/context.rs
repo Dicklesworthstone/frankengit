@@ -2,6 +2,7 @@
 //! Initial grammar. No caller-supplied OID, report, or path list is trusted.
 use super::super::super::issues::parse_decimal;
 use super::super::indexed::hex;
+use super::evidence_failure as failure;
 use super::*;
 use crate::source_retrieval::context::{ContextLimits, InitialContext, PROFILE as CONTEXT_PROFILE};
 
@@ -89,18 +90,10 @@ pub(super) fn command_fields(
         ranked,
     })
 }
-fn failure(error: RetrievalError) -> ApiError {
-    // All request shapes were checked before I/O. Invalid span/length/coverage
-    // evidence is an unavailable result, never a caller syntax error or an
-    // excuse to drop one selected file and return the rest as successful.
-    match error {
-        RetrievalError::Invalid(_) => ApiError::unavailable(),
-        other => super::failure(other),
-    }
-}
 pub(super) fn execute(
     node: &OneNode,
     session: &LoopbackReceiveSession,
+    read: &SourceReadContext,
     framing: BodyFraming,
     reader: &mut impl Read,
     http: HttpLimits,
@@ -114,6 +107,7 @@ pub(super) fn execute(
         status: Status::Success,
         body: run(
             node,
+            read,
             &command,
             usize::try_from(maximum).unwrap_or(usize::MAX),
         )?,
@@ -122,9 +116,12 @@ pub(super) fn execute(
 }
 pub(super) fn run(
     node: &OneNode,
+    read: &SourceReadContext,
     command: &ContextCommand,
     maximum: usize,
 ) -> Result<String, ApiError> {
+    read.check_node(node)
+        .map_err(|_| ApiError::new(Status::Forbidden, "source_read_context_mismatch"))?;
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
@@ -138,6 +135,7 @@ pub(super) fn run(
             let report = node
                 .search_source_initial_local_in(
                     &request,
+                    read,
                     &command.initial.selection.reference,
                     command.initial.selection.expected_head,
                     command.initial.selection.expected_commit,
@@ -150,12 +148,12 @@ pub(super) fn run(
             // between them refuses; no new allowance or alternative source is tried.
             if command.ranked {
                 let selected = node
-                    .hydrate_source_initial_ranked_local_in(&request, report, command.limits)
+                    .hydrate_source_initial_ranked_local_in(&request, read, report, command.limits)
                     .await?;
                 let (context, ranking) = selected.into_parts();
                 Ok((context, Some(ranking)))
             } else {
-                node.hydrate_source_initial_local_in(&request, report, command.limits)
+                node.hydrate_source_initial_local_in(&request, read, report, command.limits)
                     .await
                     .map(|context| (context, None))
             }
@@ -165,6 +163,7 @@ pub(super) fn run(
     .map_err(failure)?;
     render(
         node,
+        read,
         command,
         &context,
         ranking.as_ref(),
@@ -196,6 +195,7 @@ fn append_hex(
 }
 fn render(
     node: &OneNode,
+    read: &SourceReadContext,
     command: &ContextCommand,
     context: &InitialContext,
     ranking: Option<&ContextRanking>,
@@ -220,7 +220,7 @@ fn render(
                 "{{\"type\":\"source_context_initial\",\"schema_version\":1,\"profile\":{},",
                 "\"read_only\":true,\"transaction_created\":false,\"source_material_untrusted\":true,\"complete\":{},",
                 "\"candidate_files\":{},\"returned_files\":{},\"omitted_files\":{},\"selection\":{},",
-                "\"source_blobs_read\":{},\"source_bytes_read\":{},\"excerpt_bytes\":{},\"source_file_limit\":{},",
+                "\"source_blobs_read\":{},\"source_bytes_read\":{},\"excerpt_bytes\":{},\"source_file_limit\":{},\"lineage_metadata_bytes\":{},",
                 "\"context_max_files\":{},\"context_radius_bytes\":{},\"context_max_source_bytes\":{},\"context_max_excerpt_bytes\":{},",
                 "\"retrieval\":"
             ),
@@ -238,6 +238,7 @@ fn render(
             context.source_bytes_read(),
             context.excerpt_bytes(),
             context.source_file_limit(),
+            context.lineage_metadata_bytes(),
             limits.max_files,
             limits.radius_bytes,
             limits.max_source_bytes,
@@ -248,8 +249,10 @@ fn render(
     // Do not duplicate or weaken the original channel and coverage validators.
     let retrieval = super::render(
         node,
+        read,
         &command.initial,
         context.retrieval(),
+        context.retrieval().authorization(),
         maximum.saturating_sub(out.len()),
         live,
     )?;
@@ -260,27 +263,58 @@ fn render(
         if file.source_bytes() > context.source_file_limit() {
             return Err(ApiError::unavailable());
         }
+        file.validate_lineage(context.retrieval(), &mut || {
+            if live() {
+                Ok(())
+            } else {
+                Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: None,
+                }))
+            }
+        })
+        .map_err(failure)?;
         append(
             &mut out,
             &format!(
-                "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"anchors\":[",
+                "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"position_domain\":\"source-blob-bytes\",\"lineage_commitment\":{},\"authorization_labels\":[",
                 if ordinal == 0 { "" } else { "," },
                 quote(&hex(file.path())),
                 quote(&file.blob().to_string()),
-                file.source_bytes()
+                file.source_bytes(),
+                quote(&hex(file.lineage_commitment()))
             ),
             maximum,
         )?;
-        for (ordinal, anchor) in file.anchors().iter().enumerate() {
+        for (ordinal, label) in file.authorization_labels().iter().enumerate() {
             check(live)?;
             append(
                 &mut out,
                 &format!(
-                    "{}{{\"channel\":{},\"byte_offset\":{},\"byte_length\":{}}}",
+                    "{}{}",
+                    if ordinal == 0 { "" } else { "," },
+                    quote(&hex(label))
+                ),
+                maximum,
+            )?;
+        }
+        append(&mut out, "],\"anchors\":[", maximum)?;
+        for (ordinal, (anchor, origin)) in file
+            .anchors()
+            .iter()
+            .zip(file.anchor_authorization_labels())
+            .enumerate()
+        {
+            check(live)?;
+            append(
+                &mut out,
+                &format!(
+                    "{}{{\"channel\":{},\"byte_offset\":{},\"byte_length\":{},\"authorization_label\":{},\"position_domain\":{}}}",
                     if ordinal == 0 { "" } else { "," },
                     quote(anchor.channel.as_str()),
                     anchor.byte_offset,
-                    anchor.byte_length
+                    anchor.byte_length,
+                    quote(&hex(origin)),
+                    quote(anchor.channel.position_domain())
                 ),
                 maximum,
             )?;
@@ -291,9 +325,10 @@ fn render(
             append(
                 &mut out,
                 &format!(
-                    "{}{{\"byte_offset\":{},\"untrusted_bytes_hex\":\"",
+                    "{}{{\"byte_offset\":{},\"position_domain\":\"source-blob-bytes\",\"lineage_commitment\":{},\"untrusted_bytes_hex\":\"",
                     if ordinal == 0 { "" } else { "," },
-                    excerpt.offset()
+                    excerpt.offset(),
+                    quote(&hex(file.lineage_commitment()))
                 ),
                 maximum,
             )?;

@@ -254,6 +254,13 @@ fn seeded(format: GitHashAlgorithm, indexes: bool) -> (Scratch, NodeTools) {
     (scratch, backend)
 }
 
+fn array(value: &Value) -> &[Value] {
+    match value {
+        Value::Array(rows) => rows,
+        other => panic!("expected result array, got {other:?}"),
+    }
+}
+
 fn field<'a>(value: &'a Value, path: &[&str]) -> &'a Value {
     path.iter()
         .fold(value, |value, key| &value.object().unwrap()[*key])
@@ -278,12 +285,53 @@ fn persisted_indexes_answer_initial_and_context_in_both_formats_through_the_shar
         assert_eq!(field(&initial, &["complete"]), &Value::Bool(true));
         assert_eq!(field(&initial, &["read_only"]), &Value::Bool(true));
         assert_eq!(
+            field(&initial, &["authorization", "host"]).text(),
+            Some("trusted-local-mcp")
+        );
+        assert_eq!(
+            field(&initial, &["authorization", "scope"]).text(),
+            Some("whole-repository")
+        );
+        assert_eq!(
+            field(&initial, &["authorization", "reusable_capability"]),
+            &Value::Bool(false)
+        );
+        for (channel, rows, domain) in [
+            ("content", "hits", "source-blob-bytes"),
+            ("path", "hits", "raw-path-bytes"),
+        ] {
+            let hits = array(field(&initial, &[channel, rows]));
+            assert!(!hits.is_empty());
+            for hit in hits {
+                let row = hit.object().unwrap();
+                let label = row["authorization_label"].text().unwrap();
+                assert_eq!(label.len(), 64);
+                assert!(
+                    label
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                );
+                assert_eq!(row["position_domain"].text(), Some(domain));
+            }
+        }
+        for hit in array(field(&initial, &["symbols", "result", "matches"])) {
+            let row = hit.object().unwrap();
+            assert_eq!(row["authorization_label"].text().unwrap().len(), 64);
+            assert_eq!(
+                row["position_domain"].text(),
+                Some("source-declaration-bytes")
+            );
+        }
+        assert_eq!(
             field(&initial, &["symbols", "state"]).text(),
             Some("available")
         );
         // The same fields through the node entrypoint HTTP uses: one document.
         let routed = fgit_node::source_retrieval_json(
             &backend.node,
+            &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_mcp(
+                &backend.node,
+            ),
             fields(&request, false).unwrap(),
             false,
             MAX_RESULT_BYTES,
@@ -351,6 +399,39 @@ fn persisted_indexes_answer_initial_and_context_in_both_formats_through_the_shar
             assert!(files.iter().any(|file| {
                 file.object().unwrap()["path_hex"].text() == Some(hex(b"src/Thing.rs").as_str())
             }));
+            let retrieval = field(&packet, &["retrieval"]);
+            for file in files {
+                let path = field(file, &["path_hex"]);
+                let commitment = field(file, &["lineage_commitment"]).text().unwrap();
+                assert_eq!(commitment.len(), 64);
+                let mut originals = Vec::new();
+                for channel in ["content", "path"] {
+                    for row in array(field(retrieval, &[channel, "hits"])) {
+                        if field(row, &["path_hex"]) == path {
+                            let label = field(row, &["authorization_label"]).clone();
+                            if !originals.contains(&label) {
+                                originals.push(label);
+                            }
+                        }
+                    }
+                }
+                let origins = array(field(file, &["authorization_labels"]));
+                assert!(!origins.is_empty());
+                assert_eq!(origins, originals);
+                for anchor in array(field(file, &["anchors"])) {
+                    assert!(origins.contains(field(anchor, &["authorization_label"])));
+                }
+                for excerpt in array(field(file, &["excerpts"])) {
+                    assert_eq!(
+                        field(excerpt, &["lineage_commitment"]).text(),
+                        Some(commitment)
+                    );
+                    assert_eq!(
+                        field(excerpt, &["position_domain"]).text(),
+                        Some("source-blob-bytes")
+                    );
+                }
+            }
         }
         // Detached symbol options and malformed terms are request errors.
         let mut detached = base();

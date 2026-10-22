@@ -46,6 +46,20 @@ fn authenticated_context_returns_exact_native_bytes_once_per_file_and_keeps_inde
         assert!(first.body.contains("\"source_material_untrusted\":true"));
         assert!(first.body.contains("\"transaction_created\":false"));
         assert!(first.body.contains("\"generation_vector\":"));
+        assert!(
+            first
+                .body
+                .contains("\"host\":\"http-repository-read-credential\"")
+        );
+        assert_eq!(first.body.matches("\"authorization_labels\":[").count(), 4);
+        // Four files and four excerpts each retain the same file-level profile.
+        assert_eq!(first.body.matches("\"lineage_commitment\":").count(), 8);
+        assert_eq!(text(&first.body, "lineage_commitment").len(), 64);
+        assert!(
+            first
+                .body
+                .contains("\"position_domain\":\"raw-path-bytes\"")
+        );
         let chunked = post(&server.client, "context-initial", 'a', &input, true);
         status(&chunked, 200);
         assert_eq!(chunked.body, first.body);

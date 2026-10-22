@@ -2,6 +2,7 @@
 //! This is untrusted source material, not an Agent Protocol ContextPacket,
 //! a capability, a retention pin, or a claim that source instructions are safe.
 use super::{InitialReport, RetrievalError, SymbolChannel};
+use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_types::GitOid;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -67,6 +68,13 @@ pub enum ContextChannel {
     Symbol,
 }
 impl ContextChannel {
+    #[must_use]
+    pub const fn position_domain(self) -> &'static str {
+        match self {
+            Self::Path => "raw-path-bytes",
+            Self::Content | Self::Symbol => "source-blob-bytes",
+        }
+    }
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Content => "content",
@@ -101,6 +109,10 @@ pub struct ContextFile {
     source_bytes: usize,
     anchors: Vec<ContextAnchor>,
     excerpts: Vec<ContextExcerpt>,
+    // Original retrieval-row commitments; these are not read capabilities.
+    authorization_labels: Vec<[u8; 32]>,
+    anchor_authorization_labels: Vec<[u8; 32]>,
+    lineage_commitment: [u8; 32],
 }
 impl ContextFile {
     pub fn path(&self) -> &[u8] {
@@ -118,6 +130,184 @@ impl ContextFile {
     pub fn excerpts(&self) -> &[ContextExcerpt] {
         &self.excerpts
     }
+    /// Original row labels contributing to this file, in first-observed order.
+    /// Every excerpt inherits this file's commitment and these references.
+    #[must_use]
+    pub fn authorization_labels(&self) -> &[[u8; 32]] {
+        &self.authorization_labels
+    }
+    /// One original row label per anchor, in the unchanged anchor order.
+    #[must_use]
+    pub fn anchor_authorization_labels(&self) -> &[[u8; 32]] {
+        &self.anchor_authorization_labels
+    }
+    /// Saved after verified hydration, never reminted by the renderer.
+    #[must_use]
+    pub const fn lineage_commitment(&self) -> &[u8; 32] {
+        &self.lineage_commitment
+    }
+    fn commitment(
+        &self,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<[u8; 32], RetrievalError> {
+        fn number(hash: &mut Sha256Hasher, value: usize) {
+            hash.update(&(value as u64).to_be_bytes());
+        }
+        fn field(hash: &mut Sha256Hasher, bytes: &[u8]) {
+            number(hash, bytes.len());
+            hash.update(bytes);
+        }
+        let mut hash = Sha256Hasher::new();
+        hash.update(b"frankengit/source-context-lineage/v1\0");
+        field(&mut hash, &self.path);
+        field(&mut hash, self.blob.to_string().as_bytes());
+        number(&mut hash, self.source_bytes);
+        number(&mut hash, self.authorization_labels.len());
+        for label in &self.authorization_labels {
+            live()?;
+            hash.update(label);
+        }
+        number(&mut hash, self.anchors.len());
+        if self.anchors.len() != self.anchor_authorization_labels.len() {
+            return Err(RetrievalError::Invalid("context anchor label count"));
+        }
+        for (anchor, label) in self.anchors.iter().zip(&self.anchor_authorization_labels) {
+            live()?;
+            field(&mut hash, anchor.channel.as_str().as_bytes());
+            number(&mut hash, anchor.byte_offset);
+            number(&mut hash, anchor.byte_length);
+            hash.update(label);
+        }
+        number(&mut hash, self.excerpts.len());
+        for excerpt in &self.excerpts {
+            live()?;
+            number(&mut hash, excerpt.offset);
+            number(&mut hash, excerpt.bytes.len());
+            for chunk in excerpt.bytes.chunks(4096) {
+                live()?;
+                hash.update(chunk);
+            }
+        }
+        live()?;
+        Ok(hash.finalize())
+    }
+    fn validate_saved_lineage(
+        &self,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<(), RetrievalError> {
+        live()?;
+        if self.authorization_labels.is_empty()
+            || self.lineage_commitment != self.commitment(live)?
+        {
+            return Err(RetrievalError::Invalid("context lineage commitment"));
+        }
+        Ok(())
+    }
+    /// Check saved hydration evidence and its original retrieval membership.
+    /// Callers must separately validate the report against their own read grant.
+    pub(crate) fn validate_lineage(
+        &self,
+        report: &InitialReport,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<(), RetrievalError> {
+        self.validate_saved_lineage(live)?;
+        let mut observed = Vec::with_capacity(self.authorization_labels.len());
+        for (results, labels) in [
+            (
+                report.content(),
+                report
+                    .authorization()
+                    .lexical(fgit_graph::lexical::LexicalChannel::Content),
+            ),
+            (
+                report.path(),
+                report
+                    .authorization()
+                    .lexical(fgit_graph::lexical::LexicalChannel::Path),
+            ),
+        ] {
+            for (row, label) in results.results.hits.iter().zip(labels) {
+                live()?;
+                if row.path != self.path {
+                    continue;
+                }
+                if row.blob != self.blob || row.content_bytes as usize != self.source_bytes {
+                    return Err(RetrievalError::MixedSource);
+                }
+                if !observed.contains(label) {
+                    observed.push(*label);
+                }
+            }
+        }
+        if let SymbolChannel::Available(symbols) = report.symbols() {
+            for (row, label) in symbols.matches.iter().zip(report.authorization().symbols()) {
+                live()?;
+                if row.location.path != self.path {
+                    continue;
+                }
+                if row.location.blob != self.blob {
+                    return Err(RetrievalError::MixedSource);
+                }
+                if !observed.contains(label) {
+                    observed.push(*label);
+                }
+            }
+        }
+        if observed != self.authorization_labels {
+            return Err(RetrievalError::Invalid("context original label membership"));
+        }
+        for (anchor, origin) in self.anchors.iter().zip(&self.anchor_authorization_labels) {
+            live()?;
+            let valid = match anchor.channel {
+                ContextChannel::Content | ContextChannel::Path => {
+                    let channel = if anchor.channel == ContextChannel::Content {
+                        fgit_graph::lexical::LexicalChannel::Content
+                    } else {
+                        fgit_graph::lexical::LexicalChannel::Path
+                    };
+                    let results = if anchor.channel == ContextChannel::Content {
+                        report.content()
+                    } else {
+                        report.path()
+                    };
+                    results
+                        .results
+                        .hits
+                        .iter()
+                        .zip(report.authorization().lexical(channel))
+                        .any(|(row, label)| {
+                            label == origin
+                                && row.path == self.path
+                                && row.blob == self.blob
+                                && row.spans.iter().any(|span| {
+                                    anchor.byte_offset == span.byte_offset as usize
+                                        && anchor.byte_length == usize::from(span.byte_length)
+                                })
+                        })
+                }
+                ContextChannel::Symbol => match report.symbols() {
+                    SymbolChannel::Available(symbols) => symbols
+                        .matches
+                        .iter()
+                        .zip(report.authorization().symbols())
+                        .any(|(row, label)| {
+                            label == origin
+                                && row.location.path == self.path
+                                && row.location.blob == self.blob
+                                && anchor.byte_offset == row.location.byte_offset
+                                && anchor.byte_length == row.location.match_length
+                        }),
+                    _ => false,
+                },
+            };
+            if !valid || !observed.contains(origin) {
+                return Err(RetrievalError::Invalid(
+                    "context anchor original label membership",
+                ));
+            }
+        }
+        live()
+    }
 }
 
 /// The original retrieval keeps its query, exact source, independent generation
@@ -130,6 +320,7 @@ pub struct InitialContext {
     source_bytes_read: usize,
     excerpt_bytes: usize,
     source_file_limit: usize,
+    lineage_metadata_bytes: usize,
 }
 impl InitialContext {
     pub const fn retrieval(&self) -> &InitialReport {
@@ -156,6 +347,12 @@ impl InitialContext {
     pub const fn source_file_limit(&self) -> usize {
         self.source_file_limit
     }
+    /// Additional conservative lineage reservation under the original Initial
+    /// result allowance. The nested retrieval retains its own exact accounting.
+    #[must_use]
+    pub const fn lineage_metadata_bytes(&self) -> usize {
+        self.lineage_metadata_bytes
+    }
     /// All returned matches were hydrated AND retrieval itself had full
     /// coverage. This does not assert that excerpts contain whole source files.
     pub fn complete(&self) -> bool {
@@ -166,9 +363,13 @@ impl InitialContext {
         plan: &Plan,
         assembly: Assembly,
         source_file_limit: usize,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
     ) -> Result<Self, RetrievalError> {
         if assembly.files.len() != plan.files.len() {
             return Err(RetrievalError::Invalid("incomplete context hydration"));
+        }
+        for file in &assembly.files {
+            file.validate_lineage(&retrieval, live)?;
         }
         Ok(Self {
             retrieval,
@@ -177,21 +378,24 @@ impl InitialContext {
             source_bytes_read: assembly.source_bytes,
             excerpt_bytes: assembly.excerpt_bytes,
             source_file_limit,
+            lineage_metadata_bytes: plan.lineage_metadata_bytes()?,
         })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug)]
 pub(crate) struct Witness {
     anchor: ContextAnchor,
     expected: Vec<u8>,
     raw_identifier: bool,
+    authorization_label: [u8; 32],
 }
 pub(crate) struct PlannedFile {
     pub(crate) path: Vec<u8>,
     pub(crate) blob: GitOid,
     source_bytes: Option<usize>,
     witnesses: Vec<Witness>,
+    authorization_labels: Vec<[u8; 32]>,
 }
 pub(crate) struct Plan {
     pub(crate) files: Vec<PlannedFile>,
@@ -220,6 +424,7 @@ fn identity(
                 blob,
                 source_bytes: size,
                 witnesses: Vec::new(),
+                authorization_labels: Vec::new(),
             });
         }
         Entry::Occupied(mut entry) => {
@@ -303,11 +508,23 @@ impl Plan {
             files.into_iter().take(limits.max_files).collect()
         };
         let mut anchors = 0usize;
-        for (channel, report) in [
-            (ContextChannel::Content, report.content()),
-            (ContextChannel::Path, report.path()),
+        for (channel, report, labels) in [
+            (
+                ContextChannel::Content,
+                report.content(),
+                report
+                    .authorization()
+                    .lexical(fgit_graph::lexical::LexicalChannel::Content),
+            ),
+            (
+                ContextChannel::Path,
+                report.path(),
+                report
+                    .authorization()
+                    .lexical(fgit_graph::lexical::LexicalChannel::Path),
+            ),
         ] {
-            for hit in &report.results.hits {
+            for (ordinal, hit) in report.results.hits.iter().enumerate() {
                 check(cancelled)?;
                 let Some(file) = files.get_mut(&hit.path) else {
                     continue;
@@ -326,13 +543,16 @@ impl Plan {
                         },
                         expected,
                         false,
+                        *labels
+                            .get(ordinal)
+                            .ok_or(RetrievalError::Invalid("context lexical label count"))?,
                         &mut anchors,
                     )?;
                 }
             }
         }
         if let SymbolChannel::Available(channel) = report.symbols() {
-            for hit in &channel.matches {
+            for (ordinal, hit) in channel.matches.iter().enumerate() {
                 check(cancelled)?;
                 if let Some(file) = files.get_mut(&hit.location.path) {
                     file.push(
@@ -343,14 +563,18 @@ impl Plan {
                         },
                         &hit.name,
                         hit.raw_identifier,
+                        *report
+                            .authorization()
+                            .symbols()
+                            .get(ordinal)
+                            .ok_or(RetrievalError::Invalid("context symbol label count"))?,
                         &mut anchors,
                     )?;
                 }
             }
         }
         for file in files.values_mut() {
-            file.witnesses.sort();
-            file.witnesses.dedup();
+            file.finish_witnesses();
         }
         check(cancelled)?;
         Ok(Self {
@@ -358,13 +582,71 @@ impl Plan {
             candidate_files,
         })
     }
+    /// Conservative binary + wire lineage reservation before native source I/O.
+    /// Planning vectors are fitted once after dedup; original references,
+    /// assembled copies and validation storage are all included.
+    /// The window bound comes from the original selected witnesses, not bytes
+    /// fetched later, and never widens the existing excerpt/window allowance.
+    pub(crate) fn lineage_metadata_bytes(&self) -> Result<usize, RetrievalError> {
+        let mut total = 0usize;
+        let mut windows = 0usize;
+        for file in &self.files {
+            let origins = file.authorization_labels.len();
+            let anchors = file.witnesses.len();
+            let source_anchors = file
+                .witnesses
+                .iter()
+                .filter(|w| w.anchor.channel != ContextChannel::Path)
+                .count();
+            windows = windows
+                .checked_add(source_anchors.max(1))
+                .ok_or(RetrievalError::Limit("context lineage bytes"))?;
+            let amount = origins
+                .checked_mul(256)
+                .and_then(|n| anchors.checked_mul(256).and_then(|a| n.checked_add(a)))
+                .and_then(|n| n.checked_add(1024))
+                .ok_or(RetrievalError::Limit("context lineage bytes"))?;
+            total = total
+                .checked_add(amount)
+                .ok_or(RetrievalError::Limit("context lineage bytes"))?;
+        }
+        windows
+            .min(MAX_WINDOWS)
+            .checked_mul(192)
+            .and_then(|bytes| total.checked_add(bytes))
+            .ok_or(RetrievalError::Limit("context lineage bytes"))
+    }
 }
 impl PlannedFile {
+    fn finish_witnesses(&mut self) {
+        // Preserve the original observable order/dedup key. A row label
+        // distinguishes provenance, never changes anchor selection/order.
+        self.witnesses.sort_by(|left, right| {
+            (&left.anchor, &left.expected, left.raw_identifier).cmp(&(
+                &right.anchor,
+                &right.expected,
+                right.raw_identifier,
+            ))
+        });
+        self.witnesses.dedup_by(|left, right| {
+            (&left.anchor, &left.expected, left.raw_identifier)
+                == (&right.anchor, &right.expected, right.raw_identifier)
+        });
+        // Fit retained planning storage so result-byte accounting depends on
+        // deterministic lengths, never target-specific vector growth history.
+        self.witnesses = std::mem::take(&mut self.witnesses)
+            .into_boxed_slice()
+            .into_vec();
+        self.authorization_labels = std::mem::take(&mut self.authorization_labels)
+            .into_boxed_slice()
+            .into_vec();
+    }
     fn push(
         &mut self,
         anchor: ContextAnchor,
         expected: &[u8],
         raw_identifier: bool,
+        authorization_label: [u8; 32],
         count: &mut usize,
     ) -> Result<(), RetrievalError> {
         if *count >= MAX_ANCHORS {
@@ -374,10 +656,14 @@ impl PlannedFile {
             return Err(RetrievalError::Invalid("context anchor length"));
         }
         *count += 1;
+        if !self.authorization_labels.contains(&authorization_label) {
+            self.authorization_labels.push(authorization_label);
+        }
         self.witnesses.push(Witness {
             anchor,
             expected: expected.to_vec(),
             raw_identifier,
+            authorization_label,
         });
         Ok(())
     }
@@ -484,13 +770,24 @@ impl Assembly {
                 bytes: bytes[range].to_vec(),
             });
         }
-        self.files.push(ContextFile {
+        let mut hydrated = ContextFile {
             path: file.path.clone(),
             blob: file.blob,
             source_bytes: bytes.len(),
             anchors: file.witnesses.iter().map(|w| w.anchor.clone()).collect(),
             excerpts,
-        });
+            authorization_labels: file.authorization_labels.clone(),
+            anchor_authorization_labels: file
+                .witnesses
+                .iter()
+                .map(|w| w.authorization_label)
+                .collect(),
+            lineage_commitment: [0; 32],
+        };
+        // All native source and span checks above precede this immutable saved
+        // commitment. Rendering compares against it; it never remints evidence.
+        hydrated.lineage_commitment = hydrated.commitment(&mut || check(cancelled))?;
+        self.files.push(hydrated);
         self.source_bytes = source_bytes;
         self.excerpt_bytes = excerpt_bytes;
         self.windows = windows;

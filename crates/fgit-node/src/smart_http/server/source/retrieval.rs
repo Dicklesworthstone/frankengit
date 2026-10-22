@@ -4,6 +4,7 @@ use super::super::issues::{ApiError, parse_form, parse_snapshot, quote, ref_fiel
 use super::indexed::{activation, append, check, positive, read_route, token, unhex};
 use super::request::Selection;
 use super::*;
+use crate::source_retrieval::authorization::{InitialAuthorization, SourceReadContext};
 use crate::source_retrieval::{
     Checkpoints, InitialLimits, InitialQuery, InitialReport, PROFILE, RetrievalError,
     SymbolChannel, SymbolPolicy, SymbolUnavailable,
@@ -234,10 +235,20 @@ fn failure(error: RetrievalError) -> ApiError {
         }
     }
 }
+// Request shapes have already been checked before these operations. Invalid
+// generated evidence is unavailable, while cancellation/resource/source errors
+// retain the existing read contract instead of being flattened to HTTP 503.
+fn evidence_failure(error: RetrievalError) -> ApiError {
+    match error {
+        RetrievalError::Invalid(_) => ApiError::unavailable(),
+        other => failure(other),
+    }
+}
 pub(super) fn execute(
     node: &OneNode,
     _request: &Request<'_>,
     session: &LoopbackReceiveSession,
+    read: &SourceReadContext,
     framing: BodyFraming,
     reader: &mut impl Read,
     http: HttpLimits,
@@ -247,13 +258,14 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     if _request.hydrate {
-        return context::execute(node, session, framing, reader, http, maximum);
+        return context::execute(node, session, read, framing, reader, http, maximum);
     }
     let command = command(&read_form(reader, framing, http)?, node.object_format)?;
     Ok(JsonReply {
         status: Status::Success,
         body: run(
             node,
+            read,
             &command,
             usize::try_from(maximum).unwrap_or(usize::MAX),
         )?,
@@ -266,28 +278,42 @@ pub(super) fn execute(
 /// `fg mcp`. `fields` are those routes' form pairs without `object_format`,
 /// which the node supplies. The grammar, validation, single request deadline
 /// and JSON document are the routes' own; there is no HTTP framing and no
-/// credential check, so the caller must already hold source-read authority.
+/// credential check: the caller must first enforce its explicit host read gate
+/// and supply that node-bound SourceReadContext. The context is retained before
+/// index I/O and labels are bound once after native source selection. Labels
+/// are response evidence, never reusable read permission or signed proofs.
 /// Errors are the routes' stable refusal codes.
 pub fn source_retrieval_json(
     node: &OneNode,
+    read: &SourceReadContext,
     mut fields: Vec<(String, String)>,
     hydrate: bool,
     maximum: usize,
 ) -> Result<String, &'static str> {
+    read.check_node(node)
+        .map_err(|_| "source_read_context_mismatch")?;
     if fields.iter().any(|(name, _)| name == "object_format") {
         return Err("unknown_initial_field");
     }
     fields.push(("object_format".into(), node.object_format.as_str().into()));
     let result = if hydrate {
         context::command_fields(fields, node.object_format)
-            .and_then(|command| context::run(node, &command, maximum))
+            .and_then(|command| context::run(node, read, &command, maximum))
     } else {
-        command_fields(fields, node.object_format).and_then(|command| run(node, &command, maximum))
+        command_fields(fields, node.object_format)
+            .and_then(|command| run(node, read, &command, maximum))
     };
     result.map_err(|error| error.code)
 }
 
-fn run(node: &OneNode, command: &Command, maximum: usize) -> Result<String, ApiError> {
+fn run(
+    node: &OneNode,
+    read: &SourceReadContext,
+    command: &Command,
+    maximum: usize,
+) -> Result<String, ApiError> {
+    read.check_node(node)
+        .map_err(|_| ApiError::new(Status::Forbidden, "source_read_context_mismatch"))?;
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
@@ -299,6 +325,7 @@ fn run(node: &OneNode, command: &Command, maximum: usize) -> Result<String, ApiE
         &context,
         node.search_source_initial_local_in(
             &context,
+            read,
             &command.selection.reference,
             command.selection.expected_head,
             command.selection.expected_commit,
@@ -308,8 +335,16 @@ fn run(node: &OneNode, command: &Command, maximum: usize) -> Result<String, ApiE
         ),
         &mut live,
     )
-    .map_err(failure)?;
-    render(node, command, &report, maximum, &mut live)
+    .map_err(evidence_failure)?;
+    render(
+        node,
+        read,
+        command,
+        &report,
+        report.authorization(),
+        maximum,
+        &mut live,
+    )
 }
 
 fn generation_json(value: &fgit_graph::GenerationActivation) -> String {
@@ -321,12 +356,25 @@ fn generation_json(value: &fgit_graph::GenerationActivation) -> String {
 }
 fn render(
     node: &OneNode,
+    read: &SourceReadContext,
     command: &Command,
     report: &InitialReport,
+    labels: &InitialAuthorization,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
     check(live)?;
+    labels
+        .validate(read, report, &mut || {
+            if live() {
+                Ok(())
+            } else {
+                Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: None,
+                }))
+            }
+        })
+        .map_err(evidence_failure)?;
     let source = report.source();
     let count = command.query.channels();
     let work = |i| crate::source_retrieval::share(command.limits.max_work, count, i);
@@ -345,6 +393,15 @@ fn render(
             },
         )
     };
+    let descriptor = format!(
+        "{{\"profile\":{},\"host\":{},\"principal\":{},\"scope\":\"whole-repository\",\"binding\":{},\"reusable_capability\":false}}",
+        quote(crate::source_retrieval::authorization::PROFILE),
+        quote(labels.host()),
+        labels
+            .principal()
+            .map_or_else(|| "null".into(), |p| quote(&p.to_string())),
+        quote(&super::indexed::hex(labels.binding()))
+    );
     let mut out = String::new();
     append(
         &mut out,
@@ -357,7 +414,7 @@ fn render(
                 "\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"root_tree\":{},",
                 "\"generation_vector\":{{\"lexical\":{},\"symbols\":{}}},",
                 "\"max_results_per_channel\":{},\"max_work\":{},\"max_payload_bytes\":{},\"max_result_bytes\":{},",
-                "\"retained_result_bytes\":{},\"completed_payload_bytes_read\":{},\"completed_work_units\":{},\"content\":"
+                "\"retained_result_bytes\":{},\"completed_payload_bytes_read\":{},\"completed_work_units\":{},\"authorization\":{},\"content\":"
             ),
             quote(PROFILE),
             report.complete(),
@@ -382,13 +439,15 @@ fn render(
             command.limits.max_result_bytes,
             report.result_bytes(),
             report.completed_payload_bytes_read(),
-            report.completed_work_units()
+            report.completed_work_units(),
+            descriptor
         ),
         maximum,
     )?;
     let content = super::indexed::render_initial(
         node,
         report.content(),
+        labels.lexical(fgit_graph::lexical::LexicalChannel::Content),
         command.query.content(),
         lex(0),
         maximum
@@ -401,6 +460,7 @@ fn render(
     let path = super::indexed::render_initial(
         node,
         report.path(),
+        labels.lexical(fgit_graph::lexical::LexicalChannel::Path),
         command.query.path(),
         lex(1),
         maximum
@@ -429,6 +489,7 @@ fn render(
             let rendered = super::symbols::indexed::render_initial(
                 node,
                 symbols,
+                labels.symbols(),
                 query,
                 (command.limits.max_results_per_channel, bytes(2)),
                 maximum
@@ -449,6 +510,33 @@ fn render(
 mod tests {
     use super::*;
     const BASE: &str = "object_format=sha1&ref=refs/heads/main&term_hex=5468696e67";
+    #[test]
+    fn output_evidence_refusals_preserve_timeout_and_resource_contracts() {
+        let stopped = evidence_failure(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
+            exhaustion: None,
+        }));
+        assert_eq!(stopped.status, Status::Timeout);
+        assert_eq!(stopped.code, "request_timeout");
+        assert!(!stopped.outcome_unknown);
+        let invalid = evidence_failure(RetrievalError::Invalid("result authorization label"));
+        assert_eq!(invalid.status, Status::Unavailable);
+        assert_eq!(invalid.code, "repository_unavailable");
+        assert!(!invalid.outcome_unknown);
+        // The same Invalid classification at the request parser remains a
+        // caller error; generated evidence must not be blamed on the caller.
+        assert_eq!(
+            failure(RetrievalError::Invalid("query")).status,
+            Status::BadRequest
+        );
+        assert_eq!(
+            evidence_failure(RetrievalError::Limit("labels")).status,
+            Status::TooLarge
+        );
+        assert_eq!(
+            evidence_failure(RetrievalError::MixedSource).status,
+            Status::Conflict
+        );
+    }
     #[test]
     fn parser_keeps_symbol_case_and_scope() {
         let c=command((BASE.to_owned()+"&path_prefix_hex=737263&symbol_name_hex=5468696e67&symbol_match=prefix&symbol_policy=required").as_bytes(),

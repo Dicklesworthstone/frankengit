@@ -5,6 +5,9 @@ use super::{
     IndexedLexicalReport, LexicalQueryLimits, LexicalReadLimits, LexicalSource,
     RevalidatedIndexReport, RevalidatedIndexRequest,
 };
+use crate::source_retrieval::authorization::{
+    InitialAuthorization, InitialLabelInput, SourceReadContext,
+};
 use crate::source_retrieval::{
     Checkpoints, GenerationVector, InitialLimits, InitialQuery, RetrievalError, SymbolChannel,
     add_result, check_lexical_join, check_symbol_join, lexical_result_bytes, live, share,
@@ -29,8 +32,21 @@ pub struct RevalidatedInitialReport {
     symbols: SymbolChannel,
     vector: GenerationVector,
     result_bytes: usize,
+    authorization: InitialAuthorization,
 }
 impl RevalidatedInitialReport {
+    #[must_use]
+    pub const fn authorization(&self) -> &InitialAuthorization {
+        &self.authorization
+    }
+    pub fn validate_authorization(
+        &self,
+        read: &SourceReadContext,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<(), RetrievalError> {
+        self.authorization.validate_revalidated(read, self, live)
+    }
+
     #[must_use]
     pub const fn current_source(&self) -> &LexicalSource {
         &self.current_source
@@ -111,10 +127,11 @@ impl OneNode {
     /// This does not create an IntentRun, retention pin or publication right.
     /// All phases share the request context. Work/payload allowances are split
     /// before I/O, including optional failures, and never borrowed or renewed.
-    /// The existing exact-source Initial reader remains unchanged.
+    /// The existing exact-source Initial reader retains its strict source joins.
     pub async fn search_source_initial_revalidated_local_in(
         &self,
         request: &NodeRequestContext,
+        read: &SourceReadContext,
         reference: &RefName,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
@@ -123,6 +140,7 @@ impl OneNode {
         limits: InitialLimits,
     ) -> Result<RevalidatedInitialReport, RetrievalError> {
         live(request)?;
+        read.check_node(self)?;
         limits.validate(query)?;
         if query.symbols().is_none() && checkpoints.symbols.is_some() {
             return Err(RetrievalError::Invalid(
@@ -256,16 +274,25 @@ impl OneNode {
             _ => None,
         };
         live(request)?;
+        let vector = GenerationVector {
+            lexical: content.generation.clone(),
+            symbols: symbol_generation,
+        };
+        let authorization = InitialAuthorization::bind(
+            read,
+            InitialLabelInput::revalidated(&current_source, &content, &path, &symbols, &vector),
+            &mut result_bytes,
+            limits.max_result_bytes,
+            &mut || live(request),
+        )?;
         Ok(RevalidatedInitialReport {
-            vector: GenerationVector {
-                lexical: content.generation.clone(),
-                symbols: symbol_generation,
-            },
+            vector,
             current_source,
             content,
             path,
             symbols,
             result_bytes,
+            authorization,
         })
     }
 }

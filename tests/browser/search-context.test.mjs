@@ -3,8 +3,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CONTEXT_DEFAULTS, CONTEXT_PROFILE, contextLimits, splitContextQuery, contextCommand,
-  contextReply, joinInitialContext } from '../../crates/fgit-node/src/smart_http/server/browser/search-context.mjs';
+  contextReply, joinInitialContext, contextReport } from '../../crates/fgit-node/src/smart_http/server/browser/search-context.mjs';
 import { fixture, check, limitsFor, hex, copy, oid } from './search-context-fixtures.mjs';
+import { initialReply, initialQuery } from '../../crates/fgit-node/src/smart_http/server/browser/search-index.mjs';
+import { selected } from './search-initial-fixtures.mjs';
+import { labelledContextFixture } from './search-label-fixtures.mjs';
+const labelledContext = f => joinInitialContext(f.reply,
+  raw => initialReply(raw, selected(f.initial.format), initialQuery(f.initial.input)), f.limits);
+for (const format of ['sha1', 'sha256']) test(`labelled context keeps original row membership and file/excerpt references (${format})`, () => {
+  const f = labelledContextFixture({ format }), original = copy(f.reply), value = labelledContext(f), file = value.context.files[0];
+  assert.equal(value.context.lineageMetadataBytes, 2944);
+  assert.deepEqual(file.authorizationLabels, f.reply.files[0].authorization_labels);
+  assert.equal(file.lineageCommitment, f.reply.files[0].lineage_commitment);
+  assert.deepEqual(file.anchors.map(anchor => anchor.authorizationLabel), file.authorizationLabels);
+  assert.deepEqual(file.anchors.map(anchor => anchor.positionDomain), ['source-blob-bytes', 'raw-path-bytes', 'source-blob-bytes']);
+  assert.equal(file.excerpts[0].lineageCommitment, file.lineageCommitment);
+  assert.equal(file.excerpts[0].positionDomain, 'source-blob-bytes');
+  const exported = JSON.parse(contextReport(value));
+  assert.deepEqual(exported.context.files[0].authorizationLabels, file.authorizationLabels);
+  assert.equal(exported.context.files[0].excerpts[0].lineageCommitment, file.lineageCommitment);
+  assert.equal(exported.retrieval.authorization.binding, value.authorization.binding);
+  assert.equal(exported.independentBlobVerification, false);
+  assert.deepEqual(f.reply, original);
+});
+test('labelled context rejects detached origins, anchor labels, domains, commitments and metadata accounting', () => {
+  const original = labelledContextFixture(); labelledContext(original);
+  for (const mutate of [r => { r.files[0].authorization_labels[0] = 'f'.repeat(64); },
+    r => { r.files[0].authorization_labels.reverse(); }, r => { delete r.files[0].authorization_labels; },
+    r => { r.files[0].position_domain = 'raw-path-bytes'; }, r => { r.files[0].lineage_commitment = 'x'.repeat(64); },
+    r => { r.files[0].anchors[0].authorization_label = r.files[0].authorization_labels[1]; },
+    r => { delete r.files[0].anchors[1].authorization_label; }, r => { r.files[0].anchors[2].position_domain = 'source-declaration-bytes'; },
+    r => { r.files[0].excerpts[0].position_domain = 'raw-path-bytes'; },
+    r => { r.files[0].excerpts[0].lineage_commitment = 'f'.repeat(64); },
+    r => { delete r.files[0].excerpts[0].lineage_commitment; }, r => { r.lineage_metadata_bytes++; },
+    r => { r.lineage_metadata_bytes--; }, r => { delete r.lineage_metadata_bytes; },
+    r => { delete r.retrieval.content.hits[0].authorization_label; }]) {
+    const f = labelledContextFixture(); mutate(f.reply); assert.throws(() => labelledContext(f));
+    labelledContext(original);
+  }
+});
+test('Initial bytes and context lineage share the original exact retained byte budget', () => {
+  const f = labelledContextFixture(), exact = f.reply.retrieval.retained_result_bytes + f.reply.lineage_metadata_bytes;
+  f.initial.input.maxResultBytes = exact; f.reply.retrieval.max_result_bytes = exact;
+  labelledContext(f);
+  f.initial.input.maxResultBytes--; f.reply.retrieval.max_result_bytes--;
+  assert.throws(() => labelledContext(f), /lineage metadata/);
+});
 for (const algorithm of ['sha1', 'sha256']) test(`deduplicates all three native channels (${algorithm}), retaining exact evidence`, () => {
   const f = fixture(algorithm), saved = copy(f);
   const result = check(f);

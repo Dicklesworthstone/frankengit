@@ -131,6 +131,34 @@ an observed head without changing which generation answered the query. Conflicti
 or regressed heads are rejected. Source refs, heads, commits, trees, incarnations,
 corpus counts and document identities must agree across the joined response.
 
+## Native read-result labels
+
+When the Initial response declares `source-read-result-labels-v1`, the client
+requires its whole-repository descriptor, original content/path/symbol row
+labels and position domains. It checks each selected file's ordered original
+label references, each anchor's originating row and each excerpt's reference to
+the file's opaque lineage commitment. Path anchors address raw path bytes;
+content/symbol anchors and excerpts address source blob bytes. The declaration
+row itself retains its distinct declaration-byte domain.
+
+The original retained-result limit covers both Initial rows/labels and the
+separately reported `lineage_metadata_bytes`. The client independently reproduces
+that metadata reservation from the selected witnesses and origin references;
+an unexplained excess, missing field or mixed labelled/unlabelled result fails.
+The normalized summary records the declared descriptor and metadata count;
+`capture.json` retains all original wire labels and references in
+`native_response`.
+
+Older schema-1 responses without a descriptor are explicitly handled as legacy,
+unlabelled data. Their summary representation remains unchanged so independently
+pinned existing bundles can still be inspected. Absence of a descriptor never
+implies labelled evidence, and partial declarations are rejected.
+
+These checks establish structure and reference membership. The client does not
+recompute the native label or lineage digests, authenticate a principal from a
+descriptor, prove source authenticity, or acquire permission from a saved label.
+The existing independent full-blob hash check below keeps its original scope.
+
 ## Bounds and incomplete coverage
 
 Defaults are 100 results per channel, 16 Mi work units, 32 MiB index payload,

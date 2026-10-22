@@ -67,8 +67,16 @@ pub(super) fn run(arguments: &[String], context: bool) -> Result<u8, String> {
         .bring_into_service(HeadGeneration::FIRST)
         .map_err(|error| error.to_string())
         .and_then(|()| {
-            fgit_node::source_retrieval_json(&node, fields, context, MAX_OUTPUT_BYTES)
-                .map_err(|code| format!("retrieval refused: {code}"))
+            fgit_node::source_retrieval_json(
+                &node,
+                &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_cli(
+                    &node,
+                ),
+                fields,
+                context,
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|code| format!("retrieval refused: {code}"))
         });
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     let document = match (operation, cleanup) {

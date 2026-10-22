@@ -334,6 +334,15 @@ fn row_json(
     format: GitHashAlgorithm,
     maximum_file: usize,
 ) -> Result<String, ApiError> {
+    row_json_labeled(row, query, format, maximum_file, None)
+}
+fn row_json_labeled(
+    row: &SymbolMatch,
+    query: &SymbolQuery,
+    format: GitHashAlgorithm,
+    maximum_file: usize,
+    label: Option<&[u8; 32]>,
+) -> Result<String, ApiError> {
     let at = &row.location;
     let path = TreePath::parse_default(&at.path).map_err(|_| ApiError::unavailable())?;
     let name = &row.name;
@@ -391,7 +400,7 @@ fn row_json(
         concat!(
             "{{\"name_hex\":{},\"kind\":{},\"raw_identifier\":{},",
             "\"path_hex\":{},\"blob\":{},\"byte_offset\":{},\"line\":{},\"byte_column\":{},",
-            "\"match_length\":{},\"excerpt_hex\":{},\"excerpt_offset\":{},\"match_truncated_in_excerpt\":false}}"
+            "\"match_length\":{},\"excerpt_hex\":{},\"excerpt_offset\":{},\"match_truncated_in_excerpt\":false{}}}"
         ),
         quote(&hex(name)),
         quote(row.kind.as_str()),
@@ -403,7 +412,11 @@ fn row_json(
         at.byte_column,
         at.match_length,
         quote(&hex(&at.excerpt)),
-        at.excerpt_offset
+        at.excerpt_offset,
+        label.map_or_else(String::new, |label| format!(
+            ",\"authorization_label\":{},\"position_domain\":\"source-declaration-bytes\"",
+            quote(&hex(label))
+        )),
     ))
 }
 fn render(
