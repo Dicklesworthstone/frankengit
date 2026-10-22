@@ -701,6 +701,26 @@ const fn reverse_low_bits(value: u16, bit_len: u8) -> u16 {
     reversed
 }
 
+/// `(bit-reversed code, length)` of every fixed literal/length symbol (RFC 1951
+/// 3.2.6), computed once instead of on every emitted symbol (frankengit-uf91).
+const FIXED_SYMBOL_CODES: [(u16, u8); 288] = fixed_symbol_codes();
+
+const fn fixed_symbol_codes() -> [(u16, u8); 288] {
+    let mut table = [(0_u16, 0_u8); 288];
+    let mut symbol = 0_u16;
+    while symbol < 288 {
+        let (canonical, bit_len) = match symbol {
+            0..=143 => (0x30 + symbol, 8),
+            144..=255 => (0x190 + (symbol - 144), 9),
+            256..=279 => (symbol - 256, 7),
+            _ => (0xc0 + (symbol - 280), 8),
+        };
+        table[symbol as usize] = (reverse_low_bits(canonical, bit_len), bit_len);
+        symbol += 1;
+    }
+    table
+}
+
 const LENGTH_BASE: [usize; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
     163, 195, 227, 258,
@@ -1489,17 +1509,22 @@ impl BitWriter {
         self.complete_bytes.try_reserve(additional).map_err(|_| ())
     }
 
+    /// Append the low `bit_count` bits of `value`, least significant first.
+    /// The bits are placed in bulk, in exactly the order a one-bit-at-a-time
+    /// writer would place them (frankengit-uf91): at most 7 pending plus 16
+    /// new bits fit one `u32`.
     fn write_bits_unchecked(&mut self, value: u16, bit_count: u8) {
-        for offset in 0..bit_count {
-            let bit = u8::from(((value >> offset) & 1) != 0);
-            self.partial_byte |= bit << self.used_bits;
-            self.used_bits += 1;
-            if self.used_bits == 8 {
-                self.complete_bytes.push(self.partial_byte);
-                self.partial_byte = 0;
-                self.used_bits = 0;
-            }
+        let mask = (1_u32 << bit_count) - 1;
+        let mut pending =
+            u32::from(self.partial_byte) | ((u32::from(value) & mask) << self.used_bits);
+        let mut bits = self.used_bits + bit_count;
+        while bits >= 8 {
+            self.complete_bytes.push(pending.to_le_bytes()[0]);
+            pending >>= 8;
+            bits -= 8;
         }
+        self.partial_byte = pending.to_le_bytes()[0];
+        self.used_bits = bits;
     }
 
     fn align_zero_unchecked(&mut self) {
@@ -2214,14 +2239,10 @@ impl Deflater {
     }
 
     fn write_fixed_symbol(&mut self, symbol: u16) -> Result<(), DeflateRefusal> {
-        let (canonical, bit_len) = match symbol {
-            0..=143 => (0x30_u16 + symbol, 8),
-            144..=255 => (0x190_u16 + (symbol - 144), 9),
-            256..=279 => (symbol - 256, 7),
-            280..=287 => (0xc0_u16 + (symbol - 280), 8),
-            _ => return Err(DeflateRefusal::InvalidProfile),
-        };
-        self.write_bits(reverse_low_bits(canonical, bit_len), bit_len)
+        let (code, bit_len) = *FIXED_SYMBOL_CODES
+            .get(usize::from(symbol))
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        self.write_bits(code, bit_len)
     }
 
     fn write_codebook_symbol(
@@ -2424,6 +2445,67 @@ impl Adler32 {
 
 #[cfg(test)]
 mod tests {
+    /// The former one-bit-at-a-time writer, kept as the oracle for the bulk one.
+    fn reference_bits(writes: &[(u16, u8)]) -> (Vec<u8>, u8, u8) {
+        let (mut bytes, mut partial, mut used) = (Vec::new(), 0_u8, 0_u8);
+        for &(value, bit_count) in writes {
+            for offset in 0..bit_count {
+                partial |= u8::from(((value >> offset) & 1) != 0) << used;
+                used += 1;
+                if used == 8 {
+                    bytes.push(partial);
+                    partial = 0;
+                    used = 0;
+                }
+            }
+        }
+        (bytes, partial, used)
+    }
+
+    #[test]
+    fn bulk_bit_writer_places_exactly_the_bits_of_the_one_bit_reference() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for round in 0..200 {
+            let mut writes = Vec::new();
+            for _ in 0..(round % 37) + 1 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let bit_count = u8::try_from(state % 17).unwrap();
+                // Includes bits above `bit_count`, which must be ignored.
+                writes.push((u16::try_from(state >> 40 & 0xffff).unwrap(), bit_count));
+            }
+            let mut writer = super::BitWriter::new();
+            for &(value, bit_count) in &writes {
+                writer.write_bits_unchecked(value, bit_count);
+            }
+            let (bytes, partial, used) = reference_bits(&writes);
+            assert_eq!(writer.complete_bytes, bytes, "round {round}");
+            assert_eq!((writer.partial_byte, writer.used_bits), (partial, used));
+        }
+    }
+
+    #[test]
+    fn fixed_symbol_table_is_the_rfc1951_canonical_code_bit_reversed() {
+        for symbol in 0_u16..288 {
+            let (canonical, bit_len) = match symbol {
+                0..=143 => (0x30 + symbol, 8),
+                144..=255 => (0x190 + (symbol - 144), 9),
+                256..=279 => (symbol - 256, 7),
+                _ => (0xc0 + (symbol - 280), 8),
+            };
+            let mut reversed = 0_u16;
+            for offset in 0..bit_len {
+                reversed = (reversed << 1) | ((canonical >> offset) & 1);
+            }
+            assert_eq!(
+                super::FIXED_SYMBOL_CODES[usize::from(symbol)],
+                (reversed, bit_len),
+                "symbol {symbol}"
+            );
+        }
+    }
+
     use super::{
         Adler32, CancellationProbe, DeflateBlockKind, DeflateLimits, DeflateProfile,
         DeflateRefusal, DeflateStreamProgress, Deflater, InflateLimits, InflateRefusal, Inflater,
