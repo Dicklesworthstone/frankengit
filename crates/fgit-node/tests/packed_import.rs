@@ -43,6 +43,8 @@ enum BlobStorage {
     Loose,
     OfsDelta,
     RefDelta,
+    /// A REF_DELTA written before its base: resolvable only after the stream.
+    RefDeltaBeforeBase,
 }
 
 enum FixtureEntry {
@@ -153,6 +155,18 @@ fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepositor
                 base_oid: base_blob,
                 oid: blob,
                 program: literal_delta(&base_blob_body, &blob_body),
+            });
+        }
+        BlobStorage::RefDeltaBeforeBase => {
+            entries.push(FixtureEntry::RefDelta {
+                base_oid: base_blob,
+                oid: blob,
+                program: literal_delta(&base_blob_body, &blob_body),
+            });
+            entries.push(FixtureEntry::Base {
+                type_code: 3,
+                oid: base_blob,
+                body: base_blob_body.clone(),
             });
         }
     }
@@ -350,12 +364,21 @@ fn variable_length_integer(value: usize) -> Vec<u8> {
     }
 }
 
+/// Stored DEFLATE blocks of at most 65,535 bytes; one block (byte-identical
+/// to a single-block member) for every fixture up to that size.
 fn zlib_stored_member(bytes: &[u8]) -> Vec<u8> {
-    let length = u16::try_from(bytes.len()).expect("fixture fits one stored block");
-    let mut member = vec![0x78, 0x01, 0x01];
-    member.extend_from_slice(&length.to_le_bytes());
-    member.extend_from_slice(&(!length).to_le_bytes());
-    member.extend_from_slice(bytes);
+    let mut member = vec![0x78, 0x01];
+    let mut chunks = bytes.chunks(usize::from(u16::MAX)).peekable();
+    if chunks.peek().is_none() {
+        member.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
+    }
+    while let Some(chunk) = chunks.next() {
+        let length = u16::try_from(chunk.len()).expect("stored block fits");
+        member.push(u8::from(chunks.peek().is_none()));
+        member.extend_from_slice(&length.to_le_bytes());
+        member.extend_from_slice(&(!length).to_le_bytes());
+        member.extend_from_slice(chunk);
+    }
     member.extend_from_slice(&adler32(bytes).to_be_bytes());
     member
 }
@@ -443,6 +466,109 @@ fn durable_import_follows_one_closure_across_loose_and_packed_storage() {
 fn durable_import_resolves_and_verifies_ofs_and_ref_delta_objects() {
     import_and_assert(BlobStorage::OfsDelta);
     import_and_assert(BlobStorage::RefDelta);
+}
+
+/// frankengit-855v: a streamed pack meets a REF_DELTA before its base. Its
+/// program waits in custody and resolves once the trailer is authenticated.
+#[test]
+fn a_ref_delta_written_before_its_base_resolves_after_the_stream() {
+    import_and_assert(BlobStorage::RefDeltaBeforeBase);
+}
+
+/// Deterministic incompressible bytes without an RNG dependency.
+fn pseudo_random(seed: u64, length: usize) -> Vec<u8> {
+    let mut state = seed | 1;
+    let mut bytes = Vec::with_capacity(length + 8);
+    while bytes.len() < length {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    bytes.truncate(length);
+    bytes
+}
+
+/// frankengit-855v: `fg import` used to read each pack whole and refused any
+/// pack over 64 MiB. Packs now stream into disk custody, so one ~66 MiB pack
+/// imports under the default profile and every blob reaches the fabric intact.
+#[test]
+fn durable_import_streams_one_pack_larger_than_the_former_64_mib_wall() {
+    const BLOB_BYTES: usize = 22 * 1024 * 1024;
+    let scratch = ScratchDirectory::new();
+    let source = scratch.0.join("source.git");
+    fs::create_dir_all(source.join("objects/pack")).expect("pack directory creates");
+    fs::create_dir_all(source.join("refs/heads")).expect("branch directory creates");
+    fs::write(source.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD writes");
+    let mut entries = Vec::new();
+    let mut tree_body = Vec::new();
+    let mut blobs = Vec::new();
+    for (name, seed) in [("a.bin", 11_u64), ("b.bin", 23), ("c.bin", 37)] {
+        let body = pseudo_random(seed, BLOB_BYTES);
+        let oid = object_id(GitObjectKind::Blob, &body);
+        tree_body.extend_from_slice(format!("100644 {name}\0").as_bytes());
+        tree_body.extend_from_slice(oid.as_bytes());
+        blobs.push((oid, seed));
+        entries.push(FixtureEntry::Base {
+            type_code: 3,
+            oid,
+            body,
+        });
+    }
+    let tree = object_id(GitObjectKind::Tree, &tree_body);
+    let commit_body = format!(
+        "tree {tree}\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000\n\nlarge pack\n"
+    )
+    .into_bytes();
+    let commit = object_id(GitObjectKind::Commit, &commit_body);
+    entries.push(FixtureEntry::Base {
+        type_code: 2,
+        oid: tree,
+        body: tree_body,
+    });
+    entries.push(FixtureEntry::Base {
+        type_code: 1,
+        oid: commit,
+        body: commit_body,
+    });
+    let (pack, records) = encode_pack(&entries);
+    drop(entries);
+    assert!(pack.len() > 64 * 1024 * 1024 + 1, "{} bytes", pack.len());
+    let index = encode_index(&records, &pack[pack.len() - 20..]);
+    fs::write(source.join("objects/pack/pack-large.pack"), pack).expect("pack writes");
+    fs::write(source.join("objects/pack/pack-large.idx"), index).expect("index writes");
+    fs::write(source.join("refs/heads/main"), format!("{commit}\n")).expect("ref writes");
+
+    let node = serving_node(scratch.0.join("node"));
+    // The import-scaled context `fg import` uses, as large_loose_import does.
+    let admission = node
+        .runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &node.import_request_context(None),
+            &source,
+            PrincipalId::from_bytes([0xc3; 16]),
+            b"large-pack",
+        ))
+        .expect("a pack over the former 64 MiB wall imports");
+    assert!(matches!(
+        admission.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .expect("the import materializes");
+    let mut closure = BTreeSet::from([commit, tree]);
+    closure.extend(blobs.iter().map(|(oid, _)| *oid));
+    assert_eq!(
+        materialized.selected_closure().closure().objects(),
+        &closure
+    );
+    for (oid, seed) in blobs {
+        let stored = node.read_git_object(oid).expect("blob reaches the fabric");
+        assert!(stored.payload() == pseudo_random(seed, BLOB_BYTES).as_slice());
+    }
+    node.shutdown().expect("node drains");
 }
 
 /// Gives every reachable OID of a pack-only source a second copy, as a gc'd
@@ -813,15 +939,17 @@ fn selected_pack_input_bytes_are_bounded_before_reading_the_file() {
                 .truncate(true)
                 .open(&repository.pack_path)
                 .expect("pack opens for sparse resize")
-                .set_len((64 * 1024 * 1024) + 1)
+                .set_len((1024 * 1024 * 1024) + 1)
                 .expect("sparse oversized pack creates");
         },
+        // Twice the default 512 MiB profile (frankengit-855v); the 64 MiB wall
+        // is gone because packs stream into disk custody.
         |refusal| {
             matches!(
                 refusal,
                 LooseGitImportRefusal::PackInputBytesExceeded {
-                    limit: 67_108_864,
-                    observed: 67_108_865,
+                    limit: 1_073_741_824,
+                    observed: 1_073_741_825,
                     ..
                 }
             )

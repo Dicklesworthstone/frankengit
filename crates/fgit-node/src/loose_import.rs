@@ -42,8 +42,9 @@ use fgit_git_object::{
     AcceptanceProfile, InflateLimits, LooseObjectDecodeError, ObjectError, ParseLimits,
 };
 use fgit_pack::{
-    CachedResolver, Deadline, IdxV2, NativeChecksumVerifier, PackError, PackLimits,
-    ResolutionBudget, read_verified_pack, validate_idx_entry_crc, validate_idx_pack_count,
+    Deadline, IdxV2, NativeChecksumVerifier, PackError, PackLimits, ParsedDeltaBase,
+    ResolutionBudget, StreamPackEntry, StreamPackError, apply_delta_to_charged_base_with_budget,
+    object_type_from_base_entry, parse_pack_header, read_streamed_pack, validate_idx_pack_count,
     verify_native_object,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, RefName, TypeRefusal};
@@ -52,12 +53,14 @@ use super::{NodeRefusal, NodeRequestContext, OneNode};
 
 const MAX_IMPORT_REFS: usize = 65_536;
 const MAX_IMPORT_OBJECTS: usize = 1_000_000;
-const MAX_IMPORT_TOTAL_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE: usize = 64 * 1024 * 1024;
 const MAX_IMPORT_PACKS: usize = 128;
-const MAX_IMPORT_PACK_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_IMPORT_TOTAL_PACK_BYTES: u64 = 128 * 1024 * 1024;
+/// One `.idx` file is read whole; packs are streamed (frankengit-855v).
+const MAX_IMPORT_INDEX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Floor of the compressed pack input every import may read, whatever its
+/// profile: many tiny objects carry more framing than body.
+const MIN_IMPORT_PACK_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_TOTAL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_PACKED_REFS_HEADER_BYTES: usize = 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;

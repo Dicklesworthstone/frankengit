@@ -31,23 +31,35 @@ replacement context. The library exposes `import_request_context_with_byte_limit
 and `import_loose_git_directory_with_byte_limit_durable_in`; callers pass the same
 byte ceiling to both, and smaller or cancelled caller contexts are still honored.
 
-Packed sources now use private disk custody too. Each fully verified pack
-retains offsets and native types instead of a map of resident object bodies.
-The decoder and resolver cache each retain their existing **128 MiB per-pack**
-envelopes; cumulative inflated and retained native bytes are bounded by the
-selected import profile. One reconstruction-work witness spans every pack,
-so opening another pack never renews its delta-work allowance. Every decoded
-member counts, including members not reachable from the selected refs.
+Packed sources use private disk custody too, and each pack is **streamed**
+(frankengit-855v): it is never read whole into memory. One pass inflates each
+member in turn and binds it to its idx row, by offset and CRC. A base member
+is verified against its idx identity and spooled at once. A delta whose base is
+already reconstructed is resolved at once, from the spooled and re-identified
+base. Any other delta program, such as a REF_DELTA written before its base,
+waits in a separate unverified spool. It is resolved after the trailer is
+authenticated against the idx, in bounded passes that never fetch an outside
+base. Resident memory is one inflated member, or one delta base, program and
+result, whatever the pack size. Each verified pack retains offsets and native
+types, never a map of resident bodies. A pack installs nothing unless all of
+it verifies.
 
-Independent limits remain: **64 MiB per input pack**, **128 MiB total compressed
-pack input**, 64 MiB of indexes, the existing per-object limit, and finite
-object, ref and graph-edge counts. Consequently a set of sufficiently compressed
-packs may exceed 128 MiB in total native bodies without increasing the resident
-cache allowance. A single oversized pack remains unsupported. The 16 GiB ceiling
-is an operator bound, not a tested repository-size guarantee.
+Cumulative inflated and retained native bytes are bounded by the selected
+import profile. One reconstruction-work witness spans every pack, so opening
+another pack never renews its delta-work allowance. Every decoded member
+counts, including members not reachable from the selected refs. Compressed pack
+input, per pack and in total, is bounded by **twice the selected profile, never
+less than 128 MiB**: 1 GiB under the default 512 MiB profile. A pack whose
+objects fit the profile exceeds it only through framing and DEFLATE expansion
+of incompressible members. Independent limits remain: 64 MiB per `.idx` file,
+64 MiB of indexes in total, the existing per-object limit, and finite object,
+ref and graph-edge counts. The 16 GiB ceiling is an operator bound, not a
+tested repository-size guarantee.
 
 Quarantine uses one reachable-closure file plus at most one private file per
 loaded pack (the existing maximum is 128 packs), never one file per object.
+A pack with deltas that must wait for their base also holds one transient
+program file while it loads.
 Packed custody closes before placement starts. On Unix each exclusive 0600 file
 is unlinked before payload writes; the owned descriptor survives until cleanup.
 An interruption between creation and unlink can leave an empty name. Other
@@ -107,9 +119,12 @@ FG_BIN=/path/to/fg FG_PACKED_LARGE=1 bash scripts/e2e/suites/admission/packed_im
 
 The default campaign constructs three native packs in each hash format and tests
 an insufficient limit, admitted refs, source removal, cold integrity and original
-key recovery. The opt-in case contains 144 MiB of blob payload in three compressed
-packs. An optional `FG_PACKED_BASELINE_BIN` records the former implementation's
-128 MiB refusal using the identical source. This script's presence is not evidence
+key recovery. The opt-in cases contain 144 MiB of blob payload in three compressed
+packs, and 72 MiB of incompressible blobs in ONE git-written pack over the former
+64 MiB per-pack wall (frankengit-855v). An optional `FG_PACKED_BASELINE_BIN`
+records the pre-custody implementation's 128 MiB refusal of the first, and
+`FG_PACKED_SINGLE_BASELINE_BIN` the pre-streaming 64 MiB refusal of the second,
+using the identical sources. This script's presence is not evidence
 that it has run. The module tests independently exercise disk-custody reuse after
 source deletion, complete-pack charging, per-pack bounds, a corrupt later pack,
 and preservation of operation-wide reconstruction work.

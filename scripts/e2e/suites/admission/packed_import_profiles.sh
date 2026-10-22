@@ -11,6 +11,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init packed-import-profiles
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.28
+fge_context bead_single_pack frankengit-855v
 fge_context fg_digest "$(fge_digest_file "$FG_BIN")"
 fge_context git_version "$(git --version)"
 fge_context git_digest "$(fge_digest_file "$(command -v git)")"
@@ -42,23 +43,34 @@ def run(label, args, expected=0, data=None):
     assert result.returncode == expected, (label, result.returncode, result.stdout[-1000:], result.stderr[-1000:])
     return result.stdout
 
-def campaign(format, blob_bytes, large):
-    label = format + ('-large' if large else '-small')
+def noise(seed, length):
+    # Deterministic incompressible bytes: SHA-256 in counter mode.
+    blocks = (length + 31) // 32
+    return b''.join(hashlib.sha256(b'%d:%d' % (seed, n)).digest() for n in range(blocks))[:length]
+
+def campaign(format, blob_bytes, large, single=False):
+    # single: ONE git-written pack of incompressible blobs over the former
+    # 64 MiB per-pack wall (frankengit-855v), instead of three compressible packs.
+    label = format + ('-single' if single else '-large' if large else '-small')
     source, store = root / (label + '-source'), root / (label + '-node')
     run(label + '-fixture', ['git', 'init', '-q', '--bare', '-b', 'main', '--object-format=' + format, '--template=', source])
     groups = [[], [], []]; tree_lines = []; all_ids = []
     for ordinal in range(9):
-        body = bytes([33 + ordinal]) * blob_bytes
+        body = noise(ordinal, blob_bytes) if single else bytes([33 + ordinal]) * blob_bytes
         oid = run(label + '-blob', ['git', '-C', source, 'hash-object', '-w', '--stdin'], data=body).decode().strip()
         groups[ordinal // 3].append(oid); all_ids.append(oid)
         tree_lines.append(f'100644 blob {oid}\tfile{ordinal}\n')
     tree = run(label + '-tree', ['git', '-C', source, 'mktree'], data=''.join(tree_lines).encode()).decode().strip()
     commit = run(label + '-commit', ['git', '-C', source, 'commit-tree', tree], data=b'multi-pack import\n').decode().strip()
     groups[2].extend([tree, commit]); all_ids.extend([tree, commit])
+    if single:
+        groups = [[oid for group in groups for oid in group]]
     run(label + '-ref', ['git', '-C', source, 'update-ref', 'refs/heads/main', commit])
     for index, group in enumerate(groups):
         payload = run(label + '-pack', ['git', '-C', source, '-c', 'pack.threads=1', 'pack-objects', '--stdout', '--window=0', '--compression=1'], data=('\n'.join(group) + '\n').encode())
         path = source / 'objects' / 'pack' / f'part-{index}.pack'; path.write_bytes(payload)
+        if single:
+            assert len(payload) > 64 * 1024 * 1024, len(payload)
         run(label + '-index', ['git', '-C', source, 'index-pack', '--index-version=2', path])
     for oid in all_ids:
         (source / 'objects' / oid[:2] / oid[2:]).unlink()
@@ -66,12 +78,16 @@ def campaign(format, blob_bytes, large):
     profile = '192' if large else '4'
     key = label + '-migration'
     args = ['import', store, tenant, repository, principal, key, source, '--max-expanded-mib', profile, '--timeout-secs', '600', '--json']
-    baseline = os.environ.get('FG_PACKED_BASELINE_BIN')
+    # Each opt-in case has its own historical baseline: the three-pack case
+    # predates disk custody (128 MiB refusal), the single-pack case predates
+    # streaming (64 MiB per-pack refusal, frankengit-855v).
+    baseline = os.environ.get('FG_PACKED_SINGLE_BASELINE_BIN' if single else 'FG_PACKED_BASELINE_BIN')
     if large and baseline:
         before_store = root / (label + '-before')
         run(label + '-before-init', [baseline, 'init', before_store, tenant, repository, format])
         before_args = list(args); before_args[1] = before_store
-        run(label + '-before-128mib-refusal', [baseline, *before_args], expected=2)
+        refusal = '-before-64mib-pack-refusal' if single else '-before-128mib-refusal'
+        run(label + refusal, [baseline, *before_args], expected=2)
         refs = json.loads(run(label + '-before-refs', [baseline, 'refs', before_store, tenant, repository, '--trusted-local', '--object-format', format]))
         assert refs['references'] == []
     run(label + '-init', [fg, 'init', store, tenant, repository, format])
@@ -95,6 +111,7 @@ for format in ['sha1', 'sha256']:
     campaign(format, 256 * 1024, False)
 if os.environ.get('FG_PACKED_LARGE') == '1':
     campaign('sha256', 16 * 1024 * 1024, True)
+    campaign('sha1', 8 * 1024 * 1024, True, single=True)
 PY
 fge_phase assert
 fge_assert_eq PACKED-IMPORT-EXIT 0 "$FGE_LAST_EXIT"

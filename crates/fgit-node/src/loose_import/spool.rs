@@ -166,6 +166,82 @@ impl Spool {
         })
     }
 
+    /// Append bytes that are not yet a native object: a delta program waiting
+    /// for its base (frankengit-855v). Nothing reads them as an object; the
+    /// object reconstructed from them is verified against its identity.
+    pub(super) fn retain_unverified(
+        &mut self,
+        bytes: &[u8],
+        control: &ImportControl<'_>,
+    ) -> Result<Entry, LooseGitImportRefusal> {
+        control.checkpoint()?;
+        let next = self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| interrupted(RefusalCode::ResourceBudgetExceeded))?;
+        if next > self.maximum {
+            return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
+                limit: self.maximum,
+                observed: next,
+            });
+        }
+        let entry = Entry {
+            offset: self.bytes,
+            length: bytes.len(),
+            kind: ObjectType::Blob,
+        };
+        let path = self.path.clone();
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| interrupted(RefusalCode::InternalInvariantBreach))?;
+        file.seek(SeekFrom::Start(self.bytes))
+            .map_err(|error| io_refusal("seek import program spool", path.clone(), error))?;
+        for chunk in bytes.chunks(IO_CHUNK_BYTES) {
+            control.checkpoint()?;
+            file.write_all(chunk)
+                .map_err(|error| io_refusal("write import program spool", path.clone(), error))?;
+        }
+        control.checkpoint()?;
+        self.bytes = next;
+        Ok(entry)
+    }
+
+    /// The exact bytes of [`Self::retain_unverified`], with no identity check.
+    pub(super) fn read_unverified(
+        &mut self,
+        entry: Entry,
+        control: &ImportControl<'_>,
+    ) -> Result<Vec<u8>, LooseGitImportRefusal> {
+        control.checkpoint()?;
+        if entry
+            .offset
+            .checked_add(entry.length as u64)
+            .is_none_or(|end| end > self.bytes)
+        {
+            return Err(interrupted(RefusalCode::InternalInvariantBreach));
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(entry.length)
+            .map_err(|_| interrupted(RefusalCode::ResourceBudgetExceeded))?;
+        bytes.resize(entry.length, 0);
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| interrupted(RefusalCode::InternalInvariantBreach))?;
+        file.seek(SeekFrom::Start(entry.offset))
+            .map_err(|error| io_refusal("seek import program spool", self.path.clone(), error))?;
+        for chunk in bytes.chunks_mut(IO_CHUNK_BYTES) {
+            control.checkpoint()?;
+            file.read_exact(chunk).map_err(|error| {
+                io_refusal("read import program spool", self.path.clone(), error)
+            })?;
+        }
+        control.checkpoint()?;
+        Ok(bytes)
+    }
+
     /// No fsync claim is attached to scratch custody. Durable placement and
     /// authority publication retain their original independent protocols.
     pub(super) fn finish(mut self) -> Result<(), LooseGitImportRefusal> {

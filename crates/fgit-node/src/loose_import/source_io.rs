@@ -58,14 +58,31 @@ pub(super) fn reject_object_alternates(
     Ok(())
 }
 
-pub(super) fn import_pack_limits(max_object_bytes: u64) -> PackLimits {
+/// Packs are streamed into disk custody, so resident memory is one object (or
+/// one delta base, program and result) whatever these bounds are. Both the
+/// per-pack decoder bound and compressed input therefore follow the selected
+/// profile instead of a fixed resident-cache envelope (frankengit-855v).
+pub(super) fn import_pack_limits(max_object_bytes: u64, maximum_bytes: u64) -> PackLimits {
+    let maximum = usize::try_from(maximum_bytes).unwrap_or(usize::MAX);
     PackLimits {
-        max_input_bytes: usize::try_from(MAX_IMPORT_PACK_BYTES).unwrap_or(usize::MAX),
+        max_input_bytes: usize::try_from(pack_input_limit(maximum_bytes)).unwrap_or(usize::MAX),
         max_object_bytes: usize::try_from(max_object_bytes).unwrap_or(usize::MAX),
-        max_total_expanded_bytes: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES)
-            .unwrap_or(usize::MAX),
-        max_cached_bytes: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES).unwrap_or(usize::MAX),
+        max_total_expanded_bytes: maximum,
+        max_cached_bytes: maximum,
         ..PackLimits::default()
+    }
+}
+
+/// Compressed pack bytes one import may read, per pack and in total: twice the
+/// selected native-byte profile, never less than the 128 MiB floor. A pack
+/// whose objects fit the profile exceeds it only through framing and DEFLATE
+/// expansion of incompressible members.
+pub(super) const fn pack_input_limit(maximum_bytes: u64) -> u64 {
+    let doubled = maximum_bytes.saturating_mul(2);
+    if doubled > MIN_IMPORT_PACK_INPUT_BYTES {
+        doubled
+    } else {
+        MIN_IMPORT_PACK_INPUT_BYTES
     }
 }
 
@@ -111,6 +128,30 @@ pub(super) fn read_regular_bounded(
     class: BoundedInputClass,
     control: &ImportControl<'_>,
 ) -> Result<Vec<u8>, LooseGitImportRefusal> {
+    let (file, _) = open_regular_bounded(path, operation, expected, limit, class, control)?;
+    let bytes = control::read_bytes(file, limit, control).map_err(|error| match error {
+        ReadFailure::Io(error) => io_refusal(operation, path.to_path_buf(), error),
+        ReadFailure::Interrupted(error) => error,
+    })?;
+    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if observed > limit {
+        return Err(class.limit_refusal(path, limit, observed));
+    }
+    Ok(bytes)
+}
+
+/// The checks of [`read_regular_bounded`] without the read: a regular,
+/// non-symlink file within `limit`, returned open with its observed length.
+/// A caller that streams it must still bound the bytes it reads, because the
+/// file can grow after this check (frankengit-855v).
+pub(super) fn open_regular_bounded(
+    path: &Path,
+    operation: &'static str,
+    expected: &'static str,
+    limit: u64,
+    class: BoundedInputClass,
+    control: &ImportControl<'_>,
+) -> Result<(fs::File, u64), LooseGitImportRefusal> {
     control.checkpoint()?;
     let metadata = control
         .run(|| fs::symlink_metadata(path))?
@@ -149,15 +190,7 @@ pub(super) fn read_regular_bounded(
     if opened_metadata.len() > limit {
         return Err(class.limit_refusal(path, limit, opened_metadata.len()));
     }
-    let bytes = control::read_bytes(file, limit, control).map_err(|error| match error {
-        ReadFailure::Io(error) => io_refusal(operation, path.to_path_buf(), error),
-        ReadFailure::Interrupted(error) => error,
-    })?;
-    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if observed > limit {
-        return Err(class.limit_refusal(path, limit, observed));
-    }
-    Ok(bytes)
+    Ok((file, opened_metadata.len()))
 }
 
 #[cfg(test)]

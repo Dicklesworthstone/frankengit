@@ -2,6 +2,9 @@
 //! Every pack is checksum/index/native-identity verified before its cache becomes
 //! usable. Per-pack decoder/cache bounds and operation-wide work remain distinct.
 use super::*;
+use std::io::{Read, Seek, SeekFrom};
+
+use super::control::IO_CHUNK_BYTES;
 
 pub(super) struct VerifiedPack {
     entries: BTreeMap<GitOid, spool::Entry>,
@@ -45,7 +48,7 @@ impl PackedObjectSources {
     ) -> Result<Self, LooseGitImportRefusal> {
         control.checkpoint()?;
         profile::validate_limit(maximum_bytes)?;
-        let limits = import_pack_limits(max_object_bytes);
+        let limits = import_pack_limits(max_object_bytes, maximum_bytes);
         let parse_limits = parse_limits(object_format, max_object_bytes);
         let pack_directory = git_directory.join("objects/pack");
         let Some(metadata) =
@@ -141,7 +144,7 @@ impl PackedObjectSources {
                 &index_path,
                 "read pack index",
                 "regular pack index file",
-                MAX_IMPORT_PACK_BYTES,
+                MAX_IMPORT_INDEX_FILE_BYTES,
                 BoundedInputClass::PackOrIndex,
                 control,
             )?;
@@ -234,6 +237,12 @@ impl PackedObjectSources {
         result
     }
 
+    /// Stream one checksum-bound pack into private disk custody
+    /// (frankengit-855v). The pack is never held whole: resident memory is
+    /// one inflated member, or one delta base, program and result. Every
+    /// member is bound to its idx row (offset, CRC and, once reconstructed,
+    /// native identity) and charged to the operation before custody, and a
+    /// pack installs nothing unless all of it verifies.
     fn load(
         &mut self,
         source_index: usize,
@@ -252,179 +261,116 @@ impl PackedObjectSources {
                 limit: MAX_IMPORT_OBJECTS,
             })?;
         let pack_path = source.pack_path.clone();
-        let pack_bytes = read_regular_bounded(
+        let index_path = source.index_path.clone();
+        let format = source.index.format();
+        let input_limit = pack_input_limit(self.maximum_bytes);
+        let (mut file, pack_length) = open_regular_bounded(
             &pack_path,
             "read packed object file",
             "regular packed object file",
-            MAX_IMPORT_PACK_BYTES,
+            input_limit,
             BoundedInputClass::PackOrIndex,
             control,
         )?;
-        let next_pack_bytes = self
-            .loaded_pack_bytes
-            .saturating_add(u64::try_from(pack_bytes.len()).unwrap_or(u64::MAX));
-        if next_pack_bytes > MAX_IMPORT_TOTAL_PACK_BYTES {
+        let next_pack_bytes = self.loaded_pack_bytes.saturating_add(pack_length);
+        if next_pack_bytes > input_limit {
             return Err(LooseGitImportRefusal::PackInputBytesExceeded {
                 path: Box::new(pack_path),
-                limit: MAX_IMPORT_TOTAL_PACK_BYTES,
+                limit: input_limit,
                 observed: next_pack_bytes,
             });
         }
-        let quarantined = read_verified_pack(
-            &pack_bytes,
-            source.index.format(),
-            &self.limits,
-            &mut control.cpu_probe(),
-            &NativeChecksumVerifier,
-        )
-        .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
-        if &quarantined.trailer != source.index.pack_checksum() {
-            return Err(pack_refusal(
-                source.index_path.clone(),
-                PackError::TrailerChecksumMismatch,
-            ));
-        }
-        validate_idx_pack_count(&source.index, quarantined.header)
-            .map_err(|error| pack_refusal(source.index_path.clone(), error))?;
+        // Refuse an idx/pack count mismatch before inflating any member.
+        let mut fixed = [0_u8; 12];
+        control
+            .run(|| file.read_exact(&mut fixed))?
+            .map_err(|error| io_refusal("read pack header", pack_path.clone(), error))?;
+        let header = parse_pack_header(&fixed, &self.limits)
+            .map_err(|error| pack_refusal(pack_path.clone(), error))?;
+        validate_idx_pack_count(&source.index, header)
+            .map_err(|error| pack_refusal(index_path.clone(), error))?;
+        control
+            .run(|| file.seek(SeekFrom::Start(0)))?
+            .map_err(|error| io_refusal("rewind packed object file", pack_path.clone(), error))?;
 
-        let mut entries_by_offset = BTreeMap::new();
+        let mut rows = BTreeMap::new();
         for entry in source.index.entries() {
             control.checkpoint()?;
-            if entries_by_offset.insert(entry.pack_offset, entry).is_some() {
+            if rows.insert(entry.pack_offset, entry.clone()).is_some() {
                 return Err(pack_refusal(
-                    source.index_path.clone(),
+                    index_path.clone(),
                     PackError::DuplicateObjectOffset(entry.pack_offset),
                 ));
             }
         }
-        let pack_body_end = pack_bytes
-            .len()
-            .checked_sub(source.index.format().digest_len())
-            .ok_or_else(|| {
-                pack_refusal(
-                    source.pack_path.clone(),
-                    PackError::Truncated {
-                        context: "pack checksum",
-                    },
-                )
-            })?;
-        for (position, entry) in quarantined.entries().iter().enumerate() {
-            control.checkpoint()?;
-            let Some(index_entry) = entries_by_offset.get(&entry.offset) else {
-                return Err(pack_refusal(
-                    source.index_path.clone(),
-                    PackError::ObjectCountMismatch {
-                        declared: u32::try_from(source.index.entries().len()).unwrap_or(u32::MAX),
-                        actual: u32::try_from(quarantined.entries().len()).unwrap_or(u32::MAX),
-                    },
-                ));
-            };
-            let end = quarantined
-                .entries()
-                .get(position + 1)
-                .and_then(|next| usize::try_from(next.offset).ok())
-                .unwrap_or(pack_body_end);
-            let start = usize::try_from(entry.offset).map_err(|_| {
-                pack_refusal(
-                    source.pack_path.clone(),
-                    PackError::IntegerOverflow {
-                        context: "pack entry offset",
-                    },
-                )
-            })?;
-            let raw_entry = pack_bytes.get(start..end).ok_or_else(|| {
-                pack_refusal(
-                    source.pack_path.clone(),
-                    PackError::Truncated {
-                        context: "indexed pack entry",
-                    },
-                )
-            })?;
-            validate_idx_entry_crc(
-                index_entry,
-                raw_entry,
-                &self.limits,
-                &mut control.cpu_probe(),
-            )
-            .map_err(|error| pack_refusal(source.index_path.clone(), error))?;
-        }
-        let inflated_bytes = quarantined
-            .entries()
-            .iter()
-            .try_fold(0_u64, |total, entry| {
-                total.checked_add(u64::try_from(entry.inflated.len()).ok()?)
-            })
-            .unwrap_or(u64::MAX);
-        let next_inflated = self.loaded_inflated_bytes.saturating_add(inflated_bytes);
-        if next_inflated > self.maximum_bytes {
-            return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
-                limit: self.maximum_bytes,
-                observed: next_inflated,
-            });
-        }
-        control.checkpoint()?;
-        let objects = quarantined
-            .into_scalar_objects(|offset| entries_by_offset.get(&offset).map(|entry| entry.oid))
-            .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
-        control.checkpoint()?;
-        // The decoder and resident resolver cache keep their original 128 MiB
-        // ceilings. Only total reconstruction work spans the selected profile.
-        // Retain ONE ResolutionBudget across all packs; never renew delta work.
-        let mut resolution_limits = self.limits.clone();
-        resolution_limits.max_total_expanded_bytes =
-            usize::try_from(self.maximum_bytes).map_err(|_| {
-                super::control::interrupted(fgit_types::RefusalCode::ResourceBudgetExceeded)
-            })?;
-        let mut resolver =
-            CachedResolver::new(&objects, &(), &resolution_limits, &mut control.cpu_probe())
-                .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+        let pack_checksum = *source.index.pack_checksum();
         let remaining = self
             .maximum_bytes
             .checked_sub(self.loaded_resolved_bytes)
             .ok_or_else(|| {
                 super::control::interrupted(fgit_types::RefusalCode::InternalInvariantBreach)
             })?;
-        let mut spool = spool::Spool::create(&self.custody_root, remaining, control)?;
-        let mut resolved_bytes = 0_u64;
+        let mut custody = StreamedPack {
+            format,
+            pack_path: &pack_path,
+            index_path: &index_path,
+            rows: &rows,
+            declared: header.object_count,
+            limits: &self.limits,
+            parse_limits: &self.parse_limits,
+            budget: &mut self.resolution_budget,
+            spool: spool::Spool::create(&self.custody_root, remaining, control)?,
+            programs: None,
+            custody_root: &self.custody_root,
+            maximum_bytes: self.maximum_bytes,
+            inflated_before: self.loaded_inflated_bytes,
+            inflated: 0,
+            resolved_bytes: 0,
+            resolved: BTreeMap::new(),
+            by_id: BTreeMap::new(),
+            pending: Vec::new(),
+            fanout: BTreeMap::new(),
+        };
+        let mut reader = std::io::BufReader::with_capacity(IO_CHUNK_BYTES, file);
+        let receipt = read_streamed_pack(
+            &mut reader,
+            format,
+            custody.limits,
+            &mut control.cpu_probe(),
+            |entry| custody.accept(entry, control),
+        );
+        let receipt = control.after(receipt, |error| match error {
+            StreamPackError::Io(error) => {
+                io_refusal("read packed object file", pack_path.clone(), error)
+            }
+            StreamPackError::Pack(error) => pack_refusal(pack_path.clone(), error),
+            StreamPackError::Sink(error) => error,
+        })?;
+        if receipt.trailer() != pack_checksum {
+            return Err(pack_refusal(
+                index_path.clone(),
+                PackError::TrailerChecksumMismatch,
+            ));
+        }
+        custody.resolve_pending(control)?;
+        let StreamedPack {
+            spool,
+            inflated,
+            resolved_bytes,
+            resolved,
+            ..
+        } = custody;
+        if resolved.len() != rows.len() {
+            return Err(pack_refusal(pack_path, PackError::MissingDeltaBase));
+        }
         let mut verified_objects = BTreeMap::new();
-        for entry in source.index.entries() {
+        for member in resolved.into_values() {
             control.checkpoint()?;
-            let (object_type, body) = resolver
-                .resolve_id_typed_with_budget(
-                    &entry.oid,
-                    &mut self.resolution_budget,
-                    &mut control.cpu_probe(),
-                )
-                .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
-            verify_native_object(
-                source.index.format(),
-                object_type,
-                &body,
-                &entry.oid,
-                AcceptanceProfile::GitCompatibleImport,
-                &self.parse_limits,
-            )
-            .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
-            control.checkpoint()?;
-            resolved_bytes = resolved_bytes
-                .checked_add(body.len() as u64)
-                .ok_or_else(|| {
-                    super::control::interrupted(fgit_types::RefusalCode::ResourceBudgetExceeded)
-                })?;
-            let handle = spool.retain(
-                entry.oid,
-                fgit_git_object::LooseObject {
-                    object_type,
-                    declared_size: body.len(),
-                    body,
-                },
-                control,
-            )?;
-            verified_objects.insert(entry.oid, handle);
+            verified_objects.insert(member.id, member.handle);
         }
         control.checkpoint()?;
         self.loaded_pack_bytes = next_pack_bytes;
-        self.loaded_inflated_bytes = next_inflated;
+        self.loaded_inflated_bytes += inflated;
         self.loaded_resolved_bytes += resolved_bytes;
         self.loaded_objects = next_objects;
         self.sources[source_index].verified_objects = Some(VerifiedPack {
@@ -432,6 +378,256 @@ impl PackedObjectSources {
             spool,
         });
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DeltaBase {
+    Offset(u64),
+    Identity(GitOid),
+}
+
+#[derive(Clone, Copy)]
+struct Member {
+    id: GitOid,
+    kind: fgit_git_object::ObjectType,
+    handle: spool::Entry,
+    depth: usize,
+}
+
+/// One pack's custody while it streams. Base members are verified against
+/// their idx identity and spooled at once; a delta whose base is already
+/// reconstructed is resolved at once; any other delta program waits in a
+/// separate unverified spool until the trailer is authenticated.
+struct StreamedPack<'a> {
+    format: GitHashAlgorithm,
+    pack_path: &'a Path,
+    index_path: &'a Path,
+    rows: &'a BTreeMap<u64, fgit_pack::IdxEntry>,
+    declared: u32,
+    limits: &'a PackLimits,
+    parse_limits: &'a ParseLimits,
+    budget: &'a mut ResolutionBudget,
+    spool: spool::Spool,
+    programs: Option<spool::Spool>,
+    custody_root: &'a Path,
+    maximum_bytes: u64,
+    inflated_before: u64,
+    inflated: u64,
+    resolved_bytes: u64,
+    resolved: BTreeMap<u64, Member>,
+    by_id: BTreeMap<GitOid, u64>,
+    pending: Vec<(u64, DeltaBase, spool::Entry)>,
+    fanout: BTreeMap<DeltaBase, usize>,
+}
+
+impl StreamedPack<'_> {
+    fn pack_error(&self, error: PackError) -> LooseGitImportRefusal {
+        pack_refusal(self.pack_path.to_path_buf(), error)
+    }
+
+    fn invariant() -> LooseGitImportRefusal {
+        super::control::interrupted(fgit_types::RefusalCode::InternalInvariantBreach)
+    }
+
+    fn accept(
+        &mut self,
+        streamed: StreamPackEntry,
+        control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
+        control.checkpoint()?;
+        let entry = streamed.entry;
+        let Some(row) = self.rows.get(&entry.offset).cloned() else {
+            return Err(pack_refusal(
+                self.index_path.to_path_buf(),
+                PackError::ObjectCountMismatch {
+                    declared: u32::try_from(self.rows.len()).unwrap_or(u32::MAX),
+                    actual: self.declared,
+                },
+            ));
+        };
+        if row.crc32 != streamed.crc32 {
+            return Err(pack_refusal(
+                self.index_path.to_path_buf(),
+                PackError::IndexEntryCrcMismatch {
+                    expected: row.crc32,
+                    actual: streamed.crc32,
+                },
+            ));
+        }
+        // Every decoded member counts, reachable or not.
+        self.inflated = self
+            .inflated
+            .checked_add(entry.inflated.len() as u64)
+            .ok_or_else(Self::invariant)?;
+        let observed = self.inflated_before.saturating_add(self.inflated);
+        if observed > self.maximum_bytes {
+            return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
+                limit: self.maximum_bytes,
+                observed,
+            });
+        }
+        self.budget
+            .charge_work(1, self.limits)
+            .map_err(|error| self.pack_error(error))?;
+        let base = match entry.delta_base {
+            None => {
+                let kind = object_type_from_base_entry(entry.header.kind)
+                    .map_err(|error| self.pack_error(error))?;
+                return self.retain(entry.offset, row.oid, kind, entry.inflated, 0, control);
+            }
+            Some(ParsedDeltaBase::Ofs { base_offset, .. }) => {
+                // Offsets name exact earlier member starts, never bytes inside one.
+                if base_offset >= entry.offset || !self.rows.contains_key(&base_offset) {
+                    return Err(self.pack_error(PackError::MissingDeltaBase));
+                }
+                DeltaBase::Offset(base_offset)
+            }
+            Some(ParsedDeltaBase::Ref { base, .. }) => DeltaBase::Identity(base),
+        };
+        let limit = self.limits.max_delta_fanout;
+        let count = self.fanout.entry(base).or_default();
+        *count += 1;
+        let fanout = *count;
+        if fanout > limit {
+            return Err(self.pack_error(PackError::DeltaFanoutLimit { fanout, limit }));
+        }
+        if let Some(member) = self.base_member(base) {
+            return self.reconstruct(entry.offset, row.oid, member, &entry.inflated, control);
+        }
+        if self.programs.is_none() {
+            self.programs = Some(spool::Spool::create(
+                self.custody_root,
+                self.maximum_bytes,
+                control,
+            )?);
+        }
+        let programs = self.programs.as_mut().ok_or_else(Self::invariant)?;
+        let held = programs.retain_unverified(&entry.inflated, control)?;
+        self.pending.push((entry.offset, base, held));
+        Ok(())
+    }
+
+    fn base_member(&self, base: DeltaBase) -> Option<Member> {
+        let offset = match base {
+            DeltaBase::Offset(offset) => offset,
+            // Bases are learned only from this pack's reconstructed members.
+            DeltaBase::Identity(id) => *self.by_id.get(&id)?,
+        };
+        self.resolved.get(&offset).copied()
+    }
+
+    fn reconstruct(
+        &mut self,
+        offset: u64,
+        id: GitOid,
+        base: Member,
+        program: &[u8],
+        control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
+        let depth = base.depth + 1;
+        if depth > self.limits.max_delta_depth {
+            return Err(self.pack_error(PackError::DeltaDepthLimit {
+                depth,
+                limit: self.limits.max_delta_depth,
+            }));
+        }
+        // The spool re-identifies the base bytes before they are used.
+        let base_body = self.spool.read(base.id, base.handle, control)?.body;
+        let result = apply_delta_to_charged_base_with_budget(
+            &base_body,
+            program,
+            self.limits,
+            self.budget,
+            &mut control.cpu_probe(),
+        );
+        drop(base_body);
+        let result = control.after(result, |error| self.pack_error(error))?;
+        self.retain(offset, id, base.kind, result, depth, control)
+    }
+
+    fn retain(
+        &mut self,
+        offset: u64,
+        id: GitOid,
+        kind: fgit_git_object::ObjectType,
+        body: Vec<u8>,
+        depth: usize,
+        control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
+        let verified = verify_native_object(
+            self.format,
+            kind,
+            &body,
+            &id,
+            AcceptanceProfile::GitCompatibleImport,
+            self.parse_limits,
+        );
+        control.after(verified, |error| self.pack_error(error))?;
+        self.resolved_bytes = self
+            .resolved_bytes
+            .checked_add(body.len() as u64)
+            .ok_or_else(Self::invariant)?;
+        let handle = self.spool.retain(
+            id,
+            fgit_git_object::LooseObject {
+                object_type: kind,
+                declared_size: body.len(),
+                body,
+            },
+            control,
+        )?;
+        self.resolved.insert(
+            offset,
+            Member {
+                id,
+                kind,
+                handle,
+                depth,
+            },
+        );
+        self.by_id.insert(id, offset);
+        Ok(())
+    }
+
+    /// Bounded passes over deltas whose base arrived later (REF_DELTA) or was
+    /// itself waiting. A pass without progress refuses; nothing is fetched.
+    fn resolve_pending(
+        &mut self,
+        control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
+        let passes = self.limits.max_delta_depth.min(self.pending.len());
+        for _ in 0..=passes {
+            control.checkpoint()?;
+            if self.pending.is_empty() {
+                return Ok(());
+            }
+            let waiting = std::mem::take(&mut self.pending);
+            let before = waiting.len();
+            for (offset, base, held) in waiting {
+                control.checkpoint()?;
+                let Some(member) = self.base_member(base) else {
+                    self.pending.push((offset, base, held));
+                    continue;
+                };
+                let row = self
+                    .rows
+                    .get(&offset)
+                    .cloned()
+                    .ok_or_else(Self::invariant)?;
+                let programs = self.programs.as_mut().ok_or_else(Self::invariant)?;
+                let program = programs.read_unverified(held, control)?;
+                self.reconstruct(offset, row.oid, member, &program, control)?;
+            }
+            if self.pending.len() == before {
+                break;
+            }
+        }
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(self.pack_error(PackError::MissingDeltaBase))
+        }
     }
 }
 

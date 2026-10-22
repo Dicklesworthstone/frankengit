@@ -15,14 +15,22 @@ fn object(format: GitHashAlgorithm, byte: u8) -> (GitOid, LooseObject) {
     )
 }
 
+/// Packs stream into disk custody (frankengit-855v), so no resident pack cache
+/// scales with these bounds: compressed input follows the profile, with a
+/// 128 MiB floor, and one `.idx` file stays bounded at 64 MiB.
 #[test]
-fn reachable_profile_supports_multi_hundred_mib_without_expanding_pack_caches() {
+fn reachable_profile_supports_multi_hundred_mib_with_profile_bound_pack_input() {
     assert_eq!(Limits::default().bytes, 512 * 1024 * 1024);
+    assert_eq!(super::super::MAX_IMPORT_INDEX_FILE_BYTES, 64 * 1024 * 1024);
+    let pack_input_limit = super::super::source_io::pack_input_limit;
+    assert_eq!(pack_input_limit(512 * 1024 * 1024), 1024 * 1024 * 1024);
+    assert_eq!(pack_input_limit(1), 128 * 1024 * 1024);
+    assert_eq!(pack_input_limit(64 * 1024 * 1024), 128 * 1024 * 1024);
     assert_eq!(
-        super::super::MAX_IMPORT_TOTAL_OBJECT_BYTES,
-        128 * 1024 * 1024
+        pack_input_limit(64 * 1024 * 1024 + 1),
+        128 * 1024 * 1024 + 2
     );
-    assert_eq!(super::super::MAX_IMPORT_PACK_BYTES, 64 * 1024 * 1024);
+    assert_eq!(pack_input_limit(u64::MAX), u64::MAX);
     assert_eq!(Limits::default().objects, MAX_IMPORT_OBJECTS);
 }
 

@@ -45,12 +45,12 @@ command module, as it does for other extended commands.
 ## Limits and evidence
 
 The default profile bounds the reachable closure's expanded object bodies at
-512 MiB. Eager pack resolution keeps its own smaller bounds: 128 MiB of
-expanded bodies and cache per pack, 128 MiB of total compressed pack input,
-64 MiB per pack and index, the node's 32 MiB default per-object ceiling, and
-1,000,000 objects. Raising the reachable ceiling does not enlarge the
-pack-resolution caches; [LOCAL_SOURCE_IMPORT_PROFILES.md](LOCAL_SOURCE_IMPORT_PROFILES.md)
-owns those numbers. It does not claim remote identity integration or a
+512 MiB. Packs stream into disk custody (frankengit-855v), so no resident pack
+cache scales with the profile. Compressed pack input is bounded at twice the
+profile, never less than 128 MiB. Each `.idx` is bounded at 64 MiB, plus the
+node's 32 MiB default per-object ceiling and 1,000,000 objects.
+[LOCAL_SOURCE_IMPORT_PROFILES.md](LOCAL_SOURCE_IMPORT_PROFILES.md) owns those
+numbers. It does not claim remote identity integration or a
 completed multi-node durability profile.
 Source validation and one head CAS remain the publication boundary; local object
 placement is not publication.
