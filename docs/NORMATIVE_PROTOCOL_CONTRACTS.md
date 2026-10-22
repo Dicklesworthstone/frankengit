@@ -220,6 +220,18 @@ struct RepositoryCommitRecord {
 }
 ```
 
+`object_closure_root` commits this decision's closure only: the native objects
+the transaction admits, plus already-selected objects it names. It is not the
+repository's complete reachable closure. The authority-selected (serving)
+closure at a head is the union of the closures of every committed RCR back to
+genesis, so naming an already-selected object leaves that union unchanged.
+- Receive names its uploaded objects and every reused ref root.
+- A merge, squash or fast-forward names the objects it adds above the selected
+  closure, plus its base, both parents and its candidate.
+- A pull-request, review, anchored-comment or workflow-check record names only
+  the already-selected objects its event refers to.
+- Issue, protection and unanchored-comment records commit an empty closure.
+
 The RCR identity hashes the unsigned canonical body. `parent_rcr_id` equals the previously committed RCR except repository creation. Source-control ref effects and associated forge transitions are one record. A PR merge cannot become visible without its target ref update, and an RCR classified as a PR merge cannot move the ref without the corresponding forge event batch.
 
 ## 8. Repository decision batch and authority head
