@@ -14,8 +14,10 @@ const USAGE: &str =
   [--object-format sha1|sha256] [--max-deliveries <1..1000>]
   [--max-scan-entries <1..16384>] [--attempt-timeout-secs <1..60>]
   [--continuous --stop-file <path> [--poll-millis <100..60000>]]
-  [--permissive-for-tests]
+  [--canonical-principal <principal-id>] [--permissive-for-tests]
 
+With --canonical-principal, routes sharing a destination form one sealed plan;
+all members must finish before canonical settlement. Default legacy mode:
 At most 32 explicit routes. Default: 64 total attempts and 16 per route per sweep.
 Routes are ordered by registration ID and destination; continuous sweeps rotate
 which route goes first. All journals are fenced before any send, and remain
@@ -23,14 +25,14 @@ locked until the controller exits. Each sweep reads one complete shared outbox
 snapshot. Accepted observations survive a switch between single-route and fanout
 workers. Delivery failures do not stop other routes; source, journal, or output
 failures stop the controller. Cancellation is latched across every route.
-A retry can duplicate an effect. Fan-out never settles canonical outbox state,
+A retry can duplicate an effect. Legacy fan-out never settles canonical outbox state,
 adds canonical subscriptions, or upgrades receiver idempotency. HTTPS is refused.
 Use dispatch-status separately for each route's durable delivery observations.";
 
 #[derive(Debug)]
-struct FanoutOptions {
-    routes: Vec<Options>,
-    max_total_deliveries: usize,
+pub(super) struct FanoutOptions {
+    pub(super) routes: Vec<Options>,
+    pub(super) max_total_deliveries: usize,
 }
 
 fn parse(args: &[String]) -> Result<FanoutOptions, String> {
@@ -86,7 +88,8 @@ fn parse(args: &[String]) -> Result<FanoutOptions, String> {
             | "--max-scan-entries"
             | "--attempt-timeout-secs"
             | "--stop-file"
-            | "--poll-millis" => {
+            | "--poll-millis"
+            | "--canonical-principal" => {
                 let value = args
                     .get(index)
                     .ok_or_else(|| format!("missing {flag} value"))?;
@@ -182,12 +185,25 @@ fn round(
     Ok(total)
 }
 
-fn execute(
+pub(super) fn execute(
     options: FanoutOptions,
     stop_signal: &impl Fn() -> Result<bool, String>,
     clock: &impl Fn() -> Result<u64, String>,
     output: &mut impl Write,
 ) -> Result<u8, String> {
+    if options
+        .routes
+        .iter()
+        .any(|r| r.canonical_principal.is_some())
+    {
+        return super::canonical::execute(
+            &options.routes,
+            options.max_total_deliveries,
+            stop_signal,
+            clock,
+            output,
+        );
+    }
     let latched = Cell::new(false);
     let stopped = || {
         if latched.get() {

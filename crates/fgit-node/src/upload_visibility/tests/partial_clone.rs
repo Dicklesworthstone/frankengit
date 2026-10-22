@@ -591,3 +591,65 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
         );
     }
 }
+
+// frankengit-e6jj: a visible closure over the selected-pack envelope is refused
+// before any advertisement with exactly one ERR packet, which a stock client
+// reports as "remote error" naming the limit and the operator flag. The same
+// node under the default envelope is the permitted twin.
+#[test]
+fn an_over_envelope_repository_is_refused_with_one_err_packet_naming_the_limit() {
+    let Fixture {
+        scratch: _scratch,
+        node,
+        config,
+        public,
+        ..
+    } = fixture(GitHashAlgorithm::Sha1);
+    node.shutdown().unwrap();
+    for version in [0_u8, 2] {
+        for (envelope, refused) in [(Some(64_usize), true), (None, false)] {
+            let configured = match envelope {
+                Some(bytes) => config.clone().with_selected_pack_byte_envelope(bytes),
+                None => config.clone(),
+            };
+            let mut node = OneNode::open_existing(configured).unwrap();
+            node.bring_into_service(HeadGeneration::FIRST).unwrap();
+            let (node, result, response) =
+                exchange_filtered(node, version, &[public], None, None, false);
+            node.shutdown().unwrap();
+            if refused {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(NodeGitDaemonServeRefusal::Pack(pack)) if matches!(
+                            **pack,
+                            NodePackMaterializationRefusal::DisclosureGraph(
+                                RefusalCode::ResourceBudgetExceeded
+                            )
+                        )
+                    ),
+                    "version {version}: {result:?}"
+                );
+                // One pkt-line and nothing else: no advertisement precedes it.
+                let length =
+                    usize::from_str_radix(std::str::from_utf8(&response[..4]).unwrap(), 16)
+                        .unwrap();
+                assert_eq!(length, response.len(), "version {version}");
+                let line = String::from_utf8(response[4..].to_vec()).unwrap();
+                assert!(
+                    line.starts_with(
+                        "ERR repository exceeds this server's upload envelope (64 bytes of objects, "
+                    ),
+                    "{line}"
+                );
+                assert!(
+                    line.ends_with("fg serve --pack-max-expanded-mib\n"),
+                    "{line}"
+                );
+            } else {
+                assert!(result.is_ok(), "version {version}: {result:?}");
+                assert!(!response.windows(4).any(|window| window == b"ERR "));
+            }
+        }
+    }
+}

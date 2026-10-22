@@ -233,6 +233,44 @@ no external call. Record the exact tested SHA, dated toolchain, RCH terminal
 exit, and store profile. A syntax check is not execution of this matrix, and
 these tests do not establish power-loss or distributed collector correctness.
 
+Terminal outbox retirement additionally requires acknowledgement and definite
+refusal to release their active slots in the same terminal publication,
+unresolved escalation to retain its slot, and retired retries to return the
+same committed effect without a new send or head advance. Exercise filesystem
+reopen in both Git object formats, historical retained-terminal migration under
+a distinct seal, missing receipt recovery, staged-only terminal bodies,
+destination mismatch and cancellation. The admission retirement tests use an
+explicit model authority; only the node reopen tests establish the file-backed
+composition. Neither establishes weak HTTP settlement or arbitrary-age lookup
+beyond the existing history budgets.
+
+The separate Weak route profile additionally requires real signed loopback
+HTTP to advance authority and release a terminal slot in both Git formats,
+receipt lookup after cold reopen, and mixed fan-out outcomes retaining pending
+siblings. Exercise transient backoff and frozen ceilings, final non-2xx failure
+with diagnostic retention, missing replies escalating without resend, and legacy
+journal refusal before claim. Strict SSRF must publish definite canonical
+failure and retain its diagnostic while an independently listening loopback
+receiver observes no connection; permissive positive cases must reach HTTP.
+The authority-model tests separately
+interrupt before send, after send but before observation, and after terminal
+observation but before finalization; only the last may finalize acknowledgement
+without another send. Require owner, endpoint, policy and membership mismatch
+refusal with unchanged head, and preserve the Strong capability guard. Scripted
+transport observations establish model publication semantics, not real HTTP or
+power-loss behavior. The actual `fgit-cli/tests/webhook_canonical.rs` process
+lane must also exercise new sealed manual replay in both formats, unchanged
+original receipt bytes, idempotent request recovery, and killed in-flight
+dispatch/replay after a complete signed HTTP write. The receiver must keep
+accepting during recovery, independently counting any forbidden resend. Include
+manual recovery of a canonical Indeterminate source with no local diagnostic.
+Model replay tests must plant an authenticated creation referencing staged-only
+source failure, require source/route/owner/request/lineage refusal, and pair each
+with permitted canonical creation. Verify exact-basis source eligibility on
+fresh marker CAS and retain owned observation/finalization after admission.
+No whole-bead credit follows until all original .4.55 acceptance execute at the
+reviewed revision.
+
 ## 9. Intent/effect and transaction semantics
 
 Test:

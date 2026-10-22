@@ -43,6 +43,35 @@ GitHub webhook JSON schema. Output is capped at 64 MiB. Repository shutdown
 must complete before any successful result is emitted. Both commands are
 read-only; neither sends a webhook nor acknowledges an obligation.
 
+## Recover a retired delivery receipt
+
+```
+fg webhook receipt ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
+  --delivery-id DELIVERY_ID --destination CANONICAL_DESTINATION \
+  --object-format sha256
+```
+
+Keep the original delivery ID and destination when dispatching. A settled entry
+that has been retired no longer appears in `outbox`, and `inspect` does not
+select it for another send. `receipt` authenticates the terminal removal in
+decision history, the original delivery binding, progress chain and receipt.
+It returns the original canonical receipt frame as lowercase hex, its root,
+terminal disposition, effect root and current source snapshot. Decode the
+frame with `fgit_codec::decode_body::<CanonicalOutboxDeliveryReceipt>`.
+
+`--expected-head SNAPSHOT_TOKEN` pins this read's source snapshot. An active or
+unknown key, wrong audience, stale pin, missing/corrupt evidence, cancellation
+or exhausted history budget refuses. Map absence and staged receipts never
+establish delivery. The history walks retain their existing 4,096-head-edge
+and 65,536-record bounds; this is not unbounded-age receipt indexing.
+
+This command accepts no endpoint, secret, attempt or send flag. It closes the
+node before emitting a successful result, makes no transport call and does not
+advance authority. `canonical_settled:true` describes the authenticated prior
+terminal outcome, including definite refusal; check `disposition` to distinguish
+acknowledgement from refusal. Explicit canonical dispatch and new sealed replay
+use this receipt reader; legacy observation-only commands do not settle state.
+
 ## Send a selected delivery
 
 ```
@@ -79,7 +108,53 @@ by this command. Exit codes are 0 for observed acceptance, 1 for transient
 failure, 2 for refusal/rejection, and 3 for an ambiguous outcome. Do not treat
 exit 3 or lost stdout as proof that the receiver did nothing.
 
-## Replay an actual dead letter
+## Canonical replay with a new sealed intent
+
+```sh
+fg webhook dead-letter replay ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
+  --id WEBHOOK_ID --delivery-id ORIGINAL_DELIVERY_ID --destination CANONICAL_DESTINATION \
+  --at-least-once --canonical-principal PRINCIPAL_ID --replay-key STABLE_NEW_REQUEST_KEY
+```
+
+Use the original canonically dispatched event's ID. The selected original route
+must be canonically Undeliverable or Indeterminate with the same endpoint,
+incarnation, strict/permissive SSRF profile and original schedule binding.
+A delivered sibling does not qualify. A local diagnostic, when present, must
+match and is retained. Missing replies and killed in-flight workers may have no
+local diagnostic; their authenticated Indeterminate route state suffices.
+Legacy journal observations alone cannot qualify a source.
+
+This publishes a new sealed `forge-replay` obligation and NEW delivery ID with
+one send allowance. It preserves the original outcome, original automatic
+budget and exact historical event bytes. The envelope's delivery ID and HMAC
+change to bind the new request; event frames/payload commitment stay identical.
+`--attempt` is refused: this is not a reset of the old attempt sequence.
+
+Retain the replay key and original ID. Repeating the same request key recovers
+the same new delivery, marker and outcome without another send. A changed
+request under the same key refuses. Another intentionally requested attempt
+uses the ORIGINAL event ID and a different replay key. A replay ID cannot itself
+become a replay parent, keeping source verification bounded. Keys are scoped
+by the existing authenticated transaction identity; use one stable principal
+for retries. An acknowledged or changed original source does not authorize
+another admission; retained new receipts remain inspectable by their new IDs.
+
+The node stays open with one finite background context through HTTP drain and
+canonical settlement. The shared route fence lasts through awaited shutdown.
+SIGINT/SIGTERM request drain; a crash/lost reply cannot prove non-delivery.
+Non-probing HTTP recovery publishes Escalated and performs no automatic resend.
+Both acknowledged and definitely failed replay slots retire; unresolved ones
+stay active. JSON returns original/new IDs, source effect/payload commitments,
+canonical progress/head, actual invocation attempts, retirement and diagnostic
+retention. Exit 0/2/3 distinguishes acknowledgement/definite failure/unknown.
+No HTTPS, receiver-side exactly-once or power-loss qualification is implied.
+
+The exact protocol and replay-source bounds are in
+[MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md](MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#new-sealed-manual-replay-intent).
+Current revision-bound execution and independent batch acceptance are required;
+this profile does not change the legacy commands below.
+
+## Legacy replay of an actual dead letter
 
 ```
 fg webhook dead-letter replay ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \

@@ -10,7 +10,7 @@ use fgit_diff::{
 };
 use fgit_forge::event::NativeMerge;
 use fgit_git_object::{
-    AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
+    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
 };
 use fgit_pack::{CanonicalObjectSource, Deadline, PackError, PackWriteError, verify_native_object};
 use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
@@ -149,6 +149,47 @@ pub fn validate_workspace_objects(
         Some(&[expected_parent]),
         AncestryRequirement::None,
         None,
+        limits,
+        deadline,
+    )
+}
+
+/// Verify a strictly formed, single-parent workspace candidate above an
+/// authenticated object frontier. The expected parent must already be selected;
+/// every candidate edge is still checked against its required native kind.
+/// The returned per-decision closure contains newly traversed objects and the
+/// named candidate/parent, without copying inherited trees, blobs or history.
+///
+/// The caller owns selection and disclosure: its source must authorize every
+/// original read from the intended visible parent, not merely local storage.
+/// This validator neither stages objects nor publishes or authorizes a change.
+pub fn validate_workspace_objects_above(
+    source: &impl CanonicalObjectSource,
+    candidate: GitOid,
+    expected_parent: GitOid,
+    selected: &BTreeSet<GitOid>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    if candidate.is_zero()
+        || expected_parent.is_zero()
+        || expected_parent.algorithm() != candidate.algorithm()
+        || expected_parent == candidate
+    {
+        return Err(invalid());
+    }
+    checkpoint(deadline)?;
+    if !selected.contains(&expected_parent) {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::ObjectClosureIncomplete,
+        ));
+    }
+    validate_candidate_objects(
+        source,
+        candidate,
+        Some(&[expected_parent]),
+        AncestryRequirement::None,
+        Some(selected),
         limits,
         deadline,
     )
@@ -379,7 +420,7 @@ fn validate_candidate_objects(
             profile,
             &parse_limits,
         )
-        .map_err(|_| invalid())?;
+        .map_err(native_parse_failure)?;
         checkpoint(deadline)?;
         visited.insert(id);
         let mut outgoing = Vec::new();
@@ -675,7 +716,7 @@ impl<S: CanonicalObjectSource> FrontierCommitGraph<'_, S> {
                 AcceptanceProfile::GitCompatibleImport,
                 self.parse_limits,
             )
-            .map_err(|_| invalid())?
+            .map_err(object_parse_failure)?
             else {
                 return Err(invalid());
             };
@@ -857,6 +898,23 @@ const fn invalid() -> ProjectionFailure {
 }
 const fn budget() -> ProjectionFailure {
     ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
+}
+
+fn object_parse_failure(error: ObjectError) -> ProjectionFailure {
+    match error {
+        ObjectError::ObjectTooLarge { .. }
+        | ObjectError::TooManyTreeEntries { .. }
+        | ObjectError::HeaderLimitExceeded { .. }
+        | ObjectError::AllocationFailure => budget(),
+        _ => invalid(),
+    }
+}
+
+fn native_parse_failure(error: PackError) -> ProjectionFailure {
+    match error {
+        PackError::ObjectParse(error) => object_parse_failure(error),
+        _ => invalid(),
+    }
 }
 fn checkpoint(deadline: &mut impl Deadline) -> Result<(), ProjectionFailure> {
     if deadline.checkpoint() {

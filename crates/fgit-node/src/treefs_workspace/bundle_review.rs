@@ -6,19 +6,24 @@
 mod candidate_inputs;
 #[path = "bundle_review/pack.rs"]
 mod pack;
+#[path = "bundle_review/reachability.rs"]
+mod reachability;
+#[cfg(test)]
+#[path = "bundle_review/reachability_tests.rs"]
+mod reachability_tests;
 #[path = "bundle_review/rebase.rs"]
 mod rebase;
 #[cfg(test)]
 #[path = "bundle_review/tests.rs"]
 mod tests;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_commit_closure, validate_fast_forward_objects,
-    validate_merge_objects, validate_squash_objects, validate_workspace_objects,
+    MergeObjectLimits, validate_commit_closure, validate_fast_forward_objects_above,
+    validate_merge_objects_above, validate_squash_objects_above, validate_workspace_objects_above,
 };
 use fgit_crypto::{git_object_id, sha256_digest};
 use fgit_forge::event::NativeMerge;
@@ -61,6 +66,8 @@ pub struct BundleInspection {
     pub pack_bytes: usize,
     pub pack_objects: usize,
     pub expanded_bytes: usize,
+    /// Objects in the validated candidate decision, including named parent/base
+    /// commits. This is independent of pack thickness, not the full history size.
     pub closure_objects: usize,
     pub transport_only_objects: usize,
     pub prerequisites: Vec<GitOid>,
@@ -243,8 +250,14 @@ impl OneNode {
             max_object_bytes: maximum_object_bytes,
             ..MergeObjectLimits::default()
         };
-        let original = OriginalSource {
-            inner: VerifiedFabricPackSource {
+        let mut parents = vec![expected_base];
+        if let Some(coordinates) = merge {
+            parents.push(coordinates.source_tip);
+        }
+        // Original reads prove reachability from these visible parents on
+        // demand. The cumulative selected set alone never grants disclosure.
+        let original = OriginalSource::with_parents(
+            VerifiedFabricPackSource {
                 fabric: &self.fabric,
                 object_format: self.object_format,
                 maximum_object_bytes,
@@ -252,32 +265,12 @@ impl OneNode {
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
             },
-            allowed: selected.selected_closure().closure().objects(),
-            budget: &budget,
-        };
-        let mut parents = vec![expected_base];
-        if let Some(coordinates) = merge {
-            parents.push(coordinates.source_tip);
-        }
-        // This traversal is rooted ONLY at the visible, independently selected
-        // parents. A thin delta cannot use an unrelated hidden branch's blob
-        // merely because the repository's cumulative admitted set contains it.
-        let mut parent_objects = BTreeSet::new();
-        for parent in &parents {
-            let verified = validate_commit_closure(&original, *parent, limits, &mut || {
-                original.live().is_ok()
-            });
-            original.live().map_err(BundleInspectionRefusal::Source)?;
-            let verified = verified.map_err(BundleInspectionRefusal::Validation)?;
-            parent_objects.extend(verified.objects);
-            if parent_objects.len() > limits.max_objects {
-                return Err(BundleInspectionRefusal::BudgetExceeded);
-            }
-        }
-        let original = OriginalSource {
-            allowed: &parent_objects,
-            ..original
-        };
+            selected.selected_closure().closure().objects(),
+            &budget,
+            &parents,
+            limits,
+        )
+        .map_err(BundleInspectionRefusal::Source)?;
         for prerequisite in &envelope.prerequisites {
             let object = original
                 .read(*prerequisite)
@@ -327,26 +320,41 @@ impl OneNode {
             .parents;
         let validation = match merge {
             Some(coordinates) if coordinates.merge_commit == coordinates.source_tip => {
-                validate_fast_forward_objects(&source, coordinates, limits, &mut || {
-                    original.live().is_ok()
-                })
+                validate_fast_forward_objects_above(
+                    &source,
+                    coordinates,
+                    original.allowed,
+                    limits,
+                    &mut || original.live().is_ok(),
+                )
             }
             Some(coordinates)
                 if candidate_parents.as_slice()
                     == std::slice::from_ref(&coordinates.target_tip_before) =>
             {
-                validate_squash_objects(&source, coordinates, limits, &mut || {
-                    original.live().is_ok()
-                })
+                validate_squash_objects_above(
+                    &source,
+                    coordinates,
+                    original.allowed,
+                    limits,
+                    &mut || original.live().is_ok(),
+                )
             }
-            Some(coordinates) => validate_merge_objects(&source, coordinates, limits, &mut || {
-                original.live().is_ok()
-            }),
-            None => {
-                validate_workspace_objects(&source, candidate, expected_base, limits, &mut || {
-                    original.live().is_ok()
-                })
-            }
+            Some(coordinates) => validate_merge_objects_above(
+                &source,
+                coordinates,
+                original.allowed,
+                limits,
+                &mut || original.live().is_ok(),
+            ),
+            None => validate_workspace_objects_above(
+                &source,
+                candidate,
+                expected_base,
+                original.allowed,
+                limits,
+                &mut || original.live().is_ok(),
+            ),
         };
         original.live().map_err(BundleInspectionRefusal::Source)?;
         let validation = validation.map_err(BundleInspectionRefusal::Validation)?;
@@ -354,7 +362,8 @@ impl OneNode {
         // object access above. A fast-forward may span several commits, so its
         // source tip's direct parent need not be the observed target.
         let parents = candidate_parents;
-        let transport_only_objects = unpacked.check_coverage(&validation.objects)?;
+        let transport_only_objects =
+            unpacked.check_frontier_coverage(&validation.objects, &original, limits)?;
         let comparison = compare_source(
             &source,
             self.object_format,
@@ -400,8 +409,46 @@ struct OriginalSource<'a> {
     inner: VerifiedFabricPackSource<'a>,
     allowed: &'a BTreeSet<GitOid>,
     budget: &'a ReadBudget,
+    frontier: Option<RefCell<reachability::ParentReachability>>,
 }
-impl OriginalSource<'_> {
+impl<'a> OriginalSource<'a> {
+    fn with_parents(
+        inner: VerifiedFabricPackSource<'a>,
+        allowed: &'a BTreeSet<GitOid>,
+        budget: &'a ReadBudget,
+        parents: &[GitOid],
+        limits: MergeObjectLimits,
+    ) -> Result<Self, MergeSourceError> {
+        if parents.iter().any(|id| !allowed.contains(id)) {
+            return Err(MergeSourceError::OutsideSelection);
+        }
+        let frontier = reachability::ParentReachability::new(inner.object_format, parents, limits)?;
+        Ok(Self {
+            inner,
+            allowed,
+            budget,
+            frontier: Some(RefCell::new(frontier)),
+        })
+    }
+
+    fn permits(&self, id: GitOid) -> Result<bool, MergeSourceError> {
+        self.live()?;
+        if !self.allowed.contains(&id) {
+            return Ok(false);
+        }
+        let result = match &self.frontier {
+            None => Ok(true),
+            Some(frontier) => {
+                frontier
+                    .borrow_mut()
+                    .ensure(id, |id| self.read_selected(id), || self.live())
+            }
+        };
+        if matches!(result, Err(MergeSourceError::BudgetExceeded)) {
+            self.budget.exhausted.set(true);
+        }
+        result
+    }
     fn live(&self) -> Result<(), MergeSourceError> {
         if self.budget.exhausted.get() || self.inner.database_exhaustion.get().is_some() {
             return Err(MergeSourceError::BudgetExceeded);
@@ -417,6 +464,26 @@ impl OriginalSource<'_> {
         }
     }
     fn read(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {
+        if !self.permits(id)? {
+            return Err(MergeSourceError::OutsideSelection);
+        }
+        let (kind, body) = self.read_selected(id)?;
+        if let Some(frontier) = &self.frontier {
+            let result = frontier
+                .borrow_mut()
+                .observe(id, kind, &body, &mut || self.live());
+            if matches!(result, Err(MergeSourceError::BudgetExceeded)) {
+                self.budget.exhausted.set(true);
+            }
+            result?;
+        }
+        self.live()?;
+        Ok((kind, body))
+    }
+
+    // Only the reachability prover may read selected objects before proving a
+    // requested object's disclosure. Its load starts at a proven native edge.
+    fn read_selected(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {
         self.live()?;
         if !self.allowed.contains(&id) {
             return Err(MergeSourceError::OutsideSelection);

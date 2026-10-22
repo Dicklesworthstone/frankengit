@@ -73,8 +73,8 @@ impl OneNode {
     /// complete native commit body, without staging uploaded objects.
     ///
     /// The caller supplies independent source/base/candidate coordinates and
-    /// authenticated disclosure policy. Both native parent closures are selected
-    /// by the existing inspector before any uploaded delta can read originals.
+    /// authenticated disclosure policy. Original reads prove reachability from
+    /// the selected parents before any uploaded delta can read their bytes.
     /// A PR from one head cannot be combined with inspection at another head.
     ///
     /// This full-candidate profile rejects path filters and merge-base diffs.
@@ -119,7 +119,7 @@ impl OneNode {
             || inspected.review.comparison.requested_before != subject.target_tip
             || inspected.review.comparison.requested_after != candidate.commit
             // The native bundle inspector already validates the selected
-            // parent closure and merge base. Preserve both supported candidate
+            // parent reachability and merge base. Preserve both supported candidate
             // shapes here: squash has one target parent, not two. A valid
             // squash is not evidence that the authenticated snapshot moved.
             || (!candidate.is_fast_forward(subject)

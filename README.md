@@ -63,9 +63,11 @@ locally at that revision. `doctor` authenticates the head and can re-verify
 one explicitly named native object; it is not yet a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` writes an authority-selected pack
 to a previously absent path. One emitted pack is bounded by the documented
-write-side envelope (`--pack-max-expanded-mib`; 128 MiB expanded by default),
-and an over-envelope clone receives a diagnosable Fatal sideband refusal
-rather than an unexplained early EOF.
+write-side envelope (`--pack-max-expanded-mib`; 128 MiB expanded by default).
+A clone or fetch of a repository whose visible objects exceed it is refused
+before the ref advertisement with one `ERR` packet naming the limit and that
+flag, which a stock client reports as `remote error:` (git:// and SSH,
+frankengit-e6jj). Until then such a clone saw only an unexplained hang-up.
 
 `serve` defaults to a bounded raw git-daemon run and also supports an explicit
 `--continuous --stop-file <path>` lifetime. Both modes drain every admitted
@@ -185,16 +187,25 @@ vision goals to current code, evidence and existing owning work.
 
 **What still blocks the product:**
 
-- Merge preparation builds a full ancestor index under a 4,096-commit bound.
-  Independent candidate validation walks the full reachable closure under
-  100,000-object and 128 MiB limits. Small PRs in ordinary larger repositories
-  can therefore refuse; `rffg` owns both walls.
+- Merge preparation reads only the history above the merge base (rffg) and
+  merge publication validates only what a merge adds above the selected
+  closure (lh8z), so 100,000-commit and 100,000-file repositories prepare and
+  publish. Merge-base ordering uses committer dates as hints: equal or skewed
+  dates can exhaust the 4,096-commit bound and refuse, never select a wrong
+  base. Serving a clone still holds the visible objects in memory under the
+  128 MiB default envelope above.
 - Forge-position and outbox state have 16,384-entry bounds; the node writer
   gate is one. Required-check history scans are independently bounded.
   These do not establish sustained or extreme-scale operation.
 - CLI/MCP writes remain operator-asserted, HTTP is loopback-only, and native
   TLS/general identity and hostile-runner isolation remain incomplete.
-  The CLI webhook dispatcher still reports `canonical_settled:false`.
+  The default webhook dispatcher remains observation-only. Explicit
+  `--canonical-principal` dispatch now publishes an immutable Weak route plan,
+  actual HTTP observations and terminal receipts; new sealed manual replay
+  preserves the original outcome under a distinct delivery ID. These bounded
+  trusted-local paths do not supply hosted identity, TLS, receiver exactly-once
+  semantics or independent full-bead acceptance; see the
+  [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#explicitly-owned-weak-dispatch-profile).
 - Eight product crates remain outside `fg`'s normal dependency closure:
   ATP-Git, compaction, exchange, object-store, projection, RaptorQ, repair
   and witness. Statistics is linked but its controller is not consulted by

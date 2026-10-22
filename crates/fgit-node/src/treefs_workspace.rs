@@ -11,6 +11,7 @@ mod initial_commit;
 mod merge_prepare;
 mod native_merge;
 mod outbox_delivery;
+pub use outbox_delivery::RetiredForgeDeliveryReceipt;
 mod patch;
 mod tags;
 pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};

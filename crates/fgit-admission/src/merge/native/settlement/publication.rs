@@ -23,7 +23,7 @@ pub(super) const fn recovered(terminal: TerminalOutcome) -> Result<bool, Admissi
 /// `Some(false)` is an authenticated prior decision; `None` needs a replan.
 /// An ambiguous publication error is deliberately not promoted into ownership
 /// by looking up its outcome: the persisted marker remains available to probe.
-pub(super) async fn publish_owned<S: AsyncAuthorityStore + ?Sized>(
+pub(in crate::merge::native) async fn publish_owned<S: AsyncAuthorityStore + ?Sized>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,

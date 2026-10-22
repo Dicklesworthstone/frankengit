@@ -242,8 +242,13 @@ impl OneNode {
         let maximum = usize::try_from(self.max_object_bytes)
             .unwrap_or(usize::MAX)
             .min(sparse.max_entry_bytes.max(MAX_CANDIDATE_BYTES));
-        let original = OriginalSource {
-            inner: VerifiedFabricPackSource {
+        let limits = MergeObjectLimits {
+            max_object_bytes: maximum,
+            ..Default::default()
+        };
+        let parents: Vec<_> = selections.iter().map(|(_, parent)| *parent).collect();
+        let original = OriginalSource::with_parents(
+            VerifiedFabricPackSource {
                 fabric: &self.fabric,
                 object_format: self.object_format,
                 maximum_object_bytes: maximum,
@@ -251,31 +256,12 @@ impl OneNode {
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
             },
-            allowed: selected.selected_closure().closure().objects(),
-            budget: &budget,
-        };
-        let limits = MergeObjectLimits {
-            max_object_bytes: maximum,
-            ..Default::default()
-        };
-        let mut parent_objects = BTreeSet::new();
-        for (_, parent) in &selections {
-            let verified = validate_commit_closure(&original, *parent, limits, &mut || {
-                original.live().is_ok()
-            });
-            original.live().map_err(BundleInspectionRefusal::Source)?;
-            let verified = verified.map_err(BundleInspectionRefusal::Validation)?;
-            for id in verified.objects {
-                if !parent_objects.contains(&id) && parent_objects.len() >= limits.max_objects {
-                    return Err(BundleInspectionRefusal::BudgetExceeded);
-                }
-                parent_objects.insert(id);
-            }
-        }
-        let original = OriginalSource {
-            allowed: &parent_objects,
-            ..original
-        };
+            selected.selected_closure().closure().objects(),
+            &budget,
+            &parents,
+            limits,
+        )
+        .map_err(BundleInspectionRefusal::Source)?;
         let pack_limits = PackLimits {
             max_input_bytes: MAX_BUNDLE_BYTES,
             max_entries: MAX_INSPECTION_OBJECTS,
@@ -304,21 +290,32 @@ impl OneNode {
             },
         };
         let verified = match merge {
-            Some((m, MergeCommitStyle::TwoParent)) => {
-                validate_merge_objects(&source, m, limits, &mut || original.live().is_ok())
-            }
-            Some((m, MergeCommitStyle::Squash)) => {
-                validate_squash_objects(&source, m, limits, &mut || original.live().is_ok())
-            }
-            None => {
-                validate_workspace_objects(&source, candidate, expected_base, limits, &mut || {
-                    original.live().is_ok()
-                })
-            }
+            Some((m, MergeCommitStyle::TwoParent)) => validate_merge_objects_above(
+                &source,
+                m,
+                selected.selected_closure().closure().objects(),
+                limits,
+                &mut || original.live().is_ok(),
+            ),
+            Some((m, MergeCommitStyle::Squash)) => validate_squash_objects_above(
+                &source,
+                m,
+                selected.selected_closure().closure().objects(),
+                limits,
+                &mut || original.live().is_ok(),
+            ),
+            None => validate_workspace_objects_above(
+                &source,
+                candidate,
+                expected_base,
+                selected.selected_closure().closure().objects(),
+                limits,
+                &mut || original.live().is_ok(),
+            ),
         };
         original.live().map_err(BundleInspectionRefusal::Source)?;
         let verified = verified.map_err(BundleInspectionRefusal::Validation)?;
-        unpacked.check_coverage(&verified.objects)?;
+        unpacked.check_frontier_coverage(&verified.objects, &original, limits)?;
         let base_commit = source
             .commit(expected_base)
             .map_err(BundleInspectionRefusal::Source)?;

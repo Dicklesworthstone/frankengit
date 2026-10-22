@@ -20,6 +20,7 @@ use fgit_types::{
 
 use super::subscription::require_subscription;
 use crate::publication_support::quote;
+mod canonical;
 mod fanout;
 mod journal;
 mod status;
@@ -31,38 +32,41 @@ const USAGE: &str =
   [--object-format sha1|sha256] [--max-deliveries <1..1000>]
   [--max-scan-entries <1..16384>] [--attempt-timeout-secs <1..60>]
   [--continuous --stop-file <path> [--poll-millis <100..60000>]]
-  [--permissive-for-tests]
+  [--canonical-principal <principal-id>] [--permissive-for-tests]
 
-Default: one sweep, at most 16 due attempts, 16384 retained entries, 5 s/attempt.
+With --canonical-principal, an explicit route set is sealed before I/O and actual
+observations settle canonically. Unknown recovered sends escalate without resend.
+Legacy journals cannot be retroactively claimed. Default: one sweep, at most 16 due attempts, 16384 retained entries, 5 s/attempt.
 A complete outbox snapshot is selected on every sweep; no append-ordered key
 cursor is assumed. The private local journal is locked and synced BEFORE each
 send. Restarted in-flight attempts remain unknown and consume the next ordinal.
-A retry can duplicate an effect. Local HTTP acceptance NEVER settles canonical
-outbox state. Checkpoints retain all outcomes and budgets. No HTTPS or exactly-once guarantee.
+A retry can duplicate an effect. Without --canonical-principal, HTTP acceptance
+never settles canonical outbox state. Checkpoints retain all outcomes and budgets. No HTTPS or exactly-once guarantee.
 For bounded multi-destination delivery, see: fg webhook dispatch fanout --help.
 Continuous mode drains on SIGTERM/SIGINT or a regular stop file. Blocking DNS
 and filesystem calls cannot be preempted. All directories must be operator-owned.
 Exit 0: no pending/failed selected work; 1: pending/backoff/bound; 2: refusal or
 rejection; 3: unresolved transport outcome. See docs/WEBHOOK_DISPATCHER.md.";
 
-#[derive(Debug)]
-struct Options {
-    storage: PathBuf,
-    tenant: TenantId,
-    repository: RepositoryId,
-    format: GitHashAlgorithm,
-    id: WebhookId,
-    destination: AsciiSlug,
-    max_deliveries: usize,
-    max_scan: usize,
-    timeout: Duration,
-    continuous: bool,
-    stop_file: Option<PathBuf>,
-    poll: Duration,
-    permissive: bool,
+#[derive(Clone, Debug)]
+pub(super) struct Options {
+    pub(super) storage: PathBuf,
+    pub(super) tenant: TenantId,
+    pub(super) repository: RepositoryId,
+    pub(super) format: GitHashAlgorithm,
+    pub(super) id: WebhookId,
+    pub(super) destination: AsciiSlug,
+    pub(super) max_deliveries: usize,
+    pub(super) max_scan: usize,
+    pub(super) timeout: Duration,
+    pub(super) continuous: bool,
+    pub(super) stop_file: Option<PathBuf>,
+    pub(super) poll: Duration,
+    pub(super) permissive: bool,
+    pub(super) canonical_principal: Option<fgit_types::PrincipalId>,
 }
 impl Options {
-    fn policy(&self) -> SsrfPolicy {
+    pub(super) fn policy(&self) -> SsrfPolicy {
         if self.permissive {
             SsrfPolicy::PERMISSIVE_FOR_TESTS
         } else {
@@ -87,7 +91,7 @@ fn number(value: &str, min: u64, max: u64) -> Result<u64, String> {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 26
+        || args.len() > 28
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
         || args[0].is_empty()
@@ -114,6 +118,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     | "--attempt-timeout-secs"
                     | "--stop-file"
                     | "--poll-millis"
+                    | "--canonical-principal"
             )
         {
             return Err(format!("unknown dispatch option {flag}"));
@@ -182,6 +187,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
         stop_file,
         poll: Duration::from_millis(bounded("--poll-millis", "1000", 100, 60000)?),
         permissive: fields.contains_key("--permissive-for-tests"),
+        canonical_principal: fields
+            .get("--canonical-principal")
+            .map(|v| fgit_types::PrincipalId::from_hex(v).map_err(|e| e.to_string()))
+            .transpose()?,
     })
 }
 
@@ -250,7 +259,7 @@ fn with_node<T>(
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),
         (result, cleanup) => Err(format!(
-            "dispatch source read/shutdown incomplete; previous attempts retain their journal status; read={:?}; shutdown={:?}",
+            "dispatch invocation/shutdown incomplete; retained canonical progress and local observations require inspection; operation={:?}; shutdown={:?}",
             result.err(),
             cleanup.err()
         )),
@@ -282,17 +291,29 @@ fn registration_snapshot(options: &Options) -> Result<(WebhookStore, WebhookRegi
         .ok_or("dispatch webhook registration is missing")?;
     Ok((store, registration))
 }
-fn registration(options: &Options) -> Result<(WebhookStore, WebhookRegistration), String> {
-    let (store, registration) = registration_snapshot(options)?;
-    if !registration.active {
-        return Err("dispatch webhook registration is inactive".into());
-    }
+pub(super) fn registration(
+    options: &Options,
+) -> Result<(WebhookStore, WebhookRegistration), String> {
+    let (store, registration) = canonical_registration(options)?;
     let validated = options
         .policy()
         .validate_url(registration.url.raw())
         .map_err(|e| e.to_string())?;
     if validated.scheme() != "http" {
         return Err("dispatch HTTPS is not supported; no TLS downgrade is permitted".into());
+    }
+    Ok((store, registration))
+}
+
+// Canonical dispatch must publish the transport's definite refusal as well as
+// actual HTTP outcomes. URL/DNS/TLS policy is enforced by the transport before
+// connection; preflight here would leave an unfinishable canonical obligation.
+pub(super) fn canonical_registration(
+    options: &Options,
+) -> Result<(WebhookStore, WebhookRegistration), String> {
+    let (store, registration) = registration_snapshot(options)?;
+    if !registration.active {
+        return Err("dispatch webhook registration is inactive".into());
     }
     let schedule = registration.retry_schedule;
     if !(2..=16).contains(&schedule.max_attempts)
@@ -308,7 +329,7 @@ fn registration(options: &Options) -> Result<(WebhookStore, WebhookRegistration)
     Ok((store, registration))
 }
 
-fn scope(
+pub(super) fn scope(
     options: &Options,
     incarnation: RepositoryIncarnationId,
     registration: &WebhookRegistration,
@@ -337,6 +358,19 @@ fn scope(
     }
     sha256_digest(&bytes)
 }
+/// Canonical capability profile is distinct from the stable legacy journal
+/// header. Changing SSRF authority cannot resume an existing canonical plan.
+/// Attempt timeout remains an invocation-local deadline, not a retry reset.
+pub(super) fn canonical_scope(
+    options: &Options,
+    incarnation: RepositoryIncarnationId,
+    registration: &WebhookRegistration,
+) -> [u8; 32] {
+    let mut bytes = b"frankengit/canonical-http-route/v1\0".to_vec();
+    bytes.extend_from_slice(&scope(options, incarnation, registration));
+    bytes.push(u8::from(options.permissive));
+    sha256_digest(&bytes)
+}
 fn journal_path(options: &Options) -> PathBuf {
     // Endpoint/incarnation changes MUST hit the same slot and fail its header,
     // never quietly create a fresh attempt counter for an old delivery key.
@@ -345,6 +379,22 @@ fn journal_path(options: &Options) -> PathBuf {
         options.id.0,
         hex(&sha256_digest(options.destination.as_bytes()))
     ))
+}
+pub(super) struct ReplayFence {
+    _journal: Journal,
+}
+pub(super) fn acquire_replay_fence(
+    options: &Options,
+    incarnation: RepositoryIncarnationId,
+    registration: &WebhookRegistration,
+) -> Result<ReplayFence, String> {
+    Ok(ReplayFence {
+        _journal: Journal::open(
+            &journal_path(options),
+            scope(options, incarnation, registration),
+            registration.retry_schedule.max_attempts,
+        )?,
+    })
 }
 fn payload_hash(root: Digest) -> [u8; 32] {
     let mut input = root.algorithm().code_point().to_be_bytes().to_vec();
@@ -431,6 +481,15 @@ fn execute(
     clock: &impl Fn() -> Result<u64, String>,
     output: &mut impl Write,
 ) -> Result<u8, String> {
+    if options.canonical_principal.is_some() {
+        return canonical::execute(
+            std::slice::from_ref(options),
+            options.max_deliveries,
+            stop_signal,
+            clock,
+            output,
+        );
+    }
     // Cancellation is a request, not a level-triggered pause. Removing a stop
     // file (or recovering from its I/O error) cannot resume an admitted drain.
     let stop_latched = Cell::new(false);
