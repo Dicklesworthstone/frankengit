@@ -91,8 +91,8 @@ impl Fixture {
             active: true,
             retry_schedule: WebhookRetrySchedule {
                 max_attempts: 3,
-                initial_delay: Duration::ZERO,
-                max_delay: Duration::ZERO,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
             },
         };
         node.webhook_store()
