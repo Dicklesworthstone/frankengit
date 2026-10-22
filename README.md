@@ -115,7 +115,7 @@ Neither is yet a multi-user production deployment:
 - `fg serve-http` refuses non-loopback addresses;
 - writes from the CLI and MCP carry a self-asserted principal;
 
-See the [reality snapshot](#reality-snapshot-2026-10-20). The raw
+See the [reality snapshot](#reality-snapshot-2026-10-21). The raw
 git-daemon receive lane is the composition slice the `first_push.sh` E2E suite
 exercises with a real `git` client. No command
 treats local object placement, a routing hint, or a connection-local ref map
@@ -154,81 +154,78 @@ then verifies that the authoritative tracker hash did not change. Graph scores
 remain advisory: an agent may claim a bead only when the exact ID appears in
 `br ready --unassigned --no-db --json`.
 
-### Reality snapshot: 2026-10-20
+### Reality snapshot: 2026-10-21
 
-FrankenGit has a substantial bounded Git node and a growing native forge core.
-It remains an integration-stage product, without a current independent gate for
-production readiness, a complete agent workflow, extreme scale, or release.
-The [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
-assesses source `7eaf1df8`, supersedes the October 17 snapshot in place, and maps
-30 vision goals to existing work under `frankengit-root-doctrine-x2mv.4`.
+FrankenGit contains a substantial bounded native Git node and real forge
+mechanisms. It remains an integration-stage product. The
+[reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) assesses
+source `26c6a7f1`, supersedes the October 20 snapshot in place, and maps 30
+vision goals to current code, evidence and existing owning work.
 
-**Material progress since October 17:**
+**Progress since October 20:**
 
-- Tier A is now declared and has historical pinned-Git receipts. The latest
-  README-cited result is 18/18 rows and 624/624 checks at `18f77336`, for
-  `git://`, with `fg serve` at its default receive budgets; see the
-  compatibility section below for scope and divergences.
-- Required workflow checks and review quorums now have real native admission
-  callers. The check gate binds the exact candidate, source ref, publisher,
-  workflow graph and job, selects the latest canonical result, and rechecks
-  after CAS loss. The earlier blanket statement that checks never gate merges
-  is obsolete; current native acceptance still needs independent execution.
-- Native canonical-ref and PR source-head workflow watchers can execute and
-  recover canonical check publication. They retain the trusted-host profile;
-  source-head PR runs do not establish synthetic-merge correctness.
-- Pack lookups are indexed, imports can batch immutable placement behind a
-  directory durability fence, and the 1 MiB authority-metadata refusal has a
-  wider finite profile with pre-placement size checks. The leading global
-  import timeout is now honored. Broad scale/performance acceptance remains open.
-- Two beads closed October 19. Formatting passes freshly at `7eaf1df8`.
+- The pending-verification queue has drained: intake is 13 `batch_pending`
+  plus 9 `in_progress` (22/36), compared with 36/36 previously. The recorded
+  non-author review discloses the same model family/harness and a different
+  session/context/worktree; this is not human or model independence.
+- Native exact-candidate required checks and review quorums remain real
+  admission gates. Workflow branch filters and trusted squash-candidate
+  composition have landed. Current complete protected-team acceptance still
+  needs independent execution.
+- `fgit-agent` now enters the node's normal dependency closure. Its new
+  authority-bound ContextPacket bridge has no product call site found by this
+  audit; the full sponsored agent run remains incomplete.
+- The checker now rejects production `#[expect]` lint relaxations. Several
+  licence/toolchain-manifest and lockfile defects were repaired. The admitted
+  constellation and normative integration text still disagree.
+- Receive ingress, processing and response budgets have focused native
+  evidence at `7fb8cf97`. The later cancellation-timer repair is present but
+  not freshly executed by this audit. Historical Tier A remains 18 rows and
+  624 checks at `18f77336`, over `git://` only.
 
 **What still blocks the product:**
 
-- Verification debt is 36/36: 28 `batch_pending` and 8 `in_progress` at intake.
-  Twenty-one pending items belong to the sole recorded appointed verifier.
-  There is still no observed one-SHA end-to-end `fast` success in the owning
-  record; the latest recorded remainder includes Clippy.
-- Forge-position and outbox state still have 16,384-entry bounds; the node
-  admits one concurrent writer. Required-check history scans are also bounded.
-  These are explicit limits, not evidence of extreme-scale operation.
-- CLI/MCP principals remain operator-asserted. HTTP is loopback-only; native
-  TLS, general identity/policy integration and hostile-runner isolation remain
-  incomplete. The webhook dispatcher still reports `canonical_settled:false`.
-- Nine product crates remain outside `fg`'s normal dependency closure:
-  agent, ATP-Git, compaction, exchange, object-store, projection, RaptorQ,
-  repair and witness. Statistics is linked, but its retry controller is
-  constructed without being consulted by the retry loop.
-- The JS browser/operator plane still diverges from accepted gateway/WASM and
-  Rust Git-engine decisions. Native verification is selectable for some
-  clients; the default legacy JS decoder has not been retired or ratified.
-- The full verification lane deliberately exits 3; the release path and native
-  target matrix remain incomplete. The public GitHub Releases API returns no
-  releases on October 20; no live deployment is established by this assessment.
+- Merge preparation builds a full ancestor index under a 4,096-commit bound.
+  Independent candidate validation walks the full reachable closure under
+  100,000-object and 128 MiB limits. Small PRs in ordinary larger repositories
+  can therefore refuse; `rffg` owns both walls.
+- Forge-position and outbox state have 16,384-entry bounds; the node writer
+  gate is one. Required-check history scans are independently bounded.
+  These do not establish sustained or extreme-scale operation.
+- CLI/MCP writes remain operator-asserted, HTTP is loopback-only, and native
+  TLS/general identity and hostile-runner isolation remain incomplete.
+  The CLI webhook dispatcher still reports `canonical_settled:false`.
+- Eight product crates remain outside `fg`'s normal dependency closure:
+  ATP-Git, compaction, exchange, object-store, projection, RaptorQ, repair
+  and witness. Statistics is linked but its controller is not consulted by
+  production retry loops. Dependency reachability alone is not integration.
+- The owned HTTP gateway and JS browser/operator paths still need reconciliation
+  with accepted sibling/WASM and native Git-engine decisions. No owner
+  decision is inferred from continued implementation.
+- The `full` lane deliberately refuses, and the release path/native target
+  matrix are incomplete. The public GitHub Releases API returned no releases
+  on October 21; this assessment establishes no live deployment.
 
-**Fresh execution limits:** the macOS browser JS suite reports 3,626 passed,
-5 failed and 1 skipped at `7eaf1df8`; observed failures involve canonical temp
-paths and filesystem filename representability. A focused default-temp failure
-passes with a canonical temp path, without changing security checks. The
-operator suite hit the audit's 180-second bound. These are JS/harness results,
-not native-server or real-browser evidence. Current native execution was not
-performed: no current local `fg`, a non-passing storage gate, an unavailable
-prescribed target volume and no local pinned-Git oracle receipt. Older Rust
-and E2E results remain historical rather than being carried forward as passes.
+**Fresh evidence at `26c6a7f1`:** pinned Node 26.8.1 browser profile:
+3,635 passed, 0 failed, 1 skipped (Chromium); scripts profile: 1,394 passed,
+0 failed or skipped. The 166-file operator profile reached its ten-minute
+campaign bound (exit 124) without a terminal suite aggregate; it remains a
+non-pass.
+These are module/peer and harness observations, not a native-server or complete
+real-browser gate. All three runs report owned process-group quiescence.
+Formatting currently fails in the new agent bridge file. Strict remote syntax
+execution selected a healthy worker but stopped before compilation because RCH
+classified deliberately invalid checker fixtures as selected Cargo sources
+(`RCH-E413`, `.4.72`). Local storage remains critical; no local compiler fallback
+or current native pass is claimed.
 
-The bridge prioritizes an independent verification drain, an authenticated
-deployment profile, a complete protected team PR workflow, canonical outbox
-settlement, predictable imports, sustained-state bounds and an independently
-executed restore. ATP, TreeFS, agents, graphs and the full 1.0 scope remain in
-the plan. Owner decisions are recorded as unresolved rather than silently
-amended by implementation.
-
-The claims registry remains the public proof boundary. Its verified rows cover
-narrow artifact identity and contained Lean-model theorems; they do not prove
-general Git compatibility, Rust refinement of the complete implementation,
-forge completeness, multi-region readiness, performance leadership, or release
-readiness. Closed beads, crate count, test presence, and a successful local
-scenario will not be treated as substitutes for revision-bound evidence.
+The bridge prioritizes exact-source verification, bounded large-repository
+merges, authenticated team use, exact protected PR/CI and canonical delivery,
+independent restore, and a real sponsored agent run. ATP, TreeFS, graphs,
+performance/economics, external adoption and the full release scope remain.
+The claims registry continues to distinguish narrow artifact/model evidence
+from production Rust refinement or readiness. Closed beads and test counts
+are not substitutes for those outcomes.
 
 ---
 
@@ -471,7 +468,7 @@ Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
 heuristic over mutable tables. `fg at <decision>` will open a complete read-only
 forge snapshot, and bisection will generalize from commits to forge state.
-The [dated reality snapshot](#reality-snapshot-2026-10-20) above identifies the
+The [dated reality snapshot](#reality-snapshot-2026-10-21) above identifies the
 bounded `at` and `bisect` implementation and its historical evidence.
 The remaining historical projection work requires non-empty durable-history
 coverage and verification of the production checkpoint path, not just parser
