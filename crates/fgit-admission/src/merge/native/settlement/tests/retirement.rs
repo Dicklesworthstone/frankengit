@@ -4,19 +4,85 @@
 use super::*;
 
 fn publish_legacy_retained_terminal(fixture: &Fixture) -> CanonicalOutboxEffectState {
-    fixture.stop_after(StopAfter::Terminal);
-    assert!(
-        fixture
-            .deliver(&mut success(fixture.key), 3, MaterializationFault::None)
-            .is_err()
-    );
-    fixture.resume();
+    publish_terminal_record(fixture, false)
+}
+
+// The negative builds an authenticated but semantically invalid history using
+// the model authority's low-level publication interface. It deliberately does
+// not use the production lifecycle stager for the forged terminal record.
+fn publish_terminal_record(
+    fixture: &Fixture,
+    mismatched_audience: bool,
+) -> CanonicalOutboxEffectState {
+    if mismatched_audience {
+        let basis = fixture.basis();
+        let state = run(delivery::read_in(&fixture.store, &(), &basis, &|| false)).unwrap();
+        let entry = state.outbox.entry(fixture.key).unwrap();
+        let deferred = fixture
+            .effect()
+            .transition(LifecycleEvent::Defer, None)
+            .unwrap();
+        run(publish_mutation(
+            &fixture.store,
+            &(),
+            &fixture.context,
+            &fixture.projection(MaterializationFault::None),
+            entry,
+            RuntimeMutation::Lifecycle {
+                next: &deferred,
+                receipt: None,
+                progress: None,
+            },
+            AdmissionLimits::default(),
+            &|| Ok(()),
+        ))
+        .unwrap();
+        let basis = fixture.basis();
+        let state = run(delivery::read_in(&fixture.store, &(), &basis, &|| false)).unwrap();
+        let entry = state.outbox.entry(fixture.key).unwrap();
+        let initial = CanonicalOutboxProgress::start(
+            fixture.context.repository_id,
+            fixture.key,
+            AsciiSlug::from_static("wrong-projection"),
+            entry.payload_root(),
+            entry.effect_state_root(),
+            ReconcilePolicy::new(NonZeroU32::new(3).unwrap()),
+        )
+        .unwrap();
+        let terminal = initial
+            .observe(
+                Observation::Probe(ProbeVerdict::Delivered),
+                b"forged different-audience receipt".to_vec(),
+            )
+            .unwrap();
+        for progress in [&initial, &terminal] {
+            run(publish_mutation(
+                &fixture.store,
+                &(),
+                &fixture.context,
+                &fixture.projection(MaterializationFault::None),
+                entry,
+                RuntimeMutation::Progress(progress),
+                AdmissionLimits::default(),
+                &|| Ok(()),
+            ))
+            .unwrap();
+        }
+    } else {
+        fixture.stop_after(StopAfter::Terminal);
+        assert!(
+            fixture
+                .deliver(&mut success(fixture.key), 3, MaterializationFault::None)
+                .is_err()
+        );
+        fixture.resume();
+    }
     let deferred = fixture.effect();
     let progress = fixture.progress();
     let receipt = CanonicalOutboxDeliveryReceipt::try_new(
         fixture.context.repository_id,
         fixture.key,
-        AsciiSlug::from_static("forge-projection"),
+        progress.destination(),
         deferred.payload_root(),
         storage::root(&deferred).unwrap(),
         OutboxDeliveryDisposition::Acknowledged,
@@ -135,14 +201,38 @@ fn publish_legacy_retained_terminal(fixture: &Fixture) -> CanonicalOutboxEffectS
         &receipt,
     ))
     .unwrap();
-    run(delivery::stage_effect_and_outbox_in(
-        &fixture.store,
-        &(),
-        &retained,
-        &effect,
-        &|| false,
-    ))
-    .unwrap();
+    let published = if mismatched_audience {
+        // Bypass the writer's audience check ONLY to plant invalid canonical
+        // input for the independent reader; no test transport is called.
+        run(storage::stage_body(
+            &fixture.store,
+            &(),
+            context.repository_id,
+            delivery::EFFECT_NAMESPACE,
+            &effect,
+        ))
+        .unwrap();
+        let pruned = CanonicalOutboxState::try_new(context.repository_id, Vec::new()).unwrap();
+        run(storage::stage_body(
+            &fixture.store,
+            &(),
+            context.repository_id,
+            delivery::OUTBOX_NAMESPACE,
+            &pruned,
+        ))
+        .unwrap();
+        pruned
+    } else {
+        run(delivery::stage_effect_and_outbox_in(
+            &fixture.store,
+            &(),
+            &retained,
+            &effect,
+            &|| false,
+        ))
+        .unwrap();
+        retained
+    };
     run(stage_runtime_evidence(
         &fixture.store,
         &(),
@@ -151,7 +241,7 @@ fn publish_legacy_retained_terminal(fixture: &Fixture) -> CanonicalOutboxEffectS
         &|| Ok(()),
     ))
     .unwrap();
-    materialization.roots.outbox_root = storage::root(&retained).unwrap();
+    materialization.roots.outbox_root = storage::root(&published).unwrap();
     materialization.record.invariant_evidence_root = root;
     materialization.record.outbox_effect_root = root;
     let mut plan = PublicationPlan::open(basis).unwrap();
@@ -177,6 +267,59 @@ fn publish_legacy_retained_terminal(fixture: &Fixture) -> CanonicalOutboxEffectS
         Some(true)
     );
     effect
+}
+
+#[test]
+fn a_matching_progress_and_receipt_cannot_retarget_a_retired_delivery() {
+    let fixture = Fixture::new();
+    let effect = publish_terminal_record(&fixture, true);
+    let before = fixture.basis();
+    let progress = fixture.progress();
+    let frame = run(storage::read_frame(
+        &fixture.store,
+        &(),
+        fixture.context.repository_id,
+        RECEIPT_NAMESPACE,
+        effect.evidence_root().unwrap(),
+    ))
+    .unwrap()
+    .unwrap();
+    let receipt =
+        decode_body::<CanonicalOutboxDeliveryReceipt>(&frame, DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(
+        progress.destination(),
+        AsciiSlug::from_static("wrong-projection")
+    );
+    assert_eq!(receipt.destination(), progress.destination());
+    history::validate_terminal_progress(&progress, &effect, &receipt).unwrap();
+    assert!(
+        run(delivery::read_in(&fixture.store, &(), &before, &|| false))
+            .unwrap()
+            .outbox
+            .entries()
+            .is_empty()
+    );
+    assert!(matches!(
+        run(history::retired_effect(
+            &fixture.store,
+            &(),
+            &before,
+            fixture.key,
+            AsciiSlug::from_static("forge-projection"),
+            &|| false
+        )),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceInvalid
+        ))
+    ));
+    let mut transport = Transport::new(fixture.key, []);
+    assert!(
+        fixture
+            .deliver(&mut transport, 3, MaterializationFault::None)
+            .is_err()
+    );
+    assert!(transport.calls.is_empty());
+    assert_eq!(fixture.basis(), before);
 }
 
 #[test]

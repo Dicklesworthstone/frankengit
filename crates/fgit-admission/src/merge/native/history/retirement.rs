@@ -120,6 +120,9 @@ where
             let receipt = read_effect_receipt(store, cx, &effect, cancelled)
                 .await?
                 .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+            if receipt.destination() != prior.destination() {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
+            }
             validate_terminal_progress(&progress, &effect, &receipt)?;
             checkpoint(cancelled)?;
             return Ok(Some(effect));
