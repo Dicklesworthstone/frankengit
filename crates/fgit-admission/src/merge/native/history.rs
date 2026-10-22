@@ -163,7 +163,10 @@ where
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
                 if entry.effect_class() == super::dispatch::replay::REPLAY_CLASS {
-                    super::dispatch::replay::validate_creation(
+                    // Keep the replay-only state machine out of the ordinary
+                    // history reader's inline async frame. Its provenance
+                    // checks still run in full when this branch is selected.
+                    Box::pin(super::dispatch::replay::validate_creation(
                         store,
                         cx,
                         &predecessor,
@@ -171,7 +174,7 @@ where
                         entry,
                         &evidence,
                         cancelled,
-                    )
+                    ))
                     .await?;
                 } else if record.forge_event_batch_root != entry.payload_root()
                     || evidence != OutboxRecordEvidence::Ordinary
