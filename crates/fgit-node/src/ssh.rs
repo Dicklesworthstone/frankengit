@@ -734,8 +734,13 @@ impl OneNode {
             service,
         };
 
-        let disclosure =
-            self.prepare_visible_upload_pack(&request, &materialized, &limits, deadline)?;
+        let disclosure = self.prepare_visible_upload_pack_or_report(
+            &request,
+            &materialized,
+            &limits,
+            deadline,
+            writer,
+        )?;
         let repository = disclosure.repository();
         let advertised_capabilities =
             crate::git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));

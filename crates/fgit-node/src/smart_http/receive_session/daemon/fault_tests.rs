@@ -497,7 +497,16 @@ fn receive_processing_can_outlast_ingress_and_expiry_recovers_with_the_same_key(
                     report.starts_with(b"ERR receive outcome unknown"),
                     "{report:?}"
                 );
-                assert!(!report.windows(3).any(|w| w == b"ng "));
+                // The expired processing clock is named for the operator.
+                let flag = b"fg serve --processing-timeout-secs";
+                assert!(report.windows(flag.len()).any(|w| w == flag));
+                // No per-ref `ng` report line. Match line starts: the words
+                // "processing" and "during" contain those bytes.
+                assert!(
+                    !report
+                        .split(|byte| *byte == b'\n')
+                        .any(|line| line.starts_with(b"ng "))
+                );
                 None
             };
             node.shutdown().unwrap();

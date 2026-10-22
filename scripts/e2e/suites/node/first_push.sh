@@ -355,8 +355,11 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_assert_eq FG-HH37-PUSH-046 0 "$XL_DOCTOR_RC" 'the doctor path re-verifies one named XL blob against the authenticated head'
 
   # Planted negative (write side): the same clone against the DEFAULT 128 MiB
-  # write envelope must fail with a client-diagnosable Fatal sideband message
-  # naming the limit -- never an unexplained early EOF (frankengit-e6jj).
+  # write envelope must fail with a client-diagnosable message naming the
+  # limit and the operator flag -- never an unexplained early EOF
+  # (frankengit-e6jj). The visible-closure walk refuses before the
+  # advertisement, so the server answers with one ERR packet, which a stock
+  # client reports as "remote error".
   FIND_PORT_AND_SERVE_XL xl1-default "$STORAGE_XL1" "$REPOID_XL1"
   fge_assert_cmd FG-HH37-PUSH-047 'a default-envelope XL serve session is listening' test -n "$FOUND_PORT"
   XLCLONE_DEFAULT="$WORK/xl-clone-default"
@@ -366,7 +369,8 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_reap "$FOUND_NAME"
   XLDEFAULT_OUT=$(cat "$WORK/xl-clone-default.out")
   fge_assert_cmd FG-HH37-PUSH-048 'the over-envelope clone fails' test "$XLDEFAULT_RC" -ne 0
-  fge_assert_contains FG-HH37-PUSH-049 "$XLDEFAULT_OUT" 'TotalExpandedLimit' 'the write-side refusal names the governing limit to the client'
+  fge_assert_contains FG-HH37-PUSH-049 "$XLDEFAULT_OUT" 'remote error: repository exceeds this server'"'"'s upload envelope (128 MiB of objects' 'the write-side refusal names the governing limit to the client'
+  fge_assert_contains FG-HH37-PUSH-052 "$XLDEFAULT_OUT" 'fg serve --pack-max-expanded-mib' 'the refusal names the operator flag that raises the limit'
 
   # 2. Work-proportional deadline: a 5 s base with 4 s/MiB scaling admits the
   # push; a flat 5 s envelope fails it anywhere (client-side pack streaming
@@ -385,15 +389,17 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_assert_eq FG-HH37-PUSH-038 0 "$XL2_RC" 'the work-scaled envelope admits a push a flat 5 s deadline cannot'
   fge_assert_contains FG-HH37-PUSH-039 "$XL2_OUT" 'main -> main' 'the scaled-envelope push publishes main'
 
-  # 3. Planted negative: a flat 15 s envelope cannot admit ~330 MB of work
-  # (pack streaming finishes inside it, then the inflate/seal cannot). The
-  # refusal must reach the client through report-status with the
-  # envelope-exhausted notice (outcome unknown; retry resolves), never a
-  # hangup (frankengit-xefn preserved).
+  # 3. Planted negative: a 2 s processing budget cannot inflate and seal
+  # ~330 MB. Since frankengit-3gdw (c9bc49ac) the session budget bounds only
+  # upload ingress, and processing has its own independent budget, so the
+  # earlier flat 15 s SESSION envelope no longer limits admission. The refusal
+  # must reach the client naming the expired processing budget (before
+  # admission: no ref decision; during it: outcome unknown; retry resolves
+  # either), never a hangup (frankengit-xefn preserved).
   REPOID_XL3=88888888888888888888888888888888
   STORAGE_XL3="$WORK/storage-xl3"
   "$FG_BIN" init "$STORAGE_XL3" "$TENANT" "$REPOID_XL3" >/dev/null 2>&1
-  FIND_PORT_AND_SERVE_XL xl3 "$STORAGE_XL3" "$REPOID_XL3" --receive-principal "$PRINCIPAL" --receive-max-input-mib 256 --receive-max-expanded-mib 512 --session-timeout-secs 15 --session-max-extension-secs 0
+  FIND_PORT_AND_SERVE_XL xl3 "$STORAGE_XL3" "$REPOID_XL3" --receive-principal "$PRINCIPAL" --receive-max-input-mib 256 --receive-max-expanded-mib 512 --processing-timeout-secs 2
   fge_assert_cmd FG-HH37-PUSH-040 'a flat-envelope XL serve session is listening' test -n "$FOUND_PORT"
   XL3_RC=0
   GIT_TERMINAL_PROMPT=0 git -C "$XL_SRC" -c protocol.version=1 -c pack.window=0 push \
@@ -401,7 +407,7 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_reap "$FOUND_NAME"
   XL3_OUT=$(cat "$WORK/xl3-push.out")
   fge_assert_cmd FG-HH37-PUSH-041 'the genuinely over-budget push fails' test "$XL3_RC" -ne 0
-  fge_assert_contains FG-HH37-PUSH-042 "$XL3_OUT" 'envelope exhausted' 'the over-budget refusal is diagnosable through report-status'
+  fge_assert_contains FG-HH37-PUSH-042 "$XL3_OUT" 'processing deadline expired' 'the over-budget refusal names the expired processing budget to the client'
   fge_assert_not_contains FG-HH37-PUSH-043 "$XL3_OUT" 'hung up' 'the over-budget refusal is never a silent hangup'
 
   # The unknown outcome resolves idempotently: the identical retried push

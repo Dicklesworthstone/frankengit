@@ -115,12 +115,29 @@ fn is_receive(
     }
 }
 
-fn fatal(writer: &mut impl Write, admission_started: bool, limits: &WireLimits) -> io::Result<()> {
-    let message = if admission_started {
-        b"ERR receive outcome unknown; retry identical commands or recover the original key\n"
-            .as_slice()
-    } else {
-        b"ERR receive failed before admission; no ref decision was attempted\n".as_slice()
+fn fatal(
+    writer: &mut impl Write,
+    admission_started: bool,
+    processing_expired: bool,
+    limits: &WireLimits,
+) -> io::Result<()> {
+    // Name the processing deadline when it is the cause, so an operator knows
+    // which budget a large push needs (frankengit-3gdw contract (b)).
+    let message = match (admission_started, processing_expired) {
+        (true, false) => {
+            b"ERR receive outcome unknown; retry identical commands or recover the original key\n"
+                .as_slice()
+        }
+        (true, true) => b"ERR receive outcome unknown: the processing deadline expired during \
+            admission; retry identical commands or recover the original key \
+            (fg serve --processing-timeout-secs)\n"
+            .as_slice(),
+        (false, false) => {
+            b"ERR receive failed before admission; no ref decision was attempted\n".as_slice()
+        }
+        (false, true) => b"ERR receive failed before admission: the processing deadline \
+            expired; no ref decision was attempted (fg serve --processing-timeout-secs)\n"
+            .as_slice(),
     };
     let bytes = encode_packets(&[Packet::Data(message.to_vec())], limits)
         .map_err(|e| io::Error::other(e.to_string()))?;
@@ -305,6 +322,7 @@ impl OneNode {
         let mut admission_started = false;
         let mut final_attempted = false;
         let mut verdict_reported = false;
+        let processing_expired = std::cell::Cell::new(false);
         let result = (|| {
             let principal = principal.ok_or(NodeSmartHttpRefusal::UnauthenticatedReceive)?;
             shared_quota
@@ -421,7 +439,13 @@ impl OneNode {
                 authority: self
                     .receive_admission_authority_context(input_bytes, processing.deadline()),
             };
-            let mut live = || !processing.expired();
+            let mut live = || {
+                let alive = !processing.expired();
+                if !alive {
+                    processing_expired.set(true);
+                }
+                alive
+            };
             let selected = drive_request_while(
                 self,
                 &request,
@@ -492,7 +516,7 @@ impl OneNode {
             ));
             // Keep the exact admission error/prefix even if this best-effort
             // diagnostic is also lost. Never replace it with a transport verdict.
-            if let Err(error) = fatal(writer, admission_started, limits) {
+            if let Err(error) = fatal(writer, admission_started, processing_expired.get(), limits) {
                 eprintln!("guarded receive fatal response delivery failed: {error}");
             }
         }
@@ -620,7 +644,7 @@ mod tests {
     #[test]
     fn fatal_interruption_never_fabricates_per_ref_rejection() {
         let mut bytes = Vec::new();
-        fatal(&mut bytes, true, &WireLimits::default()).unwrap();
+        fatal(&mut bytes, true, false, &WireLimits::default()).unwrap();
         assert!(
             bytes
                 .windows(b"ERR receive outcome unknown".len())
@@ -628,8 +652,27 @@ mod tests {
         );
         assert!(!bytes.windows(3).any(|w| w == b"ng "));
         let mut before = Vec::new();
-        fatal(&mut before, false, &WireLimits::default()).unwrap();
+        fatal(&mut before, false, false, &WireLimits::default()).unwrap();
         assert_ne!(bytes, before);
+        // A processing-deadline cause is named, with the same outcome class:
+        // still UNKNOWN after admission started, still no decision before it.
+        let mut unknown = Vec::new();
+        fatal(&mut unknown, true, true, &WireLimits::default()).unwrap();
+        let mut early = Vec::new();
+        fatal(&mut early, false, true, &WireLimits::default()).unwrap();
+        for (payload, class) in [
+            (&unknown, b"ERR receive outcome unknown".as_slice()),
+            (&early, b"ERR receive failed before admission".as_slice()),
+        ] {
+            assert!(payload.windows(class.len()).any(|w| w == class));
+            let flag = b"fg serve --processing-timeout-secs";
+            assert!(payload.windows(flag.len()).any(|w| w == flag));
+            // One ERR packet, never a per-ref `ng` report line (the words
+            // "processing" and "during" contain those bytes, so match the
+            // packet start rather than a substring).
+            assert!(payload[4..].starts_with(b"ERR "));
+            assert!(!payload[4..].starts_with(b"ng "));
+        }
     }
     #[test]
     fn raw_retry_selector_preserves_legacy_bytes_and_excludes_pack_representation() {

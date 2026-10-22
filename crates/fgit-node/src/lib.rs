@@ -6321,6 +6321,76 @@ fn unserved_filter_error(filter: &str) -> Vec<u8> {
     format!("ERR filter '{filter}' not supported\n").into_bytes()
 }
 
+/// The `ERR` line a stock client reports as "remote error" when the visible
+/// repository exceeds this server's selected-pack envelope (frankengit-e6jj).
+/// It names the governing bounds and the operator flag, never repository
+/// content. `None` for every other refusal.
+fn upload_envelope_error(
+    refusal: &NodeGitDaemonServeRefusal,
+    total_bytes: usize,
+    object_bytes: usize,
+) -> Option<Vec<u8>> {
+    let NodeGitDaemonServeRefusal::Pack(pack) = refusal else {
+        return None;
+    };
+    if !matches!(
+        **pack,
+        NodePackMaterializationRefusal::DisclosureGraph(RefusalCode::ResourceBudgetExceeded)
+    ) {
+        return None;
+    }
+    Some(
+        format!(
+            "ERR repository exceeds this server's upload envelope ({} of objects, {} per \
+             object); the operator can raise it with fg serve --pack-max-expanded-mib\n",
+            envelope_size(total_bytes),
+            envelope_size(object_bytes),
+        )
+        .into_bytes(),
+    )
+}
+
+/// Whole MiB when exact, otherwise exact bytes: a limit is never rounded.
+fn envelope_size(bytes: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    if bytes % MIB == 0 {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+impl OneNode {
+    /// [`Self::prepare_visible_upload_pack`], telling the client in one `ERR`
+    /// packet when the refusal is the selected-pack envelope, before any
+    /// advertisement. The typed refusal stays the outcome; a client that is
+    /// already gone changes nothing about it.
+    pub(crate) fn prepare_visible_upload_pack_or_report(
+        &self,
+        request: &NodeRequestContext,
+        materialized: &MaterializedAdmission,
+        limits: &WireLimits,
+        deadline: &GitDaemonSessionDeadline,
+        writer: &mut impl Write,
+    ) -> Result<upload_visibility::VisibleUploadPack, NodeGitDaemonServeRefusal> {
+        self.prepare_visible_upload_pack(request, materialized, limits, deadline)
+            .map_err(|refusal| {
+                let object_bytes = self
+                    .selected_pack_limits
+                    .max_object_bytes
+                    .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
+                if let Some(line) = upload_envelope_error(
+                    &refusal,
+                    self.selected_pack_limits.max_total_expanded_bytes,
+                    object_bytes,
+                ) {
+                    let _ = write_packet_group(writer, &[Packet::Data(line)], limits);
+                }
+                refusal
+            })
+    }
+}
+
 /// Refuses a pack request whose filter this node does not serve, the way
 /// upstream upload-pack does: one `ERR` packet in place of the transition's
 /// negotiation output, so the client reports "remote error: filter '<name>'
@@ -8568,8 +8638,16 @@ impl OneNode {
             }
             return Ok(served);
         }
-        let disclosure =
-            self.prepare_visible_upload_pack(&request, &materialized, &limits, &deadline)?;
+        let disclosure = {
+            let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline.clone());
+            self.prepare_visible_upload_pack_or_report(
+                &request,
+                &materialized,
+                &limits,
+                &deadline,
+                &mut writer,
+            )?
+        };
         let repository = disclosure.repository();
         let advertised_capabilities =
             git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
