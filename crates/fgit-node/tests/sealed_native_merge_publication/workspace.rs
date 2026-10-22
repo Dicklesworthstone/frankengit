@@ -107,9 +107,15 @@ fn workspace_package(
     receipt: &MergeWorkspaceReceipt,
 ) -> Package {
     let offered = intent(fixture, 1, ExpectedVersion::NewStream);
-    let closure = validate_merge_objects(
+    let selected = snapshot(node)
+        .selected_closure()
+        .closure()
+        .objects()
+        .clone();
+    let closure = validate_merge_objects_above(
         &NodeObjects(node),
         offered.merge().unwrap(),
+        &selected,
         MergeObjectLimits::default(),
         &mut || true,
     )
@@ -535,9 +541,15 @@ fn workspace_base_must_equal_the_offered_merge_target_even_when_export_tree_matc
             },
         )
         .unwrap();
-        let inverse_closure = validate_merge_objects(
+        let selected = snapshot(&node)
+            .selected_closure()
+            .closure()
+            .objects()
+            .clone();
+        let inverse_closure = validate_merge_objects_above(
             &NodeObjects(&node),
             inverse_intent.merge().unwrap(),
+            &selected,
             MergeObjectLimits::default(),
             &mut || true,
         )

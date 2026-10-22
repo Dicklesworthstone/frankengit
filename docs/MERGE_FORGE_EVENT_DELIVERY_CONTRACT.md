@@ -360,7 +360,11 @@ materializer.
 Commit `b588c0b592b774f426b29d5b97774658e3e66950` restores the checks omitted
 when the shared driver and sealed-node tests were merged: the entire supplied
 closure must equal the independently verified closure, and every declared
-package object must belong to it. All six `CommitEvidence` fields must match
+package object must belong to it. That closure is per decision
+(frankengit-lh8z): the objects the merge adds above the authority-selected
+closure, plus its base, both parents and candidate. The serving closure is the
+union over every committed decision, so already-selected history is neither
+re-validated nor re-committed. All six `CommitEvidence` fields must match
 the complete prepared record: principal snapshot, actual forge event batch,
 policy decision, invariant evidence, outbox effects, and retention delta.
 Supplied roots are compared, never substituted into the published record.

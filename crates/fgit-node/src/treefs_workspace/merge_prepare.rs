@@ -21,7 +21,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_merge_objects, validate_squash_objects,
+    MergeObjectLimits, validate_merge_objects_above, validate_squash_objects_above,
 };
 use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
@@ -265,16 +265,20 @@ fn bundle_for_plan(
         merge_commit: plan.commit,
     };
     let mut live = || original.checkpoint().is_ok();
+    // Only what the plan adds above the selected closure is validated here;
+    // publication validates the same frontier again (frankengit-lh8z).
     let verified = match plan.style {
-        MergeCommitStyle::TwoParent => validate_merge_objects(
+        MergeCommitStyle::TwoParent => validate_merge_objects_above(
             &candidate,
             &coordinates,
+            original.selected.closure().objects(),
             MergeObjectLimits::default(),
             &mut live,
         ),
-        MergeCommitStyle::Squash => validate_squash_objects(
+        MergeCommitStyle::Squash => validate_squash_objects_above(
             &candidate,
             &coordinates,
+            original.selected.closure().objects(),
             MergeObjectLimits::default(),
             &mut live,
         ),

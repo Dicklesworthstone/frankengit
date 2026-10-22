@@ -14,7 +14,7 @@ use std::task::Poll;
 use fgit_admission::evidence::{DecisionEvidenceBodies, evidence_root, principal_snapshot_id};
 use fgit_admission::merge::native::{
     NativeMergeIntent,
-    objects::{MergeObjectLimits, validate_merge_objects},
+    objects::{MergeObjectLimits, validate_merge_objects, validate_merge_objects_above},
 };
 use fgit_admission::merge::{SealedMerge, seal_attempt_for};
 use fgit_admission::{
@@ -500,15 +500,28 @@ fn package_with_workspace(
     package
 }
 
+/// The exact closure a sealed merge supplies: what the candidate adds above the
+/// node's current selected closure plus the commits admission names
+/// (frankengit-lh8z), not the whole reachable history.
 fn exact_package(node: &OneNode, f: &Fixture, context: &AdmissionContext) -> Package {
     let offered = intent(f, 1, ExpectedVersion::NewStream);
-    let exact = validate_merge_objects(
+    let selected = snapshot(node)
+        .selected_closure()
+        .closure()
+        .objects()
+        .clone();
+    let exact = validate_merge_objects_above(
         &NodeObjects(node),
         offered.merge().unwrap(),
+        &selected,
         MergeObjectLimits::default(),
         &mut || true,
     )
     .unwrap();
+    assert_eq!(
+        exact.objects,
+        BTreeSet::from([f.merged_tree, f.candidate, f.base, f.target, f.source])
+    );
     package(node, f, context, exact)
 }
 
@@ -1176,8 +1189,9 @@ fn missing_native_candidate_stays_retryable_until_real_bytes_arrive() {
     let f = fixture(&node, &scratch.0, GitHashAlgorithm::Sha256, false);
     let context = context(GitHashAlgorithm::Sha256, b"missing-native-body");
     let before = snapshot(&node);
-    let mut objects = before.selected_closure().closure().objects().clone();
-    objects.extend([f.merged_tree, f.candidate]);
+    // Supplied before the candidate's bytes exist: the closure names what the
+    // merge adds and the commits admission requires.
+    let objects = BTreeSet::from([f.merged_tree, f.candidate, f.base, f.target, f.source]);
     let offered = package(&node, &f, &context, closure(objects));
     let original = seal_attempt_for(&context, &offered.sealed()).unwrap();
     assert!(matches!(

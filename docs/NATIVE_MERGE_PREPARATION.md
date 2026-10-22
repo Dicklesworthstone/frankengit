@@ -108,8 +108,11 @@ An already integrated source prints `outcome: "already_up_to_date"` and
 Preparation performs no seal, native-object staging, ref update, forge event
 append or outbox transition. Generated objects remain in memory while the
 candidate is independently checked by the production native merge validator.
-That check re-hashes its objects, verifies ordered parents and common ancestry,
-and walks its complete reachable closure before the bundle is built.
+That check re-hashes every object the candidate adds, checks the kind of each
+already-selected object those reference, verifies ordered parents, and proves
+common ancestry by an exact frontier traversal over selected commits. It does
+not walk the already-selected history again; that was verified when it was
+admitted (frankengit-lh8z).
 
 The node is explicitly closed before the CLI publishes the artifact. A node
 shutdown failure leaves no output bundle. The output destination must be absent;
@@ -172,10 +175,12 @@ with the typed limit, never with a different base. Two incomparable best
 bases are proved incomparable by reading their shared history, so a
 criss-cross pair over a long history refuses at the ceiling; multiple bases
 refuse in any case.
-Admission's revalidation of the candidate still walks its complete native
-object closure: at most 100,000 objects, 400,000 edges and 128 MiB. A
-repository beyond those totals cannot yet prepare or publish a merge
-(frankengit-rffg).
+Admission revalidates only what the candidate adds above the
+authority-selected closure, plus the already-selected objects it references
+directly (frankengit-lh8z). The 100,000-object, 400,000-edge and 128 MiB
+ceilings bound that work and the ancestry walk, not repository size. A merge
+whose new trees reference more than those ceilings, for example one changing a
+directory with more entries than that, still refuses with the typed budget.
 It limits content merges to 64, each with a 1 MiB combined-input ceiling,
 a separate 1 MiB output ceiling and explicit diff/merge work limits. There
 are at most 128 reported conflicts, 10,000 constructed objects and 32 MiB

@@ -293,7 +293,8 @@ where
     }
 
     /// Re-read native objects and validate ordered parents, common ancestry
-    /// and full closure on every CAS attempt. Staging is not object authority.
+    /// and every object the candidate adds above the authority-selected
+    /// closure on every CAS attempt. Staging is not object authority.
     fn validate_merge_async<'a>(
         &'a self,
         authority: &'a S,
@@ -306,7 +307,8 @@ where
     /// Explicit opt-in for the no-new-commit method. Existing projections fail
     /// closed rather than accidentally treating a fast-forward as an already
     /// validated two-parent merge. Implementations must verify parent ancestry,
-    /// the entire admitted source closure, and the same current merge policy.
+    /// that the source tip and everything it reaches is already admitted, and
+    /// the same current merge policy.
     fn validate_fast_forward_async<'a>(
         &'a self,
         _authority: &'a S,

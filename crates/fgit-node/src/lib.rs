@@ -7846,8 +7846,9 @@ impl OneNode {
     ///
     /// Native Git merge events use the same asynchronous driver and node-owned
     /// object validation as [`Self::admit_native_merge_durable_in`]. The node
-    /// re-reads the candidate and complete closure, verifies its ordered parents
-    /// and base ancestry, and publishes ref, forge and outbox effects together.
+    /// re-reads the candidate and every object it adds above the selected
+    /// closure, verifies its ordered parents and base ancestry, and publishes
+    /// ref, forge and outbox effects together.
     /// Supplied closure and evidence must match the independently validated
     /// objects and complete fold at the selected authority basis.
     ///

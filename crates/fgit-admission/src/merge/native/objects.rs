@@ -5,11 +5,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_diff::{
-    AncestryQueryScratch, CommitAncestryIndex, CommitGraph, MergeBaseError, MergeBaseLimits,
-    ParentSet,
+    AncestryQueryScratch, AncestryQueryWork, CommitAncestryIndex, CommitGraph, MergeBaseError,
+    MergeBaseLimits, MergeBaseResult, ParentSet, frontier_merge_bases_all,
 };
 use fgit_forge::event::NativeMerge;
-use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
+use fgit_git_object::{
+    AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
+};
 use fgit_pack::{CanonicalObjectSource, Deadline, PackError, PackWriteError, verify_native_object};
 use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 
@@ -59,6 +61,7 @@ pub fn validate_merge_objects(
         AncestryRequirement::Merge {
             base: merge.base_tip,
         },
+        None,
         limits,
         deadline,
     )
@@ -87,6 +90,7 @@ pub fn validate_fast_forward_objects(
         AncestryRequirement::FastForward {
             base: merge.target_tip_before,
         },
+        None,
         limits,
         deadline,
     )
@@ -121,6 +125,7 @@ pub fn validate_squash_objects(
             base: merge.base_tip,
             source: merge.source_tip,
         },
+        None,
         limits,
         deadline,
     )
@@ -143,6 +148,7 @@ pub fn validate_workspace_objects(
         candidate,
         Some(&[expected_parent]),
         AncestryRequirement::None,
+        None,
         limits,
         deadline,
     )
@@ -163,6 +169,90 @@ pub fn validate_commit_closure(
         commit,
         None,
         AncestryRequirement::None,
+        None,
+        limits,
+        deadline,
+    )
+}
+
+/// Verify an explicit two-parent merge ABOVE the authority-selected closure
+/// (frankengit-lh8z). Objects the candidate reaches that are already selected
+/// were verified when admitted: their kind is checked here, but their bytes are
+/// not hashed again and their edges are not walked. Base ancestry is proved by
+/// an exact frontier traversal over selected commits instead of a full parent
+/// map. The result names the objects this merge adds plus the four commits
+/// admission requires; the serving closure, a union over every decision, is
+/// unchanged by the objects that were already selected.
+pub fn validate_merge_objects_above(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    selected: &BTreeSet<GitOid>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    merge.validate().map_err(|_| invalid())?;
+    validate_candidate_objects(
+        source,
+        merge.merge_commit,
+        Some(&[merge.target_tip_before, merge.source_tip]),
+        AncestryRequirement::Merge {
+            base: merge.base_tip,
+        },
+        Some(selected),
+        limits,
+        deadline,
+    )
+}
+
+/// [`validate_fast_forward_objects`] above the selected closure: the candidate
+/// is the already-selected source tip, so the result names no new object, only
+/// the source and target tips. See [`validate_merge_objects_above`].
+pub fn validate_fast_forward_objects_above(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    selected: &BTreeSet<GitOid>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    merge.validate().map_err(|_| invalid())?;
+    if merge.merge_commit != merge.source_tip || merge.base_tip != merge.target_tip_before {
+        return Err(invalid());
+    }
+    validate_candidate_objects(
+        source,
+        merge.source_tip,
+        None,
+        AncestryRequirement::FastForward {
+            base: merge.target_tip_before,
+        },
+        Some(selected),
+        limits,
+        deadline,
+    )
+}
+
+/// [`validate_squash_objects`] above the selected closure. See
+/// [`validate_merge_objects_above`].
+pub fn validate_squash_objects_above(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    selected: &BTreeSet<GitOid>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    merge.validate().map_err(|_| invalid())?;
+    if merge.source_tip == merge.target_tip_before {
+        return Err(invalid());
+    }
+    validate_candidate_objects(
+        source,
+        merge.merge_commit,
+        Some(&[merge.target_tip_before]),
+        AncestryRequirement::Squash {
+            base: merge.base_tip,
+            source: merge.source_tip,
+        },
+        Some(selected),
         limits,
         deadline,
     )
@@ -181,6 +271,7 @@ fn validate_candidate_objects(
     candidate: GitOid,
     expected_parents: Option<&[GitOid]>,
     ancestry: AncestryRequirement,
+    frontier: Option<&BTreeSet<GitOid>>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
@@ -270,6 +361,11 @@ fn validate_candidate_objects(
             .checked_add(object.body().len())
             .filter(|bytes| *bytes <= limits.max_total_bytes)
             .ok_or_else(budget)?;
+        // An already-selected object other than the candidate was verified when
+        // it was admitted. Its kind is checked above; it adds nothing here.
+        if id != candidate && frontier.is_some_and(|selected| selected.contains(&id)) {
+            continue;
+        }
         let profile = if id == candidate && expected_parents.is_some() {
             AcceptanceProfile::StrictCreate
         } else {
@@ -363,14 +459,42 @@ fn validate_candidate_objects(
             require_object(target, kind, &mut required, &mut pending, limits)?;
         }
     }
-    validate_ancestry(
-        ancestry,
-        candidate,
-        expected_parents,
-        &parents,
-        limits,
-        deadline,
-    )?;
+    if let Some(selected) = frontier {
+        validate_ancestry_above(
+            source,
+            format,
+            ancestry,
+            candidate,
+            expected_parents,
+            &parents,
+            selected,
+            limits,
+            deadline,
+        )?;
+        // Admission requires these commits by name; they are already selected
+        // (or, for the candidate, verified above), so naming them changes no
+        // serving closure.
+        visited.insert(candidate);
+        visited.extend(expected_parents.into_iter().flatten().copied());
+        match ancestry {
+            AncestryRequirement::None => {}
+            AncestryRequirement::Merge { base } | AncestryRequirement::FastForward { base } => {
+                visited.insert(base);
+            }
+            AncestryRequirement::Squash { base, source } => {
+                visited.extend([base, source]);
+            }
+        }
+    } else {
+        validate_ancestry(
+            ancestry,
+            candidate,
+            expected_parents,
+            &parents,
+            limits,
+            deadline,
+        )?;
+    }
     checkpoint(deadline)?;
     let closure = PermittedObjectClosure::new(visited);
     let object_closure_root =
@@ -518,6 +642,170 @@ fn validate_ancestry(
         .map_err(ancestry_failure)?
     {
         return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Commit parents above the selected closure: commits this request walked come
+/// from its own verified parent map, selected commits are read and parsed from
+/// the source. A commit that is in neither refuses: ancestry never reaches
+/// outside the authority-selected closure. Committer dates only order the
+/// frontier traversal; they never decide ancestry.
+struct FrontierCommitGraph<'a, S> {
+    source: &'a S,
+    format: GitHashAlgorithm,
+    walked: &'a BTreeMap<GitOid, Vec<GitOid>>,
+    selected: &'a BTreeSet<GitOid>,
+    parse_limits: &'a ParseLimits,
+}
+
+impl<S: CanonicalObjectSource> FrontierCommitGraph<'_, S> {
+    fn read(&self, commit: &GitOid) -> Result<(ParentSet<GitOid>, i64), ProjectionFailure> {
+        let (mut parents, hint) = if let Some(parents) = self.walked.get(commit) {
+            // Commits this request created are the newest in the walk.
+            (parents.clone(), i64::MAX)
+        } else if self.selected.contains(commit) {
+            let object = self.source.load(commit).map_err(source_failure)?;
+            if object.id() != *commit || object.object_type() != ObjectType::Commit {
+                return Err(invalid());
+            }
+            let ParsedObject::Commit(parsed) = parse_object_body(
+                ObjectType::Commit,
+                object.body(),
+                AcceptanceProfile::GitCompatibleImport,
+                self.parse_limits,
+            )
+            .map_err(|_| invalid())?
+            else {
+                return Err(invalid());
+            };
+            let parents = parsed
+                .parent_references()
+                .map(|value| parse_oid(self.format, value))
+                .collect::<Result<Vec<_>, _>>()?;
+            (parents, committer_seconds(&parsed).unwrap_or(i64::MIN))
+        } else {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete,
+            ));
+        };
+        // As for VerifiedCommitGraph: repeated historical parent headers keep
+        // their bytes, but reachability uses the simple graph.
+        parents.sort_unstable();
+        parents.dedup();
+        Ok((ParentSet::Complete(parents), hint))
+    }
+}
+
+impl<S: CanonicalObjectSource> CommitGraph for FrontierCommitGraph<'_, S> {
+    type CommitId = GitOid;
+    type Error = ProjectionFailure;
+
+    fn parents_of(&self, commit: &GitOid) -> Result<ParentSet<GitOid>, ProjectionFailure> {
+        self.read(commit).map(|(parents, _)| parents)
+    }
+
+    fn parents_with_order_hint(
+        &self,
+        commit: &GitOid,
+    ) -> Result<(ParentSet<GitOid>, i64), ProjectionFailure> {
+        self.read(commit)
+    }
+}
+
+/// The single, uncontinued committer header's seconds field, as an untrusted
+/// order hint only.
+fn committer_seconds(commit: &fgit_git_object::Commit) -> Option<i64> {
+    let mut fields = commit
+        .headers()
+        .iter()
+        .filter(|header| header.name == b"committer");
+    let header = fields.next()?;
+    if fields.next().is_some() || !header.continuations.is_empty() {
+        return None;
+    }
+    let mut tail = header.value.rsplitn(3, |byte| *byte == b' ');
+    tail.next()?;
+    std::str::from_utf8(tail.next()?).ok()?.parse().ok()
+}
+
+/// `base` is an ancestor of `tip` exactly when it is their only best common
+/// ancestor; the frontier traversal reads only the history between them.
+fn is_ancestor_above<S: CanonicalObjectSource>(
+    graph: &FrontierCommitGraph<'_, S>,
+    base: GitOid,
+    tip: GitOid,
+    limits: MergeBaseLimits,
+    deadline: &mut impl Deadline,
+) -> Result<bool, ProjectionFailure> {
+    let result = frontier_merge_bases_all(
+        graph,
+        base,
+        tip,
+        limits,
+        &mut AncestryQueryWork::default(),
+        || checkpoint(deadline),
+    )
+    .map_err(ancestry_failure)?;
+    Ok(result == MergeBaseResult::Bases(vec![base]))
+}
+
+fn validate_ancestry_above<S: CanonicalObjectSource>(
+    source: &S,
+    format: GitHashAlgorithm,
+    ancestry: AncestryRequirement,
+    candidate: GitOid,
+    expected_parents: Option<&[GitOid]>,
+    walked: &BTreeMap<GitOid, Vec<GitOid>>,
+    selected: &BTreeSet<GitOid>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<(), ProjectionFailure> {
+    let parse_limits = ParseLimits {
+        max_object_bytes: limits.max_object_bytes,
+        tree_reference_bytes: format.digest_len(),
+        ..ParseLimits::default()
+    };
+    let graph = FrontierCommitGraph {
+        source,
+        format,
+        walked,
+        selected,
+        parse_limits: &parse_limits,
+    };
+    let graph_limits = MergeBaseLimits {
+        max_commits: limits.max_objects,
+        max_edges: limits.max_edges,
+    };
+    let (base, tips) = match ancestry {
+        AncestryRequirement::None => return Ok(()),
+        AncestryRequirement::Merge { base } => {
+            let expected = expected_parents.ok_or_else(invalid)?;
+            (base, vec![expected[1], expected[0]])
+        }
+        AncestryRequirement::Squash { base, source } => {
+            let expected = expected_parents.ok_or_else(invalid)?;
+            (base, vec![source, expected[0]])
+        }
+        AncestryRequirement::FastForward { base } => {
+            return if is_ancestor_above(&graph, base, candidate, graph_limits, deadline)? {
+                Ok(())
+            } else {
+                Err(ProjectionFailure::Refuse(
+                    RefusalCode::NonFastForwardRefused,
+                ))
+            };
+        }
+    };
+    // The base itself must be selected or walked: an unknown base is invalid,
+    // exactly as an absent generation is in the full-closure validator.
+    if !selected.contains(&base) && !walked.contains_key(&base) {
+        return Err(invalid());
+    }
+    for tip in tips {
+        if !is_ancestor_above(&graph, base, tip, graph_limits, deadline)? {
+            return Err(invalid());
+        }
     }
     Ok(())
 }
