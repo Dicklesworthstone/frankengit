@@ -14,7 +14,6 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 fn secret() -> WebhookSecret {
