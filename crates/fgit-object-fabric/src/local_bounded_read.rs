@@ -62,35 +62,7 @@ pub(super) fn read_object(
     maximum_payload: u64,
 ) -> Result<Vec<u8>, StoreRefusal> {
     let (mut file, length) = open_regular(path)?;
-    if length > maximum_stored {
-        return Err(StoreRefusal::StoredObjectTooLarge {
-            offered: length,
-            maximum: maximum_stored,
-        });
-    }
-    if length < 8 {
-        return Err(StoreRefusal::MalformedStoredObject);
-    }
-    let mut prefix = [0; 8];
-    file.read_exact(&mut prefix).map_err(|error| {
-        if error.kind() == io::ErrorKind::UnexpectedEof {
-            StoreRefusal::MalformedStoredObject
-        } else {
-            read_error(error)
-        }
-    })?;
-    if &prefix[..4] != super::OBJECT_MAGIC {
-        return Err(StoreRefusal::MalformedStoredObject);
-    }
-    let envelope = u32::from_be_bytes(
-        prefix[4..]
-            .try_into()
-            .map_err(|_| StoreRefusal::MalformedStoredObject)?,
-    );
-    if u64::from(envelope) > maximum_envelope as u64 {
-        return Err(crate::FabricError::EnvelopeTooLarge.into());
-    }
-    let payload_start = 8 + u64::from(envelope);
+    let payload_start = read_framing(&mut file, length, maximum_stored, maximum_envelope)?;
     let offered = length
         .checked_sub(payload_start)
         .ok_or(StoreRefusal::MalformedStoredObject)?;
@@ -114,6 +86,67 @@ pub(super) fn read_object(
         }
         other => other,
     })
+}
+
+/// Read only a stored FGOB file's envelope bytes, never its payload, and
+/// return them with the payload length the file holds. The caller decodes the
+/// envelope and checks it against the file; nothing here verifies a body.
+pub(super) fn read_envelope(
+    path: &Path,
+    maximum_stored: u64,
+    maximum_envelope: usize,
+) -> Result<(Vec<u8>, u64), StoreRefusal> {
+    let (mut file, length) = open_regular(path)?;
+    let payload_start = read_framing(&mut file, length, maximum_stored, maximum_envelope)?;
+    let payload = length
+        .checked_sub(payload_start)
+        .ok_or(StoreRefusal::MalformedStoredObject)?;
+    // Bounded by `maximum_envelope` in read_framing.
+    let mut envelope =
+        vec![0; usize::try_from(payload_start - 8).map_err(|_| StoreRefusal::LengthOverflow)?];
+    file.read_exact(&mut envelope).map_err(eof_is_malformed)?;
+    Ok((envelope, payload))
+}
+
+/// Check the fixed FGOB prefix of an open object file and return where its
+/// payload starts. The envelope length is bounded independently of the file.
+fn read_framing(
+    file: &mut File,
+    length: u64,
+    maximum_stored: u64,
+    maximum_envelope: usize,
+) -> Result<u64, StoreRefusal> {
+    if length > maximum_stored {
+        return Err(StoreRefusal::StoredObjectTooLarge {
+            offered: length,
+            maximum: maximum_stored,
+        });
+    }
+    if length < 8 {
+        return Err(StoreRefusal::MalformedStoredObject);
+    }
+    let mut prefix = [0; 8];
+    file.read_exact(&mut prefix).map_err(eof_is_malformed)?;
+    if &prefix[..4] != super::OBJECT_MAGIC {
+        return Err(StoreRefusal::MalformedStoredObject);
+    }
+    let envelope = u32::from_be_bytes(
+        prefix[4..]
+            .try_into()
+            .map_err(|_| StoreRefusal::MalformedStoredObject)?,
+    );
+    if u64::from(envelope) > maximum_envelope as u64 {
+        return Err(crate::FabricError::EnvelopeTooLarge.into());
+    }
+    Ok(8 + u64::from(envelope))
+}
+
+fn eof_is_malformed(error: io::Error) -> StoreRefusal {
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+        StoreRefusal::MalformedStoredObject
+    } else {
+        read_error(error)
+    }
 }
 
 fn read_stream<R: Read>(

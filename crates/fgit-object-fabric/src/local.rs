@@ -160,6 +160,15 @@ pub enum LocalCrashPoint {
     BeforeStageCleanup,
 }
 
+/// Kind and exact payload length of one stored object, as its envelope
+/// declares them. Unverified against the payload; see
+/// [`LocalFilesystemFabric::read_header_bounded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredObjectHeader {
+    pub kind: ObjectKind,
+    pub payload_length: u64,
+}
+
 /// A body-first, root-last local object-fabric backend.
 #[derive(Debug, Clone)]
 pub struct LocalFilesystemFabric {
@@ -379,6 +388,50 @@ impl LocalFilesystemFabric {
         let object = self.load_object_within(identity, Some(maximum_payload_bytes))?;
         let placement = self.placement_for(Self::object_envelope_id(&object)?)?;
         Ok(WholeObjectRead { object, placement })
+    }
+
+    /// Read one stored object's kind and exact payload length from its
+    /// envelope, without reading or hashing the payload (frankengit-8xyq).
+    ///
+    /// This is NOT a verified read. The envelope must decode under the
+    /// configured profile, carry this fabric's namespace and exactly
+    /// `identity`, and declare the payload length the file actually holds;
+    /// all of that is checked. Whether the payload bytes still match
+    /// `identity` is not. A caller that discloses or relies on payload bytes
+    /// uses [`Self::read_whole_bounded`], which verifies them.
+    pub fn read_header_bounded(
+        &self,
+        identity: GitOid,
+        maximum_payload_bytes: u64,
+    ) -> Result<StoredObjectHeader, StoreRefusal> {
+        let (bytes, stored) = bounded_read::read_envelope(
+            &self.object_path(identity),
+            self.max_stored_object_bytes,
+            self.envelope_limits.max_envelope_bytes,
+        )?;
+        let envelope = ObjectEnvelope::decode(&bytes, &self.envelope_limits)?;
+        if envelope.namespace() != self.namespace {
+            return Err(StoreRefusal::NamespaceMismatch);
+        }
+        if envelope.object_identity() != identity {
+            return Err(StoreRefusal::StoredObjectReconstructionMismatch {
+                requested: identity,
+                reconstructed: envelope.object_identity(),
+            });
+        }
+        if envelope.declared_length() != stored {
+            return Err(StoreRefusal::MalformedStoredObject);
+        }
+        if stored > maximum_payload_bytes {
+            return Err(StoreRefusal::StreamingBudgetExceeded {
+                offered: stored,
+                maximum: maximum_payload_bytes,
+            });
+        }
+        Ok(StoredObjectHeader {
+            kind: envelope.object_kind(),
+            payload_length: stored,
+        })
     }
 
     fn read_bounded(&self, path: &Path) -> Result<Vec<u8>, StoreRefusal> {
@@ -1266,6 +1319,107 @@ mod tests {
             Err(StoreRefusal::PartialRangeUnverified)
         );
         assert_quiescent(ledger);
+    }
+
+    #[test]
+    fn header_read_reports_kind_and_exact_length_and_refuses_files_that_disagree() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let stored = object(b"payload");
+        let other = object(b"another payload");
+        let placements = ledger();
+        for placed in [&stored, &other] {
+            fabric
+                .put_if_absent(placed.clone(), admission(&placements, placed))
+                .expect("local placement must succeed");
+        }
+        assert_quiescent(placements);
+        let identity = stored.identity();
+        let path = fabric.object_path(identity);
+        let original = fs::read(&path).expect("stored object reads");
+        let header = StoredObjectHeader {
+            kind: ObjectKind::Blob,
+            payload_length: 7,
+        };
+        assert_eq!(fabric.read_header_bounded(identity, 7), Ok(header));
+        assert_eq!(
+            fabric.read_header_bounded(identity, 6),
+            Err(StoreRefusal::StreamingBudgetExceeded {
+                offered: 7,
+                maximum: 6
+            })
+        );
+        let absent = object(b"never stored").identity();
+        assert_eq!(
+            fabric.read_header_bounded(absent, 4096),
+            Err(StoreRefusal::ObjectAbsent)
+        );
+
+        // The payload is neither read nor hashed: a flipped payload byte still
+        // yields the envelope's header, and only the verified read refuses it.
+        let mut flipped = original.clone();
+        *flipped.last_mut().expect("stored object has a payload") ^= 0x01;
+        fs::write(&path, &flipped).expect("payload flip writes");
+        assert_eq!(fabric.read_header_bounded(identity, 7), Ok(header));
+        assert!(fabric.read_whole_bounded(identity, 7).is_err());
+
+        // A file whose length disagrees with its envelope is malformed.
+        fs::write(&path, &original[..original.len() - 1]).expect("truncation writes");
+        assert_eq!(
+            fabric.read_header_bounded(identity, 4096),
+            Err(StoreRefusal::MalformedStoredObject)
+        );
+        let mut grown = original.clone();
+        grown.push(0);
+        fs::write(&path, &grown).expect("growth writes");
+        assert_eq!(
+            fabric.read_header_bounded(identity, 4096),
+            Err(StoreRefusal::MalformedStoredObject)
+        );
+        fs::write(&path, &original[..6]).expect("prefix truncation writes");
+        assert_eq!(
+            fabric.read_header_bounded(identity, 4096),
+            Err(StoreRefusal::MalformedStoredObject)
+        );
+
+        // Another object's file under this name names the other identity.
+        fs::copy(fabric.object_path(other.identity()), &path).expect("misplaced file copies");
+        assert_eq!(
+            fabric.read_header_bounded(identity, 4096),
+            Err(StoreRefusal::StoredObjectReconstructionMismatch {
+                requested: identity,
+                reconstructed: other.identity(),
+            })
+        );
+
+        // The same object stored under another namespace is not this fabric's.
+        let foreign_root = TestRoot::new();
+        let foreign = LocalFilesystemFabric::open(LocalFilesystemConfig::new(
+            foreign_root.path(),
+            vec![b'm'],
+            OpaqueHandle::new(b"rack-a").expect("test failure domain must fit"),
+            OpaqueHandle::new(b"key-a").expect("test key dependency must fit"),
+            4096,
+            limits(),
+        ))
+        .expect("foreign test fabric must open");
+        let foreign_object = object_in_namespace(b"m", b"payload");
+        let foreign_placements = ledger();
+        foreign
+            .put_if_absent(
+                foreign_object.clone(),
+                admission(&foreign_placements, &foreign_object),
+            )
+            .expect("foreign placement must succeed");
+        assert_quiescent(foreign_placements);
+        fs::copy(foreign.object_path(identity), &path).expect("foreign file copies");
+        assert_eq!(
+            fabric.read_header_bounded(identity, 4096),
+            Err(StoreRefusal::NamespaceMismatch)
+        );
+
+        fs::write(&path, &original).expect("original restores");
+        assert_eq!(fabric.read_header_bounded(identity, 7), Ok(header));
     }
 
     #[test]

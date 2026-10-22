@@ -1076,9 +1076,37 @@ impl Display for NodePackMaterializationRefusal {
                 "{operation} exhausted {} runtime budget ({dimension})",
                 class.code()
             ),
-            Self::Pack(error) => Display::fmt(error, formatter),
+            // The selected-pack envelope bounds both the planned object bytes and
+            // the emitted pack, and an operator sets it. Since the disclosure
+            // walk reads blob headers rather than bodies, a clone or fetch over
+            // it is refused here, after the advertisement, and the client sees
+            // this text on the side band (frankengit-8xyq).
+            Self::Pack(error) => match error.as_ref() {
+                PackWriteError::Pack(PackError::TotalExpandedLimit { actual, limit }) => {
+                    write_envelope_refusal(formatter, "objects", *actual, *limit)
+                }
+                PackWriteError::OutputLimit { attempted, limit } => {
+                    write_envelope_refusal(formatter, "pack output", *attempted, *limit)
+                }
+                _ => Display::fmt(error, formatter),
+            },
         }
     }
+}
+
+fn write_envelope_refusal(
+    formatter: &mut Formatter<'_>,
+    what: &str,
+    needed: usize,
+    limit: usize,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "pack needs {} of {what}, over this server's upload envelope ({} of {what}); the \
+         operator can raise it with fg serve --pack-max-expanded-mib",
+        envelope_size(needed),
+        envelope_size(limit)
+    )
 }
 
 impl Error for NodePackMaterializationRefusal {
@@ -2977,6 +3005,16 @@ where
     }
 }
 
+fn native_object_type(kind: ObjectKind) -> Result<ObjectType, PackWriteError> {
+    Ok(match kind {
+        ObjectKind::Commit => ObjectType::Commit,
+        ObjectKind::Tree => ObjectType::Tree,
+        ObjectKind::Blob => ObjectType::Blob,
+        ObjectKind::Tag => ObjectType::Tag,
+        ObjectKind::Internal => return Err(PackError::InvalidEntryType(5).into()),
+    })
+}
+
 struct VerifiedFabricPackSource<'a> {
     fabric: &'a LocalFilesystemFabric,
     object_format: GitHashAlgorithm,
@@ -3061,13 +3099,7 @@ impl VerifiedFabricPackSource<'_> {
             }
             _ => PackWriteError::MissingCanonicalObject(*id),
         })?;
-        let object_type = match verified.object.envelope().object_kind() {
-            ObjectKind::Commit => ObjectType::Commit,
-            ObjectKind::Tree => ObjectType::Tree,
-            ObjectKind::Blob => ObjectType::Blob,
-            ObjectKind::Tag => ObjectType::Tag,
-            ObjectKind::Internal => return Err(PackError::InvalidEntryType(5).into()),
-        };
+        let object_type = native_object_type(verified.object.envelope().object_kind())?;
         let payload = verified.object.payload();
         if payload.len() > self.maximum_object_bytes {
             return Err(PackError::ObjectSizeLimit {
@@ -3083,6 +3115,39 @@ impl VerifiedFabricPackSource<'_> {
             })?;
         body.extend_from_slice(payload);
         Ok((object_type, body))
+    }
+
+    /// The kind and exact length of one stored object, from its envelope
+    /// alone, under the same session and Database probes as a body read. The
+    /// payload is neither read nor verified (frankengit-8xyq): a caller that
+    /// discloses or packs the bytes reads them through [`Self::read_object`].
+    fn read_object_header(&self, id: &GitOid) -> Result<(ObjectType, usize), PackWriteError> {
+        self.session_checkpoint()?;
+        if !self.database_read_is_live() {
+            return Err(PackError::DeadlineExceeded.into());
+        }
+        let read = self
+            .fabric
+            .read_header_bounded(*id, self.maximum_object_bytes as u64);
+        self.session_checkpoint()?;
+        if !self.database_read_is_live() {
+            return Err(PackError::DeadlineExceeded.into());
+        }
+        let header = read.map_err(|error| match error {
+            StoreRefusal::StreamingBudgetExceeded { offered, .. } => {
+                PackWriteError::from(PackError::ObjectSizeLimit {
+                    actual: usize::try_from(offered).unwrap_or(usize::MAX),
+                    limit: self.maximum_object_bytes,
+                })
+            }
+            _ => PackWriteError::MissingCanonicalObject(*id),
+        })?;
+        let length =
+            usize::try_from(header.payload_length).map_err(|_| PackError::ObjectSizeLimit {
+                actual: usize::MAX,
+                limit: self.maximum_object_bytes,
+            })?;
+        Ok((native_object_type(header.kind)?, length))
     }
 
     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {

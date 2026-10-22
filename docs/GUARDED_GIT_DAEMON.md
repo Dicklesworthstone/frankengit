@@ -36,17 +36,37 @@ There is no fallback to the old receiver after a guarded-serving failure.
 
 `--pack-max-expanded-mib <non-zero>` sets the selected-pack write envelope
 (frankengit-e6jj). This is the total expanded object bytes one upload-pack
-session may hold and emit, 128 MiB by default; the per-object ceiling is
-separate. Before the ref advertisement, every session walks the visible
-closure of the advertised refs and holds those objects in memory. A
-repository whose visible objects exceed the envelope is therefore refused
-before any advertisement, with one `ERR` packet such as
+response may hold and emit, 128 MiB by default; the per-object ceiling is
+separate. The pack is built in memory, so the envelope is an operator memory
+bound, not a repository-size guarantee.
+
+Before the ref advertisement, every session walks the visible closure of the
+advertised refs. It reads and verifies every commit, tree and tag body, but
+reads only the stored header (kind and exact size) of a blob reached through
+a tree or tag (frankengit-8xyq). A blob body is read and verified only when a
+pack selects it. The envelope bounds the commit, tree and tag bytes of this
+walk. So `ls-remote`, and a fetch that needs only a small pack, do not depend
+on blob bytes: a repository larger than the envelope is still advertised and
+incrementally fetchable.
+
+A request whose pack exceeds the envelope is refused after the advertisement,
+on the side band. git prints it and then stops, for example:
+
+```text
+remote: pack needs 134217845 bytes of objects, over this server's upload envelope (128 MiB of objects); the operator can raise it with fg serve --pack-max-expanded-mib
+fatal: early EOF
+```
+
+The first figure is where the writer crossed the limit, not the full pack
+size. A full clone of a 160 MiB repository needs, for example,
+`--pack-max-expanded-mib 512`.
+
+A repository whose commit, tree and tag bytes alone exceed the envelope is
+refused before any advertisement, with one `ERR` packet such as
 `ERR repository exceeds this server's upload envelope (128 MiB of objects, 32 MiB per object); the operator can raise it with fg serve --pack-max-expanded-mib`.
-A stock client prints it as `fatal: remote error: ...` (git:// and SSH). The
-envelope is an operator memory bound, not a repository-size guarantee. For
-example, a 160 MiB repository clones under `--pack-max-expanded-mib 512`.
-Smart HTTP refuses the same case with its existing status mapping and does
-not yet carry this message.
+A stock client prints it as `fatal: remote error: ...` (git:// and SSH).
+Smart HTTP refuses that case with its existing status mapping and does not
+yet carry the message.
 
 `--processing-timeout-secs <non-zero>` sets the server-work budget a push gets
 after its pack trailer: quarantine, delta resolution, policy and publication.

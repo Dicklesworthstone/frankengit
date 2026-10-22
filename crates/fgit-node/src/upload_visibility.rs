@@ -13,7 +13,12 @@ pub mod tags;
 const MAX_DISCLOSURE_EDGES: usize = 4_000_000;
 const DISCLOSURE_OPERATION: &str = "verify visible upload-pack graph";
 
-/// Constructible only after the entire selected graph has been checked.
+/// Constructible only after the entire selected graph has been checked:
+/// every commit, tree and tag body is read and native-verified, and every blob
+/// reached through a typed edge is checked by kind and exact size from its
+/// stored envelope. A blob body is verified when a pack selects it, never
+/// disclosed unverified. The aggregate read budget therefore counts commit,
+/// tree and tag bytes; packs charge blob bytes (frankengit-8xyq).
 /// The derived set is not an RCR root and is deliberately not persisted.
 pub struct VisibleUploadPack {
     basis: PublicationBasis,
@@ -148,6 +153,12 @@ trait VisibilitySource {
     fn parse_limits(&self) -> ParseLimits;
     fn checkpoint(&self) -> Result<(), NodePackMaterializationRefusal>;
     fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal>;
+    /// Kind and exact size without the body, for a blob the walk reached
+    /// through a typed edge. Nothing the walk returns discloses its bytes.
+    fn load_header(
+        &self,
+        id: GitOid,
+    ) -> Result<(ObjectType, usize), NodePackMaterializationRefusal>;
 }
 
 impl VisibilitySource for VerifiedFabricPackSource<'_> {
@@ -166,6 +177,13 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
     }
     fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> {
         self.read_object(&id)
+            .map_err(NodePackMaterializationRefusal::from)
+    }
+    fn load_header(
+        &self,
+        id: GitOid,
+    ) -> Result<(ObjectType, usize), NodePackMaterializationRefusal> {
+        self.read_object_header(&id)
             .map_err(NodePackMaterializationRefusal::from)
     }
 }
@@ -218,6 +236,30 @@ fn project_visible_graph(
     let parse_limits = source.parse_limits();
     while let Some(id) = pending.pop_first() {
         source.checkpoint()?;
+        // A blob reached through a typed edge has no edges of its own, so the
+        // walk needs only its kind and size (frankengit-8xyq). Reading the
+        // header keeps every ls-remote and fetch independent of blob bytes,
+        // and a blob's body is read and verified only when a pack selects it.
+        if required.get(&id) == Some(&Some(ObjectType::Blob)) {
+            let header = source.load_header(id);
+            source.checkpoint()?;
+            let (kind, size) = header?;
+            if size > limits.max_object_bytes || size > parse_limits.max_object_bytes {
+                return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
+            }
+            require_kind(kind, ObjectType::Blob)?;
+            known.insert(id, kind);
+            objects.insert(
+                id,
+                partial_clone::FilterObject {
+                    commit_time: None,
+                    kind,
+                    size,
+                    edges: Vec::new(),
+                },
+            );
+            continue;
+        }
         let loaded = source.load(id);
         source.checkpoint()?;
         let (kind, body) = loaded?;

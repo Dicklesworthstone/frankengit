@@ -653,3 +653,133 @@ fn an_over_envelope_repository_is_refused_with_one_err_packet_naming_the_limit()
         }
     }
 }
+
+/// frankengit-8xyq: the disclosure walk charges commit, tree and tag bodies,
+/// not blobs. An envelope that holds exactly those bytes still advertises
+/// and negotiates; the full pack is refused by the writer, on the side band,
+/// with the sizes and the operator flag. The default envelope is the twin.
+#[test]
+fn an_envelope_holding_only_commits_and_trees_advertises_and_refuses_the_pack_on_the_side_band() {
+    let format = GitHashAlgorithm::Sha1;
+    let Fixture {
+        scratch: _scratch,
+        node,
+        config,
+        public,
+        private,
+        visible,
+        ..
+    } = fixture(format);
+    // Advertise exactly `visible`: the private ref would add its own history.
+    delete_private(&node, private);
+    let blobs = [&b"common ancestor body"[..], b"current public content"]
+        .map(|body| git_object_id(format, crypto_object_kind(ObjectType::Blob), body));
+    let size = |id: GitOid| node.read_git_object(id).unwrap().payload().len();
+    let total = visible.iter().map(|id| size(*id)).sum::<usize>();
+    let walked = total - blobs.iter().map(|id| size(*id)).sum::<usize>();
+    node.shutdown().unwrap();
+    // The default envelope delivers the same request.
+    for (envelope, delivered) in [(Some(walked), false), (None, true)] {
+        let configured = match envelope {
+            Some(bytes) => config.clone().with_selected_pack_byte_envelope(bytes),
+            None => config.clone(),
+        };
+        let mut node = OneNode::open_existing(configured).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let (node, result, response) = exchange_filtered(node, 2, &[public], None, None, false);
+        node.shutdown().unwrap();
+        let text = String::from_utf8_lossy(&response);
+        // The walk fits, so the v2 capability advertisement goes out first.
+        assert!(text.contains("version 2"), "{text}");
+        assert!(!text.contains("ERR "), "{text}");
+        if delivered {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(bodies(&response, 2, format).len(), visible.len());
+            continue;
+        }
+        assert!(
+            matches!(
+                &result,
+                Err(NodeGitDaemonServeRefusal::Pack(pack)) if matches!(
+                    &**pack,
+                    NodePackMaterializationRefusal::Pack(error) if matches!(
+                        **error,
+                        PackWriteError::Pack(PackError::TotalExpandedLimit { .. })
+                    )
+                )
+            ),
+            "{result:?}"
+        );
+        // The writer reports its running sum where it first crossed the limit.
+        assert!(text.contains("pack needs "), "{text}");
+        assert!(
+            text.contains(&format!(
+                " bytes of objects, over this server's upload envelope ({walked} bytes of \
+                 objects); the operator can raise it with fg serve --pack-max-expanded-mib"
+            )),
+            "{text}"
+        );
+    }
+}
+
+/// frankengit-8xyq: the walk reads a blob's header, so a blob whose stored
+/// payload no longer matches its identity does not stop the advertisement.
+/// The pack that selects it reads and verifies the body, and refuses: a
+/// corrupted body is never served.
+#[test]
+fn a_corrupted_blob_body_is_still_advertised_but_never_packed() {
+    let format = GitHashAlgorithm::Sha1;
+    let Fixture {
+        scratch,
+        node,
+        config,
+        public,
+        private,
+        ..
+    } = fixture(format);
+    delete_private(&node, private);
+    node.shutdown().unwrap();
+    let blob = git_object_id(
+        format,
+        crypto_object_kind(ObjectType::Blob),
+        b"current public content",
+    );
+    let name = blob.to_string();
+    let mut stored = Vec::new();
+    for namespace in std::fs::read_dir(scratch.0.join("objects")).unwrap() {
+        for domain in std::fs::read_dir(namespace.unwrap().path()).unwrap() {
+            let path = domain.unwrap().path().join(&name);
+            if path.exists() {
+                stored.push(path);
+            }
+        }
+    }
+    let [path] = stored.as_slice() else {
+        panic!("one stored copy of the blob: {stored:?}");
+    };
+    let mut bytes = std::fs::read(path).unwrap();
+    *bytes.last_mut().unwrap() ^= 0x01;
+    std::fs::write(path, bytes).unwrap();
+
+    let mut node = OneNode::open_existing(config).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let (node, result, response) = exchange_filtered(node, 2, &[public], None, None, false);
+    node.shutdown().unwrap();
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.contains("version 2"), "{text}");
+    assert!(!text.contains("ERR "), "{text}");
+    assert!(
+        matches!(
+            &result,
+            Err(NodeGitDaemonServeRefusal::Pack(pack)) if matches!(
+                &**pack,
+                NodePackMaterializationRefusal::Pack(error) if matches!(
+                    **error,
+                    PackWriteError::MissingCanonicalObject(id) if id == blob
+                )
+            )
+        ),
+        "{result:?}"
+    );
+    assert!(!text.contains("PACK"), "no pack is emitted: {text}");
+}

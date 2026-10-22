@@ -7,6 +7,7 @@ struct MemorySource {
     format: GitHashAlgorithm,
     objects: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
     reads: RefCell<Vec<GitOid>>,
+    header_reads: RefCell<Vec<GitOid>>,
     polls: Cell<usize>,
     stop_at: Cell<usize>,
 }
@@ -16,6 +17,7 @@ impl MemorySource {
             format,
             objects: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
+            header_reads: RefCell::new(Vec::new()),
             polls: Cell::new(0),
             stop_at: Cell::new(usize::MAX),
         }
@@ -59,6 +61,16 @@ impl VisibilitySource for MemorySource {
         self.objects
             .get(&id)
             .cloned()
+            .ok_or_else(|| PackWriteError::MissingCanonicalObject(id).into())
+    }
+    fn load_header(
+        &self,
+        id: GitOid,
+    ) -> Result<(ObjectType, usize), NodePackMaterializationRefusal> {
+        self.header_reads.borrow_mut().push(id);
+        self.objects
+            .get(&id)
+            .map(|(kind, body)| (*kind, body.len()))
             .ok_or_else(|| PackWriteError::MissingCanonicalObject(id).into())
     }
 }
@@ -121,6 +133,9 @@ fn disclosure_walk_keeps_shared_history_and_tags_without_reading_hidden_or_gitli
         .unwrap();
         let expected = BTreeSet::from([common, base_tree, base, public, tree, tip, tag, outer_tag]);
         assert_eq!(result.objects(), &expected);
+        // Bodies of commits, trees and tags; only the headers of blobs reached
+        // through tree edges (frankengit-8xyq). Each object is read once.
+        let bodies = BTreeSet::from([base_tree, base, tree, tip, tag, outer_tag]);
         assert_eq!(
             source
                 .reads
@@ -128,9 +143,15 @@ fn disclosure_walk_keeps_shared_history_and_tags_without_reading_hidden_or_gitli
                 .iter()
                 .copied()
                 .collect::<BTreeSet<_>>(),
-            expected
+            bodies
         );
-        assert_eq!(source.reads.borrow().len(), expected.len());
+        assert_eq!(source.reads.borrow().len(), bodies.len());
+        assert_eq!(
+            *source.header_reads.borrow(),
+            BTreeSet::from([common, public])
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
         assert!(!result.objects().contains(&secret));
         assert!(!result.objects().contains(&private));
     }
@@ -203,16 +224,76 @@ fn disclosure_walk_checks_required_kinds_even_for_unconstrained_or_already_visit
 }
 
 #[test]
+fn disclosure_walk_checks_edge_blobs_by_header_and_reads_root_blobs_whole() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = MemorySource::new(format);
+        let large = source.put(ObjectType::Blob, vec![b'x'; 4096]);
+        let small = source.put(ObjectType::Blob, b"small".to_vec());
+        let tree = source.tree(&[(b"100644", b"large", large), (b"100644", b"small", small)]);
+        let commit = source.commit(tree, &[]);
+        // Commits and trees here are far below 4,095 bytes; only the blob is not.
+        let bounded = PackLimits {
+            max_object_bytes: 4095,
+            ..PackLimits::default()
+        };
+        // An over-limit blob refuses from its header, without its body.
+        expect_code(
+            project_visible_closure(&source, &source.admitted(), [commit], &bounded),
+            RefusalCode::ResourceBudgetExceeded,
+        );
+        assert!(source.header_reads.borrow().contains(&large));
+        assert!(!source.reads.borrow().contains(&large));
+        let exact = PackLimits {
+            max_object_bytes: 4096,
+            ..PackLimits::default()
+        };
+        let visible =
+            project_visible_closure(&source, &source.admitted(), [commit], &exact).unwrap();
+        assert_eq!(
+            visible.objects(),
+            &BTreeSet::from([large, small, tree, commit])
+        );
+
+        // A blob-mode entry naming a tree is caught by the header's kind.
+        let inner = source.tree(&[(b"100644", b"small", small)]);
+        let liar = source.tree(&[(b"100644", b"not-a-blob", inner)]);
+        source.reads.borrow_mut().clear();
+        source.header_reads.borrow_mut().clear();
+        expect_code(
+            project_visible_closure(&source, &source.admitted(), [liar], &exact),
+            RefusalCode::EvidenceInvalid,
+        );
+        assert_eq!(*source.header_reads.borrow(), vec![inner]);
+        assert!(!source.reads.borrow().contains(&inner));
+
+        // A missing edge blob is still a refusal, not a silently thin graph.
+        let mut missing = MemorySource::new(format);
+        let absent = missing.put(ObjectType::Blob, b"absent".to_vec());
+        let holder = missing.tree(&[(b"100644", b"absent", absent)]);
+        let admitted = missing.admitted();
+        missing.objects.remove(&absent);
+        assert!(project_visible_closure(&missing, &admitted, [holder], &exact).is_err());
+
+        // A ref naming a blob directly has no typed edge to vouch for its
+        // kind, so its body is read and its kind taken from the verified read.
+        source.reads.borrow_mut().clear();
+        source.header_reads.borrow_mut().clear();
+        let root = project_visible_closure(&source, &source.admitted(), [small], &exact).unwrap();
+        assert_eq!(root.objects(), &BTreeSet::from([small]));
+        assert_eq!(*source.reads.borrow(), vec![small]);
+        assert!(source.header_reads.borrow().is_empty());
+    }
+}
+
+#[test]
 fn disclosure_walk_bounds_unique_nodes_frontier_and_aggregate_bytes_inclusively() {
     let mut source = MemorySource::new(GitHashAlgorithm::Sha256);
     let a = source.put(ObjectType::Blob, b"a".to_vec());
     let b = source.put(ObjectType::Blob, b"bb".to_vec());
     let tree = source.tree(&[(b"100644", b"a", a), (b"100644", b"b", b)]);
-    let bytes = source
-        .objects
-        .values()
-        .map(|(_, body)| body.len())
-        .sum::<usize>();
+    // The aggregate counts the bodies the walk reads: the tree, not the blobs
+    // it reaches through edges, whose headers alone are read (frankengit-8xyq).
+    let bytes = source.objects[&tree].1.len();
     let exact = PackLimits {
         max_entries: 3,
         max_total_expanded_bytes: bytes,
@@ -882,6 +963,7 @@ fn hidden_ref_rules_select_the_negotiation_scope_before_any_hidden_body_read() {
             assert!(!repository.contains_want(id));
             assert!(!repository.is_common(id));
             assert!(!source.reads.borrow().contains(&id));
+            assert!(!source.header_reads.borrow().contains(&id));
         }
     }
 }

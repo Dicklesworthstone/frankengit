@@ -64,10 +64,13 @@ one explicitly named native object; it is not yet a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` writes an authority-selected pack
 to a previously absent path. One emitted pack is bounded by the documented
 write-side envelope (`--pack-max-expanded-mib`; 128 MiB expanded by default).
-A clone or fetch of a repository whose visible objects exceed it is refused
-before the ref advertisement with one `ERR` packet naming the limit and that
-flag, which a stock client reports as `remote error:` (git:// and SSH,
-frankengit-e6jj). Until then such a clone saw only an unexplained hang-up.
+The pre-advertisement walk reads blob headers, not blob bodies
+(frankengit-8xyq), so a repository larger than the envelope is still
+advertised and incrementally fetchable. A pack over the envelope is refused
+on the side band with a message naming the limit and that flag, which git
+prints as `remote: pack needs ...`. A repository whose commit, tree and tag bytes
+alone exceed it is refused before the advertisement with one `ERR` packet
+(git:// and SSH, frankengit-e6jj).
 
 `serve` defaults to a bounded raw git-daemon run and also supports an explicit
 `--continuous --stop-file <path>` lifetime. Both modes drain every admitted

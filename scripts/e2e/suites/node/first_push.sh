@@ -354,14 +354,37 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   "$FG_BIN" doctor "$STORAGE_XL1" "$TENANT" "$REPOID_XL1" "$XL_BLOB_OID" >"$WORK/xl-doctor.out" 2>&1 || XL_DOCTOR_RC=$?
   fge_assert_eq FG-HH37-PUSH-046 0 "$XL_DOCTOR_RC" 'the doctor path re-verifies one named XL blob against the authenticated head'
 
-  # Planted negative (write side): the same clone against the DEFAULT 128 MiB
-  # write envelope must fail with a client-diagnosable message naming the
-  # limit and the operator flag -- never an unexplained early EOF
-  # (frankengit-e6jj). The visible-closure walk refuses before the
-  # advertisement, so the server answers with one ERR packet, which a stock
-  # client reports as "remote error".
-  FIND_PORT_AND_SERVE_XL xl1-default "$STORAGE_XL1" "$REPOID_XL1"
+  # A small follow-up commit, pushed from the clone, so that a default-envelope
+  # fetch below needs only a small pack from a repository far larger than
+  # the envelope.
+  XLFOLLOW_RC=0
+  git -C "$XLCLONE" -c user.name=FG -c user.email=fg@example.invalid \
+    commit -q --allow-empty -m 'small follow-up' >/dev/null 2>&1 || XLFOLLOW_RC=$?
+  FIND_PORT_AND_SERVE_XL xl1-follow "$STORAGE_XL1" "$REPOID_XL1" --receive-principal "$PRINCIPAL"
+  GIT_TERMINAL_PROMPT=0 git -C "$XLCLONE" -c protocol.version=1 push \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" main >"$WORK/xl-follow-push.out" 2>&1 || XLFOLLOW_RC=$?
+  fge_reap "$FOUND_NAME"
+  fge_assert_eq FG-HH37-PUSH-053 0 "$XLFOLLOW_RC" 'a small follow-up commit is pushed on top of the XL head'
+  XLFOLLOW_HEAD=$(git -C "$XLCLONE" rev-parse HEAD 2>/dev/null || echo clone-missing)
+
+  # The DEFAULT 128 MiB write envelope (frankengit-8xyq). The disclosure walk
+  # reads blob headers, not bodies, so the XL repository is still advertised
+  # and a fetch that needs a small pack succeeds. A request whose pack is
+  # over the envelope is refused after the advertisement, on the side band,
+  # with a client-diagnosable message naming the limit and the operator flag
+  # -- never an unexplained early EOF (frankengit-e6jj).
+  FIND_PORT_AND_SERVE_XL xl1-default "$STORAGE_XL1" "$REPOID_XL1" --max-sessions 3 --max-in-flight 1
   fge_assert_cmd FG-HH37-PUSH-047 'a default-envelope XL serve session is listening' test -n "$FOUND_PORT"
+  XLLS_RC=0
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 ls-remote \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" >"$WORK/xl-ls-default.out" 2>&1 || XLLS_RC=$?
+  fge_assert_eq FG-HH37-PUSH-054 0 "$XLLS_RC" 'the default envelope advertises a repository far larger than itself'
+  fge_assert_contains FG-HH37-PUSH-055 "$(cat "$WORK/xl-ls-default.out")" "$XLFOLLOW_HEAD	refs/heads/main" 'the advertisement names the current XL head'
+  XLFETCH_RC=0
+  GIT_TERMINAL_PROMPT=0 git -C "$XL_SRC" -c protocol.version=1 fetch -q \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" main >"$WORK/xl-fetch-default.out" 2>&1 || XLFETCH_RC=$?
+  fge_assert_eq FG-HH37-PUSH-056 0 "$XLFETCH_RC" 'an incremental fetch from the XL repository succeeds under the default envelope'
+  fge_assert_eq FG-HH37-PUSH-057 "$XLFOLLOW_HEAD" "$(git -C "$XL_SRC" rev-parse FETCH_HEAD 2>/dev/null || echo fetch-missing)" 'the incremental fetch delivers the follow-up head'
   XLCLONE_DEFAULT="$WORK/xl-clone-default"
   XLDEFAULT_RC=0
   GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
@@ -369,7 +392,7 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_reap "$FOUND_NAME"
   XLDEFAULT_OUT=$(cat "$WORK/xl-clone-default.out")
   fge_assert_cmd FG-HH37-PUSH-048 'the over-envelope clone fails' test "$XLDEFAULT_RC" -ne 0
-  fge_assert_contains FG-HH37-PUSH-049 "$XLDEFAULT_OUT" 'remote error: repository exceeds this server'"'"'s upload envelope (128 MiB of objects' 'the write-side refusal names the governing limit to the client'
+  fge_assert_contains FG-HH37-PUSH-049 "$XLDEFAULT_OUT" 'over this server'"'"'s upload envelope (128 MiB of objects)' 'the pack-time refusal names the governing limit to the client'
   fge_assert_contains FG-HH37-PUSH-052 "$XLDEFAULT_OUT" 'fg serve --pack-max-expanded-mib' 'the refusal names the operator flag that raises the limit'
 
   # 2. Work-proportional deadline: a 5 s base with 4 s/MiB scaling admits the
