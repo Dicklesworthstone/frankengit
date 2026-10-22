@@ -36,6 +36,9 @@ usage: fg webhook outbox <storage-root> <tenant-id> <repository-id> --trusted-lo
 usage: fg webhook inspect <storage-root> <tenant-id> <repository-id> --trusted-local
          --delivery-id <delivery-id> --destination <canonical-destination>
          [--object-format sha1|sha256] [--expected-head <snapshot-token>]
+usage: fg webhook receipt <storage-root> <tenant-id> <repository-id> --trusted-local
+         --delivery-id <delivery-id> --destination <canonical-destination>
+         [--object-format sha1|sha256] [--expected-head <snapshot-token>]
 
 usage: fg webhook dispatch --help
 usage: fg webhook dispatch-migrate --help
@@ -60,7 +63,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         "list" => run_list(&args[1..]),
         "rotate" => run_rotate(&args[1..]),
         "dead-letter" => run_dead_letter(&args[1..]),
-        "outbox" | "inspect" | "deliver" => delivery::run(args[0].as_str(), &args[1..]),
+        "outbox" | "inspect" | "receipt" | "deliver" => delivery::run(args[0].as_str(), &args[1..]),
         _ => Err(format!("unknown webhook subcommand: {}", args[0])),
     }
 }

@@ -33,6 +33,7 @@ pub(super) fn run(action: &str, args: &[String]) -> Result<u8, String> {
     let (exit_code, output) = match action {
         "outbox" => (0, list(&options)?),
         "inspect" => (0, inspect(&options)?),
+        "receipt" => (0, receipt(&options)?),
         "deliver" | "replay" => manual::execute(&options, action == "replay")?,
         _ => return Err("unsupported canonical webhook action".into()),
     };
@@ -156,6 +157,74 @@ fn inspect(options: &Options) -> Result<String, String> {
     Ok(output)
 }
 
+fn receipt(options: &Options) -> Result<String, String> {
+    let key = options.key.ok_or("missing --delivery-id")?;
+    let destination = options.destination.ok_or("missing --destination")?;
+    let selected = with_node(options, |node| {
+        let request = fgit_cli::command_request_context(node);
+        node.runtime()
+            .block_on(node.read_retired_forge_receipt_in(&request, key, destination, None))
+            .map_err(|error| error.to_string())
+    })?;
+    check_head(options, selected.source_head())?;
+    render_receipt(
+        options,
+        selected.source_head(),
+        selected.effect(),
+        selected.receipt(),
+    )
+}
+
+fn render_receipt(
+    options: &Options,
+    head: RepositoryAuthorityHeadId,
+    effect: &fgit_codec::CanonicalOutboxEffectState,
+    receipt: &fgit_codec::CanonicalOutboxDeliveryReceipt,
+) -> Result<String, String> {
+    let frame = fgit_codec::encode_body(receipt).map_err(|error| error.to_string())?;
+    let mut frame_hex = String::new();
+    reserve_inspection(
+        &mut frame_hex,
+        frame.len().checked_mul(2).ok_or("receipt size overflow")?,
+    )?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in frame {
+        frame_hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        frame_hex.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    let disposition = match receipt.disposition() {
+        fgit_codec::OutboxDeliveryDisposition::Acknowledged => "acknowledged",
+        fgit_codec::OutboxDeliveryDisposition::TerminallyRefused => "terminally_refused",
+        fgit_codec::OutboxDeliveryDisposition::Indeterminate => {
+            return Err("retired delivery has an unresolved receipt".into());
+        }
+    };
+    Ok(format!(
+        "{{\"type\":\"forge_delivery_receipt\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},\"source_head\":{},\"snapshot_token\":{},\"delivery_id\":{},\"destination\":{},\"payload_root\":{},\"effect_state_root\":{},\"receipt_root\":{},\"disposition\":{},\"canonical_frame_hex\":{},\"retired\":true,\"canonical_settled\":true,\"sent\":false,\"node_closed\":true}}",
+        quote(&options.tenant.to_string()),
+        quote(&options.repository.to_string()),
+        quote(&head.to_string()),
+        quote(&head_token(head)),
+        quote(receipt.delivery_key().as_str()),
+        quote(receipt.destination().as_str()),
+        quote(&receipt.payload_root().to_string()),
+        quote(
+            &effect
+                .root()
+                .map_err(|error| error.to_string())?
+                .to_string()
+        ),
+        quote(
+            &receipt
+                .root()
+                .map_err(|error| error.to_string())?
+                .to_string()
+        ),
+        quote(disposition),
+        quote(&frame_hex),
+    ))
+}
+
 fn reserve_inspection(output: &mut String, bytes: usize) -> Result<(), String> {
     const MAX_INSPECTION_BYTES: usize = 64 * 1024 * 1024;
     if output
@@ -193,8 +262,10 @@ fn check_head(options: &Options, head: RepositoryAuthorityHeadId) -> Result<(), 
 }
 
 fn parse(action: &str, args: &[String]) -> Result<Options, String> {
-    if !matches!(action, "outbox" | "inspect" | "deliver" | "replay")
-        || args.len() > 26
+    if !matches!(
+        action,
+        "outbox" | "inspect" | "receipt" | "deliver" | "replay"
+    ) || args.len() > 26
         || args.iter().any(|value| value.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -209,7 +280,7 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
         let flag = args[index].as_str();
         let permitted = matches!(flag, "--object-format" | "--expected-head")
             || (action == "outbox" && matches!(flag, "--after" | "--limit"))
-            || (matches!(action, "inspect" | "deliver" | "replay")
+            || (matches!(action, "inspect" | "receipt" | "deliver" | "replay")
                 && matches!(flag, "--delivery-id" | "--destination"))
             || (matches!(action, "deliver" | "replay")
                 && matches!(
@@ -363,6 +434,32 @@ mod tests {
         assert_eq!(options.destination.unwrap().as_str(), "forge-projection");
         assert_eq!(options.format, GitHashAlgorithm::Sha256);
         assert!(parse("outbox", &args(&["--delivery-id", "delivery-1"])).is_err());
+    }
+
+    #[test]
+    fn receipt_read_requires_exact_identity_and_cannot_enable_a_send() {
+        let parameters = [
+            "--delivery-id",
+            "delivery-1",
+            "--destination",
+            "forge-projection",
+        ];
+        assert!(parse("receipt", &args(&[])).is_err());
+        assert!(parse("receipt", &args(&parameters[..2])).is_err());
+        assert!(parse("receipt", &args(&parameters)).is_ok());
+        for network_flag in [
+            "--id",
+            "--attempt",
+            "--at-least-once",
+            "--permissive-for-tests",
+        ] {
+            let mut input = args(&parameters);
+            input.extend([network_flag.to_owned(), "1".to_owned()]);
+            assert!(parse("receipt", &input).is_err(), "{network_flag}");
+        }
+        let mut duplicate = args(&parameters);
+        duplicate.extend(["--destination".to_owned(), "other".to_owned()]);
+        assert!(parse("receipt", &duplicate).is_err());
     }
 
     #[test]

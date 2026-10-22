@@ -732,6 +732,7 @@ version = "0.0.1"
 name = "fgit-cli"
 version = "0.0.1"
 dependencies = [
+ "fgit-admission",
  "fgit-authority",
  "fgit-codec",
  "fgit-crypto",
@@ -740,6 +741,7 @@ dependencies = [
  "fgit-node",
  "fgit-object-fabric",
  "fgit-pack",
+ "fgit-resource",
  "fgit-schema",
  "fgit-ssh",
  "fgit-types",

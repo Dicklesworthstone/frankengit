@@ -43,6 +43,35 @@ GitHub webhook JSON schema. Output is capped at 64 MiB. Repository shutdown
 must complete before any successful result is emitted. Both commands are
 read-only; neither sends a webhook nor acknowledges an obligation.
 
+## Recover a retired delivery receipt
+
+```
+fg webhook receipt ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
+  --delivery-id DELIVERY_ID --destination CANONICAL_DESTINATION \
+  --object-format sha256
+```
+
+Keep the original delivery ID and destination when dispatching. A settled entry
+that has been retired no longer appears in `outbox`, and `inspect` does not
+select it for another send. `receipt` authenticates the terminal removal in
+decision history, the original delivery binding, progress chain and receipt.
+It returns the original canonical receipt frame as lowercase hex, its root,
+terminal disposition, effect root and current source snapshot. Decode the
+frame with `fgit_codec::decode_body::<CanonicalOutboxDeliveryReceipt>`.
+
+`--expected-head SNAPSHOT_TOKEN` pins this read's source snapshot. An active or
+unknown key, wrong audience, stale pin, missing/corrupt evidence, cancellation
+or exhausted history budget refuses. Map absence and staged receipts never
+establish delivery. The history walks retain their existing 4,096-head-edge
+and 65,536-record bounds; this is not unbounded-age receipt indexing.
+
+This command accepts no endpoint, secret, attempt or send flag. It closes the
+node before emitting a successful result, makes no transport call and does not
+advance authority. `canonical_settled:true` describes the authenticated prior
+terminal outcome, including definite refusal; check `disposition` to distinguish
+acknowledgement from refusal. It does not claim that HTTP dispatch or manual
+replay now publishes canonical settlements. That work remains in `.4.55`.
+
 ## Send a selected delivery
 
 ```

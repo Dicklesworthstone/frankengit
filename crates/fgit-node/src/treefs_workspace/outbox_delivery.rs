@@ -1,6 +1,8 @@
 //! Local authenticated composition for bounded canonical forge delivery.
 
+mod receipt;
 mod selection;
+pub use receipt::RetiredForgeDeliveryReceipt;
 
 use fgit_admission::merge::native::settlement::{OutboxDestination, deliver_outbox_async};
 use fgit_admission::{AdmissionContext, AdmissionLimits};

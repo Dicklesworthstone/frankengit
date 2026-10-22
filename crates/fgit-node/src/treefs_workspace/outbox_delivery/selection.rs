@@ -84,7 +84,7 @@ impl SelectedForgeDelivery {
     }
 }
 
-fn checkpoint(request: &NodeRequestContext) -> Result<(), ForgeDeliveryReadRefusal> {
+pub(super) fn checkpoint(request: &NodeRequestContext) -> Result<(), ForgeDeliveryReadRefusal> {
     match checkpoint_pack_context(request.authority()) {
         PackContextCheckpoint::Live => Ok(()),
         PackContextCheckpoint::Stopped {
