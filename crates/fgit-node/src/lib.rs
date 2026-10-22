@@ -2506,6 +2506,31 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
     }
 }
 
+/// The closure a forge decision commits: exactly the already-selected objects
+/// it names. The serving closure is the union of every committed decision's
+/// closure, and these objects are already in it, so the union is unchanged.
+/// The decision no longer copies, hashes or caps the whole repository. Admission
+/// still requires each named object, and a name outside the selected closure
+/// refuses here.
+pub(crate) fn named_object_closure(
+    selected: &PermittedObjectClosure,
+    named: &[GitOid],
+) -> Result<ValidatedClosure, fgit_admission::ProjectionFailure> {
+    if named.iter().any(|oid| !selected.objects().contains(oid)) {
+        return Err(fgit_admission::ProjectionFailure::Refuse(
+            RefusalCode::ObjectClosureIncomplete,
+        ));
+    }
+    let objects = named.iter().copied().collect::<BTreeSet<_>>();
+    let object_closure_root =
+        permitted_object_closure_root(&PermittedObjectClosure::new(objects.clone()))
+            .map_err(fgit_admission::ProjectionFailure::Unavailable)?;
+    Ok(ValidatedClosure {
+        object_closure_root,
+        objects,
+    })
+}
+
 fn async_projection_unavailable(
     refusal: AdmissionMaterializationRefusal,
 ) -> AsyncProjectionFailure {
