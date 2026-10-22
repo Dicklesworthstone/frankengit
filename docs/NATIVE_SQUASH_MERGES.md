@@ -255,6 +255,15 @@ without requiring them to add a direct admission dependency. Custom admission
 projections must explicitly implement the squash validation hook; the default
 refuses publication.
 
+A `NodeRequestContext` belongs to one independently admitted request. Separate
+preparation, inspection, review, publication and retry requests use separate
+finite contexts. Keep the same context throughout all work inside one request;
+do not replace it to reset an in-flight deadline or cancellation. In particular,
+a context held across a whole review workflow can already be expired when a
+later publication begins. A new request using the original principal and
+idempotency key recovers that original transaction; it does not change its
+meaning or establish that an earlier uncertain attempt did not commit.
+
 Automatic squash uses the existing bounded merge rules and conflict behavior.
 Explicit conflict resolution supports both styles under PathMergeV1, including
 manual binary content and whole-side choices. Its original entry points retain
