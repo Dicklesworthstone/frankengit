@@ -152,19 +152,20 @@ impl Receiver {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let worker = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(30);
             let mut observations = Vec::new();
             for status in statuses {
                 let mut stream = loop {
-                    if stopping.load(Ordering::Acquire) || Instant::now() >= deadline {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "dispatch request absent",
-                        ));
-                    }
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // Drain a queued request even when its caller has
+                            // already finished with an unknown observation.
+                            if stopping.load(Ordering::Acquire) {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Interrupted,
+                                    "receiver finished before its expected dispatch request",
+                                ));
+                            }
                             thread::sleep(Duration::from_millis(5))
                         }
                         Err(e) => return Err(e),
@@ -195,8 +196,17 @@ impl Receiver {
             worker: Some(worker),
         }
     }
-    fn finish(mut self) -> Vec<Captured> {
-        self.worker.take().unwrap().join().unwrap().unwrap()
+    fn finish_result(mut self) -> io::Result<Vec<Captured>> {
+        // The fixture owns the listener across bounded node operations, cold
+        // reads and retry invocations. A lifetime timer can expire between
+        // those operations under a loaded full-suite run. Explicitly stop at
+        // the ownership boundary instead; missing expected requests still
+        // refuse, and in-flight reads/writes retain their socket timeouts.
+        self.stop.store(true, Ordering::Release);
+        self.worker.take().unwrap().join().unwrap()
+    }
+    fn finish(self) -> Vec<Captured> {
+        self.finish_result().unwrap()
     }
 }
 impl Drop for Receiver {
@@ -236,6 +246,39 @@ fn capture(stream: &mut TcpStream) -> io::Result<Captured> {
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     Ok(Captured { headers, body })
+}
+
+#[test]
+fn finishing_a_receiver_without_its_expected_request_refuses() {
+    let receiver = Receiver::new(vec![Some(204)]);
+    let error = receiver.finish_result().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert!(error.to_string().contains("expected dispatch request"));
+}
+
+#[test]
+fn finishing_a_receiver_drains_its_queued_request() {
+    let receiver = Receiver::new(vec![Some(204)]);
+    let address = receiver
+        .url
+        .strip_prefix("http://")
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(b"POST /hook HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        .unwrap();
+    let captured = receiver.finish_result().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].body.is_empty());
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 204 No Content\r\n"));
 }
 
 #[test]
