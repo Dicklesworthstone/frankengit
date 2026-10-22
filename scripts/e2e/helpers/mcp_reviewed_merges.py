@@ -67,6 +67,20 @@ def refused(response):
     return value.get('refusal_code', 'refused')
 
 
+def terminal_refusal(response, expected_code):
+    # Parse/grant errors and an uncertain mutation are not canonical refusals.
+    assert 'error' not in response, response
+    result = response['result']
+    assert result['isError'] is True, result
+    value = result['structuredContent']
+    assert value['outcome'] == 'refused' and value['command_committed'] is False, value
+    assert value['terminal'] is True and value['outcome_unknown'] is False, value
+    assert value['refusal_code'] == expected_code, value
+    assert value['refusal_record_id'] and value['tx_id'] and int(value['decision_sequence']) > 0, value
+    assert value['repository_commit_id'] is None, value
+    return value
+
+
 for fmt in ['sha1', 'sha256']:
     for resolution, method in [('clean', 'merge-commit'), ('clean', 'squash'), ('file', 'merge-commit'), ('file', 'squash'), ('ours', 'squash')]:
         label = f'{fmt}-{resolution}-{method}'
@@ -166,7 +180,7 @@ for fmt in ['sha1', 'sha256']:
             assert 'error' in row and row['error']['code'] == -32602, row
         assert refs('after-ungranted-writes') == before
         early = dict(publish_args, idempotency_key='before-approval')
-        refused(mcp('unapproved-merge', [(MERGE, early)], ['--allow-reviewed-merges'], merger)[0])
+        unapproved_refusal = terminal_refusal(mcp('unapproved-merge', [(MERGE, early)], ['--allow-reviewed-merges'], merger)[0], 'EvidenceMissing')
         assert tips(refs('after-unapproved')) == {'refs/heads/main': target, 'refs/heads/topic': tip}
         approved_rows = mcp('approve-and-repeat', [(REVIEW, review_args), (REVIEW, review_args)], ['--allow-review-writes'], reviewer)
         approved = content(approved_rows[0])
@@ -175,7 +189,7 @@ for fmt in ['sha1', 'sha256']:
         assert content(mcp('approval-after-reopen', [(REVIEW, review_args)], ['--allow-review-writes'], reviewer)[0]) == approved
         assert refs('after-review-retry') == after_review
         wrong_method = dict(publish_args, method='merge-commit' if method == 'squash' else 'squash', idempotency_key='wrong-method')
-        refused(mcp('method-substitution', [(MERGE, wrong_method)], ['--allow-reviewed-merges'], merger)[0])
+        method_refusal = terminal_refusal(mcp('method-substitution', [(MERGE, wrong_method)], ['--allow-reviewed-merges'], merger)[0], 'EvidenceInvalid')
         assert tips(refs('after-method-refusal')) == {'refs/heads/main': target, 'refs/heads/topic': tip}
         published_rows = mcp('publish-and-repeat', [(MERGE, publish_args), (MERGE, publish_args)], ['--allow-reviewed-merges'], merger)
         published = content(published_rows[0])
@@ -188,6 +202,8 @@ for fmt in ['sha1', 'sha256']:
         assert content(mcp('publication-after-restart', [(MERGE, publish_args)], ['--allow-reviewed-merges'], merger)[0]) == published
         assert refs('after-restarted-retry') == after
         changed_key = dict(publish_args, method=wrong_method['method'])
+        # A changed command under a committed key can remain an uncertain tool
+        # error; it is not the typed pre-publication method refusal above.
         refused(mcp('same-key-changed-method', [(MERGE, changed_key)], ['--allow-reviewed-merges'], merger)[0])
         assert refs('after-key-reuse') == after
         blobs = mcp('read-merged-bytes', [('frankengit_source_blob', {'reference': 'refs/heads/main', 'path_hex': name.encode().hex()}) for name in expected], ['--allow-source'])
@@ -195,6 +211,7 @@ for fmt in ['sha1', 'sha256']:
             assert content(row)['bytes_hex'] == data.hex(), name
         cases.append({'format': fmt, 'resolution': resolution, 'method': method, 'candidate': candidate, 'exact_parents': expected_parents,
                       'independent_grants': True, 'unapproved_and_changed_method_refused': True, 'source_unchanged': True,
+                      'unapproved_refusal_code': unapproved_refusal['refusal_code'], 'method_substitution_refusal_code': method_refusal['refusal_code'],
                       'source_free_terminal_retry': True, 'native_identity_and_content_verified': True})
         print('PASS', label, flush=True)
 
