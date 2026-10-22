@@ -32,6 +32,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod ancestry;
 pub use ancestry::{AncestryQueryScratch, AncestryQueryWork, CommitAncestryIndex};
+mod frontier;
+pub use frontier::frontier_merge_bases_all;
 
 /// The requested tokenization and deterministic edit-selection profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1460,14 +1462,26 @@ pub enum ParentSet<CommitId> {
     ShallowBoundary,
 }
 
-/// A graph-only boundary. Commit generations and commit dates are deliberately
-/// absent, so neither can influence best-common-ancestor selection.
+/// A graph-only boundary. Commit generations are deliberately absent. A commit
+/// date may order a frontier traversal, but neither can influence
+/// best-common-ancestor selection.
 pub trait CommitGraph {
     type CommitId: Clone + Ord;
     type Error;
 
     fn parents_of(&self, commit: &Self::CommitId)
     -> Result<ParentSet<Self::CommitId>, Self::Error>;
+
+    /// Parents plus an untrusted visit-order hint, such as a committer date.
+    /// [`frontier_merge_bases_all`] visits higher hints first. A hint can make
+    /// that traversal cheaper or costlier; it never changes the bases returned.
+    /// The default supplies none, which leaves the traversal breadth-first.
+    fn parents_with_order_hint(
+        &self,
+        commit: &Self::CommitId,
+    ) -> Result<(ParentSet<Self::CommitId>, i64), Self::Error> {
+        Ok((self.parents_of(commit)?, 0))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

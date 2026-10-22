@@ -342,3 +342,166 @@ fn preparation_resolution_and_review_rebuild_from_the_current_owned_source() {
         assert_eq!(review(&source).unwrap(), reviewed);
     }
 }
+
+/// The fixture source plus the committer dates a node adapter supplies.
+/// Commit reads are counted, whichever entry point performs them.
+struct Dated<'a> {
+    source: &'a Source,
+    dates: BTreeMap<GitOid, i64>,
+    reads: Cell<usize>,
+}
+
+impl MergeObjectSource for Dated<'_> {
+    fn checkpoint(&self) -> Result<(), MergeSourceError> {
+        self.source.checkpoint()
+    }
+
+    fn commit(&self, id: GitOid) -> Result<CommitInput, MergeSourceError> {
+        self.reads.set(self.reads.get() + 1);
+        self.source.commit(id)
+    }
+
+    fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError> {
+        self.source.tree(id)
+    }
+
+    fn blob(&self, id: GitOid) -> Result<Vec<u8>, MergeSourceError> {
+        self.source.blob(id)
+    }
+
+    fn commit_with_date(&self, id: GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError> {
+        Ok((self.commit(id)?, self.dates.get(&id).copied()))
+    }
+}
+
+/// main is `count` dated commits; its tip edits `a`. topic is newer, adds `b`
+/// and branches from main~`back`. Returns (source, dates, main, topic, base).
+fn long_history(
+    format: GitHashAlgorithm,
+    count: usize,
+    back: usize,
+) -> (Source, BTreeMap<GitOid, i64>, GitOid, GitOid, GitOid) {
+    let mut source = Source::new(format);
+    let base_file = source.file(b"a", b"base\n", 0o100644);
+    let ours_file = source.file(b"a", b"ours\n", 0o100644);
+    let side_file = source.file(b"b", b"side\n", 0o100644);
+    let base_tree = source.store_tree(vec![base_file.clone()]);
+    let ours_tree = source.store_tree(vec![ours_file]);
+    let side_tree = source.store_tree(vec![base_file, side_file]);
+    let mut dates = BTreeMap::new();
+    let mut main: Vec<GitOid> = Vec::with_capacity(count);
+    for step in 0..count {
+        let tree = if step + 1 == count {
+            ours_tree
+        } else {
+            base_tree
+        };
+        let parents = main.last().map(|tip| vec![*tip]).unwrap_or_default();
+        let id = source.store_commit(tree, &parents, &format!("main {step}"));
+        dates.insert(id, 1_700_000_000 + i64::try_from(step).unwrap());
+        main.push(id);
+    }
+    let base = main[count - 1 - back];
+    let topic = source.store_commit(side_tree, &[base], "topic");
+    dates.insert(topic, 1_800_000_000);
+    (source, dates, main[count - 1], topic, base)
+}
+
+#[test]
+fn ten_thousand_commit_history_prepares_against_its_recent_base_within_the_profile() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (source, dates, main, topic, base) = long_history(format, 10_000, 10);
+        let dated = Dated {
+            source: &source,
+            dates,
+            reads: Cell::new(0),
+        };
+        let prepared = prepare_merge(
+            &dated,
+            format,
+            main,
+            topic,
+            &metadata(),
+            PreparationLimits::default(),
+        )
+        .unwrap();
+        let MergePreparation::Clean(prepared) = prepared else {
+            panic!("{format:?}: {prepared:?}");
+        };
+        assert_eq!(
+            (prepared.base, prepared.target, prepared.source),
+            (base, main, topic)
+        );
+        // Thirteen commits for the base, three for the trees: not the history.
+        assert_eq!(dated.reads.get(), 16, "{format:?}");
+        // Review and comment anchors share the same graph boundary.
+        assert_eq!(
+            source_merge_bases(&dated, format, main, topic, limits()),
+            Ok(MergeBaseResult::Bases(vec![base]))
+        );
+    }
+}
+
+#[test]
+fn a_base_beyond_the_profile_and_an_undated_source_refuse_typed_never_a_wrong_base() {
+    let format = GitHashAlgorithm::Sha256;
+    let refused = |result: Result<MergePreparation, PreparationError>| {
+        matches!(
+            result,
+            Err(PreparationError::Graph(
+                MergeBaseError::CommitLimitExceeded { limit: 4096 }
+            ))
+        )
+    };
+    // 5,000 commits above the base exceed the 4,096-commit profile.
+    let (source, dates, main, topic, _) = long_history(format, 6_000, 5_000);
+    let dated = Dated {
+        source: &source,
+        dates,
+        reads: Cell::new(0),
+    };
+    assert!(refused(prepare_merge(
+        &dated,
+        format,
+        main,
+        topic,
+        &metadata(),
+        PreparationLimits::default()
+    )));
+    // 4,000 fit.
+    let (source, dates, main, topic, base) = long_history(format, 6_000, 4_000);
+    let dated = Dated {
+        source: &source,
+        dates,
+        reads: Cell::new(0),
+    };
+    assert!(matches!(
+        prepare_merge(&dated, format, main, topic, &metadata(), PreparationLimits::default()),
+        Ok(MergePreparation::Clean(PreparedMerge { base: selected, .. })) if selected == base
+    ));
+    // Without dates the traversal is breadth-first. Here the topic's side runs
+    // below the base as fast as the stop follows it, so the walk reaches the
+    // profile and refuses: more work, never a different base.
+    let (source, _, main, topic, base) = long_history(format, 6_000, 10);
+    assert!(refused(prepare_merge(
+        &source,
+        format,
+        main,
+        topic,
+        &metadata(),
+        PreparationLimits::default()
+    )));
+    assert_eq!(
+        source_merge_bases(
+            &source,
+            format,
+            main,
+            topic,
+            MergeBaseLimits {
+                max_commits: 10_000,
+                max_edges: 10_000,
+            }
+        ),
+        Ok(MergeBaseResult::Bases(vec![base]))
+    );
+}

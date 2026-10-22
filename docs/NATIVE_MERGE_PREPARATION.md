@@ -163,6 +163,19 @@ and recovery semantics.
 
 The initial profile admits at most 4,096 ancestor commits, 16,384 graph edges,
 100,000 cumulatively decoded tree entries, depth 64 and 4,096-byte paths.
+The commit and edge ceilings count what merge-base discovery reads, not the
+repository's total history. It reads the commits between both tips and their
+best bases, plus the frontier that proves those bases best, so a long history
+with a recent base fits. Committer dates only order that walk. A missing,
+equal or skewed date can cost reads up to the ceiling, which then refuses
+with the typed limit, never with a different base. Two incomparable best
+bases are proved incomparable by reading their shared history, so a
+criss-cross pair over a long history refuses at the ceiling; multiple bases
+refuse in any case.
+Admission's revalidation of the candidate still walks its complete native
+object closure: at most 100,000 objects, 400,000 edges and 128 MiB. A
+repository beyond those totals cannot yet prepare or publish a merge
+(frankengit-rffg).
 It limits content merges to 64, each with a 1 MiB combined-input ceiling,
 a separate 1 MiB output ceiling and explicit diff/merge work limits. There
 are at most 128 reported conflicts, 10,000 constructed objects and 32 MiB

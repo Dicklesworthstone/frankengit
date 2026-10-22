@@ -3,7 +3,7 @@
 use super::partial_clone::FilterObject;
 use super::*;
 use fgit_wire::closure::ShallowUpdate;
-pub(super) mod cutoffs;
+pub(crate) mod cutoffs;
 mod relative;
 
 /// Shared only with the repository view for the lifetime of this connection.
