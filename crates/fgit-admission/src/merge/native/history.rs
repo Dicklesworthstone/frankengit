@@ -18,6 +18,9 @@ use super::progress::{CanonicalOutboxProgress, MAX_OUTBOX_PROGRESS_TRANSITIONS};
 use super::{delivery, storage, unavailable};
 use crate::AdmissionError;
 
+mod retirement;
+pub use retirement::retired_effect;
+
 /// Existing admission evidence namespace. Progress and lifecycle records use
 /// typed bodies here and under the invariant namespace with the same root.
 pub const OUTBOX_EFFECT_NAMESPACE: &[u8] = b"frankengit/admission/outbox-effect-batch/v1/";
@@ -644,7 +647,7 @@ impl ReverseProgress {
     }
 }
 
-fn validate_terminal_progress(
+pub(super) fn validate_terminal_progress(
     progress: &CanonicalOutboxProgress,
     effect: &CanonicalOutboxEffectState,
     receipt: &CanonicalOutboxDeliveryReceipt,

@@ -67,6 +67,14 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
   request context and draining acquired responsibility. The embedded profile
   retains immutable authority bodies; distributed outbox GC and arbitrary
   webhook transport are not established by this integration.
+- Active outbox retirement requires a canonically published acknowledgement
+  or definite terminal refusal and preserves its RCR, progress, payload and
+  receipt closure. An absent active key alone proves neither non-delivery nor
+  completion. Retired-key recovery authenticates the removal transition and
+  original receipt; missing history fails closed and authorizes no resend.
+  Unresolved escalations retain their active responsibility. Any future GC or
+  history compactor must retain this closure or provide a verified checkpoint
+  replacement before deleting it.
 - Replay completeness is explicit.
 - Backups/capsules/restores use the same commitments as normal reads.
 - Security incidents can reconstruct actor/capability/input/basis/decision/publication/effect history subject to confidentiality policy.

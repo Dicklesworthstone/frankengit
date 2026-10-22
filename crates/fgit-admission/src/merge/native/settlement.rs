@@ -99,13 +99,23 @@ where
         checkpoint().map_err(unavailable)?;
         let (basis, _, _) = crate::read_basis_async(store, cx, &context.head_key).await?;
         let state = delivery::read_in(store, cx, &basis, &|| checkpoint().is_err()).await?;
-        let entry = state
-            .outbox
-            .entry(key)
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+        if destination.idempotency() != DownstreamIdempotency::Strong {
+            return Err(unavailable(RefusalCode::PublicationPolicyRefused));
+        }
+        let Some(entry) = state.outbox.entry(key) else {
+            return history::retired_effect(
+                store,
+                cx,
+                &basis,
+                key,
+                destination.destination(),
+                &|| checkpoint().is_err(),
+            )
+            .await?
+            .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing));
+        };
         if destination.destination() != entry.destination()
             || entry.effect_class() != AsciiSlug::from_static("forge-event")
-            || destination.idempotency() != DownstreamIdempotency::Strong
         {
             return Err(unavailable(RefusalCode::PublicationPolicyRefused));
         }
@@ -119,6 +129,28 @@ where
                 | ObligationState::TerminallyFailed
                 | ObligationState::Escalated
         ) {
+            if retired_state(effect.state()) {
+                let progress =
+                    history::latest_progress_for_entry(store, cx, &basis, entry, &|| {
+                        checkpoint().is_err()
+                    })
+                    .await?;
+                publish_mutation(
+                    store,
+                    cx,
+                    context,
+                    projection,
+                    entry,
+                    RuntimeMutation::Retirement {
+                        effect: &effect,
+                        progress: progress.as_ref(),
+                    },
+                    limits,
+                    checkpoint,
+                )
+                .await?;
+                continue;
+            }
             return Ok(effect);
         }
         if effect.state() == ObligationState::Committed {
@@ -293,7 +325,7 @@ const fn terminal_transition(
     }
 }
 
-// Both mutation kinds use the ordinary seal, reference materializer and sole
+// All mutation kinds use the ordinary seal, reference materializer and sole
 // authority CAS. Progress is in committed decision history; it is not a second
 // database or an uncommitted object interpreted as permission to dispatch.
 enum RuntimeMutation<'a> {
@@ -303,6 +335,10 @@ enum RuntimeMutation<'a> {
         progress: Option<&'a CanonicalOutboxProgress>,
     },
     Progress(&'a CanonicalOutboxProgress),
+    Retirement {
+        effect: &'a CanonicalOutboxEffectState,
+        progress: Option<&'a CanonicalOutboxProgress>,
+    },
 }
 
 impl RuntimeMutation<'_> {
@@ -310,12 +346,14 @@ impl RuntimeMutation<'_> {
         match self {
             Self::Lifecycle { next, .. } => storage::root(*next),
             Self::Progress(body) => storage::root(*body),
+            Self::Retirement { effect, .. } => storage::root(*effect),
         }
     }
     fn predecessor_progress_root(&self) -> Result<Option<Digest>, AdmissionError> {
         match self {
             Self::Lifecycle { progress, .. } => progress.map(storage::root).transpose(),
             Self::Progress(body) => Ok(body.predecessor_progress_root()),
+            Self::Retirement { progress, .. } => progress.map(storage::root).transpose(),
         }
     }
 }
@@ -339,6 +377,10 @@ where
     C: Fn() -> Result<(), RefusalCode> + Sync,
 {
     let next_root = mutation.root()?;
+    // Retiring a legacy retained terminal entry is a distinct sealed intent
+    // from its earlier lifecycle publication, even though both name the same
+    // immutable terminal effect. Never reuse a decided seal with new semantics.
+    let retiring = matches!(&mutation, RuntimeMutation::Retirement { .. });
     let semantic = SemanticRequest::build(
         fgit_authority::RECEIVE_ADMISSION_SCHEMA,
         context.object_format,
@@ -347,14 +389,19 @@ where
         Vec::new(),
         vec![ScopedEntry::new(
             AsciiSlug::from_static("outbox"),
-            AsciiSlug::from_static("runtime-successor"),
+            if retiring {
+                AsciiSlug::from_static("retire-settled")
+            } else {
+                AsciiSlug::from_static("runtime-successor")
+            },
             next_root.bytes().as_bytes(),
         )?],
     )?;
     let mut settlement_context = context.clone();
     settlement_context.idempotency_key = fgit_authority::IdempotencyKey::new(
         format!(
-            "outbox/{}",
+            "outbox/{}{}",
+            if retiring { "retire/" } else { "" },
             fgit_crypto::lowercase_hex(next_root.bytes().as_bytes())
         )
         .into_bytes(),
@@ -398,10 +445,11 @@ where
             continue;
         }
         let state = delivery::read_in(store, cx, &basis, &|| checkpoint().is_err()).await?;
-        let entry = state
-            .outbox
-            .entry(original.delivery_key())
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+        let Some(entry) = state.outbox.entry(original.delivery_key()) else {
+            // A concurrent terminal publication may have retired this slot.
+            // Reload authority; absence never grants dispatch ownership.
+            return Ok(false);
+        };
         if entry != original {
             return Ok(false);
         }
@@ -464,7 +512,18 @@ where
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
         match &mutation {
-            RuntimeMutation::Lifecycle { next, receipt, .. } => {
+            RuntimeMutation::Lifecycle {
+                next,
+                receipt,
+                progress,
+            } => {
+                if retired_state(next.state()) {
+                    history::validate_terminal_progress(
+                        progress.ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?,
+                        next,
+                        receipt.ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?,
+                    )?;
+                }
                 let mut entries = state.outbox.entries().to_vec();
                 let slot = entries
                     .iter_mut()
@@ -480,6 +539,9 @@ where
                     next_root,
                     Some(entry.effect_state_root()),
                 );
+                if retired_state(next.state()) {
+                    entries.retain(|entry| entry.delivery_key() != original.delivery_key());
+                }
                 let outbox = CanonicalOutboxState::try_new(context.repository_id, entries)
                     .map_err(codec_error)?;
                 if let Some(receipt) = receipt {
@@ -502,6 +564,29 @@ where
             }
             RuntimeMutation::Progress(body) => {
                 stage_runtime_evidence(store, cx, context, *body, checkpoint).await?;
+            }
+            RuntimeMutation::Retirement { effect, progress } => {
+                if !retired_state(effect.state())
+                    || storage::root(*effect)? != entry.effect_state_root()
+                    || progress.is_none()
+                {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                }
+                let entries = state
+                    .outbox
+                    .entries()
+                    .iter()
+                    .copied()
+                    .filter(|entry| entry.delivery_key() != original.delivery_key())
+                    .collect();
+                let outbox = CanonicalOutboxState::try_new(context.repository_id, entries)
+                    .map_err(codec_error)?;
+                delivery::stage_effect_and_outbox_in(store, cx, &outbox, effect, &|| {
+                    checkpoint().is_err()
+                })
+                .await?;
+                stage_runtime_evidence(store, cx, context, *effect, checkpoint).await?;
+                materialization.roots.outbox_root = storage::root(&outbox)?;
             }
         }
         materialization.record.invariant_evidence_root = next_root;
@@ -531,6 +616,13 @@ where
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,
     })
+}
+
+const fn retired_state(state: ObligationState) -> bool {
+    matches!(
+        state,
+        ObligationState::Acknowledged | ObligationState::TerminallyFailed
+    )
 }
 
 async fn stage_runtime_evidence<S, B, C>(

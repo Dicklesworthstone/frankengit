@@ -2,6 +2,8 @@
 //! The scripted transport supplies observations, not durability evidence. These
 //! tests do not establish filesystem crash behavior or a real remote service.
 
+mod retirement;
+
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +54,7 @@ struct Store {
     memory: MemoryAuthorityStore,
     stopped: Arc<AtomicBool>,
     stop_after: Mutex<Option<StopAfter>>,
+    missing_body: Mutex<Option<ImmutableKey>>,
 }
 
 impl Store {
@@ -123,7 +126,12 @@ impl AsyncAuthorityStore for Store {
         (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
-        std::future::ready(self.memory.read_immutable(key))
+        let result = if self.missing_body.lock().unwrap().as_ref() == Some(key) {
+            Ok(ImmutableRead::Absent)
+        } else {
+            self.memory.read_immutable(key)
+        };
+        std::future::ready(result)
     }
     fn initialize_head(
         &self,
@@ -380,6 +388,7 @@ impl Fixture {
             memory: MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x957)),
             stopped: Arc::new(AtomicBool::new(false)),
             stop_after: Mutex::new(None),
+            missing_body: Mutex::new(None),
         };
         let events = ForgeEventBatch::of_one(ForgeEvent {
             aggregate: AggregateId::PullRequest(PullRequestNumber::FIRST),
@@ -474,11 +483,23 @@ impl Fixture {
             false
         }))
         .expect("selected outbox");
+        let Some(entry) = state.outbox.entry(self.key) else {
+            return run(history::retired_effect(
+                &self.store,
+                &(),
+                &self.basis(),
+                self.key,
+                AsciiSlug::from_static("forge-projection"),
+                &|| false,
+            ))
+            .expect("authenticated retired outcome")
+            .expect("retired effect");
+        };
         run(delivery::read_effect_in(
             &self.store,
             &(),
             self.context.repository_id,
-            state.outbox.entry(self.key).expect("obligation"),
+            entry,
             &|| false,
         ))
         .expect("selected lifecycle")
@@ -632,6 +653,12 @@ fn delivered_obligation_and_terminal_retry_are_read_from_canonical_roots() {
         after.body().forge_position_root
     );
     assert_ne!(before.body().outbox_root, after.body().outbox_root);
+    let active = run(delivery::read_in(&fixture.store, &(), &after, &|| false))
+        .expect("selected active outbox");
+    assert!(
+        active.outbox.entries().is_empty(),
+        "settlement frees active capacity"
+    );
     let mut retry = Transport::new(fixture.key, []);
     assert_eq!(
         fixture
@@ -641,6 +668,203 @@ fn delivered_obligation_and_terminal_retry_are_read_from_canonical_roots() {
     );
     assert!(retry.calls.is_empty());
     assert_eq!(fixture.basis(), after);
+}
+
+#[test]
+fn permanent_rejection_retires_but_unresolved_escalation_keeps_its_slot() {
+    for verdict in [
+        DeliveryVerdict::PermanentRejection,
+        DeliveryVerdict::AmbiguousTimeout,
+    ] {
+        let fixture = Fixture::new();
+        let mut observations = vec![
+            Observation::Probe(ProbeVerdict::NotDelivered),
+            Observation::Delivery(verdict),
+        ];
+        if verdict == DeliveryVerdict::AmbiguousTimeout {
+            observations.push(Observation::Probe(ProbeVerdict::Unknown));
+        }
+        let mut transport = Transport::new(fixture.key, observations);
+        let result = fixture
+            .deliver(&mut transport, 3, MaterializationFault::None)
+            .unwrap();
+        let active = run(delivery::read_in(
+            &fixture.store,
+            &(),
+            &fixture.basis(),
+            &|| false,
+        ))
+        .unwrap();
+        if verdict == DeliveryVerdict::PermanentRejection {
+            assert_eq!(result.state(), ObligationState::TerminallyFailed);
+            assert!(active.outbox.entries().is_empty());
+            assert_eq!(fixture.effect(), result);
+        } else {
+            assert_eq!(result.state(), ObligationState::Escalated);
+            assert!(active.outbox.entry(fixture.key).is_some());
+            assert!(
+                run(history::retired_effect(
+                    &fixture.store,
+                    &(),
+                    &fixture.basis(),
+                    fixture.key,
+                    AsciiSlug::from_static("forge-projection"),
+                    &|| false
+                ))
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn retired_lookup_refuses_wrong_audience_and_cancellation_without_transport() {
+    let fixture = Fixture::new();
+    fixture
+        .deliver(&mut success(fixture.key), 3, MaterializationFault::None)
+        .unwrap();
+    let before = fixture.basis();
+    let mut wrong = Transport::new(fixture.key, []);
+    wrong.destination = AsciiSlug::from_static("other-destination");
+    assert!(
+        fixture
+            .deliver(&mut wrong, 3, MaterializationFault::None)
+            .is_err()
+    );
+    assert!(wrong.calls.is_empty());
+    assert!(
+        run(history::retired_effect(
+            &fixture.store,
+            &(),
+            &before,
+            fixture.key,
+            AsciiSlug::from_static("forge-projection"),
+            &|| true
+        ))
+        .is_err()
+    );
+    assert_eq!(fixture.basis(), before);
+}
+
+#[test]
+fn missing_retired_receipt_refuses_instead_of_resending_and_recovers_when_restored() {
+    let fixture = Fixture::new();
+    let acknowledged = fixture
+        .deliver(&mut success(fixture.key), 3, MaterializationFault::None)
+        .unwrap();
+    let receipt_key = storage::body_key(
+        RECEIPT_NAMESPACE,
+        fixture.context.repository_id,
+        acknowledged.evidence_root().unwrap(),
+    )
+    .unwrap();
+    *fixture.store.missing_body.lock().unwrap() = Some(receipt_key);
+    let before = fixture.basis();
+    let mut retry = Transport::new(fixture.key, []);
+    assert!(
+        fixture
+            .deliver(&mut retry, 3, MaterializationFault::None)
+            .is_err()
+    );
+    assert!(
+        retry.calls.is_empty(),
+        "missing evidence never grants a fresh delivery"
+    );
+    assert_eq!(fixture.basis(), before);
+    *fixture.store.missing_body.lock().unwrap() = None;
+    assert_eq!(
+        fixture
+            .deliver(&mut retry, 3, MaterializationFault::None)
+            .unwrap(),
+        acknowledged
+    );
+    assert!(retry.calls.is_empty());
+    assert_eq!(fixture.basis(), before);
+}
+
+#[test]
+fn uncommitted_terminal_objects_cannot_establish_a_retired_outcome() {
+    let fixture = Fixture::new();
+    let key =
+        AsciiSlug::from_static("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let deferred = CanonicalOutboxEffectState::committed(
+        fixture.context.repository_id,
+        key,
+        tx_id(),
+        digest_of(77),
+    )
+    .transition(LifecycleEvent::Defer, None)
+    .unwrap();
+    let receipt = CanonicalOutboxDeliveryReceipt::try_new(
+        fixture.context.repository_id,
+        key,
+        AsciiSlug::from_static("forge-projection"),
+        deferred.payload_root(),
+        storage::root(&deferred).unwrap(),
+        OutboxDeliveryDisposition::Acknowledged,
+        b"unpublished observation".to_vec(),
+    )
+    .unwrap();
+    let terminal = deferred
+        .transition(
+            LifecycleEvent::Acknowledge,
+            Some(storage::root(&receipt).unwrap()),
+        )
+        .unwrap();
+    run(storage::stage_body(
+        &fixture.store,
+        &(),
+        fixture.context.repository_id,
+        RECEIPT_NAMESPACE,
+        &receipt,
+    ))
+    .unwrap();
+    run(storage::stage_body(
+        &fixture.store,
+        &(),
+        fixture.context.repository_id,
+        delivery::EFFECT_NAMESPACE,
+        &terminal,
+    ))
+    .unwrap();
+    run(stage_runtime_evidence(
+        &fixture.store,
+        &(),
+        &fixture.context,
+        &terminal,
+        &|| Ok(()),
+    ))
+    .unwrap();
+    let before = fixture.basis();
+    assert_eq!(
+        run(history::retired_effect(
+            &fixture.store,
+            &(),
+            &before,
+            key,
+            AsciiSlug::from_static("forge-projection"),
+            &|| false
+        ))
+        .unwrap(),
+        None
+    );
+    let mut transport = Transport::new(key, []);
+    assert!(
+        run(deliver_outbox_async(
+            &fixture.store,
+            &(),
+            &fixture.context,
+            key,
+            &fixture.projection(MaterializationFault::None),
+            &mut transport,
+            ReconcilePolicy::new(NonZeroU32::new(3).unwrap()),
+            AdmissionLimits::default(),
+            &|| Ok(())
+        ))
+        .is_err()
+    );
+    assert!(transport.calls.is_empty());
+    assert_eq!(fixture.basis(), before);
 }
 
 #[test]

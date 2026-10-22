@@ -1115,6 +1115,84 @@ fn canonical_outbox_delivers_once_and_refuses_weak_capability_before_any_call() 
 }
 
 #[test]
+fn terminal_outbox_retirement_survives_reopen_in_both_object_formats() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &scratch.0, format, true);
+        apply(
+            &node,
+            &intent(&f, 1, ExpectedVersion::NewStream),
+            b"retire-outbox",
+        )
+        .unwrap();
+        let key = delivery_key(&node);
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let mut consumer = destination(&scratch.0);
+        let acknowledged = deliver(&node, key, &mut consumer).unwrap();
+        assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+        let request = node.request_context();
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert!(
+            after.snapshot().outbox.is_empty(),
+            "terminal entries do not occupy active slots"
+        );
+        assert_eq!(
+            before.basis().body().ref_root,
+            after.basis().body().ref_root
+        );
+        assert_eq!(
+            before.basis().body().forge_position_root,
+            after.basis().body().forge_position_root
+        );
+        assert_eq!(
+            before.basis().body().retention_root,
+            after.basis().body().retention_root
+        );
+        assert_ne!(
+            before.basis().body().outbox_root,
+            after.basis().body().outbox_root
+        );
+        let terminal_head = after.basis().id();
+        node.shutdown().unwrap();
+
+        let mut node = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let mut recovered_consumer = destination(&scratch.0);
+        assert_eq!(
+            deliver(&node, key, &mut recovered_consumer).unwrap(),
+            acknowledged
+        );
+        assert_eq!(
+            (recovered_consumer.probes, recovered_consumer.sends),
+            (0, 0)
+        );
+        let request = node.request_context();
+        let recovered = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(
+            recovered.basis().id(),
+            terminal_head,
+            "retry does not republish a terminal outcome"
+        );
+        assert!(recovered.snapshot().outbox.is_empty());
+        assert_eq!(refs(&node)[&main_ref()], f.candidate);
+        assert_eq!(fs::read_dir(&consumer.root).unwrap().count(), 1);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn exhausted_background_budget_refuses_before_effect_and_fresh_worker_reconciles() {
     use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
     let scratch = Scratch::new();

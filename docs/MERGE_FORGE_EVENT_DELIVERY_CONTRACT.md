@@ -323,6 +323,27 @@ a strong destination must durably suppress duplicate effects. Weak
 idempotency is refused before transport access. This is not a claim of one
 physical request or support for arbitrary webhook destinations.
 
+Terminal acknowledgement and definite terminal refusal now release the active
+outbox entry in the same authority CAS that publishes the terminal lifecycle
+and receipt. Escalated, indeterminate responsibilities remain active. A retry
+of a retired key resolves its original terminal effect through authenticated
+decision history and checks the predecessor map, removal, stable identity,
+progress chain and receipt before returning without transport access. Existing
+retained terminal entries with verified progress are retired by a separate
+`retire-settled` sealed intent; it does not reuse the earlier lifecycle seal.
+This releases active map capacity without changing the permanent codec limit
+or deleting immutable evidence. It does not connect the weak HTTP dispatcher
+or manual replay to canonical settlement; that remains in
+`frankengit-root-doctrine-x2mv.4.55`. The new retirement tests require current
+execution and independent batch verification before capability credit.
+
+Retired lookup uses the existing bounded authenticated history reader for
+both the removal suffix and the original progress chain. Each scan retains
+its existing head-edge and record ceilings. Missing or over-budget history
+refuses instead of treating absence as permission to send. This profile
+therefore does not establish unbounded-age receipt lookup or receipt-index
+checkpoint compaction.
+
 The file-backed process-death matrix interrupts native admission before its
 first authority write and after awaited event, forge-position, obligation and
 outbox-state writes, in both Git object formats. It checks the intercepted

@@ -233,6 +233,17 @@ no external call. Record the exact tested SHA, dated toolchain, RCH terminal
 exit, and store profile. A syntax check is not execution of this matrix, and
 these tests do not establish power-loss or distributed collector correctness.
 
+Terminal outbox retirement additionally requires acknowledgement and definite
+refusal to release their active slots in the same terminal publication,
+unresolved escalation to retain its slot, and retired retries to return the
+same committed effect without a new send or head advance. Exercise filesystem
+reopen in both Git object formats, historical retained-terminal migration under
+a distinct seal, missing receipt recovery, staged-only terminal bodies,
+destination mismatch and cancellation. The admission retirement tests use an
+explicit model authority; only the node reopen tests establish the file-backed
+composition. Neither establishes weak HTTP settlement or arbitrary-age lookup
+beyond the existing history budgets.
+
 ## 9. Intent/effect and transaction semantics
 
 Test:
