@@ -2,6 +2,7 @@
 //! Exercises the original public sealed-package API against actual embedded
 //! authority storage. No test publication engine or fake staging success.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -110,6 +111,7 @@ struct Offer {
     package: MergeEffectPackage,
     attempt: MergeAttempt,
     closure: ValidatedClosure,
+    serving_closure: ValidatedClosure,
     evidence: CommitEvidence,
     predecessor_evidence: CommitEvidence,
 }
@@ -218,14 +220,35 @@ fn setup(node: &OneNode, scratch: &Scratch, format: GitHashAlgorithm) -> Offer {
         .runtime()
         .block_on(node.materialize_admission_in(&request))
         .unwrap();
-    let mut objects = selected.selected_closure().closure().objects().clone();
-    objects.insert(candidate);
+    let selected_objects = selected.selected_closure().closure().objects();
+    assert_eq!(
+        selected_objects,
+        &BTreeSet::from([blob, tree, base, target, source])
+    );
+    // The decision names these four commits; the already selected tree/blob
+    // remain available through the union of committed decision closures.
+    let objects = BTreeSet::from([base, target, source, candidate]);
     let closure = ValidatedClosure {
         object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
             objects.clone(),
         ))
         .unwrap(),
         objects,
+    };
+    let serving_objects = BTreeSet::from([blob, tree, base, target, source, candidate]);
+    assert_eq!(
+        selected_objects
+            .union(&closure.objects)
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        serving_objects,
+    );
+    let serving_closure = ValidatedClosure {
+        object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
+            serving_objects.clone(),
+        ))
+        .unwrap(),
+        objects: serving_objects,
     };
     let request = node.request_context();
     let history = node
@@ -275,6 +298,7 @@ fn setup(node: &OneNode, scratch: &Scratch, format: GitHashAlgorithm) -> Offer {
             workspace_epoch: WorkspaceEpoch::from_u64(9),
         },
         closure,
+        serving_closure,
         evidence,
         predecessor_evidence: evidence,
     };
@@ -289,8 +313,8 @@ fn setup(node: &OneNode, scratch: &Scratch, format: GitHashAlgorithm) -> Offer {
     )
     .expect("epoch-one candidate and actual source objects pass the production native validator");
     assert_eq!(
-        offer.closure, verified,
-        "supplied closure must match the independently traversed objects"
+        offer.serving_closure, verified,
+        "full traversal must preserve the independently enumerated serving closure"
     );
     offer
 }
@@ -417,6 +441,146 @@ fn prepare_evidence(node: &OneNode, context: &AdmissionContext, offer: &mut Offe
         outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
         retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),
     };
+}
+
+#[test]
+fn full_serving_closure_is_terminally_refused_and_exact_decision_closure_can_publish() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let mut offer = setup(&node, &scratch, format);
+        let invalid_context = context(&node, format, b"sealed-native-full-closure");
+        prepare_evidence(&node, &invalid_context, &mut offer);
+        let decision_closure = offer.closure.clone();
+        assert_eq!(decision_closure.objects.len(), 4);
+        assert_eq!(offer.serving_closure.objects.len(), 6);
+        // Change only the supplied derived closure, retaining correct evidence
+        // for this key and the exact same sealed native merge request.
+        offer.closure = offer.serving_closure.clone();
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let refused = apply(
+            &node,
+            &invalid_context,
+            &offer,
+            offer.attempt.workspace_epoch,
+        );
+        assert!(matches!(
+            refused.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ObjectClosureIncomplete,
+                ..
+            }
+        ));
+        let request = node.request_context();
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(after.snapshot().refs, before.snapshot().refs);
+        assert_eq!(after.snapshot().head_target, before.snapshot().head_target);
+        assert_eq!(
+            after.basis().body().ref_root,
+            before.basis().body().ref_root
+        );
+        assert_eq!(
+            after.basis().body().forge_position_root,
+            before.basis().body().forge_position_root
+        );
+        assert_eq!(
+            after.basis().body().outbox_root,
+            before.basis().body().outbox_root
+        );
+        assert_eq!(
+            after.basis().body().retention_root,
+            before.basis().body().retention_root
+        );
+        assert_eq!(
+            after.selected_closure().closure().objects(),
+            before.selected_closure().closure().objects()
+        );
+        // Correcting derived input cannot resurrect a terminally refused seal.
+        offer.closure = decision_closure;
+        assert_eq!(
+            apply(
+                &node,
+                &invalid_context,
+                &offer,
+                offer.attempt.workspace_epoch
+            ),
+            refused
+        );
+        let permitted_context = context(&node, format, b"sealed-native-exact-closure");
+        prepare_evidence(&node, &permitted_context, &mut offer);
+        let committed = apply(
+            &node,
+            &permitted_context,
+            &offer,
+            offer.attempt.workspace_epoch,
+        );
+        assert!(matches!(
+            committed.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let request = node.request_context();
+        let selected = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(
+            selected.snapshot().refs[&main_ref()],
+            offer.package.ref_intent.new_tip
+        );
+        assert_eq!(selected.snapshot().forge_positions.len(), 1);
+        assert_eq!(selected.snapshot().outbox.len(), 1);
+        assert_eq!(
+            selected.selected_closure().closure().objects(),
+            &offer.serving_closure.objects
+        );
+        let request = node.request_context();
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&request))
+            .unwrap();
+        assert_eq!(
+            history.last().unwrap().batch.committed_rcrs[0].object_closure_root,
+            offer.closure.object_closure_root
+        );
+        let head = selected.basis().id();
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert_eq!(
+            apply(
+                &reopened,
+                &invalid_context,
+                &offer,
+                offer.attempt.workspace_epoch
+            ),
+            refused
+        );
+        assert_eq!(
+            apply(
+                &reopened,
+                &permitted_context,
+                &offer,
+                offer.attempt.workspace_epoch
+            ),
+            committed
+        );
+        let request = reopened.request_context();
+        let selected = reopened
+            .runtime()
+            .block_on(reopened.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(selected.basis().id(), head);
+        assert_eq!(selected.snapshot().outbox.len(), 1);
+        reopened.shutdown().unwrap();
+    }
 }
 
 #[test]
