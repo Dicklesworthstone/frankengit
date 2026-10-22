@@ -34,6 +34,26 @@ fn reachable_profile_supports_multi_hundred_mib_with_profile_bound_pack_input() 
     assert_eq!(Limits::default().objects, MAX_IMPORT_OBJECTS);
 }
 
+/// frankengit-kxew: delta work follows the profile (twice its bytes plus one
+/// unit per member), not the fixed 256 MiB PackLimits default.
+#[test]
+fn reconstruction_work_follows_the_selected_profile() {
+    let delta_work_limit = super::super::source_io::delta_work_limit;
+    let objects = MAX_IMPORT_OBJECTS as u64;
+    assert_eq!(
+        delta_work_limit(512 * 1024 * 1024),
+        1024 * 1024 * 1024 + objects
+    );
+    assert_eq!(delta_work_limit(1), 2 + objects);
+    assert_eq!(delta_work_limit(u64::MAX), u64::MAX);
+    let limits = super::super::source_io::import_pack_limits(1024, 512 * 1024 * 1024);
+    assert_eq!(
+        limits.max_delta_work as u64,
+        delta_work_limit(512 * 1024 * 1024)
+    );
+    assert!(limits.max_delta_work > fgit_pack::PackLimits::default().max_delta_work);
+}
+
 #[test]
 fn exact_byte_limit_admits_and_one_byte_less_refuses_in_both_hash_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {

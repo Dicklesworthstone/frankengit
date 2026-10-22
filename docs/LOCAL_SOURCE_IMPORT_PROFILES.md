@@ -46,7 +46,10 @@ it verifies.
 
 Cumulative inflated and retained native bytes are bounded by the selected
 import profile. One reconstruction-work witness spans every pack, so opening
-another pack never renews its delta-work allowance. Every decoded member
+another pack never renews its delta-work allowance. That allowance follows the
+profile too (frankengit-kxew): twice its bytes plus one unit per object. Each
+member is reconstructed once and charged its base and result bytes. The former
+fixed 256 MiB refused ordinary histories whose deltas fit the profile. Every decoded member
 counts, including members not reachable from the selected refs. Compressed pack
 input, per pack and in total, is bounded by **twice the selected profile, never
 less than 128 MiB**: 1 GiB under the default 512 MiB profile. A pack whose

@@ -69,8 +69,21 @@ pub(super) fn import_pack_limits(max_object_bytes: u64, maximum_bytes: u64) -> P
         max_object_bytes: usize::try_from(max_object_bytes).unwrap_or(usize::MAX),
         max_total_expanded_bytes: maximum,
         max_cached_bytes: maximum,
+        max_delta_work: usize::try_from(delta_work_limit(maximum_bytes)).unwrap_or(usize::MAX),
         ..PackLimits::default()
     }
+}
+
+/// Reconstruction work one import may spend, across every pack
+/// (frankengit-kxew). A streamed member is reconstructed exactly once:
+/// it is charged one unit, and a delta is charged its base length and its
+/// result bytes. Both are resolved bytes the profile already bounds, so the
+/// work bound follows the same operator decision instead of the fixed
+/// 256 MiB default that refused ordinary repositories.
+pub(super) const fn delta_work_limit(maximum_bytes: u64) -> u64 {
+    maximum_bytes
+        .saturating_mul(2)
+        .saturating_add(MAX_IMPORT_OBJECTS as u64)
 }
 
 /// Compressed pack bytes one import may read, per pack and in total: twice the
