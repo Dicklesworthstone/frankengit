@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "pack_local_tests.rs"]
+mod pack_local_tests;
+
 struct Scratch(PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -273,6 +276,437 @@ fn copy_then_exclaim(base: &[u8]) -> Vec<u8> {
     let length = u8::try_from(base.len()).unwrap();
     assert!(length < 127);
     vec![length, length + 1, 0x90, length, 1, b'!']
+}
+
+fn sparse_input_bodies<A: fgit_crypto::GitHashAlgorithm>(
+    node: &OneNode,
+    f: &Fixture,
+    candidate: GitOid,
+    bytes: &[u8],
+    merge: Option<(&NativeMerge, fgit_forge::preparation::MergeCommitStyle)>,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BundleInspectionRefusal> {
+    use fgit_treefs::{SparseLimits, TreeCapability, TreePath, WorkspaceId};
+
+    let mut capability = TreeCapability::new(
+        WorkspaceId::from_bytes([0x93; 16]),
+        node.repository_id(),
+        [b"file".as_slice(), b"keep"]
+            .into_iter()
+            .map(|path| TreePath::parse_default(path).unwrap())
+            .collect(),
+        Vec::new(),
+    );
+    let limits = SparseLimits {
+        max_entries: 8,
+        max_entry_bytes: 4096,
+        max_payload_bytes: 8192,
+    };
+    let request = node.request_context();
+    let (_, manifest, digest) = if let Some((merge, style)) = merge {
+        node.runtime()
+            .block_on(node.sparse_merge_candidate_manifest_with_style_in::<A>(
+                &request,
+                merge,
+                bytes,
+                &RefVisibility::new(),
+                None,
+                &mut capability,
+                0,
+                limits,
+                style,
+            ))?
+    } else {
+        node.runtime()
+            .block_on(node.sparse_candidate_manifest_in::<A>(
+                &request,
+                &target(),
+                f.target,
+                candidate,
+                bytes,
+                &RefVisibility::new(),
+                None,
+                &mut capability,
+                0,
+                limits,
+            ))?
+    };
+    assert_eq!(digest, sha256_digest(bytes));
+    Ok(manifest
+        .entries()
+        .iter()
+        .map(|entry| {
+            (
+                entry.path().as_bytes().to_vec(),
+                entry.kind().body().unwrap().to_vec(),
+            )
+        })
+        .collect())
+}
+
+fn sparse_inputs(
+    format: GitHashAlgorithm,
+    node: &OneNode,
+    f: &Fixture,
+    candidate: GitOid,
+    bytes: &[u8],
+    merge: Option<(&NativeMerge, fgit_forge::preparation::MergeCommitStyle)>,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BundleInspectionRefusal> {
+    match format {
+        GitHashAlgorithm::Sha1 => {
+            sparse_input_bodies::<fgit_crypto::Sha1>(node, f, candidate, bytes, merge)
+        }
+        GitHashAlgorithm::Sha256 => {
+            sparse_input_bodies::<fgit_crypto::Sha256>(node, f, candidate, bytes, merge)
+        }
+    }
+}
+
+#[test]
+fn minimal_and_thick_workspace_merge_and_squash_have_identical_reviews_and_sparse_inputs() {
+    use fgit_forge::preparation::MergeCommitStyle;
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, node, f) = fixture(format);
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        for mode in 0..3 {
+            let style = if mode == 1 {
+                MergeCommitStyle::TwoParent
+            } else {
+                MergeCommitStyle::Squash
+            };
+            let parents = if mode == 1 {
+                vec![f.target, f.source]
+            } else {
+                vec![f.target]
+            };
+            let (id, _, mut entries) = candidate(format, &f, &parents, b"reviewed result\n");
+            let merge = NativeMerge {
+                source_ref: incoming(),
+                source_tip: f.source,
+                target_ref: target(),
+                target_tip_before: f.target,
+                base_tip: f.base,
+                merge_commit: id,
+            };
+            let bundle = |entries: &[Entry]| {
+                let mut header = format!(
+                    "# v3 git bundle\n@object-format={}\n-{} target\n",
+                    format.as_str(),
+                    f.target
+                );
+                if mode != 0 {
+                    header.push_str(&format!("-{} source\n", f.source));
+                }
+                header.push_str(&format!("{id} refs/heads/main\n\n"));
+                [header.into_bytes(), pack(format, entries)].concat()
+            };
+            let minimal = bundle(&entries);
+            // A thick artifact may repeat existing parent-reachable bytes.
+            // The unchanged sibling is candidate content, not delta-only data.
+            entries.push(Entry::Direct(3, b"preserved sibling\n".to_vec()));
+            let thick = bundle(&entries);
+            let inspect = |bytes: &[u8]| {
+                if mode == 0 {
+                    inspection(&node, &f, id, bytes)
+                } else {
+                    node.runtime().block_on(node.inspect_merge_bundle_in(
+                        &request,
+                        &merge,
+                        bytes,
+                        &RefVisibility::new(),
+                        Some(before.basis().id()),
+                        &ReviewOptions::default(),
+                    ))
+                }
+            };
+            let first = inspect(&minimal).unwrap();
+            let second = inspect(&thick).unwrap();
+            assert_eq!(first.review.comparison, second.review.comparison);
+            assert_eq!(first.candidate_commit_body, second.candidate_commit_body);
+            assert_eq!(first.parents, second.parents);
+            assert_eq!(first.closure_objects, second.closure_objects);
+            assert_eq!(first.transport_only_objects, 0);
+            assert_eq!(second.transport_only_objects, 0);
+            assert_eq!(first.pack_objects + 1, second.pack_objects);
+            let coordinates = (mode != 0).then_some((&merge, style));
+            let first_inputs = sparse_inputs(format, &node, &f, id, &minimal, coordinates).unwrap();
+            let second_inputs = sparse_inputs(format, &node, &f, id, &thick, coordinates).unwrap();
+            assert_eq!(first_inputs, second_inputs);
+            assert_eq!(
+                first_inputs,
+                vec![
+                    (b"file".to_vec(), b"reviewed result\n".to_vec()),
+                    (b"keep".to_vec(), b"preserved sibling\n".to_vec()),
+                ]
+            );
+            assert!(node.read_git_object(id).is_err());
+        }
+        assert_eq!(
+            node.runtime()
+                .block_on(node.materialize_admission_in(&request))
+                .unwrap()
+                .basis(),
+            before.basis()
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn uploaded_selected_hidden_tree_cannot_disclose_omitted_descendants() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, node, f) = fixture(format);
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let hidden_tree_body = tree(f.secret, f.keep);
+        let hidden_tree = git_object_id(format, ObjectType::Tree, &hidden_tree_body);
+        assert!(
+            before
+                .selected_closure()
+                .closure()
+                .objects()
+                .contains(&hidden_tree)
+        );
+        let candidate_body = body(hidden_tree, &[f.target], "uploaded selected hidden tree");
+        let id = git_object_id(format, ObjectType::Commit, &candidate_body);
+        let mut entries = vec![
+            Entry::Direct(2, hidden_tree_body),
+            Entry::Direct(1, candidate_body),
+        ];
+        let incomplete = envelope(format, f.target, id, &entries);
+        assert!(matches!(
+            inspection(&node, &f, id, &incomplete),
+            Err(BundleInspectionRefusal::Source(
+                MergeSourceError::OutsideSelection
+            ))
+        ));
+        assert!(matches!(
+            sparse_inputs(format, &node, &f, id, &incomplete, None),
+            Err(BundleInspectionRefusal::Source(
+                MergeSourceError::OutsideSelection
+            ))
+        ));
+        // Supplying the actual bytes is permitted. Their presence elsewhere
+        // in the selected repository did not authorize the omitted-body twin.
+        entries.push(Entry::Direct(3, b"unrelated secret\n".to_vec()));
+        let complete = envelope(format, f.target, id, &entries);
+        let inspected = inspection(&node, &f, id, &complete).unwrap();
+        assert_eq!(inspected.transport_only_objects, 0);
+        assert_eq!(inspected.review.comparison.entries.len(), 1);
+        let bodies = sparse_inputs(format, &node, &f, id, &complete, None).unwrap();
+        assert_eq!(
+            bodies[0],
+            (b"file".to_vec(), b"unrelated secret\n".to_vec())
+        );
+        assert!(node.read_git_object(id).is_err());
+        assert_eq!(
+            node.runtime()
+                .block_on(node.materialize_admission_in(&request))
+                .unwrap()
+                .basis(),
+            before.basis()
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn unchanged_large_parent_content_is_not_read_for_review_or_sparse_candidate_inputs() {
+    let format = GitHashAlgorithm::Sha256;
+    let (_scratch, node, mut f) = fixture(format);
+    let request = node.request_context();
+    let initial = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    let mut ids = initial.selected_closure().closure().objects().clone();
+    let mut large_tree_body = Vec::new();
+    // Each body fits the existing 32 MiB object ceiling, but their inherited
+    // total exceeds the old 128 MiB eager-parent validation ceiling. Place
+    // one body at a time so the fixture does not retain all payloads in RAM.
+    const BLOB_BYTES: usize = 20 * 1024 * 1024;
+    const BLOB_COUNT: usize = 7;
+    assert!(BLOB_BYTES * BLOB_COUNT > MAX_ORIGINAL_READ_BYTES);
+    for index in 0..BLOB_COUNT {
+        let id = node
+            .put_git_object(ObjectType::Blob, vec![b'A' + index as u8; BLOB_BYTES])
+            .unwrap()
+            .identity();
+        ids.insert(id);
+        large_tree_body.extend_from_slice(format!("100644 file-{index}\0").as_bytes());
+        large_tree_body.extend_from_slice(id.as_bytes());
+    }
+    let large_tree = node
+        .put_git_object(ObjectType::Tree, large_tree_body)
+        .unwrap()
+        .identity();
+    ids.insert(large_tree);
+    let keep = f.keep;
+    let root_body = |file| {
+        let mut bytes = tree(file, keep);
+        bytes.extend_from_slice(b"40000 large\0");
+        bytes.extend_from_slice(large_tree.as_bytes());
+        bytes
+    };
+    let root_tree = node
+        .put_git_object(ObjectType::Tree, root_body(f.original))
+        .unwrap()
+        .identity();
+    ids.insert(root_tree);
+    let new_target = node
+        .put_git_object(
+            ObjectType::Commit,
+            body(root_tree, &[f.target], "large target"),
+        )
+        .unwrap()
+        .identity();
+    let new_source = node
+        .put_git_object(
+            ObjectType::Commit,
+            body(root_tree, &[f.source], "large source"),
+        )
+        .unwrap()
+        .identity();
+    ids.extend([new_target, new_source]);
+    let receipt = SourceImportReceipt {
+        object_format: format,
+        object_count: u32::try_from(ids.len()).unwrap(),
+        delete_only: false,
+        origin: SourceImportOrigin::LocalGitDirectory,
+    };
+    let closure = ValidatedClosure {
+        object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
+            ids.clone(),
+        ))
+        .unwrap(),
+        objects: ids,
+    };
+    let imported = validate_source_import(
+        &[
+            SourceRefUpdate {
+                old: f.target,
+                new: new_target,
+                ref_name: target().as_bytes().to_vec(),
+            },
+            SourceRefUpdate {
+                old: f.source,
+                new: new_source,
+                ref_name: incoming().as_bytes().to_vec(),
+            },
+        ],
+        &receipt,
+        closure,
+    )
+    .unwrap();
+    let context = AdmissionContext {
+        head_key: node.head_key.clone(),
+        tenant_id: node.tenant_id,
+        repository_id: node.repository_id,
+        principal_id: PrincipalId::from_bytes([0x83; 16]),
+        idempotency_key: IdempotencyKey::new(b"large-inspection-fixture".to_vec()).unwrap(),
+        object_format: format,
+    };
+    let request = node.request_context();
+    let outcome = node
+        .runtime()
+        .block_on(node.admit_validated_source_import_durable_in(
+            &request,
+            &context,
+            &imported,
+            AdmissionLimits::default(),
+        ))
+        .unwrap();
+    assert!(
+        outcome
+            .commands
+            .iter()
+            .all(|command| matches!(command.terminal.outcome, DecisionOutcome::Committed { .. }))
+    );
+    f.target = new_target;
+    f.source = new_source;
+    let request = node.request_context();
+    let before = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    {
+        let exhaustion = Cell::new(None);
+        let budget = ReadBudget {
+            bytes: Cell::new(0),
+            exhausted: Cell::new(false),
+        };
+        let original = OriginalSource::with_parents(
+            VerifiedFabricPackSource {
+                fabric: &node.fabric,
+                object_format: format,
+                maximum_object_bytes: 32 * 1024 * 1024,
+                database_context: request.authority(),
+                database_exhaustion: &exhaustion,
+                session_is_live: None,
+            },
+            before.selected_closure().closure().objects(),
+            &budget,
+            &[f.target],
+            MergeObjectLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            validate_commit_closure(
+                &original,
+                f.target,
+                MergeObjectLimits::default(),
+                &mut || original.live().is_ok(),
+            )
+            .is_err(),
+            "the former full-parent validation cannot fit the inherited payload"
+        );
+        assert_eq!(original.live(), Err(MergeSourceError::BudgetExceeded));
+    }
+    let changed = b"small reviewed edit\n";
+    let changed_id = git_object_id(format, ObjectType::Blob, changed);
+    let candidate_tree_body = root_body(changed_id);
+    let candidate_tree = git_object_id(format, ObjectType::Tree, &candidate_tree_body);
+    let candidate_body = body(candidate_tree, &[f.target], "bounded review");
+    let candidate_id = git_object_id(format, ObjectType::Commit, &candidate_body);
+    let bytes = envelope(
+        format,
+        f.target,
+        candidate_id,
+        &[
+            Entry::Direct(3, changed.to_vec()),
+            Entry::Direct(2, candidate_tree_body),
+            Entry::Direct(1, candidate_body),
+        ],
+    );
+    let inspected = inspection(&node, &f, candidate_id, &bytes).unwrap();
+    assert_eq!(inspected.review.comparison.entries.len(), 1);
+    assert_eq!(inspected.review.comparison.entries[0].path, b"file");
+    let ReviewContent::Text { hunks, .. } = &inspected.review.comparison.entries[0].content else {
+        panic!("small file must have its actual text diff");
+    };
+    assert_eq!(hunks[0].before, b"original\n");
+    assert_eq!(hunks[0].after, changed);
+    let bodies = sparse_inputs(format, &node, &f, candidate_id, &bytes, None).unwrap();
+    assert_eq!(bodies[0], (b"file".to_vec(), changed.to_vec()));
+    assert_eq!(bodies.len(), 2);
+    assert!(node.read_git_object(candidate_id).is_err());
+    assert!(node.read_git_object(candidate_tree).is_err());
+    let request = node.request_context();
+    assert_eq!(
+        node.runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap()
+            .basis(),
+        before.basis()
+    );
+    node.shutdown().unwrap();
 }
 
 #[test]

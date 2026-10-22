@@ -226,3 +226,7 @@ Cargo, rustc, a built `fg`, Rust tests, rustfmt and Clippy were unavailable in
 this editing environment. The native tests and full CLI campaign remain
 unexecuted here. This source integration does not close a bead or establish the
 full Git merge compatibility matrix.
+
+Candidate inspection and trusted workflow inputs use bounded, parent-scoped
+original-object proofs; see [Bounded candidate inspection](BOUNDED_CANDIDATE_INSPECTION.md)
+for disclosure, thick-bundle coverage, and the remaining comparison limits.

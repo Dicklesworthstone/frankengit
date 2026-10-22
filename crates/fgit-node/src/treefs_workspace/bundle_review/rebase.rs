@@ -113,6 +113,7 @@ impl OneNode {
             inner: fabric(),
             allowed: selected.selected_closure().closure().objects(),
             budget: &budget,
+            frontier: None,
         };
         let limits = MergeObjectLimits {
             max_object_bytes: maximum,
@@ -126,6 +127,7 @@ impl OneNode {
             inner: fabric(),
             allowed: &base.objects,
             budget: &budget,
+            frontier: None,
         };
         let pack_limits = PackLimits {
             max_input_bytes: MAX_BUNDLE_BYTES,
@@ -179,6 +181,7 @@ impl OneNode {
             inner: fabric(),
             allowed: &review_objects,
             budget: &budget,
+            frontier: None,
         };
         let review_source = InspectionSource {
             original: &review_original,
