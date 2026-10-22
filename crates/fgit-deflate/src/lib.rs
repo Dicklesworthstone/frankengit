@@ -286,12 +286,15 @@ impl DeflateLimits {
             {
                 return Err(DeflateRefusal::InvalidProfile);
             }
-            DeflateBlockKind::Fixed
+            DeflateBlockKind::Fixed | DeflateBlockKind::FixedOrStored
                 if profile.window_bytes == 0 || profile.max_match_chain == 0 =>
             {
                 return Err(DeflateRefusal::InvalidProfile);
             }
-            DeflateBlockKind::Stored | DeflateBlockKind::Fixed | DeflateBlockKind::Dynamic => {}
+            DeflateBlockKind::Stored
+            | DeflateBlockKind::Fixed
+            | DeflateBlockKind::FixedOrStored
+            | DeflateBlockKind::Dynamic => {}
         }
         Ok(())
     }
@@ -306,6 +309,11 @@ pub enum DeflateBlockKind {
     Fixed,
     /// Dynamic RFC 1951 Huffman tables with deterministic literal emission.
     Dynamic,
+    /// Per block, the fixed-Huffman encoding of [`Self::Fixed`] unless a stored
+    /// block is strictly smaller in bits at the current bit offset
+    /// (frankengit-uf91). Incompressible blocks are stored, neither expanded
+    /// nor bit-encoded; every other block is byte-identical to `Fixed`.
+    FixedOrStored,
 }
 
 /// A frozen deterministic compression policy.
@@ -358,6 +366,19 @@ impl DeflateProfile {
 
     /// Fixed-Huffman emission with the same policy as [`Self::DEFAULT`].
     pub const FIXED: Self = Self::DEFAULT;
+
+    /// [`Self::DEFAULT`]'s matcher and fixed codes, except that a block whose
+    /// fixed encoding would not beat a stored block is stored (frankengit-uf91).
+    /// Random or already-compressed bytes then cost a copy instead of 8-9 bits
+    /// per literal, and never expand by more than stored-block framing.
+    pub const FIXED_OR_STORED: Self = Self {
+        id: "fixed-or-stored-v1",
+        block_kind: DeflateBlockKind::FixedOrStored,
+        block_bytes: RFC1951_MAX_WINDOW_BYTES,
+        window_bytes: RFC1951_MAX_WINDOW_BYTES,
+        max_match_chain: 64,
+        lazy_matching: false,
+    };
 
     /// Deterministic dynamic-Huffman emission. Its first slice emits literals
     /// through a frozen dynamic codebook, so it intentionally retains no
@@ -719,6 +740,42 @@ const fn fixed_symbol_codes() -> [(u16, u8); 288] {
         symbol += 1;
     }
     table
+}
+
+/// Index of the RFC 1951 length code covering `length`.
+fn length_code(length: usize) -> Result<usize, DeflateRefusal> {
+    LENGTH_BASE
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, base)| {
+            length >= **base && length <= **base + ((1_usize << LENGTH_EXTRA[*index]) - 1)
+        })
+        .map(|(index, _)| index)
+        .ok_or(DeflateRefusal::InvalidProfile)
+}
+
+/// Index of the RFC 1951 distance code covering `distance`.
+fn distance_code(distance: usize) -> Result<usize, DeflateRefusal> {
+    DISTANCE_BASE
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, base)| {
+            distance >= **base && distance <= **base + ((1_usize << DISTANCE_EXTRA[*index]) - 1)
+        })
+        .map(|(index, _)| index)
+        .ok_or(DeflateRefusal::InvalidProfile)
+}
+
+/// Exact bits `write_fixed_match` emits for one length/distance pair.
+fn fixed_match_bits(length: usize, distance: usize) -> Result<u64, DeflateRefusal> {
+    let length_index = length_code(length)?;
+    let distance_index = distance_code(distance)?;
+    Ok(u64::from(FIXED_SYMBOL_CODES[257 + length_index].1)
+        + u64::from(LENGTH_EXTRA[length_index])
+        + 5
+        + u64::from(DISTANCE_EXTRA[distance_index]))
 }
 
 const LENGTH_BASE: [usize; 29] = [
@@ -1787,6 +1844,15 @@ pub struct Deflater {
     block_count: usize,
     writer: BitWriter,
     adler32: Adler32,
+    /// One block's matcher decisions, reused across blocks by FixedOrStored.
+    fixed_tokens: Vec<FixedToken>,
+}
+
+/// One fixed-Huffman decision, recorded before choosing a block encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FixedToken {
+    Literal(u8),
+    Match { length: u16, distance: u16 },
 }
 
 impl Deflater {
@@ -1807,6 +1873,7 @@ impl Deflater {
             block_count: 0,
             writer: BitWriter::new(),
             adler32: Adler32::new(),
+            fixed_tokens: Vec::new(),
         };
         // CM=8, CINFO=7 (32 KiB), no dictionary, FCHECK valid.
         encoder.write_aligned(&[0x78, 0x01])?;
@@ -2018,7 +2085,73 @@ impl Deflater {
             DeflateBlockKind::Stored => self.encode_stored_block(block, final_block),
             DeflateBlockKind::Fixed => self.encode_fixed_block(block, final_block, control),
             DeflateBlockKind::Dynamic => self.encode_dynamic_block(block, final_block, control),
+            DeflateBlockKind::FixedOrStored => {
+                self.encode_fixed_or_stored_block(block, final_block, control)
+            }
         }
+    }
+
+    /// The same matcher decisions as [`Self::encode_fixed_block`], recorded
+    /// with their exact fixed-Huffman bit cost. The block is then emitted as
+    /// those fixed codes, bit for bit what `Fixed` writes, unless a stored
+    /// block (3 header bits, zero padding to a byte boundary from the current
+    /// bit offset, LEN/NLEN, the bytes) is strictly smaller.
+    fn encode_fixed_or_stored_block(
+        &mut self,
+        block: &[u8],
+        final_block: bool,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        let mut tokens = std::mem::take(&mut self.fixed_tokens);
+        tokens.clear();
+        let reserved = tokens.try_reserve(block.len()).map_err(|_| {
+            deflate_resource_limit(Resource::Allocation, self.profile.block_bytes, block.len())
+        });
+        let result = reserved.and_then(|()| {
+            // Header and end-of-block code, then each decision.
+            let mut fixed_bits = 3_u64 + u64::from(FIXED_SYMBOL_CODES[256].1);
+            let mut matcher = MatchIndex::new(&self.history, block)?;
+            let mut position = 0_usize;
+            while position < block.len() {
+                self.charge_work(control)?;
+                if let Some((length, distance)) =
+                    self.find_match(block, position, &matcher, control)?
+                {
+                    fixed_bits += fixed_match_bits(length, distance)?;
+                    tokens.push(FixedToken::Match {
+                        length: u16::try_from(length)
+                            .map_err(|_| DeflateRefusal::InvalidProfile)?,
+                        distance: u16::try_from(distance)
+                            .map_err(|_| DeflateRefusal::InvalidProfile)?,
+                    });
+                    matcher.record_emitted(position, length, &self.history, block)?;
+                    position += length;
+                } else {
+                    fixed_bits += u64::from(FIXED_SYMBOL_CODES[usize::from(block[position])].1);
+                    tokens.push(FixedToken::Literal(block[position]));
+                    matcher.record_emitted(position, 1, &self.history, block)?;
+                    position += 1;
+                }
+            }
+            let padding = (8 - (u64::from(self.writer.used_bits) + 3) % 8) % 8;
+            let stored_bits = 3 + padding + 32 + 8 * block.len() as u64;
+            if stored_bits < fixed_bits {
+                return self.encode_stored_block(block, final_block);
+            }
+            self.write_bits(u16::from(final_block), 1)?;
+            self.write_bits(1, 2)?;
+            for &token in &tokens {
+                match token {
+                    FixedToken::Literal(byte) => self.write_fixed_symbol(u16::from(byte))?,
+                    FixedToken::Match { length, distance } => {
+                        self.write_fixed_match(usize::from(length), usize::from(distance))?;
+                    }
+                }
+            }
+            self.write_fixed_symbol(256)
+        });
+        self.fixed_tokens = tokens;
+        result
     }
 
     fn encode_stored_block(
@@ -2196,15 +2329,7 @@ impl Deflater {
     }
 
     fn write_fixed_match(&mut self, length: usize, distance: usize) -> Result<(), DeflateRefusal> {
-        let length_index = LENGTH_BASE
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(index, base)| {
-                length >= **base && length <= **base + ((1_usize << LENGTH_EXTRA[*index]) - 1)
-            })
-            .map(|(index, _)| index)
-            .ok_or(DeflateRefusal::InvalidProfile)?;
+        let length_index = length_code(length)?;
         let length_symbol = 257_u16
             .checked_add(u16::try_from(length_index).map_err(|_| DeflateRefusal::InvalidProfile)?)
             .ok_or(DeflateRefusal::InvalidProfile)?;
@@ -2215,15 +2340,7 @@ impl Deflater {
             LENGTH_EXTRA[length_index],
         )?;
 
-        let distance_index = DISTANCE_BASE
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(index, base)| {
-                distance >= **base && distance <= **base + ((1_usize << DISTANCE_EXTRA[*index]) - 1)
-            })
-            .map(|(index, _)| index)
-            .ok_or(DeflateRefusal::InvalidProfile)?;
+        let distance_index = distance_code(distance)?;
         self.write_bits(
             reverse_low_bits(
                 u16::try_from(distance_index).map_err(|_| DeflateRefusal::InvalidProfile)?,
@@ -3130,6 +3247,11 @@ mod tests {
             (DeflateProfile::FAST_STORED, 1_u8, DeflateBlockKind::Stored),
             (DeflateProfile::DEFAULT, 3_u8, DeflateBlockKind::Fixed),
             (DeflateProfile::DYNAMIC, 5_u8, DeflateBlockKind::Dynamic),
+            (
+                DeflateProfile::FIXED_OR_STORED,
+                3_u8,
+                DeflateBlockKind::FixedOrStored,
+            ),
         ] {
             let encoded = deflate_zlib(input, deflate_limits(), profile)
                 .unwrap_or_else(|error| panic!("{}: {error}", profile.id));
@@ -3182,6 +3304,92 @@ mod tests {
         }
     }
 
+    fn noise(seed: u64, length: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        let mut bytes = Vec::with_capacity(length);
+        while bytes.len() < length {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.push(state.to_le_bytes()[3]);
+        }
+        bytes
+    }
+
+    fn text(length: usize) -> Vec<u8> {
+        b"fn main() { println!(\"frankengit\"); }\n"
+            .iter()
+            .copied()
+            .cycle()
+            .take(length)
+            .collect()
+    }
+
+    /// frankengit-uf91: where every block's fixed encoding wins, the profile
+    /// is byte-identical to DEFAULT; where none does, it stores every block
+    /// and is never larger than the input plus stored-block framing.
+    #[test]
+    fn fixed_or_stored_equals_default_on_compressible_input_and_stores_noise() {
+        for length in [0, 1, 20, 32_767, 32_768, 32_769, 70_000] {
+            let input = text(length);
+            assert_eq!(
+                deflate_zlib(&input, deflate_limits(), DeflateProfile::FIXED_OR_STORED),
+                deflate_zlib(&input, deflate_limits(), DeflateProfile::DEFAULT),
+                "text {length}"
+            );
+        }
+        // One random byte is cheaper as a fixed literal than as a stored block.
+        let single = noise(1, 1);
+        assert_eq!(
+            deflate_zlib(&single, deflate_limits(), DeflateProfile::FIXED_OR_STORED),
+            deflate_zlib(&single, deflate_limits(), DeflateProfile::DEFAULT)
+        );
+        for length in [300, 32_767, 32_768, 32_769, 100_000] {
+            let input = noise(u64::try_from(length).unwrap(), length);
+            let stored =
+                deflate_zlib(&input, deflate_limits(), DeflateProfile::FIXED_OR_STORED).unwrap();
+            let fixed = deflate_zlib(&input, deflate_limits(), DeflateProfile::DEFAULT).unwrap();
+            assert_eq!(inflate_zlib(&stored, limits()), Ok(input.clone()));
+            // zlib header 2 + adler 4, and per block (every full block plus the
+            // final, possibly empty one) at most a header byte, LEN and NLEN.
+            let blocks = length / 32_768 + 1;
+            assert!(
+                stored.len() <= input.len() + 6 + 5 * blocks,
+                "noise {length}"
+            );
+            assert!(stored.len() < fixed.len(), "noise {length}");
+        }
+    }
+
+    /// Mixed blocks choose independently; the member still round-trips and is
+    /// never larger than DEFAULT's.
+    #[test]
+    fn fixed_or_stored_chooses_per_block_on_mixed_input() {
+        let mut input = Vec::new();
+        for round in 0..3_u64 {
+            input.extend(noise(round + 7, 32_768));
+            input.extend(text(32_768));
+        }
+        let mixed =
+            deflate_zlib(&input, deflate_limits(), DeflateProfile::FIXED_OR_STORED).unwrap();
+        let fixed = deflate_zlib(&input, deflate_limits(), DeflateProfile::DEFAULT).unwrap();
+        let wide = InflateLimits {
+            max_input_bytes: 1 << 20,
+            max_output_bytes: 1 << 20,
+            ..limits()
+        };
+        assert_eq!(inflate_zlib(&mixed, wide), Ok(input.clone()));
+        assert!(mixed.len() < fixed.len());
+        assert_eq!(
+            encode_streamed(
+                &input,
+                DeflateProfile::FIXED_OR_STORED,
+                &[1, 17, 9_991, 31, 40_007]
+            ),
+            mixed
+        );
+    }
+
     #[test]
     fn encoder_streaming_chunking_is_byte_identical_to_one_shot() {
         let mut input = Vec::with_capacity(70_123);
@@ -3196,6 +3404,7 @@ mod tests {
             DeflateProfile::FAST_STORED,
             DeflateProfile::DEFAULT,
             DeflateProfile::DYNAMIC,
+            DeflateProfile::FIXED_OR_STORED,
         ] {
             let one_shot = deflate_zlib(&input, deflate_limits(), profile)
                 .unwrap_or_else(|error| panic!("{}: {error}", profile.id));

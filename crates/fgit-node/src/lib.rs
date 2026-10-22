@@ -3795,10 +3795,12 @@ pub(crate) fn selected_fetch_write_profile(request: &fgit_wire::PackRequest) -> 
         && request.deepen.is_none()
         && request.deepen_since.is_none()
         && request.deepen_not.is_empty();
+    // V4: V3's plan with stored blocks where fixed codes would not help
+    // (frankengit-uf91).
     if options.thin_pack() && whole_closure && !request.haves.is_empty() {
-        PackWriteProfile::COMPRESSED_V3_THIN
+        PackWriteProfile::COMPRESSED_V4_THIN
     } else {
-        PackWriteProfile::COMPRESSED_V3
+        PackWriteProfile::COMPRESSED_V4
     }
 }
 
@@ -8398,7 +8400,7 @@ impl OneNode {
                 &[],
                 // Local authority materialization has no wire capability to
                 // respect; a pack file carries OFS deltas unconditionally.
-                PackWriteProfile::COMPRESSED_V3,
+                PackWriteProfile::COMPRESSED_V4,
                 request.authority(),
                 &database_exhaustion,
                 None,

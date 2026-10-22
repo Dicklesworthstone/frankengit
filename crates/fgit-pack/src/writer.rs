@@ -340,6 +340,27 @@ impl PackWriteProfile {
         thin: true,
         ..Self::COMPRESSED_V3
     };
+
+    /// [`Self::COMPRESSED_V3`]'s plan, compressed with
+    /// [`DeflateProfile::FIXED_OR_STORED`] (frankengit-uf91). A member block
+    /// whose fixed-Huffman encoding would not beat a stored block is stored;
+    /// every other block is byte-identical to V3. Entries, bases and inflated
+    /// payloads equal V3's. Random or already-compressed objects were
+    /// bit-encoded at ~10 MB/s and grew ~5%; they are now copied. A separate
+    /// profile because its bytes differ.
+    pub const COMPRESSED_V4: Self = Self {
+        id: "git-pack-compressed-v4",
+        compression: DeflateProfile::FIXED_OR_STORED,
+        ..Self::COMPRESSED_V3
+    };
+
+    /// [`Self::COMPRESSED_V4`] that may delta against client-held objects, as
+    /// [`Self::COMPRESSED_V3_THIN`] does for V3.
+    pub const COMPRESSED_V4_THIN: Self = Self {
+        id: "git-pack-compressed-v4-thin",
+        thin: true,
+        ..Self::COMPRESSED_V4
+    };
 }
 
 /// Maximum client-held bases a plan considers for one target.
@@ -3858,6 +3879,51 @@ mod tests {
 
     fn thin_planner(profile: PackWriteProfile) -> PackPlanner {
         PackPlanner::new(ObjectFormat::Sha1, profile, wide_limits())
+    }
+
+    /// frankengit-uf91: V4 plans exactly as V3 and its members inflate to
+    /// exactly V3's, so only DEFLATE framing differs. It is never larger,
+    /// and smaller wherever a corpus holds incompressible members.
+    #[test]
+    fn v4_plans_and_inflates_as_v3_and_is_never_larger() {
+        let mut shrank = false;
+        for corpus in delta_corpora() {
+            let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+            let source = FixtureSource::with(corpus);
+            let write = |profile| {
+                let plan = thin_planner(profile)
+                    .plan_selected(&source, &ids, &mut always)
+                    .expect("plan");
+                let (bytes, receipt) = PackWriter::new(wide_limits())
+                    .write(&plan, &mut always)
+                    .expect("pack");
+                let parsed = read_verified_pack(
+                    &bytes,
+                    ObjectFormat::Sha1,
+                    &wide_limits(),
+                    &mut always,
+                    &NativeChecksumVerifier,
+                )
+                .expect("the reader accepts the pack");
+                let members: Vec<Vec<u8>> = parsed
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.inflated.clone())
+                    .collect();
+                (plan, bytes, receipt, members)
+            };
+            let (v3, v3_bytes, _, v3_members) = write(PackWriteProfile::COMPRESSED_V3);
+            let (v4, v4_bytes, v4_receipt, v4_members) = write(PackWriteProfile::COMPRESSED_V4);
+            assert_eq!(v3.entries(), v4.entries());
+            assert_eq!(v3_members, v4_members);
+            assert!(v4_bytes.len() <= v3_bytes.len());
+            shrank |= v4_bytes.len() < v3_bytes.len();
+            assert_eq!(v4_receipt.profile.id, "git-pack-compressed-v4");
+            let (_, thin_bytes, thin_receipt, _) = write(PackWriteProfile::COMPRESSED_V4_THIN);
+            assert_eq!(thin_bytes, v4_bytes);
+            assert_eq!(thin_receipt.profile.id, "git-pack-compressed-v4-thin");
+        }
+        assert!(shrank, "the corpora hold incompressible members");
     }
 
     /// frankengit-pazc: with no client-held bases the thin profile plans and

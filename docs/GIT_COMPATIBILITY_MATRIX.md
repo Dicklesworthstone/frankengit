@@ -281,7 +281,11 @@ selected blobs once.
 **Thin fetch packs** (frankengit-pazc). Upload-pack advertises `thin-pack` on
 every transport. A fetch that requested it, with `ofs-delta` and at least one
 have, and that is full-history and unfiltered, is written with the
-`git-pack-compressed-v3-thin` profile.
+`git-pack-compressed-v4-thin` profile. V4 is V3's plan with the
+`fixed-or-stored-v1` DEFLATE profile (frankengit-uf91): a member block whose
+fixed-Huffman encoding would not beat a stored block is stored, so
+incompressible objects are copied rather than bit-encoded and do not grow.
+Every other block is byte-identical to V3.
 - An entry may then delta against a client-held object that the pack does not
   carry, emitted as REF_DELTA.
 - Candidates come from a bounded tree walk: every commit the pack sends is
@@ -295,7 +299,7 @@ have, and that is full-history and unfiltered, is written with the
 - Bases are paid from the same per-target work budget as in-pack candidates.
   An in-pack base wins an equal-length tie.
 - Clones (no haves), shallow and filtered fetches, and clients without
-  `thin-pack` keep the self-contained `git-pack-compressed-v3` pack, byte for
+  `thin-pack` keep the self-contained `git-pack-compressed-v4` pack, byte for
   byte.
 
 A client base must beat the best in-pack choice by more than its REF_DELTA
