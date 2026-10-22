@@ -244,6 +244,7 @@ TRANSPORT_TARGET=authenticated_receive_transport
 TRANSPORT_SOURCE="$E2E_ROOT/../../crates/fgit-node/tests/authenticated_receive_transport.rs"
 TRANSPORT_CASE_NAMES=(
   authenticated_loopback_session_admits_a_validated_push
+  deleting_the_canonical_head_branch_is_refused_like_upstream
   anonymous_loopback_session_is_refused_before_admission
   a_cell_nobody_brought_into_service_refuses_a_source_import
 )
