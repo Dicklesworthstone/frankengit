@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_diff::{
-    AncestryQueryScratch, CommitAncestryIndex, CommitGraph, ContentMergeError, ContentMergeOptions,
-    ContentMergeOutcome, MergeBaseError, MergeBaseLimits, MergeBaseQueryResult, MergeBaseResult,
-    MergeCancellation, ParentSet, merge_content_with_cancellation,
+    AncestryQueryWork, CommitGraph, ContentMergeError, ContentMergeOptions, ContentMergeOutcome,
+    MergeBaseError, MergeBaseLimits, MergeBaseQueryResult, MergeBaseResult, MergeCancellation,
+    ParentSet, frontier_merge_bases_all, merge_content_with_cancellation,
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
@@ -70,6 +70,14 @@ pub trait MergeObjectSource {
     fn commit(&self, id: GitOid) -> Result<CommitInput, MergeSourceError>;
     fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError>;
     fn blob(&self, id: GitOid) -> Result<Vec<u8>, MergeSourceError>;
+
+    /// The commit plus its committer date in seconds, when one is usable. The
+    /// date only orders merge-base traversal, later dates first: a wrong or
+    /// missing date can cost work, never select a different base. The default
+    /// supplies none.
+    fn commit_with_date(&self, id: GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError> {
+        Ok((self.commit(id)?, None))
+    }
 }
 
 /// Fixed ceilings for the v1 profile. Callers may narrow, but not exceed them.
@@ -254,15 +262,17 @@ struct Graph<'a, S> {
     source: &'a S,
     format: GitHashAlgorithm,
 }
-impl<S: MergeObjectSource> CommitGraph for Graph<'_, S> {
-    type CommitId = GitOid;
-    type Error = MergeSourceError;
-    fn parents_of(&self, id: &GitOid) -> Result<ParentSet<GitOid>, MergeSourceError> {
+impl<S: MergeObjectSource> Graph<'_, S> {
+    fn checked(
+        &self,
+        id: &GitOid,
+        read: impl FnOnce(GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError>,
+    ) -> Result<(ParentSet<GitOid>, Option<i64>), MergeSourceError> {
         self.source.checkpoint()?;
         if id.is_zero() || id.algorithm() != self.format {
             return Err(MergeSourceError::InvalidObject(*id));
         }
-        let commit = self.source.commit(*id)?;
+        let (commit, date) = read(*id)?;
         if commit.tree.is_zero()
             || commit.tree.algorithm() != self.format
             || commit
@@ -273,16 +283,35 @@ impl<S: MergeObjectSource> CommitGraph for Graph<'_, S> {
             return Err(MergeSourceError::InvalidObject(*id));
         }
         self.source.checkpoint()?;
-        Ok(ParentSet::Complete(commit.parents))
+        Ok((ParentSet::Complete(commit.parents), date))
     }
 }
 
-/// Build one exact, request-owned parent snapshot from the selected source.
-/// The immutable index is discarded with this call: no prior source selection
-/// can make missing objects, a narrowed budget or cancellation disappear.
-/// Automatic preparation, explicit resolution and review share this graph
-/// boundary, while object disclosure and eventual publication remain owned by
-/// the caller's source and admission path respectively.
+impl<S: MergeObjectSource> CommitGraph for Graph<'_, S> {
+    type CommitId = GitOid;
+    type Error = MergeSourceError;
+    fn parents_of(&self, id: &GitOid) -> Result<ParentSet<GitOid>, MergeSourceError> {
+        self.checked(id, |id| Ok((self.source.commit(id)?, None)))
+            .map(|(parents, _)| parents)
+    }
+    // An unusable date sorts last; it never makes a commit look newer.
+    fn parents_with_order_hint(
+        &self,
+        id: &GitOid,
+    ) -> Result<(ParentSet<GitOid>, i64), MergeSourceError> {
+        self.checked(id, |id| self.source.commit_with_date(id))
+            .map(|(parents, date)| (parents, date.unwrap_or(i64::MIN)))
+    }
+}
+
+/// Find the exact best bases, reading from the selected source only the
+/// commits between the tips and those bases (frankengit-rffg). `limits` bound
+/// the commits and parent edges this query reads, not the repository's total
+/// history, so a long history with a recent base succeeds. Nothing is cached:
+/// no prior query can make missing objects, a narrowed budget or cancellation
+/// disappear. Automatic preparation, explicit resolution and review share this
+/// graph boundary, while object disclosure and eventual publication remain
+/// owned by the caller's source and admission path respectively.
 pub(crate) fn source_merge_bases<S: MergeObjectSource>(
     source: &S,
     format: GitHashAlgorithm,
@@ -290,17 +319,12 @@ pub(crate) fn source_merge_bases<S: MergeObjectSource>(
     right: GitOid,
     limits: MergeBaseLimits,
 ) -> MergeBaseQueryResult<GitOid, MergeSourceError> {
-    let index = CommitAncestryIndex::build_with_checkpoints(
+    frontier_merge_bases_all(
         &Graph { source, format },
-        [left, right],
+        left,
+        right,
         limits,
-        || source.checkpoint(),
-    )?;
-    index.merge_bases_all(
-        &left,
-        &right,
-        &mut AncestryQueryScratch::default(),
-        limits,
+        &mut AncestryQueryWork::default(),
         || source.checkpoint(),
     )
 }

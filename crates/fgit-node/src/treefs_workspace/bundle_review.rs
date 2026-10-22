@@ -39,6 +39,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use super::{CandidateEnvelope, MAX_BUNDLE_BYTES, MAX_CANDIDATE_BYTES, MAX_PREREQUISITES};
+use crate::upload_visibility::shallow::cutoffs::committer_time;
 use crate::{
     AdmissionMaterializationRefusal, NodeRequestContext, OneNode, PackContextCheckpoint,
     VerifiedFabricPackSource, checkpoint_pack_context,
@@ -502,15 +503,20 @@ impl MergeObjectSource for InspectionSource<'_, '_> {
         self.original.live()
     }
     fn commit(&self, id: GitOid) -> Result<CommitInput, MergeSourceError> {
+        self.commit_with_date(id).map(|(commit, _)| commit)
+    }
+    fn commit_with_date(&self, id: GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError> {
         let (_, bytes) = self.read(id, Some(ObjectType::Commit))?;
-        let ParsedObject::Commit(commit) = parse_object_body(
+        let parsed = parse_object_body(
             ObjectType::Commit,
             &bytes,
             AcceptanceProfile::GitCompatibleImport,
             &self.parse_limits,
         )
-        .map_err(|_| MergeSourceError::InvalidObject(id))?
-        else {
+        .map_err(|_| MergeSourceError::InvalidObject(id))?;
+        // The date only orders merge-base traversal; it is never trusted.
+        let date = committer_time(&parsed);
+        let ParsedObject::Commit(commit) = parsed else {
             return Err(MergeSourceError::InvalidObject(id));
         };
         if commit
@@ -537,7 +543,7 @@ impl MergeObjectSource for InspectionSource<'_, '_> {
             .map(|value| self.oid(value, id))
             .collect::<Result<Vec<_>, _>>()?;
         self.checkpoint()?;
-        Ok(CommitInput { tree, parents })
+        Ok((CommitInput { tree, parents }, date))
     }
     fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError> {
         let (_, bytes) = self.read(id, Some(ObjectType::Tree))?;
