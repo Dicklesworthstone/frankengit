@@ -39,6 +39,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use super::NodeWorkspaceRefusal;
+use crate::upload_visibility::shallow::cutoffs::committer_time;
 use crate::{
     AuthoritySelectedClosure, NodeRequestContext, OneNode, PackContextCheckpoint,
     VerifiedFabricPackSource, checkpoint_pack_context,
@@ -410,15 +411,20 @@ impl MergeObjectSource for SelectedSource<'_> {
         }
     }
     fn commit(&self, id: GitOid) -> Result<CommitInput, MergeSourceError> {
+        self.commit_with_date(id).map(|(commit, _)| commit)
+    }
+    fn commit_with_date(&self, id: GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError> {
         let (_, body) = self.read(id, Some(ObjectType::Commit))?;
-        let ParsedObject::Commit(commit) = parse_object_body(
+        let parsed = parse_object_body(
             ObjectType::Commit,
             &body,
             AcceptanceProfile::GitCompatibleImport,
             &self.limits,
         )
-        .map_err(|error| self.parse_error(id, error))?
-        else {
+        .map_err(|error| self.parse_error(id, error))?;
+        // The date only orders merge-base traversal; it is never trusted.
+        let date = committer_time(&parsed);
+        let ParsedObject::Commit(commit) = parsed else {
             return Err(MergeSourceError::InvalidObject(id));
         };
         // Import preserves unusual headers; computation cannot choose one of
@@ -447,7 +453,7 @@ impl MergeObjectSource for SelectedSource<'_> {
             .map(|value| self.oid(value, id))
             .collect::<Result<Vec<_>, _>>()?;
         self.checkpoint()?;
-        Ok(CommitInput { tree, parents })
+        Ok((CommitInput { tree, parents }, date))
     }
     fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError> {
         let (_, body) = self.read(id, Some(ObjectType::Tree))?;

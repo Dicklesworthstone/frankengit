@@ -306,6 +306,9 @@ impl<S: MergeObjectSource> MergeObjectSource for EmptyTreeSource<'_, S> {
     fn blob(&self, id: GitOid) -> Result<Vec<u8>, MergeSourceError> {
         self.source.blob(id)
     }
+    fn commit_with_date(&self, id: GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError> {
+        self.source.commit_with_date(id)
+    }
 }
 
 struct History<'a, S> {
