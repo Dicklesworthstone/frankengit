@@ -66,6 +66,7 @@ impl Fixture {
                 stop_file: None,
                 poll: Duration::from_millis(100),
                 permissive: true,
+                canonical_principal: None,
             },
             clock: AtomicU64::new(10_000),
         }
@@ -563,6 +564,7 @@ fn preexisting_stop_file_never_opens_repository_or_creates_a_journal() {
         stop_file: Some(stop.clone()),
         poll: Duration::from_millis(100),
         permissive: true,
+        canonical_principal: None,
     };
     assert_eq!(
         execute(
@@ -891,4 +893,214 @@ fn status_output_failure_does_not_reserve_or_rewrite_a_delivery() {
         listener.accept().unwrap_err().kind(),
         io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn canonical_http_ack_advances_authority_retires_and_recovers_receipt_in_both_formats() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut fixture = Fixture::new(format);
+        fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+        let receiver = Receiver::new(vec![Some(204)]);
+        fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+        let before = snapshot(&fixture.options).unwrap();
+        let key = before.entries[0].delivery_key();
+        let (code, output) = fixture.run();
+        assert_eq!(code, 0, "{output}");
+        assert!(output.contains("\"canonical_settled\":true"));
+        assert!(output.contains("\"active_retired\":true"));
+        let captured = receiver.finish();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].headers["x-frankengit-signature-256"],
+            secret().sign_hex(&captured[0].body)
+        );
+        assert_eq!(captured[0].headers["x-frankengit-delivery"], key.as_str());
+        let after = snapshot(&fixture.options).unwrap();
+        assert_ne!(before.head, after.head);
+        assert!(after.entries.is_empty());
+        // A cold reopen authenticates the receipt from the actual HTTP path.
+        with_node(&fixture.options, |node| {
+            let request = fgit_cli::command_request_context(node);
+            let receipt = node
+                .runtime()
+                .block_on(node.read_retired_forge_receipt_in(
+                    &request,
+                    key,
+                    fixture.options.destination,
+                    Some(after.head),
+                ))
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                receipt.effect().state(),
+                fgit_resource::ObligationState::Acknowledged
+            );
+            assert!(
+                std::str::from_utf8(receipt.receipt().evidence())
+                    .unwrap()
+                    .starts_with("frankengit/fenced-dispatch/v1:")
+            );
+            Ok(())
+        })
+        .unwrap();
+        let (code, output) = fixture.run();
+        assert_eq!(code, 0);
+        assert!(output.contains("\"attempts\":0"));
+        assert_eq!(snapshot(&fixture.options).unwrap().head, after.head);
+    }
+}
+
+#[test]
+fn canonical_fanout_ack_does_not_erase_an_unfinished_sibling_and_retry_sends_only_owed_route() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    let a = Receiver::new(vec![Some(204)]);
+    let b = Receiver::new(vec![Some(503), Some(204)]);
+    fixture.register(&a.url, WebhookEventFilter::Wildcard);
+    let mut registration = fixture.register(&a.url, WebhookEventFilter::Wildcard);
+    registration.id = WebhookId(8);
+    registration.url = SsrfPolicy::PERMISSIVE_FOR_TESTS
+        .validate_url(&b.url)
+        .unwrap();
+    fixture.store().register(registration).unwrap();
+    let mut second = fixture.options.clone();
+    second.id = WebhookId(8);
+    let routes = vec![fixture.options.clone(), second];
+    let run = |now| {
+        let mut output = Vec::new();
+        let code = fanout::execute(
+            fanout::FanoutOptions {
+                routes: routes.clone(),
+                max_total_deliveries: 2,
+            },
+            &|| Ok(false),
+            &|| Ok(now),
+            &mut output,
+        )
+        .unwrap();
+        (code, String::from_utf8(output).unwrap())
+    };
+    let (code, output) = run(10_000);
+    assert_eq!(code, 1, "{output}");
+    assert!(output.contains("\"canonical_settled\":false"));
+    let pending = snapshot(&fixture.options).unwrap();
+    assert_eq!(pending.entries.len(), 1);
+    with_node(&fixture.options, |node| {
+        let request = fgit_cli::command_request_context(node);
+        let p = node
+            .runtime()
+            .block_on(node.read_forge_dispatch_in(
+                &request,
+                pending.entries[0].delivery_key(),
+                None,
+            ))
+            .map_err(|e| e.to_string())?
+            .unwrap();
+        assert_eq!(p.routes().len(), 2);
+        assert!(matches!(
+            p.routes()[0].state,
+            fgit_resource::ReconcileState::Delivered { attempt: 1 }
+        ));
+        assert!(matches!(
+            p.routes()[1].state,
+            fgit_resource::ReconcileState::Pending { attempt: 2 }
+        ));
+        Ok(())
+    })
+    .unwrap();
+    let (code, output) = run(20_000);
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("\"attempts\":1"));
+    assert!(snapshot(&fixture.options).unwrap().entries.is_empty());
+    let first = a.finish();
+    let second = b.finish();
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 2);
+    assert_eq!(first[0].body, second[0].body);
+    assert_eq!(second[0].body, second[1].body);
+    for request in first.iter().chain(&second) {
+        assert_eq!(
+            request.headers["x-frankengit-signature-256"],
+            secret().sign_hex(&request.body)
+        );
+    }
+}
+
+#[test]
+fn canonical_http_missing_reply_is_escalated_and_never_automatically_replayed() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    let receiver = Receiver::new(vec![None]);
+    fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    let (code, output) = fixture.run();
+    assert_eq!(code, 3, "{output}");
+    assert!(output.contains("\"active_retired\":false"));
+    assert_eq!(receiver.finish().len(), 1);
+    let selected = snapshot(&fixture.options).unwrap();
+    assert_eq!(selected.entries.len(), 1);
+    let (code, output) = fixture.run();
+    assert_eq!(code, 3, "{output}");
+    assert!(output.contains("\"attempts\":0"));
+    assert_eq!(snapshot(&fixture.options).unwrap().head, selected.head);
+}
+
+#[test]
+fn canonical_http_retry_ceiling_terminalizes_non_2xx_and_keeps_the_diagnostic() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha256);
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    let receiver = Receiver::new(vec![Some(503), Some(503), Some(503)]);
+    fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    let key = snapshot(&fixture.options).unwrap().entries[0].delivery_key();
+    assert_eq!(fixture.run().0, 1);
+    assert_eq!(fixture.run().0, 1);
+    let (code, output) = fixture.run();
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("\"active_retired\":true"));
+    assert!(snapshot(&fixture.options).unwrap().entries.is_empty());
+    assert!(
+        fixture
+            .store()
+            .get_dead_letter_for(fixture.options.id, key)
+            .is_some()
+    );
+    assert_eq!(receiver.finish().len(), 3);
+}
+
+#[test]
+fn canonical_claim_refuses_legacy_observations_instead_of_inventing_a_marker() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    let receiver = Receiver::new(vec![Some(204)]);
+    fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    assert_eq!(fixture.run().0, 0);
+    assert_eq!(receiver.finish().len(), 1);
+    let before = snapshot(&fixture.options).unwrap();
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    let error = execute(
+        &fixture.options,
+        &|| Ok(false),
+        &|| Ok(20_000),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(error.contains("legacy journal observation"), "{error}");
+    assert_eq!(snapshot(&fixture.options).unwrap().head, before.head);
+}
+
+#[test]
+fn canonical_strict_ssrf_refuses_before_claim_and_permissive_positive_is_separate() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    fixture.register("http://127.0.0.1:1/hook", WebhookEventFilter::Wildcard);
+    fixture.options.permissive = false;
+    let before = snapshot(&fixture.options).unwrap().head;
+    assert!(
+        execute(
+            &fixture.options,
+            &|| Ok(false),
+            &|| Ok(20_000),
+            &mut Vec::new()
+        )
+        .is_err()
+    );
+    assert_eq!(snapshot(&fixture.options).unwrap().head, before);
+    assert!(!journal_path(&fixture.options).exists());
 }

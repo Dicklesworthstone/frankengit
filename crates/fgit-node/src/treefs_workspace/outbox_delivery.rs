@@ -4,6 +4,9 @@ mod receipt;
 mod selection;
 pub use receipt::RetiredForgeDeliveryReceipt;
 
+use fgit_admission::merge::native::dispatch::{
+    DispatchResult, DispatchTransport, dispatch_outbox_async,
+};
 use fgit_admission::merge::native::settlement::{OutboxDestination, deliver_outbox_async};
 use fgit_admission::{AdmissionContext, AdmissionLimits};
 use fgit_codec::CanonicalOutboxEffectState;
@@ -84,5 +87,106 @@ impl OneNode {
         )
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
+    }
+    /// Run an explicitly owned, immutable set of Weak routes. Canonical markers
+    /// precede transport I/O; every observed outcome and terminal removal uses
+    /// the same authority-head publication as the original obligation.
+    pub async fn dispatch_forge_outbox_in<T, N>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        key: AsciiSlug,
+        transport: &mut T,
+        send_allowance: u32,
+        limits: AdmissionLimits,
+        now: &N,
+    ) -> Result<DispatchResult, NodeReceiveTransportRefusal>
+    where
+        T: DispatchTransport<Cx>,
+        N: Fn() -> Result<u64, RefusalCode>,
+    {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
+        self.push_quota.evaluate(&authenticated.principal_id())?;
+        self.receive_publication_admitted()?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: authenticated.principal_id(),
+            idempotency_key: authenticated.client_idempotency_key().clone(),
+            object_format: self.object_format,
+        };
+        let projection = self
+            .durable_admission_projection(&context)
+            .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e)))?;
+        let checkpoint = || match checkpoint_pack_context(request.authority()) {
+            PackContextCheckpoint::Live => Ok(()),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(_),
+            } => Err(RefusalCode::ResourceBudgetExceeded),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: None,
+            } => Err(RefusalCode::CancellationInProgress),
+        };
+        dispatch_outbox_async(
+            &self.authority,
+            request.authority(),
+            &context,
+            key,
+            &projection,
+            transport,
+            send_allowance,
+            limits,
+            &checkpoint,
+            now,
+        )
+        .await
+        .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e)))
+    }
+
+    /// Read canonical route ownership before selecting a local dispatcher plan.
+    /// A journal observation cannot stand in for a missing canonical marker.
+    pub async fn read_forge_dispatch_in(
+        &self,
+        request: &NodeRequestContext,
+        key: AsciiSlug,
+        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
+    ) -> Result<
+        Option<fgit_admission::merge::native::dispatch::CanonicalDispatchProgress>,
+        selection::ForgeDeliveryReadRefusal,
+    > {
+        use selection::{ForgeDeliveryReadRefusal as R, checkpoint};
+        checkpoint(request)?;
+        fgit_types::cell::admits_read(self.cell_state(), fgit_types::cell::ReadMode::Current)
+            .map_err(R::Cell)?;
+        let selected = self
+            .materialize_admission_in(request)
+            .await
+            .map_err(|e| R::Authority(Box::new(e)))?;
+        if expected_head.is_some_and(|h| h != selected.basis().id()) {
+            return Err(R::SnapshotMoved);
+        }
+        let state = fgit_admission::merge::native::delivery::read_in(
+            &self.authority,
+            request.authority(),
+            selected.basis(),
+            &|| checkpoint(request).is_err(),
+        )
+        .await
+        .map_err(|e| R::Admission(Box::new(e)))?;
+        let entry = state.outbox.entry(key).ok_or(R::MissingDelivery)?;
+        let progress = fgit_admission::merge::native::dispatch::read_dispatch_progress(
+            &self.authority,
+            request.authority(),
+            selected.basis(),
+            entry,
+            &|| checkpoint(request).is_err(),
+        )
+        .await
+        .map_err(|e| R::Admission(Box::new(e)))?;
+        checkpoint(request)?;
+        Ok(progress)
     }
 }

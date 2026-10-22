@@ -75,8 +75,27 @@ where
             .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         for record in batch.committed_rcrs.iter().rev() {
             let evidence = verify_record_evidence(store, cx, repository, record, cancelled).await?;
-            let OutboxRecordEvidence::Effect(effect) = evidence else {
-                continue;
+            let (effect, dispatch) = match evidence {
+                OutboxRecordEvidence::Effect(effect) => (effect, None),
+                OutboxRecordEvidence::Dispatch(progress) if progress.delivery_key() == key => {
+                    if progress.finished_effect_root().is_none() {
+                        return Err(unavailable(RefusalCode::EvidenceInvalid));
+                    }
+                    let origin = read_body(
+                        store,
+                        cx,
+                        repository,
+                        delivery::EFFECT_NAMESPACE,
+                        progress.origin_effect_root(),
+                        cancelled,
+                    )
+                    .await?;
+                    let (effect, _) = progress
+                        .terminal_objects(&origin)
+                        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+                    (effect, Some(progress))
+                }
+                _ => continue,
             };
             if effect.delivery_key() != key {
                 continue;
@@ -114,16 +133,37 @@ where
             // chain. Also validate the canonical progress through its creation
             // boundary, not merely the existence of a receipt-shaped object.
             delivery::read_effect_in(store, cx, repository, &prior, cancelled).await?;
-            let progress = latest_progress_for_entry(store, cx, &predecessor, &prior, cancelled)
-                .await?
-                .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
             let receipt = read_effect_receipt(store, cx, &effect, cancelled)
                 .await?
                 .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
             if receipt.destination() != prior.destination() {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
-            validate_terminal_progress(&progress, &effect, &receipt)?;
+            if let Some(dispatch) = dispatch {
+                let previous = super::super::dispatch::read_progress(
+                    store,
+                    cx,
+                    &predecessor,
+                    &prior,
+                    cancelled,
+                )
+                .await?
+                .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+                dispatch
+                    .verify_successor_of(&previous)
+                    .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+                if dispatch.origin_effect_root() != prior.effect_state_root()
+                    || dispatch.destination() != prior.destination()
+                {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                }
+            } else {
+                let progress =
+                    latest_progress_for_entry(store, cx, &predecessor, &prior, cancelled)
+                        .await?
+                        .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+                validate_terminal_progress(&progress, &effect, &receipt)?;
+            }
             checkpoint(cancelled)?;
             return Ok(Some(effect));
         }

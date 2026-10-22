@@ -20,6 +20,7 @@ use fgit_types::{
 
 use super::subscription::require_subscription;
 use crate::publication_support::quote;
+mod canonical;
 mod fanout;
 mod journal;
 mod status;
@@ -31,21 +32,23 @@ const USAGE: &str =
   [--object-format sha1|sha256] [--max-deliveries <1..1000>]
   [--max-scan-entries <1..16384>] [--attempt-timeout-secs <1..60>]
   [--continuous --stop-file <path> [--poll-millis <100..60000>]]
-  [--permissive-for-tests]
+  [--canonical-principal <principal-id>] [--permissive-for-tests]
 
-Default: one sweep, at most 16 due attempts, 16384 retained entries, 5 s/attempt.
+With --canonical-principal, an explicit route set is sealed before I/O and actual
+observations settle canonically. Unknown recovered sends escalate without resend.
+Legacy journals cannot be retroactively claimed. Default: one sweep, at most 16 due attempts, 16384 retained entries, 5 s/attempt.
 A complete outbox snapshot is selected on every sweep; no append-ordered key
 cursor is assumed. The private local journal is locked and synced BEFORE each
 send. Restarted in-flight attempts remain unknown and consume the next ordinal.
-A retry can duplicate an effect. Local HTTP acceptance NEVER settles canonical
-outbox state. Checkpoints retain all outcomes and budgets. No HTTPS or exactly-once guarantee.
+A retry can duplicate an effect. Without --canonical-principal, HTTP acceptance
+never settles canonical outbox state. Checkpoints retain all outcomes and budgets. No HTTPS or exactly-once guarantee.
 For bounded multi-destination delivery, see: fg webhook dispatch fanout --help.
 Continuous mode drains on SIGTERM/SIGINT or a regular stop file. Blocking DNS
 and filesystem calls cannot be preempted. All directories must be operator-owned.
 Exit 0: no pending/failed selected work; 1: pending/backoff/bound; 2: refusal or
 rejection; 3: unresolved transport outcome. See docs/WEBHOOK_DISPATCHER.md.";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Options {
     storage: PathBuf,
     tenant: TenantId,
@@ -60,6 +63,7 @@ struct Options {
     stop_file: Option<PathBuf>,
     poll: Duration,
     permissive: bool,
+    canonical_principal: Option<fgit_types::PrincipalId>,
 }
 impl Options {
     fn policy(&self) -> SsrfPolicy {
@@ -87,7 +91,7 @@ fn number(value: &str, min: u64, max: u64) -> Result<u64, String> {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 26
+        || args.len() > 28
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
         || args[0].is_empty()
@@ -114,6 +118,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     | "--attempt-timeout-secs"
                     | "--stop-file"
                     | "--poll-millis"
+                    | "--canonical-principal"
             )
         {
             return Err(format!("unknown dispatch option {flag}"));
@@ -182,6 +187,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
         stop_file,
         poll: Duration::from_millis(bounded("--poll-millis", "1000", 100, 60000)?),
         permissive: fields.contains_key("--permissive-for-tests"),
+        canonical_principal: fields
+            .get("--canonical-principal")
+            .map(|v| fgit_types::PrincipalId::from_hex(v).map_err(|e| e.to_string()))
+            .transpose()?,
     })
 }
 
@@ -250,7 +259,7 @@ fn with_node<T>(
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),
         (result, cleanup) => Err(format!(
-            "dispatch source read/shutdown incomplete; previous attempts retain their journal status; read={:?}; shutdown={:?}",
+            "dispatch invocation/shutdown incomplete; retained canonical progress and local observations require inspection; operation={:?}; shutdown={:?}",
             result.err(),
             cleanup.err()
         )),
@@ -431,6 +440,15 @@ fn execute(
     clock: &impl Fn() -> Result<u64, String>,
     output: &mut impl Write,
 ) -> Result<u8, String> {
+    if options.canonical_principal.is_some() {
+        return canonical::execute(
+            std::slice::from_ref(options),
+            options.max_deliveries,
+            stop_signal,
+            clock,
+            output,
+        );
+    }
     // Cancellation is a request, not a level-triggered pause. Removing a stop
     // file (or recovering from its I/O error) cannot resume an admitted drain.
     let stop_latched = Cell::new(false);

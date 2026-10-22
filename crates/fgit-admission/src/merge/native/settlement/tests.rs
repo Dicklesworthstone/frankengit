@@ -2,6 +2,7 @@
 //! The scripted transport supplies observations, not durability evidence. These
 //! tests do not establish filesystem crash behavior or a real remote service.
 
+mod dispatch;
 mod retirement;
 
 use std::collections::VecDeque;
@@ -97,6 +98,23 @@ impl Store {
                     }
                     StopAfter::Terminal => progress.state().is_terminal(),
                 };
+                if selected {
+                    *stop_after = None;
+                    self.stopped.store(true, Ordering::SeqCst);
+                }
+            } else if let Ok(progress) = decode_body::<
+                super::super::dispatch::CanonicalDispatchProgress,
+            >(&frame, DecodeLimits::DEFAULT)
+            {
+                let selected = progress.routes().iter().any(|m| match selector {
+                    StopAfter::Pending(attempt) => {
+                        m.state == ReconcileState::Pending { attempt } && !m.in_flight
+                    }
+                    StopAfter::InFlight(attempt) => {
+                        m.state == ReconcileState::Pending { attempt } && m.in_flight
+                    }
+                    StopAfter::Terminal => progress.routes().iter().all(|m| m.state.is_terminal()),
+                });
                 if selected {
                     *stop_after = None;
                     self.stopped.store(true, Ordering::SeqCst);

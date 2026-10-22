@@ -59,7 +59,16 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Seals, prepared evidence, decisions, RCRs, outbox, repairs, deletions, overrides, policy epochs, and releases emit immutable evidence.
 - Native forge delivery accepts a configured capability whose audience must
   match the canonical outbox entry; repository text cannot select an endpoint.
-  Automated dispatch requires durable downstream idempotency. Recovery validates
+  The original Strong driver requires durable downstream idempotency. The
+  separate explicitly owned Weak profile first publishes its complete selected
+  route intent and deferral together. Only the acknowledged marker CAS winner
+  may send. Recovered markers grant probes, never new send ownership; non-probing
+  HTTP Unknown escalates and remains active. Local journals and registrations
+  cannot establish completion or erase an owed sibling. Legacy observations
+  without canonical markers refuse rather than being retroactively credited.
+  This is trusted-local routing intent, not subscriber discovery or hosted
+  authorization. HTTP evidence commits actual response bytes without publishing
+  secrets or response text. Recovery validates
   committed progress order, exact lifecycle predecessors, the original payload,
   the persisted retry ceiling, and bounded receipt evidence. Staged progress,
   missing evidence aliases, refused settlements, and corrupt advanced roots

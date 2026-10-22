@@ -185,6 +185,12 @@ impl Journal {
         })
     }
 
+    /// Legacy transport observations require explicit reconciliation before a
+    /// canonical owner can claim this key. They never prove a canonical send.
+    pub(super) fn has_entry(&self, key: AsciiSlug) -> bool {
+        self.entries.contains_key(&key)
+    }
+
     pub(super) fn due_at(&self, key: AsciiSlug) -> u64 {
         self.entries.get(&key).map_or(0, |entry| entry.next_at)
     }

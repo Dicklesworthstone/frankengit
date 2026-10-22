@@ -244,6 +244,20 @@ explicit model authority; only the node reopen tests establish the file-backed
 composition. Neither establishes weak HTTP settlement or arbitrary-age lookup
 beyond the existing history budgets.
 
+The separate Weak route profile additionally requires real signed loopback
+HTTP to advance authority and release a terminal slot in both Git formats,
+receipt lookup after cold reopen, and mixed fan-out outcomes retaining pending
+siblings. Exercise transient backoff and frozen ceilings, final non-2xx failure
+with diagnostic retention, missing replies escalating without resend, and legacy
+journal/strict-SSRF refusal before claim. The authority-model tests separately
+interrupt before send, after send but before observation, and after terminal
+observation but before finalization; only the last may finalize acknowledgement
+without another send. Require owner, endpoint, policy and membership mismatch
+refusal with unchanged head, and preserve the Strong capability guard. Scripted
+transport observations establish model publication semantics, not real HTTP or
+power-loss behavior. No whole-bead acceptance follows until manual replay and
+all original .4.55 acceptance also execute at the reviewed revision.
+
 ## 9. Intent/effect and transaction semantics
 
 Test:

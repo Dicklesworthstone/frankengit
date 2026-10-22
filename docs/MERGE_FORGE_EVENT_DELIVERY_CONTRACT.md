@@ -332,10 +332,69 @@ progress chain and receipt before returning without transport access. Existing
 retained terminal entries with verified progress are retired by a separate
 `retire-settled` sealed intent; it does not reuse the earlier lifecycle seal.
 This releases active map capacity without changing the permanent codec limit
-or deleting immutable evidence. It does not connect the weak HTTP dispatcher
-or manual replay to canonical settlement; that remains in
-`frankengit-root-doctrine-x2mv.4.55`. The new retirement tests require current
-execution and independent batch verification before capability credit.
+or deleting immutable evidence. The explicitly selected Weak HTTP composition
+below connects dispatcher observations to this publication model. Manual replay
+and independent batch acceptance remain in `frankengit-root-doctrine-x2mv.4.55`;
+the retirement tests alone do not establish those capabilities.
+
+### Explicitly owned Weak dispatch profile
+
+`merge/native/dispatch` owns the separate `outbox-fenced-dispatch` v1 body.
+The original `outbox-reconciliation` v1 Strong schema, bytes, capability check,
+and recovery rules are unchanged. This profile implements the normative
+at-least-once delivery allowance; it claims no downstream exactly-once effect.
+A trusted-local operator supplies an explicit authenticated principal and a
+complete selected route set for one destination. This is an explicit routing
+intent, not discovery of all subscribers or a canonical subscription registry.
+Registration files supply configured capabilities, never completion evidence.
+
+The first RCR atomically selects deferral and an immutable plan: repository,
+original delivery key, destination, payload root, exact deferred effect root,
+principal, and up to 32 routes sorted by unique registration ID. Each route
+binds its non-secret endpoint/incarnation/fence configuration, original retry
+ceiling (1..16), and bounded retry schedule. No caller may change the owner,
+membership, endpoint, policy, or budget by resuming the same delivery. Missing
+canonical ownership plus a legacy local attempt is refused before claiming;
+legacy acceptance cannot be promoted into a canonical dispatch marker.
+
+Each subsequent body names one exact predecessor, one action, and every route's
+persisted state. A successful acknowledged marker CAS in this invocation alone
+grants a new send. CAS recovery and recovered markers grant only a probe at the
+same attempt. Actual transport outcomes use the shared Weak `ReconcilePlan`.
+Non-probing HTTP returns Unknown on recovery, which becomes Indeterminate;
+there is no automatic resend after an unknown execution. A known transient
+response may schedule the next bounded attempt, with persisted due time and
+deterministic route/key jitter. Invocation allowances and route quotas can stop
+new sends without changing the canonical retry policy or creating a marker.
+
+Completed observations precede terminal publication. HTTP evidence records the
+actual response byte count and SHA-256 commitment; the verdict is independently
+encoded in the observation. No response body or signing secret is published.
+Every route must be terminal before aggregate settlement: any Indeterminate
+selects Escalated; otherwise any Undeliverable selects TerminallyFailed;
+otherwise all Delivered selects Acknowledged. The immutable receipt commits to
+the final observation root. The final RCR selects this receipt, lifecycle and
+progress together and removes only acknowledged/definitely failed active slots.
+Escalated entries remain active. A delivered route cannot retire an unfinished
+sibling, and subscription narrowing cannot delete an owed member.
+
+History authenticates the selected start/deferral, every exact predecessor,
+original delivery identity and audience, and terminal receipt/removal. A staged
+body is not progress. This writer admits one progress transition per decision
+batch, at most 2049 transitions per execution and 4096 evidence bytes per route;
+shared history scan ceilings remain in force. Strong and Weak progress cannot
+claim the same execution. The node composition carries one finite native context
+through transport drain and publication. Local fences serialize local workers;
+they are not distributed leases or a second authority. Concurrent callers that
+observe another marker conservatively reconcile its uncertainty.
+
+This profile currently requires explicit CLI `--canonical-principal`; the
+legacy default stays an observation-only worker. Authenticated hosted dispatch,
+durable receiver acknowledgement queries, canonical subscriber administration,
+manual terminal replay, HTTPS, power-loss qualification, and arbitrary-age
+history compaction are not established by this implementation. Authored model
+and real-loopback tests require revision-bound execution and independent batch
+review; compilation alone earns no HTTP capability credit.
 
 Retired lookup uses the existing bounded authenticated history reader for
 both the removal suffix and the original progress chain. Each scan retains

@@ -37,6 +37,8 @@ pub enum OutboxRecordEvidence {
     Progress(CanonicalOutboxProgress),
     /// A transition of the shared resource obligation lifecycle.
     Effect(CanonicalOutboxEffectState),
+    /// Explicitly owned route-set progress using the shared Weak reconciler.
+    Dispatch(super::dispatch::CanonicalDispatchProgress),
 }
 
 /// Find the latest progress for `key` through the exact authenticated decision
@@ -169,6 +171,11 @@ where
             match evidence {
                 OutboxRecordEvidence::Ordinary => {}
                 OutboxRecordEvidence::Progress(progress) => chain.progress(progress)?,
+                OutboxRecordEvidence::Dispatch(progress) => {
+                    if progress.delivery_key() == key {
+                        return Err(unavailable(RefusalCode::PublicationPolicyRefused));
+                    }
+                }
                 OutboxRecordEvidence::Effect(effect) => {
                     if effect.delivery_key() == key
                         && let Some(receipt) =
@@ -223,7 +230,7 @@ where
     chain.finish()
 }
 
-async fn read_selected_entry<S, C>(
+pub(super) async fn read_selected_entry<S, C>(
     store: &S,
     cx: &S::Context,
     head: &RepositoryAuthorityHeadBody,
@@ -359,6 +366,9 @@ where
     }
     match &evidence {
         OutboxRecordEvidence::Ordinary => {}
+        OutboxRecordEvidence::Dispatch(progress) => {
+            super::dispatch::verify_progress(store, cx, progress, cancelled).await?;
+        }
         OutboxRecordEvidence::Progress(progress) => {
             let origin: CanonicalOutboxEffectState = read_body(
                 store,
@@ -413,6 +423,17 @@ fn decode_record_effect(
 ) -> Result<OutboxRecordEvidence, AdmissionError> {
     if record.repository_id != repository {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    if let Ok(progress) =
+        decode_body::<super::dispatch::CanonicalDispatchProgress>(frame, DecodeLimits::DEFAULT)
+    {
+        if progress.repository_id() != repository
+            || storage::root(&progress)? != record.outbox_effect_root
+            || record.invariant_evidence_root != record.outbox_effect_root
+        {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+        return Ok(OutboxRecordEvidence::Dispatch(progress));
     }
     if let Ok(progress) = decode_body::<CanonicalOutboxProgress>(frame, DecodeLimits::DEFAULT) {
         if progress.repository_id() != repository
@@ -693,7 +714,7 @@ where
     Ok(frame)
 }
 
-async fn read_body<S, B, C>(
+pub(super) async fn read_body<S, B, C>(
     store: &S,
     cx: &S::Context,
     repository: RepositoryId,
@@ -715,7 +736,7 @@ where
     Ok(body)
 }
 
-fn checkpoint(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionError> {
+pub(super) fn checkpoint(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionError> {
     if cancelled() {
         Err(unavailable(RefusalCode::CancellationInProgress))
     } else {

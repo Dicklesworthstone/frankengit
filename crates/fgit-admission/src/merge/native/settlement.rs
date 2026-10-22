@@ -328,7 +328,12 @@ const fn terminal_transition(
 // All mutation kinds use the ordinary seal, reference materializer and sole
 // authority CAS. Progress is in committed decision history; it is not a second
 // database or an uncommitted object interpreted as permission to dispatch.
-enum RuntimeMutation<'a> {
+pub(super) enum RuntimeMutation<'a> {
+    Dispatch {
+        next: &'a super::dispatch::CanonicalDispatchProgress,
+        effect: Option<&'a CanonicalOutboxEffectState>,
+        receipt: Option<&'a CanonicalOutboxDeliveryReceipt>,
+    },
     Lifecycle {
         next: &'a CanonicalOutboxEffectState,
         receipt: Option<&'a CanonicalOutboxDeliveryReceipt>,
@@ -344,6 +349,7 @@ enum RuntimeMutation<'a> {
 impl RuntimeMutation<'_> {
     fn root(&self) -> Result<Digest, AdmissionError> {
         match self {
+            Self::Dispatch { next, .. } => storage::root(*next),
             Self::Lifecycle { next, .. } => storage::root(*next),
             Self::Progress(body) => storage::root(*body),
             Self::Retirement { effect, .. } => storage::root(*effect),
@@ -351,6 +357,7 @@ impl RuntimeMutation<'_> {
     }
     fn predecessor_progress_root(&self) -> Result<Option<Digest>, AdmissionError> {
         match self {
+            Self::Dispatch { next, .. } => Ok(next.predecessor_progress_root()),
             Self::Lifecycle { progress, .. } => progress.map(storage::root).transpose(),
             Self::Progress(body) => Ok(body.predecessor_progress_root()),
             Self::Retirement { progress, .. } => progress.map(storage::root).transpose(),
@@ -361,7 +368,7 @@ impl RuntimeMutation<'_> {
 // true means this invocation won the exact publication CAS and authenticated
 // its commit. false means recovery or changed state: reload and probe rather
 // than sending under another invocation's marker. A refusal never authorizes I/O.
-async fn publish_mutation<S, P, C>(
+pub(super) async fn publish_mutation<S, P, C>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
@@ -389,7 +396,9 @@ where
         Vec::new(),
         vec![ScopedEntry::new(
             AsciiSlug::from_static("outbox"),
-            if retiring {
+            if matches!(&mutation, RuntimeMutation::Dispatch { .. }) {
+                AsciiSlug::from_static("fenced-dispatch")
+            } else if retiring {
                 AsciiSlug::from_static("retire-settled")
             } else {
                 AsciiSlug::from_static("runtime-successor")
@@ -453,14 +462,65 @@ where
         if entry != original {
             return Ok(false);
         }
-        let previous =
-            history::latest_progress_for_entry(store, cx, &basis, entry, &|| checkpoint().is_err())
-                .await?;
-        if previous.as_ref().map(storage::root).transpose()?
-            != mutation.predecessor_progress_root()?
-        {
-            return Ok(false);
-        }
+        let previous = if let RuntimeMutation::Dispatch { next, effect, .. } = &mutation {
+            let previous =
+                super::dispatch::read_progress(store, cx, &basis, entry, &|| checkpoint().is_err())
+                    .await?;
+            if previous.as_ref().map(storage::root).transpose()? != next.predecessor_progress_root()
+            {
+                return Ok(false);
+            }
+            if next.owner() != context.principal_id
+                || next.destination() != entry.destination()
+                || next.payload_root() != entry.payload_root()
+            {
+                return Err(unavailable(RefusalCode::PublicationPolicyRefused));
+            }
+            if let Some(previous) = &previous {
+                next.verify_successor_of(previous).map_err(codec_error)?;
+            } else {
+                let current =
+                    delivery::read_effect_in(store, cx, context.repository_id, entry, &|| {
+                        checkpoint().is_err()
+                    })
+                    .await?;
+                if current.state() != ObligationState::Committed
+                    || next.ordinal() != 0
+                    || effect.map(|e| storage::root(e)).transpose()?
+                        != Some(next.origin_effect_root())
+                    || current
+                        .transition(LifecycleEvent::Defer, None)
+                        .map_err(codec_error)?
+                        .root()
+                        .map_err(codec_error)?
+                        != next.origin_effect_root()
+                {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                }
+                // A Weak route set cannot take over a Strong or otherwise
+                // already claimed execution merely because no Weak row exists.
+                if history::latest_progress_for_entry(store, cx, &basis, entry, &|| {
+                    checkpoint().is_err()
+                })
+                .await?
+                .is_some()
+                {
+                    return Err(unavailable(RefusalCode::PublicationPolicyRefused));
+                }
+            }
+            None
+        } else {
+            let previous = history::latest_progress_for_entry(store, cx, &basis, entry, &|| {
+                checkpoint().is_err()
+            })
+            .await?;
+            if previous.as_ref().map(storage::root).transpose()?
+                != mutation.predecessor_progress_root()?
+            {
+                return Ok(false);
+            }
+            previous
+        };
         if let RuntimeMutation::Progress(next) = &mutation {
             if next.origin_effect_root() != entry.effect_state_root() {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
@@ -512,6 +572,81 @@ where
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
         match &mutation {
+            RuntimeMutation::Dispatch {
+                next,
+                effect,
+                receipt,
+            } => {
+                if let Some(effect) = effect {
+                    let current =
+                        delivery::read_effect_in(store, cx, context.repository_id, entry, &|| {
+                            checkpoint().is_err()
+                        })
+                        .await?;
+                    if next.finished_effect_root().is_some() {
+                        let (expected_effect, expected_receipt) =
+                            next.terminal_objects(&current).map_err(codec_error)?;
+                        if *effect != &expected_effect || *receipt != Some(&expected_receipt) {
+                            return Err(unavailable(RefusalCode::EvidenceInvalid));
+                        }
+                    } else if next.ordinal() != 0
+                        || effect.state() != ObligationState::DeferredExternally
+                        || receipt.is_some()
+                    {
+                        return Err(unavailable(RefusalCode::EvidenceInvalid));
+                    }
+                    if let Some(receipt) = receipt {
+                        storage::stage_body(
+                            store,
+                            cx,
+                            context.repository_id,
+                            RECEIPT_NAMESPACE,
+                            *receipt,
+                        )
+                        .await?;
+                    }
+                    let root = storage::root(*effect)?;
+                    let entries = state
+                        .outbox
+                        .entries()
+                        .iter()
+                        .map(|e| {
+                            if e.delivery_key() == entry.delivery_key() {
+                                CanonicalOutboxStateEntry::new(
+                                    e.delivery_key(),
+                                    e.effect_class(),
+                                    e.destination(),
+                                    e.payload_root(),
+                                    e.tx_id(),
+                                    e.predecessor_rcr_id(),
+                                    root,
+                                    Some(e.effect_state_root()),
+                                )
+                            } else {
+                                *e
+                            }
+                        })
+                        .collect();
+                    let outbox = CanonicalOutboxState::try_new(context.repository_id, entries)
+                        .map_err(codec_error)?;
+                    delivery::stage_effect_and_outbox_in(store, cx, &outbox, effect, &|| {
+                        checkpoint().is_err()
+                    })
+                    .await?;
+                    materialization.roots.outbox_root = if retired_state(effect.state()) {
+                        stage_retired_map(store, cx, &outbox, entry.delivery_key(), checkpoint)
+                            .await?
+                    } else {
+                        storage::root(&outbox)?
+                    };
+                } else if next.ordinal() == 0
+                    || next.finished_effect_root().is_some()
+                    || receipt.is_some()
+                {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                }
+                stage_runtime_evidence(store, cx, context, *next, checkpoint).await?;
+            }
             RuntimeMutation::Lifecycle {
                 next,
                 receipt,

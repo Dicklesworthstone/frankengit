@@ -1,10 +1,58 @@
 # Restartable local webhook dispatch
 
-Owning work: FG-046. `fg webhook dispatch` connects the native canonical outbox
-reader to the existing signed HTTP transport. Unlike manual `deliver`, it owns
+Owning work: FG-046; canonical composition: frankengit-root-doctrine-x2mv.4.55. `fg webhook dispatch` connects the native canonical outbox
+reader to the existing signed HTTP transport. The default legacy mode described
+below is observation-only. With `--canonical-principal`, use the explicit
+canonical mode in the next section. Unlike manual `deliver`, it owns
 bounded retries and records attempts durably. Unlike the separate strong
 canonical settlement driver, it **never acknowledges, removes, or changes a
 canonical outbox obligation**.
+
+## Canonical dispatch with an explicit route intent
+
+```sh
+fg webhook dispatch ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
+  --id WEBHOOK_ID --destination CANONICAL_DESTINATION --at-least-once \
+  --canonical-principal PRINCIPAL_ID
+```
+
+The same option is supported by `dispatch fanout`. Routes sharing a destination
+form one immutable selected plan before the first send. The operator must supply
+the complete intended route set: this command does not discover all subscribers
+or administer a canonical subscription registry. The first canonical RCR binds
+the principal, endpoint/incarnation/fence commitments and retry policies. A
+subsequent invocation must present the identical plan and principal. Adding or
+removing a member, changing an endpoint or ceiling, and narrowing an owed member's
+filter refuse without dropping that responsibility. Secret rotation is observed
+before each send. All route fences remain held through node shutdown.
+
+Authority history owns markers, observations, backoff and terminal outcomes.
+The local journal supplies the stable process fence and detects legacy attempts;
+it does not decide retries or canonical completion. A legacy observation without
+a canonical marker refuses before claim and requires explicit reconciliation.
+Canonical HTTP acceptance is published before aggregate terminal settlement.
+One receiver's acceptance cannot retire another owed route. Missing replies and
+recovered send markers are Unknown for non-probing HTTP; they escalate and never
+automatically resend. Known transient responses retain the original bounded
+schedule across invocations. Zero remaining invocation allowance still permits
+recovery/finalization, without reserving a fresh send.
+
+Per-delivery JSON names its canonical progress root, whether terminal settlement
+was published, and whether the active slot was retired. These observations are
+emitted while the node is still open; the final sweep record follows awaited
+shutdown. `canonical_settled:true` can include Escalated: inspect `active_retired`
+and the unknown-route count. Exit 3 denotes unresolved outcomes. The persisted
+receipt, recoverable through `fg webhook receipt`, commits to canonical route
+outcomes and actual HTTP response commitments. It proves recorded observations,
+not receiver-side exactly-once behavior. Broken stdout cannot undo publication.
+
+The normative bounded profile and non-claims are in
+[MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md](MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#explicitly-owned-weak-dispatch-profile).
+Manual terminal replay remains unfinished in the original .4.55 bead. The new
+tests are authored; current revision-bound execution and independent batch
+acceptance remain required before a verified-capability claim.
+
+## Legacy observation-only mode
 
 ## Run one sweep
 
