@@ -45,6 +45,7 @@ impl TrustedRefWorkflowPoll {
 struct Selected {
     head: RepositoryAuthorityHeadId,
     commit: GitOid,
+    previous_commit: Option<GitOid>,
     batch: RepositoryDecisionBatchId,
     event_head: RepositoryAuthorityHeadId,
     pull: Option<pull_request::PullSelection>,
@@ -226,6 +227,12 @@ impl OneNode {
         if let Some(pull) = &selected.pull {
             event.pop();
             event.push_str(&format!(",\"pull_request\":{}}}", pull.to_json()));
+        } else {
+            let before = selected
+                .previous_commit
+                .map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
+            event.pop();
+            event.push_str(&format!(",\"previous_commit\":{before}}}"));
         }
         match fs::symlink_metadata(&event_directory) {
             Ok(_) => {
@@ -273,12 +280,18 @@ impl OneNode {
                 limits,
                 artifacts,
                 selected.pull.as_ref().map(|pull| pull.target_reference()),
-                selected.pull.as_ref().map(|pull| {
+                Some(selected.pull.as_ref().map_or(
                     (
-                        Some(pull.path_comparison_base()),
-                        fgit_forge::review::ComparisonMode::MergeBase,
-                    )
-                }),
+                        selected.previous_commit,
+                        fgit_forge::review::ComparisonMode::Direct,
+                    ),
+                    |pull| {
+                        (
+                            Some(pull.path_comparison_base()),
+                            fgit_forge::review::ComparisonMode::MergeBase,
+                        )
+                    },
+                )),
             )
             .await
             .map_err(|e| {
@@ -335,31 +348,33 @@ impl OneNode {
         {
             return Ok(Selection::ChangedBeforeReservation);
         }
-        let event = history
-            .iter()
-            .rev()
-            .find(|batch| {
-                batch
-                    .ref_updates
-                    .iter()
-                    .any(|(name, _)| name == reference.as_bytes())
-            })
+        // snapshot_history_in authenticates the COMPLETE bounded history to
+        // empty genesis, oldest first; it never returns a truncated prefix.
+        // The first matching row is this event, the next is its exact old
+        // ref value. Preserve a deletion as None: skipping it would reuse a
+        // previous branch incarnation. This is neither a Git first parent nor
+        // the last tip this particular polling process happened to observe.
+        let mut changes = history.iter().rev().filter_map(|batch| {
+            batch
+                .ref_updates
+                .iter()
+                .find(|(name, _)| name == reference.as_bytes())
+                .map(|(_, value)| (batch, *value))
+        });
+        let (event, value) = changes
+            .next()
             .ok_or_else(|| invalid("current ref has no authenticated change event"))?;
-        if event
-            .ref_updates
-            .iter()
-            .find(|(name, _)| name == reference.as_bytes())
-            .map(|(_, oid)| *oid)
-            != Some(Some(commit))
-        {
+        if value != Some(commit) {
             return Err(invalid("ref event does not match the current branch"));
         }
+        let previous_commit = changes.next().and_then(|(_, value)| value);
         if !workspace_request_live(request) {
             return Err(invalid("ref watcher source selection cancelled"));
         }
         Ok(Selection::Ready(Selected {
             head,
             commit,
+            previous_commit,
             batch: event.batch_id,
             event_head: event.resulting_head_id,
             pull: None,

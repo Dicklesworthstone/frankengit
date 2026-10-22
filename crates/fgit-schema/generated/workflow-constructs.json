@@ -144,13 +144,13 @@
       "key": "trigger.paths",
       "status": "accepted",
       "refuses": false,
-      "reason": "ordered bounded path patterns select complete canonical PR merge-base changes; missing, incomplete or over-budget evidence refuses"
+      "reason": "ordered bounded path patterns select complete canonical push ref differences or PR merge-base changes; missing, incomplete or over-budget evidence refuses"
     },
     {
       "key": "trigger.paths-ignore",
       "status": "accepted",
       "refuses": false,
-      "reason": "PR execution requires at least one changed path outside the exclusions; empty changes create no jobs or passing checks"
+      "reason": "push and PR execution require at least one changed path outside the exclusions; empty changes create no jobs or passing checks"
     },
     {
       "key": "workflow.concurrency",
@@ -180,7 +180,7 @@
       "key": "workflow.on",
       "status": "accepted",
       "refuses": false,
-      "reason": "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch filters and explicitly empty event scalars"
+      "reason": "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch and path filters and explicitly empty event scalars"
     },
     {
       "key": "workflow.secrets",

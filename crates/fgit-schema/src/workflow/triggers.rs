@@ -285,7 +285,7 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
                     Node::Mapping { entries, .. } => {
                         for (key, value, span) in entries {
                             if matches!(key.as_str(), "paths" | "paths-ignore")
-                                && name == "pull_request"
+                                && matches!(name.as_str(), "push" | "pull_request")
                             {
                                 if trigger.path_filter.is_some() {
                                     return Err(malformed(

@@ -572,6 +572,11 @@ fn dispatch_at<A: GitHashAlgorithm>(
         ));
     }
     if let Some(changes) = &path_changes {
+        let profile = match path_basis {
+            Some((_, ComparisonMode::Direct)) => "canonical-ref-difference-v1",
+            Some((_, ComparisonMode::MergeBase)) => "unique-merge-base-v1",
+            None => return Err(invalid("changed paths have no comparison basis")),
+        };
         let mut bytes = b"frankengit/workflow-changed-paths/v1\0".to_vec();
         for path in &changes.paths {
             bytes.extend_from_slice(&(path.len() as u64).to_be_bytes());
@@ -580,8 +585,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
         let oid =
             |id: Option<GitOid>| id.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
         identity.push_str(&format!(
-            ",\"changed_paths\":{{\"profile\":\"unique-merge-base-v1\",\"requested_before\":{},\"compared_before\":{},\"after\":\"{}\",\"before_tree\":{},\"after_tree\":\"{}\",\"count\":{},\"sha256\":\"{}\",\"complete\":true}}",
-            oid(changes.requested_before), oid(changes.compared_before), changes.after,
+            ",\"changed_paths\":{{\"profile\":\"{}\",\"requested_before\":{},\"compared_before\":{},\"after\":\"{}\",\"before_tree\":{},\"after_tree\":\"{}\",\"count\":{},\"sha256\":\"{}\",\"complete\":true}}",
+            profile, oid(changes.requested_before), oid(changes.compared_before), changes.after,
             oid(changes.before_tree), changes.after_tree, changes.paths.len(), hex(&sha256_digest(&bytes))
         ));
     }

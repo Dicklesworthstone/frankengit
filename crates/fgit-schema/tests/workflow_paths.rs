@@ -113,7 +113,7 @@ fn malformed_ambiguous_and_unimplemented_events_refuse() {
     }
     assert!(
         compile(
-            &source("    paths:\n      - '**'").replace("pull_request:", "push:"),
+            &source("    paths:\n      - '**'").replace("pull_request:", "schedule:"),
             &Limits::default()
         )
         .is_err()
@@ -171,4 +171,81 @@ fn matching_work_is_bounded_and_cancellation_remains_a_refusal() {
         g.selects_event_with_paths("pull_request", None, Some(&paths(&[b"a"])), &|| true),
         Err(E::Cancelled)
     );
+}
+
+#[test]
+fn push_filters_use_source_branches_and_require_complete_path_evidence() {
+    let text = source(
+        "    branches:\n      - main\n    paths:\n      - 'src/**'\n      - '!src/private/**'",
+    )
+    .replace("pull_request:", "push:");
+    let g = compile(&text, &Limits::default()).unwrap();
+    assert!(g.canonical_bytes().starts_with("fgit-workflow/v6\n"));
+    for (p, wanted) in [
+        (paths(&[b"src/a.rs"]), true),
+        (paths(&[b"docs/a.md"]), false),
+        (paths(&[b"src/private/a.rs"]), false),
+        (paths(&[b"src/private/a.rs", b"src/public.rs"]), true),
+        (paths(&[]), false),
+    ] {
+        assert_eq!(
+            g.selects_event_with_paths("push", Some(b"refs/heads/main"), Some(&p), &|| false)
+                .unwrap(),
+            wanted
+        );
+        assert!(
+            !g.selects_event_with_paths("push", Some(b"refs/heads/other"), Some(&p), &|| false)
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        g.selects_event("push", Some(b"refs/heads/main"), &|| false),
+        Err(E::MissingChangedPaths)
+    );
+    assert_eq!(
+        g.selects_event_with_paths(
+            "push",
+            Some(b"refs/heads/main"),
+            Some(&paths(&[b"src/a.rs"])),
+            &|| true
+        ),
+        Err(E::Cancelled)
+    );
+}
+
+#[test]
+fn push_and_pr_path_profiles_remain_separate_and_ignore_never_means_empty_success() {
+    let pr = graph("    paths-ignore:\n      - 'docs/**'");
+    let push = compile(
+        &source("    paths-ignore:\n      - 'docs/**'").replace("pull_request:", "push:"),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_ne!(pr.canonical_bytes(), push.canonical_bytes());
+    for (p, wanted) in [
+        (paths(&[]), false),
+        (paths(&[b"docs/a"]), false),
+        (paths(&[b"docs/a", b"raw/\xff"]), true),
+    ] {
+        assert_eq!(
+            push.selects_event_with_paths("push", Some(b"refs/heads/work"), Some(&p), &|| false)
+                .unwrap(),
+            wanted
+        );
+        assert!(
+            !push
+                .selects_event_with_paths(
+                    "pull_request",
+                    Some(b"refs/heads/main"),
+                    Some(&p),
+                    &|| false
+                )
+                .unwrap()
+        );
+    }
+    for event in ["push", "pull_request"] {
+        let text = source("    paths:\n      - '**'\n    paths-ignore:\n      - docs")
+            .replace("pull_request:", &format!("{event}:"));
+        assert!(compile(&text, &Limits::default()).is_err());
+    }
 }

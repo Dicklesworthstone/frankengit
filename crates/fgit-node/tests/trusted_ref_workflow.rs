@@ -470,3 +470,73 @@ fn filtered_pr_dispatch_without_canonical_target_refuses_before_batch_or_script(
         assert_eq!(g.count(), "x");
     }
 }
+
+#[test]
+fn push_paths_select_creation_and_suppress_equal_trees_without_fake_checks() {
+    for fmt in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut f = Fixture::new(fmt, "\n  push:\n    paths:\n      - 'ci/**'", "true");
+        let first = poll!(f).unwrap();
+        assert_eq!(first.dispatch().unwrap().runs().len(), 1);
+        assert!(first.to_json().contains("\"previous_commit\":null"));
+        assert!(first.to_json().contains("canonical-ref-difference-v1"));
+        assert_eq!(f.count(), "x");
+        let old = f.tip;
+        f.advance();
+        f.reopen();
+        let empty = poll!(f).unwrap();
+        assert_eq!(empty.state(), "dispatched");
+        assert!(empty.dispatch().unwrap().runs().is_empty());
+        assert!(
+            empty
+                .to_json()
+                .contains(&format!("\"requested_before\":\"{old}\""))
+        );
+        assert!(empty.to_json().contains("\"count\":0"));
+        assert_eq!(f.count(), "x");
+        f.reopen();
+        assert_eq!(poll!(f).unwrap().state(), "previously_settled");
+        assert_eq!(f.count(), "x");
+    }
+}
+
+#[test]
+fn push_path_basis_is_last_canonical_change_not_last_polled_tip() {
+    for fmt in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut f = Fixture::new(fmt, "\n  push:\n    paths:\n      - 'ci/**'", "true");
+        poll!(f).unwrap();
+        let text = format!(
+            "name: changed\non:\n  push:\n    paths:\n      - 'ci/**'\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf x >> '{}'\n",
+            f.root.join("effects").display()
+        );
+        let source = f.root.join("source");
+        let blob = loose(&source, fmt, GitObjectKind::Blob, text.as_bytes());
+        let dir = loose(
+            &source,
+            fmt,
+            GitObjectKind::Tree,
+            &[b"100644 build.yml\0".as_slice(), blob.as_bytes()].concat(),
+        );
+        f.tree = loose(
+            &source,
+            fmt,
+            GitObjectKind::Tree,
+            &[b"40000 ci\0".as_slice(), dir.as_bytes()].concat(),
+        );
+        f.advance();
+        let intermediate = f.tip;
+        // The watcher intentionally misses this first ref update. The latest
+        // canonical update has identical trees, so it must not replay its work.
+        f.advance();
+        f.reopen();
+        let report = poll!(f).unwrap();
+        assert_eq!(report.state(), "dispatched");
+        assert!(report.dispatch().unwrap().runs().is_empty());
+        assert!(
+            report
+                .to_json()
+                .contains(&format!("\"previous_commit\":\"{intermediate}\""))
+        );
+        assert!(report.to_json().contains("\"count\":0"));
+        assert_eq!(f.count(), "x");
+    }
+}
