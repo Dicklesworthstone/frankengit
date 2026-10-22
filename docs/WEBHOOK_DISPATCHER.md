@@ -20,7 +20,8 @@ The same option is supported by `dispatch fanout`. Routes sharing a destination
 form one immutable selected plan before the first send. The operator must supply
 the complete intended route set: this command does not discover all subscribers
 or administer a canonical subscription registry. The first canonical RCR binds
-the principal, endpoint/incarnation/fence commitments and retry policies. A
+the principal, endpoint/incarnation/fence commitments, strict/permissive SSRF
+authority and retry policies. Attempt timeout remains an invocation deadline. A
 subsequent invocation must present the identical plan and principal. Adding or
 removing a member, changing an endpoint or ceiling, and narrowing an owed member's
 filter refuse without dropping that responsibility. Secret rotation is observed
@@ -37,20 +38,26 @@ automatically resend. Known transient responses retain the original bounded
 schedule across invocations. Zero remaining invocation allowance still permits
 recovery/finalization, without reserving a fresh send.
 
+Strict SSRF and unsupported TLS refusals are definite transport failures: they
+publish canonical terminal failure and retain a local diagnostic without opening
+a connection. There is no HTTPS downgrade. Legacy mode retains its pre-claim URL
+preflight; canonical replay also preflights before admitting a new replay intent.
+
 Per-delivery JSON names its canonical progress root, whether terminal settlement
 was published, and whether the active slot was retired. These observations are
 emitted while the node is still open; the final sweep record follows awaited
 shutdown. `canonical_settled:true` can include Escalated: inspect `active_retired`
 and the unknown-route count. Exit 3 denotes unresolved outcomes. The persisted
 receipt, recoverable through `fg webhook receipt`, commits to canonical route
-outcomes and actual HTTP response commitments. It proves recorded observations,
+outcomes and actual transport evidence commitments. It proves recorded observations,
 not receiver-side exactly-once behavior. Broken stdout cannot undo publication.
 
 The normative bounded profile and non-claims are in
 [MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md](MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#explicitly-owned-weak-dispatch-profile).
-Manual terminal replay remains unfinished in the original .4.55 bead. The new
-tests are authored; current revision-bound execution and independent batch
-acceptance remain required before a verified-capability claim.
+Explicit new sealed manual replay is described in
+[WEBHOOK_OPERATOR_DELIVERY.md](WEBHOOK_OPERATOR_DELIVERY.md#canonical-replay-with-a-new-sealed-intent).
+Current revision-bound execution and independent batch acceptance remain
+required before full .4.55 capability credit.
 
 ## Legacy observation-only mode
 

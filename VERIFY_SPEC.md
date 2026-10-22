@@ -249,14 +249,27 @@ HTTP to advance authority and release a terminal slot in both Git formats,
 receipt lookup after cold reopen, and mixed fan-out outcomes retaining pending
 siblings. Exercise transient backoff and frozen ceilings, final non-2xx failure
 with diagnostic retention, missing replies escalating without resend, and legacy
-journal/strict-SSRF refusal before claim. The authority-model tests separately
+journal refusal before claim. Strict SSRF must publish definite canonical
+failure and retain its diagnostic while an independently listening loopback
+receiver observes no connection; permissive positive cases must reach HTTP.
+The authority-model tests separately
 interrupt before send, after send but before observation, and after terminal
 observation but before finalization; only the last may finalize acknowledgement
 without another send. Require owner, endpoint, policy and membership mismatch
 refusal with unchanged head, and preserve the Strong capability guard. Scripted
 transport observations establish model publication semantics, not real HTTP or
-power-loss behavior. No whole-bead acceptance follows until manual replay and
-all original .4.55 acceptance also execute at the reviewed revision.
+power-loss behavior. The actual `fgit-cli/tests/webhook_canonical.rs` process
+lane must also exercise new sealed manual replay in both formats, unchanged
+original receipt bytes, idempotent request recovery, and killed in-flight
+dispatch/replay after a complete signed HTTP write. The receiver must keep
+accepting during recovery, independently counting any forbidden resend. Include
+manual recovery of a canonical Indeterminate source with no local diagnostic.
+Model replay tests must plant an authenticated creation referencing staged-only
+source failure, require source/route/owner/request/lineage refusal, and pair each
+with permitted canonical creation. Verify exact-basis source eligibility on
+fresh marker CAS and retain owned observation/finalization after admission.
+No whole-bead credit follows until all original .4.55 acceptance execute at the
+reviewed revision.
 
 ## 9. Intent/effect and transaction semantics
 

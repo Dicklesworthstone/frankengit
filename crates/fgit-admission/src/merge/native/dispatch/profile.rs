@@ -173,6 +173,9 @@ impl CanonicalDispatchProgress {
             && self.routes.len() == routes.len()
             && self.routes.iter().zip(routes).all(|(a, b)| a.route == *b)
     }
+    pub(in crate::merge::native) fn admits_new_send(&self) -> bool {
+        matches!(self.action, Action::Start | Action::Dispatch { .. })
+    }
     pub fn dispatch(&self, route: u64, at: u64) -> Result<Self, CodecRefusal> {
         self.advance(Action::Dispatch { route, at }, &[])
     }

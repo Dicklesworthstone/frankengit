@@ -194,7 +194,13 @@ vision goals to current code, evidence and existing owning work.
   These do not establish sustained or extreme-scale operation.
 - CLI/MCP writes remain operator-asserted, HTTP is loopback-only, and native
   TLS/general identity and hostile-runner isolation remain incomplete.
-  The CLI webhook dispatcher still reports `canonical_settled:false`.
+  The default webhook dispatcher remains observation-only. Explicit
+  `--canonical-principal` dispatch now publishes an immutable Weak route plan,
+  actual HTTP observations and terminal receipts; new sealed manual replay
+  preserves the original outcome under a distinct delivery ID. These bounded
+  trusted-local paths do not supply hosted identity, TLS, receiver exactly-once
+  semantics or independent full-bead acceptance; see the
+  [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#explicitly-owned-weak-dispatch-profile).
 - Eight product crates remain outside `fg`'s normal dependency closure:
   ATP-Git, compaction, exchange, object-store, projection, RaptorQ, repair
   and witness. Statistics is linked but its controller is not consulted by

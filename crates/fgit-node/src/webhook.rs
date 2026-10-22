@@ -6,6 +6,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub use fgit_admission::merge::native::dispatch::replay::ReplayIntent;
 pub use fgit_admission::merge::native::dispatch::{
     CanonicalDispatchProgress, DispatchResult, DispatchRoute, DispatchTransport,
 };

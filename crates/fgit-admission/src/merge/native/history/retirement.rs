@@ -35,6 +35,22 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    retired_effect_in_class(store, cx, basis, key, destination, None, cancelled).await
+}
+
+pub(in crate::merge::native) async fn retired_effect_in_class<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    key: AsciiSlug,
+    destination: AsciiSlug,
+    required_class: Option<AsciiSlug>,
+    cancelled: &C,
+) -> Result<Option<CanonicalOutboxEffectState>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     checkpoint(cancelled)?;
     if fgit_authority::authority_head_identity(basis.body())
         .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
@@ -120,7 +136,9 @@ where
             .await?;
             if selected.repository_id() != repository
                 || selected.entry(key).is_some()
-                || prior.effect_class() != AsciiSlug::from_static("forge-event")
+                || (prior.effect_class() != AsciiSlug::from_static("forge-event")
+                    && prior.effect_class() != super::super::dispatch::replay::REPLAY_CLASS)
+                || required_class.is_some_and(|class| prior.effect_class() != class)
                 || prior.destination() != destination
                 || prior.tx_id() != effect.tx_id()
                 || prior.payload_root() != effect.payload_root()

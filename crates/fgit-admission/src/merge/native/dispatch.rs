@@ -2,6 +2,7 @@
 //! No Strong capability is fabricated. An unknown recovered marker escalates.
 mod history;
 mod profile;
+pub mod replay;
 pub(super) use history::{latest as read_progress, verify as verify_progress};
 pub use profile::{CanonicalDispatchProgress, DispatchRoute, MAX_ROUTES, RouteProgress};
 
@@ -43,6 +44,31 @@ pub trait DispatchTransport<C: Sync + ?Sized> {
     ) -> impl Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + 'a;
 }
 
+/// Authenticate an owned plan for an active or retired key, without a sender.
+/// Missing plans grant no retry rights; Strong deliveries return no Weak plan.
+pub async fn read_dispatch_plan<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &fgit_chronicle::PublicationBasis,
+    key: AsciiSlug,
+    destination: AsciiSlug,
+    cancelled: &C,
+) -> Result<Option<CanonicalDispatchProgress>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let state = delivery::read_in(store, cx, basis, cancelled).await?;
+    if let Some(entry) = state.outbox.entry(key) {
+        if entry.destination() != destination {
+            return Err(unavailable(RefusalCode::PublicationPolicyRefused));
+        }
+        read_dispatch_progress(store, cx, basis, entry, cancelled).await
+    } else {
+        history::retired(store, cx, basis, key, destination, cancelled).await
+    }
+}
+
 /// Authenticate the route execution selected by this exact retained entry.
 /// `None` is not permission to send; a caller must still atomically claim it.
 pub async fn read_dispatch_progress<S, C>(
@@ -56,7 +82,11 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    read_progress(store, cx, basis, entry, cancelled).await
+    let selected = read_progress(store, cx, basis, entry, cancelled).await?;
+    if selected.is_none() {
+        super::history::latest_progress_for_entry(store, cx, basis, entry, cancelled).await?;
+    }
+    Ok(selected)
 }
 
 #[derive(Debug)]
@@ -133,10 +163,15 @@ where
             });
         };
         if entry.destination() != transport.destination()
-            || entry.effect_class() != AsciiSlug::from_static("forge-event")
+            || (entry.effect_class() != AsciiSlug::from_static("forge-event")
+                && entry.effect_class() != replay::REPLAY_CLASS)
         {
             return Err(unavailable(RefusalCode::PublicationPolicyRefused));
         }
+        replay::validate_plan(store, cx, context, &basis, entry, &routes, false, &|| {
+            checkpoint().is_err()
+        })
+        .await?;
         let effect = delivery::read_effect_in(store, cx, context.repository_id, entry, &|| {
             checkpoint().is_err()
         })

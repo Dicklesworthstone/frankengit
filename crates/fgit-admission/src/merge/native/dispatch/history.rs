@@ -141,6 +141,21 @@ where
                         {
                             return Err(bad());
                         }
+                        // Re-prove original creation and before-creation
+                        // absence through the existing authenticated reader.
+                        // Selected predecessor membership alone is insufficient.
+                        if history::latest_progress_for_entry(
+                            store,
+                            cx,
+                            &predecessor,
+                            &prior,
+                            cancelled,
+                        )
+                        .await?
+                        .is_some()
+                        {
+                            return Err(bad());
+                        }
                         history::checkpoint(cancelled)?;
                         return Ok(newest);
                     }

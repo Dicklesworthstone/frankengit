@@ -13,9 +13,21 @@ use super::super::subscription::require_subscription;
 use super::{Options, check_head, head_token, with_node};
 use crate::publication_support::quote;
 
+mod canonical;
 mod replay_budget;
 
+pub(super) fn execute_canonical(
+    options: &Options,
+    replay: bool,
+    stopped: &impl Fn() -> bool,
+) -> Result<(u8, String), String> {
+    canonical::execute(options, replay, stopped)
+}
+
 pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), String> {
+    if options.canonical_principal.is_some() {
+        return canonical::execute(options, replay, &|| false);
+    }
     if !options.at_least_once {
         return Err(
             "manual delivery requires --at-least-once; a repeated send can duplicate an effect"

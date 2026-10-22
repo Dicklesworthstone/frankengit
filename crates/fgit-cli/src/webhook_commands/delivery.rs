@@ -26,6 +26,8 @@ struct Options {
     attempt: Option<u32>,
     at_least_once: bool,
     permissive: bool,
+    canonical_principal: Option<fgit_types::PrincipalId>,
+    replay_key: Option<String>,
 }
 
 pub(super) fn run(action: &str, args: &[String]) -> Result<u8, String> {
@@ -34,7 +36,15 @@ pub(super) fn run(action: &str, args: &[String]) -> Result<u8, String> {
         "outbox" => (0, list(&options)?),
         "inspect" => (0, inspect(&options)?),
         "receipt" => (0, receipt(&options)?),
-        "deliver" | "replay" => manual::execute(&options, action == "replay")?,
+        "deliver" | "replay" => {
+            if options.canonical_principal.is_some() {
+                let signals =
+                    fgit_node::TerminationSignals::install().map_err(|e| e.to_string())?;
+                manual::execute_canonical(&options, action == "replay", &|| signals.requested())?
+            } else {
+                manual::execute(&options, action == "replay")?
+            }
+        }
         _ => return Err("unsupported canonical webhook action".into()),
     };
     writeln!(std::io::stdout().lock(), "{output}")
@@ -265,7 +275,7 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
     if !matches!(
         action,
         "outbox" | "inspect" | "receipt" | "deliver" | "replay"
-    ) || args.len() > 26
+    ) || args.len() > 30
         || args.iter().any(|value| value.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -285,7 +295,12 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
             || (matches!(action, "deliver" | "replay")
                 && matches!(
                     flag,
-                    "--id" | "--attempt" | "--at-least-once" | "--permissive-for-tests"
+                    "--id"
+                        | "--attempt"
+                        | "--at-least-once"
+                        | "--permissive-for-tests"
+                        | "--canonical-principal"
+                        | "--replay-key"
                 ));
         if !permitted {
             return Err(format!("unknown {action} option {flag}"));
@@ -350,6 +365,28 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
     {
         return Err("manual delivery requires --id and explicit --at-least-once; automatic settlement is not supported".into());
     }
+    let canonical_principal = flags
+        .get("--canonical-principal")
+        .map(|v| fgit_types::PrincipalId::from_hex(v).map_err(|e| e.to_string()))
+        .transpose()?;
+    let replay_key = flags.get("--replay-key").map(|s| s.to_string());
+    if (canonical_principal.is_some() || replay_key.is_some())
+        && (action != "replay"
+            || canonical_principal.is_none()
+            || replay_key.is_none()
+            || attempt.is_some())
+    {
+        return Err("canonical replay requires --canonical-principal and --replay-key; --attempt cannot reopen the original delivery".into());
+    }
+    if replay_key.as_ref().is_some_and(|s| {
+        s.is_empty()
+            || s.len() > 128
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
+    }) {
+        return Err("replay key must be 1..128 ASCII letters, digits or -._/".into());
+    }
     let limit = flags.get("--limit").copied().unwrap_or("50");
     if !limit.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("outbox limit must be 1..100".into());
@@ -376,6 +413,8 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
         attempt,
         at_least_once: flags.contains_key("--at-least-once"),
         permissive: flags.contains_key("--permissive-for-tests"),
+        canonical_principal,
+        replay_key,
     })
 }
 

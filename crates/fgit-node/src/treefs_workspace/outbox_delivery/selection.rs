@@ -224,7 +224,9 @@ impl OneNode {
         if entry.destination() != expected_destination {
             return Err(ForgeDeliveryReadRefusal::DestinationMismatch);
         }
-        if entry.effect_class() != AsciiSlug::from_static("forge-event") {
+        if entry.effect_class() != AsciiSlug::from_static("forge-event")
+            && entry.effect_class() != fgit_admission::merge::native::dispatch::replay::REPLAY_CLASS
+        {
             return Err(ForgeDeliveryReadRefusal::UnsupportedEffectClass);
         }
         let effect = delivery::read_effect_in(

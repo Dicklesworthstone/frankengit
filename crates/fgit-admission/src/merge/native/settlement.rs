@@ -5,7 +5,7 @@
 //! progress resumes its next dispatch. Automatic dispatch requires durable
 //! downstream idempotency; weaker destinations need a separate fenced owner.
 
-mod publication;
+pub(super) mod publication;
 
 use std::future::Future;
 
@@ -463,6 +463,22 @@ where
             return Ok(false);
         }
         let previous = if let RuntimeMutation::Dispatch { next, effect, .. } = &mutation {
+            let routes = next
+                .routes()
+                .iter()
+                .map(|m| m.route.clone())
+                .collect::<Vec<_>>();
+            super::dispatch::replay::validate_plan(
+                store,
+                cx,
+                context,
+                &basis,
+                entry,
+                &routes,
+                next.admits_new_send(),
+                &|| checkpoint().is_err(),
+            )
+            .await?;
             let previous =
                 super::dispatch::read_progress(store, cx, &basis, entry, &|| checkpoint().is_err())
                     .await?;
@@ -796,7 +812,7 @@ where
     Ok(root)
 }
 
-async fn stage_runtime_evidence<S, B, C>(
+pub(super) async fn stage_runtime_evidence<S, B, C>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
@@ -833,7 +849,7 @@ fn codec_error(_: fgit_codec::CodecRefusal) -> AdmissionError {
     unavailable(RefusalCode::EvidenceInvalid)
 }
 
-const fn projection_error(error: ProjectionFailure) -> AdmissionError {
+pub(super) const fn projection_error(error: ProjectionFailure) -> AdmissionError {
     match error {
         ProjectionFailure::Unavailable(code) | ProjectionFailure::Refuse(code) => unavailable(code),
     }

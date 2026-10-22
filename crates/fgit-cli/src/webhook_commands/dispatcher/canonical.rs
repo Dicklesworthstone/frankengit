@@ -37,6 +37,9 @@ where
         &self.definitions
     }
     fn can_deliver(&self, id: u64) -> bool {
+        if !matches!((self.stopped)(), Ok(false)) {
+            return false;
+        }
         self.routes
             .iter()
             .find(|r| r.options.id.0 == id)
@@ -62,8 +65,8 @@ where
                 .iter()
                 .find(|r| r.options.id.0 == id)
                 .ok_or("route missing")?;
-            let (store, registration) = registration(&route.options)?;
-            if scope(&route.options, self.incarnation, &registration) != route.binding {
+            let (store, registration) = canonical_registration(&route.options)?;
+            if canonical_scope(&route.options, self.incarnation, &registration) != route.binding {
                 return Err(
                     "canonical dispatch endpoint or policy changed; original plan retained".into(),
                 );
@@ -159,7 +162,11 @@ pub(super) fn execute(
         return Err("canonical routes must share one explicit principal and repository".into());
     }
     let latched = Cell::new(false);
+    let stop_error = std::cell::RefCell::new(None::<String>);
     let stopped = || {
+        if let Some(error) = stop_error.borrow().as_ref() {
+            return Err(error.clone());
+        }
         if latched.get() {
             return Ok(true);
         }
@@ -167,6 +174,9 @@ pub(super) fn execute(
             Ok(false) => Ok(false),
             result => {
                 latched.set(true);
+                if let Err(error) = &result {
+                    *stop_error.borrow_mut() = Some(error.clone());
+                }
                 result
             }
         }
@@ -185,11 +195,11 @@ pub(super) fn execute(
     let mut ordered: Vec<_> = options.iter().collect();
     ordered.sort_by_key(|r| (r.id.0, r.destination));
     for route in ordered {
-        let (_, registration) = registration(route)?;
-        let binding = scope(route, incarnation, &registration);
+        let (_, registration) = canonical_registration(route)?;
+        let binding = canonical_scope(route, incarnation, &registration);
         let journal = Journal::open(
             &journal_path(route),
-            binding,
+            scope(route, incarnation, &registration),
             registration.retry_schedule.max_attempts,
         )?;
         routes.push(Route {
@@ -250,8 +260,9 @@ pub(super) fn execute(
                 let mut members = Vec::new();
                 let mut definitions = Vec::new();
                 for route in configured {
-                    let (_, registration) = registration(&route.options)?;
-                    if scope(&route.options, incarnation, &registration) != route.binding {
+                    let (_, registration) = canonical_registration(&route.options)?;
+                    if canonical_scope(&route.options, incarnation, &registration) != route.binding
+                    {
                         return Err("canonical dispatch route binding changed".into());
                     }
                     if require_subscription(
@@ -348,6 +359,7 @@ pub(super) fn execute(
                     ),
                 )?;
             }
+            summary.stopped |= stopped()?;
             Ok(summary)
         })?;
         emit(
@@ -378,4 +390,9 @@ pub(super) fn execute(
             );
         }
     }
+}
+
+fn emit(output: &mut impl Write, text: &str) -> Result<(), String> {
+    writeln!(output,"{text}").and_then(|()|output.flush()).map_err(|e|
+        format!("canonical dispatch output failed; inspect retained canonical progress and receipt history; the receiver may have accepted: {e}"))
 }

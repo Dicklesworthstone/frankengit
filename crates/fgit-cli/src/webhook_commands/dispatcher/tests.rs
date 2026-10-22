@@ -1086,12 +1086,60 @@ fn canonical_claim_refuses_legacy_observations_instead_of_inventing_a_marker() {
 }
 
 #[test]
-fn canonical_strict_ssrf_refuses_before_claim_and_permissive_positive_is_separate() {
+fn canonical_strict_ssrf_records_terminal_refusal_without_a_connection() {
     let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
     fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
-    fixture.register("http://127.0.0.1:1/hook", WebhookEventFilter::Wildcard);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fixture.register(
+        &format!("http://{}/hook", listener.local_addr().unwrap()),
+        WebhookEventFilter::Wildcard,
+    );
     fixture.options.permissive = false;
+    let before = snapshot(&fixture.options).unwrap();
+    let key = before.entries[0].delivery_key();
+    let (code, output) = fixture.run();
+    assert_eq!(code, 2, "{output}");
+    assert!(output.contains("\"active_retired\":true"));
+    let after = snapshot(&fixture.options).unwrap();
+    assert_ne!(after.head, before.head);
+    assert!(after.entries.is_empty());
+    assert!(
+        fixture
+            .store()
+            .get_dead_letter_for(fixture.options.id, key)
+            .is_some()
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn canonical_route_binding_freezes_ssrf_authority_without_rewriting_legacy_scope() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    let registration = fixture.register("http://example.com/hook", WebhookEventFilter::Wildcard);
+    let incarnation = snapshot(&fixture.options).unwrap().incarnation;
+    let legacy = scope(&fixture.options, incarnation, &registration);
+    let permissive = canonical_scope(&fixture.options, incarnation, &registration);
+    fixture.options.permissive = false;
+    assert_eq!(scope(&fixture.options, incarnation, &registration), legacy);
+    assert_ne!(
+        canonical_scope(&fixture.options, incarnation, &registration),
+        permissive
+    );
+}
+
+#[test]
+fn canonical_policy_refusal_keeps_original_pending_plan_and_permitted_resume() {
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    let receiver = Receiver::new(vec![Some(503), Some(204)]);
+    fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    assert_eq!(fixture.run().0, 1);
     let before = snapshot(&fixture.options).unwrap().head;
+    fixture.options.permissive = false;
     assert!(
         execute(
             &fixture.options,
@@ -1102,5 +1150,34 @@ fn canonical_strict_ssrf_refuses_before_claim_and_permissive_positive_is_separat
         .is_err()
     );
     assert_eq!(snapshot(&fixture.options).unwrap().head, before);
-    assert!(!journal_path(&fixture.options).exists());
+    fixture.options.permissive = true;
+    assert_eq!(fixture.run().0, 0);
+    assert_eq!(receiver.finish().len(), 2);
+}
+
+#[test]
+fn canonical_broken_output_preserves_actual_published_ack_and_no_resend() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("closed pipe"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    fixture.options.canonical_principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+    let receiver = Receiver::new(vec![Some(204)]);
+    fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    let error = execute(&fixture.options, &|| Ok(false), &|| Ok(20_000), &mut Broken).unwrap_err();
+    assert!(
+        error.contains("retained canonical progress and receipt history"),
+        "{error}"
+    );
+    assert_eq!(receiver.finish().len(), 1);
+    assert!(snapshot(&fixture.options).unwrap().entries.is_empty());
+    let (code, output) = fixture.run();
+    assert_eq!(code, 0);
+    assert!(output.contains("\"attempts\":0"));
 }

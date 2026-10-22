@@ -20,6 +20,7 @@ use crate::AdmissionError;
 
 mod retirement;
 pub use retirement::retired_effect;
+pub(super) use retirement::retired_effect_in_class;
 
 /// Existing admission evidence namespace. Progress and lifecycle records use
 /// typed bodies here and under the invariant namespace with the same root.
@@ -158,15 +159,30 @@ where
             if let Some(entry) = boundary
                 && record.tx_id == entry.tx_id()
             {
-                if creation_found
-                    || record.parent_rcr_id != entry.predecessor_rcr_id()
-                    || record.forge_event_batch_root != entry.payload_root()
+                if creation_found || record.parent_rcr_id != entry.predecessor_rcr_id() {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                }
+                if entry.effect_class() == super::dispatch::replay::REPLAY_CLASS {
+                    super::dispatch::replay::validate_creation(
+                        store,
+                        cx,
+                        &predecessor,
+                        record,
+                        entry,
+                        &evidence,
+                        cancelled,
+                    )
+                    .await?;
+                } else if record.forge_event_batch_root != entry.payload_root()
                     || evidence != OutboxRecordEvidence::Ordinary
                 {
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
                 creation_found = true;
                 chain.created()?;
+                // Creation has its own validated ordinary/replay partition.
+                // It is not a post-creation lifecycle observation.
+                continue;
             }
             match evidence {
                 OutboxRecordEvidence::Ordinary => {}
@@ -496,7 +512,7 @@ where
     Ok(())
 }
 
-async fn read_effect_receipt<S, C>(
+pub(super) async fn read_effect_receipt<S, C>(
     store: &S,
     cx: &S::Context,
     effect: &CanonicalOutboxEffectState,

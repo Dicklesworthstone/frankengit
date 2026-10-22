@@ -403,6 +403,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_false_creation_position(false)
+    }
+    // Only the negative reader fixture plants an authenticated but structurally
+    // invalid genesis position. Production initialization never uses this path.
+    fn with_false_creation_position(invalid_creation: bool) -> Self {
         let context = AdmissionContext {
             head_key: HeadKey::new(b"outbox-worker-test".to_vec()).expect("head key"),
             tenant_id: TenantId::from_bytes([1; 16]),
@@ -484,6 +489,9 @@ impl Fixture {
         .expect("canonical empty refs");
         head.forge_position_root = storage::root(&delivery.forge).expect("frontier root");
         head.outbox_root = storage::root(&delivery.outbox).expect("outbox root");
+        if invalid_creation {
+            head.latest_repository_sequence = Some(fgit_types::RepositorySequence::FIRST);
+        }
         fgit_authority::initialize_repository(&store.memory, &context.head_key, &head)
             .expect("initialize the reference authority");
         Self {

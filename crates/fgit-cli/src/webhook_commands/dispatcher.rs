@@ -49,24 +49,24 @@ Exit 0: no pending/failed selected work; 1: pending/backoff/bound; 2: refusal or
 rejection; 3: unresolved transport outcome. See docs/WEBHOOK_DISPATCHER.md.";
 
 #[derive(Clone, Debug)]
-struct Options {
-    storage: PathBuf,
-    tenant: TenantId,
-    repository: RepositoryId,
-    format: GitHashAlgorithm,
-    id: WebhookId,
-    destination: AsciiSlug,
-    max_deliveries: usize,
-    max_scan: usize,
-    timeout: Duration,
-    continuous: bool,
-    stop_file: Option<PathBuf>,
-    poll: Duration,
-    permissive: bool,
-    canonical_principal: Option<fgit_types::PrincipalId>,
+pub(super) struct Options {
+    pub(super) storage: PathBuf,
+    pub(super) tenant: TenantId,
+    pub(super) repository: RepositoryId,
+    pub(super) format: GitHashAlgorithm,
+    pub(super) id: WebhookId,
+    pub(super) destination: AsciiSlug,
+    pub(super) max_deliveries: usize,
+    pub(super) max_scan: usize,
+    pub(super) timeout: Duration,
+    pub(super) continuous: bool,
+    pub(super) stop_file: Option<PathBuf>,
+    pub(super) poll: Duration,
+    pub(super) permissive: bool,
+    pub(super) canonical_principal: Option<fgit_types::PrincipalId>,
 }
 impl Options {
-    fn policy(&self) -> SsrfPolicy {
+    pub(super) fn policy(&self) -> SsrfPolicy {
         if self.permissive {
             SsrfPolicy::PERMISSIVE_FOR_TESTS
         } else {
@@ -291,17 +291,29 @@ fn registration_snapshot(options: &Options) -> Result<(WebhookStore, WebhookRegi
         .ok_or("dispatch webhook registration is missing")?;
     Ok((store, registration))
 }
-fn registration(options: &Options) -> Result<(WebhookStore, WebhookRegistration), String> {
-    let (store, registration) = registration_snapshot(options)?;
-    if !registration.active {
-        return Err("dispatch webhook registration is inactive".into());
-    }
+pub(super) fn registration(
+    options: &Options,
+) -> Result<(WebhookStore, WebhookRegistration), String> {
+    let (store, registration) = canonical_registration(options)?;
     let validated = options
         .policy()
         .validate_url(registration.url.raw())
         .map_err(|e| e.to_string())?;
     if validated.scheme() != "http" {
         return Err("dispatch HTTPS is not supported; no TLS downgrade is permitted".into());
+    }
+    Ok((store, registration))
+}
+
+// Canonical dispatch must publish the transport's definite refusal as well as
+// actual HTTP outcomes. URL/DNS/TLS policy is enforced by the transport before
+// connection; preflight here would leave an unfinishable canonical obligation.
+pub(super) fn canonical_registration(
+    options: &Options,
+) -> Result<(WebhookStore, WebhookRegistration), String> {
+    let (store, registration) = registration_snapshot(options)?;
+    if !registration.active {
+        return Err("dispatch webhook registration is inactive".into());
     }
     let schedule = registration.retry_schedule;
     if !(2..=16).contains(&schedule.max_attempts)
@@ -317,7 +329,7 @@ fn registration(options: &Options) -> Result<(WebhookStore, WebhookRegistration)
     Ok((store, registration))
 }
 
-fn scope(
+pub(super) fn scope(
     options: &Options,
     incarnation: RepositoryIncarnationId,
     registration: &WebhookRegistration,
@@ -346,6 +358,19 @@ fn scope(
     }
     sha256_digest(&bytes)
 }
+/// Canonical capability profile is distinct from the stable legacy journal
+/// header. Changing SSRF authority cannot resume an existing canonical plan.
+/// Attempt timeout remains an invocation-local deadline, not a retry reset.
+pub(super) fn canonical_scope(
+    options: &Options,
+    incarnation: RepositoryIncarnationId,
+    registration: &WebhookRegistration,
+) -> [u8; 32] {
+    let mut bytes = b"frankengit/canonical-http-route/v1\0".to_vec();
+    bytes.extend_from_slice(&scope(options, incarnation, registration));
+    bytes.push(u8::from(options.permissive));
+    sha256_digest(&bytes)
+}
 fn journal_path(options: &Options) -> PathBuf {
     // Endpoint/incarnation changes MUST hit the same slot and fail its header,
     // never quietly create a fresh attempt counter for an old delivery key.
@@ -354,6 +379,22 @@ fn journal_path(options: &Options) -> PathBuf {
         options.id.0,
         hex(&sha256_digest(options.destination.as_bytes()))
     ))
+}
+pub(super) struct ReplayFence {
+    _journal: Journal,
+}
+pub(super) fn acquire_replay_fence(
+    options: &Options,
+    incarnation: RepositoryIncarnationId,
+    registration: &WebhookRegistration,
+) -> Result<ReplayFence, String> {
+    Ok(ReplayFence {
+        _journal: Journal::open(
+            &journal_path(options),
+            scope(options, incarnation, registration),
+            registration.retry_schedule.max_attempts,
+        )?,
+    })
 }
 fn payload_hash(root: Digest) -> [u8; 32] {
     let mut input = root.algorithm().code_point().to_be_bytes().to_vec();
