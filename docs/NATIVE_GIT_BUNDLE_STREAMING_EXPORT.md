@@ -165,6 +165,14 @@ after cancellation. These checks are cooperative: a blocking operating-system
 read, write or synchronization call is not preempted at an exact wall-clock
 instant.
 
+The cancellation driver's timer completion is consumed once, and rearming
+explicitly schedules the owner's next poll. An immediately completed replacement
+must not be polled again after its completion was discarded. The deterministic
+`immediately_ready_stop_ticks_are_consumed_once_and_pending_ticks_keep_their_wake`
+unit test covers that scheduling boundary; the native pending-materialization
+and partial-output/fresh-sink-retry tests cover draining and unchanged source
+state. These are coverage requirements, not a current verification claim.
+
 ### Private file publication and refusals
 
 This local publication profile requires Unix and an existing destination

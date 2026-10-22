@@ -6,8 +6,8 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::io::Write;
-use std::pin::pin;
-use std::task::Poll;
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use fgit_pack::full_bundle::stream::{
@@ -131,6 +131,20 @@ impl Stop {
     }
 }
 
+/// Consume each completed tick once. A replacement may already be ready when
+/// first polled, so do not poll it here and discard that completion. Wake the
+/// owner to register or consume the replacement on its next bounded poll.
+pub(super) fn rearm_stop_tick<T: Future<Output = ()>>(
+    mut tick: Pin<&mut T>,
+    context: &mut Context<'_>,
+    next: impl FnOnce() -> T,
+) {
+    if tick.as_mut().poll(context).is_ready() {
+        tick.set(next());
+        context.waker().wake_by_ref();
+    }
+}
+
 /// Poll the same owned operation through cancellation and completion. The
 /// timer also wakes this driver when the authority operation is pending and a
 /// caller stop has no waker of its own. No task or authority work is detached.
@@ -157,10 +171,9 @@ pub(super) async fn drain_materialization<F: Future>(
         if let Poll::Ready(result) = materialization.as_mut().poll(context) {
             return Poll::Ready(result);
         }
-        if tick.as_mut().poll(context).is_ready() {
-            tick.set(asupersync::time::sleep(node.runtime().now(), next_tick()));
-            let _ = tick.as_mut().poll(context);
-        }
+        rearm_stop_tick(tick.as_mut(), context, || {
+            asupersync::time::sleep(node.runtime().now(), next_tick())
+        });
         Poll::Pending
     })
     .await

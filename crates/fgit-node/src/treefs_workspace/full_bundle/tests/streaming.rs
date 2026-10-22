@@ -528,6 +528,59 @@ fn a_pulse_stop_before_materialization_does_not_cancel_the_parent_request() {
 }
 
 #[test]
+fn immediately_ready_stop_ticks_are_consumed_once_and_pending_ticks_keep_their_wake() {
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct RegisteredTick<'a>(&'a RefCell<Option<Waker>>);
+    impl Future for RegisteredTick<'_> {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+            self.0.replace(Some(context.waker().clone()));
+            Poll::Pending
+        }
+    }
+    let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut context = Context::from_waker(&waker);
+    // Ready, like Sleep, panics if polled again after completion. Every new
+    // tick is immediately ready here: this is a deterministic scheduling unit
+    // test, not a substitute for the native export/drain tests below.
+    let mut ready = std::pin::pin!(std::future::ready(()));
+    for expected in 1..=4 {
+        super::super::streaming::rearm_stop_tick(ready.as_mut(), &mut context, || {
+            std::future::ready(())
+        });
+        assert_eq!(wakes.0.load(Ordering::SeqCst), expected);
+    }
+    let registration = RefCell::new(None);
+    let mut pending = std::pin::pin!(RegisteredTick(&registration));
+    super::super::streaming::rearm_stop_tick(pending.as_mut(), &mut context, || {
+        panic!("a pending tick must retain its registered wake")
+    });
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 4);
+    registration
+        .borrow_mut()
+        .take()
+        .expect("the pending timer registered its wake")
+        .wake();
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 5);
+}
+
+#[test]
 fn pending_materialization_stop_is_woken_and_drained_without_a_child_wake() {
     let root = Scratch::new();
     let (node, _, _, _) = fixture(&root, GitHashAlgorithm::Sha1);
