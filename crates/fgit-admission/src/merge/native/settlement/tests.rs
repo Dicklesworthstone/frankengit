@@ -55,6 +55,7 @@ struct Store {
     stopped: Arc<AtomicBool>,
     stop_after: Mutex<Option<StopAfter>>,
     missing_body: Mutex<Option<ImmutableKey>>,
+    stop_on_retirement_stage: AtomicBool,
 }
 
 impl Store {
@@ -119,7 +120,16 @@ impl AsyncAuthorityStore for Store {
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
-        std::future::ready(self.memory.put_if_absent(key, body))
+        let result = self.memory.put_if_absent(key, body);
+        if result.is_ok()
+            && self.stop_on_retirement_stage.load(Ordering::SeqCst)
+            && decode_body::<CanonicalOutboxState>(body, DecodeLimits::DEFAULT)
+                .is_ok_and(|outbox| outbox.entries().is_empty())
+            && self.stop_on_retirement_stage.swap(false, Ordering::SeqCst)
+        {
+            self.stopped.store(true, Ordering::SeqCst);
+        }
+        std::future::ready(result)
     }
     fn read_immutable(
         &self,
@@ -389,6 +399,7 @@ impl Fixture {
             stopped: Arc::new(AtomicBool::new(false)),
             stop_after: Mutex::new(None),
             missing_body: Mutex::new(None),
+            stop_on_retirement_stage: AtomicBool::new(false),
         };
         let events = ForgeEventBatch::of_one(ForgeEvent {
             aggregate: AggregateId::PullRequest(PullRequestNumber::FIRST),
@@ -637,7 +648,12 @@ fn delivered_obligation_and_terminal_retry_are_read_from_canonical_roots() {
     let mut transport = success(fixture.key);
     let acknowledged = fixture
         .deliver(&mut transport, 3, MaterializationFault::None)
-        .expect("worker acknowledges");
+        .unwrap_or_else(|error| {
+            let basis = fixture.basis();
+            let active = run(delivery::read_in(&fixture.store, &(), &basis, &|| false));
+            let progress = run(history::latest_progress(&fixture.store, &(), &basis, fixture.key, &|| false));
+            panic!("worker acknowledgement failed: {error:?}; generation={:?}; active={active:?}; progress={progress:?}", basis.body().generation);
+        });
     assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
     assert_eq!(fixture.effect(), acknowledged);
     assert_eq!(transport.calls, [Call::Probe, Call::Deliver(2)]);

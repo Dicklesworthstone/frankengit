@@ -184,6 +184,24 @@ fn legacy_terminal_is_retired_under_a_distinct_seal_without_another_send() {
     let fixture = Fixture::new();
     let effect = publish_legacy_retained_terminal(&fixture);
     let before = fixture.basis();
+    let missing_entry =
+        CanonicalOutboxState::try_new(fixture.context.repository_id, Vec::new()).unwrap();
+    assert!(
+        matches!(
+            run(delivery::stage_effect_and_outbox_in(
+                &fixture.store,
+                &(),
+                &missing_entry,
+                &effect,
+                &|| false,
+            )),
+            Err(AdmissionError::AsyncProjectionUnavailable(
+                RefusalCode::EvidenceInvalid
+            ))
+        ),
+        "retirement must not weaken the lifecycle stager's membership check"
+    );
+    assert_eq!(fixture.basis(), before);
     assert!(
         run(delivery::read_in(&fixture.store, &(), &before, &|| false))
             .unwrap()
@@ -216,4 +234,74 @@ fn legacy_terminal_is_retired_under_a_distinct_seal_without_another_send() {
     );
     assert_eq!(fixture.basis(), after);
     assert!(transport.calls.is_empty());
+}
+
+#[test]
+fn cancellation_after_pruned_body_staging_keeps_authority_live_and_resumes_without_resend() {
+    let fixture = Fixture::new();
+    fixture
+        .store
+        .stop_on_retirement_stage
+        .store(true, Ordering::SeqCst);
+    let mut first = success(fixture.key);
+    assert!(matches!(
+        fixture.deliver(&mut first, 3, MaterializationFault::None),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::CancellationInProgress
+        ))
+    ));
+    assert_eq!(first.calls, [Call::Probe, Call::Deliver(2)]);
+    assert_eq!(
+        fixture.effect().state(),
+        ObligationState::DeferredExternally
+    );
+    let staged_basis = fixture.basis();
+    let active = run(delivery::read_in(
+        &fixture.store,
+        &(),
+        &staged_basis,
+        &|| false,
+    ))
+    .unwrap();
+    assert_eq!(
+        active.outbox.entries().len(),
+        1,
+        "a staged pruned map is not canonical retirement"
+    );
+    assert!(
+        run(history::retired_effect(
+            &fixture.store,
+            &(),
+            &staged_basis,
+            fixture.key,
+            AsciiSlug::from_static("forge-projection"),
+            &|| false
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        fixture.progress().state(),
+        ReconcileState::Delivered { attempt: 2 }
+    );
+    fixture.resume();
+    let mut recovered = Transport::new(fixture.key, []);
+    let terminal = fixture
+        .deliver(&mut recovered, 3, MaterializationFault::None)
+        .unwrap();
+    assert_eq!(terminal.state(), ObligationState::Acknowledged);
+    assert!(recovered.calls.is_empty());
+    assert_ne!(fixture.basis().id(), staged_basis.id());
+    assert!(
+        run(delivery::read_in(
+            &fixture.store,
+            &(),
+            &fixture.basis(),
+            &|| false
+        ))
+        .unwrap()
+        .outbox
+        .entries()
+        .is_empty()
+    );
+    assert_eq!(fixture.effect(), terminal);
 }

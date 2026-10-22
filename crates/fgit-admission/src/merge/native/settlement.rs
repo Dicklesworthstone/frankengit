@@ -539,9 +539,6 @@ where
                     next_root,
                     Some(entry.effect_state_root()),
                 );
-                if retired_state(next.state()) {
-                    entries.retain(|entry| entry.delivery_key() != original.delivery_key());
-                }
                 let outbox = CanonicalOutboxState::try_new(context.repository_id, entries)
                     .map_err(codec_error)?;
                 if let Some(receipt) = receipt {
@@ -560,7 +557,12 @@ where
                 })
                 .await?;
                 stage_runtime_evidence(store, cx, context, *next, checkpoint).await?;
-                materialization.roots.outbox_root = storage::root(&outbox)?;
+                materialization.roots.outbox_root = if retired_state(next.state()) {
+                    stage_retired_map(store, cx, &outbox, original.delivery_key(), checkpoint)
+                        .await?
+                } else {
+                    storage::root(&outbox)?
+                };
             }
             RuntimeMutation::Progress(body) => {
                 stage_runtime_evidence(store, cx, context, *body, checkpoint).await?;
@@ -572,21 +574,19 @@ where
                 {
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
-                let entries = state
-                    .outbox
-                    .entries()
-                    .iter()
-                    .copied()
-                    .filter(|entry| entry.delivery_key() != original.delivery_key())
-                    .collect();
-                let outbox = CanonicalOutboxState::try_new(context.repository_id, entries)
-                    .map_err(codec_error)?;
-                delivery::stage_effect_and_outbox_in(store, cx, &outbox, effect, &|| {
+                delivery::stage_effect_and_outbox_in(store, cx, &state.outbox, effect, &|| {
                     checkpoint().is_err()
                 })
                 .await?;
                 stage_runtime_evidence(store, cx, context, *effect, checkpoint).await?;
-                materialization.roots.outbox_root = storage::root(&outbox)?;
+                materialization.roots.outbox_root = stage_retired_map(
+                    store,
+                    cx,
+                    &state.outbox,
+                    original.delivery_key(),
+                    checkpoint,
+                )
+                .await?;
             }
         }
         materialization.record.invariant_evidence_root = next_root;
@@ -623,6 +623,42 @@ const fn retired_state(state: ObligationState) -> bool {
         state,
         ObligationState::Acknowledged | ObligationState::TerminallyFailed
     )
+}
+
+// The ordinary lifecycle stager MUST first verify the terminal entry and its
+// predecessor/receipt closure in a map that actually contains it. Its staged
+// retained map grants no authority. Only the pruned map below is selected by
+// the final CAS; do not relax the lifecycle stager's membership check.
+async fn stage_retired_map<S, C>(
+    store: &S,
+    cx: &S::Context,
+    validated: &CanonicalOutboxState,
+    key: AsciiSlug,
+    checkpoint: &C,
+) -> Result<Digest, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
+    checkpoint().map_err(unavailable)?;
+    let entries = validated
+        .entries()
+        .iter()
+        .copied()
+        .filter(|entry| entry.delivery_key() != key)
+        .collect();
+    let active =
+        CanonicalOutboxState::try_new(validated.repository_id(), entries).map_err(codec_error)?;
+    let root = storage::stage_body(
+        store,
+        cx,
+        validated.repository_id(),
+        delivery::OUTBOX_NAMESPACE,
+        &active,
+    )
+    .await?;
+    checkpoint().map_err(unavailable)?;
+    Ok(root)
 }
 
 async fn stage_runtime_evidence<S, B, C>(
