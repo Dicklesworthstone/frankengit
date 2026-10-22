@@ -196,11 +196,10 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let inputs = coordinates(&node);
         assert_eq!((inputs.target, inputs.source), (target, incoming));
         let (mut subject, data) = open(&node, inputs);
-        let request = node.request_context();
         let (_, protection) = node
             .runtime()
             .block_on(node.admit_review_protection_durable_in(
-                &request,
+                &node.request_context(),
                 &session(1, b"protect-resolved-squash"),
                 &ProtectionCommand {
                     expected_version: ExpectedVersion::NewStream,
@@ -239,7 +238,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let legacy = node
             .runtime()
             .block_on(node.prepare_resolved_pull_request_bundle_in(
-                &request,
+                &node.request_context(),
                 &subject,
                 inputs.base,
                 &RefVisibility::new(),
@@ -254,7 +253,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let legacy_branch = node
             .runtime()
             .block_on(node.prepare_resolved_merge_bundle_in(
-                &request,
+                &node.request_context(),
                 &subject.target_ref,
                 &subject.source_ref,
                 &RefVisibility::new(),
@@ -292,7 +291,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let inspected = node
             .runtime()
             .block_on(node.inspect_pull_request_bundle_in(
-                &request,
+                &node.request_context(),
                 &subject,
                 CandidateBinding {
                     merge_base: inputs.base,
@@ -334,7 +333,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let (_, refused) = node
             .runtime()
             .block_on(node.apply_reviewed_merge_bundle_with_method_durable_in(
-                &request,
+                &node.request_context(),
                 actor(2),
                 b"wrong-resolved-candidate-review",
                 PullRequestNumber::FIRST,
@@ -377,7 +376,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         let accepted = node
             .runtime()
             .block_on(node.apply_reviewed_merge_bundle_with_method_durable_in(
-                &request,
+                &node.request_context(),
                 actor(2),
                 b"publish-resolved-squash",
                 PullRequestNumber::FIRST,
@@ -434,7 +433,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         .unwrap();
         let history = node
             .runtime()
-            .block_on(node.snapshot_history_in(&request))
+            .block_on(node.snapshot_history_in(&node.request_context()))
             .unwrap();
         let last = history.last().unwrap();
         assert_eq!(last.batch.committed_rcrs.len(), 1);
@@ -450,14 +449,20 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         );
         let page = node
             .runtime()
-            .block_on(node.read_pull_requests_in(&request, &RefVisibility::new(), 0, 10, None))
+            .block_on(node.read_pull_requests_in(
+                &node.request_context(),
+                &RefVisibility::new(),
+                0,
+                10,
+                None,
+            ))
             .unwrap();
         assert_eq!(page.pull_requests[0].event, *intent.event());
         assert_eq!(page.pull_requests[0].data, Some(data));
         assert!(
             node.runtime()
                 .block_on(node.apply_reviewed_merge_bundle_with_method_durable_in(
-                    &request,
+                    &node.request_context(),
                     actor(2),
                     b"publish-resolved-squash",
                     PullRequestNumber::FIRST,
@@ -475,7 +480,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
         assert!(matches!(
             node.runtime()
                 .block_on(node.prepare_resolved_merge_bundle_with_style_in(
-                    &request,
+                    &node.request_context(),
                     &subject.target_ref,
                     &subject.source_ref,
                     &RefVisibility::new(),
@@ -548,11 +553,10 @@ fn choosing_ours_can_publish_a_resolved_squash_with_an_empty_target_diff() {
         assert_ne!(plan.commit, inputs.target);
         assert_ne!(plan.commit, inputs.source);
         let merge = candidate(&subject, &artifact);
-        let request = node.request_context();
         let inspected = node
             .runtime()
             .block_on(node.inspect_pull_request_bundle_in(
-                &request,
+                &node.request_context(),
                 &subject,
                 CandidateBinding {
                     merge_base: inputs.base,
@@ -570,7 +574,7 @@ fn choosing_ours_can_publish_a_resolved_squash_with_an_empty_target_diff() {
         let accepted = node
             .runtime()
             .block_on(node.apply_merge_bundle_with_method_durable_in(
-                &request,
+                &node.request_context(),
                 actor(2),
                 b"publish-ours-squash",
                 PullRequestNumber::FIRST,
