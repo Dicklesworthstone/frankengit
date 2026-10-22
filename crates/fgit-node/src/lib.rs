@@ -56,6 +56,7 @@ mod capsule_history;
 pub mod source_retrieval;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
+pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
     BundleInspectionRefusal, PullRequestInspectionRefusal,
 };

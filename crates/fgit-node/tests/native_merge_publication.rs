@@ -1115,6 +1115,181 @@ fn canonical_outbox_delivers_once_and_refuses_weak_capability_before_any_call() 
 }
 
 #[test]
+fn terminal_outbox_retirement_survives_reopen_in_both_object_formats() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &scratch.0, format, true);
+        apply(
+            &node,
+            &intent(&f, 1, ExpectedVersion::NewStream),
+            b"retire-outbox",
+        )
+        .unwrap();
+        let key = delivery_key(&node);
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let mut consumer = destination(&scratch.0);
+        assert!(
+            node.runtime()
+                .block_on(node.read_retired_forge_receipt_in(
+                    &request,
+                    key,
+                    consumer.destination(),
+                    Some(before.basis().id()),
+                ))
+                .is_err(),
+            "an active obligation has no authenticated retirement receipt"
+        );
+        let acknowledged = deliver(&node, key, &mut consumer).unwrap();
+        assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+        let request = node.request_context();
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert!(
+            after.snapshot().outbox.is_empty(),
+            "terminal entries do not occupy active slots"
+        );
+        assert_eq!(
+            before.basis().body().ref_root,
+            after.basis().body().ref_root
+        );
+        assert_eq!(
+            before.basis().body().forge_position_root,
+            after.basis().body().forge_position_root
+        );
+        assert_eq!(
+            before.basis().body().retention_root,
+            after.basis().body().retention_root
+        );
+        assert_ne!(
+            before.basis().body().outbox_root,
+            after.basis().body().outbox_root
+        );
+        let terminal_head = after.basis().id();
+        let receipt = node
+            .runtime()
+            .block_on(node.read_retired_forge_receipt_in(
+                &request,
+                key,
+                consumer.destination(),
+                Some(terminal_head),
+            ))
+            .unwrap();
+        assert_eq!(receipt.source_head(), terminal_head);
+        assert_eq!(receipt.effect(), &acknowledged);
+        assert_eq!(
+            Some(receipt.receipt().root().unwrap()),
+            acknowledged.evidence_root()
+        );
+        assert_eq!(receipt.receipt().destination(), consumer.destination());
+        assert_eq!(
+            receipt.receipt().payload_root(),
+            acknowledged.payload_root()
+        );
+        assert_eq!(
+            receipt.receipt().disposition(),
+            fgit_codec::OutboxDeliveryDisposition::Acknowledged
+        );
+        let receipt_frame = fgit_codec::encode_body(receipt.receipt()).unwrap();
+        let cancelled = node.request_context();
+        cancelled.cancel();
+        assert!(
+            node.runtime()
+                .block_on(node.read_retired_forge_receipt_in(
+                    &cancelled,
+                    key,
+                    consumer.destination(),
+                    Some(terminal_head),
+                ))
+                .is_err()
+        );
+        for (query_key, audience, head) in [
+            (
+                key,
+                AsciiSlug::from_static("another-destination"),
+                Some(terminal_head),
+            ),
+            (
+                AsciiSlug::from_static("not-a-delivery"),
+                consumer.destination(),
+                Some(terminal_head),
+            ),
+            (key, consumer.destination(), Some(before.basis().id())),
+        ] {
+            assert!(
+                node.runtime()
+                    .block_on(
+                        node.read_retired_forge_receipt_in(&request, query_key, audience, head,)
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!((consumer.probes, consumer.sends), (1, 1));
+        node.shutdown().unwrap();
+
+        let mut node = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let mut recovered_consumer = destination(&scratch.0);
+        let request = node.request_context();
+        let recovered_receipt = node
+            .runtime()
+            .block_on(node.read_retired_forge_receipt_in(
+                &request,
+                key,
+                recovered_consumer.destination(),
+                Some(terminal_head),
+            ))
+            .unwrap();
+        assert_eq!(recovered_receipt.source_head(), terminal_head);
+        assert_eq!(recovered_receipt.effect(), &acknowledged);
+        assert_eq!(
+            fgit_codec::encode_body(recovered_receipt.receipt()).unwrap(),
+            receipt_frame
+        );
+        assert!(
+            node.runtime()
+                .block_on(node.select_forge_delivery_in(
+                    &request,
+                    key,
+                    recovered_consumer.destination(),
+                    Some(terminal_head),
+                ))
+                .is_err(),
+            "receipt lookup does not make a retired delivery selectable for manual resend"
+        );
+        assert_eq!(
+            deliver(&node, key, &mut recovered_consumer).unwrap(),
+            acknowledged
+        );
+        assert_eq!(
+            (recovered_consumer.probes, recovered_consumer.sends),
+            (0, 0)
+        );
+        let request = node.request_context();
+        let recovered = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(
+            recovered.basis().id(),
+            terminal_head,
+            "retry does not republish a terminal outcome"
+        );
+        assert!(recovered.snapshot().outbox.is_empty());
+        assert_eq!(refs(&node)[&main_ref()], f.candidate);
+        assert_eq!(fs::read_dir(&consumer.root).unwrap().count(), 1);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn exhausted_background_budget_refuses_before_effect_and_fresh_worker_reconciles() {
     use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
     let scratch = Scratch::new();
