@@ -185,7 +185,7 @@ fn rejected_pattern_operators_have_permitted_twins_and_source_spans() {
 #[test]
 fn unknown_filter_fields_and_shapes_never_disappear() {
     for on in [
-        "\n  push:\n    paths:\n      - src/**",
+        "\n  push:\n    tags:\n      - release/**",
         "\n  pull_request:\n    types:\n      - opened",
         "\n  workflow_dispatch:\n    branches:\n      - main",
         "\n  schedule: ''",

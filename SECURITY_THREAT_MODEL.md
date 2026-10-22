@@ -59,7 +59,18 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Seals, prepared evidence, decisions, RCRs, outbox, repairs, deletions, overrides, policy epochs, and releases emit immutable evidence.
 - Native forge delivery accepts a configured capability whose audience must
   match the canonical outbox entry; repository text cannot select an endpoint.
-  Automated dispatch requires durable downstream idempotency. Recovery validates
+  The original Strong driver requires durable downstream idempotency. The
+  separate explicitly owned Weak profile first publishes its complete selected
+  route intent and deferral together. Only the acknowledged marker CAS winner
+  may send. Recovered markers grant probes, never new send ownership; non-probing
+  HTTP Unknown escalates and remains active. Local journals and registrations
+  cannot establish completion or erase an owed sibling. Legacy observations
+  without canonical markers refuse rather than being retroactively credited.
+  This is trusted-local routing intent, not subscriber discovery or hosted
+  authorization. HTTP evidence commits actual transport evidence (a response or
+  typed refusal) without publishing secrets or response text. SSRF and unsupported
+  TLS refusals publish definite failure before connection, never delivery.
+  Recovery validates
   committed progress order, exact lifecycle predecessors, the original payload,
   the persisted retry ceiling, and bounded receipt evidence. Staged progress,
   missing evidence aliases, refused settlements, and corrupt advanced roots
@@ -67,6 +78,24 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
   request context and draining acquired responsibility. The embedded profile
   retains immutable authority bodies; distributed outbox GC and arbitrary
   webhook transport are not established by this integration.
+- Active outbox retirement requires a canonically published acknowledgement
+  or definite terminal refusal and preserves its RCR, progress, payload and
+  receipt closure. An absent active key alone proves neither non-delivery nor
+  completion. Retired-key recovery authenticates the removal transition and
+  original receipt; missing history fails closed and authorizes no resend.
+  Unresolved escalations retain their active responsibility. Any future GC or
+  history compactor must retain this closure or provide a verified checkpoint
+  replacement before deleting it.
+- Canonical manual replay creates a separate sealed one-send obligation from
+  an authenticated failed/uncertain ORIGINAL forge-event route. Source effect,
+  payload, destination and route commitments are retained in the RCR-bound
+  semantic request. Original outcome and budgets never reopen. Replay parents
+  cannot be other replay obligations; repeated explicit requests use the original
+  source and new keys, bounding provenance depth. Source eligibility is checked
+  at creation and every fresh marker CAS basis, including replans. Staged source
+  receipts, a delivered sibling, or local diagnostics alone grant no send.
+  Indeterminate canonical routes need no invented local diagnostic. Recovery
+  of a replay marker probes Unknown and cannot silently send again.
 - Replay completeness is explicit.
 - Backups/capsules/restores use the same commitments as normal reads.
 - Security incidents can reconstruct actor/capability/input/basis/decision/publication/effect history subject to confidentiality policy.

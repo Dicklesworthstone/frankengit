@@ -101,6 +101,8 @@ impl Fixture {
             attempt: None,
             at_least_once: true,
             permissive: true,
+            canonical_principal: None,
+            replay_key: None,
         };
         let root = entry.payload_root();
         node.shutdown().unwrap();

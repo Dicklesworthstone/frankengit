@@ -30,7 +30,9 @@ fgit-types.workspace = true
 fgit-verified-read.workspace = true
 
 [dev-dependencies]
+fgit-admission.workspace = true
 fgit-pack.workspace = true
+fgit-resource.workspace = true
 
 [lints]
 workspace = true

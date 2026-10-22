@@ -57,8 +57,9 @@ pub trait SyncNativeMergeProjection: Sync {
         basis: &PublicationBasis,
         authenticated: &AuthenticatedHead,
     ) -> Result<NativeMergeBasis, ProjectionFailure>;
-    /// Revalidate the exact candidate, ordered parents, base and full native
-    /// object closure at each authority basis, including every CAS replan.
+    /// Revalidate the exact candidate, ordered parents, base and the native
+    /// objects it adds above the selected closure at each authority basis,
+    /// including every CAS replan.
     fn validate_merge(
         &self,
         basis: &PublicationBasis,

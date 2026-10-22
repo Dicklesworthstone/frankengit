@@ -6,8 +6,8 @@ use std::cell::Cell;
 use std::future::Future;
 
 use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_fast_forward_objects, validate_merge_objects,
-    validate_squash_objects,
+    MergeObjectLimits, validate_fast_forward_objects_above, validate_merge_objects_above,
+    validate_squash_objects_above,
 };
 use fgit_admission::merge::native::{
     NativeMergeIntent, NativeMergeMethod, NativeMergeProjection, admit_native_merge_async,
@@ -583,16 +583,31 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     false
                 }
             };
+            // Validate only what the candidate adds above the authority-selected
+            // closure; the record then names those objects (frankengit-lh8z).
+            let objects = selected.selected_closure().closure().objects();
             let result = match intent.method() {
-                NativeMergeMethod::MergeCommit => {
-                    validate_merge_objects(&source, merge, self.object_limits, &mut live)
-                }
-                NativeMergeMethod::FastForwardOnly => {
-                    validate_fast_forward_objects(&source, merge, self.object_limits, &mut live)
-                }
-                NativeMergeMethod::Squash => {
-                    validate_squash_objects(&source, merge, self.object_limits, &mut live)
-                }
+                NativeMergeMethod::MergeCommit => validate_merge_objects_above(
+                    &source,
+                    merge,
+                    objects,
+                    self.object_limits,
+                    &mut live,
+                ),
+                NativeMergeMethod::FastForwardOnly => validate_fast_forward_objects_above(
+                    &source,
+                    merge,
+                    objects,
+                    self.object_limits,
+                    &mut live,
+                ),
+                NativeMergeMethod::Squash => validate_squash_objects_above(
+                    &source,
+                    merge,
+                    objects,
+                    self.object_limits,
+                    &mut live,
+                ),
             };
             if exhaustion.get().is_some() {
                 return Err(ProjectionFailure::Unavailable(

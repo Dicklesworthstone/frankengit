@@ -67,10 +67,11 @@ impl ProcessGroup {
         if !self.exited()? {
             return Err(io::Error::other("process group is not ready to complete"));
         }
-        match inspect(
+        match inspect_until(
             Path::new("/proc"),
             self.pid.as_raw_pid() as u32,
-            Instant::now() + SCAN,
+            Instant::now() + DRAIN,
+            SCAN,
         ) {
             Ok(snapshot) if !snapshot.other => Ok((self.reap()?, false)),
             Ok(_) => Ok((self.terminate()?, true)),
@@ -107,11 +108,8 @@ impl ProcessGroup {
             // Kill the still-owned direct child too; never broaden to other PIDs.
             let _direct = kill_process(self.pid, Signal::KILL);
             let exited = self.exited()?;
-            let snapshot = inspect(
-                Path::new("/proc"),
-                self.pid.as_raw_pid() as u32,
-                end.min(Instant::now() + SCAN),
-            );
+            let snapshot =
+                inspect_until(Path::new("/proc"), self.pid.as_raw_pid() as u32, end, SCAN);
             match snapshot {
                 Ok(snapshot) if exited && !snapshot.live_other => return self.reap(),
                 Ok(_) => {}
@@ -163,17 +161,58 @@ impl Drop for ProcessGroup {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Snapshot {
     other: bool,
     live_other: bool,
 }
-fn inspect(root: &Path, leader: u32, end: Instant) -> io::Result<Snapshot> {
+
+/// A scan that outlived its window says nothing about the group: a busy host
+/// can simply deschedule it. Every other failure is a definitive refusal.
+#[derive(Debug)]
+enum ScanError {
+    Expired,
+    Failed(io::Error),
+}
+impl From<io::Error> for ScanError {
+    fn from(error: io::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Retry expired scans, doubling the window, until `end`; refuse at once on a
+/// definitive failure. Quiescence still has to be proved by one complete scan
+/// (frankengit-twuw).
+fn inspect_until(
+    root: &Path,
+    leader: u32,
+    end: Instant,
+    first_window: Duration,
+) -> io::Result<Snapshot> {
+    let mut window = first_window;
+    loop {
+        match inspect(root, leader, end.min(Instant::now() + window)) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(ScanError::Expired) if Instant::now() < end => {
+                window = window.saturating_mul(2).max(Duration::from_millis(1));
+            }
+            Err(ScanError::Expired) => {
+                return Err(io::Error::other("process-group observation limit exceeded"));
+            }
+            Err(ScanError::Failed(error)) => return Err(error),
+        }
+    }
+}
+
+fn inspect(root: &Path, leader: u32, end: Instant) -> Result<Snapshot, ScanError> {
     let mut snapshot = Snapshot::default();
     let mut saw_leader = false;
     for (count, entry) in fs::read_dir(root)?.enumerate() {
-        if count >= MAX_PROC_ENTRIES || Instant::now() >= end {
-            return Err(io::Error::other("process-group observation limit exceeded"));
+        if count >= MAX_PROC_ENTRIES {
+            return Err(io::Error::other("process-group observation limit exceeded").into());
+        }
+        if Instant::now() >= end {
+            return Err(ScanError::Expired);
         }
         let entry = entry?;
         let name = entry.file_name();
@@ -189,7 +228,7 @@ fn inspect(root: &Path, leader: u32, end: Instant) -> io::Result<Snapshot> {
         let file = match File::open(entry.path().join("stat")) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let mut bytes = Vec::new();
         if let Err(error) = file
@@ -200,26 +239,27 @@ fn inspect(root: &Path, leader: u32, end: Instant) -> io::Result<Snapshot> {
             if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) {
                 continue;
             }
-            return Err(error);
+            return Err(error.into());
         }
         if bytes.len() > MAX_STAT_BYTES {
-            return Err(io::Error::other("process stat limit exceeded"));
+            return Err(io::Error::other("process stat limit exceeded").into());
         }
         let (group, state) = stat(&bytes, pid)?;
         if pid == leader {
             saw_leader = true;
             if group != leader {
-                return Err(io::Error::other(
-                    "direct child left its owned process group",
-                ));
+                return Err(io::Error::other("direct child left its owned process group").into());
             }
         } else if group == leader {
             snapshot.other = true;
             snapshot.live_other |= !matches!(state, b'Z' | b'X');
         }
     }
-    if !saw_leader || Instant::now() >= end {
-        return Err(io::Error::other("incomplete process-group observation"));
+    if !saw_leader {
+        return Err(io::Error::other("incomplete process-group observation").into());
+    }
+    if Instant::now() >= end {
+        return Err(ScanError::Expired);
     }
     Ok(snapshot)
 }

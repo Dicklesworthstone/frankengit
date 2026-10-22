@@ -205,11 +205,6 @@ impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore>
                 return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
             }
             let closure = materialized.selected_closure().closure();
-            if closure.objects().len() > self.object_limits.max_objects {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::ResourceBudgetExceeded,
-                ));
-            }
             if !closure.objects().contains(&record.source_commit) {
                 return Err(ProjectionFailure::Refuse(
                     RefusalCode::ObjectClosureIncomplete,
@@ -264,11 +259,7 @@ impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore>
             }
             self.merge_checkpoint(cx)
                 .map_err(ProjectionFailure::Unavailable)?;
-            Ok(ValidatedClosure {
-                object_closure_root: fgit_admission::permitted_object_closure_root(closure)
-                    .map_err(ProjectionFailure::Unavailable)?,
-                objects: closure.objects().clone(),
-            })
+            crate::named_object_closure(closure, &[record.source_commit])
         }
     }
 }

@@ -113,6 +113,7 @@ fn parse(args: &[String]) -> Result<Query, String> {
             stop_file: None,
             poll: Duration::from_secs(1),
             permissive: false,
+            canonical_principal: None,
         },
         after,
         limit: number(fields.get("--limit").copied().unwrap_or("20"), 1, 100)? as usize,

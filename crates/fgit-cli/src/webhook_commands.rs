@@ -25,6 +25,7 @@ usage: fg webhook dead-letter list <storage-root> <tenant-id> <repository-id> --
 usage: fg webhook dead-letter replay <storage-root> <tenant-id> <repository-id> --trusted-local
          --id <id> --delivery-id <delivery-id> --destination <canonical-destination>
          --at-least-once [--object-format sha1|sha256] [--expected-head <snapshot-token>]
+         [--canonical-principal <principal-id> --replay-key <new-stable-key>]
          [--permissive-for-tests]
 usage: fg webhook deliver <storage-root> <tenant-id> <repository-id> --trusted-local
          --id <id> --delivery-id <delivery-id> --destination <canonical-destination>
@@ -36,12 +37,15 @@ usage: fg webhook outbox <storage-root> <tenant-id> <repository-id> --trusted-lo
 usage: fg webhook inspect <storage-root> <tenant-id> <repository-id> --trusted-local
          --delivery-id <delivery-id> --destination <canonical-destination>
          [--object-format sha1|sha256] [--expected-head <snapshot-token>]
+usage: fg webhook receipt <storage-root> <tenant-id> <repository-id> --trusted-local
+         --delivery-id <delivery-id> --destination <canonical-destination>
+         [--object-format sha1|sha256] [--expected-head <snapshot-token>]
 
 usage: fg webhook dispatch --help
 usage: fg webhook dispatch-migrate --help
 usage: fg webhook dispatch-status --help
 
-Manual deliver/replay can duplicate an effect and never settle its canonical
+Legacy manual deliver/replay can duplicate an effect and never settle its canonical
 obligation. Replay contacts the receiver; diagnostic dead letters are retained.
 Exit 0: acceptance observed; 1: transient failure; 2: refusal; 3: outcome unknown.
 See docs/WEBHOOK_OPERATOR_DELIVERY.md for the supported operator profile.";
@@ -60,7 +64,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         "list" => run_list(&args[1..]),
         "rotate" => run_rotate(&args[1..]),
         "dead-letter" => run_dead_letter(&args[1..]),
-        "outbox" | "inspect" | "deliver" => delivery::run(args[0].as_str(), &args[1..]),
+        "outbox" | "inspect" | "receipt" | "deliver" => delivery::run(args[0].as_str(), &args[1..]),
         _ => Err(format!("unknown webhook subcommand: {}", args[0])),
     }
 }

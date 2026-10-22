@@ -178,12 +178,12 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "trigger.paths",
         status: ConstructStatus::Accepted,
-        reason: "ordered bounded path patterns select complete canonical PR merge-base changes; missing, incomplete or over-budget evidence refuses",
+        reason: "ordered bounded path patterns select complete canonical push ref differences or PR merge-base changes; missing, incomplete or over-budget evidence refuses",
     },
     Construct {
         key: "trigger.paths-ignore",
         status: ConstructStatus::Accepted,
-        reason: "PR execution requires at least one changed path outside the exclusions; empty changes create no jobs or passing checks",
+        reason: "push and PR execution require at least one changed path outside the exclusions; empty changes create no jobs or passing checks",
     },
     Construct {
         key: "workflow.concurrency",
@@ -208,7 +208,7 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "workflow.on",
         status: ConstructStatus::Accepted,
-        reason: "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch filters and explicitly empty event scalars",
+        reason: "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch and path filters and explicitly empty event scalars",
     },
     Construct {
         key: "workflow.secrets",

@@ -507,9 +507,21 @@ oracle_validate_run_directory() {
 
 oracle_reject_escape_options() {
     local argument=""
+    local seen_subcommand=0
     for argument in "$@"; do
+        # Git's own options precede the subcommand; no oracle caller needs one,
+        # and there -p/-P/-c/-C select paging, config or a directory. After the
+        # subcommand the same letters are the subcommand's own flags (for
+        # example merge-file -p prints to stdout), so only the escape forms
+        # below stay refused everywhere (frankengit-mey1).
+        if (( ! seen_subcommand )); then
+            case "${argument}" in
+                -*) oracle_die "ESCAPE" "Git option is not permitted in the sandbox runner: ${argument}" ;;
+                *) seen_subcommand=1 ;;
+            esac
+        fi
         case "${argument}" in
-            -C|-p|-P|--git-dir|--work-tree|--template|--exec-path|--config-env|--config|--super-prefix|-c|--paginate|--no-pager|--)
+            --git-dir|--work-tree|--template|--exec-path|--config-env|--config|--super-prefix|--paginate|--no-pager|--)
                 oracle_die "ESCAPE" "Git option is not permitted in the sandbox runner: ${argument}"
                 ;;
             -C*|--git-dir=*|--work-tree=*|--template=*|--exec-path=*|--config-env=*|--config=*|--super-prefix=*|file://*|ssh://*|git://*|http://*|https://*|/*)

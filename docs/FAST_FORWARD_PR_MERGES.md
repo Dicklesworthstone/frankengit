@@ -32,9 +32,11 @@ The embedded node implements it through its existing verified materializer.
 
 ## Verification boundary
 
-The independent native-object walker hashes and parses the complete source
-closure. It proves ancestry through commit parent headers, including non-first
-parents; tree equality, fabricated outgoing-edge metadata, gitlinks and mere
+The independent native-object walker hashes and parses the source tip and
+checks the kind of each already-selected object it references; selected history
+is not walked again (frankengit-lh8z). It proves ancestry through commit parent
+headers of selected commits, including non-first parents, with an exact
+frontier traversal; tree equality, fabricated outgoing-edge metadata, gitlinks and mere
 local object existence cannot establish ancestry. Every resulting dependency
 must already belong to the authority-selected closure. The existing object,
 edge, byte, deadline and cancellation ceilings remain in force.

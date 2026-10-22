@@ -101,6 +101,7 @@ impl Fixture {
             stop_file: None,
             poll: Duration::from_millis(100),
             permissive: true,
+            canonical_principal: None,
         }
     }
 

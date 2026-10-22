@@ -11,6 +11,7 @@ use fgit_admission::evidence::{
     DecisionEvidenceBodies, OutboxEffectBatch, evidence_root, principal_snapshot_id,
 };
 use fgit_admission::merge::native::delivery::{self, EFFECT_NAMESPACE, OUTBOX_NAMESPACE};
+use fgit_admission::merge::native::objects::validate_merge_objects;
 use fgit_admission::merge::{SealedMerge, prepare_native_merge, seal_attempt_for};
 use fgit_admission::{
     CanonicalRefState, CommitEvidence, PermittedObjectClosure, permitted_object_closure_root,
@@ -407,12 +408,9 @@ impl OfferedPackage {
 }
 
 fn offered(node: &OneNode, f: &Fixture, number: u64, epoch: u64, key: &[u8]) -> OfferedPackage {
-    let mut objects = snapshot(node)
-        .selected_closure()
-        .closure()
-        .objects()
-        .clone();
-    objects.insert(f.candidate);
+    // The candidate is the only object this merge adds above the selected
+    // closure; admission also names its base and both parents (lh8z).
+    let objects = BTreeSet::from([f.candidate, f.base, f.target, f.source]);
     let event = intent(f, number, f.target, f.candidate).event().clone();
     let mut offer = OfferedPackage {
         evidence: unrelated_evidence(),

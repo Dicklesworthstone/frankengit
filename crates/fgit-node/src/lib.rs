@@ -56,6 +56,7 @@ mod capsule_history;
 pub mod source_retrieval;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
+pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
     BundleInspectionRefusal, PullRequestInspectionRefusal,
 };
@@ -2504,6 +2505,31 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             .await
             .map_err(async_projection_unavailable)
     }
+}
+
+/// The closure a forge decision commits: exactly the already-selected objects
+/// it names. The serving closure is the union of every committed decision's
+/// closure, and these objects are already in it, so the union is unchanged.
+/// The decision no longer copies, hashes or caps the whole repository. Admission
+/// still requires each named object, and a name outside the selected closure
+/// refuses here.
+pub(crate) fn named_object_closure(
+    selected: &PermittedObjectClosure,
+    named: &[GitOid],
+) -> Result<ValidatedClosure, fgit_admission::ProjectionFailure> {
+    if named.iter().any(|oid| !selected.objects().contains(oid)) {
+        return Err(fgit_admission::ProjectionFailure::Refuse(
+            RefusalCode::ObjectClosureIncomplete,
+        ));
+    }
+    let objects = named.iter().copied().collect::<BTreeSet<_>>();
+    let object_closure_root =
+        permitted_object_closure_root(&PermittedObjectClosure::new(objects.clone()))
+            .map_err(fgit_admission::ProjectionFailure::Unavailable)?;
+    Ok(ValidatedClosure {
+        object_closure_root,
+        objects,
+    })
 }
 
 fn async_projection_unavailable(
@@ -7821,8 +7847,9 @@ impl OneNode {
     ///
     /// Native Git merge events use the same asynchronous driver and node-owned
     /// object validation as [`Self::admit_native_merge_durable_in`]. The node
-    /// re-reads the candidate and complete closure, verifies its ordered parents
-    /// and base ancestry, and publishes ref, forge and outbox effects together.
+    /// re-reads the candidate and every object it adds above the selected
+    /// closure, verifies its ordered parents and base ancestry, and publishes
+    /// ref, forge and outbox effects together.
     /// Supplied closure and evidence must match the independently validated
     /// objects and complete fold at the selected authority basis.
     ///

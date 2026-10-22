@@ -646,3 +646,81 @@ mod snapshot_tests;
 
 #[path = "metadata_read_tests.rs"]
 mod metadata_read_tests;
+
+#[test]
+fn named_object_closure_commits_only_selected_named_objects() {
+    use fgit_admission::{
+        PermittedObjectClosure, ProjectionFailure, permitted_object_closure_root,
+    };
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let [a, b, c, outside] = ["a", "b", "c", "outside"]
+            .map(|label| git_object_id(format, GitObjectKind::Blob, label.as_bytes()));
+        let selected = PermittedObjectClosure::new([a, b, c].into());
+        // Duplicates collapse; the root covers exactly the named set.
+        let named = crate::named_object_closure(&selected, &[b, a, b]).unwrap();
+        assert_eq!(named.objects, [a, b].into());
+        assert_eq!(
+            named.object_closure_root,
+            permitted_object_closure_root(&PermittedObjectClosure::new([a, b].into())).unwrap()
+        );
+        assert_ne!(
+            named.object_closure_root,
+            permitted_object_closure_root(&selected).unwrap()
+        );
+        // An unselected name refuses rather than widening the closure.
+        assert!(matches!(
+            crate::named_object_closure(&selected, &[a, outside]),
+            Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete
+            ))
+        ));
+        // Naming nothing is the empty closure, as issue records commit.
+        assert!(
+            crate::named_object_closure(&selected, &[])
+                .unwrap()
+                .objects
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn pull_request_records_commit_their_two_tips_and_leave_the_selected_closure_unchanged() {
+    use fgit_admission::{PermittedObjectClosure, permitted_object_closure_root};
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = node(&scratch, format);
+        let f = fixture(&node, &scratch, format);
+        let before = snapshot(&node);
+        let whole = before.selected_closure().closure().clone();
+        // The repository holds more than the two tips: base, tree and blob too.
+        assert!(whole.objects().len() > 2);
+        let (tx_id, _) = accepted(apply(&node, &command(&f, 4), "named-open"));
+        let after = snapshot(&node);
+        assert_eq!(after.selected_closure().closure(), &whole);
+        let request = node.request_context();
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&request))
+            .unwrap();
+        let record = &history.last().unwrap().batch.committed_rcrs[0];
+        assert_eq!(record.tx_id, tx_id);
+        assert_eq!(
+            record.object_closure_root,
+            permitted_object_closure_root(&PermittedObjectClosure::new(
+                [f.data.source_tip, f.data.target_tip].into()
+            ))
+            .unwrap()
+        );
+        assert_ne!(
+            record.object_closure_root,
+            permitted_object_closure_root(&whole).unwrap()
+        );
+        node.shutdown().unwrap();
+        // The union still serves every object after a restart.
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert_eq!(snapshot(&reopened).selected_closure().closure(), &whole);
+        reopened.shutdown().unwrap();
+    }
+}

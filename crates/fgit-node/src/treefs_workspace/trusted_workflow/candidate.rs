@@ -15,6 +15,22 @@ pub(super) enum WorkflowInputs<A: GitHashAlgorithm> {
     },
 }
 impl<A: GitHashAlgorithm> WorkflowInputs<A> {
+    // Each workflow gets fresh host copies, while immutable verified input bytes
+    // and their provenance remain shared across the dispatch.
+    pub(super) fn shared(&self) -> Self {
+        match self {
+            Self::Canonical(manifest) => Self::Canonical(Arc::clone(manifest)),
+            Self::Candidate {
+                manifest,
+                bundle_sha256,
+                merge,
+            } => Self::Candidate {
+                manifest: Arc::clone(manifest),
+                bundle_sha256: *bundle_sha256,
+                merge: merge.clone(),
+            },
+        }
+    }
     pub(super) fn entries(&self) -> &[SparseEntry<A>] {
         match self {
             Self::Canonical(m) => m.entries(),

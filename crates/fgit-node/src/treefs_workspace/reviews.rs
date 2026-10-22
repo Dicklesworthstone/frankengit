@@ -453,11 +453,6 @@ impl ReviewProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
                 .await
                 .map_err(async_projection_unavailable)?;
             let closure = selected.selected_closure().closure();
-            if closure.objects().len() > self.inner.object_limits.max_objects {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::ResourceBudgetExceeded,
-                ));
-            }
             for tip in [command.subject.source_tip, command.subject.target_tip] {
                 if !closure.objects().contains(&tip) {
                     return Err(ProjectionFailure::Refuse(
@@ -562,11 +557,10 @@ impl ReviewProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
             }
             self.merge_checkpoint(cx)
                 .map_err(ProjectionFailure::Unavailable)?;
-            Ok(ValidatedClosure {
-                object_closure_root: fgit_admission::permitted_object_closure_root(closure)
-                    .map_err(ProjectionFailure::Unavailable)?,
-                objects: closure.objects().clone(),
-            })
+            crate::named_object_closure(
+                closure,
+                &[command.subject.source_tip, command.subject.target_tip],
+            )
         }
     }
 }

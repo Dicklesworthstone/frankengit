@@ -236,11 +236,6 @@ impl PullRequestProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             .await
             .map_err(async_projection_unavailable)?;
         let closure = selected.selected_closure().closure();
-        if closure.objects().len() > self.object_limits.max_objects {
-            return Err(ProjectionFailure::Unavailable(
-                RefusalCode::ResourceBudgetExceeded,
-            ));
-        }
         let exhaustion = Cell::new(None);
         let source = VerifiedFabricPackSource {
             fabric: &self.node.fabric,
@@ -302,11 +297,7 @@ impl PullRequestProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         }
         self.merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
-        Ok(ValidatedClosure {
-            object_closure_root: fgit_admission::permitted_object_closure_root(closure)
-                .map_err(ProjectionFailure::Unavailable)?,
-            objects: closure.objects().clone(),
-        })
+        crate::named_object_closure(closure, &[command.data.source_tip, command.data.target_tip])
     }
 }
 

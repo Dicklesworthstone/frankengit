@@ -323,6 +323,152 @@ a strong destination must durably suppress duplicate effects. Weak
 idempotency is refused before transport access. This is not a claim of one
 physical request or support for arbitrary webhook destinations.
 
+Terminal acknowledgement and definite terminal refusal now release the active
+outbox entry in the same authority CAS that publishes the terminal lifecycle
+and receipt. Escalated, indeterminate responsibilities remain active. A retry
+of a retired key resolves its original terminal effect through authenticated
+decision history and checks the predecessor map, removal, stable identity,
+progress chain and receipt before returning without transport access. Existing
+retained terminal entries with verified progress are retired by a separate
+`retire-settled` sealed intent; it does not reuse the earlier lifecycle seal.
+This releases active map capacity without changing the permanent codec limit
+or deleting immutable evidence. The explicitly selected Weak HTTP composition
+below connects dispatcher observations to this publication model. Independent
+batch acceptance remains in `frankengit-root-doctrine-x2mv.4.55`;
+the retirement tests alone do not establish those capabilities.
+
+### Explicitly owned Weak dispatch profile
+
+`merge/native/dispatch` owns the separate `outbox-fenced-dispatch` v1 body.
+The original `outbox-reconciliation` v1 Strong schema, bytes, capability check,
+and recovery rules are unchanged. This profile implements the normative
+at-least-once delivery allowance; it claims no downstream exactly-once effect.
+A trusted-local operator supplies an explicit authenticated principal and a
+complete selected route set for one destination. This is an explicit routing
+intent, not discovery of all subscribers or a canonical subscription registry.
+Registration files supply configured capabilities, never completion evidence.
+
+The first RCR atomically selects deferral and an immutable plan: repository,
+original delivery key, destination, payload root, exact deferred effect root,
+principal, and up to 32 routes sorted by unique registration ID. Each route
+binds its non-secret endpoint/incarnation/fence configuration, strict/permissive
+SSRF authority, original retry ceiling (1..16), and bounded retry schedule.
+The canonical HTTP binding is SHA-256 of the exact tag
+`frankengit/canonical-http-route/v1` followed by one NUL byte, the existing
+32-byte local route-scope digest, and one byte (strict 0, permissive 1).
+The legacy journal scope remains unchanged. Attempt timeout is an invocation
+deadline, not a capability or retry reset. Schedule durations are rounded up
+to canonical milliseconds, never down. No caller may change the owner,
+membership, endpoint, policy, or budget by resuming the same delivery. Missing
+canonical ownership plus a legacy local attempt is refused before claiming;
+legacy acceptance cannot be promoted into a canonical dispatch marker.
+
+Each subsequent body names one exact predecessor, one action, and every route's
+persisted state. A successful acknowledged marker CAS in this invocation alone
+grants a new send. CAS recovery and recovered markers grant only a probe at the
+same attempt. Actual transport outcomes use the shared Weak `ReconcilePlan`.
+Non-probing HTTP returns Unknown on recovery, which becomes Indeterminate;
+there is no automatic resend after an unknown execution. A known transient
+response may schedule the next bounded attempt, with persisted due time and
+deterministic route/key jitter. Invocation allowances and route quotas can stop
+new sends without changing the canonical retry policy or creating a marker.
+
+Completed observations precede terminal publication. HTTP evidence records the
+actual adapter-evidence byte count and SHA-256 commitment (response bytes or a
+local refusal/transport diagnostic); the verdict is independently
+encoded in the observation. No response body or signing secret is published.
+Every route must be terminal before aggregate settlement: any Indeterminate
+selects Escalated; otherwise any Undeliverable selects TerminallyFailed;
+otherwise all Delivered selects Acknowledged. The immutable receipt commits to
+the final observation root. The final RCR selects this receipt, lifecycle and
+progress together and removes only acknowledged/definitely failed active slots.
+Escalated entries remain active. A delivered route cannot retire an unfinished
+sibling, and subscription narrowing cannot delete an owed member.
+
+History authenticates the selected start/deferral, every exact predecessor,
+original delivery identity and audience, and terminal receipt/removal. A staged
+body is not progress. This writer admits one progress transition per decision
+batch, at most 2049 transitions per execution and 4096 evidence bytes per route;
+shared history scan ceilings remain in force. Strong and Weak progress cannot
+claim the same execution. The node composition carries one finite native context
+through transport drain and publication. Local fences serialize local workers;
+they are not distributed leases or a second authority. Concurrent callers that
+observe another marker conservatively reconcile its uncertainty.
+
+This profile currently requires explicit CLI `--canonical-principal`; the
+legacy default stays an observation-only worker. Authenticated hosted dispatch,
+durable receiver acknowledgement queries, canonical subscriber administration,
+HTTPS, power-loss qualification, and arbitrary-age history compaction are not
+established by this implementation. Explicit manual replay is defined below.
+Authored model
+and real-loopback tests require revision-bound execution and independent batch
+review; compilation alone earns no HTTP capability credit.
+
+### New sealed manual replay intent
+
+`dispatch/replay` accepts an original `forge-event` source, its expected
+canonical failed/escalated effect root, original destination and payload, and
+one original route ID/configuration binding. The source must have an
+authenticated Weak plan whose selected member is Undeliverable or Indeterminate.
+A delivered sibling, a staged failed body/receipt, a local diagnostic alone,
+or a `forge-replay` source cannot grant this intent. Multiple explicit requests
+may reference the same original source using different replay keys; replay
+parents always remain the original event, so source provenance has one level.
+
+The authenticated principal and explicit replay key use the unchanged transaction
+identity derivation. The semantic request is the existing canonical-request v2,
+receive-admission schema, atomic true, with no ref commands or push options and
+exactly six `outbox-replay` scoped entries: `source-key`, `source-effect`,
+`payload`, `destination`, `route-id`, and `route-binding`. Slugs are exact bytes;
+route ID is big-endian u64. Digest values contain big-endian u16 algorithm ID,
+one u8 byte count, then exact digest bytes. The canonical request's existing
+sorting/framing rules apply; unknown/duplicate fields refuse.
+
+A new RCR publishes a `forge-replay` Committed obligation with the normal stable
+delivery-key derivation, the new TxId and exact winning predecessor RCR. Its
+payload references the original event bytes. It does not advance forge positions,
+create another forge event, reopen the original lifecycle, or change refs,
+retention or policy epochs. The actual semantic request body is retained under
+`outbox-replay-request/v1` at the RCR/seal canonical request digest. Recovery
+finds the original creation in authenticated decision history. Same-key request
+changes fail closed; repeating the same intent creates no additional obligation.
+
+Replay creation history checks the complete original source eligibility at its
+exact predecessor, including selected route state and original creation proof.
+The class-constrained original-source reader rejects replay parents before
+validating their progress. Source eligibility is also revalidated at the exact
+basis used for every fresh replay Start/Dispatch marker, including CAS replans.
+A later source change cannot authorize a stale marker. Already-owned
+observations/finalization still publish after the marker's admission; source
+changes cannot erase an actual HTTP outcome.
+
+The sealed replay class requires its original principal, exact retained request,
+one matching route, ceiling one and zero retry delay before it can claim Weak
+dispatch. It uses the same marker/observation/terminal-publication and retirement
+protocol. Its first attempt belongs to a NEW delivery ID; it is not attempt one
+of the old responsibility. Lost replies/recovered markers remain Unknown and
+Escalated without automatic resend. Original automatic and prior replay budgets
+are immutable. A new explicit replay key grants a separate one-send intent.
+
+The CLI requires `--canonical-principal` plus `--replay-key`, and refuses
+`--attempt` in this profile. A matching local diagnostic is checked/preserved
+when present; a canonically Indeterminate route needs no fabricated diagnostic.
+The route fence spans HTTP drain, publication and awaited node shutdown. Outer
+stdout follows shutdown; broken stdout cannot undo canonical state. Accepted
+receipts remain available through `fg webhook receipt`. Hosted credential
+administration, Strong receiver idempotency, TLS, and power-loss certification
+remain separate work. Native `webhook_canonical` integration tests require real
+fg-process HTTP/HMAC, both Git formats, preserved original receipts, idempotent
+replay, and killed in-flight dispatch/replay recovery with a receiver that
+continues accepting during the no-resend observation window.
+
+Retired lookup uses the existing bounded authenticated history reader for
+both the removal suffix and the original progress chain. Each scan retains
+its existing head-edge and record ceilings. Missing or over-budget history
+refuses instead of treating absence as permission to send. This profile
+therefore does not establish unbounded-age receipt lookup or receipt-index
+checkpoint compaction.
+
 The file-backed process-death matrix interrupts native admission before its
 first authority write and after awaited event, forge-position, obligation and
 outbox-state writes, in both Git object formats. It checks the intercepted
@@ -360,7 +506,11 @@ materializer.
 Commit `b588c0b592b774f426b29d5b97774658e3e66950` restores the checks omitted
 when the shared driver and sealed-node tests were merged: the entire supplied
 closure must equal the independently verified closure, and every declared
-package object must belong to it. All six `CommitEvidence` fields must match
+package object must belong to it. That closure is per decision
+(frankengit-lh8z): the objects the merge adds above the authority-selected
+closure, plus its base, both parents and candidate. The serving closure is the
+union over every committed decision, so already-selected history is neither
+re-validated nor re-committed. All six `CommitEvidence` fields must match
 the complete prepared record: principal snapshot, actual forge event batch,
 policy decision, invariant evidence, outbox effects, and retention delta.
 Supplied roots are compared, never substituted into the published record.

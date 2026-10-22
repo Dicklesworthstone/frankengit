@@ -1,4 +1,4 @@
-# Native PR workflow path filters
+# Native push and PR workflow path filters
 
 `fg workflow watch --pull-request NUMBER` accepts `paths` or `paths-ignore`
 under `on.pull_request`, optionally combined with existing target-branch filters.
@@ -45,8 +45,39 @@ not an authorization credential or independent proof of execution.
 Ordinary explicit `workflow dispatch` lacks canonical comparison coordinates and
 refuses a selected path-filtered graph before batch execution. The CLI accepts no
 caller-supplied changed-file list. Explicit `workflow run` remains a named manual
-execution, not an event-filter evaluator. Push path filters are not admitted by
-this initial PR profile.
+execution, not an event-filter evaluator. Push filters require the canonical
+ref watcher described below; a manually asserted push event supplies no basis.
+
+## Canonical push/ref-change filtering
+
+`fg workflow watch` without `--pull-request` admits `paths` and `paths-ignore`
+under `on.push`. Branch filters match the source branch. The existing bounded
+history reader authenticates the full decision history through checkpoints to
+empty genesis. The latest change of the watched ref chooses the new commit;
+the preceding change chooses its exact old value, including a deletion. Direct
+comparison of those two trees uses the same verified native object owner as
+workflow discovery. It never substitutes the new commit's first parent, a merge
+base, the last locally polled tip or a caller-provided path list.
+
+A newly created or recreated branch has an absent old value: all files of its
+new tree are candidates for matching. A deletion is not skipped to find an older
+branch incarnation. A deleted branch starts no jobs. This is an explicit native
+profile, not a claim to duplicate hosted Actions' new-branch heuristics.
+
+Several commits published in one ref transition are compared as one complete
+old/new tree difference. Several separate transitions between polls retain the
+watcher's documented latest-event coalescing: the last transition is evaluated,
+not an invented union since the last poll. Same-tree updates select no path-filtered
+workflows. Intervening comments, check decisions and unrelated ref changes do not
+change the selected transition or allow scripts to repeat.
+
+Push event observations include `previous_commit` (null for absence). Their
+`changed_paths` receipt uses `canonical-ref-difference-v1`, with requested and
+compared old commits identical. PR receipts retain `unique-merge-base-v1` and
+existing graph/attempt identities are unchanged. Only path-filtered graphs cause
+the tree walk; unfiltered definitions do not acquire this extra read obligation.
+Excluded workflows produce no checks. Original-key publication can recover the
+selected observations without executing them again, including after restart.
 
 ## Failure, recovery and bounds
 
@@ -80,3 +111,9 @@ and canonical check publication in SHA-1 and SHA-256. Independently constructed
 expected path digests distinguish merge-base from target-tip comparisons.
 These are focused tests, not whole-workspace, release, physical power-loss or
 hostile-code-isolation qualification.
+
+`scripts/e2e/suites/smokes/workflow_push_paths.sh` drives real native imports,
+branch mutations, watchers and recovered check publication in both hash formats.
+It checks independent path digests, deletion/recreation, multi-commit updates,
+coalesced events, raw paths, mode/type changes, unchanged trees and exhausted
+comparison bounds. This campaign does not invoke a stock Git wire client.

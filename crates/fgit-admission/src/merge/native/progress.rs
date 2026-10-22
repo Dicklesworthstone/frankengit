@@ -452,7 +452,7 @@ fn check_evidence(length: usize) -> Result<(), CodecRefusal> {
     Ok(())
 }
 
-fn write_state(out: &mut Encoder, state: ReconcileState) {
+pub(super) fn write_state(out: &mut Encoder, state: ReconcileState) {
     let (tag, detail): (u16, u32) = match state {
         ReconcileState::Pending { attempt } => (0, attempt),
         ReconcileState::Probing { attempt } => (1, attempt),
@@ -479,7 +479,7 @@ fn write_state(out: &mut Encoder, state: ReconcileState) {
     out.write_scalar(detail);
 }
 
-fn read_state(input: &mut Decoder<'_>) -> Result<ReconcileState, CodecRefusal> {
+pub(super) fn read_state(input: &mut Decoder<'_>) -> Result<ReconcileState, CodecRefusal> {
     let tag = input.read_scalar::<u16>("outbox_progress_state")?;
     let detail = input.read_scalar::<u32>("outbox_progress_state_detail")?;
     Ok(match tag {
@@ -507,7 +507,7 @@ fn read_state(input: &mut Decoder<'_>) -> Result<ReconcileState, CodecRefusal> {
     })
 }
 
-fn write_observation(out: &mut Encoder, observation: Observation) {
+pub(super) fn write_observation(out: &mut Encoder, observation: Observation) {
     let tag: u16 = match observation {
         Observation::Delivery(DeliveryVerdict::Accepted) => 0,
         Observation::Delivery(DeliveryVerdict::DuplicateSuppressed) => 1,
@@ -521,7 +521,7 @@ fn write_observation(out: &mut Encoder, observation: Observation) {
     out.write_scalar(tag);
 }
 
-fn read_observation(input: &mut Decoder<'_>) -> Result<Observation, CodecRefusal> {
+pub(super) fn read_observation(input: &mut Decoder<'_>) -> Result<Observation, CodecRefusal> {
     Ok(
         match input.read_scalar::<u16>("outbox_progress_observation")? {
             0 => Observation::Delivery(DeliveryVerdict::Accepted),

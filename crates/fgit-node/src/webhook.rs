@@ -6,11 +6,18 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub use fgit_admission::merge::native::dispatch::replay::ReplayIntent;
+pub use fgit_admission::merge::native::dispatch::{
+    CanonicalDispatchProgress, DispatchResult, DispatchRoute, DispatchTransport,
+};
+pub use fgit_admission::merge::native::settlement::DeliveryRequest as CanonicalDeliveryRequest;
 use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
 use fgit_forge::webhook::{
     DeadLetterEntry, SsrfPolicy, ValidatedWebhookUrl, WebhookRefusal, WebhookRegistration,
 };
-use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVerdict};
+use fgit_resource::settlement::DownstreamIdempotency;
+pub use fgit_resource::settlement::{DeliveryVerdict, ProbeVerdict};
+pub use fgit_resource::{ObligationState, ReconcileState};
 use fgit_types::{AsciiSlug, RefusalCode};
 use fsqlite_types::cx::Cx;
 

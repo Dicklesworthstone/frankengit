@@ -41,11 +41,6 @@ impl NodeNativeMergeProjection<'_> {
             .await
             .map_err(async_projection_unavailable)?;
         let closure = selected.selected_closure().closure();
-        if closure.objects().len() > self.object_limits.max_objects {
-            return Err(ProjectionFailure::Unavailable(
-                RefusalCode::ResourceBudgetExceeded,
-            ));
-        }
         if anchor.source_tip.algorithm() != self.node.object_format {
             return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
         }
@@ -87,11 +82,15 @@ impl NodeNativeMergeProjection<'_> {
             .checkpoint()
             .map_err(|error| failure(SourceCommentError::Source(error)))?;
         result.map_err(failure)?;
-        Ok(ValidatedClosure {
-            object_closure_root: fgit_admission::permitted_object_closure_root(closure)
-                .map_err(ProjectionFailure::Unavailable)?,
-            objects: closure.objects().clone(),
-        })
+        crate::named_object_closure(
+            closure,
+            &[
+                anchor.source_tip,
+                anchor.target_tip,
+                anchor.compared_base,
+                anchor.blob,
+            ],
+        )
     }
 }
 

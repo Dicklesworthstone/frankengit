@@ -27,7 +27,7 @@ impl ProcRoot {
         .unwrap();
     }
     fn inspect(&self) -> io::Result<Snapshot> {
-        inspect(&self.0, 123, Instant::now() + Duration::from_secs(10))
+        inspect_until(&self.0, 123, Instant::now() + Duration::from_secs(10), SCAN)
     }
 }
 impl Drop for ProcRoot {
@@ -74,6 +74,46 @@ fn scan_rejects_incomplete_identity_oversized_records_and_expired_deadlines() {
     assert!(root.inspect().is_err());
     root.record(123, 123, b'Z');
     assert!(root.inspect().is_ok());
+}
+
+// frankengit-twuw: on a busy host one scan can outlive SCAN without saying
+// anything about the group. That is retried within the deadline; a
+// definitive failure is not.
+#[test]
+fn expired_scans_retry_until_the_deadline_and_definitive_failures_do_not() {
+    let root = ProcRoot::new();
+    root.record(123, 123, b'Z');
+    root.record(42, 123, b'S');
+    // A window that has already closed is Expired, not a refusal.
+    assert!(matches!(
+        inspect(&root.0, 123, Instant::now()),
+        Err(ScanError::Expired)
+    ));
+    // A zero first window expires; the retry completes and still sees the
+    // live member, so quiescence is not granted.
+    let far = || Instant::now() + Duration::from_secs(3);
+    let live = inspect_until(&root.0, 123, far(), Duration::ZERO).unwrap();
+    assert!(live.other && live.live_other);
+    // The permitted twin: a zombie member is stopped, not live.
+    root.record(42, 123, b'Z');
+    let settled = inspect_until(&root.0, 123, far(), Duration::ZERO).unwrap();
+    assert!(settled.other && !settled.live_other);
+    // The overall deadline still refuses with the original message.
+    let error = inspect_until(&root.0, 123, Instant::now(), SCAN).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "process-group observation limit exceeded"
+    );
+    // A leader that left its group is definitive: refused promptly, never
+    // retried to the deadline.
+    root.record(123, 321, b'Z');
+    let started = Instant::now();
+    let error = inspect_until(&root.0, 123, far(), Duration::ZERO).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "direct child left its owned process group"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]
