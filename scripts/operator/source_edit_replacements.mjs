@@ -8,6 +8,7 @@ import { binaryLiteralCost, emitBinaryLiteral, emitBinaryMember } from './source
 import { planBinaryMember, planBinaryRunMember } from './source_edit_binary_delta.mjs';
 
 export const REPLACEMENT_PROFILE = 'frankengit-source-replacements-v1';
+export const REFACTOR_PROFILE = 'frankengit-source-refactoring-v1';
 export const BINARY_REPLACEMENT_PROFILE = 'frankengit-source-replacements-binary-v1';
 export const DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-v1';
 export const RUN_DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-runs-v1';
@@ -29,7 +30,7 @@ function path(value) {
   return value;
 }
 function quoted(prefix, value) {
-  let text = `"${prefix}/`;
+  let text = `"${prefix ? `${prefix}/` : ''}`;
   for (const byte of Buffer.from(value, 'hex')) {
     text += byte >= 33 && byte <= 126 && byte !== 34 && byte !== 92 ? String.fromCharCode(byte)
       : `\\${byte.toString(8).padStart(3, '0')}`;
@@ -67,28 +68,53 @@ function lines(bytes, check, maximum) {
 }
 
 export function compileSourceReplacements(format, changes, options = {}, check = () => {}) {
+  return compileChanges(format, changes, options, check, false);
+}
+
+// Explicit original-coordinate moves, never rename detection or a repository
+// read. The native exact-tree-v1 preparer still checks source membership and
+// destination absence. The historical compiler cannot accept destination_hex.
+export function compileSourceRefactoring(format, changes, options = {}, check = () => {}) {
+  return compileChanges(format, changes, options, check, true);
+}
+
+function compileChanges(format, changes, options, check, refactoring) {
   if (!['sha1', 'sha256'].includes(format) || typeof check !== 'function') fail('source_replacement_input');
   check(); fields(options, [...Object.keys(REPLACEMENT_LIMITS), 'binary'], []);
   const binary = binaryMode(options);
   const limits = Object.fromEntries(Object.entries(REPLACEMENT_LIMITS).map(([key, maximum]) =>
     [key, integer(options[key] ?? maximum, 1, maximum)]));
   if (!Array.isArray(changes) || !changes.length || changes.length > 32) fail('source_replacement_changes');
-  let sourceBytes = 0, resultBytes = 0, pathBytes = 0;
+  let sourceBytes = 0, resultBytes = 0, pathBytes = 0, moves = 0;
+  const endpoints = [];
   const owned = changes.map(row => {
-    check(); fields(row, ['path_hex', 'before', 'after']); const name = path(row.path_hex);
-    pathBytes += name.length / 2;
+    check(); fields(row, refactoring ? ['path_hex', 'before', 'after', 'destination_hex']
+      : ['path_hex', 'before', 'after'], ['path_hex', 'before', 'after']);
+    const name = path(row.path_hex), moved = refactoring && Object.hasOwn(row, 'destination_hex');
+    const destination = moved ? path(row.destination_hex) : name;
+    if (moved && (name === destination || row.before === null || row.after === null)) fail('source_refactor_move');
+    pathBytes += (name.length + (moved ? destination.length : 0)) / 2;
     if (pathBytes > 32768) fail('source_replacement_paths');
-    const before = body(row.before, format, true, binary), after = body(row.after, format, false, binary);
-    if (!before && !after || before && after && before.mode === after.mode && before.blob === after.blob) {
+    endpoints.push(name); if (moved) { endpoints.push(destination); moves++; }
+    const before = body(row.before, format, true, binary || moved);
+    const after = body(row.after, format, false, binary || moved);
+    if (moved && !before.bytes.equals(after.bytes) && (before.bytes.includes(0) || after.bytes.includes(0))) {
+      fail('source_refactor_binary_move_edit');
+    }
+    if (!before && !after || !moved && before && after && before.mode === after.mode && before.blob === after.blob) {
       fail('source_replacement_no_effect');
     }
     sourceBytes += before?.bytes.length ?? 0; resultBytes += after?.bytes.length ?? 0;
     if (sourceBytes > limits.maxSourceBytes || resultBytes > limits.maxResultBytes) fail('source_replacement_bytes');
-    return { path_hex: name, before, after };
+    return { path_hex: name, destination_hex: destination, moved, before, after };
   }).sort((a, b) => a.path_hex < b.path_hex ? -1 : a.path_hex > b.path_hex ? 1 : 0);
-  for (let i = 0; i < owned.length; i++) for (let j = 0; j < i; j++) {
-    if (owned[i].path_hex === owned[j].path_hex || owned[i].path_hex.startsWith(`${owned[j].path_hex}2f`)) {
-      fail('source_replacement_collision');
+  // Check BOTH endpoints against the ORIGINAL namespace. A delete or move in
+  // this batch cannot free a path for another section; swaps/chains refuse.
+  endpoints.sort();
+  for (let i = 0; i < endpoints.length; i++) for (let j = 0; j < i; j++) {
+    check();
+    if (endpoints[i] === endpoints[j] || endpoints[i].startsWith(`${endpoints[j]}2f`)) {
+      fail(refactoring ? 'source_refactor_collision' : 'source_replacement_collision');
     }
   }
   const chunks = []; let size = 0, records = 0, binaryFiles = 0, deltaMembers = 0, alignedCopyRegions = 0;
@@ -103,11 +129,18 @@ export function compileSourceReplacements(format, changes, options = {}, check =
   };
   const zero = '0'.repeat(format === 'sha1' ? 40 : 64);
   for (const row of owned) {
-    const { before, after } = row, a = quoted('a', row.path_hex), b = quoted('b', row.path_hex);
+    const { before, after } = row, a = quoted('a', row.path_hex), b = quoted('b', row.destination_hex);
     put(`diff --git ${a} ${b}\n`);
     if (!before) put(`new file mode ${after.mode.toString(8)}\n`);
     else if (!after) put(`deleted file mode ${before.mode.toString(8)}\n`);
     else if (before.mode !== after.mode) { put(`old mode ${before.mode.toString(8)}\n`); put(`new mode ${after.mode.toString(8)}\n`); }
+    if (row.moved) {
+      // Only claim exact similarity for byte-equal files. Edited moves need no
+      // guessed percentage; their whole original/result identities are explicit.
+      if (before.bytes.equals(after.bytes)) put('similarity index 100%\n');
+      put(`rename from ${quoted('', row.path_hex)}\n`);
+      put(`rename to ${quoted('', row.destination_hex)}\n`);
+    }
     put(`index ${before?.blob ?? zero}..${after?.blob ?? zero}${before && after && before.mode === after.mode ? ` ${before.mode.toString(8)}` : ''}\n`);
     // Empty additions/deletions and pure executable-bit changes need no hunk.
     if ((before?.blob ?? null) === (after?.blob ?? null) || !(before?.bytes.length || after?.bytes.length)) continue;
@@ -136,13 +169,19 @@ export function compileSourceReplacements(format, changes, options = {}, check =
     for (const line of newLines) emitLine('+', line);
   }
   check(); const patch = Buffer.concat(chunks, size);
-  return { profile: binary === 'delta-runs' ? RUN_DELTA_REPLACEMENT_PROFILE
+  return { profile: refactoring ? REFACTOR_PROFILE : binary === 'delta-runs' ? RUN_DELTA_REPLACEMENT_PROFILE
       : binary === 'delta' ? DELTA_REPLACEMENT_PROFILE : binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
     ...(['delta', 'delta-runs'].includes(binary) ? { delta_members: deltaMembers, literal_members: 2 * binaryFiles - deltaMembers } : {}),
     ...(binary === 'delta-runs' ? { aligned_copy_regions: alignedCopyRegions } : {}),
     ...(binary ? { binary_files: binaryFiles } : {}), patch, source_bytes: sourceBytes, result_bytes: resultBytes, records,
-    changes: owned.map(row => ({ path_hex: row.path_hex, before_blob: row.before?.blob ?? null,
-      after_blob: row.after?.blob ?? null, before_mode: row.before?.mode ?? null, after_mode: row.after?.mode ?? null })),
+    ...(refactoring ? { native_patch_profile: 'exact-tree-v1', move_count: moves, file_sections: owned.length,
+      ...(binary ? { binary_profile: binary } : {}), destinations_absent_verified: false } : {}),
+    changes: owned.flatMap(row => row.moved ? [
+      { path_hex: row.path_hex, before_blob: row.before.blob, after_blob: null, before_mode: row.before.mode, after_mode: null },
+      { path_hex: row.destination_hex, before_blob: null, after_blob: row.after.blob, before_mode: null, after_mode: row.after.mode },
+    ] : [{ path_hex: row.path_hex, before_blob: row.before?.blob ?? null,
+      after_blob: row.after?.blob ?? null, before_mode: row.before?.mode ?? null, after_mode: row.after?.mode ?? null }])
+      .sort((a, b) => a.path_hex < b.path_hex ? -1 : a.path_hex > b.path_hex ? 1 : 0),
     source_membership_verified: false, publication_authorized: false };
 }
 
