@@ -621,7 +621,10 @@ mod tests {
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!(
+            Self::in_base(std::env::temp_dir())
+        }
+        fn in_base(base: PathBuf) -> Self {
+            let root = base.join(format!(
                 "fg-webhook-durable-{}-{}",
                 std::process::id(),
                 TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -895,7 +898,10 @@ mod tests {
     fn special_record_slots_refuse_before_open_and_regular_empty_files_are_allowed() {
         use std::os::unix::net::UnixListener;
         for filename in ["registrations.json", "dead_letters.jsonl"] {
-            let dir = Directory::new();
+            // Socket addresses have a kernel pathname bound. Keep this real
+            // socket fixture short even when TMPDIR names a nested worker job.
+            // The regular-file and directory refusal twins stay unchanged.
+            let dir = Directory::in_base(PathBuf::from("/tmp"));
             let path = dir.0.join(filename);
             std::fs::create_dir(&path).unwrap();
             assert!(
