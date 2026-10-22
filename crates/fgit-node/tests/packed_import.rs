@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fgit_admission::AdmissionResult;
 use fgit_crypto::GitObjectKind;
 use fgit_node::{LooseGitImportRefusal, NodeConfig, NodeSourceImportRefusal, OneNode};
 use fgit_pack::PackError;
@@ -78,6 +79,8 @@ struct PackedRepository {
     tree: GitOid,
     blob: GitOid,
     blob_body: Vec<u8>,
+    tree_body: Vec<u8>,
+    commit_body: Vec<u8>,
     pack_path: PathBuf,
     index_path: PathBuf,
 }
@@ -156,12 +159,12 @@ fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepositor
     entries.push(FixtureEntry::Base {
         type_code: 2,
         oid: tree,
-        body: tree_body,
+        body: tree_body.clone(),
     });
     entries.push(FixtureEntry::Base {
         type_code: 1,
         oid: commit,
-        body: commit_body,
+        body: commit_body.clone(),
     });
 
     let (pack, records) = encode_pack(&entries);
@@ -178,6 +181,8 @@ fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepositor
         tree,
         blob,
         blob_body,
+        tree_body,
+        commit_body,
         pack_path,
         index_path,
     }
@@ -438,6 +443,214 @@ fn durable_import_follows_one_closure_across_loose_and_packed_storage() {
 fn durable_import_resolves_and_verifies_ofs_and_ref_delta_objects() {
     import_and_assert(BlobStorage::OfsDelta);
     import_and_assert(BlobStorage::RefDelta);
+}
+
+/// Gives every reachable OID of a pack-only source a second copy, as a gc'd
+/// repository keeps loose duplicates of packed objects. The commit and tree
+/// become loose too, and a second pack repeats the tree and stores the blob
+/// as an OFS delta against a base no ref reaches. The reader prefers a loose
+/// copy and then the first pack by sorted stem, so the commit and tree come
+/// from loose files, and `overlap_stem` decides whether the blob is decoded
+/// as the base in "pack-fixture" or as the delta. Returns the unreachable
+/// base.
+fn add_duplicate_copies(repository: &PackedRepository, overlap_stem: &str) -> GitOid {
+    write_loose_object(
+        &repository.root,
+        GitObjectKind::Commit,
+        &repository.commit_body,
+    );
+    write_loose_object(&repository.root, GitObjectKind::Tree, &repository.tree_body);
+    let base_body = b"overlapping pack delta base\n".to_vec();
+    let base = object_id(GitObjectKind::Blob, &base_body);
+    let (pack, records) = encode_pack(&[
+        FixtureEntry::Base {
+            type_code: 3,
+            oid: base,
+            body: base_body.clone(),
+        },
+        FixtureEntry::OfsDelta {
+            base_index: 0,
+            oid: repository.blob,
+            program: literal_delta(&base_body, &repository.blob_body),
+        },
+        FixtureEntry::Base {
+            type_code: 2,
+            oid: repository.tree,
+            body: repository.tree_body.clone(),
+        },
+    ]);
+    let index = encode_index(&records, &pack[pack.len() - 20..]);
+    let directory = repository.root.join("objects/pack");
+    fs::write(directory.join(format!("{overlap_stem}.pack")), pack)
+        .expect("overlapping pack writes");
+    fs::write(directory.join(format!("{overlap_stem}.idx")), index)
+        .expect("overlapping index writes");
+    base
+}
+
+/// Every immutable object file the node's fabric holds, as sorted native-OID
+/// names across all namespace and hash-domain directories. A second copy of
+/// an OID anywhere in the fabric would appear twice.
+fn fabric_object_files(node_root: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    for namespace in fs::read_dir(node_root.join("objects")).expect("fabric objects open") {
+        let namespace = namespace.expect("namespace entry reads").path();
+        for domain in fs::read_dir(namespace).expect("namespace directory opens") {
+            let domain = domain.expect("hash-domain entry reads").path();
+            for object in fs::read_dir(domain).expect("hash-domain directory opens") {
+                files.push(
+                    object
+                        .expect("object entry reads")
+                        .file_name()
+                        .into_string()
+                        .expect("object file name is hex"),
+                );
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+fn import_duplicated_source(node: &OneNode, source: &Path, key: &[u8]) -> AdmissionResult {
+    let admission = node
+        .runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &node.request_context(),
+            source,
+            PrincipalId::from_bytes([0xc3; 16]),
+            key,
+        ))
+        .expect("a source holding duplicate copies imports");
+    assert_eq!(admission.commands.len(), 1);
+    assert!(matches!(
+        admission.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    admission
+}
+
+/// Refs, closure, fabric files and stored payloads after one import: the part
+/// of the result that must not depend on which copy of an OID was read.
+type ImportedState = (
+    BTreeMap<RefName, GitOid>,
+    BTreeSet<GitOid>,
+    Vec<String>,
+    Vec<Vec<u8>>,
+);
+
+fn imported_state(
+    node: &OneNode,
+    node_root: &Path,
+    repository: &PackedRepository,
+) -> ImportedState {
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .expect("authority-selected import materializes");
+    let payloads = [repository.commit, repository.tree, repository.blob]
+        .into_iter()
+        .map(|oid| {
+            node.read_git_object(oid)
+                .expect("closure object reads from the fabric")
+                .payload()
+                .to_vec()
+        })
+        .collect();
+    (
+        materialized.snapshot().refs.clone(),
+        materialized.selected_closure().closure().objects().clone(),
+        fabric_object_files(node_root),
+        payloads,
+    )
+}
+
+#[test]
+fn durable_import_places_one_copy_of_each_oid_held_loose_and_in_overlapping_packs() {
+    let mut states = Vec::new();
+    // "pack-0-…" sorts before "pack-fixture" and "pack-z-…" after it.
+    for overlap_stem in ["pack-0-overlap", "pack-z-overlap"] {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let repository = write_packed_repository(&source, BlobStorage::Base);
+        let unreachable = add_duplicate_copies(&repository, overlap_stem);
+        let node_root = scratch.0.join("node");
+        let node = serving_node(node_root.clone());
+        import_duplicated_source(&node, &source, b"duplicated-sources");
+
+        let (refs, closure, files, payloads) = imported_state(&node, &node_root, &repository);
+        let main = RefName::try_new(b"refs/heads/main").expect("fixed branch parses");
+        assert_eq!(refs, BTreeMap::from([(main, repository.commit)]));
+        assert_eq!(
+            closure,
+            BTreeSet::from([repository.commit, repository.tree, repository.blob])
+        );
+        // One fabric file per closure OID; the unreachable pack base and the
+        // second and third copies of the commit, tree and blob place nothing.
+        let mut expected = [repository.commit, repository.tree, repository.blob]
+            .map(|oid| oid.to_string())
+            .to_vec();
+        expected.sort();
+        assert_eq!(files, expected, "pack order {overlap_stem}");
+        assert!(!files.contains(&unreachable.to_string()));
+        assert_eq!(
+            payloads,
+            vec![
+                repository.commit_body.clone(),
+                repository.tree_body.clone(),
+                repository.blob_body.clone(),
+            ]
+        );
+        states.push((refs, closure, files, payloads));
+        node.shutdown().expect("node drains");
+    }
+    assert_eq!(
+        states[0], states[1],
+        "permuting the pack order changes no ref, closure, placement or payload"
+    );
+}
+
+#[test]
+fn reimporting_a_duplicated_source_in_permuted_pack_order_replays_one_decision() {
+    let scratch = ScratchDirectory::new();
+    let source = scratch.0.join("source.git");
+    let repository = write_packed_repository(&source, BlobStorage::Base);
+    add_duplicate_copies(&repository, "pack-0-overlap");
+    let node_root = scratch.0.join("node");
+    let node = serving_node(node_root.clone());
+    let key = b"duplicated-sources-retry";
+    let first = import_duplicated_source(&node, &source, key);
+    let state = imported_state(&node, &node_root, &repository);
+    let head = node
+        .runtime()
+        .block_on(node.read_authority_head())
+        .expect("authority head reads");
+
+    // Move the overlapping pack after "pack-fixture", so the retry decodes the
+    // blob from the other pack and encoding, then retry with the same key.
+    let pack_directory = source.join("objects/pack");
+    for extension in ["pack", "idx"] {
+        fs::rename(
+            pack_directory.join(format!("pack-0-overlap.{extension}")),
+            pack_directory.join(format!("pack-z-overlap.{extension}")),
+        )
+        .expect("overlapping pack renames");
+    }
+    let second = import_duplicated_source(&node, &source, key);
+
+    assert_eq!(
+        second, first,
+        "the retry resolves to the same transaction and terminal decision"
+    );
+    assert_eq!(
+        node.runtime()
+            .block_on(node.read_authority_head())
+            .expect("authority head rereads"),
+        head,
+        "a replayed import publishes no second decision"
+    );
+    assert_eq!(imported_state(&node, &node_root, &repository), state);
+    node.shutdown().expect("node drains");
 }
 
 #[test]
