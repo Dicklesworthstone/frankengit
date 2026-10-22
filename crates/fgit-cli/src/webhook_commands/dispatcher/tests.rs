@@ -271,7 +271,9 @@ fn finishing_a_receiver_drains_its_queued_request() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     stream
-        .write_all(b"POST /hook HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        .write_all(
+            b"POST /hook HTTP/1.1\r\nUser-Agent: FrankenGit-Test/1.0\r\nContent-Length: 0\r\n\r\n",
+        )
         .unwrap();
     let captured = receiver.finish_result().unwrap();
     assert_eq!(captured.len(), 1);
