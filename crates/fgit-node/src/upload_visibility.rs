@@ -57,6 +57,15 @@ impl VisibleUploadPack {
         &self.repository
     }
 
+    /// Pack selection over this proof's verified graph (frankengit-8xyq).
+    /// `source` supplies the object format and liveness checkpoints only.
+    pub(super) fn selection_source<'a, S>(&'a self, source: &'a S) -> VisibleGraphSelection<'a, S> {
+        VisibleGraphSelection {
+            objects: &self.objects,
+            source,
+        }
+    }
+
     pub(super) fn closure_for(
         &self,
         materialized: &MaterializedAdmission,
@@ -185,6 +194,37 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
     ) -> Result<(ObjectType, usize), NodePackMaterializationRefusal> {
         self.read_object_header(&id)
             .map_err(NodePackMaterializationRefusal::from)
+    }
+}
+
+/// Every edge here was taken from a native-verified body (or, for a blob, is
+/// absent) during the disclosure walk. Want and have reachability therefore
+/// reads no object, and the planner reads and verifies only what it packs.
+/// Before, selection re-read every reachable body, blobs included, so even a
+/// small incremental fetch read the whole repository once.
+pub(super) struct VisibleGraphSelection<'a, S> {
+    objects: &'a BTreeMap<GitOid, partial_clone::FilterObject>,
+    source: &'a S,
+}
+
+impl<S: PermittedClosureTraversalSource> PermittedClosureTraversalSource
+    for VisibleGraphSelection<'_, S>
+{
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.source.object_format()
+    }
+
+    fn selection_checkpoint(&self) -> Result<(), PackWriteError> {
+        self.source.selection_checkpoint()
+    }
+
+    fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+        self.source.selection_checkpoint()?;
+        let object = self
+            .objects
+            .get(id)
+            .ok_or(PackWriteError::MissingCanonicalObject(*id))?;
+        Ok(object.edges.iter().map(|(child, _)| *child).collect())
     }
 }
 

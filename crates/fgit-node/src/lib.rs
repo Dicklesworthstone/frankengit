@@ -8495,6 +8495,16 @@ impl OneNode {
                 // A shallow have proves only history above the client's boundary.
                 // The visible scope below computes both clipped closures together.
                 (Vec::new(), BTreeSet::new())
+            } else if let Some((scope, _)) = fetch {
+                // The disclosure proof already holds every visible edge, so
+                // want and have reachability reads no object (frankengit-8xyq).
+                selected_pack_ids_and_held(
+                    &scope.selection_source(&served),
+                    disclosure_closure,
+                    client_wants,
+                    client_haves,
+                    &limits,
+                )?
             } else {
                 selected_pack_ids_and_held(
                     &served,

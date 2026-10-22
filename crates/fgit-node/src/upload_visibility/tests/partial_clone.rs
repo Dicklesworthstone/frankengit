@@ -761,7 +761,7 @@ fn a_corrupted_blob_body_is_still_advertised_but_never_packed() {
     *bytes.last_mut().unwrap() ^= 0x01;
     std::fs::write(path, bytes).unwrap();
 
-    let mut node = OneNode::open_existing(config).unwrap();
+    let mut node = OneNode::open_existing(config.clone()).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let (node, result, response) = exchange_filtered(node, 2, &[public], None, None, false);
     node.shutdown().unwrap();
@@ -782,4 +782,102 @@ fn a_corrupted_blob_body_is_still_advertised_but_never_packed() {
         "{result:?}"
     );
     assert!(!text.contains("PACK"), "no pack is emitted: {text}");
+
+    // A blob:none fetch never selects the blob, and selection reads no body
+    // (frankengit-8xyq), so the same corrupted node still serves it.
+    let mut node = OneNode::open_existing(config).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let (node, result, response) =
+        exchange_filtered(node, 2, &[public], None, Some("blob:none"), false);
+    node.shutdown().unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    let served = bodies(&response, 2, format);
+    assert_eq!(served.len(), 4, "public, its tree, ancestor and its tree");
+    assert!(!served.contains(&b"current public content"[..].to_vec()));
+}
+
+/// Counts every fabric-shaped call. The visible-graph selection may poll its
+/// liveness but must never ask the source for an object's references.
+struct NoReads {
+    format: GitHashAlgorithm,
+    references: Cell<usize>,
+}
+impl PermittedClosureTraversalSource for NoReads {
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.format
+    }
+    fn selection_checkpoint(&self) -> Result<(), PackWriteError> {
+        Ok(())
+    }
+    fn references(&self, _id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+        self.references.set(self.references.get() + 1);
+        Err(PackWriteError::from(PackError::DeadlineExceeded))
+    }
+}
+
+/// frankengit-8xyq: pack selection over the disclosure proof's graph is
+/// exactly the fabric-read walk's selection (the oracle), for clone,
+/// incremental, up-to-date and foreign-have requests, and the same refusal
+/// for a want outside the visible closure, while reading no object.
+#[test]
+fn visible_graph_selection_matches_the_fabric_walk_and_reads_nothing() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let Fixture {
+            scratch: _scratch,
+            node,
+            public,
+            private,
+            ancestor,
+            ..
+        } = fixture(format);
+        delete_private(&node, private);
+        let request = node.request_context();
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let deadline = GitDaemonSessionDeadline::new(
+            GitDaemonSessionTimeout::DEFAULT,
+            GitDaemonSessionWorkScaling::FLAT,
+        );
+        let visible = node
+            .prepare_visible_upload_pack(&request, &materialized, &WireLimits::default(), &deadline)
+            .unwrap();
+        let closure = visible.closure_for(&materialized).unwrap();
+        let limits = PackLimits::default();
+        let database_context = FsqliteCx::new();
+        let database_exhaustion = Cell::new(None);
+        let fabric = VerifiedFabricPackSource {
+            fabric: &node.fabric,
+            object_format: node.object_format,
+            maximum_object_bytes: limits.max_object_bytes,
+            database_context: &database_context,
+            database_exhaustion: &database_exhaustion,
+            session_is_live: None,
+        };
+        let no_reads = NoReads {
+            format,
+            references: Cell::new(0),
+        };
+        let graph = visible.selection_source(&no_reads);
+        let cases: [(&[GitOid], &[GitOid]); 4] = [
+            (&[public], &[]),
+            (&[public], &[ancestor]),
+            (&[public], &[public]),
+            (&[public], &[private]),
+        ];
+        for (wants, haves) in cases {
+            let oracle =
+                selected_pack_ids_and_held(&fabric, closure, Some(wants), haves, &limits).unwrap();
+            let selected =
+                selected_pack_ids_and_held(&graph, closure, Some(wants), haves, &limits).unwrap();
+            assert_eq!(selected, oracle, "wants {wants:?} haves {haves:?}");
+        }
+        assert!(matches!(
+            selected_pack_ids_and_held(&graph, closure, Some(&[private]), &[], &limits),
+            Err(NodePackMaterializationRefusal::RequestedWantOutsideClosure(id)) if id == private
+        ));
+        assert_eq!(no_reads.references.get(), 0);
+        node.shutdown().unwrap();
+    }
 }
