@@ -54,11 +54,12 @@ source-free object reads. Linux process read counters bound actual I/O during
 large minimal-candidate inspection; no general latency ratio is promised.
 No stock Git engine or HTTP stand-in implements those operations.
 
-Receive quarantine remains a separate body-verification obligation: the 140 MiB
-fixture still exceeds its existing original-input budget at publication. The
-observed HTTP response is `outcome_unknown`, not proof of non-commit or permission
-to invent a new key. This change does not weaken that path or claim large-push
-completion.
+At `281f90ff`, inspection succeeded but reviewed publication of the 140 MiB
+fixture still exceeded the quarantine original-input budget. The explicit
+[reviewed publication frontier](REVIEWED_PUBLICATION_FRONTIER.md) now connects
+admitted-blob reuse to that owner without changing ordinary raw receive or
+complete-prerequisite verification. An `outcome_unknown` response still does not
+prove non-commit or authorize a new key. Inspection alone never publishes.
 
 This does not remove all repository-scale limits, stream arbitrarily wide trees,
 change rebase-series inspection, or provide hostile-code isolation, release,
