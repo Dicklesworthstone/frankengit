@@ -21,9 +21,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::ProjectionFailure;
+#[cfg(test)]
+use fgit_admission::merge::native::objects::validate_commit_closure;
 use fgit_admission::merge::native::objects::{
     CanonicalObjectHeader, FrontierObjectHeaders, MergeObjectLimits, ObjectFrontier,
-    validate_commit_closure, validate_fast_forward_objects_above, validate_merge_objects_above,
+    validate_fast_forward_objects_above, validate_merge_objects_above,
     validate_squash_objects_above, validate_workspace_objects_above,
 };
 use fgit_crypto::{git_object_id, sha256_digest};

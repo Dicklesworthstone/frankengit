@@ -5,6 +5,7 @@ use super::*;
 use crate::treefs_workspace::candidate_inspection::{
     InspectedBundle, InspectedRebaseCommit, RebaseBundleInspection,
 };
+use fgit_admission::merge::native::objects::validate_commit_closure_above;
 use fgit_forge::review::compare_source_series;
 
 const MAX_COMMITS: usize = 256;
@@ -109,26 +110,20 @@ impl OneNode {
             database_exhaustion: &exhaustion,
             session_is_live: None,
         };
-        let original = OriginalSource {
-            inner: fabric(),
-            allowed: selected.selected_closure().closure().objects(),
-            budget: &budget,
-            frontier: None,
-        };
         let limits = MergeObjectLimits {
             max_object_bytes: maximum,
             ..MergeObjectLimits::default()
         };
-        let base =
-            validate_commit_closure(&original, onto, limits, &mut || original.live().is_ok());
-        original.live().map_err(BundleInspectionRefusal::Source)?;
-        let base = base.map_err(BundleInspectionRefusal::Validation)?;
-        let onto_source = OriginalSource {
-            inner: fabric(),
-            allowed: &base.objects,
-            budget: &budget,
-            frontier: None,
-        };
+        // This source proves each original from onto alone. The old source
+        // lease and cumulative admission membership cannot lend pack inputs.
+        let onto_source = OriginalSource::with_parents(
+            fabric(),
+            selected.selected_closure().closure().objects(),
+            &budget,
+            &[onto],
+            limits,
+        )
+        .map_err(BundleInspectionRefusal::Source)?;
         let pack_limits = PackLimits {
             max_input_bytes: MAX_BUNDLE_BYTES,
             max_entries: MAX_INSPECTION_OBJECTS,
@@ -143,7 +138,9 @@ impl OneNode {
             &pack_limits,
             &onto_source,
         );
-        original.live().map_err(BundleInspectionRefusal::Source)?;
+        onto_source
+            .live()
+            .map_err(BundleInspectionRefusal::Source)?;
         let unpacked = unpacked?;
         let source = InspectionSource {
             original: &onto_source,
@@ -156,33 +153,32 @@ impl OneNode {
             },
         };
         let commits = inspect_chain(&source, candidate, onto)?;
-        let closure =
-            validate_commit_closure(&source, candidate, limits, &mut || original.live().is_ok());
-        original.live().map_err(BundleInspectionRefusal::Source)?;
+        let closure = validate_commit_closure_above(
+            &source,
+            candidate,
+            ObjectFrontier::with_headers(onto_source.allowed, &source),
+            limits,
+            &mut || onto_source.live().is_ok(),
+        );
+        onto_source
+            .live()
+            .map_err(BundleInspectionRefusal::Source)?;
         let closure = closure.map_err(BundleInspectionRefusal::Validation)?;
-        let transport_only_objects = unpacked.check_coverage(&closure.objects)?;
+        let transport_only_objects =
+            unpacked.check_frontier_coverage(&closure.objects, &onto_source, limits)?;
 
-        // Only now is old-source history made available for the final comparison.
-        // It was deliberately unavailable to the uploaded pack and candidate
-        // closure validator. All reads still consume the SAME original budget.
-        let old = validate_commit_closure(&original, expected_source, limits, &mut || {
-            original.live().is_ok()
-        });
-        original.live().map_err(BundleInspectionRefusal::Source)?;
-        let old = old.map_err(BundleInspectionRefusal::Validation)?;
-        let mut review_objects = base.objects.clone();
-        for id in old.objects {
-            if !review_objects.contains(&id) && review_objects.len() >= limits.max_objects {
-                return Err(BundleInspectionRefusal::BudgetExceeded);
-            }
-            review_objects.insert(id);
-        }
-        let review_original = OriginalSource {
-            inner: fabric(),
-            allowed: &review_objects,
-            budget: &budget,
-            frontier: None,
-        };
+        // Only AFTER all uploaded edges have proved their onto-only inputs is
+        // old-source history made available to the net comparison. The two
+        // capabilities never alias, and every actual original read still
+        // consumes the same finite byte budget across validation and review.
+        let review_original = OriginalSource::with_parents(
+            fabric(),
+            selected.selected_closure().closure().objects(),
+            &budget,
+            &[onto, expected_source],
+            limits,
+        )
+        .map_err(BundleInspectionRefusal::Source)?;
         let review_source = InspectionSource {
             original: &review_original,
             objects: &unpacked.objects,
@@ -196,11 +192,15 @@ impl OneNode {
         pairs.extend(commits.iter().map(|commit| (commit.parent, commit.id)));
         let comparisons =
             compare_source_series(&review_source, self.object_format, &pairs, options);
-        original.live().map_err(BundleInspectionRefusal::Source)?;
+        onto_source
+            .live()
+            .map_err(BundleInspectionRefusal::Source)?;
         let comparisons =
             comparisons.map_err(|error| BundleInspectionRefusal::Review(Box::new(error)))?;
         let digest = sha256_digest(input);
-        original.live().map_err(BundleInspectionRefusal::Source)?;
+        onto_source
+            .live()
+            .map_err(BundleInspectionRefusal::Source)?;
         Ok(RebaseBundleInspection {
             repository_id: self.repository_id,
             source_head: selected.basis().id(),

@@ -414,3 +414,6 @@ fn old_source_objects_are_not_implicit_pack_prerequisites_and_empty_series_are_r
         node.shutdown().unwrap();
     }
 }
+
+#[path = "rebase_inspection/frontier.rs"]
+mod frontier;

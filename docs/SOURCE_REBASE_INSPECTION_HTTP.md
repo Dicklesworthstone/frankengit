@@ -73,8 +73,23 @@ source branch and candidate, with exactly one prerequisite equal to onto.
 External delta bases and candidate dependencies may be borrowed **only from
 onto's verified history**. Merely being admitted somewhere in the repository, or
 reachable from the old source, is not enough. Missing source-side objects must
-be included in the bundle. Native hashes, object kinds, pack checksums and full
-candidate closure are validated using the existing stage-free inspector.
+be included in the bundle. Native hashes, object kinds, pack checksums and the
+complete uploaded graph are validated using the existing stage-free inspector.
+
+Validation now stops at independently admitted object frontiers rather than
+materializing all of onto's history, the candidate's inherited payloads, and the
+old source's history. The onto-only reader proves each original's typed native
+reachability on demand. Its bounded storage headers can verify omitted reused
+edges without loading unchanged blob payloads. Actual changed bytes, graph
+proofs, candidate bodies and external delta bases retain full verified reads
+and the same shared original-input byte budget. Metadata reuse is not a scrub
+certificate; it does not certify unread payload integrity.
+
+A supplied tree that was already admitted elsewhere still cannot authorize its
+omitted descendants. Uploaded-edge coverage independently checks every omitted
+edge against onto-only disclosure before the old-source comparison reader is
+created. Thick packs may repeat admitted onto-reachable bytes without changing
+the review; unrelated objects still refuse.
 
 The uploaded candidate must form a single-parent chain back to onto. Every
 rewritten commit is supplied by the pack, with at most 256 commits, 2 MiB per
@@ -104,6 +119,11 @@ with the candidate tree. Each `commits` item contains `index`, `commit`, `parent
 that commit's actual sole parent and result. Nested reference names label the
 inspected source branch; their exact requested OIDs identify the comparison.
 They are not a claim that a newly uploaded commit is already its canonical tip.
+
+`bundle.closure_objects` counts objects traversed above the selected frontier,
+including the candidate root even for an empty series. It is independent of
+minimal versus thick transport, not the repository's full history size or an
+integrity-scan count. `pack_objects` still measures actual uploaded objects.
 
 The complete native commit body is encoded losslessly, including author,
 committer, encoding, message and any other accepted metadata. File paths and
@@ -141,6 +161,18 @@ restart, metadata, transient changes, omitted source objects, corruption and
 empty series. `fgit-node --test source_rebase_inspection_http` covers the live
 HTTP workflow, grants, keys, rotation, framing, limits and explicit publication.
 
-These tests were authored with the implementation but were **not executed in
-the authoring environment**, which lacked cargo, rustc and rustfmt. Compilation,
-Clippy, formatting and repository-wide verification are not claimed here.
+The original endpoint landed with an explicit unexecuted-test limitation.
+The frontier integration is checked with pinned native admission tests, the
+rebase node/HTTP targets above, and the actual-process `rebase_frontier.sh`
+campaign. That campaign independently constructs SHA-1/SHA-256 trees, commits
+and packs beside 140 MiB of inherited blobs. It checks complete transient
+changes with an empty net diff, equivalent minimal/thick artifacts, source-only
+borrowing refusals, a missing intermediate commit, cumulative limits, corruption,
+empty series, source-free restart, explicit publication and original-key recovery.
+Its `--baseline` helper mode distinguishes the old large-fixture refusal from a
+permitted 20 MiB control. Unit source stand-ins are not native service evidence.
+
+No resource limit, dependency, runtime, unsafe boundary, production Git fallback
+or publication policy is added. Arbitrary history/tree-width scaling, hostile
+isolation, full-workspace, Clippy, release and physical-power-loss qualification
+remain separate obligations. `frankengit-t0iw` stays open for its full acceptance.
