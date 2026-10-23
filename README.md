@@ -233,7 +233,8 @@ campaign bound (exit 124) without a terminal suite aggregate; it remains a
 non-pass.
 These are module/peer and harness observations, not a native-server or complete
 real-browser gate. All three runs report owned process-group quiescence.
-Formatting currently fails in the new agent bridge file. Strict remote syntax
+Formatting failed at that SHA in the new agent bridge file (one blank line;
+fixed in `4ccbe484`, after which `cargo fmt --all -- --check` reports no diffs). Strict remote syntax
 execution selected a healthy worker but stopped before compilation because RCH
 classified deliberately invalid checker fixtures as selected Cargo sources
 (`RCH-E413`, `.4.72`). Local storage remains critical; no local compiler fallback
