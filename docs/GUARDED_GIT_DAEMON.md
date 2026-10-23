@@ -36,9 +36,34 @@ There is no fallback to the old receiver after a guarded-serving failure.
 
 `--pack-max-expanded-mib <non-zero>` sets the selected-pack write envelope
 (frankengit-e6jj). This is the total expanded object bytes one upload-pack
-response may hold and emit, 128 MiB by default; the per-object ceiling is
-separate. The pack is built in memory, so the envelope is an operator memory
-bound, not a repository-size guarantee.
+response may emit, 4096 MiB by default; the 32 MiB per-object ceiling is
+separate. The pack streams (frankengit-8xyq). Each object is loaded, verified,
+delta-searched against the preceding candidates and written to a private
+scratch file under the storage root, unlinked as soon as it is created (on
+Unix; elsewhere it is removed when the response ends), and read back to the
+client in bounded chunks. Server memory is the candidates, not the pack: at
+most 32 entries and 128 MiB of their bodies
+under the served `git-pack-compressed-v5` profile, plus their search indexes,
+the current object and its at most two client-held bases. The envelope bounds
+work and scratch disk. It was 128 MiB, and a memory bound, while packs were
+built in memory.
+
+Measured with a release fg of 25ba1840 built on ba7f09a3, on one commit of
+1 MiB random blobs, one `fg serve` session per clone, default flags:
+
+| repository | clone | received pack | server peak RSS |
+| --- | --- | --- | --- |
+| 160 MiB | 18.5-18.7 s | 167,804,125 B | 102-110 MiB |
+| 500 MiB | 57.1 s | 524,387,130 B | 108 MiB |
+
+Before this change the 160 MiB clone needed `--pack-max-expanded-mib 512` and
+peaked at 537-540 MiB (release fg 9f15cfb5), taking 18.8 s at the same host
+load. Every 160 MiB clone, before and after, received the identical pack
+(`pack-6ecbf0f4...`). This is one corpus shape: its blobs do not delta, so the
+window holds bodies and indexes but finds no bases. The byte bound itself is
+exercised by the opt-in XL lane (`first_push.sh`, `FG_E2E_LARGE_PUSH=1`): 24
+blobs of about 14 MB, a 314 MiB count window, clone under the default envelope
+(FG-HH37-PUSH-036, -058).
 
 Before the ref advertisement, every session walks the visible closure of the
 advertised refs. It reads and verifies every commit, tree and tag body, but
@@ -50,7 +75,8 @@ on blob bytes: a repository larger than the envelope is still advertised and
 incrementally fetchable.
 
 A request whose pack exceeds the envelope is refused after the advertisement,
-on the side band. git prints it and then stops, for example:
+on the side band. git prints it and then stops, for example under
+`--pack-max-expanded-mib 128`:
 
 ```text
 remote: pack needs 134217845 bytes of objects, over this server's upload envelope (128 MiB of objects); the operator can raise it with fg serve --pack-max-expanded-mib
@@ -58,11 +84,11 @@ fatal: early EOF
 ```
 
 The first figure is where the writer crossed the limit, not the full pack
-size. A full clone of a 160 MiB repository needs, for example,
-`--pack-max-expanded-mib 512`.
+size.
 
 A repository whose commit, tree and tag bytes alone exceed the envelope is
-refused before any advertisement, with one `ERR` packet such as
+refused before any advertisement, with one `ERR` packet such as, under
+`--pack-max-expanded-mib 128`,
 `ERR repository exceeds this server's upload envelope (128 MiB of objects, 32 MiB per object); the operator can raise it with fg serve --pack-max-expanded-mib`.
 A stock client prints it as `fatal: remote error: ...` (git:// and SSH).
 Smart HTTP refuses that case with its existing status mapping and does not

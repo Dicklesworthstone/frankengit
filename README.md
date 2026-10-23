@@ -62,8 +62,14 @@ previously kept the wider node package gate red was fixed in `7ccaf8b`
 locally at that revision. `doctor` authenticates the head and can re-verify
 one explicitly named native object; it is not yet a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` writes an authority-selected pack
-to a previously absent path. One emitted pack is bounded by the documented
-write-side envelope (`--pack-max-expanded-mib`; 128 MiB expanded by default).
+to a previously absent path. Served and exported packs stream through
+private scratch custody (frankengit-8xyq): the write-side envelope
+(`--pack-max-expanded-mib`, 4096 MiB of objects by default) bounds work and
+scratch disk, and the delta window (`git-pack-compressed-v5`: at most 32
+candidates and 128 MiB of their bodies) bounds memory. A default-flag clone of a
+500 MiB repository of random blobs completed with 108 MiB peak server RSS
+(release fg of 25ba1840 built on ba7f09a3; one corpus, see
+docs/GUARDED_GIT_DAEMON.md).
 The pre-advertisement walk reads blob headers, not blob bodies
 (frankengit-8xyq), so a repository larger than the envelope is still
 advertised and incrementally fetchable. A pack over the envelope is refused
@@ -195,8 +201,8 @@ vision goals to current code, evidence and existing owning work.
   closure (lh8z), so 100,000-commit and 100,000-file repositories prepare and
   publish. Merge-base ordering uses committer dates as hints: equal or skewed
   dates can exhaust the 4,096-commit bound and refuse, never select a wrong
-  base. Serving a clone still holds the visible objects in memory under the
-  128 MiB default envelope above.
+  base. Served packs refuse any single object over the 32 MiB per-object
+  ceiling.
 - Forge-position and outbox state have 16,384-entry bounds; the node writer
   gate is one. Required-check history scans are independently bounded.
   These do not establish sustained or extreme-scale operation.

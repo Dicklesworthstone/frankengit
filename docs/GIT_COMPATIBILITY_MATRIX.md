@@ -252,10 +252,12 @@ and the seal, so a large-but-legitimate first push is never capped by the
 host's incidental throughput rank.
 
 The sibling **write-side envelope** (frankengit-e6jj) bounds one emitted
-pack: `PackLimits.max_total_expanded_bytes` (default 128 MiB; the writer's
-delta-base cache tracks it) gates the selected-pack plan because the current
-writer buffers the finished pack in memory before streaming. `fg serve` and
-`fg export` widen it explicitly with `--pack-max-expanded-mib`. An
+pack: `PackLimits.max_total_expanded_bytes`, 4096 MiB by default on every
+transport and for `fg export`. The writer streams (frankengit-8xyq): objects
+are loaded, decided and written one at a time to unlinked scratch, so the
+envelope bounds work and scratch disk, while memory is the delta candidates,
+bounded by the profile and enforced as `max_cached_bytes` (128 MiB). Every
+serving command and `fg export` set it with `--pack-max-expanded-mib`. An
 over-envelope selected pack is refused before any pack byte is emitted: a
 client that negotiated sideband-64k receives one Fatal sideband message
 naming the limit (diagnosable, not an unexplained early EOF); without
@@ -281,7 +283,10 @@ selected blobs once.
 **Thin fetch packs** (frankengit-pazc). Upload-pack advertises `thin-pack` on
 every transport. A fetch that requested it, with `ofs-delta` and at least one
 have, and that is full-history and unfiltered, is written with the
-`git-pack-compressed-v4-thin` profile. V4 is V3's plan with the
+`git-pack-compressed-v5-thin` profile. V5 is V4 with delta candidates also
+bounded by body bytes: a decision looks back over at most 128 MiB of
+preceding bodies (frankengit-8xyq), which bounds a streamed pack's memory.
+Where the nearest 32 bodies fit, V5 plans exactly as V4. V4 is V3's plan with the
 `fixed-or-stored-v1` DEFLATE profile (frankengit-uf91): a member block whose
 fixed-Huffman encoding would not beat a stored block is stored, so
 incompressible objects are copied rather than bit-encoded and do not grow.
@@ -299,7 +304,7 @@ Every other block is byte-identical to V3.
 - Bases are paid from the same per-target work budget as in-pack candidates.
   An in-pack base wins an equal-length tie.
 - Clones (no haves), shallow and filtered fetches, and clients without
-  `thin-pack` keep the self-contained `git-pack-compressed-v4` pack, byte for
+  `thin-pack` keep the self-contained `git-pack-compressed-v5` pack, byte for
   byte.
 
 A client base must beat the best in-pack choice by more than its REF_DELTA
@@ -323,7 +328,8 @@ These are two corpora, not a general performance claim.
 `fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
 `--session-secs-per-mib`, `--session-max-extension-secs`, `--processing-timeout-secs`,
 `--receive-max-input-mib`, `--receive-max-expanded-mib`; `fg serve` and
-`fg export` select the write-side envelope with `--pack-max-expanded-mib`.
+`fg export` select the write-side envelope with `--pack-max-expanded-mib`
+(4096 MiB by default; `fg serve-http` accepts 1..65536).
 
 Refusal behavior by phase: a deadline that fires while the client is still
 sending (greeting, command section, pack stream) is a typed serve error and
