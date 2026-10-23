@@ -51,12 +51,9 @@ impl Unpacked {
                 .permits(*id)
                 .map_err(BundleInspectionRefusal::Source)?
             {
-                let (kind, _) = original
-                    .read(*id)
+                original
+                    .verify_reused(*id, object.kind)
                     .map_err(BundleInspectionRefusal::Source)?;
-                if kind != object.kind {
-                    return Err(invalid("uploaded original has the wrong native kind"));
-                }
                 pending.insert(*id);
                 self.walk_uploaded(
                     &mut pending,
@@ -124,12 +121,12 @@ impl Unpacked {
                         pending.insert(child);
                     }
                 } else {
-                    let (actual, _) = original
-                        .read(child)
+                    // The parent proof authenticates this reused edge. Its
+                    // payload is not needed to validate uploaded graph bytes;
+                    // fetching every unchanged blob recreates a full-byte walk.
+                    original
+                        .verify_reused(child, kind)
                         .map_err(BundleInspectionRefusal::Source)?;
-                    if actual != kind {
-                        return Err(invalid("original edge has the wrong native kind"));
-                    }
                 }
             }
         }

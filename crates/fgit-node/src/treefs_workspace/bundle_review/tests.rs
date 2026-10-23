@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "frontier_header_tests.rs"]
+mod frontier_header_tests;
 #[path = "pack_local_tests.rs"]
 mod pack_local_tests;
 

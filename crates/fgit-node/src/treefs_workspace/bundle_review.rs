@@ -22,8 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_commit_closure, validate_fast_forward_objects_above,
-    validate_merge_objects_above, validate_squash_objects_above, validate_workspace_objects_above,
+    CanonicalObjectHeader, FrontierObjectHeaders, MergeObjectLimits, ObjectFrontier,
+    validate_commit_closure, validate_fast_forward_objects_above, validate_merge_objects_above,
+    validate_squash_objects_above, validate_workspace_objects_above,
 };
 use fgit_crypto::{git_object_id, sha256_digest};
 use fgit_forge::event::NativeMerge;
@@ -323,7 +324,7 @@ impl OneNode {
                 validate_fast_forward_objects_above(
                     &source,
                     coordinates,
-                    original.allowed,
+                    ObjectFrontier::with_headers(original.allowed, &source),
                     limits,
                     &mut || original.live().is_ok(),
                 )
@@ -335,7 +336,7 @@ impl OneNode {
                 validate_squash_objects_above(
                     &source,
                     coordinates,
-                    original.allowed,
+                    ObjectFrontier::with_headers(original.allowed, &source),
                     limits,
                     &mut || original.live().is_ok(),
                 )
@@ -343,7 +344,7 @@ impl OneNode {
             Some(coordinates) => validate_merge_objects_above(
                 &source,
                 coordinates,
-                original.allowed,
+                ObjectFrontier::with_headers(original.allowed, &source),
                 limits,
                 &mut || original.live().is_ok(),
             ),
@@ -351,7 +352,7 @@ impl OneNode {
                 &source,
                 candidate,
                 expected_base,
-                original.allowed,
+                ObjectFrontier::with_headers(original.allowed, &source),
                 limits,
                 &mut || original.live().is_ok(),
             ),
@@ -463,6 +464,37 @@ impl<'a> OriginalSource<'a> {
             } => Err(MergeSourceError::Cancelled),
         }
     }
+    /// Check a reused native edge without fetching its undisclosed payload.
+    /// Selected membership alone is insufficient: the exact visible-parent
+    /// proof must first authorize the identity and agree with the edge's kind.
+    /// The bounded fabric envelope establishes local availability and shape,
+    /// not payload integrity. Actual content/delta reads still use `read`.
+    fn verify_reused(&self, id: GitOid, expected: ObjectType) -> Result<(), MergeSourceError> {
+        if self.header(id)?.object_type != expected {
+            return Err(MergeSourceError::InvalidObject(id));
+        }
+        Ok(())
+    }
+
+    fn header(&self, id: GitOid) -> Result<CanonicalObjectHeader, MergeSourceError> {
+        if !self.permits(id)? {
+            return Err(MergeSourceError::OutsideSelection);
+        }
+        self.live()?;
+        let result = self.inner.read_object_header(&id);
+        self.live()?;
+        let (kind, body_bytes) = result.map_err(|_| MergeSourceError::Unavailable(id))?;
+        if let Some(frontier) = &self.frontier {
+            frontier.borrow().require_kind(id, kind)?;
+        }
+        self.live()?;
+        Ok(CanonicalObjectHeader {
+            id,
+            object_type: kind,
+            body_bytes,
+        })
+    }
+
     fn read(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {
         if !self.permits(id)? {
             return Err(MergeSourceError::OutsideSelection);
@@ -557,6 +589,23 @@ impl InspectionSource<'_, '_> {
         .map_err(|_| MergeSourceError::InvalidObject(owner))
     }
 }
+impl FrontierObjectHeaders for InspectionSource<'_, '_> {
+    fn load_header(&self, id: &GitOid) -> Result<Option<CanonicalObjectHeader>, PackWriteError> {
+        self.original
+            .live()
+            .map_err(|error| pack_source_error(error, *id))?;
+        // Uploaded bytes retain full native validation and accounting, even if
+        // their identity is also selected. Only omitted originals use metadata.
+        if self.objects.contains_key(id) {
+            return Ok(None);
+        }
+        self.original
+            .header(*id)
+            .map(Some)
+            .map_err(|error| pack_source_error(error, *id))
+    }
+}
+
 impl CanonicalObjectSource for InspectionSource<'_, '_> {
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         let (kind, body) = self

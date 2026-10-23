@@ -82,6 +82,19 @@ impl ParentReachability {
         Ok(false)
     }
 
+    /// A remembered identity is a typed native edge, not an untyped allow-list.
+    pub(super) fn require_kind(
+        &self,
+        id: GitOid,
+        kind: ObjectType,
+    ) -> Result<(), MergeSourceError> {
+        if self.required.get(&id) == Some(&kind) {
+            Ok(())
+        } else {
+            Err(MergeSourceError::InvalidObject(id))
+        }
+    }
+
     pub(super) fn observe(
         &mut self,
         id: GitOid,

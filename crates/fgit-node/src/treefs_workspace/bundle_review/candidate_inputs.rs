@@ -293,14 +293,20 @@ impl OneNode {
             Some((m, MergeCommitStyle::TwoParent)) => validate_merge_objects_above(
                 &source,
                 m,
-                selected.selected_closure().closure().objects(),
+                ObjectFrontier::with_headers(
+                    selected.selected_closure().closure().objects(),
+                    &source,
+                ),
                 limits,
                 &mut || original.live().is_ok(),
             ),
             Some((m, MergeCommitStyle::Squash)) => validate_squash_objects_above(
                 &source,
                 m,
-                selected.selected_closure().closure().objects(),
+                ObjectFrontier::with_headers(
+                    selected.selected_closure().closure().objects(),
+                    &source,
+                ),
                 limits,
                 &mut || original.live().is_ok(),
             ),
@@ -308,7 +314,10 @@ impl OneNode {
                 &source,
                 candidate,
                 expected_base,
-                selected.selected_closure().closure().objects(),
+                ObjectFrontier::with_headers(
+                    selected.selected_closure().closure().objects(),
+                    &source,
+                ),
                 limits,
                 &mut || original.live().is_ok(),
             ),
