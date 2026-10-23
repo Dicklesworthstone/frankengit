@@ -113,6 +113,11 @@ impl std::error::Error for CollisionDefenseError {}
 /// Monomorphising over this trait keeps the unscreened path free of dynamic
 /// dispatch while letting the screened path see real internal state.
 pub trait BlockObserver {
+    /// Whether [`Self::observe`] looks at its context. An observer that never
+    /// does (always `Clean`) lets the core skip materialising the 80-word
+    /// schedule for it (frankengit-0dq9).
+    const INSPECTS_BLOCKS: bool = true;
+
     fn observe(&mut self, context: &Sha1BlockContext<'_>) -> BlockVerdict;
 }
 
@@ -120,6 +125,8 @@ pub trait BlockObserver {
 pub struct UnobservedBlocks;
 
 impl BlockObserver for UnobservedBlocks {
+    const INSPECTS_BLOCKS: bool = false;
+
     #[inline]
     fn observe(&mut self, _context: &Sha1BlockContext<'_>) -> BlockVerdict {
         BlockVerdict::Clean
