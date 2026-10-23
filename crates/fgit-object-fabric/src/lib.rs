@@ -17,8 +17,8 @@ use fgit_crypto::{
     Sha256Hasher,
 };
 use fgit_types::{
-    CodecVersion, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, SchemaFamily, SchemaId,
-    TypeRefusal,
+    CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, SchemaFamily,
+    SchemaId, TypeRefusal,
 };
 
 pub mod artifact;
@@ -178,7 +178,7 @@ impl DigestAlgorithm for CryptoDigest {
             ObjectKind::Internal => return Err(FabricError::InternalObjectKindUnsupported),
         };
         let identity =
-            fgit_crypto::git_payload_commitment(object_kind, payload, CodecVersion::new(1, 0));
+            fgit_crypto::git_payload_commitment(object_kind, payload, CANONICAL_CODEC_VERSION);
         commitment_from_bytes(identity.digest().as_bytes())
     }
 }
@@ -1441,6 +1441,8 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
+    use fgit_types::CodecVersion;
+
     use super::*;
 
     fn limits() -> SegmentLimits {

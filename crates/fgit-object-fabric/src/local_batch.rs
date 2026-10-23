@@ -187,7 +187,7 @@ impl LocalFilesystemFabric {
             let evidence = AdmittedObject::verified(
                 &reservation,
                 object.identity(),
-                payload_identity(object.envelope().object_kind(), object.payload())?,
+                payload_identity(object)?,
                 reservation.declared_len,
                 StructureVerdict::Verified,
             )?;
