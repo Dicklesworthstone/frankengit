@@ -7,12 +7,12 @@ import { lstat } from 'node:fs/promises';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { absolute, directory, readPrivate, writeNew, syncDirectory } from './operator/workflow_watch_io.mjs';
 import { fail, clock, hash } from './operator/source_edit_wire.mjs';
-import { compileSourceRefactoring, REFACTOR_PROFILE, REPLACEMENT_LIMITS } from './operator/source_edit_replacements.mjs';
+import { compileSourceRefactoring, REPLACEMENT_LIMITS } from './operator/source_edit_replacements.mjs';
 import { loadSourceRefactorFiles } from './operator/source_edit_refactor_files.mjs';
-const USAGE = 'node scripts/fg_source_refactor.mjs compile --plan-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--binary literal|delta|delta-runs] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
+const USAGE = 'node scripts/fg_source_refactor.mjs compile --plan-file PRIVATE_JSON --output ABSENT_PRIVATE_PATCH [--profile exact-tree-v1|exact-tree-binary-v1] [--binary literal|delta|delta-runs] [--max-patch-bytes 1..1048576] [--timeout-ms 1..300000]';
 function argumentsFor(args) {
-  if (!Array.isArray(args) || args.length > 11 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || args[0] !== 'compile') fail('source_refactor_arguments');
-  const found = new Map(), allowed = ['--plan-file', '--output', '--binary', '--max-patch-bytes', '--timeout-ms'];
+  if (!Array.isArray(args) || args.length > 13 || args.some(s => typeof s !== 'string' || Buffer.byteLength(s) > 4096) || args[0] !== 'compile') fail('source_refactor_arguments');
+  const found = new Map(), allowed = ['--plan-file', '--output', '--profile', '--binary', '--max-patch-bytes', '--timeout-ms'];
   for (let at = 1; at < args.length; at += 2) {
     const key = args[at], value = args[at + 1];
     if (!allowed.includes(key) || found.has(key) || !value || value.startsWith('--')) fail('source_refactor_arguments');
@@ -20,12 +20,14 @@ function argumentsFor(args) {
   }
   for (const key of ['--plan-file', '--output']) if (!found.has(key)) fail('source_refactor_arguments');
   if (found.has('--binary') && !['literal', 'delta', 'delta-runs'].includes(found.get('--binary'))) fail('source_refactor_binary_profile');
+  if (found.has('--profile') && !['exact-tree-v1', 'exact-tree-binary-v1'].includes(found.get('--profile'))) fail('source_refactor_native_profile');
   const positive = (key, fallback, maximum) => {
     const value = found.get(key) ?? String(fallback);
     if (!/^[1-9][0-9]{0,8}$/.test(value) || Number(value) > maximum) fail('source_refactor_limit');
     return Number(value);
   };
   return { input: absolute(found.get('--plan-file')), output: absolute(found.get('--output')),
+    ...(found.has('--profile') ? { nativeProfile: found.get('--profile') } : {}),
     ...(found.has('--binary') ? { binary: found.get('--binary') } : {}),
     maxPatchBytes: positive('--max-patch-bytes', REPLACEMENT_LIMITS.maxPatchBytes, REPLACEMENT_LIMITS.maxPatchBytes),
     timeoutMs: positive('--timeout-ms', 30000, 300000) };
@@ -56,8 +58,8 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     const plan = await loadSourceRefactorFiles(options.input, time.check);
     const compiled = compileSourceRefactoring(plan.format, plan.changes,
-      { maxPatchBytes: options.maxPatchBytes, ...(options.binary ? { binary: options.binary } : {}) }, time.check);
-    const candidate = { type: 'source_refactoring_compiled', profile: REFACTOR_PROFILE, native_patch_profile: compiled.native_patch_profile,
+      { maxPatchBytes: options.maxPatchBytes, ...(options.nativeProfile ? { nativeProfile: options.nativeProfile } : {}), ...(options.binary ? { binary: options.binary } : {}) }, time.check);
+    const candidate = { type: 'source_refactoring_compiled', profile: compiled.profile, native_patch_profile: compiled.native_patch_profile,
       output: options.output, object_format: plan.format, plan_sha256: plan.plan_sha256,
       patch_sha256: hash(compiled.patch), patch_bytes: compiled.patch.length, changed_paths: compiled.changes.length,
       file_sections: compiled.file_sections, move_count: compiled.move_count, source_bytes: compiled.source_bytes, result_bytes: compiled.result_bytes,

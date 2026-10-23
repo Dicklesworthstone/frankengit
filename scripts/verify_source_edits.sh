@@ -24,4 +24,5 @@ node --test tests/operator/source_edit_candidate.test.mjs \
   tests/operator/source_edit_compact_splices.test.mjs tests/operator/source_edit_compact_splices_cli.test.mjs \
   tests/operator/source_edit_splice_files_cli.test.mjs \
   tests/operator/source_edit_refactoring.test.mjs tests/operator/source_edit_refactoring_cli.test.mjs \
-  tests/operator/source_edit_refactoring_git_oracle.test.mjs
+  tests/operator/source_edit_refactoring_git_oracle.test.mjs \
+  tests/operator/source_edit_refactoring_binary.test.mjs

@@ -12,6 +12,7 @@ pub(super) enum Profile {
     Exact,
     ExactBinary,
     ExactTree,
+    ExactTreeBinary,
 }
 impl Profile {
     pub(super) const fn token(self) -> &'static str {
@@ -19,6 +20,7 @@ impl Profile {
             Self::Exact => "exact-v1",
             Self::ExactBinary => "exact-binary-v1",
             Self::ExactTree => "exact-tree-v1",
+            Self::ExactTreeBinary => "exact-tree-binary-v1",
         }
     }
     pub(super) fn preflight(self, bytes: &[u8], limits: PatchLimits) -> Result<(), String> {
@@ -26,6 +28,9 @@ impl Profile {
             Self::Exact => fgit_forge::patch::UnifiedPatch::parse(bytes, limits, &|| false),
             Self::ExactBinary => {
                 fgit_forge::patch::UnifiedPatch::parse_with_binary(bytes, limits, &|| false)
+            }
+            Self::ExactTreeBinary => {
+                fgit_forge::patch::UnifiedPatch::parse_with_binary_renames(bytes, limits, &|| false)
             }
             Self::ExactTree => fgit_forge::patch::UnifiedPatch::parse_with_binary_and_renames(
                 bytes,
@@ -188,9 +193,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             "exact-v1" => Profile::Exact,
             "exact-binary-v1" => Profile::ExactBinary,
             "exact-tree-v1" => Profile::ExactTree,
+            "exact-tree-binary-v1" => Profile::ExactTreeBinary,
             _ => {
                 return Err(
-                    "explicit --profile exact-v1, exact-binary-v1 or exact-tree-v1 is required"
+                    "explicit --profile exact-v1, exact-binary-v1, exact-tree-v1 or exact-tree-binary-v1 is required"
                         .into(),
                 );
             }

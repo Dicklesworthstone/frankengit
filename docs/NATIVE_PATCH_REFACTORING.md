@@ -3,6 +3,8 @@
 `fg patch prepare --profile exact-tree-v1` exposes the existing native regular-file
 relocation engine. It composes explicit moves, exact text edits, ordinary binary
 literal/delta edits, file creation/deletion and executable modes into one candidate.
+Edited binary moves require the separate [binary refactoring profile](NATIVE_BINARY_REFACTORING.md),
+`exact-tree-binary-v1`; `exact-tree-v1` retains its previous grammar.
 It does not infer renames from equal content or similarity scores and never runs
 Git, a source script, a host tool or an external merge driver.
 
@@ -34,13 +36,13 @@ input file section but two path effects; existing parser/exporter bounds are not
 increased or reinterpreted.
 
 The original `exact-v1` remains text-only. `exact-binary-v1` accepts compressed
-binary edits but still refuses rename records. Only the explicit new profile
-admits moves. Existing unfiltered receipt fields and the apply API are unchanged;
+binary edits but still refuses rename records. An explicit tree profile
+is required for moves. Existing unfiltered receipt fields and the apply API are unchanged;
 the preparation receipt names the selected profile.
 
 ## Independently pin the whole result
 
-Optional `--expected-result-tree NATIVE_TREE_ID` works with all three preparation
+Optional `--expected-result-tree NATIVE_TREE_ID` works with all four preparation
 profiles. Choose this complete tree independently from the preparation response.
 It binds every file name, byte identity, executable mode, nested tree and unchanged
 sibling in the intended result. A valid patch which also changes an unintended

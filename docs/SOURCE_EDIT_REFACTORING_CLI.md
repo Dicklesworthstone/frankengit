@@ -1,7 +1,7 @@
 # Explicit file-refactoring patches from private local plans
 
 `node scripts/fg_source_refactor.mjs compile` authors bounded native
-`exact-tree-v1` patch input. It reuses `compileSourceReplacements`' encoder,
+`exact-tree-v1` patch input by default. It reuses `compileSourceReplacements`' encoder,
 original-file checks, binary framing and limits; it does not apply a patch, read
 a repository, publish a branch or infer a rename. Existing `fg_source_patch.mjs`
 compile/splice commands and replacement profiles keep their previous behavior.
@@ -70,9 +70,12 @@ move targets are not accepted.
 
 Pure binary moves need no binary member: their unchanged bytes are selected by
 exact original/result identities. They therefore do not transmit the whole file
-body in both directions. A binary move whose bytes change is deliberately refused,
-including when `--binary` is supplied. This matches the currently documented
-native edited-rename boundary rather than silently converting it to two effects.
+body in both directions. A binary move whose bytes change is refused by the default `exact-tree-v1`,
+including when only `--binary` is supplied. Explicit `--profile exact-tree-binary-v1`
+together with `--binary literal|delta|delta-runs` opts into the new
+[native binary refactoring path](NATIVE_BINARY_REFACTORING.md). Its receipt uses
+`frankengit-source-refactoring-binary-v1`; existing defaults and encodings do not
+change. The plan schema remains the same and still grants no native authority.
 
 Ordinary same-path binary edits inside the batch require explicit `--binary
 literal`, `--binary delta` or `--binary delta-runs`. Those options retain the
@@ -104,8 +107,8 @@ binary profile. It states `preimages_verified: true`, but also explicitly states
 
 An offline patch compiler cannot prove that a source exists, that its mode is
 current, or that a destination is absent in the selected repository. Native
-`fg patch prepare --profile exact-tree-v1` must verify those facts against the
-independently pinned source. Use `--expected-result-tree` to bind the complete
+`fg patch prepare` with the matching explicit native profile must verify those
+facts against the independently pinned source. Use `--expected-result-tree` to bind the complete
 intended result, including untouched siblings, then inspect the exact resulting
 bundle. Only ordinary `fg patch apply` with the reviewed commit, expected base,
 principal and original idempotency key can publish. The plan and compiler receipt

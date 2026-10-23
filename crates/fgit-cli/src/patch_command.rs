@@ -8,11 +8,11 @@ use crate::publication_support::{describe, quote, read_bundle, write_terminal_re
 use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, TerminalOutcome};
 use fgit_node::{NodeConfig, OneNode, WorkspacePatchCandidate};
 use fgit_types::{DecisionOutcome, HeadGeneration, TxId};
-use options::{Operation, Options, hex};
+use options::{Operation, Options, Profile, hex};
 use std::io::{Read, Write};
 
 const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <repository-id> <branch-ref> <patch-file> <new-bundle>
-  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
+  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1|exact-tree-binary-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>
   (--message <text> | --message-file <raw-file>) [--ref-hex]
   [--expected-result-tree <independently-chosen-native-tree-id>]
@@ -21,6 +21,9 @@ const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <reposit
 usage: fg patch apply <storage-root> <tenant-id> <repository-id> <branch-ref> <reviewed-bundle>
   --trusted-local --principal <id> (--idempotency-key <key> | --key-stdin)
   --expected-base <native-commit-id> --expected-commit <independently-reviewed-id> [--ref-hex]
+
+exact-tree-binary-v1 additionally permits explicit edited binary moves with full
+old/new identities and both forward/reverse members; existing profiles do not.
 
 exact-v1 accepts ordinary Git unified text patches for regular files: exact
 hunk offsets/context, additions/deletions, executable-bit changes, quoted raw
@@ -107,23 +110,38 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         let request = fgit_cli::command_request_context(&node);
         match &options.operation {
             Operation::Prepare {
+                profile,
                 workspace_id,
                 metadata,
                 limits,
                 ..
-            } => node
-                .runtime()
-                .block_on(node.prepare_trusted_patch_in(
-                    &request,
-                    &options.reference,
-                    options.base,
-                    *workspace_id,
-                    &input,
-                    metadata,
-                    *limits,
-                ))
-                .map(Completed::Prepared)
-                .map_err(|error| error.to_string()),
+            } => {
+                let candidate = if *profile == Profile::ExactTreeBinary {
+                    node.runtime()
+                        .block_on(node.prepare_trusted_binary_refactor_in(
+                            &request,
+                            &options.reference,
+                            options.base,
+                            *workspace_id,
+                            &input,
+                            metadata,
+                            *limits,
+                        ))
+                } else {
+                    node.runtime().block_on(node.prepare_trusted_patch_in(
+                        &request,
+                        &options.reference,
+                        options.base,
+                        *workspace_id,
+                        &input,
+                        metadata,
+                        *limits,
+                    ))
+                };
+                candidate
+                    .map(Completed::Prepared)
+                    .map_err(|error| error.to_string())
+            }
             Operation::Apply {
                 principal,
                 candidate,

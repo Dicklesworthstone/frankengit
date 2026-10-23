@@ -350,3 +350,40 @@ fn tree_profile_refuses_ambiguous_or_unsupported_refactorings_and_keeps_limits()
     let text = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
     assert!(profile.preflight(text, Default::default()).is_ok());
 }
+
+#[test]
+fn binary_tree_profile_is_explicit_and_not_an_apply_option() {
+    for width in [40, 64] {
+        let mut args = prepare_args(width);
+        replace(&mut args, "--profile", "exact-tree-binary-v1");
+        let Operation::Prepare { profile, .. } = options::parse(&args).unwrap().operation else {
+            panic!("wrong operation")
+        };
+        assert_eq!(profile, Profile::ExactTreeBinary);
+        assert_eq!(profile.token(), "exact-tree-binary-v1");
+        let mut apply = apply_args(width);
+        apply.extend(["--profile".into(), profile.token().into()]);
+        assert!(options::parse(&apply).is_err());
+    }
+}
+#[test]
+fn binary_move_preflight_is_not_silently_admitted_by_old_tree_profile() {
+    let bytes = format!(
+        "diff --git a/old b/new\nrename from old\nrename to new\nindex {}..{} 100644\nGIT binary patch\nliteral 3\nC00000\n\nliteral 3\nC00000\n\n",
+        "a".repeat(40),
+        "b".repeat(40)
+    );
+    assert!(
+        Profile::ExactTreeBinary
+            .preflight(bytes.as_bytes(), Default::default())
+            .is_ok()
+    );
+    for p in [Profile::Exact, Profile::ExactBinary, Profile::ExactTree] {
+        assert!(p.preflight(bytes.as_bytes(), Default::default()).is_err());
+    }
+    assert!(
+        Profile::ExactTreeBinary
+            .preflight(bytes.trim_end().as_bytes(), Default::default())
+            .is_err()
+    );
+}

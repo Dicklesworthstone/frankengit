@@ -9,6 +9,7 @@ import { planBinaryMember, planBinaryRunMember } from './source_edit_binary_delt
 
 export const REPLACEMENT_PROFILE = 'frankengit-source-replacements-v1';
 export const REFACTOR_PROFILE = 'frankengit-source-refactoring-v1';
+export const BINARY_REFACTOR_PROFILE = 'frankengit-source-refactoring-binary-v1';
 export const BINARY_REPLACEMENT_PROFILE = 'frankengit-source-replacements-binary-v1';
 export const DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-v1';
 export const RUN_DELTA_REPLACEMENT_PROFILE = 'frankengit-source-replacements-delta-runs-v1';
@@ -80,7 +81,9 @@ export function compileSourceRefactoring(format, changes, options = {}, check = 
 
 function compileChanges(format, changes, options, check, refactoring) {
   if (!['sha1', 'sha256'].includes(format) || typeof check !== 'function') fail('source_replacement_input');
-  check(); fields(options, [...Object.keys(REPLACEMENT_LIMITS), 'binary'], []);
+  check(); fields(options, [...Object.keys(REPLACEMENT_LIMITS), 'binary', ...(refactoring ? ['nativeProfile'] : [])], []);
+  const nativeProfile = Object.hasOwn(options, 'nativeProfile') ? options.nativeProfile : 'exact-tree-v1';
+  if (refactoring && !['exact-tree-v1', 'exact-tree-binary-v1'].includes(nativeProfile)) fail('source_refactor_native_profile');
   const binary = binaryMode(options);
   const limits = Object.fromEntries(Object.entries(REPLACEMENT_LIMITS).map(([key, maximum]) =>
     [key, integer(options[key] ?? maximum, 1, maximum)]));
@@ -98,7 +101,8 @@ function compileChanges(format, changes, options, check, refactoring) {
     endpoints.push(name); if (moved) { endpoints.push(destination); moves++; }
     const before = body(row.before, format, true, binary || moved);
     const after = body(row.after, format, false, binary || moved);
-    if (moved && !before.bytes.equals(after.bytes) && (before.bytes.includes(0) || after.bytes.includes(0))) {
+    if (moved && !before.bytes.equals(after.bytes) && (before.bytes.includes(0) || after.bytes.includes(0)) &&
+        (nativeProfile !== 'exact-tree-binary-v1' || !binary)) {
       fail('source_refactor_binary_move_edit');
     }
     if (!before && !after || !moved && before && after && before.mode === after.mode && before.blob === after.blob) {
@@ -169,12 +173,12 @@ function compileChanges(format, changes, options, check, refactoring) {
     for (const line of newLines) emitLine('+', line);
   }
   check(); const patch = Buffer.concat(chunks, size);
-  return { profile: refactoring ? REFACTOR_PROFILE : binary === 'delta-runs' ? RUN_DELTA_REPLACEMENT_PROFILE
+  return { profile: refactoring ? (nativeProfile === 'exact-tree-binary-v1' ? BINARY_REFACTOR_PROFILE : REFACTOR_PROFILE) : binary === 'delta-runs' ? RUN_DELTA_REPLACEMENT_PROFILE
       : binary === 'delta' ? DELTA_REPLACEMENT_PROFILE : binary ? BINARY_REPLACEMENT_PROFILE : REPLACEMENT_PROFILE,
     ...(['delta', 'delta-runs'].includes(binary) ? { delta_members: deltaMembers, literal_members: 2 * binaryFiles - deltaMembers } : {}),
     ...(binary === 'delta-runs' ? { aligned_copy_regions: alignedCopyRegions } : {}),
     ...(binary ? { binary_files: binaryFiles } : {}), patch, source_bytes: sourceBytes, result_bytes: resultBytes, records,
-    ...(refactoring ? { native_patch_profile: 'exact-tree-v1', move_count: moves, file_sections: owned.length,
+    ...(refactoring ? { native_patch_profile: nativeProfile, move_count: moves, file_sections: owned.length,
       ...(binary ? { binary_profile: binary } : {}), destinations_absent_verified: false } : {}),
     changes: owned.flatMap(row => row.moved ? [
       { path_hex: row.path_hex, before_blob: row.before.blob, after_blob: null, before_mode: row.before.mode, after_mode: null },
