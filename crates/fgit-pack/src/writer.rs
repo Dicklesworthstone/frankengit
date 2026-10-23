@@ -38,6 +38,10 @@ const ENCODER_INPUT_CHUNK_BYTES: usize = 16 * 1024;
 /// run, so the index granularity is also the shortest match the search emits.
 const DELTA_INDEX_BLOCK_BYTES: usize = 16;
 
+/// Indexed base blocks between deadline checks while an index is built:
+/// 64 KiB of base at the finest stride.
+const DELTA_INDEX_CHECKPOINT_STRIDE: usize = 4096;
+
 /// Maximum candidate base offsets inspected at one target position.
 ///
 /// A bucket is walked from its highest indexed offset downwards and the walk
@@ -2162,16 +2166,8 @@ fn probe_score(
     Ok(hits)
 }
 
-/// Builds the profile's delta program for one base/target pair.
-///
-/// Under [`DeltaSearch::IndexedBlocks`] both encodings are considered and the
-/// shorter one is emitted; an exact tie keeps the prefix/suffix encoding, so a
-/// pair that prefix/suffix search already encoded well emits the same bytes it
-/// emitted before.  The pair is rejected -- `None` -- unless the chosen
-/// program is shorter than `bound`, which the caller sets to the target length
-/// or the shorter program it already holds.  Rejecting at the bound is the
-/// same decision the caller's strict comparison would make, so the indexed
-/// scan may stop as soon as it can no longer come in under it.
+/// [`make_delta_program_with`] without a live set; for tests.
+#[cfg(test)]
 fn make_delta_program(
     base: &[u8],
     target: &[u8],
@@ -2183,8 +2179,19 @@ fn make_delta_program(
     make_delta_program_with(base, target, search, index, None, bound, deadline)
 }
 
-/// [`make_delta_program`] whose indexed scan skips what `live` leaves
-/// unmarked; `live` must cover `index`.
+/// Builds the profile's delta program for one base/target pair.
+///
+/// Under [`DeltaSearch::IndexedBlocks`] both encodings are considered and the
+/// shorter one is emitted; an exact tie keeps the prefix/suffix encoding, so a
+/// pair that prefix/suffix search already encoded well emits the same bytes it
+/// emitted before.  The pair is rejected -- `None` -- unless the chosen
+/// program is shorter than `bound`, which the caller sets to the target length
+/// or the shorter program it already holds.  Rejecting at the bound is the
+/// same decision the caller's strict comparison would make, so the indexed
+/// scan may stop as soon as it can no longer come in under it.
+///
+/// Its indexed scan skips what `live` leaves unmarked; `live` must cover
+/// `index`.
 fn make_delta_program_with(
     base: &[u8],
     target: &[u8],
@@ -2325,7 +2332,11 @@ impl BaseDeltaIndex {
 
         let mut offset = 0_usize;
         while offset <= span {
-            checkpoint(deadline)?;
+            // A served deadline reads clocks; once per block was ~7.5% of a
+            // clone's CPU (frankengit-t8cr).
+            if offsets.len() % DELTA_INDEX_CHECKPOINT_STRIDE == 0 {
+                checkpoint(deadline)?;
+            }
             let slot = u32::try_from(offsets.len()).map_err(|_| PackError::IntegerOverflow {
                 context: "delta base index slot",
             })?;
@@ -2535,6 +2546,19 @@ fn block_fingerprint(window: &[u8]) -> u32 {
     })
 }
 
+/// The byte-by-byte indexed scan: [`scan_indexed_delta_program`] without a
+/// live set. Production scans pass one; tests use this as the plain scan.
+#[cfg(test)]
+fn make_indexed_delta_program(
+    index: &BaseDeltaIndex,
+    base: &[u8],
+    target: &[u8],
+    limit: usize,
+    deadline: &mut impl Deadline,
+) -> Result<Option<Vec<u8>>, PackWriteError> {
+    scan_indexed_delta_program(index, base, target, limit, None, deadline)
+}
+
 /// Encodes the target as interior copy runs against an indexed base.
 ///
 /// The scan is greedy and forward-only: at each position it takes the longest
@@ -2547,18 +2571,9 @@ fn block_fingerprint(window: &[u8]) -> u32 {
 /// whatever follows, so `program + insert_cost(pending)` is a lower bound on
 /// its final length.  A `Some` program is exactly the one the unbounded scan
 /// would build.
-fn make_indexed_delta_program(
-    index: &BaseDeltaIndex,
-    base: &[u8],
-    target: &[u8],
-    limit: usize,
-    deadline: &mut impl Deadline,
-) -> Result<Option<Vec<u8>>, PackWriteError> {
-    scan_indexed_delta_program(index, base, target, limit, None, deadline)
-}
-
-/// [`make_indexed_delta_program`] that jumps over the target positions `live`
-/// leaves unmarked (frankengit-sctx). `live` must cover `index`.
+///
+/// With `live`, the scan jumps over the target positions it leaves unmarked
+/// (frankengit-sctx); `live` must cover `index`.
 fn scan_indexed_delta_program(
     index: &BaseDeltaIndex,
     base: &[u8],
@@ -5107,6 +5122,36 @@ mod tests {
                 .expect("live")
                 .is_none()
         );
+    }
+
+    /// frankengit-t8cr: an index build checks its deadline once per stride of
+    /// blocks, not per block, and a refused deadline still stops it partway.
+    #[test]
+    fn an_index_build_checks_its_deadline_per_stride_and_still_refuses() {
+        let base = noise(321, 1 << 20);
+        let limits = PackLimits {
+            max_index_entries: 1 << 20,
+            ..wide_limits()
+        };
+        let mut calls = 0_usize;
+        let mut counting = || {
+            calls += 1;
+            true
+        };
+        BaseDeltaIndex::build(&base, &limits, &mut counting)
+            .expect("index")
+            .expect("indexable");
+        let blocks = base.len() / DELTA_INDEX_BLOCK_BYTES;
+        assert_eq!(calls, blocks.div_ceil(DELTA_INDEX_CHECKPOINT_STRIDE));
+        let mut allowed = 5_usize;
+        let mut expiring = || {
+            allowed = allowed.saturating_sub(1);
+            allowed > 0
+        };
+        assert!(matches!(
+            BaseDeltaIndex::build(&base, &limits, &mut expiring),
+            Err(PackWriteError::Pack(PackError::DeadlineExceeded))
+        ));
     }
 
     /// frankengit-uf91: V4 plans exactly as V3 and its members inflate to
