@@ -52,7 +52,6 @@ fn source_commitment(
     sha256_digest(&input)
 }
 
-
 /// Bind one native InitialContext to an authenticated agent run.
 ///
 /// Search ranking, generations, and repository text never supply authority.
