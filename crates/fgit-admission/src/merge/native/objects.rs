@@ -263,6 +263,33 @@ pub fn validate_commit_closure(
     )
 }
 
+/// Verify native dependencies above an independently admitted frontier without
+/// prescribing a parent shape. The root commit is always loaded and hashed,
+/// even if selected; reused edges retain native-kind and resource checks.
+///
+/// This is NOT a complete reachable-object inventory or source authorization.
+/// The caller must prove original disclosure and, for replay/rebase, separately
+/// verify the entire supplied commit chain and its exact stopping boundary.
+/// Returns newly traversed objects plus the root, not inherited history.
+/// Passing an empty frontier reproduces `validate_commit_closure` behavior.
+pub fn validate_commit_closure_above<'a>(
+    source: &impl CanonicalObjectSource,
+    commit: GitOid,
+    selected: impl Into<ObjectFrontier<'a>>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    validate_candidate_objects(
+        source,
+        commit,
+        None,
+        AncestryRequirement::None,
+        Some(selected.into()),
+        limits,
+        deadline,
+    )
+}
+
 /// Verify an explicit two-parent merge ABOVE the authority-selected closure
 /// (frankengit-lh8z). Objects the candidate reaches that are already selected
 /// were verified when admitted: their kind is checked here, but their bytes are
