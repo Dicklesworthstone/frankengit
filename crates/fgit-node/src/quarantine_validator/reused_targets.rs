@@ -120,6 +120,50 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         self.with_object(id, deadline, |kind, _, _| Ok(kind))
     }
 
+    /// Called only for an identity reached through a verified original Blob
+    /// edge, never for a guessed/uploaded edge or an untyped ref root. The
+    /// envelope binds namespace, identity, kind and exact local length; actual
+    /// consumed bodies still use with_object and its shared byte ledger.
+    fn reused_blob_kind(
+        &mut self,
+        id: GitOid,
+        deadline: &mut impl Deadline,
+    ) -> Result<ObjectType, RefusalCode> {
+        checkpoint(deadline)?;
+        self.require_selected(id)?;
+        if let Some(kind) = self.kinds.get(&id) {
+            check_kind(*kind, Some(ObjectType::Blob))?;
+            return Ok(*kind);
+        }
+        if self.bases.bases.contains_key(&id) {
+            let kind = self.read_kind(id, deadline)?;
+            check_kind(kind, Some(ObjectType::Blob))?;
+            return Ok(kind);
+        }
+        if self.kinds.len() >= MAX_ORIGINAL_OBJECTS {
+            return Err(RefusalCode::ResourceBudgetExceeded);
+        }
+        let maximum = self
+            .validator
+            .pack_limits
+            .max_object_bytes
+            .min(self.validator.parse_limits.max_object_bytes) as u64;
+        let maximum = maximum.min(self.validator.node.max_object_bytes);
+        let result = self.validator.node.fabric.read_header_bounded(id, maximum);
+        checkpoint(deadline)?;
+        let header = result.map_err(|error| match error {
+            StoreRefusal::ObjectAbsent => RefusalCode::EvidenceMissing,
+            StoreRefusal::StreamingBudgetExceeded { .. } => RefusalCode::ResourceBudgetExceeded,
+            _ => RefusalCode::EvidenceInvalid,
+        })?;
+        if header.kind != fgit_object_fabric::ObjectKind::Blob {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        self.kinds.insert(id, ObjectType::Blob);
+        checkpoint(deadline)?;
+        Ok(ObjectType::Blob)
+    }
+
     fn require_selected(&self, id: GitOid) -> Result<(), RefusalCode> {
         if id.is_zero() || id.algorithm() != self.validator.node.object_format {
             return Err(RefusalCode::ObjectHeaderInvalid);
@@ -226,6 +270,19 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         while let Some(id) = pending.pop() {
             checkpoint(deadline)?;
             let expected = requirements.get(&id).copied().flatten();
+            if self.validator.reuse_admitted_blobs
+                && expected == Some(ObjectType::Blob)
+                && wanted.contains(&id)
+            {
+                self.reused_blob_kind(id, deadline)?;
+                wanted.remove(&id);
+                if wanted.is_empty() {
+                    checkpoint(deadline)?;
+                    self.authorized = required.clone();
+                    return Ok(());
+                }
+                continue;
+            }
             if wanted.len() == 1 && wanted.contains(&id) {
                 let actual = self.read_kind(id, deadline)?;
                 check_kind(actual, expected)?;

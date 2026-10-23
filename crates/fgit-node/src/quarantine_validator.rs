@@ -168,6 +168,9 @@ pub struct ProductionQuarantineValidator<'node> {
     /// Commitment to `selected_closure` and `visible_roots`; `None` only for
     /// the unit-fixture constructor, which is not bound to a basis.
     authority: Option<ReceiveValidationAuthority>,
+    // Only the reviewed-candidate owner opts into immutable blob-edge reuse.
+    // Ordinary receive and complete-prerequisite validation remain full-body.
+    reuse_admitted_blobs: bool,
 }
 
 /// The visible ref roots of one materialized basis: every canonical ref the
@@ -226,11 +229,21 @@ impl<'node> ProductionQuarantineValidator<'node> {
             pack_limits,
             parse_limits,
             authority: None,
+            reuse_admitted_blobs: false,
         }
     }
 }
 
 impl ProductionQuarantineValidator<'_> {
+    /// Reuse already-admitted blob commitments only after the current visible
+    /// graph proves their typed native edges. This is not a payload scrub and
+    /// does not bypass body verification for uploaded bytes or external deltas.
+    /// Kept crate-private: untrusted commands cannot select this policy.
+    pub(crate) fn for_reviewed_candidate(mut self) -> Self {
+        self.reuse_admitted_blobs = true;
+        self
+    }
+
     fn empty_closure() -> Result<ValidatedClosure, RefusalCode> {
         let objects = BTreeSet::new();
         Ok(ValidatedClosure {
@@ -665,6 +678,7 @@ impl OneNode {
             pack_limits,
             parse_limits,
             authority: Some(receive_validation_authority(materialized)),
+            reuse_admitted_blobs: false,
         })
     }
 }

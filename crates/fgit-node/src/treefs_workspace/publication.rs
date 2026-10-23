@@ -475,7 +475,8 @@ impl OneNode {
             )
             .map_err(|code| {
                 receive_error(fgit_wire::receive::ReceiveError::AuthoritativeRefusal(code))
-            })?;
+            })?
+            .for_reviewed_candidate();
         let context =
             ReceiveContext::new(wire_format, advertised, limits, SignedPushProfile::Refuse)
                 .map_err(receive_error)?;

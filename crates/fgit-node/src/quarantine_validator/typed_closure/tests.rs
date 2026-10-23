@@ -719,3 +719,6 @@ fn typed_handoff_enters_real_admission_and_recovers_without_a_second_decision() 
 }
 
 mod ref_roots;
+
+#[path = "admitted_blob_tests.rs"]
+mod admitted_blob_tests;

@@ -196,6 +196,7 @@ fn fixture_validator<'a>(
             ..ParseLimits::default()
         },
         authority: None,
+        reuse_admitted_blobs: false,
     }
 }
 fn put(node: &OneNode, objects: &[Raw]) {

@@ -243,6 +243,7 @@ impl ProductionQuarantineValidator<'_> {
                 pack_limits: self.pack_limits.clone(),
                 parse_limits: self.parse_limits.clone(),
                 authority: self.authority,
+                reuse_admitted_blobs: self.reuse_admitted_blobs,
             });
         }
         let validator = restricted.as_ref().unwrap_or(self);
