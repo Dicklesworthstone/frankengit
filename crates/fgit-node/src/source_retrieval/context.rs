@@ -189,7 +189,7 @@ impl ContextFile {
             }
         }
         live()?;
-        Ok(hash.finalize())
+        Ok(hash.finish())
     }
     fn validate_saved_lineage(
         &self,
