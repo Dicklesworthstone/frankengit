@@ -211,6 +211,9 @@ impl<C: Connection> ProjectionSession<C> {
     }
 
     /// Install the canonical meta-schema idempotently.
+    /// This installs tables only. Use [`crate::ensure_schema_generation`] to
+    /// install the exact identity and empty watermark before folds or
+    /// watermark-bound reads. Legacy unbound empty reads validate no identity.
     ///
     /// # Errors
     /// Driver errors, cancellation and panic retain their distinct variants.
@@ -349,6 +352,22 @@ where
         }
         None => None,
     };
+    let receipt_row = checked!(flatten(
+        tx.query_one(
+            cx,
+            "SELECT receipt FROM fgit_projection_identity WHERE singleton = 1",
+            &[],
+        )
+        .await,
+        "select_identity"
+    ));
+    checked!(check_identity_receipt(
+        identity,
+        receipt_row
+            .as_ref()
+            .and_then(|row| row.get_by_name("receipt"))
+            .and_then(Value::as_str),
+    ));
     // None is an expected empty snapshot, not permission to accept whatever
     // another folder installed since the caller read it.
     if expected_held != held {
@@ -552,6 +571,25 @@ pub(crate) fn check_watermark_binding(
     Ok(())
 }
 
+/// Compare the complete installed generation, including projector/build
+/// identity, without weakening the existing identity-v1 representation.
+pub(crate) fn check_identity_receipt(
+    identity: &ProjectionIdentity,
+    receipt: Option<&str>,
+) -> Result<(), ProjectionError> {
+    let receipt = receipt.ok_or(StoreReadError::MissingColumn("projection_identity_receipt"))?;
+    let expected = identity.render_receipt();
+    if receipt != expected {
+        return Err(IdentityAdvanceError::BindingMismatch {
+            field: "projection_identity",
+            expected,
+            observed: receipt.to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,7 +688,7 @@ mod tests {
             let cx = node.request_cx(fgit_runtime::meter::BudgetClass::Request);
             rt.block_on(async {
                 let session = ProjectionSession::open_memory(identity(1, 7))?;
-                session.install_schema(&cx).await?;
+                crate::ensure_schema_generation(&session, &cx, 1).await?;
                 flatten(
                     session
                         .connection_ref()
@@ -723,7 +761,7 @@ mod tests {
             let cx = node.request_cx(fgit_runtime::meter::BudgetClass::Request);
             rt.block_on(async {
                 let session = ProjectionSession::open_memory(identity(u32::MAX, 7))?;
-                session.install_schema(&cx).await?;
+                crate::ensure_schema_generation(&session, &cx, u32::MAX).await?;
                 apply_batch(&session, &cx, &[record(1)]).await?;
                 assert_eq!(
                     session
