@@ -185,7 +185,7 @@ def http_campaign(f):
         for label, bad in [('empty', ''), ('zero', '0' * len(f.base)), ('uppercase', 'A' * len(f.base)), ('invalid', 'z' * len(f.base)), ('wrong-domain', 'a' * (64 if f.fmt == 'sha1' else 40))]:
             server.request('prepare', dict(form, expected_result_tree=bad), f.patch, code=400)
             record(f.fmt, 'http-' + label + '-pin-refused')
-        server.request('prepare', list(pinned.items()) + [('expected_result_tree', f.expected_tree)], f.patch, code=413)
+        server.request('prepare', list(pinned.items()) + [('expected_result_tree', f.expected_tree)], f.patch, code=400)
         server.request('prepare', [(k, v) for k, v in pinned.items() if k != 'message'] + [('expected_result_tree', f.expected_tree)], f.patch, code=400)
         record(f.fmt, 'http-duplicate-pin-refused')
         alt, alt_bundle = server.request('prepare', form, f.extra_patch)

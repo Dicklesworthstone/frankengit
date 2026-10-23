@@ -86,7 +86,7 @@ impl<'a> Request<'a> {
     ) -> Result<Command, ApiError> {
         let mut fields = BTreeMap::new();
         let maximum_fields = if self.operation == Operation::Prepare {
-            8
+            9
         } else {
             7
         };
@@ -95,7 +95,12 @@ impl<'a> Request<'a> {
             let applicable = match self.operation {
                 Operation::Prepare => matches!(
                     name.as_str(),
-                    "author" | "committer" | "timestamp" | "message" | "expected_result_tree"
+                    "author"
+                        | "committer"
+                        | "timestamp"
+                        | "message"
+                        | "expected_result_tree"
+                        | "patch_profile"
                 ),
                 Operation::Inspect | Operation::Apply => name == "candidate_commit",
             };
@@ -121,6 +126,10 @@ impl<'a> Request<'a> {
                     .remove("expected_result_tree")
                     .map(|value| oid(&value, format))
                     .transpose()?;
+                let profile = fields
+                    .remove("patch_profile")
+                    .map(|value| PatchProfile::parse(&value))
+                    .transpose()?;
                 let metadata = MergeMetadata {
                     author: take(&mut fields, "author")?,
                     committer: take(&mut fields, "committer")?,
@@ -134,6 +143,7 @@ impl<'a> Request<'a> {
                     reference,
                     base,
                     expected_result_tree,
+                    profile,
                     metadata,
                 })
             }
@@ -151,12 +161,35 @@ impl<'a> Request<'a> {
         }
     }
 }
+/// An explicit intake grammar, never a publication credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PatchProfile {
+    Tree,
+    BinaryTree,
+}
+impl PatchProfile {
+    fn parse(value: &str) -> Result<Self, ApiError> {
+        match value {
+            "exact-tree-v1" => Ok(Self::Tree),
+            "exact-tree-binary-v1" => Ok(Self::BinaryTree),
+            _ => Err(ApiError::bad("unsupported_source_patch_profile")),
+        }
+    }
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tree => "exact-tree-v1",
+            Self::BinaryTree => "exact-tree-binary-v1",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum Command {
     Prepare {
         reference: RefName,
         base: GitOid,
         expected_result_tree: Option<GitOid>,
+        profile: Option<PatchProfile>,
         metadata: MergeMetadata,
     },
     Candidate {
@@ -350,6 +383,79 @@ mod tests {
                         .is_err()
                 );
             }
+        }
+    }
+    #[test]
+    fn patch_profiles_are_explicit_closed_and_preparation_only() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let body = form(format)
+                + "&author=A+%3Ca%40example.invalid%3E&committer=A+%3Ca%40example.invalid%3E&timestamp=1&message=change";
+            assert!(matches!(
+                request(Operation::Prepare)
+                    .command(body.as_bytes(), format)
+                    .unwrap(),
+                Command::Prepare { profile: None, .. }
+            ));
+            for (name, wanted) in [
+                ("exact-tree-v1", PatchProfile::Tree),
+                ("exact-tree-binary-v1", PatchProfile::BinaryTree),
+            ] {
+                let pinned = format!(
+                    "{body}&patch_profile={name}&expected_result_tree={}",
+                    "b".repeat(format.digest_len() * 2)
+                );
+                let Command::Prepare {
+                    profile,
+                    expected_result_tree,
+                    ..
+                } = request(Operation::Prepare)
+                    .command(pinned.as_bytes(), format)
+                    .unwrap()
+                else {
+                    panic!("prepare");
+                };
+                assert_eq!(profile, Some(wanted));
+                assert!(expected_result_tree.is_some());
+                assert_eq!(wanted.as_str(), name);
+                let candidate = format!(
+                    "{}&candidate_commit={}&patch_profile={name}",
+                    form(format),
+                    "c".repeat(format.digest_len() * 2)
+                );
+                for operation in [Operation::Inspect, Operation::Apply] {
+                    assert!(
+                        request(operation)
+                            .command(candidate.as_bytes(), format)
+                            .is_err()
+                    );
+                }
+            }
+            for name in [
+                "",
+                "exact-tree-binary-v2",
+                "exact-binary-v1",
+                "EXACT-TREE-BINARY-V1",
+                "exact-tree-binary-v1+",
+                "null",
+            ] {
+                assert!(
+                    request(Operation::Prepare)
+                        .command(format!("{body}&patch_profile={name}").as_bytes(), format)
+                        .is_err(),
+                    "{name}"
+                );
+            }
+            assert!(
+                request(Operation::Prepare)
+                    .command(
+                        format!(
+                            "{body}&patch_profile=exact-tree-v1&patch_profile=exact-tree-binary-v1"
+                        )
+                        .as_bytes(),
+                        format
+                    )
+                    .is_err()
+            );
         }
     }
 }

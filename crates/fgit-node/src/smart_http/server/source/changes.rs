@@ -22,7 +22,7 @@ use fgit_wire::smart_http::{BodyFraming, HttpLimits};
 use fgit_wire::visibility::RefVisibility;
 pub(super) use output::PatchReply;
 pub(super) use request::Request;
-use request::{Command, Operation};
+use request::{Command, Operation, PatchProfile};
 use std::io::Read;
 
 pub(super) fn execute(
@@ -54,23 +54,41 @@ pub(super) fn execute(
             reference,
             base,
             expected_result_tree,
+            profile,
             metadata,
         } => {
-            let candidate = drive_request_while(
-                node,
-                &context,
-                node.prepare_trusted_patch_in(
-                    &context,
-                    &reference,
-                    base,
-                    *authenticated.principal_id().as_bytes(),
-                    payload,
-                    &metadata,
-                    PatchLimits::default(),
-                ),
-                &mut live,
-            )
-            .map_err(preparation_error)?;
+            // Selection is closed and explicit. An absent field keeps the
+            // legacy grammar, including its edited-binary-rename refusal.
+            let preparation = async {
+                match profile {
+                    Some(PatchProfile::BinaryTree) => {
+                        node.prepare_trusted_binary_refactor_in(
+                            &context,
+                            &reference,
+                            base,
+                            *authenticated.principal_id().as_bytes(),
+                            payload,
+                            &metadata,
+                            PatchLimits::default(),
+                        )
+                        .await
+                    }
+                    None | Some(PatchProfile::Tree) => {
+                        node.prepare_trusted_patch_in(
+                            &context,
+                            &reference,
+                            base,
+                            *authenticated.principal_id().as_bytes(),
+                            payload,
+                            &metadata,
+                            PatchLimits::default(),
+                        )
+                        .await
+                    }
+                }
+            };
+            let candidate = drive_request_while(node, &context, preparation, &mut live)
+                .map_err(preparation_error)?;
             // The input lifetime ends before output framing. The native bundle
             // stays owned by its candidate, not copied into a response buffer.
             drop(bytes);
@@ -80,6 +98,7 @@ pub(super) fn execute(
                 base,
                 candidate,
                 expected_result_tree,
+                profile,
                 maximum,
                 &mut live,
             )

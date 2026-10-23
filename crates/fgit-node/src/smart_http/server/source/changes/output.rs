@@ -5,6 +5,7 @@ use super::super::super::{
     Status,
     issues::{ApiError, Reply as JsonReply, quote, ref_fields},
 };
+use super::request::PatchProfile;
 use crate::{OneNode, treefs_workspace::WorkspacePatchCandidate};
 use fgit_admission::AdmissionResult;
 use fgit_crypto::sha256_digest;
@@ -134,6 +135,7 @@ pub(super) fn prepared(
     base: GitOid,
     candidate: WorkspacePatchCandidate,
     expected_result_tree: Option<GitOid>,
+    profile: Option<PatchProfile>,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<PatchReply, ApiError> {
@@ -198,6 +200,13 @@ pub(super) fn prepared(
         )?;
     }
     append(&mut metadata, "]", MAX_METADATA)?;
+    if let Some(profile) = profile {
+        append(
+            &mut metadata,
+            &format!(",\"patch_profile\":{}", quote(profile.as_str())),
+            MAX_METADATA,
+        )?;
+    }
     if let Some(expected) = expected_result_tree {
         append(
             &mut metadata,

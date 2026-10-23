@@ -13,7 +13,8 @@ multipart `command` form alongside `ref`, `object_format`, `expected_commit`,
 `author`, `committer`, `timestamp` and `message`. It is a nonzero, full lowercase
 native tree ID in the repository's SHA-1 or SHA-256 domain. Empty, malformed,
 wrong-width and duplicate fields refuse. The command field-count allowance is
-eight for preparation; all byte, patch, decoding, response and source-read budgets
+nine for preparation, including optional `patch_profile` (see
+[HTTP binary refactoring](HTTP_BINARY_REFACTORING.md)); all byte, patch, decoding, response and source-read budgets
 are unchanged. Inspection and publication refuse this preparation-only field.
 
 The existing native planner validates the entire patch and produces its candidate.
