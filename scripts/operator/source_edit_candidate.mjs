@@ -1,6 +1,7 @@
 // External source-authoring client. Native Rust owns patch application, bundle
 // validation and repository authority; this module never runs a Git engine.
 import { createHash } from 'node:crypto';
+import { encodeVerifiedTreeRows, TREE_TRANSITION_LIMITS } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { SourceEditError, hash, fail, fields, integer, endpoint, parse, clock, upload, exchange } from './source_edit_wire.mjs';
 export { SourceEditError, hash, parse } from './source_edit_wire.mjs';
 export const EDIT_CAPTURE = 'frankengit-source-edit-capture-v1';
@@ -8,7 +9,10 @@ export const EDIT_CAPTURE = 'frankengit-source-edit-capture-v1';
 // from a preparation reply. A new capture profile prevents older readers from
 // silently dropping that constraint; ordinary v1 captures keep their bytes.
 export const EDIT_RESULT_CAPTURE = 'frankengit-source-edit-capture-v2';
-const captureProfile = request => Object.hasOwn(request, 'expected_result_tree') ? EDIT_RESULT_CAPTURE : EDIT_CAPTURE;
+export const EDIT_PROFILE_CAPTURE = 'frankengit-source-edit-capture-v3';
+const PATCH_PROFILES = Object.freeze(['exact-tree-v1', 'exact-tree-binary-v1']);
+const captureProfile = request => Object.hasOwn(request, 'patch_profile') ? EDIT_PROFILE_CAPTURE
+  : Object.hasOwn(request, 'expected_result_tree') ? EDIT_RESULT_CAPTURE : EDIT_CAPTURE;
 export const BUNDLE_LIMIT = 8 * 1024 * 1024, CAPTURE_LIMIT = 10 * 1024 * 1024;
 const PREPARE_LIMIT = BUNDLE_LIMIT + 1024 * 1024 + 16384;
 export const canonical = value => Buffer.from(`${JSON.stringify(value)}\n`);
@@ -34,7 +38,7 @@ function path(value) {
 }
 export function editInput(value) {
   const required = ['endpoint', 'scope', 'ref', 'expected_commit', 'metadata', 'paths_hex'];
-  fields(value, [...required, 'expected_result_tree'], required);
+  fields(value, [...required, 'expected_result_tree', 'patch_profile'], required);
   fields(value.scope, ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format']);
   const scope = { tenant_id: identity(value.scope.tenant_id), repository_id: identity(value.scope.repository_id),
     repository_incarnation: identity(value.scope.repository_incarnation), object_format: value.scope.object_format };
@@ -56,10 +60,15 @@ export function editInput(value) {
   // undefined, the wrong hash domain and zero are refusals, not an opt-out.
   const result = Object.hasOwn(value, 'expected_result_tree')
     ? { expected_result_tree: oid(value.expected_result_tree, scope.object_format) } : {};
-  return { endpoint: endpoint(value.endpoint), scope, ref, expected_commit: oid(value.expected_commit, scope.object_format), metadata, paths_hex: paths, ...result };
+  const profile = {};
+  if (Object.hasOwn(value, 'patch_profile')) {
+    if (!PATCH_PROFILES.includes(value.patch_profile)) fail('source_edit_patch_profile');
+    profile.patch_profile = value.patch_profile;
+  }
+  return { endpoint: endpoint(value.endpoint), scope, ref, expected_commit: oid(value.expected_commit, scope.object_format), metadata, paths_hex: paths, ...result, ...profile };
 }
-// The result constraint belongs to local intent/custody, not a new native form
-// field. Preserve the existing server's closed grammar and publication rules.
+// Inspection/publication coordinates NEVER carry preparation-only fields.
+// Historical v1/v2 uploads retain their bytes, including local-only result pins.
 export function editCoordinates(request, candidate) {
   return { object_format: request.scope.object_format, ref: request.ref, expected_commit: request.expected_commit,
     ...(candidate === undefined ? {} : { candidate_commit: candidate }) };
@@ -86,7 +95,11 @@ export function decodePreparation(response) {
 function prepared(reply, bundle, request, patchHash) {
   fields(reply, ['type', 'schema_version', ...Object.keys(request.scope), 'ref', 'ref_hex', 'source_commit', 'source_rcr',
     'candidate_commit', 'root_tree', 'patch_sha256', 'object_count', 'read_only', 'objects_staged', 'transaction_created',
-    'published', 'publication_authorized', 'bundle', 'paths']);
+    'published', 'publication_authorized', 'bundle', 'paths',
+    ...(Object.hasOwn(request, 'patch_profile') ? ['patch_profile',
+      ...(Object.hasOwn(request, 'expected_result_tree') ? ['expected_result_tree'] : [])] : [])]);
+  if (Object.hasOwn(request, 'patch_profile') && (reply.patch_profile !== request.patch_profile ||
+      Object.hasOwn(request, 'expected_result_tree') && reply.expected_result_tree !== request.expected_result_tree)) fail('source_edit_profile_binding');
   selected(reply, request, 'source_preparation');
   const format = request.scope.object_format;
   if (oid(reply.source_commit, format) !== request.expected_commit || reply.patch_sha256 !== patchHash) fail('source_edit_patch_binding');
@@ -125,6 +138,63 @@ function span(value, hex, total) {
   const bytes = Buffer.from(hex, 'hex'), lines = bytes.reduce((n, b) => n + Number(b === 10), 0) + Number(bytes.length > 0 && bytes.at(-1) !== 10);
   if (lines !== value.line_count) fail('source_edit_span');
 }
+// Native review includes whole created/deleted directories as well as leaves.
+// V3 admits ONLY those structural ancestors whose complete native tree bytes
+// reconstruct from the checked leaf identities. Never drop arbitrary extra rows.
+function profileFileRows(rows, format) {
+  const files = [], directories = new Map(); let previous = '', treeBytes = 0, entries = 0;
+  const coordinates = value => {
+    path(value); const bytes = Buffer.from(value, 'hex'), ancestors = [];
+    for (let i = 0; i < bytes.length; i++) if (bytes[i] === 47) ancestors.push(bytes.subarray(0,i).toString('hex'));
+    if (ancestors.length >= 64) fail('source_edit_structural_depth');
+    const slash = bytes.lastIndexOf(47);
+    return { ancestors, parent: slash < 0 ? '' : bytes.subarray(0,slash).toString('hex'), name: bytes.subarray(slash+1) };
+  };
+  for (const row of rows) {
+    fields(row,['path_hex','kind','before','after','content']); const where=coordinates(row.path_hex);
+    if (row.path_hex <= previous) fail('source_edit_comparison'); previous=row.path_hex;
+    if (row.before?.mode !== 0o40000 && row.after?.mode !== 0o40000) { files.push({row,where}); continue; }
+    const side = row.before === null && row.after?.mode === 0o40000 ? 'after'
+      : row.after === null && row.before?.mode === 0o40000 ? 'before' : null;
+    if (!side || row.kind !== (side === 'after' ? 'added' : 'deleted')) fail('source_edit_structural_kind');
+    fields(row[side],['mode','oid']); fields(row.content,['type','content_read']);
+    if (row.content.type !== 'object_only' || row.content.content_read !== false) fail('source_edit_structural_content');
+    directories.set(row.path_hex,{where,side,oid:oid(row[side].oid,format),children:[]});
+  }
+  const parent = where => {
+    let seen=false;
+    for (const ancestor of where.ancestors) {
+      if (directories.has(ancestor)) seen=true;
+      else if (seen) fail('source_edit_structural_missing');
+    }
+    return directories.get(where.parent);
+  };
+  const add = (directory,name,kind,id) => {
+    if (++entries > TREE_TRANSITION_LIMITS.maxEntries) fail('source_edit_structural_budget');
+    const bytes=new Uint8Array(name),order=new Uint8Array(bytes.length+1);order.set(bytes);order[bytes.length]=kind==='directory'?47:0;
+    treeBytes += (kind==='directory'?5:6)+2+bytes.length+id.length/2;
+    if (treeBytes > TREE_TRANSITION_LIMITS.maxTreeBytes) fail('source_edit_structural_budget');
+    directory.children.push({kind,bytes,order,object_id:id});
+  };
+  for (const {row,where} of files) {
+    const directory=parent(where); if (!directory) continue;
+    const absent=directory.side==='after'?'before':'after', present=entry(row[directory.side],format);
+    if (row[absent] !== null || !present) fail('source_edit_structural_effect');
+    add(directory,where.name,present.mode===0o100755?'executable':'file',present.oid);
+  }
+  for (const [key,directory] of [...directories].sort((a,b)=>b[0].length-a[0].length)) {
+    if (!directory.children.length) fail('source_edit_structural_empty');
+    const body=encodeVerifiedTreeRows(directory.children,()=>{});
+    const id=createHash(format).update(`tree ${body.length}\0`).update(body).digest('hex');
+    if (id !== directory.oid) fail('source_edit_structural_identity');
+    const owner=parent(directory.where);
+    if (owner) {
+      if (owner.side !== directory.side) fail('source_edit_structural_effect');
+      add(owner,directory.where.name,'directory',id);
+    }
+  }
+  return files.map(value=>value.row);
+}
 function inspection(reply, request, preparation, bundle, artifact) {
   fields(reply, ['type', 'schema_version', ...Object.keys(request.scope), 'ref', 'ref_hex', 'source_head', 'snapshot_token',
     'expected_commit', 'candidate_commit', 'parents', 'bundle_bytes', 'bundle_sha256', 'read_only', 'objects_staged',
@@ -143,9 +213,11 @@ function inspection(reply, request, preparation, bundle, artifact) {
   if (!body.equals(expected) || createHash(format).update(`commit ${body.length}\0`).update(body).digest('hex') !== artifact.candidate) fail('source_edit_commit_body');
   const c = fields(reply.comparison, ['mode', 'before_tree', 'after_tree', 'entry_count', 'entries']); oid(c.before_tree, format);
   if (c.mode !== 'direct' || oid(c.after_tree, format) !== artifact.tree || !Array.isArray(c.entries) ||
-      c.entries.length !== c.entry_count || c.entries.length !== artifact.paths.size) fail('source_edit_comparison');
+      c.entries.length !== c.entry_count || c.entries.length > 512) fail('source_edit_comparison');
+  const rows = Object.hasOwn(request, 'patch_profile') ? profileFileRows(c.entries, format) : c.entries;
+  if (rows.length !== artifact.paths.size) fail('source_edit_comparison');
   let previous = '';
-  for (const row of c.entries) {
+  for (const row of rows) {
     fields(row, ['path_hex', 'kind', 'before', 'after', 'content']); path(row.path_hex);
     const expected = artifact.paths.get(row.path_hex), before = entry(row.before, format), after = entry(row.after, format);
     if (row.path_hex <= previous || !expected || (before?.oid ?? null) !== expected.old || (after?.oid ?? null) !== expected.next ||
@@ -178,7 +250,7 @@ function inspection(reply, request, preparation, bundle, artifact) {
 }
 export function validateSourceEdit(value, suppliedBundle) {
   fields(value, ['schema', 'request', 'patch_sha256', 'patch_bytes', 'preparation', 'inspection']);
-  if (![EDIT_CAPTURE, EDIT_RESULT_CAPTURE].includes(value.schema) || !/^[0-9a-f]{64}$/.test(value.patch_sha256)) fail('source_edit_capture');
+  if (![EDIT_CAPTURE, EDIT_RESULT_CAPTURE, EDIT_PROFILE_CAPTURE].includes(value.schema) || !/^[0-9a-f]{64}$/.test(value.patch_sha256)) fail('source_edit_capture');
   integer(value.patch_bytes, 1, 1048576);
   if (!Buffer.isBuffer(suppliedBundle) || suppliedBundle.length > BUNDLE_LIMIT) fail('source_edit_bundle_limit');
   const request = editInput(value.request), bytes = canonical(value);
@@ -193,7 +265,9 @@ export async function captureSourceEdit(value, patch, credential, options = {}) 
   const request = editInput(value), time = clock(options); time.check();
   if (!Buffer.isBuffer(patch) || !patch.length || patch.length > 1048576) fail('source_edit_patch_limit');
   const bytes = Buffer.from(patch), patchHash = hash(bytes);
-  const first = await exchange(request.endpoint, credential, 'prepare', upload({ ...editCoordinates(request), ...request.metadata }, bytes, 'patch'), time,
+  const first = await exchange(request.endpoint, credential, 'prepare', upload({ ...editCoordinates(request), ...request.metadata,
+    ...(Object.hasOwn(request, 'patch_profile') ? { patch_profile: request.patch_profile,
+      ...(Object.hasOwn(request, 'expected_result_tree') ? { expected_result_tree: request.expected_result_tree } : {}) } : {}) }, bytes, 'patch'), time,
     Math.min(PREPARE_LIMIT, time.maxWireBytes));
   time.check(); const { preparation, bundle } = decodePreparation(first);
   const artifact = prepared(preparation, bundle, request, patchHash), remaining = time.maxWireBytes - first.bytes.length;

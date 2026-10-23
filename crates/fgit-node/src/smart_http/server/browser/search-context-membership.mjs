@@ -499,3 +499,6 @@ export function mountContextMembership(document, result, { acquire, run, current
   return { element: section, submit, inspect, download, sync, invalidate,
     dispose() { const wasWorking = working; disposed = true; if (wasWorking) cancelRead(); invalidate(); commit.value = ''; file.value = ''; } };
 }
+
+// Shared synchronous encoder for already validated, bounded native tree rows.
+export { encodeTree as encodeVerifiedTreeRows };
