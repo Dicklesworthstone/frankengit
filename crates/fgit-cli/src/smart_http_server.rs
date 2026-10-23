@@ -29,7 +29,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
-  [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]
+  [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..65536>]
   [--trusted-origin <origin>]
   [--index-state-dir <private-directory> --index-state init|resume
    --index-profile lexical|symbols --index-format sha1|sha256
@@ -170,7 +170,8 @@ a single receive-command result does not prove completion of the whole session.
 Forwarded identity headers never authenticate. This is an operator credential
 profile, not organization/team IAM, per-ref/per-item ACLs, account lifecycle or
 TLS. Use an authenticated external TLS terminator for nonlocal access.
-Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB Git envelopes;
+Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB receive
+envelopes and a 4096 MiB upload pack envelope (packs stream; memory is the delta window);
 metadata forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
 Outcome replies have a separate per-principal quota; single-transaction replies
 are capped at 16 KiB and whole-session replies at 1 MiB. Source reads have another
@@ -469,8 +470,16 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         .with_git_daemon_receive_byte_envelope(
             Some(bytes("--receive-max-input-mib")?),
             Some(bytes("--receive-max-expanded-mib")?),
-        )
-        .with_selected_pack_byte_envelope(bytes("--pack-max-expanded-mib")?);
+        );
+    // Served packs stream through scratch custody (frankengit-8xyq), so the
+    // node's default upload envelope stands unless the operator names one.
+    if flags.contains_key("--pack-max-expanded-mib") {
+        let mib = number(&flags, "--pack-max-expanded-mib", 1, 65536)?;
+        config = config.with_selected_pack_byte_envelope(
+            usize::try_from(mib * 1024 * 1024)
+                .map_err(|_| "byte envelope is not supported on this platform".to_owned())?,
+        );
+    }
     if allow_protection {
         config = config.with_http_protection_admin();
     }
@@ -973,11 +982,33 @@ mod tests {
             ("--idle-timeout-secs", "0"),
             ("--session-timeout-secs", "3601"),
             ("--receive-max-input-mib", "1025"),
+            ("--pack-max-expanded-mib", "0"),
+            ("--pack-max-expanded-mib", "65537"),
         ] {
             let mut args = arguments();
             args.extend([flag.into(), value.into()]);
             assert!(parse(&args).is_err(), "{flag}");
         }
+    }
+    /// frankengit-8xyq: served packs stream, so the upload envelope is the
+    /// node's 4 GiB default unless named, and a named one may exceed the old
+    /// 1 GiB ceiling.
+    #[test]
+    fn the_pack_envelope_keeps_the_node_default_unless_named() {
+        let debug = |args: &[String]| format!("{:?}", parse(args).unwrap().config);
+        let default = debug(&arguments());
+        assert!(
+            default.contains("max_total_expanded_bytes: 4294967296"),
+            "{default}"
+        );
+        let mut args = arguments();
+        args.extend(["--pack-max-expanded-mib".into(), "8192".into()]);
+        let widened = debug(&args);
+        assert!(
+            widened.contains("max_total_expanded_bytes: 8589934592"),
+            "{widened}"
+        );
+        assert!(!widened.contains("max_total_expanded_bytes: 4294967296"));
     }
     /// frankengit-root-doctrine-x2mv.4.31: the one trusted browser origin
     /// reaches the node configuration only in exact form, and only once.

@@ -113,9 +113,10 @@ use fgit_object_fabric::fabric::{
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_pack::{
-    CanonicalObjectSource, CanonicalPackObject, MAX_THIN_BASES_PER_TARGET, PackBoundaryScanner,
-    PackError, PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt,
-    PackWriter, ScanStatus, ThinBase,
+    CanonicalObjectSource, CanonicalPackObject, DeterministicPackEncoder,
+    MAX_THIN_BASES_PER_TARGET, PackBoundaryScanner, PackError, PackLimits, PackOrderKey,
+    PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus,
+    ThinBase,
 };
 use fgit_reference::intent::TransactionRequest;
 use fgit_resource::{
@@ -156,6 +157,7 @@ mod loose_import;
 #[cfg(test)]
 mod merge_delivery;
 mod node_lanes;
+mod pack_spool;
 mod smart_http;
 /// HTTP `search-initial`/`context-initial` for an in-process host (see the fn).
 pub use smart_http::source_retrieval_json;
@@ -944,13 +946,14 @@ impl MaterializedAdmission {
 /// The payload is consumable only after the `fgit-pack` writer finished its
 /// temporary artifact and checksum.  Its evidence retains both the exact
 /// authority head basis and the RCR/genesis source that selected the objects.
+/// The completed pack lives in private scratch custody (frankengit-8xyq) and
+/// is read back in bounded chunks, never held whole by a serving session.
 #[derive(Debug)]
 pub struct AuthoritySelectedPackPayload {
     basis: PublicationBasis,
     closure: AuthoritySelectedClosure,
     receipt: PackWriteReceipt,
-    bytes: Vec<u8>,
-    offset: usize,
+    pack: pack_spool::SpooledPack,
 }
 
 impl AuthoritySelectedPackPayload {
@@ -978,9 +981,11 @@ impl AuthoritySelectedPackPayload {
     /// the returned bytes are the already completed pack whose receipt remains
     /// available until this call consumes the payload.  A file-export caller
     /// may therefore publish only this immutable, authority-selected result.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+    /// It reads the completed pack back from scratch custody, which can fail.
+    pub fn into_bytes(self) -> Result<Vec<u8>, NodePackMaterializationRefusal> {
+        self.pack
+            .into_bytes()
+            .map_err(|_| NodePackMaterializationRefusal::from(PackWriteError::TemporaryReadRefused))
     }
 }
 
@@ -991,22 +996,9 @@ impl PackPayloadSource for AuthoritySelectedPackPayload {
                 field: "pack payload chunk bytes",
             });
         }
-        if self.offset == self.bytes.len() {
-            return Ok(None);
-        }
-        let remaining = self.bytes.len().saturating_sub(self.offset);
-        let length = remaining.min(maximum_chunk_bytes);
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(WireError::AllocationFailure)?;
-        let mut chunk = Vec::new();
-        chunk
-            .try_reserve_exact(length)
-            .map_err(|_| WireError::AllocationFailure)?;
-        chunk.extend_from_slice(&self.bytes[self.offset..end]);
-        self.offset = end;
-        Ok(Some(chunk))
+        self.pack
+            .next_chunk(maximum_chunk_bytes)
+            .map_err(|_| WireError::PackPayloadRead)
     }
 }
 
@@ -1088,6 +1080,12 @@ impl Display for NodePackMaterializationRefusal {
                 PackWriteError::OutputLimit { attempted, limit } => {
                     write_envelope_refusal(formatter, "pack output", *attempted, *limit)
                 }
+                PackWriteError::WindowCacheLimit { resident, limit } => write!(
+                    formatter,
+                    "pack delta window needs {} of objects, over this server's {} window",
+                    envelope_size(*resident),
+                    envelope_size(*limit)
+                ),
                 _ => Display::fmt(error, formatter),
             },
         }
@@ -3795,12 +3793,13 @@ pub(crate) fn selected_fetch_write_profile(request: &fgit_wire::PackRequest) -> 
         && request.deepen.is_none()
         && request.deepen_since.is_none()
         && request.deepen_not.is_empty();
-    // V4: V3's plan with stored blocks where fixed codes would not help
-    // (frankengit-uf91).
+    // V5: V4's plan and compression (frankengit-uf91) with delta candidates
+    // bounded by body bytes, which bounds a streamed pack's memory
+    // (frankengit-8xyq).
     if options.thin_pack() && whole_closure && !request.haves.is_empty() {
-        PackWriteProfile::COMPRESSED_V4_THIN
+        PackWriteProfile::COMPRESSED_V5_THIN
     } else {
-        PackWriteProfile::COMPRESSED_V4
+        PackWriteProfile::COMPRESSED_V5
     }
 }
 
@@ -6673,7 +6672,7 @@ impl NodeConfig {
             initial_branch: None,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
-            selected_pack_limits: PackLimits::default(),
+            selected_pack_limits: default_selected_pack_limits(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
@@ -6953,25 +6952,62 @@ impl NodeConfig {
     }
 
     /// Selects the selected-pack write envelope in bytes: the total expanded
-    /// content one emitted pack may carry. The writer's delta-base cache
-    /// bound tracks the same value, exactly as the pack-crate default profile
-    /// couples them (frankengit-e6jj), and so does the writer's output cap,
-    /// which bounds the finished pack the writer buffers in memory before
-    /// streaming it. A deployment serving repositories larger than the
-    /// documented 128 MiB default widens it explicitly.
+    /// content one emitted pack may carry (frankengit-e6jj). Packs stream
+    /// through private scratch custody (frankengit-8xyq), so this bounds read
+    /// work and scratch disk, not memory. See [`selected_pack_envelope`] for
+    /// the output cap and the delta-window memory bound it also sets.
     ///
     /// The output cap is `PackLimits::max_input_bytes`, a receive-side name
-    /// the writer reuses; it stayed at its 64 MiB default when only the two
+    /// the writer reuses. It once stayed at its 64 MiB default when only the
     /// expanded bounds were widened, so no pack over 64 MiB could be served
     /// under any operator setting (a 200 MB clone was refused at 67,137,621
     /// bytes after 287 s, x2mv.4.4).
     #[must_use]
     pub const fn with_selected_pack_byte_envelope(mut self, max_expanded_bytes: usize) -> Self {
-        self.selected_pack_limits.max_total_expanded_bytes = max_expanded_bytes;
-        self.selected_pack_limits.max_cached_bytes = max_expanded_bytes;
-        self.selected_pack_limits.max_input_bytes = max_expanded_bytes;
+        self.selected_pack_limits =
+            selected_pack_envelope(self.selected_pack_limits, max_expanded_bytes);
         self
     }
+}
+
+/// Default selected-pack envelope (frankengit-8xyq): 4 GiB of expanded
+/// objects. It bounds work and scratch disk; the delta window bounds memory.
+/// It was 128 MiB while packs were built in memory, which refused a default
+/// clone of most real repositories.
+const DEFAULT_SELECTED_PACK_EXPANDED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Object bytes a streamed pack's delta candidates may hold: the served
+/// profiles' byte bound (frankengit-8xyq). A session's pack memory is this
+/// plus the current object and its at most two client-held bases. Enforced
+/// as `max_cached_bytes`, so a served profile without the bound fails closed
+/// rather than silently holding its whole count window.
+const SELECTED_PACK_WINDOW_BYTES: usize = match PackWriteProfile::COMPRESSED_V5.delta_window_bytes {
+    Some(bytes) => bytes,
+    None => 0,
+};
+
+fn default_selected_pack_limits() -> PackLimits {
+    selected_pack_envelope(
+        PackLimits::default(),
+        usize::try_from(DEFAULT_SELECTED_PACK_EXPANDED_BYTES).unwrap_or(usize::MAX),
+    )
+}
+
+/// The selected-pack bounds for an `expanded`-byte envelope:
+/// - `expanded` caps the pack's total object bytes;
+/// - the output cap allows 1/16 more for headers and DEFLATE framing;
+/// - the delta window, the only resident object bytes, holds at most
+///   [`SELECTED_PACK_WINDOW_BYTES`], or `expanded` if that is smaller. A
+///   smaller envelope therefore still refuses on its total first.
+const fn selected_pack_envelope(mut limits: PackLimits, expanded: usize) -> PackLimits {
+    limits.max_total_expanded_bytes = expanded;
+    limits.max_input_bytes = expanded.saturating_add(expanded / 16);
+    limits.max_cached_bytes = if expanded < SELECTED_PACK_WINDOW_BYTES {
+        expanded
+    } else {
+        SELECTED_PACK_WINDOW_BYTES
+    };
+    limits
 }
 
 /// The idempotent result of creating the initial authority head.
@@ -8423,7 +8459,7 @@ impl OneNode {
                 &[],
                 // Local authority materialization has no wire capability to
                 // respect; a pack file carries OFS deltas unconditionally.
-                PackWriteProfile::COMPRESSED_V4,
+                PackWriteProfile::COMPRESSED_V5,
                 request.authority(),
                 &database_exhaustion,
                 None,
@@ -8555,19 +8591,58 @@ impl OneNode {
             }
             _ => Vec::new(),
         };
+        // Stream the pack into private scratch custody (frankengit-8xyq): only
+        // the delta window's bodies are resident, never the pack or all of
+        // its objects. Plan order needs each kind first. A fetch takes it from
+        // its verified disclosure graph; local materialization reads headers.
+        // Each loaded object must then match the declared key.
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(ids.len()).map_err(|_| {
+            NodePackMaterializationRefusal::from(PackWriteError::from(
+                PackError::AllocationFailed {
+                    requested: ids.len(),
+                },
+            ))
+        })?;
+        for id in &ids {
+            let known = fetch.and_then(|(scope, _)| scope.kind_of(id));
+            let object_type = match known {
+                Some(kind) => kind,
+                None => {
+                    source
+                        .read_object_header(id)
+                        .map_err(NodePackMaterializationRefusal::from)?
+                        .0
+                }
+            };
+            keys.push(PackOrderKey {
+                id: *id,
+                object_type,
+                recency: 0,
+                path_hash: 0,
+            });
+        }
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone());
-        let plan = planner
-            .plan_selected_thin(&served, &ids, &thin_bases, is_live)
+        let mut spool = pack_spool::PackSpool::new(self.storage_root());
+        let receipt = planner
+            .stream_selected_thin(
+                &served,
+                &keys,
+                &thin_bases,
+                &PackWriter::new(limits),
+                &mut DeterministicPackEncoder::for_profile(write_profile),
+                &mut spool,
+                is_live,
+            )
             .map_err(NodePackMaterializationRefusal::from)?;
-        let (bytes, receipt) = PackWriter::new(limits)
-            .write(&plan, is_live)
-            .map_err(NodePackMaterializationRefusal::from)?;
+        let pack = spool.into_promoted().ok_or_else(|| {
+            NodePackMaterializationRefusal::from(PackWriteError::PromotionRefused)
+        })?;
         Ok(AuthoritySelectedPackPayload {
             basis: materialized.basis().clone(),
             closure: materialized.selected_closure().clone(),
             receipt,
-            bytes,
-            offset: 0,
+            pack,
         })
     }
 
@@ -14317,37 +14392,56 @@ mod selected_pack_envelope_tests {
     use super::*;
     use fgit_wire::PackOptions;
 
+    /// frankengit-8xyq: packs stream through scratch custody, so the envelope
+    /// bounds work and output while the delta window alone bounds memory.
     #[test]
-    fn the_selected_pack_byte_envelope_couples_the_writer_cache_ceiling() {
-        let config = NodeConfig::new(
-            PathBuf::from("/nonexistent"),
-            TenantId::from_bytes([0x41; 16]),
-            RepositoryId::from_bytes([0x42; 16]),
-        )
-        .with_selected_pack_byte_envelope(512 * 1024 * 1024);
+    fn the_selected_pack_envelope_bounds_work_and_the_window_bounds_memory() {
+        let config = |envelope: Option<usize>| {
+            let config = NodeConfig::new(
+                PathBuf::from("/nonexistent"),
+                TenantId::from_bytes([0x41; 16]),
+                RepositoryId::from_bytes([0x42; 16]),
+            );
+            match envelope {
+                Some(bytes) => config.with_selected_pack_byte_envelope(bytes),
+                None => config,
+            }
+            .selected_pack_limits
+        };
+        let mib = 1024 * 1024;
+        let wide = config(Some(512 * mib));
+        assert_eq!(wide.max_total_expanded_bytes, 512 * mib);
         assert_eq!(
-            config.selected_pack_limits.max_total_expanded_bytes,
-            512 * 1024 * 1024
+            wide.max_input_bytes,
+            544 * mib,
+            "the output cap widens with the envelope, or packs over 64 MiB never serve"
         );
         assert_eq!(
-            config.selected_pack_limits.max_cached_bytes,
-            512 * 1024 * 1024,
-            "the delta-base cache tracks the expanded ceiling as the default profile couples them"
+            wide.max_cached_bytes,
+            128 * mib,
+            "memory is the delta window"
         );
+        for profile in [
+            PackWriteProfile::COMPRESSED_V5,
+            PackWriteProfile::COMPRESSED_V5_THIN,
+        ] {
+            assert_eq!(profile.delta_window_bytes, Some(wide.max_cached_bytes));
+        }
+        // A small envelope keeps its window under its total, so it refuses
+        // on the total first.
+        let small = config(Some(4_096));
         assert_eq!(
-            config.selected_pack_limits.max_input_bytes,
-            512 * 1024 * 1024,
-            "the writer's output cap widens with the envelope, or packs over 64 MiB never serve"
+            (small.max_total_expanded_bytes, small.max_cached_bytes),
+            (4_096, 4_096)
         );
-        // The untouched profile keeps the documented 128 MiB default.
-        let plain = NodeConfig::new(
-            PathBuf::from("/nonexistent"),
-            TenantId::from_bytes([0x41; 16]),
-            RepositoryId::from_bytes([0x42; 16]),
-        );
+        // The default serves real repositories: 4 GiB of objects.
+        let plain = config(None);
+        assert_eq!(plain.max_total_expanded_bytes, 4_096 * mib);
+        assert_eq!(plain.max_input_bytes, 4_352 * mib);
+        assert_eq!(plain.max_cached_bytes, 128 * mib);
         assert_eq!(
-            plain.selected_pack_limits.max_total_expanded_bytes,
-            128 * 1024 * 1024
+            plain.max_object_bytes,
+            PackLimits::default().max_object_bytes
         );
     }
 

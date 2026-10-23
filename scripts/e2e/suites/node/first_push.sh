@@ -21,8 +21,11 @@
 # opt-in XL case (FG_E2E_LARGE_PUSH=1, release node) additionally pins the
 # documented receive session envelope (frankengit-asb8): a >= 300 MB inflated
 # first push under explicit size ceilings, a work-scaled deadline that admits
-# it under a 5 s base, and the over-budget report-status refusal. A
-# successful run is compatibility evidence for exactly the cells exercised.
+# it under a 5 s base, and the over-budget report-status refusal; and the
+# served side (frankengit-8xyq): the same repository clones under the default
+# upload envelope, and a deliberately narrowed envelope refuses the clone
+# with a client-visible message. A successful run is compatibility evidence
+# for exactly the cells exercised.
 set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$E2E_ROOT/../../.." && pwd)"
@@ -334,21 +337,21 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_assert_contains FG-HH37-PUSH-033 "$XL1_OUT" 'main -> main' 'the XL push is accepted and reported to the client'
   fge_assert_not_contains FG-HH37-PUSH-034 "$XL1_OUT" 'hung up' 'the XL outcome is report-status, never a hangup'
 
-  # The published XL head must reproduce the pushed head exactly (clone-back),
-  # with the serve session's write-side envelope widened deliberately
-  # (frankengit-e6jj): the selected-pack writer's default 128 MiB expanded
-  # ceiling cannot emit a >= 300 MB closure, so this serve names a 512 MiB
-  # bound. A same-content clone attempt against the DEFAULT envelope is the
-  # planted negative below.
-  FIND_PORT_AND_SERVE_XL xl1-verify "$STORAGE_XL1" "$REPOID_XL1" --pack-max-expanded-mib 512
-  fge_assert_cmd FG-HH37-PUSH-035 'an XL verification serve session with the widened write envelope is listening' test -n "$FOUND_PORT"
+  # The published XL head must reproduce the pushed head exactly (clone-back)
+  # under the DEFAULT upload envelope (frankengit-8xyq). The pack streams
+  # through scratch custody, so the 4 GiB default bounds work and the profile's
+  # 128 MiB delta window bounds memory; this clone needed an explicit 512 MiB
+  # envelope while packs were built in memory (frankengit-e6jj). A narrowed
+  # envelope's refusal is the planted negative below.
+  FIND_PORT_AND_SERVE_XL xl1-verify "$STORAGE_XL1" "$REPOID_XL1"
+  fge_assert_cmd FG-HH37-PUSH-035 'an XL verification serve session with the default envelope is listening' test -n "$FOUND_PORT"
   XLCLONE="$WORK/xl-clone"
   GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
     "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" "$XLCLONE" >"$WORK/xl-clone.out" 2>&1 || true
   fge_reap "$FOUND_NAME"
   XLSRC_HEAD=$(git -C "$XL_SRC" rev-parse HEAD 2>/dev/null || echo source-missing)
   XLCLONE_HEAD=$(git -C "$XLCLONE" rev-parse HEAD 2>/dev/null || echo clone-missing)
-  fge_assert_eq FG-HH37-PUSH-036 "$XLSRC_HEAD" "$XLCLONE_HEAD" 'the published XL head round-trips identically under the documented write envelope'
+  fge_assert_eq FG-HH37-PUSH-036 "$XLSRC_HEAD" "$XLCLONE_HEAD" 'the published XL head round-trips identically under the default envelope'
   XL_BLOB_OID=$(git -C "$XL_SRC" ls-tree HEAD xl1.txt | awk '{print $3}')
   XL_DOCTOR_RC=0
   "$FG_BIN" doctor "$STORAGE_XL1" "$TENANT" "$REPOID_XL1" "$XL_BLOB_OID" >"$WORK/xl-doctor.out" 2>&1 || XL_DOCTOR_RC=$?
@@ -367,12 +370,10 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_assert_eq FG-HH37-PUSH-053 0 "$XLFOLLOW_RC" 'a small follow-up commit is pushed on top of the XL head'
   XLFOLLOW_HEAD=$(git -C "$XLCLONE" rev-parse HEAD 2>/dev/null || echo clone-missing)
 
-  # The DEFAULT 128 MiB write envelope (frankengit-8xyq). The disclosure walk
-  # reads blob headers, not bodies, so the XL repository is still advertised
-  # and a fetch that needs a small pack succeeds. A request whose pack is
-  # over the envelope is refused after the advertisement, on the side band,
-  # with a client-diagnosable message naming the limit and the operator flag
-  # -- never an unexplained early EOF (frankengit-e6jj).
+  # The DEFAULT envelope under a session cap (frankengit-8xyq). The disclosure
+  # walk reads blob headers, not bodies, so advertising the XL repository is
+  # cheap; an incremental fetch needs only a small pack; and a full clone of
+  # the follow-up head streams like the clone-back above.
   FIND_PORT_AND_SERVE_XL xl1-default "$STORAGE_XL1" "$REPOID_XL1" --max-sessions 3 --max-in-flight 1
   fge_assert_cmd FG-HH37-PUSH-047 'a default-envelope XL serve session is listening' test -n "$FOUND_PORT"
   XLLS_RC=0
@@ -390,10 +391,24 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
     "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" "$XLCLONE_DEFAULT" >"$WORK/xl-clone-default.out" 2>&1 || XLDEFAULT_RC=$?
   fge_reap "$FOUND_NAME"
-  XLDEFAULT_OUT=$(cat "$WORK/xl-clone-default.out")
-  fge_assert_cmd FG-HH37-PUSH-048 'the over-envelope clone fails' test "$XLDEFAULT_RC" -ne 0
-  fge_assert_contains FG-HH37-PUSH-049 "$XLDEFAULT_OUT" 'over this server'"'"'s upload envelope (128 MiB of objects)' 'the pack-time refusal names the governing limit to the client'
-  fge_assert_contains FG-HH37-PUSH-052 "$XLDEFAULT_OUT" 'fg serve --pack-max-expanded-mib' 'the refusal names the operator flag that raises the limit'
+  fge_assert_eq FG-HH37-PUSH-058 0 "$XLDEFAULT_RC" 'a full clone of the XL repository succeeds under the default envelope'
+  fge_assert_eq FG-HH37-PUSH-059 "$XLFOLLOW_HEAD" "$(git -C "$XLCLONE_DEFAULT" rev-parse HEAD 2>/dev/null || echo clone-missing)" 'the default-envelope clone checks out the follow-up head'
+
+  # Planted negative: an envelope narrowed to 128 MiB, the old default. A
+  # request whose pack is over the envelope is refused after the
+  # advertisement, on the side band, with a client-diagnosable message naming
+  # the limit and the operator flag -- never an unexplained early EOF
+  # (frankengit-e6jj).
+  FIND_PORT_AND_SERVE_XL xl1-narrow "$STORAGE_XL1" "$REPOID_XL1" --pack-max-expanded-mib 128
+  fge_assert_cmd FG-HH37-PUSH-060 'a narrowed-envelope XL serve session is listening' test -n "$FOUND_PORT"
+  XLNARROW_RC=0
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" "$WORK/xl-clone-narrow" >"$WORK/xl-clone-narrow.out" 2>&1 || XLNARROW_RC=$?
+  fge_reap "$FOUND_NAME"
+  XLNARROW_OUT=$(cat "$WORK/xl-clone-narrow.out")
+  fge_assert_cmd FG-HH37-PUSH-048 'the over-envelope clone fails' test "$XLNARROW_RC" -ne 0
+  fge_assert_contains FG-HH37-PUSH-049 "$XLNARROW_OUT" 'over this server'"'"'s upload envelope (128 MiB of objects)' 'the pack-time refusal names the governing limit to the client'
+  fge_assert_contains FG-HH37-PUSH-052 "$XLNARROW_OUT" 'fg serve --pack-max-expanded-mib' 'the refusal names the operator flag that raises the limit'
 
   # 2. Work-proportional deadline: a 5 s base with 4 s/MiB scaling admits the
   # push; a flat 5 s envelope fails it anywhere (client-side pack streaming

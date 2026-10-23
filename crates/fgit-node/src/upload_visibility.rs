@@ -57,6 +57,12 @@ impl VisibleUploadPack {
         &self.repository
     }
 
+    /// The verified kind of a visible object, which orders a streamed pack
+    /// before any body is read (frankengit-8xyq).
+    pub(super) fn kind_of(&self, id: &GitOid) -> Option<ObjectType> {
+        self.objects.get(id).map(|object| object.kind)
+    }
+
     /// Pack selection over this proof's verified graph (frankengit-8xyq).
     /// `source` supplies the object format and liveness checkpoints only.
     pub(super) fn selection_source<'a, S>(&'a self, source: &'a S) -> VisibleGraphSelection<'a, S> {

@@ -191,6 +191,8 @@ pub enum WireError {
     TruncatedPacket { pending: usize },
     /// A bounded allocation failed.
     AllocationFailure,
+    /// A pack payload source could not read its completed pack back.
+    PackPayloadRead,
     /// A line was required to end with LF.
     MissingLineFeed,
     /// A protocol token contained a forbidden byte.
@@ -301,6 +303,7 @@ impl Display for WireError {
                 )
             }
             Self::AllocationFailure => formatter.write_str("bounded wire allocation failed"),
+            Self::PackPayloadRead => formatter.write_str("pack payload could not be read back"),
             Self::MissingLineFeed => formatter.write_str("protocol line lacks trailing LF"),
             Self::InvalidToken {
                 field,

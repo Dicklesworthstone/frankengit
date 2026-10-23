@@ -1270,7 +1270,9 @@ fn run_export(
         .block_on(node.authority_selected_pack_payload_in(&request))
         .map_err(|error| CliRefusal::ExportMaterialization(Box::new(error)))
         .and_then(|payload| {
-            let bytes = payload.into_bytes();
+            let bytes = payload
+                .into_bytes()
+                .map_err(|error| CliRefusal::ExportMaterialization(Box::new(error)))?;
             write_new_export(&destination, &bytes)?;
             Ok(CliOutcome::Exported {
                 destination,

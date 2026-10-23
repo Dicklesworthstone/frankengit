@@ -11,7 +11,8 @@
 //! object ID ascending.  The final ID comparison makes the order total across
 //! platforms and independent of source enumeration order.  Delta selection is
 //! likewise fixed: only the preceding `delta_window` planned entries of the
-//! same native type are considered; the smallest delta wins, then the nearest
+//! same native type are considered, fewer when the profile bounds their body
+//! bytes (`delta_window_bytes`); the smallest delta wins, then the nearest
 //! preceding entry, then its native object ID.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -142,6 +143,22 @@ pub trait CanonicalObjectSource {
     fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError>;
 }
 
+/// The ordering metadata a caller declares for one object of a streamed pack
+/// ([`PackPlanner::stream_selected_thin`]): exactly what plan order compares,
+/// so entries can be emitted in plan order before any body is loaded. The
+/// loaded object must agree with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackOrderKey {
+    /// Native object identity.
+    pub id: ObjectId,
+    /// Native object type, the first ordering key.
+    pub object_type: ObjectType,
+    /// [`CanonicalPackObject`] recency the source will report.
+    pub recency: u64,
+    /// [`CanonicalPackObject`] path hash the source will report.
+    pub path_hash: u64,
+}
+
 /// How a profile searches a candidate base for reusable byte runs.
 ///
 /// This is the shape of the emitted delta program, not the choice of which
@@ -207,6 +224,11 @@ pub struct PackWriteProfile {
     pub id: &'static str,
     /// Maximum preceding same-type entries considered as delta bases.
     pub delta_window: usize,
+    /// Maximum body bytes of the preceding entries a decision looks back
+    /// over: the candidates are the nearest entries whose bodies together fit,
+    /// so an entry larger than this is nobody's base. `None` bounds the window
+    /// by count alone.
+    pub delta_window_bytes: Option<usize>,
     /// Maximum emitted OFS-delta chain depth, counted from base entries at 0.
     pub max_delta_depth: usize,
     /// Exact deterministic zlib profile used for every emitted member.
@@ -233,6 +255,7 @@ impl PackWriteProfile {
     pub const STORED_V1: Self = Self {
         id: "git-pack-stored-v1",
         delta_window: 32,
+        delta_window_bytes: None,
         max_delta_depth: 8,
         compression: DeflateProfile::FAST_STORED,
         delta_search: DeltaSearch::PrefixSuffix,
@@ -250,6 +273,7 @@ impl PackWriteProfile {
     pub const COMPRESSED_V1: Self = Self {
         id: "git-pack-compressed-v1",
         delta_window: 32,
+        delta_window_bytes: None,
         max_delta_depth: 8,
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::PrefixSuffix,
@@ -269,6 +293,7 @@ impl PackWriteProfile {
     pub const COMPRESSED_NO_DELTA_V1: Self = Self {
         id: "git-pack-compressed-no-delta-v1",
         delta_window: 0,
+        delta_window_bytes: None,
         max_delta_depth: 8,
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::PrefixSuffix,
@@ -293,6 +318,7 @@ impl PackWriteProfile {
     pub const COMPRESSED_V2: Self = Self {
         id: "git-pack-compressed-v2",
         delta_window: 32,
+        delta_window_bytes: None,
         max_delta_depth: 8,
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::IndexedBlocks,
@@ -317,6 +343,7 @@ impl PackWriteProfile {
     pub const COMPRESSED_V3: Self = Self {
         id: "git-pack-compressed-v3",
         delta_window: 32,
+        delta_window_bytes: None,
         max_delta_depth: 8,
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::IndexedBlocks,
@@ -360,6 +387,29 @@ impl PackWriteProfile {
         id: "git-pack-compressed-v4-thin",
         thin: true,
         ..Self::COMPRESSED_V4
+    };
+
+    /// [`Self::COMPRESSED_V4`] whose delta candidates are also bounded by
+    /// body bytes: a decision looks back over at most 128 MiB of preceding
+    /// bodies (frankengit-8xyq). A streamed pack holds only its candidates,
+    /// so this is what bounds a served pack's memory: 32 candidates of 14 MB
+    /// blobs would hold 448 MB, and their indexes about as much again. Where
+    /// the 32 nearest bodies fit, which is every window of ordinary source,
+    /// the plan is V4's entry for entry. A separate profile because a window
+    /// that does not fit plans differently.
+    pub const COMPRESSED_V5: Self = Self {
+        id: "git-pack-compressed-v5",
+        delta_window_bytes: Some(128 * 1024 * 1024),
+        ..Self::COMPRESSED_V4
+    };
+
+    /// [`Self::COMPRESSED_V5`] that may delta against client-held objects, as
+    /// [`Self::COMPRESSED_V3_THIN`] does for V3. Client-held bases are loaded
+    /// per plan, bounded by [`MAX_THIN_BASES_PER_TARGET`], not by the window.
+    pub const COMPRESSED_V5_THIN: Self = Self {
+        id: "git-pack-compressed-v5-thin",
+        thin: true,
+        ..Self::COMPRESSED_V5
     };
 }
 
@@ -680,7 +730,7 @@ impl PackPlanner {
                 requested: ids.len(),
             })?;
         let mut total_object_bytes = 0_usize;
-        for id in ids {
+        for &id in &ids {
             checkpoint(deadline)?;
             let object = source.load(&id)?;
             if object.id != id {
@@ -712,23 +762,243 @@ impl PackPlanner {
             )?;
             objects.push(object);
         }
-        let external = self.load_thin_bases(source, &objects, thin_bases, deadline)?;
+        let external = self.load_thin_bases(source, &ids, thin_bases, deadline)?;
         self.finish_plan(objects, total_object_bytes, &external, deadline)
+    }
+
+    /// [`Self::plan_selected_thin`] followed by [`PackWriter::write_into`],
+    /// byte for byte, without holding the plan (frankengit-8xyq).
+    ///
+    /// The caller declares each selected object's ordering key, so entries are
+    /// emitted in plan order before any body is loaded; every loaded object
+    /// must match its key. Each object is loaded, verified, decided against the
+    /// window and emitted, then kept only while it can still be a delta base.
+    /// A target's client-held bases are loaded for its decision alone. Held
+    /// object bytes are therefore the candidates (bounded by the profile's
+    /// `delta_window_bytes`, and refused typed past `max_cached_bytes` as
+    /// [`PackWriteError::WindowCacheLimit`]) plus the current target and its
+    /// at most [`MAX_THIN_BASES_PER_TARGET`] bases, not the pack. Decisions
+    /// and emission share the planned path's code. The sink receives the
+    /// complete pack and is promoted only after the trailer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stream_selected_thin(
+        &self,
+        source: &impl CanonicalObjectSource,
+        selected: &[PackOrderKey],
+        thin_bases: &[ThinBase],
+        writer: &PackWriter,
+        encoder: &mut impl PackEntryEncoder,
+        sink: &mut impl PackArtifactSink,
+        deadline: &mut impl Deadline,
+    ) -> Result<PackWriteReceipt, PackWriteError> {
+        if !thin_bases.is_empty() && !self.profile.thin {
+            return Err(PackWriteError::ThinBasesNotPermitted);
+        }
+        self.validate_profile_depth()?;
+        let count = u32::try_from(selected.len()).map_err(|_| PackError::EntryCountLimit {
+            actual: u32::MAX,
+            limit: self.limits.max_entries,
+        })?;
+        for limit in [self.limits.max_entries, writer.limits.max_entries] {
+            if count > limit {
+                return Err(PackError::EntryCountLimit {
+                    actual: count,
+                    limit,
+                }
+                .into());
+            }
+        }
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(selected.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: selected.len(),
+            })?;
+        for key in selected {
+            checkpoint(deadline)?;
+            ensure_format(self.format, key.id)?;
+            ids.push(key.id);
+        }
+        ids.sort_unstable();
+        for pair in ids.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(PackWriteError::DuplicateSelectedObject(pair[0]));
+            }
+        }
+        let offers = self.validate_thin_offers(&ids, thin_bases, deadline)?;
+        drop(ids);
+        let mut counted_bases = BTreeSet::new();
+        let mut total_base_bytes = 0_usize;
+        let mut order = Vec::new();
+        order
+            .try_reserve_exact(selected.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: selected.len(),
+            })?;
+        order.extend_from_slice(selected);
+        order.sort_unstable_by(compare_order_keys);
+
+        let temporary = sink.create_temporary()?;
+        let mut staged = StagedArtifact::new(sink, temporary);
+        let mut emitter =
+            StreamingEmitter::new(&mut staged, self.format, writer.limits.max_input_bytes);
+        checkpoint(deadline)?;
+        emitter.emit_hashed(&pack_header(count))?;
+        let mut offsets = Vec::new();
+        let mut compression = Vec::new();
+        compression
+            .try_reserve(order.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: order.len(),
+            })?;
+        let mut selector = DeltaSelector::new(self.profile, &self.limits, None)?;
+        let mut total_object_bytes = 0_usize;
+        let mut delta_count = 0_usize;
+        for key in order {
+            checkpoint(deadline)?;
+            let object = source.load(&key.id)?;
+            if object.id != key.id {
+                return Err(PackWriteError::SourceIdentityMismatch {
+                    requested: key.id,
+                    returned: object.id,
+                });
+            }
+            if object.object_type != key.object_type
+                || object.recency != key.recency
+                || object.path_hash != key.path_hash
+            {
+                return Err(PackWriteError::SourceOrderMismatch(key.id));
+            }
+            self.limits.object_size(object.body.len())?;
+            writer.limits.object_size(object.body.len())?;
+            total_object_bytes = total_object_bytes.checked_add(object.body.len()).ok_or(
+                PackError::IntegerOverflow {
+                    context: "selected pack plan total object bytes",
+                },
+            )?;
+            for limit in [
+                self.limits.max_total_expanded_bytes,
+                writer.limits.max_total_expanded_bytes,
+            ] {
+                if total_object_bytes > limit {
+                    return Err(PackError::TotalExpandedLimit {
+                        actual: total_object_bytes,
+                        limit,
+                    }
+                    .into());
+                }
+            }
+            verify_native_object(
+                self.format,
+                object.object_type,
+                &object.body,
+                &object.id,
+                AcceptanceProfile::GitCompatibleImport,
+                &object_parse_limits(self.format, &self.limits),
+            )?;
+            let external = self.load_target_thin_bases(
+                source,
+                &offers,
+                key.id,
+                &mut counted_bases,
+                &mut total_base_bytes,
+                deadline,
+            )?;
+            let delta = selector.decide(&object, &external, deadline)?;
+            drop(external);
+            let entry = PackPlanEntry { object, delta };
+            if let Some(delta) = entry.delta.as_ref() {
+                writer.limits.object_size(delta.program.len())?;
+                if delta.base_index().is_none() && !self.profile.thin {
+                    return Err(PackWriteError::ThinBasesNotPermitted);
+                }
+            }
+            checkpoint(deadline)?;
+            let (receipt, delta) =
+                emit_planned_entry(&mut emitter, &entry, &mut offsets, encoder, deadline)?;
+            if delta {
+                delta_count = delta_count
+                    .checked_add(1)
+                    .ok_or(PackError::IntegerOverflow {
+                        context: "pack delta count",
+                    })?;
+            }
+            compression.push(receipt);
+            selector.push(entry)?;
+            if selector.window.resident_bytes > self.limits.max_cached_bytes {
+                return Err(PackWriteError::WindowCacheLimit {
+                    resident: selector.window.resident_bytes,
+                    limit: self.limits.max_cached_bytes,
+                });
+            }
+        }
+        let checksum = emitter.finish_and_emit_trailer(deadline)?;
+        let output_bytes = emitter.bytes_written();
+        staged.promote()?;
+        Ok(PackWriteReceipt {
+            profile: self.profile,
+            checksum,
+            object_count: count,
+            delta_count,
+            total_object_bytes,
+            output_bytes,
+            compression,
+        })
     }
 
     /// Loads and verifies the offered client-held bases, grouped by target.
     fn load_thin_bases(
         &self,
         source: &impl CanonicalObjectSource,
-        objects: &[CanonicalPackObject],
+        selected: &[ObjectId],
         thin_bases: &[ThinBase],
         deadline: &mut impl Deadline,
     ) -> Result<ExternalBases, PackWriteError> {
         let mut external = ExternalBases::default();
-        if thin_bases.is_empty() {
+        let offers = self.validate_thin_offers(selected, thin_bases, deadline)?;
+        if offers.is_empty() {
             return Ok(external);
         }
+        let mut bases: Vec<ObjectId> = offers.iter().map(ThinBase::base).collect();
+        bases.sort_unstable();
+        bases.dedup();
+        let mut total_base_bytes = 0_usize;
+        external
+            .objects
+            .try_reserve_exact(bases.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: bases.len(),
+            })?;
+        for id in bases {
+            let object = self.load_thin_base(source, id, &mut total_base_bytes, deadline)?;
+            external.objects.push(object);
+        }
+        for offer in offers {
+            let position = external
+                .objects
+                .binary_search_by(|object| object.id.cmp(&offer.base))
+                .map_err(|_| PackWriteError::MissingCanonicalObject(offer.base))?;
+            external
+                .by_target
+                .entry(offer.target)
+                .or_default()
+                .push(position);
+        }
+        Ok(external)
+    }
+
+    /// The offers sorted by target then base, each target's at most
+    /// [`MAX_THIN_BASES_PER_TARGET`], every target in `selected` (sorted) and
+    /// no base in it. Identities only; nothing is loaded.
+    fn validate_thin_offers(
+        &self,
+        selected: &[ObjectId],
+        thin_bases: &[ThinBase],
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<ThinBase>, PackWriteError> {
         let mut offers = Vec::new();
+        if thin_bases.is_empty() {
+            return Ok(offers);
+        }
         offers
             .try_reserve_exact(thin_bases.len())
             .map_err(|_| PackError::AllocationFailed {
@@ -736,7 +1006,7 @@ impl PackPlanner {
             })?;
         offers.extend_from_slice(thin_bases);
         offers.sort_unstable();
-        let in_pack = |id: &ObjectId| objects.binary_search_by(|object| object.id.cmp(id)).is_ok();
+        let in_pack = |id: &ObjectId| selected.binary_search(id).is_ok();
         let mut per_target = 0_usize;
         for (index, offer) in offers.iter().enumerate() {
             checkpoint(deadline)?;
@@ -759,58 +1029,86 @@ impl PackPlanner {
                 return Err(invalid);
             }
         }
-        let mut bases: Vec<ObjectId> = offers.iter().map(ThinBase::base).collect();
-        bases.sort_unstable();
-        bases.dedup();
-        let mut total_base_bytes = 0_usize;
-        external
-            .objects
-            .try_reserve_exact(bases.len())
-            .map_err(|_| PackError::AllocationFailed {
-                requested: bases.len(),
-            })?;
-        for id in bases {
-            checkpoint(deadline)?;
-            let object = source.load(&id)?;
-            if object.id != id {
-                return Err(PackWriteError::SourceIdentityMismatch {
-                    requested: id,
-                    returned: object.id,
-                });
-            }
-            self.limits.object_size(object.body.len())?;
-            total_base_bytes = total_base_bytes.checked_add(object.body.len()).ok_or(
-                PackError::IntegerOverflow {
+        Ok(offers)
+    }
+
+    /// One client-held base, loaded and verified, its bytes added to the
+    /// distinct-base total that `max_total_expanded_bytes` bounds.
+    fn load_thin_base(
+        &self,
+        source: &impl CanonicalObjectSource,
+        id: ObjectId,
+        total_base_bytes: &mut usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<CanonicalPackObject, PackWriteError> {
+        checkpoint(deadline)?;
+        let object = source.load(&id)?;
+        if object.id != id {
+            return Err(PackWriteError::SourceIdentityMismatch {
+                requested: id,
+                returned: object.id,
+            });
+        }
+        self.limits.object_size(object.body.len())?;
+        *total_base_bytes =
+            total_base_bytes
+                .checked_add(object.body.len())
+                .ok_or(PackError::IntegerOverflow {
                     context: "thin base total object bytes",
-                },
-            )?;
-            if total_base_bytes > self.limits.max_total_expanded_bytes {
-                return Err(PackError::TotalExpandedLimit {
-                    actual: total_base_bytes,
-                    limit: self.limits.max_total_expanded_bytes,
-                }
-                .into());
+                })?;
+        if *total_base_bytes > self.limits.max_total_expanded_bytes {
+            return Err(PackError::TotalExpandedLimit {
+                actual: *total_base_bytes,
+                limit: self.limits.max_total_expanded_bytes,
             }
-            verify_native_object(
-                self.format,
-                object.object_type,
-                &object.body,
-                &object.id,
-                AcceptanceProfile::GitCompatibleImport,
-                &object_parse_limits(self.format, &self.limits),
-            )?;
+            .into());
+        }
+        verify_native_object(
+            self.format,
+            object.object_type,
+            &object.body,
+            &object.id,
+            AcceptanceProfile::GitCompatibleImport,
+            &object_parse_limits(self.format, &self.limits),
+        )?;
+        Ok(object)
+    }
+
+    /// The client-held bases offered for `target` alone, loaded for its one
+    /// decision. A decision reads only its own target's bases, so this is
+    /// [`Self::load_thin_bases`]'s view of that target. `counted` keeps each
+    /// distinct base in the total once, as the planned path counts it.
+    fn load_target_thin_bases(
+        &self,
+        source: &impl CanonicalObjectSource,
+        offers: &[ThinBase],
+        target: ObjectId,
+        counted: &mut BTreeSet<ObjectId>,
+        total_base_bytes: &mut usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<ExternalBases, PackWriteError> {
+        let mut external = ExternalBases::default();
+        let first = offers.partition_point(|offer| offer.target < target);
+        let mine = offers[first..]
+            .iter()
+            .take_while(|offer| offer.target == target);
+        for offer in mine {
+            let mut uncounted = 0_usize;
+            let total = if counted.insert(offer.base) {
+                &mut *total_base_bytes
+            } else {
+                &mut uncounted
+            };
+            let object = self.load_thin_base(source, offer.base, total, deadline)?;
+            external
+                .objects
+                .try_reserve(1)
+                .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
             external.objects.push(object);
         }
-        for offer in offers {
-            let position = external
-                .objects
-                .binary_search_by(|object| object.id.cmp(&offer.base))
-                .map_err(|_| PackWriteError::MissingCanonicalObject(offer.base))?;
-            external
-                .by_target
-                .entry(offer.target)
-                .or_default()
-                .push(position);
+        if !external.objects.is_empty() {
+            let positions: Vec<usize> = (0..external.objects.len()).collect();
+            external.by_target.insert(target, positions);
         }
         Ok(external)
     }
@@ -874,11 +1172,24 @@ pub enum PackWriteError {
     TemporaryWriteRefused,
     /// The sink could not atomically promote the completed temporary artifact.
     PromotionRefused,
+    /// A promoted artifact could not be read back from its custody.
+    TemporaryReadRefused,
     /// A completed dependency encoder omitted its required immutable receipt.
     MissingCompressionReceipt,
     /// Thin bases were offered to a profile that emits only self-contained
     /// packs, or a self-contained profile's plan carries a client-held base.
     ThinBasesNotPermitted,
+    /// A streamed object did not match the type, recency or path hash its
+    /// caller declared for ordering (frankengit-8xyq).
+    SourceOrderMismatch(ObjectId),
+    /// A streamed pack's delta window would hold more object bytes than
+    /// `max_cached_bytes` (frankengit-8xyq).
+    WindowCacheLimit {
+        /// Object bytes the window would hold.
+        resident: usize,
+        /// Configured ceiling.
+        limit: usize,
+    },
     /// A thin-base offer the planner cannot honour: its target is not in the
     /// pack, its base is, the pair repeats, or the target already has
     /// [`MAX_THIN_BASES_PER_TARGET`] bases.
@@ -966,6 +1277,13 @@ impl DeterministicPackEncoder {
     #[must_use]
     pub const fn new(limits: DeflateLimits, profile: DeflateProfile) -> Self {
         Self { limits, profile }
+    }
+
+    /// The encoder [`PackWriter::write`] uses for `profile`: its compression
+    /// profile under the Git-object DEFLATE bounds.
+    #[must_use]
+    pub const fn for_profile(profile: PackWriteProfile) -> Self {
+        Self::new(DeflateLimits::GIT_OBJECT, profile.compression)
     }
 }
 
@@ -1067,8 +1385,7 @@ impl PackWriter {
         deadline: &mut impl Deadline,
     ) -> Result<(Vec<u8>, PackWriteReceipt), PackWriteError> {
         let mut sink = MemoryPackSink::default();
-        let mut encoder =
-            DeterministicPackEncoder::new(DeflateLimits::GIT_OBJECT, plan.profile.compression);
+        let mut encoder = DeterministicPackEncoder::for_profile(plan.profile);
         let receipt = self.write_into(plan, deadline, &mut encoder, &mut sink)?;
         let bytes = sink.promoted.ok_or(PackWriteError::PromotionRefused)?;
         Ok((bytes, receipt))
@@ -1136,10 +1453,52 @@ impl PackWriter {
 
         for entry in &plan.entries {
             checkpoint(deadline)?;
+            let (receipt, delta) =
+                emit_planned_entry(&mut emitter, entry, &mut offsets, encoder, deadline)?;
+            if delta {
+                delta_count = delta_count
+                    .checked_add(1)
+                    .ok_or(PackError::IntegerOverflow {
+                        context: "pack delta count",
+                    })?;
+            }
+            compression.push(receipt);
+        }
+        let checksum = emitter.finish_and_emit_trailer(deadline)?;
+        let output_bytes = emitter.bytes_written();
+        staged.promote()?;
+        Ok(PackWriteReceipt {
+            profile: plan.profile,
+            checksum,
+            object_count: count,
+            delta_count,
+            total_object_bytes: plan.total_object_bytes,
+            output_bytes,
+            compression,
+        })
+    }
+}
+
+/// Emits one planned entry at the current offset and records that offset.
+/// [`PackWriter::write_into`] and [`PackPlanner::stream_selected_thin`] both
+/// emit through this, so equal decisions give equal bytes. Returns the
+/// member's receipt and whether the entry is a delta.
+fn emit_planned_entry<S: PackArtifactSink>(
+    emitter: &mut StreamingEmitter<'_, '_, S>,
+    entry: &PackPlanEntry,
+    offsets: &mut Vec<u64>,
+    encoder: &mut impl PackEntryEncoder,
+    deadline: &mut impl Deadline,
+) -> Result<(DeflateReceipt, bool), PackWriteError> {
+    {
+        {
             let offset =
                 u64::try_from(emitter.bytes_written()).map_err(|_| PackError::IntegerOverflow {
                     context: "pack entry offset",
                 })?;
+            offsets
+                .try_reserve(1)
+                .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
             offsets.push(offset);
             let payload = match entry.delta.as_ref() {
                 Some(delta) => {
@@ -1159,11 +1518,6 @@ impl PackWriter {
                             emitter.emit_hashed(base.as_bytes())?;
                         }
                     }
-                    delta_count = delta_count
-                        .checked_add(1)
-                        .ok_or(PackError::IntegerOverflow {
-                            context: "pack delta count",
-                        })?;
                     delta.program.as_slice()
                 }
                 None => {
@@ -1176,20 +1530,8 @@ impl PackWriter {
             };
             let receipt =
                 encoder.encode_entry(payload, deadline, &mut |bytes| emitter.emit_hashed(bytes))?;
-            compression.push(receipt);
+            Ok((receipt, entry.delta.is_some()))
         }
-        let checksum = emitter.finish_and_emit_trailer(deadline)?;
-        let output_bytes = emitter.bytes_written();
-        staged.promote()?;
-        Ok(PackWriteReceipt {
-            profile: plan.profile,
-            checksum,
-            object_count: count,
-            delta_count,
-            total_object_bytes: plan.total_object_bytes,
-            output_bytes,
-            compression,
-        })
     }
 }
 
@@ -1312,6 +1654,16 @@ struct ExternalBases {
     by_target: BTreeMap<ObjectId, Vec<usize>>,
 }
 
+/// [`compare_pack_objects`] over declared keys: the same total order.
+fn compare_order_keys(left: &PackOrderKey, right: &PackOrderKey) -> std::cmp::Ordering {
+    left.object_type
+        .type_code()
+        .cmp(&right.object_type.type_code())
+        .then_with(|| right.recency.cmp(&left.recency))
+        .then_with(|| left.path_hash.cmp(&right.path_hash))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
 fn compare_pack_objects(
     left: &CanonicalPackObject,
     right: &CanonicalPackObject,
@@ -1331,40 +1683,192 @@ fn select_deltas(
     limits: &PackLimits,
     deadline: &mut impl Deadline,
 ) -> Result<Vec<PackPlanEntry>, PackWriteError> {
-    let max_delta_fanout = limits.max_delta_fanout;
-    // One index per candidate base, built on first use and retained only while
-    // that base is still inside the window. Every target in the window would
-    // otherwise rebuild the same index, which is the whole cost of the search.
-    let mut indexes: VecDeque<(usize, Option<BaseDeltaIndex>)> = VecDeque::new();
-    let mut entries: Vec<PackPlanEntry> = Vec::new();
-    entries
-        .try_reserve(objects.len())
-        .map_err(|_| PackError::AllocationFailed {
-            requested: objects.len(),
-        })?;
-    let mut fanout = Vec::new();
-    fanout
-        .try_reserve(objects.len())
-        .map_err(|_| PackError::AllocationFailed {
-            requested: objects.len(),
-        })?;
+    let mut selector = DeltaSelector::new(profile, limits, Some(objects.len()))?;
     for object in objects {
+        let delta = selector.decide(object, external, deadline)?;
+        selector.push(PackPlanEntry {
+            object: object.clone(),
+            delta,
+        })?;
+    }
+    Ok(selector.window.entries.into())
+}
+
+/// The plan entries a delta decision may look back at, by absolute index.
+///
+/// The next decision's candidates are `start..len()`: the nearest entries, at
+/// most the profile's `delta_window` of them and, under a byte bound, only as
+/// many as fit in it. A plan retains every entry; a streamed pack evicts each
+/// one as it leaves the candidates, since no later decision can name it
+/// (frankengit-8xyq). Decisions read entries solely through [`Self::get`]
+/// and [`Self::fanout`], so both keep the same decisions.
+struct DeltaWindow {
+    /// Absolute index of `entries[0]`.
+    first: usize,
+    entries: VecDeque<PackPlanEntry>,
+    fanout: VecDeque<usize>,
+    /// Whether entries leaving the candidates are dropped (a stream).
+    evict: bool,
+    /// The profile's candidate count bound.
+    count: usize,
+    /// The profile's candidate body-byte bound, if any.
+    bytes: Option<usize>,
+    /// Absolute index of the next decision's oldest candidate.
+    start: usize,
+    /// Body bytes of the candidates `start..len()`.
+    candidate_bytes: usize,
+    /// Object body bytes currently held.
+    resident_bytes: usize,
+}
+
+impl DeltaWindow {
+    fn len(&self) -> usize {
+        self.first + self.entries.len()
+    }
+
+    fn get(&self, index: usize) -> &PackPlanEntry {
+        &self.entries[index - self.first]
+    }
+
+    fn fanout(&self, index: usize) -> usize {
+        self.fanout[index - self.first]
+    }
+
+    fn push(&mut self, entry: PackPlanEntry) -> Result<(), PackWriteError> {
+        let base = entry.delta.as_ref().and_then(PlannedDelta::base_index);
+        self.resident_bytes = self
+            .resident_bytes
+            .checked_add(entry.object.body.len())
+            .ok_or(PackError::IntegerOverflow {
+                context: "delta window resident bytes",
+            })?;
+        self.entries
+            .try_reserve(1)
+            .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+        self.fanout
+            .try_reserve(1)
+            .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+        self.candidate_bytes = self
+            .candidate_bytes
+            .checked_add(entry.object.body.len())
+            .ok_or(PackError::IntegerOverflow {
+                context: "delta window candidate bytes",
+            })?;
+        self.entries.push_back(entry);
+        self.fanout.push_back(0);
+        if let Some(base_index) = base {
+            let count = &mut self.fanout[base_index - self.first];
+            *count = count.checked_add(1).ok_or(PackError::IntegerOverflow {
+                context: "planned delta fanout",
+            })?;
+        }
+        while self.len() - self.start > self.count
+            || self.bytes.is_some_and(|limit| self.candidate_bytes > limit)
+        {
+            let leaving = self.get(self.start).object.body.len();
+            self.candidate_bytes -= leaving;
+            self.start += 1;
+        }
+        if self.evict {
+            while self.first < self.start {
+                if let Some(evicted) = self.entries.pop_front() {
+                    self.resident_bytes -= evicted.object.body.len();
+                }
+                self.fanout.pop_front();
+                self.first += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One plan's delta policy over a [`DeltaWindow`].
+struct DeltaSelector<'limits> {
+    profile: PackWriteProfile,
+    limits: &'limits PackLimits,
+    window: DeltaWindow,
+    /// One index per candidate base, built on first use and retained only while
+    /// that base is still inside the window. Every target in the window would
+    /// otherwise rebuild the same index, which is the whole cost of the search.
+    indexes: VecDeque<(usize, Option<BaseDeltaIndex>)>,
+}
+
+impl<'limits> DeltaSelector<'limits> {
+    /// `retain` is the plan's entry count when every entry is kept, or `None`
+    /// for a stream that keeps only the delta window.
+    fn new(
+        profile: PackWriteProfile,
+        limits: &'limits PackLimits,
+        retain: Option<usize>,
+    ) -> Result<Self, PackWriteError> {
+        let capacity = retain.unwrap_or(profile.delta_window.saturating_add(1));
+        let mut entries = VecDeque::new();
+        entries
+            .try_reserve(capacity)
+            .map_err(|_| PackError::AllocationFailed {
+                requested: capacity,
+            })?;
+        let mut fanout = VecDeque::new();
+        fanout
+            .try_reserve(capacity)
+            .map_err(|_| PackError::AllocationFailed {
+                requested: capacity,
+            })?;
+        Ok(Self {
+            profile,
+            limits,
+            window: DeltaWindow {
+                first: 0,
+                entries,
+                fanout,
+                evict: retain.is_none(),
+                count: profile.delta_window,
+                bytes: profile.delta_window_bytes,
+                start: 0,
+                candidate_bytes: 0,
+                resident_bytes: 0,
+            },
+            indexes: VecDeque::new(),
+        })
+    }
+
+    /// Appends a decided entry; an index whose base left the candidates goes
+    /// with it. Indexes are a cache, so dropping one changes no decision.
+    fn push(&mut self, entry: PackPlanEntry) -> Result<(), PackWriteError> {
+        self.window.push(entry)?;
+        let start = self.window.start;
+        self.indexes.retain(|(base_index, _)| *base_index >= start);
+        Ok(())
+    }
+
+    /// The delta chosen for `object` after every entry already pushed.
+    fn decide(
+        &mut self,
+        object: &CanonicalPackObject,
+        external: &ExternalBases,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<PlannedDelta>, PackWriteError> {
+        let profile = self.profile;
+        let limits = self.limits;
+        let max_delta_fanout = limits.max_delta_fanout;
+        let window = &self.window;
+        let indexes = &mut self.indexes;
         checkpoint(deadline)?;
-        let window_start = entries.len().saturating_sub(profile.delta_window);
+        let window_start = window.start;
         // The candidates the window offers, nearest first, with the chain depth
         // a delta against each would have.
-        let offered = entries.len() - window_start;
+        let offered = window.len() - window_start;
         let mut candidates: Vec<(usize, usize)> = Vec::new();
         candidates
             .try_reserve(offered)
             .map_err(|_| PackError::AllocationFailed { requested: offered })?;
-        for base_index in (window_start..entries.len()).rev() {
+        for base_index in (window_start..window.len()).rev() {
             checkpoint(deadline)?;
-            let base = &entries[base_index];
+            let base = window.get(base_index);
             if base.object.object_type != object.object_type {
                 continue;
             }
-            if fanout[base_index] >= max_delta_fanout {
+            if window.fanout(base_index) >= max_delta_fanout {
                 continue;
             }
             let base_depth = base.delta.as_ref().map_or(0, PlannedDelta::depth);
@@ -1409,8 +1913,8 @@ fn select_deltas(
                     candidates = rank_for_budget(
                         &candidates,
                         &object.body,
-                        &entries,
-                        &mut indexes,
+                        window,
+                        indexes,
                         profile.delta_window,
                         limits,
                         deadline,
@@ -1461,11 +1965,11 @@ fn select_deltas(
             }
         }
         for (base_index, depth) in candidates {
-            let base = &entries[base_index];
+            let base = window.get(base_index);
             let index = match profile.delta_search {
                 DeltaSearch::PrefixSuffix => None,
                 DeltaSearch::IndexedBlocks => ensure_index(
-                    &mut indexes,
+                    indexes,
                     base_index,
                     &base.object.body,
                     profile.delta_window,
@@ -1506,31 +2010,14 @@ fn select_deltas(
                         && current.base_index().is_none_or(|current_index| {
                             base_index > current_index
                                 || (base_index == current_index
-                                    && base.object.id < entries[current_index].object.id)
+                                    && base.object.id < window.get(current_index).object.id)
                         }))
             }) {
                 selected = Some(candidate);
             }
         }
-        entries.push(PackPlanEntry {
-            object: object.clone(),
-            delta: selected,
-        });
-        fanout.push(0);
-        if let Some(base_index) = entries
-            .last()
-            .and_then(PackPlanEntry::delta)
-            .and_then(PlannedDelta::base_index)
-        {
-            fanout[base_index] =
-                fanout[base_index]
-                    .checked_add(1)
-                    .ok_or(PackError::IntegerOverflow {
-                        context: "planned delta fanout",
-                    })?;
-        }
+        Ok(selected)
     }
-    Ok(entries)
 }
 
 /// The window's index for `base_index`, built on first use.
@@ -1568,7 +2055,7 @@ fn ensure_index<'a>(
 fn rank_for_budget(
     candidates: &[(usize, usize)],
     target: &[u8],
-    entries: &[PackPlanEntry],
+    entries: &DeltaWindow,
     indexes: &mut VecDeque<(usize, Option<BaseDeltaIndex>)>,
     window: usize,
     limits: &PackLimits,
@@ -1581,7 +2068,7 @@ fn rank_for_budget(
             requested: candidates.len(),
         })?;
     for (nearness, &(base_index, depth)) in candidates.iter().enumerate() {
-        let base = &entries[base_index].object.body;
+        let base = &entries.get(base_index).object.body;
         let score = match ensure_index(indexes, base_index, base, window, limits, deadline)? {
             Some(index) => probe_score(index, base, target, deadline)?,
             None => 0,
@@ -3879,6 +4366,348 @@ mod tests {
 
     fn thin_planner(profile: PackWriteProfile) -> PackPlanner {
         PackPlanner::new(ObjectFormat::Sha1, profile, wide_limits())
+    }
+
+    fn order_keys(objects: &[CanonicalPackObject]) -> Vec<PackOrderKey> {
+        objects
+            .iter()
+            .rev()
+            .map(|object| PackOrderKey {
+                id: object.id,
+                object_type: object.object_type,
+                recency: object.recency,
+                path_hash: object.path_hash,
+            })
+            .collect()
+    }
+
+    fn stream(
+        planner: &PackPlanner,
+        source: &impl CanonicalObjectSource,
+        keys: &[PackOrderKey],
+        thin: &[ThinBase],
+    ) -> Result<(Vec<u8>, PackWriteReceipt), PackWriteError> {
+        let mut sink = MemoryPackSink::default();
+        let mut encoder =
+            DeterministicPackEncoder::new(DeflateLimits::GIT_OBJECT, planner.profile.compression);
+        let receipt = planner.stream_selected_thin(
+            source,
+            keys,
+            thin,
+            &PackWriter::new(wide_limits()),
+            &mut encoder,
+            &mut sink,
+            &mut always,
+        )?;
+        Ok((sink.promoted.expect("a streamed pack is promoted"), receipt))
+    }
+
+    /// frankengit-8xyq: a streamed pack is the planned pack, byte for byte and
+    /// receipt for receipt, for every delta corpus and served profile. The
+    /// declared keys arrive in reverse; plan order is recomputed.
+    #[test]
+    fn streamed_packs_equal_planned_packs_for_every_corpus_and_profile() {
+        for profile in [
+            PackWriteProfile::COMPRESSED_NO_DELTA_V1,
+            PackWriteProfile::COMPRESSED_V2,
+            PackWriteProfile::COMPRESSED_V3,
+            PackWriteProfile::COMPRESSED_V4,
+        ] {
+            for corpus in delta_corpora() {
+                let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+                let keys = order_keys(&corpus);
+                let source = FixtureSource::with(corpus);
+                let planner = thin_planner(profile);
+                let plan = planner
+                    .plan_selected(&source, &ids, &mut always)
+                    .expect("plan");
+                let planned = PackWriter::new(wide_limits())
+                    .write(&plan, &mut always)
+                    .expect("planned pack");
+                let streamed = stream(&planner, &source, &keys, &[]).expect("streamed pack");
+                assert_eq!(streamed, planned, "{}", profile.id);
+            }
+        }
+    }
+
+    /// The thin profile streams the same REF_DELTA against a client-held base.
+    #[test]
+    fn a_streamed_thin_pack_equals_the_planned_thin_pack() {
+        let held = object(ObjectType::Blob, &shifted_lines(0, 4000), 1, 7);
+        let target = object(ObjectType::Blob, &shifted_lines(3, 4000), 3, 7);
+        let chained = object(ObjectType::Blob, &shifted_lines(5, 4000), 2, 7);
+        let source = FixtureSource::with(vec![held.clone(), target.clone(), chained.clone()]);
+        for profile in [
+            PackWriteProfile::COMPRESSED_V3_THIN,
+            PackWriteProfile::COMPRESSED_V4_THIN,
+            PackWriteProfile::COMPRESSED_V5_THIN,
+        ] {
+            let planner = thin_planner(profile);
+            let offer = ThinBase::new(target.id(), held.id());
+            let plan = planner
+                .plan_selected_thin(&source, &[target.id(), chained.id()], &[offer], &mut always)
+                .expect("thin plan");
+            let planned = PackWriter::new(wide_limits())
+                .write(&plan, &mut always)
+                .expect("planned thin pack");
+            let keys = order_keys(&[target.clone(), chained.clone()]);
+            let streamed = stream(&planner, &source, &keys, &[offer]).expect("streamed thin pack");
+            assert_eq!(streamed, planned, "{}", profile.id);
+            assert_eq!(streamed.1.delta_count, 2);
+        }
+    }
+
+    /// The stream holds only the delta window: a corpus four times larger than
+    /// `max_cached_bytes` streams (and equals the plan) while each window fits;
+    /// a cap below one window refuses typed.
+    #[test]
+    fn a_streamed_pack_holds_only_the_delta_window() {
+        let corpus: Vec<_> = (0..200_u64)
+            .map(|seed| {
+                object(
+                    ObjectType::Blob,
+                    &noise(seed + 1_000, 4_096),
+                    seed % 5,
+                    seed,
+                )
+            })
+            .collect();
+        let total: usize = corpus.iter().map(|object| object.body.len()).sum();
+        let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+        let keys = order_keys(&corpus);
+        let source = FixtureSource::with(corpus);
+        // After each entry the window keeps exactly `delta_window` bodies.
+        let window_bytes = PackWriteProfile::COMPRESSED_V4.delta_window * 4_096;
+        for (cap, admitted) in [(total / 4, true), (window_bytes - 1, false)] {
+            assert!(cap >= window_bytes || !admitted);
+            let limits = PackLimits {
+                max_cached_bytes: cap,
+                ..wide_limits()
+            };
+            let planner =
+                PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::COMPRESSED_V4, limits);
+            let result = stream(&planner, &source, &keys, &[]);
+            if admitted {
+                let plan = planner
+                    .plan_selected(&source, &ids, &mut always)
+                    .expect("plan");
+                let planned = PackWriter::new(wide_limits())
+                    .write(&plan, &mut always)
+                    .expect("planned pack");
+                assert_eq!(result.expect("window-bounded stream"), planned);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PackWriteError::WindowCacheLimit { limit, .. }) if limit == cap
+                ));
+            }
+        }
+    }
+
+    /// A loaded object that contradicts its declared ordering key is refused.
+    #[test]
+    fn a_streamed_object_must_match_its_declared_key() {
+        let blob = object(ObjectType::Blob, b"declared as a tree", 0, 0);
+        let source = FixtureSource::with(vec![blob.clone()]);
+        let planner = thin_planner(PackWriteProfile::COMPRESSED_V4);
+        let wrong = PackOrderKey {
+            id: blob.id(),
+            object_type: ObjectType::Tree,
+            recency: 0,
+            path_hash: 0,
+        };
+        assert_eq!(
+            stream(&planner, &source, &[wrong], &[]),
+            Err(PackWriteError::SourceOrderMismatch(blob.id()))
+        );
+        assert!(matches!(
+            stream(&planner, &source, &[wrong, wrong], &[]),
+            Err(PackWriteError::DuplicateSelectedObject(id)) if id == blob.id()
+        ));
+    }
+
+    /// A source that records every load, in order.
+    struct RecordingSource {
+        inner: FixtureSource,
+        loads: std::cell::RefCell<Vec<ObjectId>>,
+    }
+
+    impl CanonicalObjectSource for RecordingSource {
+        fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
+            self.loads.borrow_mut().push(*id);
+            self.inner.load(id)
+        }
+    }
+
+    fn byte_window(bytes: usize) -> PackWriteProfile {
+        PackWriteProfile {
+            id: "window-bytes-test",
+            delta_window_bytes: Some(bytes),
+            ..PackWriteProfile::COMPRESSED_V4
+        }
+    }
+
+    /// frankengit-8xyq: where the nearest 32 bodies fit in 128 MiB, V5 is V4:
+    /// the same bytes and per-entry receipts; only the profile differs.
+    #[test]
+    fn v5_writes_exactly_as_v4_where_every_window_fits() {
+        assert_eq!(
+            PackWriteProfile::COMPRESSED_V5.delta_window_bytes,
+            Some(128 * 1024 * 1024)
+        );
+        assert_eq!(
+            PackWriteProfile::COMPRESSED_V5_THIN.delta_window_bytes,
+            PackWriteProfile::COMPRESSED_V5.delta_window_bytes
+        );
+        assert!(PackWriteProfile::COMPRESSED_V5_THIN.thin);
+        for corpus in delta_corpora() {
+            let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+            let source = FixtureSource::with(corpus);
+            let write = |profile| {
+                let plan = thin_planner(profile)
+                    .plan_selected(&source, &ids, &mut always)
+                    .expect("plan");
+                PackWriter::new(wide_limits())
+                    .write(&plan, &mut always)
+                    .expect("pack")
+            };
+            let (v4, v4_receipt) = write(PackWriteProfile::COMPRESSED_V4);
+            let (v5, v5_receipt) = write(PackWriteProfile::COMPRESSED_V5);
+            assert_eq!(v5, v4);
+            assert_eq!(v5_receipt.profile.id, "git-pack-compressed-v5");
+            assert_eq!(v5_receipt.delta_count, v4_receipt.delta_count);
+            assert_eq!(v5_receipt.compression, v4_receipt.compression);
+        }
+    }
+
+    /// A byte bound offers only the nearest bodies that fit, inclusive: a
+    /// similar base behind 16 KiB of unrelated bodies is a candidate at
+    /// exactly their sum and not one byte below it. The stream holds no more
+    /// than the bound and equals the plan either way.
+    #[test]
+    fn a_byte_bounded_window_offers_only_the_nearest_bodies_that_fit() {
+        let base = object(ObjectType::Blob, &shifted_lines(0, 2_000), 9, 7);
+        let target = object(ObjectType::Blob, &shifted_lines(1, 2_000), 1, 7);
+        let mut corpus = vec![base.clone(), target.clone()];
+        for (at, recency) in (5..=8_u64).enumerate() {
+            corpus.push(object(
+                ObjectType::Blob,
+                &noise(at as u64 + 40, 4_096),
+                recency,
+                7,
+            ));
+        }
+        let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+        let keys = order_keys(&corpus);
+        let source = FixtureSource::with(corpus);
+        let reach = 4 * 4_096 + base.body.len();
+        for (bytes, reaches) in [(reach, true), (reach - 1, false)] {
+            let profile = byte_window(bytes);
+            let limits = PackLimits {
+                max_cached_bytes: bytes,
+                ..wide_limits()
+            };
+            let planner = PackPlanner::new(ObjectFormat::Sha1, profile, limits);
+            let plan = planner
+                .plan_selected(&source, &ids, &mut always)
+                .expect("plan");
+            let last = plan.entries().last().expect("entries");
+            assert_eq!(last.object().id(), target.id());
+            let base_index = last.delta().and_then(PlannedDelta::base_index);
+            assert_eq!(base_index, reaches.then_some(0), "bound {bytes}");
+            let planned = PackWriter::new(wide_limits())
+                .write(&plan, &mut always)
+                .expect("planned pack");
+            let streamed = stream(&planner, &source, &keys, &[]).expect("streamed pack");
+            assert_eq!(streamed, planned, "bound {bytes}");
+        }
+        let unbounded = thin_planner(PackWriteProfile::COMPRESSED_V4)
+            .plan_selected(&source, &ids, &mut always)
+            .expect("unbounded plan");
+        assert_eq!(
+            unbounded.entries()[5]
+                .delta()
+                .and_then(PlannedDelta::base_index),
+            Some(0)
+        );
+    }
+
+    /// Over every corpus, no delta reaches back over more body bytes than the
+    /// bound, the bound changes decisions, and the stream equals the plan.
+    #[test]
+    fn no_delta_reaches_past_the_byte_bound() {
+        let bytes = 6_000;
+        let (mut deltas, mut changed) = (0, 0);
+        for corpus in delta_corpora() {
+            let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+            let keys = order_keys(&corpus);
+            let source = FixtureSource::with(corpus);
+            let limits = PackLimits {
+                max_cached_bytes: bytes,
+                ..wide_limits()
+            };
+            let planner = PackPlanner::new(ObjectFormat::Sha1, byte_window(bytes), limits);
+            let plan = planner
+                .plan_selected(&source, &ids, &mut always)
+                .expect("plan");
+            let unbounded = thin_planner(PackWriteProfile::COMPRESSED_V4)
+                .plan_selected(&source, &ids, &mut always)
+                .expect("unbounded plan");
+            let entries = plan.entries();
+            for (at, entry) in entries.iter().enumerate() {
+                let reached = entry.delta().and_then(PlannedDelta::base_index);
+                if let Some(base) = reached {
+                    deltas += 1;
+                    let behind: usize = entries[base..at]
+                        .iter()
+                        .map(|entry| entry.object().body.len())
+                        .sum();
+                    assert!(behind <= bytes, "{behind} bytes behind entry {at}");
+                }
+                let free = unbounded.entries()[at]
+                    .delta()
+                    .and_then(PlannedDelta::base_index);
+                changed += usize::from(reached != free);
+            }
+            let planned = PackWriter::new(wide_limits())
+                .write(&plan, &mut always)
+                .expect("planned pack");
+            assert_eq!(
+                stream(&planner, &source, &keys, &[]).expect("streamed pack"),
+                planned
+            );
+        }
+        assert!(deltas > 0, "the bound leaves deltas to check");
+        assert!(changed > 0, "the bound binds somewhere");
+    }
+
+    /// A streamed thin pack loads each client-held base for its own target's
+    /// decision, right after that target, not all of them up front.
+    #[test]
+    fn a_streamed_thin_pack_loads_each_base_for_its_target() {
+        let held = object(ObjectType::Blob, &shifted_lines(0, 4000), 1, 7);
+        let target = object(ObjectType::Blob, &shifted_lines(3, 4000), 3, 7);
+        let chained = object(ObjectType::Blob, &shifted_lines(5, 4000), 2, 7);
+        let source = RecordingSource {
+            inner: FixtureSource::with(vec![held.clone(), target.clone(), chained.clone()]),
+            loads: std::cell::RefCell::new(Vec::new()),
+        };
+        let planner = thin_planner(PackWriteProfile::COMPRESSED_V5_THIN);
+        let offer = ThinBase::new(target.id(), held.id());
+        let keys = order_keys(&[target.clone(), chained.clone()]);
+        let streamed = stream(&planner, &source, &keys, &[offer]).expect("streamed thin pack");
+        assert_eq!(
+            source.loads.borrow().as_slice(),
+            &[target.id(), held.id(), chained.id()]
+        );
+        let plan = planner
+            .plan_selected_thin(&source, &[target.id(), chained.id()], &[offer], &mut always)
+            .expect("thin plan");
+        let planned = PackWriter::new(wide_limits())
+            .write(&plan, &mut always)
+            .expect("planned thin pack");
+        assert_eq!(streamed, planned);
+        assert_eq!(streamed.1.delta_count, 2);
     }
 
     /// frankengit-uf91: V4 plans exactly as V3 and its members inflate to

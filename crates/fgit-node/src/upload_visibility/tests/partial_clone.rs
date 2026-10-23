@@ -296,6 +296,23 @@ fn exchange_filtered(
     Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
     Vec<u8>,
 ) {
+    exchange_requesting(node, version, wants, have, filter, include_tag, false)
+}
+
+/// [`exchange_filtered`] that may also request `ofs-delta`.
+fn exchange_requesting(
+    node: OneNode,
+    version: u8,
+    wants: &[GitOid],
+    have: Option<GitOid>,
+    filter: Option<&str>,
+    include_tag: bool,
+    ofs_delta: bool,
+) -> (
+    OneNode,
+    Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
+    Vec<u8>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let suffix = if version == 0 {
@@ -326,6 +343,9 @@ fn exchange_filtered(
             if include_tag {
                 caps.push_str(" include-tag");
             }
+            if ofs_delta {
+                caps.push_str(" ofs-delta");
+            }
         }
         packets.push(Packet::Data(format!("want {want}{caps}\n").into_bytes()));
     }
@@ -334,6 +354,9 @@ fn exchange_filtered(
     }
     if version == 2 && include_tag {
         packets.push(Packet::Data(b"include-tag\n".to_vec()));
+    }
+    if version == 2 && ofs_delta {
+        packets.push(Packet::Data(b"ofs-delta\n".to_vec()));
     }
     if version != 2 {
         packets.push(Packet::Flush);
@@ -878,6 +901,119 @@ fn visible_graph_selection_matches_the_fabric_walk_and_reads_nothing() {
             Err(NodePackMaterializationRefusal::RequestedWantOutsideClosure(id)) if id == private
         ));
         assert_eq!(no_reads.references.get(), 0);
+        node.shutdown().unwrap();
+    }
+}
+
+/// The plan-then-write pack for `ids` over the node's own verified fabric,
+/// with the node's selected-pack limits: the oracle for the streamed path.
+fn planned_pack(node: &OneNode, ids: &[GitOid], profile: PackWriteProfile) -> Vec<u8> {
+    let limits = node.selected_pack_limits.clone();
+    let database_context = FsqliteCx::new();
+    let database_exhaustion = Cell::new(None);
+    let source = VerifiedFabricPackSource {
+        fabric: &node.fabric,
+        object_format: node.object_format,
+        maximum_object_bytes: limits.max_object_bytes,
+        database_context: &database_context,
+        database_exhaustion: &database_exhaustion,
+        session_is_live: None,
+    };
+    let plan = PackPlanner::new(node.object_format, profile, limits.clone())
+        .plan_selected(&source, ids, &mut || true)
+        .unwrap();
+    PackWriter::new(limits)
+        .write(&plan, &mut || true)
+        .unwrap()
+        .0
+}
+
+fn spool_names(root: &std::path::Path) -> usize {
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".fg-pack-spool-")
+        })
+        .count()
+}
+
+/// frankengit-8xyq: a served fetch and an export now stream through private
+/// scratch custody, and the bytes are the plan-then-write pack exactly.
+/// Kinds come from the disclosure graph (fetch) or header reads (export);
+/// no spool name remains in the node's storage root.
+#[test]
+fn served_and_exported_packs_stream_and_equal_the_planned_pack() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let Fixture {
+            scratch,
+            node,
+            config,
+            public,
+            private,
+            visible,
+            ..
+        } = fixture(format);
+        delete_private(&node, private);
+        // Export: the whole authority-selected closure, every kind from a header.
+        let request = node.request_context();
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let closure: Vec<GitOid> = materialized
+            .selected_closure()
+            .closure()
+            .objects()
+            .iter()
+            .copied()
+            .collect();
+        let exported = node
+            .runtime()
+            .block_on(node.authority_selected_pack_payload_in(&request))
+            .unwrap()
+            .into_bytes()
+            .unwrap();
+        assert_eq!(
+            exported,
+            planned_pack(&node, &closure, PackWriteProfile::COMPRESSED_V5)
+        );
+        assert_eq!(spool_names(&scratch.0), 0);
+        node.shutdown().unwrap();
+
+        // A served v2 fetch of `public`: no ofs-delta was requested, so the
+        // pack is the delta-free profile over exactly the visible closure.
+        let mut node = OneNode::open_existing(config).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let (node, result, response) = exchange_filtered(node, 2, &[public], None, None, false);
+        assert!(result.is_ok(), "{result:?}");
+        let served = extract_pack(&response, 2);
+        let ids: Vec<GitOid> = visible.iter().copied().collect();
+        assert_eq!(
+            served,
+            planned_pack(&node, &ids, PackWriteProfile::COMPRESSED_NO_DELTA_V1)
+        );
+        assert_eq!(spool_names(&scratch.0), 0);
+
+        // The same fetch requesting ofs-delta, in v2 and v1, streams the
+        // delta profile over the same closure.
+        let mut node = node;
+        for version in [2, 1] {
+            let (next, result, response) =
+                exchange_requesting(node, version, &[public], None, None, false, true);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(
+                extract_pack(&response, version),
+                planned_pack(&next, &ids, PackWriteProfile::COMPRESSED_V5),
+                "v{version}"
+            );
+            node = next;
+        }
+        assert_eq!(spool_names(&scratch.0), 0);
         node.shutdown().unwrap();
     }
 }
