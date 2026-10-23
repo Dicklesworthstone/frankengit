@@ -5,6 +5,7 @@ use crate::{LoopbackReceiveSession, NodeConfig};
 use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_forge::preparation::MergeMetadata;
 use fgit_forge::source_symbols::{SymbolKind, SymbolMatchMode};
+use fgit_graph::lexical::LexicalChannel;
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use std::{
     fs,
