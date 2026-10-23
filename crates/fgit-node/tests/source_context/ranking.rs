@@ -12,6 +12,9 @@ fn ranked(
     node.runtime()
         .block_on(node.hydrate_source_initial_ranked_local_in(
             &node.outbox_delivery_context(),
+            &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                &node,
+            ),
             report,
             limits,
         ))
@@ -198,12 +201,17 @@ fn ranked_source_pins_cancellation_and_unpolled_reads_preserve_existing_state() 
     let report = initial(&node, b"Thing", true, &[]);
     let before = generation(&node);
     let request = node.outbox_delivery_context();
-    drop(node.hydrate_source_initial_ranked_local_in(&request, report.clone(), Default::default()));
+    drop(node.hydrate_source_initial_ranked_local_in(
+        &request,
+        &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
+        report.clone(),
+        Default::default(),
+    ));
     request.cancel();
     assert!(
         node.runtime()
             .block_on(node.hydrate_source_initial_ranked_local_in(
-                &request,
+                &request, &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
                 report.clone(),
                 Default::default()
             ))

@@ -48,6 +48,43 @@ fn authenticated_initial_http_returns_one_vector_with_native_channels_and_shared
         assert_eq!(number(&first.body, "source_blobs_read"), 0);
         assert_eq!(number(&first.body, "returned_hits"), 3);
         assert_eq!(number(&first.body, "returned_matches"), 2);
+        assert!(
+            first
+                .body
+                .contains("\"profile\":\"source-read-result-labels-v1\"")
+        );
+        assert!(
+            first
+                .body
+                .contains("\"host\":\"http-repository-read-credential\"")
+        );
+        assert!(first.body.contains(&format!("\"principal\":\"{OWNER}\"")));
+        assert!(first.body.contains("\"scope\":\"whole-repository\""));
+        assert!(first.body.contains("\"reusable_capability\":false"));
+        // Three content hits, three path hits, two declaration hits. These
+        // are eight rows in ONE source/vector, not eight independent queries.
+        assert_eq!(first.body.matches("\"authorization_label\":").count(), 8);
+        assert_eq!(
+            first
+                .body
+                .matches("\"position_domain\":\"source-blob-bytes\"")
+                .count(),
+            3
+        );
+        assert_eq!(
+            first
+                .body
+                .matches("\"position_domain\":\"raw-path-bytes\"")
+                .count(),
+            3
+        );
+        assert_eq!(
+            first
+                .body
+                .matches("\"position_domain\":\"source-declaration-bytes\"")
+                .count(),
+            2
+        );
         let chunked = post(&server.client, "search-initial", 'a', &input, true);
         status(&chunked, 200);
         assert_eq!(chunked.body, first.body);

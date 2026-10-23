@@ -5,6 +5,7 @@ use crate::{LoopbackReceiveSession, NodeConfig};
 use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_forge::preparation::MergeMetadata;
 use fgit_forge::source_symbols::{SymbolKind, SymbolMatchMode};
+use fgit_graph::lexical::LexicalChannel;
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use std::{
     fs,
@@ -171,6 +172,9 @@ impl Fixture {
         node.runtime()
             .block_on(node.search_source_initial_revalidated_local_in(
                 &node.request_context(),
+                &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                    &node,
+                ),
                 &self.reference,
                 None,
                 Some(self.commit),
@@ -289,13 +293,31 @@ fn differently_dated_indexes_join_to_current_source_without_relabelling_or_publi
         assert_eq!(result.generations().lexical, *f.lexical.as_ref().unwrap());
         assert_eq!(result.generations().symbols, f.symbols);
         assert!(result.complete());
+        let read = crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+            f.node(),
+        );
+        result
+            .validate_authorization(&read, &mut || Ok(()))
+            .unwrap();
+        assert_eq!(
+            result
+                .authorization()
+                .lexical(LexicalChannel::Content)
+                .len(),
+            3
+        );
+        assert_eq!(
+            result.authorization().lexical(LexicalChannel::Path).len(),
+            2
+        );
+        assert_eq!(result.authorization().symbols().len(), 3);
         assert_eq!(f.head(), before);
         // The old exact-source contract has NOT been silently relaxed.
         let node = f.node();
         assert!(
             node.runtime()
                 .block_on(node.search_source_initial_local_in(
-                    &node.request_context(),
+                    &node.request_context(), &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
                     &f.reference,
                     None,
                     None,
@@ -311,6 +333,22 @@ fn differently_dated_indexes_join_to_current_source_without_relabelling_or_publi
         assert_eq!(reopened.current_source(), result.current_source());
         assert_eq!(reopened.content().results, result.content().results);
         assert_eq!(reopened.generations(), result.generations());
+        assert_eq!(
+            reopened.authorization().binding(),
+            result.authorization().binding()
+        );
+        assert_eq!(
+            reopened.authorization().symbols(),
+            result.authorization().symbols()
+        );
+        reopened
+            .validate_authorization(
+                &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                    f.node(),
+                ),
+                &mut || Ok(()),
+            )
+            .unwrap();
         assert_eq!(f.head(), before);
     }
 }
@@ -451,6 +489,9 @@ fn stale_source_pins_cancellation_and_unresolved_generation_floors_never_fallbac
         node.runtime()
             .block_on(node.search_source_initial_revalidated_local_in(
                 &node.request_context(),
+                &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                    &node
+                ),
                 &f.reference,
                 Some(original.source_head),
                 Some(f.commit),
@@ -466,6 +507,9 @@ fn stale_source_pins_cancellation_and_unresolved_generation_floors_never_fallbac
         node.runtime()
             .block_on(node.search_source_initial_revalidated_local_in(
                 &request,
+                &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                    &node
+                ),
                 &f.reference,
                 None,
                 None,

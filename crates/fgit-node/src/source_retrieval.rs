@@ -20,6 +20,9 @@ use fgit_graph::lexical::{
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
 use fgit_types::{GitOid, HeadGeneration, RefName, RepositoryAuthorityHeadId};
 
+pub mod authorization;
+use authorization::{InitialAuthorization, InitialLabelInput, SourceReadContext};
+
 pub const PROFILE: &str = "source-initial-retrieval-v1";
 const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
@@ -164,8 +167,54 @@ pub struct InitialReport {
     symbols: SymbolChannel,
     vector: GenerationVector,
     result_bytes: usize,
+    max_result_bytes: usize,
+    authorization: InitialAuthorization,
 }
 impl InitialReport {
+    fn from_channels(
+        read: &SourceReadContext,
+        content: IndexedLexicalReport,
+        path: IndexedLexicalReport,
+        symbols: SymbolChannel,
+        vector: GenerationVector,
+        mut result_bytes: usize,
+        maximum: usize,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<Self, RetrievalError> {
+        let authorization = InitialAuthorization::bind(
+            read,
+            InitialLabelInput::exact(&content, &path, &symbols, &vector),
+            &mut result_bytes,
+            maximum,
+            live,
+        )?;
+        Ok(Self {
+            content,
+            path,
+            symbols,
+            vector,
+            result_bytes,
+            max_result_bytes: maximum,
+            authorization,
+        })
+    }
+    #[must_use]
+    pub const fn authorization(&self) -> &InitialAuthorization {
+        &self.authorization
+    }
+    pub fn validate_authorization(
+        &self,
+        read: &SourceReadContext,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<(), RetrievalError> {
+        self.authorization.validate(read, self, live)
+    }
+    pub(crate) fn check_context_metadata(&self, amount: usize) -> Result<(), RetrievalError> {
+        // Context owns its added metadata. Preserve the independently retained
+        // Initial accounting while checking both against the same allowance.
+        let mut aggregate = self.result_bytes;
+        add_result(&mut aggregate, amount, self.max_result_bytes)
+    }
     #[must_use]
     pub const fn source(&self) -> &LexicalSource {
         &self.content.source
@@ -241,7 +290,7 @@ impl std::fmt::Display for RetrievalError {
     }
 }
 impl std::error::Error for RetrievalError {}
-fn live(request: &NodeRequestContext) -> Result<(), RetrievalError> {
+pub(crate) fn live(request: &NodeRequestContext) -> Result<(), RetrievalError> {
     match checkpoint_pack_context(request.authority()) {
         PackContextCheckpoint::Stopped { budget_exhaustion } => {
             Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
@@ -328,6 +377,7 @@ impl OneNode {
     pub async fn search_source_initial_local_in(
         &self,
         request: &NodeRequestContext,
+        read: &SourceReadContext,
         reference: &RefName,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
@@ -336,6 +386,7 @@ impl OneNode {
         limits: InitialLimits,
     ) -> Result<InitialReport, RetrievalError> {
         live(request)?;
+        read.check_node(self)?;
         limits.validate(query)?;
         if query.symbol.is_none() && checkpoints.symbols.is_some() {
             return Err(RetrievalError::Invalid(
@@ -456,16 +507,20 @@ impl OneNode {
             _ => None,
         };
         live(request)?;
-        Ok(InitialReport {
-            vector: GenerationVector {
-                lexical: content.generation.clone(),
-                symbols: symbol_generation,
-            },
+        let vector = GenerationVector {
+            lexical: content.generation.clone(),
+            symbols: symbol_generation,
+        };
+        InitialReport::from_channels(
+            read,
             content,
             path,
-            symbols: channel,
+            channel,
+            vector,
             result_bytes,
-        })
+            limits.max_result_bytes,
+            &mut || live(request),
+        )
     }
 }
 fn symbol_unavailable(

@@ -80,3 +80,41 @@ export async function peer(t, handler) {
   return { endpoint: `http://127.0.0.1:${server.address().port}/team/repo.git`, calls, server, sockets };
 }
 export const json = (res, data) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
+
+// Add opaque response-reference fields to an existing independent schema peer.
+// These labels are not hashes computed by Rust, authentication or live-node
+// evidence. The original legacy factories and native Git blob oracles stay intact.
+export function withReadLabels(original) {
+  const response = structuredClone(original), r = response.retrieval;
+  r.authorization = { profile: 'source-read-result-labels-v1', host: 'http-repository-read-credential',
+    principal: '8'.repeat(32), scope: 'whole-repository', binding: 'a'.repeat(64), reusable_capability: false };
+  const rows = []; let ordinal = 0;
+  for (const [channel, hits] of [['content', r.content.hits], ['path', r.path.hits], ['symbol', r.symbols.result?.matches ?? []]]) {
+    for (const hit of hits) {
+      hit.authorization_label = (++ordinal).toString(16).padStart(64, '0');
+      hit.position_domain = channel === 'path' ? 'raw-path-bytes' : channel === 'symbol' ? 'source-declaration-bytes' : 'source-blob-bytes';
+      rows.push({ channel, hit });
+    }
+  }
+  r.retained_result_bytes += ordinal * 192 + 768 + r.ref_hex.length / 2;
+  let metadata = 0, maximumWindows = 0;
+  response.files.forEach((file, i) => {
+    const selected = rows.filter(({ hit }) => hit.path_hex === file.path_hex);
+    file.authorization_labels = [...new Set(selected.map(({ hit }) => hit.authorization_label))];
+    file.lineage_commitment = (1024 + i).toString(16).padStart(64, '0');
+    file.position_domain = 'source-blob-bytes';
+    for (const anchor of file.anchors) {
+      const origin = selected.find(({ channel, hit }) => channel === anchor.channel && (channel === 'symbol'
+        ? hit.byte_offset === anchor.byte_offset && hit.match_length === anchor.byte_length
+        : hit.spans.some(span => span.byte_offset === anchor.byte_offset && span.byte_length === anchor.byte_length)));
+      if (!origin) throw new Error('fixture anchor has no original row');
+      Object.assign(anchor, { authorization_label: origin.hit.authorization_label,
+        position_domain: anchor.channel === 'path' ? 'raw-path-bytes' : 'source-blob-bytes' });
+    }
+    for (const excerpt of file.excerpts) Object.assign(excerpt, { lineage_commitment: file.lineage_commitment, position_domain: 'source-blob-bytes' });
+    metadata += file.authorization_labels.length * 256 + file.anchors.length * 256 + 1024;
+    maximumWindows += Math.max(1, file.anchors.filter(anchor => anchor.channel !== 'path').length);
+  });
+  response.lineage_metadata_bytes = metadata + Math.min(maximumWindows, 128) * 192;
+  return response;
+}

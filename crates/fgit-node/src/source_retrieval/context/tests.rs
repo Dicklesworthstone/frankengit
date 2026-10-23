@@ -8,6 +8,7 @@ fn file(path: &[u8], bytes: &[u8]) -> PlannedFile {
         blob: git_object_id(GitHashAlgorithm::Sha256, GitObjectKind::Blob, bytes),
         source_bytes: Some(bytes.len()),
         witnesses: Vec::new(),
+        authorization_labels: Vec::new(),
     }
 }
 fn witness(file: &mut PlannedFile, channel: ContextChannel, at: usize, expected: &[u8], raw: bool) {
@@ -19,6 +20,11 @@ fn witness(file: &mut PlannedFile, channel: ContextChannel, at: usize, expected:
         },
         expected,
         raw,
+        [match channel {
+            ContextChannel::Content => 1,
+            ContextChannel::Path => 2,
+            ContextChannel::Symbol => 3,
+        }; 32],
         &mut 0,
     )
     .unwrap();
@@ -221,4 +227,118 @@ fn too_many_disjoint_windows_never_exposes_a_truncated_success() {
         Err(RetrievalError::Limit("context windows"))
     ));
     assert!(result.files.is_empty());
+}
+
+// These are saved-commitment contract tests over verified-byte assembly, not
+// authentication, native object-store or HTTP execution evidence.
+#[test]
+fn saved_lineage_rejects_substituted_file_blob_anchor_excerpt_and_origin() {
+    let bytes = b"fn Thing() {}\n";
+    let mut selected = file(b"src/Thing.rs", bytes);
+    witness(&mut selected, ContextChannel::Content, 3, b"thing", false);
+    witness(&mut selected, ContextChannel::Path, 4, b"thing", false);
+    let mut assembly = Assembly::default();
+    assembly
+        .observe(&selected, bytes, ContextLimits::default(), &|| false)
+        .unwrap();
+    let original = &assembly.files[0];
+    original.validate_saved_lineage(&mut || Ok(())).unwrap();
+    assert_eq!(original.authorization_labels().len(), 2);
+    assert_eq!(
+        original.anchor_authorization_labels().len(),
+        original.anchors().len()
+    );
+    assert_eq!(
+        original.anchors()[0].channel.position_domain(),
+        "source-blob-bytes"
+    );
+    assert_eq!(
+        original.anchors()[1].channel.position_domain(),
+        "raw-path-bytes"
+    );
+
+    let mut path = original.clone();
+    path.path = b"src/Other.rs".to_vec();
+    let mut blob = original.clone();
+    blob.blob = git_object_id(GitHashAlgorithm::Sha256, GitObjectKind::Blob, b"other");
+    let mut anchor = original.clone();
+    anchor.anchors[0].byte_offset += 1;
+    let mut channel = original.clone();
+    channel.anchors[0].channel = ContextChannel::Path;
+    let mut excerpt = original.clone();
+    excerpt.excerpts[0].bytes[0] ^= 1;
+    let mut excerpt_offset = original.clone();
+    excerpt_offset.excerpts[0].offset += 1;
+    let mut origin = original.clone();
+    origin.authorization_labels[0] = [9; 32];
+    let mut anchor_origin = original.clone();
+    anchor_origin.anchor_authorization_labels[0] = [9; 32];
+    for changed in [
+        path,
+        blob,
+        anchor,
+        channel,
+        excerpt,
+        excerpt_offset,
+        origin,
+        anchor_origin,
+    ] {
+        assert!(matches!(
+            changed.validate_saved_lineage(&mut || Ok(())),
+            Err(RetrievalError::Invalid("context lineage commitment"))
+        ));
+        original.validate_saved_lineage(&mut || Ok(())).unwrap();
+    }
+    assert!(matches!(
+        original.validate_saved_lineage(&mut || Err(RetrievalError::Source(
+            crate::NodeWorkspaceRefusal::Cancelled { exhaustion: None }
+        ))),
+        Err(RetrievalError::Source(
+            crate::NodeWorkspaceRefusal::Cancelled { .. }
+        ))
+    ));
+    original.validate_saved_lineage(&mut || Ok(())).unwrap();
+}
+
+#[test]
+fn lineage_preserves_original_dedup_key_and_fits_retained_planning_storage() {
+    let empty = Plan {
+        files: vec![],
+        candidate_files: 0,
+    };
+    assert_eq!(empty.lineage_metadata_bytes().unwrap(), 0);
+    let mut selected = file(b"src/Thing.rs", b"Thing");
+    for _ in 0..513 {
+        witness(&mut selected, ContextChannel::Content, 0, b"thing", false);
+    }
+    let original_label = selected.witnesses[0].authorization_label;
+    // A different origin for the same original witness key cannot create an
+    // extra observable anchor. Its file-level lineage reference survives.
+    selected
+        .push(
+            ContextAnchor {
+                channel: ContextChannel::Content,
+                byte_offset: 0,
+                byte_length: 5,
+            },
+            b"thing",
+            false,
+            [9; 32],
+            &mut 0,
+        )
+        .unwrap();
+    selected.finish_witnesses();
+    assert_eq!(selected.witnesses.len(), 1);
+    assert_eq!(selected.witnesses[0].authorization_label, original_label);
+    assert_eq!(selected.authorization_labels, vec![original_label, [9; 32]]);
+    assert_eq!(selected.witnesses.capacity(), selected.witnesses.len());
+    assert_eq!(
+        selected.authorization_labels.capacity(),
+        selected.authorization_labels.len()
+    );
+    let plan = Plan {
+        files: vec![selected],
+        candidate_files: 1,
+    };
+    assert!(plan.lineage_metadata_bytes().unwrap() >= 32 * (2 + 1));
 }

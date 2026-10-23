@@ -411,6 +411,18 @@ fn rows(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
+    rows_labeled(command, report, None, maximum, live)
+}
+fn rows_labeled(
+    command: &Command,
+    report: &IndexedLexicalReport,
+    labels: Option<&[[u8; 32]]>,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    if labels.is_some_and(|labels| labels.len() != report.results.hits.len()) {
+        return Err(ApiError::unavailable());
+    }
     report
         .validate_coverage()
         .map_err(|_| ApiError::unavailable())?;
@@ -491,7 +503,21 @@ fn rows(
                 maximum,
             )?;
         }
-        append(&mut out, "]}", maximum)?;
+        append(&mut out, "]", maximum)?;
+        if let Some(labels) = labels {
+            append(
+                &mut out,
+                &format!(
+                    ",\"authorization_label\":{},\"position_domain\":{}",
+                    quote(&hex(&labels[index])),
+                    quote(crate::source_retrieval::authorization::position_domain(
+                        command.query.channel()
+                    ))
+                ),
+                maximum,
+            )?;
+        }
+        append(&mut out, "}", maximum)?;
     }
     check(live)?;
     Ok(out)
@@ -501,6 +527,7 @@ fn rows(
 pub(super) fn render_initial(
     node: &OneNode,
     report: &IndexedLexicalReport,
+    labels: &[[u8; 32]],
     query: &LexicalQuery,
     budget: (LexicalQueryLimits, LexicalReadLimits),
     maximum: usize,
@@ -520,7 +547,15 @@ pub(super) fn render_initial(
         limits: budget.0,
         reads: budget.1,
     };
-    render(node, &command, report, maximum, live)
+    render_at_labeled(
+        node,
+        &command,
+        report,
+        &report.source,
+        Some(labels),
+        maximum,
+        live,
+    )
 }
 
 fn render(
@@ -541,6 +576,17 @@ fn render_at(
     command: &Command,
     report: &IndexedLexicalReport,
     source: &LexicalSource,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    render_at_labeled(node, command, report, source, None, maximum, live)
+}
+fn render_at_labeled(
+    node: &OneNode,
+    command: &Command,
+    report: &IndexedLexicalReport,
+    source: &LexicalSource,
+    labels: Option<&[[u8; 32]]>,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
@@ -574,7 +620,10 @@ fn render_at(
     {
         return Err(ApiError::unavailable());
     }
-    let hits = rows(command, report, maximum, live)?;
+    let hits = match labels {
+        Some(labels) => rows_labeled(command, report, Some(labels), maximum, live)?,
+        None => rows(command, report, maximum, live)?,
+    };
     let mut out = String::new();
     append(
         &mut out,

@@ -186,12 +186,25 @@ impl Reply {
     }
 }
 
+// Retained separately from a principal session: only source reads that passed
+// the actual route, credential and UploadPack grant can create this value.
+pub(super) struct HttpReadGrant {
+    principal: fgit_types::PrincipalId,
+}
+impl HttpReadGrant {
+    fn context(&self, node: &OneNode) -> crate::source_retrieval::authorization::SourceReadContext {
+        crate::source_retrieval::authorization::SourceReadContext::http_credential(
+            node,
+            self.principal,
+        )
+    }
+}
 pub(super) fn authenticate(
     request: &Request<'_>,
     envelope: &Envelope<'_>,
     raw_head: &[u8],
     profile: &Profile,
-) -> Result<LoopbackReceiveSession, ApiError> {
+) -> Result<(LoopbackReceiveSession, Option<HttpReadGrant>), ApiError> {
     let grant = profile
         .credentials
         .authenticate(super::bearer_only(envelope.authorization()))
@@ -217,9 +230,16 @@ pub(super) fn authenticate(
         // Transport identity only: reads never pass it into seal/key binding.
         b"read-only-source-query".as_slice()
     };
-    Ok(LoopbackReceiveSession::authenticated(
-        grant.principal,
-        IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
+    let read = (!request.is_mutation()).then_some(HttpReadGrant {
+        principal: grant.principal,
+    });
+    Ok((
+        LoopbackReceiveSession::authenticated(
+            grant.principal,
+            IdempotencyKey::new(key.to_vec())
+                .map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
+        ),
+        read,
     ))
 }
 
@@ -227,6 +247,7 @@ pub(super) fn execute(
     node: &OneNode,
     request: &Request<'_>,
     session: &LoopbackReceiveSession,
+    read_grant: Option<&HttpReadGrant>,
     framing: BodyFraming,
     reader: &mut impl Read,
     http: HttpLimits,
@@ -238,10 +259,14 @@ pub(super) fn execute(
                 .map(|reply| Reply(ReplyBody::VerifiedBlob(reply)));
         }
         RequestKind::Retrieval(request) => {
+            let read = read_grant
+                .ok_or_else(|| ApiError::new(Status::Forbidden, "source_read_grant_required"))?
+                .context(node);
             return retrieval::execute(
                 node,
                 request,
                 session,
+                &read,
                 framing,
                 reader,
                 http,

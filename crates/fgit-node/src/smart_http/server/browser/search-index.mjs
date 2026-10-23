@@ -72,7 +72,7 @@ export function verifyWordSpans(bytes, q, spans, checkpoint = () => {}) {
   if (spans.length !== q.termsHex.length || spans.some((s, i) => s.queryIndex !== i || found.get(i) !== s.offset || s.length !== q.termsHex[i].length / 2)) fail('Indexed spans do not reproduce the first complete words.');
   checkpoint();
 }
-export function indexReply(reply, selected, q, scope = null, pin = null, previous = null, minimum = null) {
+export function indexReply(reply, selected, q, scope = null, pin = null, previous = null, minimum = null, authorization = null) {
   record(reply);
   const partial = reply.schema_version === 2;
   if (partial && reply.index_profile !== 'ascii-word-postings-omissions-v1') fail('Unsupported indexed coverage profile.');
@@ -120,7 +120,8 @@ export function indexReply(reply, selected, q, scope = null, pin = null, previou
     retained += path.length + spans.length * 24 + 64;
     if (retained > 2 * 1024 * 1024) fail('Indexed result byte budget exceeded.');
     if (q.channel === 'path') verifyWordSpans(path, q, spans);
-    return { documentId: id, pathHex: raw.path_hex, blob, contentBytes, spans };
+    return { documentId: id, pathHex: raw.path_hex, blob, contentBytes, spans,
+      ...rowAuthorization(raw, authorization, q.channel === 'path' ? 'raw-path-bytes' : 'source-blob-bytes') };
   });
   if ((previous && !hits.length) || (reply.complete ? reply.next_after !== null : (!hits.length || hits.length !== q.maxMatches || reply.next_after !== lastId))) fail('Invalid indexed completion or continuation.');
   const seen = (previous?.seen ?? 0) + hits.length;
@@ -216,8 +217,8 @@ export function symbolCommand(selected, pin, q, minimum = null) {
   if (minimum) Object.assign(values, { minimum_index_token: minimum.token, minimum_index_number: minimum.number });
   return form(values);
 }
-export function symbolReply(reply, selected, q, scope = null, pin = null, minimum = null) {
-  if (sourceMode(q.sourceMode) !== 'revalidated') return exactSymbolReply(reply, selected, q, scope, pin, minimum);
+export function symbolReply(reply, selected, q, scope = null, pin = null, minimum = null, authorization = null) {
+  if (sourceMode(q.sourceMode) !== 'revalidated') return exactSymbolReply(reply, selected, q, scope, pin, minimum, authorization);
   const sources = symbolSources(reply);
   // These source records inherit the validated wrapper's read-only schema, not
   // a fabricated current result. The nested receipt is validated unchanged.
@@ -225,10 +226,10 @@ export function symbolReply(reply, selected, q, scope = null, pin = null, minimu
     read_only: reply.read_only, transaction_created: reply.transaction_created, published: reply.published });
   const current = coordinates(frame(sources.current), selected, scope, pin);
   const original = coordinates(frame(sources.indexed), selected, current.scope);
-  const result = exactSymbolReply(reply.result, selected, q, current.scope, original.pin, minimum);
+  const result = exactSymbolReply(reply.result, selected, q, current.scope, original.pin, minimum, authorization);
   return { ...result, ...current, sources };
 }
-function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum = null) {
+function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum = null, authorization = null) {
   record(reply);
   const partial = reply.schema_version === 2;
   if (reply.schema_version !== (partial ? 2 : 1) ||
@@ -294,6 +295,7 @@ function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum 
   });
   if (blobs.size > stats.tables) fail('Declaration matches exceed the tables read.');
   const omissions = symbolOmissions(reply, selected.format, partial, stats, blobs);
+  for (let i = 0; i < hits.length; i++) Object.assign(hits[i], rowAuthorization(reply.matches[i], authorization, 'source-declaration-bytes'));
   return { ...source, query: copy(q), index, stats, hits, complete: reply.complete,
     coverageComplete: !partial, omissions };
 }
@@ -397,6 +399,33 @@ function vectorEntry(value) {
   return activation(value.index_token, value.index_number, 'exact');
 }
 const sameActivation = (a, b) => a.token === b.token && a.number === b.number;
+// Native response commitments are not browser cryptographic proofs, credential
+// authentication, delegation, or permission. Missing profile is legacy/no-label.
+const READ_LABEL_PROFILE = 'source-read-result-labels-v1';
+function digestLabel(value) {
+  if (typeof value !== 'string' || value.length !== 64 || !/^[0-9a-f]{64}$/.test(value)) fail('Invalid source-read result label.');
+  return value;
+}
+function readAuthorization(reply) {
+  if (!Object.hasOwn(reply, 'authorization')) return { state: 'legacy-unlabelled' };
+  const raw = reply.authorization;
+  keys(raw, ['profile', 'host', 'principal', 'scope', 'binding', 'reusable_capability']);
+  if (raw.profile !== READ_LABEL_PROFILE || !['trusted-local-native', 'trusted-local-cli', 'trusted-local-mcp', 'http-repository-read-credential'].includes(raw.host) ||
+      raw.scope !== 'whole-repository' || raw.reusable_capability !== false ||
+      (raw.host === 'http-repository-read-credential' ? typeof raw.principal !== 'string' || !/^[0-9a-f]{32}$/.test(raw.principal) : raw.principal !== null)) {
+    fail('Invalid source-read authorization descriptor.');
+  }
+  return { state: 'labelled', profile: raw.profile, host: raw.host, principal: raw.principal,
+    scope: raw.scope, binding: digestLabel(raw.binding), reusableCapability: false };
+}
+function rowAuthorization(raw, authorization, domain) {
+  if (authorization?.state !== 'labelled') {
+    if (Object.hasOwn(raw, 'authorization_label') || Object.hasOwn(raw, 'position_domain')) fail('Undeclared or mixed source-read result labels.');
+    return {};
+  }
+  if (raw.position_domain !== domain) fail('Source-read result position domain changed.');
+  return { authorizationLabel: digestLabel(raw.authorization_label), positionDomain: domain };
+}
 export function initialReply(reply, selected, q, scope = null, pin = null, minimum = {}) {
   record(reply);
   if (reply.type !== 'source_search_initial' || reply.schema_version !== 1 || reply.profile !== 'source-initial-retrieval-v1' ||
@@ -406,9 +435,9 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
       reply.max_payload_bytes !== q.maxPayloadBytes || reply.max_result_bytes !== q.maxResultBytes || typeof reply.complete !== 'boolean') {
     fail('Invalid combined retrieval profile or shared limits.');
   }
-  const queries = initialQueries(q);
-  const content = indexReply(reply.content, selected, queries.content, scope, pin, null, minimum.lexical);
-  const path = indexReply(reply.path, selected, queries.path, content.scope, content.pin, null, minimum.lexical);
+  const authorization = readAuthorization(reply), queries = initialQueries(q);
+  const content = indexReply(reply.content, selected, queries.content, scope, pin, null, minimum.lexical, authorization);
+  const path = indexReply(reply.path, selected, queries.path, content.scope, content.pin, null, minimum.lexical, authorization);
   // The native outer receipt deliberately has no source_head or published
   // field. Bind its actual fields to the validated child; do not invent them.
   for (const field of ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format', 'ref', 'ref_hex',
@@ -441,7 +470,7 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
   } else {
     keys(reply.symbols, ['state', 'result']);
     if (reply.symbols.state !== 'available') fail('Requested symbol channel has no result.');
-    const result = symbolReply(reply.symbols.result, selected, queries.symbols, content.scope, content.pin, minimum.symbols);
+    const result = symbolReply(reply.symbols.result, selected, queries.symbols, content.scope, content.pin, minimum.symbols, authorization);
     symbolGeneration = vectorEntry(reply.generation_vector.symbols);
     // The native child renderer echoes the original symbol-query ceiling.
     // Independently enforce the smaller fixed allowance used by its lookup.
@@ -477,6 +506,10 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
       retained += omission.pathHex.length / 2 + 96;
     }
   }
+  if (authorization.state === 'labelled') {
+    const count = content.hits.length + path.hits.length + (symbols.state === 'available' ? symbols.result.hits.length : 0);
+    retained += count * 192 + 768 + unhex(reply.ref_hex, 4096).length;
+  }
   const complete = content.complete && path.complete && content.coverageComplete && path.coverageComplete && (symbols.state === 'not_requested' ||
     (symbols.state === 'available' && symbols.result.complete && symbols.result.coverageComplete));
   if (integer(reply.retained_result_bytes, 'combined retained bytes', 0, q.maxResultBytes) !== retained ||
@@ -484,7 +517,7 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
       integer(reply.completed_work_units, 'successful channel work', 0, q.maxWork) !== work || reply.complete !== complete) {
     fail('Combined completion or aggregate accounting disagrees with its channels.');
   }
-  return { scope: content.scope, pin: content.pin, query: copy(q), content, path, symbols,
+  return { scope: content.scope, pin: content.pin, query: copy(q), content, path, symbols, authorization,
     vector: { lexical, symbols: symbolGeneration }, lexicalCheckpoint: copy(lexicalCheckpoint), complete,
     stats: { retainedBytes: retained, payloadBytes: payload, work },
     totalHits: content.hits.length + path.hits.length + (symbols.state === 'available' ? symbols.result.hits.length : 0) };

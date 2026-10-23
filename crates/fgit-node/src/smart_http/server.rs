@@ -1193,6 +1193,7 @@ fn serve_connection(
         } else {
             None
         };
+        let mut source_read_grant = None;
         let session =
             if let Some(request) = &protection_request {
                 protection::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
@@ -1202,6 +1203,10 @@ fn serve_connection(
                 })?
             } else if let Some(request) = &source_request {
                 source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                    .map(|(session, read)| {
+                        source_read_grant = read;
+                        session
+                    })
                     .map_err(|error| {
                         api_error = Some(error);
                         error.status
@@ -1322,6 +1327,7 @@ fn serve_connection(
                     &node,
                     request,
                     &session,
+                    source_read_grant.as_ref(),
                     envelope.body,
                     &mut body,
                     profile.http,

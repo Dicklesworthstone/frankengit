@@ -2,11 +2,13 @@
 
 `source-initial-context-v1` connects persisted Initial retrieval to verified
 native source bytes. `OneNode::hydrate_source_initial_local_in` consumes an
-`InitialReport` plus `source_retrieval::context::ContextLimits`. It does not
+`InitialReport`, an independent `&SourceReadContext`, and
+`source_retrieval::context::ContextLimits`. It does not
 initialize, refresh, publish, or silently change either index generation.
 
-The embedding must already authorize whole-repository reads. A saved report is
-not a capability. Hydration reselects current canonical visibility with the
+The embedding must already authorize whole-repository reads. The supplied
+context must match the report's retained host/namespace labels before planning
+or source I/O. A saved report is not a capability. Hydration reselects current canonical visibility with the
 report's exact authority-head and commit pins, checks repository/incarnation/hash
 format and the source RCR/tree/forge position, then resolves only selected paths
 through the existing bounded TreeFS source. Symlinks and gitlinks cannot become
@@ -44,6 +46,30 @@ retrieval's full coverage; it never asserts excerpts contain entire files.
 Repository text is available through `untrusted_bytes()`. This output is not an
 Agent Protocol ContextPacket, run authorization, prompt-injection detector,
 compiler-resolved graph, signed proof, durable context archive, or retention pin.
+
+## Result lineage and the original allowance
+
+Hydration retains each contributing original row label. Files expose ordered
+`authorization_labels()` and one `anchor_authorization_labels()` reference per
+unchanged anchor. A saved `lineage_commitment()` binds the verified path, blob,
+length, original labels, ordered anchors and exact excerpt offsets/bytes. The
+commitment is minted after native blob/path/span verification and checked
+against both saved bytes and original report membership before native return
+and rendering. It does not authorize disclosure or claim a signed proof.
+
+New lineage storage and wire metadata are conservatively reserved before native
+source I/O under the original Initial `max_result_bytes`; no second result
+allowance is introduced. `lineage_metadata_bytes()` exposes that reservation.
+The nested retrieval keeps its original exact row-and-label byte count, so
+rehydrating it does not accumulate charges for an earlier context. Excerpt and
+source limits remain independent and unchanged.
+
+The browser preserves the declared profile and checks row/file membership,
+position domains, excerpt references and exact budget accounting. It does not
+recompute native commitments or authenticate these unkeyed digests. Older
+schema-1 responses without the profile remain explicitly `legacy-unlabelled`;
+partial or mixed label declarations refuse. Context report downloads retain
+the labels without treating them as reusable access credentials.
 
 ## Authenticated HTTP context
 
@@ -104,9 +130,12 @@ per-selected-path allocation share. `candidate_files`, `returned_files`,
 and coverage without confusing an omitted file with an empty one.
 
 Each `files` entry has `path_hex`, native `blob`, `source_bytes`, typed `anchors`
-and ordered `excerpts`. Anchors retain channel, byte offset and byte length;
-`path` offsets apply to path bytes. Each excerpt has its original `byte_offset`
-and lossless `untrusted_bytes_hex`. Repository bytes never become control fields,
+and ordered `excerpts`, plus original `authorization_labels` and its saved
+`lineage_commitment`. Each anchor includes `authorization_label` and
+`position_domain`; `path` offsets apply to raw path bytes. Each excerpt has its
+original `byte_offset`, lossless `untrusted_bytes_hex`, source-blob position
+domain and reference to its file's commitment. The outer
+`lineage_metadata_bytes` reports the additional reservation. Repository bytes never become control fields,
 markup, commands, a JSON fragment or authorization. Hex conversion is chunked,
 bounded and cancellation-checked; all output shares the existing gateway response
 ceiling, including the nested retrieval. Neither a large requested excerpt limit
@@ -114,7 +143,7 @@ nor a successful native read overrides that final encoded-response ceiling.
 
 ## Opt-in deterministic document fusion
 
-Use `OneNode::hydrate_source_initial_ranked_local_in(request, report, limits)`
+Use `OneNode::hydrate_source_initial_ranked_local_in(request, read, report, limits)`
 in native code, or add this field to the HTTP request above:
 
 ```text
@@ -124,7 +153,7 @@ context_selection=context-weighted-rrf-q16-v1
 The native method returns a `RankedContext` containing the unchanged source
 context and a `ContextRanking`. The existing native method and omitted or
 explicit `context_selection=raw-path-prefix` keep alphabetical selection and
-the old response shape. `search-initial` remains index-only and rejects this field.
+the same selection behavior. `search-initial` remains index-only and rejects this field.
 Unknown profiles, duplicate selectors and caller-supplied weights are refused.
 
 For each available channel, collapse consecutive hits to distinct raw paths and
@@ -189,9 +218,10 @@ an assertion that they have run at an arbitrary later revision.
 
 `fgit_node::source_retrieval_json` runs the exact `search-initial` /
 `context-initial` implementation (form grammar, validation, one request
-deadline across retrieval and hydration, JSON document) without HTTP framing
-or credentials; the HTTP routes call the same functions, so the surfaces cannot
-drift. The node supplies `object_format`; a caller-supplied one is refused.
+deadline across retrieval and hydration, JSON document) without HTTP framing;
+it requires the caller's explicit read context. HTTP, CLI and
+MCP call the shared implementation with their own distinct host attestations.
+The node supplies `object_format`; a caller-supplied one is refused.
 
 - `fg search --initial` / `fg search --context <root> <tenant> <repository>
   --trusted-local field=value...` takes the route fields verbatim (repeat

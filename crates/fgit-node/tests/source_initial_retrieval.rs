@@ -128,6 +128,7 @@ fn initial(
 ) -> Result<InitialReport, RetrievalError> {
     node.runtime().block_on(node.search_source_initial_local_in(
         &node.outbox_delivery_context(),
+        &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
         &reference(),
         None,
         None,
@@ -148,6 +149,26 @@ fn channels_match_native_owners_share_source_and_keep_generation_vector_after_re
         let q = query(SymbolPolicy::Required, &[]);
         let report = initial(&node, &q, &floors, Default::default()).unwrap();
         assert!(report.complete());
+        let read =
+            fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                &node,
+            );
+        report
+            .validate_authorization(&read, &mut || Ok(()))
+            .unwrap();
+        for (channel, rows) in [
+            (
+                fgit_graph::lexical::LexicalChannel::Content,
+                report.content(),
+            ),
+            (fgit_graph::lexical::LexicalChannel::Path, report.path()),
+        ] {
+            assert_eq!(
+                report.authorization().lexical(channel).len(),
+                rows.results.hits.len()
+            );
+        }
+        assert_eq!(report.authorization().symbols().len(), 2);
         assert_eq!(report.source().commit, commit);
         assert_eq!(report.content().results.hits.len(), 3);
         assert_eq!(report.path().results.hits.len(), 3);
@@ -211,6 +232,15 @@ fn channels_match_native_owners_share_source_and_keep_generation_vector_after_re
         assert_eq!(again.content().results.hits, report.content().results.hits);
         assert_eq!(again.path().results.hits, report.path().results.hits);
         assert_eq!(again.source(), report.source());
+        assert_eq!(
+            again.authorization().binding(),
+            report.authorization().binding()
+        );
+        assert_eq!(
+            again.authorization().symbols(),
+            report.authorization().symbols()
+        );
+        again.validate_authorization(&fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node), &mut || Ok(())).unwrap();
         assert_eq!(generation(&node), canonical);
         node.shutdown().unwrap();
     }
@@ -333,7 +363,7 @@ fn stale_symbols_never_mix_old_source_with_refreshed_lexical_results() {
         assert!(
             node.runtime()
                 .block_on(node.search_source_initial_local_in(
-                    &node.outbox_delivery_context(),
+                    &node.outbox_delivery_context(), &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
                     &reference(),
                     Some(old.source().source_head),
                     Some(commit),
@@ -428,14 +458,21 @@ fn shared_limits_truncation_and_cancellation_have_no_publication_side_effects() 
     }
     let request = node.outbox_delivery_context();
     let reference = reference();
-    drop(
-        node.search_source_initial_local_in(&request, &reference, None, None, &floors, &q, limits),
-    );
+    drop(node.search_source_initial_local_in(
+        &request,
+        &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
+        &reference,
+        None,
+        None,
+        &floors,
+        &q,
+        limits,
+    ));
     request.cancel();
     assert!(
         node.runtime()
             .block_on(node.search_source_initial_local_in(
-                &request, &reference, None, None, &floors, &q, limits
+                &request, &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node), &reference, None, None, &floors, &q, limits
             ))
             .is_err()
     );
@@ -482,7 +519,11 @@ fn omitted_rust_files_make_initial_incomplete_and_share_its_retained_result_budg
             .sum();
         assert_eq!(
             report.result_bytes(),
-            lexical_bytes + symbol_bytes + b"broken.rs".len() + 96
+            lexical_bytes
+                + symbol_bytes
+                + b"broken.rs".len()
+                + 96
+                + report.authorization().retained_bytes()
         );
         assert!(matches!(
             initial(
@@ -504,7 +545,7 @@ fn omitted_rust_files_make_initial_incomplete_and_share_its_retained_result_budg
         let current = node
             .runtime()
             .block_on(node.search_source_initial_revalidated_local_in(
-                &node.outbox_delivery_context(),
+                &node.outbox_delivery_context(), &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
                 &reference(),
                 None,
                 None,
@@ -518,7 +559,7 @@ fn omitted_rust_files_make_initial_incomplete_and_share_its_retained_result_budg
         assert!(matches!(
             node.runtime()
                 .block_on(node.search_source_initial_revalidated_local_in(
-                    &node.outbox_delivery_context(),
+                    &node.outbox_delivery_context(), &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
                     &reference(),
                     None,
                     None,
@@ -558,3 +599,71 @@ fn missing_lexical_index_never_becomes_a_source_scan_or_implicit_build() {
 
 #[path = "source_initial_retrieval/http.rs"]
 mod http;
+
+#[test]
+fn source_read_context_is_checked_before_initial_index_reads() {
+    use fgit_node::source_retrieval::authorization::SourceReadContext;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let other_root = Scratch::new();
+        let (mut node, _) = fixture(&root, format);
+        let (mut other, _) = fixture(&other_root, format);
+        let read = SourceReadContext::trusted_local_native(&node);
+        let substituted = SourceReadContext::trusted_local_native(&other);
+        let q = query(SymbolPolicy::Optional, &[]);
+        let floors = Checkpoints::default();
+        for current in [false, true] {
+            let request = node.outbox_delivery_context();
+            let refused = if current {
+                node.runtime()
+                    .block_on(node.search_source_initial_revalidated_local_in(
+                        &request,
+                        &substituted,
+                        &reference(),
+                        None,
+                        None,
+                        &floors,
+                        &q,
+                        Default::default(),
+                    ))
+                    .map(|_| ())
+            } else {
+                node.runtime()
+                    .block_on(node.search_source_initial_local_in(
+                        &request,
+                        &substituted,
+                        &reference(),
+                        None,
+                        None,
+                        &floors,
+                        &q,
+                        Default::default(),
+                    ))
+                    .map(|_| ())
+            };
+            assert!(matches!(
+                refused,
+                Err(RetrievalError::Invalid("source read context namespace"))
+            ));
+        }
+        // Same node grant reaches the existing native index boundary; no index
+        // has been built and the read cannot silently scan/build one.
+        assert!(matches!(
+            node.runtime().block_on(node.search_source_initial_local_in(
+                &node.outbox_delivery_context(),
+                &read,
+                &reference(),
+                None,
+                None,
+                &floors,
+                &q,
+                Default::default()
+            )),
+            Err(RetrievalError::Source(
+                fgit_node::NodeWorkspaceRefusal::SourceIndex(_)
+            ))
+        ));
+        node.shutdown().unwrap();
+        other.shutdown().unwrap();
+    }
+}

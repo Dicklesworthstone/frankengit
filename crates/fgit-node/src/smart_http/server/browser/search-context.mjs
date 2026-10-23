@@ -9,6 +9,8 @@ export const CONTEXT_DEFAULTS = Object.freeze({ maxFiles: 8, radiusBytes: 128,
   maxSourceBytes: 64 * 1024 * 1024, maxExcerptBytes: 256 * 1024, selection: PATH_SELECTION });
 const MAX_FILE = 8 * 1024 * 1024, MAX_ANCHORS = 4096, MAX_WINDOWS = 128;
 const CHANNELS = ['content', 'path', 'symbol'];
+const LABEL_PROFILE = 'source-read-result-labels-v1';
+const positionDomain = channel => channel === 'path' ? 'raw-path-bytes' : 'source-blob-bytes';
 const limitNames = ['maxFiles', 'radiusBytes', 'maxSourceBytes', 'maxExcerptBytes'];
 const optionNames = [...limitNames, 'selection'];
 const wireNames = ['context_max_files', 'context_radius_bytes', 'context_max_source_bytes', 'context_max_excerpt_bytes'];
@@ -44,6 +46,17 @@ const word = byte => (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) ||
   (byte >= 97 && byte <= 122) || byte === 95;
 const fold = byte => byte >= 65 && byte <= 90 ? byte + 32 : byte;
 const same = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+function label(value) {
+  if (typeof value !== 'string' || value.length !== 64 || !/^[0-9a-f]{64}$/.test(value)) reject('invalid lineage label.');
+  return value;
+}
+function labelledRetrieval(retrieval) {
+  const evidence = retrieval.authorization;
+  if (evidence === undefined || evidence.state === 'legacy-unlabelled') return false;
+  if (evidence.state !== 'labelled' || evidence.profile !== LABEL_PROFILE || evidence.reusableCapability !== false) reject('invalid Initial label profile.');
+  label(evidence.binding);
+  return true;
+}
 
 export function contextLimits(input = {}) {
   object(input, optionNames, false);
@@ -77,9 +90,13 @@ export function contextCommand(initialBody, input) {
 
 function plan(retrieval, limits, checkpoint) {
   if (retrieval?.query?.mode !== 'initial' || typeof retrieval.complete !== 'boolean') reject('validate the Initial receipt first.');
-  const files = new Map(), ranked = limits.selection === CONTEXT_RANKED_PROFILE;
-  function select(hit, size) {
+  const files = new Map(), ranked = limits.selection === CONTEXT_RANKED_PROFILE, labelled = labelledRetrieval(retrieval);
+  function select(hit, size, channel) {
     checkpoint();
+    if (labelled) {
+      label(hit.authorizationLabel);
+      if (hit.positionDomain !== (channel === 'symbol' ? 'source-declaration-bytes' : positionDomain(channel))) reject('Initial result position domain changed.');
+    } else if (Object.hasOwn(hit, 'authorizationLabel') || Object.hasOwn(hit, 'positionDomain')) reject('undeclared Initial row labels.');
     const path = hexBytes(hit.pathHex, 4096);
     if (!path.length || typeof hit.blob !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(hit.blob)) reject('invalid selected file.');
     if (ranked && ((!['sha1', 'sha256'].includes(retrieval.scope?.format)) ||
@@ -88,20 +105,22 @@ function plan(retrieval, limits, checkpoint) {
     if (previous) {
       if (previous.blob !== hit.blob || (size !== null && previous.sourceBytes !== null && previous.sourceBytes !== size)) reject('mixed file identities.');
       if (size !== null) previous.sourceBytes = size;
+      if (labelled && !previous.authorizationLabels.includes(hit.authorizationLabel)) previous.authorizationLabels.push(hit.authorizationLabel);
       return;
     }
-    files.set(path, { pathHex: path, blob: hit.blob, sourceBytes: size, witnesses: [], score: 0, contributions: [] });
+    files.set(path, { pathHex: path, blob: hit.blob, sourceBytes: size, witnesses: [], score: 0, contributions: [],
+      authorizationLabels: labelled ? [hit.authorizationLabel] : [] });
   }
   for (const channel of ['content', 'path']) {
     const hits = retrieval[channel]?.hits;
     if (!Array.isArray(hits) || hits.length > 100) reject('invalid selected channel.');
-    for (const hit of hits) select(hit, count(hit.contentBytes, 'indexed file bytes', 0, MAX_FILE));
+    for (const hit of hits) select(hit, count(hit.contentBytes, 'indexed file bytes', 0, MAX_FILE), channel);
   }
   const symbols = retrieval.symbols;
   if (!symbols || !['available', 'unavailable', 'not_requested'].includes(symbols.state)) reject('invalid symbol availability.');
   const symbolHits = symbols.state === 'available' ? symbols.result?.hits : [];
   if (!Array.isArray(symbolHits) || symbolHits.length > 100) reject('invalid selected symbols.');
-  for (const hit of symbolHits) select(hit, null);
+  for (const hit of symbolHits) select(hit, null, 'symbol');
   const candidateFiles = files.size;
   let ranking = null;
   if (ranked) {
@@ -146,10 +165,11 @@ function plan(retrieval, limits, checkpoint) {
     count(offset, 'anchor offset', 0, channel === 'path' ? hit.pathHex.length / 2 : MAX_FILE);
     count(length, 'anchor length', 1, 128);
     if (expected.length / 2 !== length || typeof raw !== 'boolean' || (raw && offset < 2)) reject('invalid anchor evidence.');
-    file.witnesses.push({ channel, offset, length, expected, raw });
+    file.witnesses.push({ channel, offset, length, expected, raw,
+      ...(labelled ? { authorizationLabel: hit.authorizationLabel } : {}) });
   }
   for (const channel of ['content', 'path']) for (const hit of retrieval[channel].hits) {
-    if (!Array.isArray(hit.spans) || hit.spans.length > 32) reject('invalid lexical spans.');
+    if (!Array.isArray(hit.spans) || hit.spans.length > 32 || (labelled && !hit.spans.length)) reject('invalid lexical spans.');
     for (const span of hit.spans) push(hit, channel, span.offset, span.length,
       retrieval[channel].query.termsHex[span.queryIndex]);
   }
@@ -157,7 +177,9 @@ function plan(retrieval, limits, checkpoint) {
   for (const file of selected.values()) {
     file.witnesses.sort((a, b) => CHANNELS.indexOf(a.channel) - CHANNELS.indexOf(b.channel) ||
       a.offset - b.offset || a.length - b.length || (a.expected < b.expected ? -1 : a.expected > b.expected ? 1 : 0) || Number(a.raw) - Number(b.raw));
-    file.witnesses = file.witnesses.filter((value, i, values) => !i || JSON.stringify(value) !== JSON.stringify(values[i - 1]));
+    // New origin references cannot alter the native original witness dedup key.
+    file.witnesses = file.witnesses.filter((value, i, values) => !i ||
+      ['channel', 'offset', 'length', 'expected', 'raw'].some(key => value[key] !== values[i - 1][key]));
   }
   return { files: [...selected.values()], candidateFiles, ranking };
 }
@@ -223,17 +245,30 @@ function witnessBytes(witness, bytesHex, offset, sourceBytes) {
 }
 
 export function contextReply(reply, retrieval, input, checkpoint = () => {}) {
-  const limits = contextLimits(input);
+  const limits = contextLimits(input), labelled = labelledRetrieval(retrieval);
   checkpoint();
   object(reply, ['type', 'schema_version', 'profile', 'read_only', 'transaction_created', 'source_material_untrusted',
     'complete', 'candidate_files', 'returned_files', 'omitted_files', 'selection', 'source_blobs_read', 'source_bytes_read',
     'excerpt_bytes', 'source_file_limit', ...wireNames, 'retrieval', 'files',
-    ...(limits.selection === CONTEXT_RANKED_PROFILE ? ['ranking'] : [])]);
+    ...(limits.selection === CONTEXT_RANKED_PROFILE ? ['ranking'] : []), ...(labelled ? ['lineage_metadata_bytes'] : [])]);
   if (reply.type !== 'source_context_initial' || reply.schema_version !== 1 || reply.profile !== CONTEXT_PROFILE ||
       reply.read_only !== true || reply.transaction_created !== false || reply.source_material_untrusted !== true ||
       reply.selection !== limits.selection || typeof reply.complete !== 'boolean') reject('unsupported hydration profile.');
   for (let i = 0; i < limitNames.length; i++) if (reply[wireNames[i]] !== limits[limitNames[i]]) reject('context limit echo changed.');
   const selected = plan(retrieval, limits, checkpoint), number = selected.files.length;
+  let lineageMetadataBytes = 0;
+  if (labelled) {
+    let maximumWindows = 0;
+    for (const file of selected.files) {
+      checkpoint();
+      lineageMetadataBytes += file.authorizationLabels.length * 256 + file.witnesses.length * 256 + 1024;
+      maximumWindows += Math.max(1, file.witnesses.filter(witness => witness.channel !== 'path').length);
+    }
+    lineageMetadataBytes += Math.min(maximumWindows, MAX_WINDOWS) * 192;
+    const maximum = count(retrieval.query.maxResultBytes, 'Initial retained byte limit', 1, 2 * 1024 * 1024);
+    const retained = count(retrieval.stats?.retainedBytes, 'Initial retained bytes', 0, maximum);
+    if (reply.lineage_metadata_bytes !== lineageMetadataBytes || retained + lineageMetadataBytes > maximum) reject('lineage metadata accounting changed or exceeded the Initial budget.');
+  } else if (reply.retrieval?.authorization !== undefined) reject('declared Initial labels were not retained by its validator.');
   if (selected.ranking) checkRanking(reply.ranking, selected.ranking, retrieval.scope?.format, checkpoint);
   const perFile = Math.min(MAX_FILE, Math.floor(limits.maxSourceBytes / Math.max(1, number)));
   if (!perFile || reply.source_file_limit !== perFile || !Array.isArray(reply.files) || reply.files.length !== number ||
@@ -243,16 +278,24 @@ export function contextReply(reply, retrieval, input, checkpoint = () => {}) {
   let sourceBytes = 0, excerptBytes = 0, totalWindows = 0;
   const files = reply.files.map((raw, i) => {
     checkpoint();
-    object(raw, ['path_hex', 'blob', 'source_bytes', 'anchors', 'excerpts']);
+    object(raw, ['path_hex', 'blob', 'source_bytes', 'anchors', 'excerpts',
+      ...(labelled ? ['position_domain', 'lineage_commitment', 'authorization_labels'] : [])]);
     const file = selected.files[i];
     if (raw.path_hex !== file.pathHex || nativeBlob(raw.blob, retrieval.scope?.format) !== file.blob) reject('file escaped the selected membership/order or changed identity.');
     const bytes = count(raw.source_bytes, 'file source bytes', 0, perFile);
     sourceBytes += bytes;
     if (sourceBytes > limits.maxSourceBytes || (file.sourceBytes !== null && file.sourceBytes !== bytes)) reject('file source accounting changed.');
+    if (labelled) {
+      label(raw.lineage_commitment);
+      if (raw.position_domain !== 'source-blob-bytes' || !Array.isArray(raw.authorization_labels) ||
+          !same(raw.authorization_labels, file.authorizationLabels)) reject('file original label membership changed.');
+    }
     if (!Array.isArray(raw.anchors) || raw.anchors.length !== file.witnesses.length) reject('missing or excess anchors.');
     for (let a = 0; a < raw.anchors.length; a++) {
-      const anchor = object(raw.anchors[a], ['channel', 'byte_offset', 'byte_length']), witness = file.witnesses[a];
+      const anchor = object(raw.anchors[a], ['channel', 'byte_offset', 'byte_length',
+        ...(labelled ? ['authorization_label', 'position_domain'] : [])]), witness = file.witnesses[a];
       if (anchor.channel !== witness.channel || anchor.byte_offset !== witness.offset || anchor.byte_length !== witness.length) reject('anchor changed or reordered.');
+      if (labelled && (anchor.authorization_label !== witness.authorizationLabel || anchor.position_domain !== positionDomain(witness.channel))) reject('anchor original label or position domain changed.');
       if (witness.channel === 'path') witnessBytes(witness, file.pathHex, 0, file.pathHex.length / 2);
     }
     const expected = windows(file.witnesses, bytes, limits.radiusBytes);
@@ -260,7 +303,8 @@ export function contextReply(reply, retrieval, input, checkpoint = () => {}) {
     if (totalWindows > MAX_WINDOWS || !Array.isArray(raw.excerpts) || raw.excerpts.length !== expected.length) reject('window budget or shape changed.');
     const excerpts = raw.excerpts.map((excerpt, e) => {
       checkpoint();
-      object(excerpt, ['byte_offset', 'untrusted_bytes_hex']);
+      object(excerpt, ['byte_offset', 'untrusted_bytes_hex', ...(labelled ? ['position_domain', 'lineage_commitment'] : [])]);
+      if (labelled && (excerpt.position_domain !== 'source-blob-bytes' || excerpt.lineage_commitment !== raw.lineage_commitment)) reject('excerpt file commitment or position domain changed.');
       const [start, end] = expected[e], value = hexBytes(excerpt.untrusted_bytes_hex, limits.maxExcerptBytes - excerptBytes);
       if (excerpt.byte_offset !== start || value.length / 2 !== end - start) reject('excerpt range changed or truncated.');
       excerptBytes += end - start;
@@ -270,16 +314,20 @@ export function contextReply(reply, retrieval, input, checkpoint = () => {}) {
           witnessBytes(witness, value, start, bytes);
         }
       }
-      return { offset: start, bytesHex: value };
+      return { offset: start, bytesHex: value,
+        ...(labelled ? { lineageCommitment: raw.lineage_commitment, positionDomain: 'source-blob-bytes' } : {}) };
     });
     return { pathHex: file.pathHex, blob: file.blob, sourceBytes: bytes,
-      anchors: raw.anchors.map(anchor => ({ channel: anchor.channel, offset: anchor.byte_offset, length: anchor.byte_length })), excerpts };
+      ...(labelled ? { authorizationLabels: [...raw.authorization_labels], lineageCommitment: raw.lineage_commitment, positionDomain: 'source-blob-bytes' } : {}),
+      anchors: raw.anchors.map(anchor => ({ channel: anchor.channel, offset: anchor.byte_offset, length: anchor.byte_length,
+        ...(labelled ? { authorizationLabel: anchor.authorization_label, positionDomain: anchor.position_domain } : {}) })), excerpts };
   });
   if (reply.source_bytes_read !== sourceBytes || reply.excerpt_bytes !== excerptBytes) reject('aggregate byte accounting changed.');
   checkpoint();
   return { profile: CONTEXT_PROFILE, selection: limits.selection, ...(selected.ranking ? { ranking: selected.ranking } : {}), complete: reply.complete, candidateFiles: selected.candidateFiles,
     omittedFiles: selected.candidateFiles - number, sourceBlobsRead: number, sourceBytesRead: sourceBytes,
-    excerptBytes, sourceFileLimit: perFile, limits, files, sourceMaterialUntrusted: true };
+    excerptBytes, sourceFileLimit: perFile, limits, files, sourceMaterialUntrusted: true,
+    authorization: labelled ? { ...retrieval.authorization } : { state: 'legacy-unlabelled' }, ...(labelled ? { lineageMetadataBytes } : {}) };
 }
 
 // The Initial validator always receives THIS envelope's child. No independently
@@ -362,7 +410,7 @@ function coverage(channel) {
 // proof, model prompt, or Agent Protocol ContextPacket. No ambient session state.
 export function contextReport(value) {
   if (!value?.context || value.query?.mode !== 'initial') reject('select a hydrated Initial result.');
-  const context = value.context, symbols = value.symbols;
+  const context = value.context, symbols = value.symbols, labelled = labelledRetrieval(value);
   const report = { schema: 'frankengit-source-context-report-v1', readOnly: true, sourceMaterialUntrusted: true,
     independentBlobVerification: false,
     scope: pick(value.scope, ['tenant', 'repository', 'incarnation', 'format']),
@@ -378,9 +426,18 @@ export function contextReport(value) {
         ...(symbols.state === 'available' ? coverage(symbols.result) : {}) } },
     context: { ...pick(context, ['profile', 'selection', 'complete', 'candidateFiles', 'omittedFiles', 'sourceBlobsRead',
       'sourceBytesRead', 'excerptBytes', 'sourceFileLimit']), limits: pick(context.limits, optionNames),
-      files: context.files.map(file => ({ ...pick(file, ['pathHex', 'blob', 'sourceBytes']),
-        anchors: file.anchors.map(anchor => pick(anchor, ['channel', 'offset', 'length'])),
-        excerpts: file.excerpts.map(excerpt => pick(excerpt, ['offset', 'bytesHex'])) })) } };
+      files: context.files.map(file => ({ ...pick(file, ['pathHex', 'blob', 'sourceBytes',
+        ...(labelled ? ['authorizationLabels', 'lineageCommitment', 'positionDomain'] : [])]),
+        anchors: file.anchors.map(anchor => pick(anchor, ['channel', 'offset', 'length',
+          ...(labelled ? ['authorizationLabel', 'positionDomain'] : [])])),
+        excerpts: file.excerpts.map(excerpt => pick(excerpt, ['offset', 'bytesHex',
+          ...(labelled ? ['lineageCommitment', 'positionDomain'] : [])])) })) } };
+  if (labelled) {
+    // Retain native lineage without exporting credentials or claiming that the
+    // browser recomputed commitments or authenticated this source.
+    report.retrieval.authorization = pick(value.authorization, ['state', 'profile', 'host', 'principal', 'scope', 'binding', 'reusableCapability']);
+    report.context.lineageMetadataBytes = context.lineageMetadataBytes;
+  }
   if (context.selection === CONTEXT_RANKED_PROFILE) {
     if (!context.ranking) reject('ranked selection receipt required for export.');
     report.context.ranking = { ...pick(context.ranking, ['profile', 'rank_constant', 'score_scale',

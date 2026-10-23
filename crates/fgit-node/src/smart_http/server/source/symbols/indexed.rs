@@ -176,6 +176,19 @@ fn render(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
+    render_labeled(node, command, report, None, maximum, live)
+}
+fn render_labeled(
+    node: &OneNode,
+    command: &Command,
+    report: &data::Report,
+    labels: Option<&[[u8; 32]]>,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    if labels.is_some_and(|labels| labels.len() != report.matches.len()) {
+        return Err(ApiError::unavailable());
+    }
     check(live)?;
     let source = &report.source;
     let query = &command.query;
@@ -343,11 +356,12 @@ fn render(
         }
         append(
             &mut out,
-            &row_json(
+            &row_json_labeled(
                 row,
                 query,
                 node.object_format,
                 command.limits.max_file_bytes,
+                labels.map(|labels| &labels[i]),
             )?,
             maximum,
         )?;
@@ -360,6 +374,7 @@ fn render(
 pub(in super::super) fn render_initial(
     node: &OneNode,
     report: &data::Report,
+    labels: &[[u8; 32]],
     query: &SymbolQuery,
     budget: (usize, usize),
     maximum: usize,
@@ -380,7 +395,7 @@ pub(in super::super) fn render_initial(
             ..Default::default()
         },
     };
-    render(node, &command, report, maximum, live)
+    render_labeled(node, &command, report, Some(labels), maximum, live)
 }
 #[cfg(test)]
 mod tests {

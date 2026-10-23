@@ -133,9 +133,16 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     }
     let context = name == CONTEXT;
     let fields = fields(args, context)?;
-    let document =
-        fgit_node::source_retrieval_json(&backend.node, fields, context, MAX_RESULT_BYTES)
-            .map_err(refusal)?;
+    let document = fgit_node::source_retrieval_json(
+        &backend.node,
+        &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_mcp(
+            &backend.node,
+        ),
+        fields,
+        context,
+        MAX_RESULT_BYTES,
+    )
+    .map_err(refusal)?;
     let value = json::parse_with(document.as_bytes(), DOCUMENT_LIMITS)
         .map_err(|_| ToolError::failed("invalid_retrieval_report"))?;
     // The node's document must describe this launch's repository and stay read-only.

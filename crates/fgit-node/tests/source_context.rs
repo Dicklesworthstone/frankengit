@@ -138,6 +138,9 @@ fn initial(node: &OneNode, term: &[u8], symbols: bool, prefixes: &[Vec<u8>]) -> 
     node.runtime()
         .block_on(node.search_source_initial_local_in(
             &node.outbox_delivery_context(),
+            &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                &node,
+            ),
             &reference(),
             None,
             None,
@@ -155,6 +158,9 @@ fn hydrate(
     node.runtime()
         .block_on(node.hydrate_source_initial_local_in(
             &node.outbox_delivery_context(),
+            &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(
+                &node,
+            ),
             report,
             limits,
         ))
@@ -185,6 +191,44 @@ fn native_context_deduplicates_channels_preserves_raw_bytes_and_survives_reopen(
             assert_eq!(file.excerpts().len(), 1);
             assert_eq!(file.excerpts()[0].offset(), 0);
             assert_eq!(file.excerpts()[0].untrusted_bytes(), *body);
+            assert_ne!(*file.lineage_commitment(), [0; 32]);
+            assert_eq!(
+                file.anchor_authorization_labels().len(),
+                file.anchors().len()
+            );
+            let mut originals = Vec::new();
+            for (channel, rows) in [
+                (
+                    fgit_graph::lexical::LexicalChannel::Content,
+                    report.content(),
+                ),
+                (fgit_graph::lexical::LexicalChannel::Path, report.path()),
+            ] {
+                for (row, label) in rows
+                    .results
+                    .hits
+                    .iter()
+                    .zip(report.authorization().lexical(channel))
+                {
+                    if row.path == *path && !originals.contains(label) {
+                        originals.push(*label);
+                    }
+                }
+            }
+            if let SymbolChannel::Available(symbols) = report.symbols() {
+                for (row, label) in symbols.matches.iter().zip(report.authorization().symbols()) {
+                    if row.location.path == *path && !originals.contains(label) {
+                        originals.push(*label);
+                    }
+                }
+            }
+            assert!(!originals.is_empty());
+            assert_eq!(file.authorization_labels(), originals);
+            assert!(
+                file.anchor_authorization_labels()
+                    .iter()
+                    .all(|label| originals.contains(label))
+            );
         }
         let first = &context.files()[0];
         for channel in [
@@ -326,12 +370,17 @@ fn cancelled_and_unpolled_hydration_does_not_change_the_repository_or_index_vect
     let report = initial(&node, b"Thing", true, &[]);
     let before = generation(&node);
     let request = node.outbox_delivery_context();
-    drop(node.hydrate_source_initial_local_in(&request, report.clone(), Default::default()));
+    drop(node.hydrate_source_initial_local_in(
+        &request,
+        &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
+        report.clone(),
+        Default::default(),
+    ));
     request.cancel();
     assert!(
         node.runtime()
             .block_on(node.hydrate_source_initial_local_in(
-                &request,
+                &request, &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
                 report.clone(),
                 Default::default()
             ))
@@ -348,3 +397,131 @@ mod http;
 
 #[path = "source_context/ranking.rs"]
 mod ranking;
+
+#[test]
+fn hydration_rejects_a_different_host_context_and_keeps_the_original_permitted() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, _) = corpus(&root, format, true);
+        let report = initial(&node, b"Thing", true, &[]);
+        let different =
+            fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_cli(&node);
+        let request = node.outbox_delivery_context();
+        for ranked in [false, true] {
+            let error = if ranked {
+                node.runtime()
+                    .block_on(node.hydrate_source_initial_ranked_local_in(
+                        &request,
+                        &different,
+                        report.clone(),
+                        Default::default(),
+                    ))
+                    .unwrap_err()
+            } else {
+                node.runtime()
+                    .block_on(node.hydrate_source_initial_local_in(
+                        &request,
+                        &different,
+                        report.clone(),
+                        Default::default(),
+                    ))
+                    .unwrap_err()
+            };
+            assert!(matches!(
+                error,
+                RetrievalError::Invalid("result authorization binding")
+            ));
+        }
+        assert!(
+            !hydrate(&node, report, Default::default())
+                .unwrap()
+                .files()
+                .is_empty()
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn context_metadata_uses_the_original_result_allowance_without_changing_initial_accounting() {
+    let root = Scratch::new();
+    let (node, _) = corpus(&root, GitHashAlgorithm::Sha256, false);
+    let report = initial(&node, b"Thing", false, &[]);
+    let bytes = report.result_bytes();
+    let read =
+        fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node);
+    let request = node.outbox_delivery_context();
+    let query = InitialQuery::new(&[b"Thing".to_vec()], &[]).unwrap();
+    let exact = node
+        .runtime()
+        .block_on(node.search_source_initial_local_in(
+            &request,
+            &read,
+            &reference(),
+            None,
+            None,
+            &Checkpoints::default(),
+            &query,
+            fgit_node::source_retrieval::InitialLimits {
+                max_result_bytes: bytes,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    assert_eq!(exact.result_bytes(), bytes);
+    assert!(matches!(
+        hydrate(&node, exact, Default::default()),
+        Err(RetrievalError::Limit("retained result bytes"))
+    ));
+    let context = hydrate(&node, report, Default::default()).unwrap();
+    assert_eq!(context.retrieval().result_bytes(), bytes);
+    assert!(context.lineage_metadata_bytes() > 0);
+    assert!(
+        bytes + context.lineage_metadata_bytes()
+            <= fgit_node::source_retrieval::InitialLimits::default().max_result_bytes
+    );
+    let aggregate = bytes + context.lineage_metadata_bytes();
+    for maximum in [aggregate, aggregate - 1] {
+        let selected = node
+            .runtime()
+            .block_on(node.search_source_initial_local_in(
+                &request,
+                &read,
+                &reference(),
+                None,
+                None,
+                &Checkpoints::default(),
+                &query,
+                fgit_node::source_retrieval::InitialLimits {
+                    max_result_bytes: maximum,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(selected.result_bytes(), bytes);
+        let hydrated = hydrate(&node, selected, Default::default());
+        if maximum == aggregate {
+            let exact = hydrated.unwrap();
+            assert_eq!(exact.files(), context.files());
+            assert_eq!(
+                exact.lineage_metadata_bytes(),
+                context.lineage_metadata_bytes()
+            );
+        } else {
+            assert!(matches!(
+                hydrated,
+                Err(RetrievalError::Limit("retained result bytes"))
+            ));
+        }
+    }
+    // A saved nested Initial can be hydrated again without accumulating a
+    // second charge for a prior context that this report does not own.
+    let again = hydrate(&node, context.retrieval().clone(), Default::default()).unwrap();
+    assert_eq!(again.retrieval().result_bytes(), bytes);
+    assert_eq!(
+        again.lineage_metadata_bytes(),
+        context.lineage_metadata_bytes()
+    );
+    assert_eq!(again.files(), context.files());
+    node.shutdown().unwrap();
+}

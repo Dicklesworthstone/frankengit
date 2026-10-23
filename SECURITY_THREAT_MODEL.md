@@ -537,6 +537,13 @@ containment substrate and its independent campaign.
 **Controls**
 
 - authorization before candidate disclosure and inherited labels;
+- Initial reads check an independent host read context before index/source I/O;
+  retained result labels bind namespace, checked host/principal, source and
+  generation vector, including independent old index provenance on revalidation;
+- context hydration retains original row-label membership and saved verified
+  file/anchor/excerpt commitments under the original result budget. These
+  unkeyed derived digests never grant access, authenticate a source, or permit
+  cross-principal cache reuse; standalone search APIs are outside this profile;
 - immutable predecessor-linked anti-rollback generations;
 - query pins one generation vector;
 - exact/deterministic/statistical edge types;

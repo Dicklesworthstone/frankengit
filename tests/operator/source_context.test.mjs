@@ -1,7 +1,91 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { acquire, query, command, validate, parse, endpoint, LIMITS } from '../../scripts/operator/source_context.mjs';
-import { input, report, peer, json, TOKEN, hex } from './source_context_fixtures.mjs';
+import { input, report, peer, json, TOKEN, hex, withReadLabels } from './source_context_fixtures.mjs';
+import { symbolInput, nativeSymbols } from './source_context_symbols_fixtures.mjs';
+import { nativeRanked } from './source_context_ranking_fixtures.mjs';
+
+for (const format of ['sha1', 'sha256']) test(`${format}: declared read-result labels survive one actual HTTP acquisition as opaque evidence`, async t => {
+  const q = input(format), original = report(q), raw = withReadLabels(original), before = structuredClone(raw);
+  assert.equal(Object.hasOwn(original.retrieval, 'authorization'), false, 'legacy fixture stays unchanged');
+  const p = await peer(t, (_req, res) => json(res, raw));
+  const captured = await acquire(p.endpoint, TOKEN, q);
+  assert.equal(p.calls.length, 1);
+  assert.equal(captured.summary.authorization.state, 'labelled');
+  assert.equal(captured.summary.authorization.binding, raw.retrieval.authorization.binding);
+  assert.equal(captured.summary.authorization.reusable_capability, false);
+  assert.equal(captured.summary.lineage_metadata_bytes, raw.lineage_metadata_bytes);
+  assert.deepEqual(captured.native_response.files, raw.files);
+  assert.deepEqual(captured.summary.full_blob_hash_verified_paths, [hex('src/recover.rs')]);
+  assert.equal(captured.summary.authority_verified, false);
+  assert.equal(captured.summary.partial_excerpts_hash_verified, false);
+  assert.deepEqual(raw, before);
+  for (const [query, response] of [[symbolInput(format), nativeSymbols(symbolInput(format))],
+    [{ ...symbolInput(format), selection: 'context-weighted-rrf-q16-v1' }, nativeRanked({ ...symbolInput(format), selection: 'context-weighted-rrf-q16-v1' })]]) {
+    const labelled = withReadLabels(response), checked = validate(labelled, query);
+    assert.equal(checked.authorization.state, 'labelled');
+    assert.equal(checked.symbols.state, 'available');
+    if (query.selection) assert.equal(checked.ranking.profile, query.selection);
+  }
+});
+
+test('declared labels reject missing/malformed rows and detached file, anchor or excerpt references', () => {
+  const original = withReadLabels(report()); validate(original, input());
+  for (const mutate of [r => { r.retrieval.authorization.profile = 'unknown'; },
+    r => { delete r.retrieval.authorization.binding; }, r => { r.retrieval.authorization.principal = null; },
+    r => { r.retrieval.authorization.reusable_capability = true; }, r => { r.retrieval.authorization.scope = 'sparse'; },
+    r => { delete r.retrieval.content.hits[0].authorization_label; }, r => { r.retrieval.path.hits[0].authorization_label = 'A'.repeat(64); },
+    r => { r.retrieval.content.hits[0].position_domain = 'raw-path-bytes'; }, r => { delete r.retrieval.authorization; },
+    r => { r.files[0].authorization_labels.reverse(); }, r => { r.files[0].authorization_labels[0] = 'f'.repeat(64); },
+    r => { delete r.files[0].authorization_labels; }, r => { r.files[0].position_domain = 'raw-path-bytes'; },
+    r => { r.files[0].lineage_commitment = 'f'.repeat(64); }, r => { r.files[0].lineage_commitment = 'x'.repeat(64); },
+    r => { r.files[0].anchors[0].authorization_label = r.files[0].authorization_labels[1]; },
+    r => { delete r.files[0].anchors[1].authorization_label; }, r => { r.files[0].anchors[0].position_domain = 'raw-path-bytes'; },
+    r => { r.files[0].excerpts[0].lineage_commitment = 'f'.repeat(64); }, r => { delete r.files[0].excerpts[0].lineage_commitment; },
+    r => { r.files[0].excerpts[0].position_domain = 'raw-path-bytes'; }, r => { r.lineage_metadata_bytes++; },
+    r => { r.lineage_metadata_bytes--; }, r => { delete r.lineage_metadata_bytes; }, r => { r.retrieval.retained_result_bytes--; }]) {
+    const changed = structuredClone(original); mutate(changed);
+    assert.throws(() => validate(changed, input()));
+    validate(original, input());
+  }
+  const q = symbolInput(), raw = withReadLabels(nativeSymbols(q));
+  for (const mutate of [r => { delete r.retrieval.symbols.result.matches[0].authorization_label; },
+    r => { r.retrieval.symbols.result.matches[0].position_domain = 'source-blob-bytes'; }]) {
+    const changed = structuredClone(raw); mutate(changed); assert.throws(() => validate(changed, q));
+    validate(raw, q);
+  }
+});
+
+test('label metadata shares the exact original retained budget and never changes legacy capture summaries', () => {
+  const raw = withReadLabels(report()), exact = raw.retrieval.retained_result_bytes + raw.lineage_metadata_bytes;
+  const permitted = input('sha1', { limits: { max_result_bytes: exact } });
+  validate(withReadLabels(report(permitted)), permitted);
+  const short = input('sha1', { limits: { max_result_bytes: exact - 1 } });
+  assert.throws(() => validate(withReadLabels(report(short)), short), /lineage_accounting/);
+  const legacy = report(), summary = validate(legacy, input());
+  assert.equal(Object.hasOwn(summary, 'authorization'), false);
+  legacy.retrieval.content.hits[0].authorization_label = 'a'.repeat(64);
+  assert.throws(() => validate(legacy, input()), /undeclared/);
+  const empty = withReadLabels(report(input(), [{ path: Buffer.from('file'), bytes: Buffer.from('nothing') }]));
+  assert.equal(validate(empty, input()).lineage_metadata_bytes, 0);
+});
+
+test('labelled capture survives private export and offline inspection without another source request', async t => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const { publishBundle, loadBundle } = await import('../../scripts/operator/source_context_export.mjs');
+  const root = await mkdtemp(join(tmpdir(), 'fg-context-labels-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const q = input(), raw = withReadLabels(report(q)), p = await peer(t, (_req, res) => json(res, raw));
+  const captured = await acquire(p.endpoint, TOKEN, q), path = join(root, 'bundle');
+  const published = await publishBundle(path, captured), requests = p.calls.length;
+  const inspected = await loadBundle(path, published.manifest_sha256);
+  assert.deepEqual(inspected.capture.summary.authorization, captured.summary.authorization);
+  assert.equal(inspected.capture.summary.lineage_metadata_bytes, raw.lineage_metadata_bytes);
+  assert.deepEqual(inspected.capture.native_response.files, raw.files);
+  assert.equal(inspected.capture.summary.authority_verified, false);
+  assert.equal(p.calls.length, requests);
+});
 
 for (const format of ['sha1', 'sha256']) {
   test(`${format}: native joined retrieval and hydration are consumed with one closed read`, async t => {

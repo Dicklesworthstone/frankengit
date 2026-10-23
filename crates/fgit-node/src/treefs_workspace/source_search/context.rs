@@ -1,6 +1,7 @@
 //! Hydrate only retrieval-selected exact paths under ONE current native source
 //! selection. The private TreeFS source prevents object-ID read substitution.
 use super::*;
+use crate::source_retrieval::authorization::SourceReadContext;
 use crate::source_retrieval::context::ranked::RankedContext;
 use crate::source_retrieval::context::{Assembly, ContextLimits, InitialContext, Plan};
 use crate::source_retrieval::{InitialReport, RetrievalError};
@@ -102,9 +103,12 @@ impl OneNode {
     pub async fn hydrate_source_initial_local_in(
         &self,
         request: &NodeRequestContext,
+        read: &SourceReadContext,
         initial: InitialReport,
         limits: ContextLimits,
     ) -> Result<InitialContext, RetrievalError> {
+        read.check_node(self)?;
+        initial.validate_authorization(read, &mut || crate::source_retrieval::live(request))?;
         let plan = Plan::new(&initial, limits, &|| !workspace_request_live(request))?;
         self.hydrate_source_initial_plan_local_in(request, initial, limits, &plan)
             .await
@@ -118,9 +122,12 @@ impl OneNode {
     pub async fn hydrate_source_initial_ranked_local_in(
         &self,
         request: &NodeRequestContext,
+        read: &SourceReadContext,
         initial: InitialReport,
         limits: ContextLimits,
     ) -> Result<RankedContext, RetrievalError> {
+        read.check_node(self)?;
+        initial.validate_authorization(read, &mut || crate::source_retrieval::live(request))?;
         let (plan, ranking) = Plan::ranked(&initial, limits, &|| !workspace_request_live(request))?;
         let context = self
             .hydrate_source_initial_plan_local_in(request, initial, limits, &plan)
@@ -138,6 +145,9 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(failure(SearchError::Cancelled));
         }
+        // Reserve all newly retained lineage before any native source I/O;
+        // the original Initial result-byte allowance remains the sole limit.
+        initial.check_context_metadata(plan.lineage_metadata_bytes()?)?;
         let expected = initial.source();
         if expected.namespace.tenant != self.tenant_id
             || expected.namespace.repository != self.repository_id
@@ -190,6 +200,8 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(failure(SearchError::Cancelled));
         }
-        InitialContext::finish(initial, plan, assembled?, file_limit)
+        InitialContext::finish(initial, plan, assembled?, file_limit, &mut || {
+            crate::source_retrieval::live(request)
+        })
     }
 }

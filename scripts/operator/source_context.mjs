@@ -10,6 +10,8 @@ export const LIMITS = Object.freeze({ response: 8 * 1024 * 1024, request: 256 * 
 export const RANKING_PROFILE = "context-weighted-rrf-q16-v1";
 const U64 = 18446744073709551615n;
 const SYMBOL_KINDS = Object.freeze(['enum', 'function', 'macro', 'module', 'struct', 'trait', 'type', 'union']);
+const READ_LABEL_PROFILE = 'source-read-result-labels-v1';
+const positionDomain = channel => channel === 'path' ? 'raw-path-bytes' : 'source-blob-bytes';
 const channelShare = (total, q, ordinal) => {
   const channels = q.symbols ? 3 : 2;
   return Math.floor(total / channels) + Number(ordinal < total % channels);
@@ -40,6 +42,28 @@ function exact(value) {
 function identifier(value) {
   if (typeof value !== 'string' || !/^[0-9a-f]{32}$/.test(value)) fail('invalid_context_identity');
   return value;
+}
+function resultLabel(value) {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) fail('invalid_context_read_label');
+  return value;
+}
+function readLabels(retrieval) {
+  if (!Object.hasOwn(retrieval, 'authorization')) return { state: 'legacy-unlabelled' };
+  const value = retrieval.authorization;
+  keys(value, ['profile', 'host', 'principal', 'scope', 'binding', 'reusable_capability']);
+  if (value.profile !== READ_LABEL_PROFILE || !['trusted-local-native', 'trusted-local-cli', 'trusted-local-mcp', 'http-repository-read-credential'].includes(value.host) ||
+      value.scope !== 'whole-repository' || value.reusable_capability !== false ||
+      (value.host === 'http-repository-read-credential' ? typeof value.principal !== 'string' || !/^[0-9a-f]{32}$/.test(value.principal) : value.principal !== null)) fail('context_read_label_profile_changed');
+  return { state: 'labelled', profile: value.profile, host: value.host, principal: value.principal,
+    scope: value.scope, binding: resultLabel(value.binding), reusable_capability: false };
+}
+function rowLabel(hit, evidence, domain) {
+  if (evidence.state === 'legacy-unlabelled') {
+    if (Object.hasOwn(hit, 'authorization_label') || Object.hasOwn(hit, 'position_domain')) fail('undeclared_context_read_labels');
+    return;
+  }
+  resultLabel(hit.authorization_label);
+  if (hit.position_domain !== domain) fail('context_read_label_domain_changed');
 }
 function opaque(value) {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 256 || /[\s\x00-\x1f\x7f]/u.test(value)) fail('invalid_context_source_record');
@@ -176,7 +200,7 @@ function verifyPathWord(bytes, span, expected) {
   if (!matchWord(bytes, span.byte_offset, expected) || (span.byte_offset && word(bytes[span.byte_offset - 1])) ||
       (span.byte_offset + span.byte_length < bytes.length && word(bytes[span.byte_offset + span.byte_length]))) fail('context_path_anchor_mismatch');
 }
-function lexical(value, name, q, selected, generation, ordinal, check) {
+function lexical(value, name, q, selected, generation, ordinal, check, evidence) {
   source(value, q, selected); opaque(value.source_head);
   const limits = q.limits, share = total => channelShare(total, q, ordinal);
   if (value.type !== 'source_search_index' || ![1, 2].includes(value.schema_version) || value.profile !== 'ascii-word-postings-v1' ||
@@ -195,6 +219,7 @@ function lexical(value, name, q, selected, generation, ordinal, check) {
   let previous = '', lastId = 0n;
   for (const hit of value.hits) {
     check(); record(hit); path(hit.path_hex); const id = BigInt(exact(hit.document_id));
+    rowLabel(hit, evidence, positionDomain(name));
     if (id <= lastId || hit.path_hex <= previous || (q.prefixes_hex.length && !q.prefixes_hex.some(p => hit.path_hex === p || hit.path_hex.startsWith(`${p}2f`)))) fail('context_hit_order_or_scope');
     previous = hit.path_hex; lastId = id; oid(hit.blob, q.scope.object_format);
     count(hit.content_bytes, LIMITS.file);
@@ -227,7 +252,7 @@ function lexical(value, name, q, selected, generation, ordinal, check) {
 }
 // Symbol declarations are a distinct native profile, never folded lexical
 // terms. A missing optional index is not an empty successful symbol corpus.
-function symbols(channel, vector, q, selected, sourceHead, check) {
+function symbols(channel, vector, q, selected, sourceHead, check, evidence) {
   const empty = { state: 'not_requested', generation: null, complete: true, coverage: true,
     retained: 0, payload: 0, work: 0, matches: [] };
   if (!q.symbols) {
@@ -268,7 +293,9 @@ function symbols(channel, vector, q, selected, sourceHead, check) {
   let previous = '', offset = -1, retained = 0; const documents = new Map();
   for (const hit of value.matches) {
     check(); keys(hit, ['name_hex', 'kind', 'raw_identifier', 'path_hex', 'blob', 'byte_offset', 'line', 'byte_column',
-      'match_length', 'excerpt_hex', 'excerpt_offset', 'match_truncated_in_excerpt']);
+      'match_length', 'excerpt_hex', 'excerpt_offset', 'match_truncated_in_excerpt',
+      ...(evidence.state === 'labelled' ? ['authorization_label', 'position_domain'] : [])]);
+    rowLabel(hit, evidence, 'source-declaration-bytes');
     path(hit.path_hex); const blob = oid(hit.blob, q.scope.object_format), name = unhex(hit.name_hex, 128);
     const text = name.toString('ascii');
     if (!name.every(b => b < 128) || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(text) ||
@@ -320,6 +347,16 @@ function symbols(channel, vector, q, selected, sourceHead, check) {
   }
   return { state: 'available', generation, complete: value.complete, coverage, retained,
     payload: value.payload_bytes_read, work: value.work_units, matches: value.matches };
+}
+
+// Preserve the native original witness order/dedup key. An opaque origin label
+// cannot change anchor ordering, merge two different witnesses or add a rank.
+function plannedWitnesses(row) {
+  const channels = ['content', 'path', 'symbol'];
+  const ordered = [...row.witnesses].sort((left, right) => channels.indexOf(left.channel) - channels.indexOf(right.channel) ||
+    left.offset - right.offset || left.word.length - right.word.length || Buffer.compare(left.word, right.word) || Number(!!left.raw) - Number(!!right.raw));
+  return ordered.filter((value, i, values) => !i || value.channel !== values[i - 1].channel || value.offset !== values[i - 1].offset ||
+    value.word.length !== values[i - 1].word.length || !value.word.equals(values[i - 1].word) || !!value.raw !== !!values[i - 1].raw);
 }
 
 // Recompute the COMPLETE returned candidate ordering, not just the scores in
@@ -389,15 +426,16 @@ export function validate(reply, input, check = () => {}) {
       (reply.selection === 'raw-path-prefix' && Object.hasOwn(reply, 'ranking')) || !Array.isArray(reply.files)) fail('unsupported_native_context');
   for (const k of ['context_max_files', 'context_radius_bytes', 'context_max_source_bytes', 'context_max_excerpt_bytes']) if (reply[k] !== limits[k]) fail('context_budget_echo_changed');
   const r = record(reply.retrieval), selected = source(r, q);
+  const evidence = readLabels(r), labelled = evidence.state === 'labelled';
   if (r.type !== 'source_search_initial' || r.schema_version !== 1 || r.profile !== 'source-initial-retrieval-v1' || r.phase !== 'Initial' ||
       r.streaming !== false || r.semantic_refinement !== false || r.source_blobs_read !== 0 || r.source_bytes_read !== 0) fail('unsupported_context_retrieval');
   for (const k of ['max_results_per_channel', 'max_work', 'max_payload_bytes', 'max_result_bytes']) if (r[k] !== limits[k]) fail('context_query_budget_changed');
   keys(r.generation_vector, ['lexical', 'symbols']);
   const vector = r.generation_vector.lexical; keys(vector, ['index_token', 'index_number']);
   const generation = activation({ token: vector.index_token, number: vector.index_number });
-  const contentCoverage = lexical(r.content, 'content', q, selected, generation, 0, check);
-  const pathCoverage = lexical(r.path, 'path', q, selected, generation, 1, check);
-  const symbol = symbols(r.symbols, r.generation_vector.symbols, q, selected, r.content.source_head, check);
+  const contentCoverage = lexical(r.content, 'content', q, selected, generation, 0, check, evidence);
+  const pathCoverage = lexical(r.path, 'path', q, selected, generation, 1, check, evidence);
+  const symbol = symbols(r.symbols, r.generation_vector.symbols, q, selected, r.content.source_head, check, evidence);
   if (r.content.source_head !== r.path.source_head || r.content.indexed_documents !== r.path.indexed_documents ||
       r.content.indexed_source_bytes !== r.path.indexed_source_bytes || r.content.non_regular_entries !== r.path.non_regular_entries ||
       !same(r.content.omissions ?? [], r.path.omissions ?? [])) fail('context_lexical_corpus_changed');
@@ -405,8 +443,9 @@ export function validate(reply, input, check = () => {}) {
   const pathHead = activation({ token: r.path.selected_index_token, number: r.path.selected_index_number });
   if (contentHead.number === pathHead.number && contentHead.token !== pathHead.token) fail('conflicting_context_index_heads');
   const checkpoint = BigInt(contentHead.number) >= BigInt(pathHead.number) ? contentHead : pathHead;
-  const retained = symbol.retained + [r.content, r.path].reduce((n, channel) => n + channel.hits.reduce((sum, h) => sum + h.path_hex.length / 2 + h.spans.length * 24 + 64, 0)
+  let retained = symbol.retained + [r.content, r.path].reduce((n, channel) => n + channel.hits.reduce((sum, h) => sum + h.path_hex.length / 2 + h.spans.length * 24 + 64, 0)
     + (channel.omissions ?? []).reduce((sum, omission) => sum + omission.path_hex.length / 2 + 96, 0), 0);
+  if (labelled) retained += (r.content.hits.length + r.path.hits.length + symbol.matches.length) * 192 + 768 + r.ref_hex.length / 2;
   if (count(r.retained_result_bytes, limits.max_result_bytes) !== retained) fail('context_retained_bytes_changed');
   if (r.completed_work_units !== r.content.work_units + r.path.work_units + symbol.work ||
       r.completed_payload_bytes_read !== r.content.payload_bytes_read + r.path.payload_bytes_read + symbol.payload ||
@@ -418,26 +457,44 @@ export function validate(reply, input, check = () => {}) {
     if (documents.has(document) && documents.get(document) !== hit.path_hex) fail('context_document_identity_conflict');
     documents.set(document, hit.path_hex);
     if (prior && (prior.document !== document || prior.blob !== blob || prior.size !== hit.content_bytes)) fail('context_file_identity_conflict');
-    const row = prior ?? { blob, document, size: hit.content_bytes, anchors: [], witnesses: [] };
+    const row = prior ?? { blob, document, size: hit.content_bytes, anchors: [], witnesses: [], origins: [] };
+    if (labelled && !row.origins.includes(hit.authorization_label)) row.origins.push(hit.authorization_label);
     hit.spans.forEach((s, i) => {
       row.anchors.push({ channel, byte_offset: s.byte_offset, byte_length: s.byte_length });
-      row.witnesses.push({ channel, offset: s.byte_offset, word: Buffer.from(q.terms[i]) });
+      row.witnesses.push({ channel, offset: s.byte_offset, word: Buffer.from(q.terms[i]),
+        ...(labelled ? { authorization_label: hit.authorization_label } : {}) });
     }); candidates.set(hit.path_hex, row);
   }
   for (const hit of symbol.matches) {
     check(); const blob = oid(hit.blob, q.scope.object_format), prior = candidates.get(hit.path_hex);
     const minimum = hit.excerpt_offset + hit.excerpt_hex.length / 2;
     if (prior && (prior.blob !== blob || prior.size !== null && prior.size < minimum)) fail('context_file_identity_conflict');
-    const row = prior ?? { blob, document: null, size: null, anchors: [], witnesses: [] };
+    const row = prior ?? { blob, document: null, size: null, anchors: [], witnesses: [], origins: [] };
+    if (labelled && !row.origins.includes(hit.authorization_label)) row.origins.push(hit.authorization_label);
     row.minimum = Math.max(row.minimum ?? 0, minimum);
     row.anchors.push({ channel: 'symbol', byte_offset: hit.byte_offset, byte_length: hit.match_length });
     row.witnesses.push({ channel: 'symbol', offset: hit.byte_offset, word: Buffer.from(hit.name_hex, 'hex'),
-      raw: hit.raw_identifier, excerptOffset: hit.excerpt_offset, excerpt: Buffer.from(hit.excerpt_hex, 'hex') });
+      raw: hit.raw_identifier, excerptOffset: hit.excerpt_offset, excerpt: Buffer.from(hit.excerpt_hex, 'hex'),
+      ...(labelled ? { authorization_label: hit.authorization_label } : {}) });
     candidates.set(hit.path_hex, row);
   }
   const ranked = q.selection === RANKING_PROFILE
     ? ranking(reply.ranking, q, candidates, [['content', r.content.hits], ['path', r.path.hits], ['symbol', symbol.matches]], check) : null;
   const paths = ranked ? ranked.selected.map(row => row.path_hex).sort() : [...candidates.keys()].sort().slice(0, limits.context_max_files);
+  const plans = new Map(); let lineageBytes = 0, maximumWindows = 0;
+  for (const p of paths) {
+    check(); const row = candidates.get(p);
+    if ((anchorCount += row.witnesses.length) > LIMITS.anchors) fail('context_anchor_limit');
+    const witnesses = plannedWitnesses(row); plans.set(p, witnesses);
+    if (labelled) {
+      lineageBytes += row.origins.length * 256 + witnesses.length * 256 + 1024;
+      maximumWindows += Math.max(1, witnesses.filter(w => w.channel !== 'path').length);
+    }
+  }
+  if (labelled) {
+    lineageBytes += Math.min(maximumWindows, LIMITS.windows) * 192;
+    if (count(reply.lineage_metadata_bytes, limits.max_result_bytes) !== lineageBytes || retained + lineageBytes > limits.max_result_bytes) fail('context_lineage_accounting_changed');
+  } else if (Object.hasOwn(reply, 'lineage_metadata_bytes')) fail('undeclared_context_read_labels');
   const fileLimit = Math.min(LIMITS.file, Math.floor(limits.context_max_source_bytes / Math.max(1, paths.length)));
   if (!fileLimit || reply.source_file_limit !== fileLimit || reply.candidate_files !== candidates.size || reply.returned_files !== paths.length ||
       reply.files.length !== paths.length || reply.omitted_files !== candidates.size - paths.length || reply.source_blobs_read !== paths.length ||
@@ -445,10 +502,13 @@ export function validate(reply, input, check = () => {}) {
   let sourceBytes = 0, symbolSourceBytes = 0, excerptBytes = 0, windows = 0; const fullBlobs = [];
   for (let i = 0; i < paths.length; i++) {
     check(); const file = record(reply.files[i]), expected = candidates.get(paths[i]);
-    if ((anchorCount += expected.anchors.length) > LIMITS.anchors) fail('context_anchor_limit');
-    const anchors = [...new Map(expected.anchors.map(a => [JSON.stringify(a), a])).values()].sort((a, b) =>
-      (a.channel === b.channel ? a.byte_offset - b.byte_offset || a.byte_length - b.byte_length :
-        ['content', 'path', 'symbol'].indexOf(a.channel) - ['content', 'path', 'symbol'].indexOf(b.channel)));
+    const anchors = plans.get(paths[i]).map(w => ({ channel: w.channel, byte_offset: w.offset, byte_length: w.word.length,
+      ...(labelled ? { authorization_label: w.authorization_label, position_domain: positionDomain(w.channel) } : {}) }));
+    if (labelled) {
+      keys(file, ['path_hex', 'blob', 'source_bytes', 'anchors', 'excerpts', 'authorization_labels', 'lineage_commitment', 'position_domain']);
+      resultLabel(file.lineage_commitment);
+      if (file.position_domain !== 'source-blob-bytes' || !same(file.authorization_labels, expected.origins)) fail('context_lineage_origins_changed');
+    } else if (['authorization_labels', 'lineage_commitment', 'position_domain'].some(k => Object.hasOwn(file, k))) fail('undeclared_context_read_labels');
     if (file.path_hex !== paths[i] || oid(file.blob, q.scope.object_format) !== expected.blob || (expected.size !== null && file.source_bytes !== expected.size) ||
         count(file.source_bytes, fileLimit, expected.minimum ?? 0) > fileLimit || !same(file.anchors, anchors) || !Array.isArray(file.excerpts)) fail('context_file_or_anchors_changed');
     if (expected.witnesses.some(w => w.channel === 'symbol')) {
@@ -462,7 +522,8 @@ export function validate(reply, input, check = () => {}) {
     for (const range of ranges) { const last = merged.at(-1); if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]); else merged.push([...range]); }
     if (file.excerpts.length !== merged.length || (windows += merged.length) > LIMITS.windows) fail('context_excerpt_windows_changed');
     const bytes = file.excerpts.map((excerpt, j) => {
-      check(); keys(excerpt, ['byte_offset', 'untrusted_bytes_hex']);
+      check(); keys(excerpt, ['byte_offset', 'untrusted_bytes_hex', ...(labelled ? ['lineage_commitment', 'position_domain'] : [])]);
+      if (labelled && (excerpt.position_domain !== 'source-blob-bytes' || excerpt.lineage_commitment !== file.lineage_commitment)) fail('context_lineage_excerpt_changed');
       const value = unhex(excerpt.untrusted_bytes_hex, limits.context_max_excerpt_bytes, true), range = merged[j];
       if (excerpt.byte_offset !== range[0] || value.length !== range[1] - range[0]) fail('context_excerpt_range_changed');
       excerptBytes += value.length;
@@ -501,6 +562,7 @@ export function validate(reply, input, check = () => {}) {
     candidate_files: candidates.size, returned_files: paths.length, omitted_files: candidates.size - paths.length,
     full_blob_hash_verified_paths: fullBlobs, partial_excerpts_hash_verified: false,
     source_material_untrusted: true, agent_context_packet: false, authority_verified: false,
+    ...(labelled ? { authorization: evidence, lineage_metadata_bytes: lineageBytes } : {}),
     source_bytes_read: sourceBytes, excerpt_bytes: excerptBytes,
     ...(q.symbols ? { symbols: { state: symbol.state, ...(symbol.reason ? { reason: symbol.reason } : {}),
       generation: symbol.generation, coverage_complete: symbol.coverage, complete: symbol.complete } } : {}),
