@@ -32,6 +32,17 @@
 //! before allocation. Orphan rows cannot extend the applied prefix. The legacy
 //! [`read_applied_range`] shares these checks but returns the whole intersecting
 //! range; prefer pages at service boundaries.
+//! Both reads and folds check the complete installed identity receipt,
+//! including the projection generation and build identity, in their existing
+//! SQL snapshot/transaction. A same-head, same-schema session cannot adopt a
+//! different installed generation. With an installed watermark, missing
+//! receipts refuse, including when that watermark describes an empty prefix.
+//! The legacy no-watermark read still returns an empty page with no watermark;
+//! it discloses no decision rows. A reversed [`read_applied_range`] still
+//! returns an empty range without querying storage. Neither empty response
+//! validates an installation. Table-only [`ProjectionSession::install_schema`]
+//! does not establish the identity required for folds or watermark-bound reads:
+//! bootstrap through [`ensure_schema_generation`].
 //!
 //! # Bounded pagination
 //!

@@ -13,7 +13,7 @@ use asupersync::Cx;
 use sqlmodel_core::{Connection, TransactionOps, Value};
 
 use crate::identity::{IdentityAdvanceError, ProjectionIdentity, ProjectionPosition};
-use crate::session::{ProjectionError, ProjectionSession, flatten};
+use crate::session::{ProjectionError, ProjectionSession, check_identity_receipt, flatten};
 use crate::store::{StoreReadError, StoredWatermarkRow, bind_position, decode_watermark_row};
 use crate::watermark::WatermarkRefusal;
 
@@ -24,7 +24,9 @@ const MAX_SQL_POSITION: u64 = 9_223_372_036_854_775_807;
 /// A missing watermark, conversely, cannot disclose orphaned decision rows.
 const READ_WINDOW: &str = "SELECT w.source_incarnation, w.authority_head, \
     w.authority_head_generation, w.last_position, w.state_text, w.schema_generation, \
+    i.receipt AS projection_identity_receipt, \
     d.seq, d.digest FROM fgit_projection_watermark AS w \
+    LEFT JOIN fgit_projection_identity AS i ON i.singleton = w.singleton \
     LEFT JOIN fgit_projection_applied_decision AS d \
     ON d.seq >= ?1 AND d.seq <= ?2 AND d.seq <= w.last_position \
     WHERE w.singleton = 1 ORDER BY d.seq ASC LIMIT ?3";
@@ -56,9 +58,12 @@ pub struct AppliedDecisionPage {
 /// Ranges above SQLite's integer domain are empty rather than panicking.
 ///
 /// # Errors
-/// Foreign incarnation/head/generation/schema bindings fail before any rows
-/// are returned. A hole or duplicate inside the claimed applied prefix is a
-/// typed gap, not a successful short page. Driver and row-shape errors retain
+/// Foreign incarnation/head/generation/schema/build bindings and missing
+/// installation receipts on an installed watermark fail before any rows are
+/// returned. With no watermark row, the legacy empty, unbound page is returned
+/// without disclosing decisions. A hole or
+/// duplicate inside the claimed applied prefix is a typed gap, not a
+/// successful short page. Driver and row-shape errors retain
 /// their existing projection error classes.
 pub async fn read_applied_page<C: Connection>(
     session: &ProjectionSession<C>,
@@ -79,6 +84,7 @@ pub async fn read_applied_page<C: Connection>(
 /// # Errors
 /// See [`read_applied_page`]. An upper bound of `u64::MAX` is supported: it is
 /// intersected with the representable, actually folded prefix before binding.
+/// A reversed range returns empty without checking the database binding.
 pub async fn read_applied_range<'a, C: Connection>(
     session: &'a ProjectionSession<C>,
     cx: &Cx,
@@ -132,6 +138,10 @@ async fn read_window<C: Connection>(
     };
     let watermark = decode_watermark_row(first)?;
     check_binding(session.identity(), &watermark)?;
+    let installed_receipt = first
+        .get_by_name("projection_identity_receipt")
+        .and_then(Value::as_str);
+    check_identity_receipt(session.identity(), installed_receipt)?;
     let visible_end = watermark
         .last_position
         .map_or(0, ProjectionPosition::get)
@@ -160,6 +170,15 @@ async fn read_window<C: Connection>(
         // it too so a malformed driver response cannot splice generations.
         if decode_watermark_row(row)? != watermark {
             return Err(StoreReadError::MissingColumn("consistent watermark snapshot").into());
+        }
+        if row
+            .get_by_name("projection_identity_receipt")
+            .and_then(Value::as_str)
+            != installed_receipt
+        {
+            return Err(
+                StoreReadError::MissingColumn("consistent projection identity snapshot").into(),
+            );
         }
         let raw = row
             .get_by_name("seq")
@@ -347,7 +366,7 @@ mod tests {
                 let identity =
                     ProjectionIdentity::new(INC, HEAD, 7, 1, 1, BuildIdentity::current());
                 let session = ProjectionSession::open_memory(identity)?;
-                session.install_schema(&cx).await?;
+                crate::ensure_schema_generation(&session, &cx, 1).await?;
                 apply_batch(
                     &session,
                     &cx,
@@ -420,7 +439,7 @@ mod tests {
                 let identity =
                     ProjectionIdentity::new(INC, HEAD, 7, 1, 1, BuildIdentity::current());
                 let session = ProjectionSession::open_memory(identity)?;
-                session.install_schema(&cx).await?;
+                crate::ensure_schema_generation(&session, &cx, 1).await?;
                 apply_batch(&session, &cx, &[record(1, "d1"), record(2, "d2")]).await?;
                 for (sql, expected_field) in [
                     ("UPDATE fgit_projection_watermark SET source_incarnation = 'foreign'", "source_incarnation"),

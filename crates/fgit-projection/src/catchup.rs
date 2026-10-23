@@ -186,7 +186,7 @@ mod tests {
             rt.block_on(async {
                 let cx = &cx;
                 let session = ProjectionSession::open_memory(identity())?;
-                session.install_schema(cx).await?;
+                crate::ensure_schema_generation(&session, cx, 1).await?;
 
                 let foreign_head = DecisionRecord {
                     authority_head: "head-evil".to_owned(),
@@ -223,13 +223,13 @@ mod tests {
                 ));
 
                 // Nothing from the refused records persisted.
-                assert_eq!(
-                    session
-                        .load_watermark_row(cx)
-                        .await?
-                        .map(|row| row.last_position),
-                    None
-                );
+                let installed = session
+                    .load_watermark_row(cx)
+                    .await?
+                    .expect("installed binding");
+                assert_eq!(installed.source_incarnation, "inc-test");
+                assert_eq!(installed.authority_head, "head-test");
+                assert_eq!(installed.last_position, None);
 
                 // The honestly-bound record still folds.
                 let report = apply_batch(&session, cx, &[record(1, "d1")]).await?;
@@ -253,7 +253,7 @@ mod tests {
             rt.block_on(async {
                 let cx = &cx;
                 let session = ProjectionSession::open_memory(identity())?;
-                session.install_schema(cx).await?;
+                crate::ensure_schema_generation(&session, cx, 1).await?;
                 apply_batch(&session, cx, &[record(1, "d1")]).await?;
 
                 // A later binary claiming a different identity over the same
