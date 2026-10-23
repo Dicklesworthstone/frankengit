@@ -34,6 +34,28 @@ SCOPES = {"full": "read,receive,lfs-read,lfs-write", "git": "read,receive",
           "read": "lfs-read", "write": "lfs-write"}
 
 
+def basic_environment(commands: LoggedCommands, token: str) -> dict[str, str]:
+    # Exercise the same credential-helper path used by stock Git and git-lfs
+    # action requests. Generated tokens stay out of argv and persistent config.
+    env = commands.env.copy()
+    env["FGIT_LFS_CAMPAIGN_TOKEN"] = token
+    helper = ('!f() { if test "$1" = get; then '
+              'printf "%s\\n" username=git; '
+              'printf "password=%s\\n" "$FGIT_LFS_CAMPAIGN_TOKEN"; fi; }; f')
+    config = [("credential.helper", ""), ("credential.helper", helper),
+              ("credential.useHttpPath", "true"), ("protocol.version", "2"),
+              ("http.proxy", "")]
+    env["GIT_CONFIG_COUNT"] = str(len(config))
+    for index, (name, value) in enumerate(config):
+        env[f"GIT_CONFIG_KEY_{index}"] = name
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
+def basic_git(commands: LoggedCommands, token: str, *args: str) -> str:
+    return commands.run([commands.git, *args], env=basic_environment(commands, token))
+
+
 def object_id(data: bytes) -> dict:
     return {"oid": hashlib.sha256(data).hexdigest(), "size": len(data)}
 
@@ -42,7 +64,8 @@ def exchange(url: str, method: str, token: str | None, data: bytes | None = None
              *, media: str = MEDIA, headers: dict | None = None) -> tuple[int, bytes]:
     endpoint = urllib.parse.urlsplit(url)
     require(endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1"
-            and not endpoint.username and not endpoint.password, "non-local or credential-bearing action URL")
+            and not endpoint.username and not endpoint.password and not endpoint.fragment,
+            "non-local, credential-bearing or fragmented action URL")
     request_headers = {"Connection": "close", "Accept": MEDIA}
     if data is not None:
         request_headers["Content-Type"] = media
@@ -51,7 +74,10 @@ def exchange(url: str, method: str, token: str | None, data: bytes | None = None
     request_headers.update(headers or {})
     connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=30)
     try:
-        connection.request(method, endpoint.path, body=data, headers=request_headers)
+        target = endpoint.path or "/"
+        if endpoint.query:
+            target += "?" + endpoint.query
+        connection.request(method, target, body=data, headers=request_headers)
         response = connection.getresponse()
         body = response.read(MAX_REPLY + 1)
         require(len(body) <= MAX_REPLY, "LFS response exceeded the campaign bound")
@@ -241,7 +267,7 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> dict:
 
     with server(fg, commands, root, table, "upload", lfs=True, receive=True) as url:
         commands.local_git("-C", str(source), "remote", "add", "origin", url)
-        commands.remote_git(tokens["full"], 2, "-C", str(source), "push", "origin", "HEAD:refs/heads/main")
+        basic_git(commands, tokens["full"], "-C", str(source), "push", "origin", "HEAD:refs/heads/main")
         require("actions" not in batch(url, tokens["write"], "upload", [known])["objects"][0],
                 "stock pre-push hook did not upload the tracked object")
         verify_transfer_edges(url, tokens, known, payload)
@@ -256,18 +282,30 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> dict:
     # not the original client cache. LFS writes do not require Git receive.
     with server(fg, commands, root, table, "restart", lfs=True, receive=False) as url:
         clone = root / "clone"
-        commands.remote_git(tokens["full"], 2, "clone", "--no-checkout", "--branch", "main", url, str(clone))
+        basic_git(commands, tokens["full"], "clone", "--no-checkout", "--branch", "main", url, str(clone))
         commands.local_git("-C", str(clone), "lfs", "install", "--local")
         skip_smudge = commands.env.copy()
         skip_smudge["GIT_LFS_SKIP_SMUDGE"] = "1"
         commands.run([git, "-C", str(clone), "checkout", "--force", "main"], env=skip_smudge)
-        commands.remote_git(tokens["full"], 2, "-C", str(clone), "lfs", "pull", "origin", "main")
+        basic_git(commands, tokens["full"], "-C", str(clone), "lfs", "pull", "origin", "main")
         require((clone / "asset.bin").read_bytes() == payload, "restarted clone/pull changed binary content")
         require(commands.local_git("-C", str(clone), "rev-parse", "HEAD") == tip, "clone changed Git identity")
         require(commands.local_git("-C", str(clone), "show", "HEAD:asset.bin") == pointer,
                 "server rewrote the native Git pointer")
         commands.local_git("-C", str(clone), "lfs", "fsck")
         commands.local_git("-C", str(clone), "fsck", "--strict")
+        before = basic_git(commands, tokens["full"], "ls-remote", "--refs", url)
+        require(f"{tip}\trefs/heads/main" in before.splitlines(),
+                "readable Git refs did not retain the accepted publication")
+        require(exchange(url + "/info/refs?service=git-receive-pack", "GET", tokens["full"])[0] == 403,
+                "disabled receive-pack still advertised Git write authority")
+        with commands.start([git, "-C", str(clone), "push", "origin",
+                             "HEAD:refs/heads/lfs-disabled-probe"],
+                            env=basic_environment(commands, tokens["full"])) as refused:
+            refused.finish(check=False)
+            require(refused.process.returncode != 0, "disabled Git receive accepted a stock push")
+        require(basic_git(commands, tokens["full"], "ls-remote", "--refs", url) == before,
+                "refused Git push changed canonical refs")
         extra = b"artifact custody independent of receive-pack"
         item = object_id(extra)
         put = action(url, batch(url, tokens["write"], "upload", [item])["objects"][0], "upload")
@@ -279,7 +317,7 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> dict:
         require(exchange(f"{url}/info/lfs/objects/{known['oid']}/{known['size']}", "GET", tokens["full"])[0] == 403,
                 "default-disabled service disclosed retained LFS content")
     return {"type": "lfs_roundtrip_passed", "format": fmt, "tip": tip, "lfs_object": known,
-            "checks": ["stock-lfs-push", "durable-restart-clone-pull", "pointer-and-binary-identity",
+            "checks": ["stock-lfs-push", "basic-credential-helper", "durable-restart-clone-pull", "pointer-and-binary-identity",
                        "independent-scopes", "revocation", "per-object-missing", "digest-and-size-refusal",
                        "interrupted-upload-retry", "idempotent-upload", "verify", "foreign-repository",
                        "unsupported-transfer-and-hash", "bounded-object-size", "untrusted-host",

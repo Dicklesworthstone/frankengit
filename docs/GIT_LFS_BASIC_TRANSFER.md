@@ -138,8 +138,11 @@ python3 scripts/e2e/lfs_roundtrip.py --fg /absolute/path/to/fg \
   --artifact-dir /absolute/path/to/new-lfs-evidence-directory
 ```
 
-It exercises actual Git LFS pre-push, pointer identity, restart, clone, pull,
-credential revocation, retry, and independent service enablement for both Git
-object formats. The campaign records client versions and the binary digest.
+It exercises actual Git LFS pre-push, pointer identity, restart, clone, and pull
+using a transient Basic credential helper, with separate Bearer API checks for
+credential revocation and retry. With Git receive disabled, it requires a stock
+push to fail without changing canonical refs while an LFS upload still succeeds.
+Both Git object formats are covered. The campaign records client versions and
+the binary digest.
 Its output is installed-client interoperability evidence, not a pinned-client
 differential campaign or proof of the full FG-053 scope.
