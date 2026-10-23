@@ -19,6 +19,52 @@ use crate::{
     PermittedObjectClosure, ProjectionFailure, ValidatedClosure, permitted_object_closure_root,
 };
 
+/// Bounded native metadata at an independently admitted object frontier.
+/// This does not claim the payload was read, hashed or scrubbed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalObjectHeader {
+    pub id: GitOid,
+    pub object_type: ObjectType,
+    pub body_bytes: usize,
+}
+
+/// Optional metadata lookup for reused objects only. Implementations must
+/// retain exact-key, disclosure, size and cancellation checks. `None` keeps
+/// ordinary full-body loading and accounting. New/candidate objects are never
+/// validated through this interface; pack emission never uses it either.
+pub trait FrontierObjectHeaders {
+    fn load_header(&self, id: &GitOid) -> Result<Option<CanonicalObjectHeader>, PackWriteError>;
+}
+
+/// An authenticated selected set with an optional bounded metadata provider.
+/// The caller still owns source authorization: this container grants none.
+/// Passing an ordinary `&BTreeSet` retains all historical full-read semantics.
+#[derive(Clone, Copy)]
+pub struct ObjectFrontier<'a> {
+    objects: &'a BTreeSet<GitOid>,
+    headers: Option<&'a dyn FrontierObjectHeaders>,
+}
+impl<'a> ObjectFrontier<'a> {
+    #[must_use]
+    pub fn with_headers(
+        objects: &'a BTreeSet<GitOid>,
+        headers: &'a dyn FrontierObjectHeaders,
+    ) -> Self {
+        Self {
+            objects,
+            headers: Some(headers),
+        }
+    }
+}
+impl<'a> From<&'a BTreeSet<GitOid>> for ObjectFrontier<'a> {
+    fn from(objects: &'a BTreeSet<GitOid>) -> Self {
+        Self {
+            objects,
+            headers: None,
+        }
+    }
+}
+
 /// Independent object/work ceilings. A caller also supplies its live deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MergeObjectLimits {
@@ -163,14 +209,15 @@ pub fn validate_workspace_objects(
 /// The caller owns selection and disclosure: its source must authorize every
 /// original read from the intended visible parent, not merely local storage.
 /// This validator neither stages objects nor publishes or authorizes a change.
-pub fn validate_workspace_objects_above(
+pub fn validate_workspace_objects_above<'a>(
     source: &impl CanonicalObjectSource,
     candidate: GitOid,
     expected_parent: GitOid,
-    selected: &BTreeSet<GitOid>,
+    selected: impl Into<ObjectFrontier<'a>>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
+    let selected = selected.into();
     if candidate.is_zero()
         || expected_parent.is_zero()
         || expected_parent.algorithm() != candidate.algorithm()
@@ -179,7 +226,7 @@ pub fn validate_workspace_objects_above(
         return Err(invalid());
     }
     checkpoint(deadline)?;
-    if !selected.contains(&expected_parent) {
+    if !selected.objects.contains(&expected_parent) {
         return Err(ProjectionFailure::Refuse(
             RefusalCode::ObjectClosureIncomplete,
         ));
@@ -224,13 +271,14 @@ pub fn validate_commit_closure(
 /// map. The result names the objects this merge adds plus the four commits
 /// admission requires; the serving closure, a union over every decision, is
 /// unchanged by the objects that were already selected.
-pub fn validate_merge_objects_above(
+pub fn validate_merge_objects_above<'a>(
     source: &impl CanonicalObjectSource,
     merge: &NativeMerge,
-    selected: &BTreeSet<GitOid>,
+    selected: impl Into<ObjectFrontier<'a>>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
+    let selected = selected.into();
     merge.validate().map_err(|_| invalid())?;
     validate_candidate_objects(
         source,
@@ -248,13 +296,14 @@ pub fn validate_merge_objects_above(
 /// [`validate_fast_forward_objects`] above the selected closure: the candidate
 /// is the already-selected source tip, so the result names no new object, only
 /// the source and target tips. See [`validate_merge_objects_above`].
-pub fn validate_fast_forward_objects_above(
+pub fn validate_fast_forward_objects_above<'a>(
     source: &impl CanonicalObjectSource,
     merge: &NativeMerge,
-    selected: &BTreeSet<GitOid>,
+    selected: impl Into<ObjectFrontier<'a>>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
+    let selected = selected.into();
     merge.validate().map_err(|_| invalid())?;
     if merge.merge_commit != merge.source_tip || merge.base_tip != merge.target_tip_before {
         return Err(invalid());
@@ -274,13 +323,14 @@ pub fn validate_fast_forward_objects_above(
 
 /// [`validate_squash_objects`] above the selected closure. See
 /// [`validate_merge_objects_above`].
-pub fn validate_squash_objects_above(
+pub fn validate_squash_objects_above<'a>(
     source: &impl CanonicalObjectSource,
     merge: &NativeMerge,
-    selected: &BTreeSet<GitOid>,
+    selected: impl Into<ObjectFrontier<'a>>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
+    let selected = selected.into();
     merge.validate().map_err(|_| invalid())?;
     if merge.source_tip == merge.target_tip_before {
         return Err(invalid());
@@ -312,7 +362,7 @@ fn validate_candidate_objects(
     candidate: GitOid,
     expected_parents: Option<&[GitOid]>,
     ancestry: AncestryRequirement,
-    frontier: Option<&BTreeSet<GitOid>>,
+    frontier: Option<ObjectFrontier<'_>>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
@@ -390,6 +440,29 @@ fn validate_candidate_objects(
 
     while let Some(id) = pending.pop_first() {
         checkpoint(deadline)?;
+        let reused =
+            id != candidate && frontier.is_some_and(|selected| selected.objects.contains(&id));
+        // A selected immutable frontier has already been admitted. Its metadata
+        // must match this edge, but undisclosed payloads are not a new closure
+        // or scrub obligation. Candidates and unselected objects NEVER enter
+        // this branch. Sources lacking bounded headers retain the old full-read
+        // path and byte accounting below.
+        if reused {
+            let header = match frontier.and_then(|selected| selected.headers) {
+                Some(headers) => headers.load_header(&id).map_err(source_failure)?,
+                None => None,
+            };
+            checkpoint(deadline)?;
+            if let Some(header) = header {
+                if header.id != id || required.get(&id) != Some(&header.object_type) {
+                    return Err(invalid());
+                }
+                if header.body_bytes > limits.max_object_bytes {
+                    return Err(budget());
+                }
+                continue;
+            }
+        }
         let object = source.load(&id).map_err(source_failure)?;
         checkpoint(deadline)?;
         if object.id() != id || required.get(&id) != Some(&object.object_type()) {
@@ -404,7 +477,7 @@ fn validate_candidate_objects(
             .ok_or_else(budget)?;
         // An already-selected object other than the candidate was verified when
         // it was admitted. Its kind is checked above; it adds nothing here.
-        if id != candidate && frontier.is_some_and(|selected| selected.contains(&id)) {
+        if reused {
             continue;
         }
         let profile = if id == candidate && expected_parents.is_some() {
@@ -508,7 +581,7 @@ fn validate_candidate_objects(
             candidate,
             expected_parents,
             &parents,
-            selected,
+            selected.objects,
             limits,
             deadline,
         )?;
