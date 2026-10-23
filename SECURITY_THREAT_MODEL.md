@@ -298,6 +298,18 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - obligations for replication/archive/repair debt;
 - independent archive profiles for high-value data.
 
+The native import syscall-stage suite plants real process death before selected
+immutable placement operations and before the completed response. Successful
+twins and cold authenticated head/ref witnesses distinguish unselected staging
+residue from committed authority; identical-key recovery must preserve the
+original terminal result and avoid another head transition. Exact tracer
+identity and real ptrace/ordinal controls bound applicability. Separate owned
+process groups are checkpointed immediately and killed/reaped on deadline or
+termination; unresolved containment remains a failure with the PID retained.
+This test-only strace lane does not simulate power loss or all SQLite/CAS stages,
+and its Python physical payload checks do not independently authenticate full
+object envelopes (`VERIFY_SPEC.md` §12).
+
 ### 7.4 Materialization and TreeFS attacks
 
 **Threats**

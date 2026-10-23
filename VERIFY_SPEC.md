@@ -392,6 +392,40 @@ For each backend/profile:
 - request throttling/cancellation/obligation closure;
 - listing unavailable/incomplete without correctness loss.
 
+`scripts/e2e/suites/storage/import_stage_kill.sh` runs a qualified prebuilt
+`FG_BIN` with its explicit `FG_IMPORT_STAGE_SOURCE_CUT` on Linux. Registered
+test-only strace observes and kills exact body-write, body-sync, immutable-link,
+directory-fence, stage-cleanup and final-response syscalls. Both native hash
+formats require successful twins, exact cold refs and authenticated head/decision
+witnesses, every physical payload/native identity, and stable same-key recovery.
+Real ordinal controls refuse unsupported tracer/path-filter semantics. Raw
+commands, PID ownership, traces, output hashes and owned staging residue remain
+under the artifact root, including failures. The 840-second internal workload
+deadline leaves cleanup time before the unchanged 900-second outer guard.
+`scripts/tests/import_stage_kill_test.py` tests the harness parser and actual
+timeout/reaping paths; these controls are separate from native product evidence.
+This six-stage campaign does not cover every CAS/SQLite publication boundary,
+power loss, independent full-envelope verification, or the import throughput
+target. Original `frankengit-pc9g` acceptance remains open until those required
+observables are independently established at the claimed source/profile.
+
+The qualified invocation is:
+
+```bash
+FG_BIN="$qualified_fg" \
+FG_IMPORT_STAGE_SOURCE_CUT="$qualified_fg_source_commit" \
+  scripts/e2e/run_all.sh scripts/e2e/suites/storage/import_stage_kill.sh
+```
+
+Bind both variables to the same actual build evidence before running; the source
+commit is exactly 40 lowercase hex digits. The suite cannot infer a prebuilt
+binary's provenance from the current checkout. `verify.sh` currently supplies
+the binary paths without deriving this source identity, so a caller selecting
+this discovered suite must also export the qualified source cut. Missing
+provenance remains an explicit non-pass (`IMPORT-STAGE-001`), never a guessed
+revision or a skipped green lane. Automatic qualification belongs to the owning
+verification command and must preserve its existing gates.
+
 ## 13. ATP-Git verification
 
 ### 13.1 Semantic parity
