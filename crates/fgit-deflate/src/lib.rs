@@ -1701,16 +1701,18 @@ struct MatchIndex {
 }
 
 impl MatchIndex {
-    fn new(history: &VecDeque<u8>, block: &[u8]) -> Result<Self, DeflateRefusal> {
-        let total = history
-            .len()
-            .checked_add(block.len())
-            .ok_or(DeflateRefusal::InvalidProfile)?;
+    /// Indexes the history part of `bytes`, which is the retained history
+    /// followed by the block: `history_len` bytes, then the block.
+    fn new(bytes: &[u8], history_len: usize) -> Result<Self, DeflateRefusal> {
+        if history_len > bytes.len() {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
         let mut heads = Vec::new();
         heads.try_reserve_exact(MATCH_HASH_ENTRIES).map_err(|_| {
             deflate_resource_limit(Resource::Allocation, MATCH_HASH_ENTRIES, MATCH_HASH_ENTRIES)
         })?;
         heads.resize(MATCH_HASH_ENTRIES, MATCH_INDEX_NONE);
+        let total = bytes.len();
         let mut previous = Vec::new();
         previous
             .try_reserve_exact(total)
@@ -1719,10 +1721,10 @@ impl MatchIndex {
         let mut index = Self {
             heads,
             previous,
-            history_len: history.len(),
+            history_len,
         };
-        for position in 0..history.len() {
-            index.record(position, history, block)?;
+        for position in 0..history_len {
+            index.record(position, bytes)?;
         }
         Ok(index)
     }
@@ -1731,31 +1733,29 @@ impl MatchIndex {
         &mut self,
         block_position: usize,
         length: usize,
-        history: &VecDeque<u8>,
-        block: &[u8],
+        bytes: &[u8],
     ) -> Result<(), DeflateRefusal> {
-        let end = block_position
+        let start = self
+            .history_len
+            .checked_add(block_position)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        let end = start
             .checked_add(length)
             .ok_or(DeflateRefusal::InvalidProfile)?;
-        if end > block.len() {
+        if end > bytes.len() {
             return Err(DeflateRefusal::InvalidProfile);
         }
-        for position in block_position..end {
-            let virtual_position = self
-                .history_len
-                .checked_add(position)
-                .ok_or(DeflateRefusal::InvalidProfile)?;
-            self.record(virtual_position, history, block)?;
+        for position in start..end {
+            self.record(position, bytes)?;
         }
         Ok(())
     }
 
-    fn candidate_for(&self, block_position: usize, history: &VecDeque<u8>, block: &[u8]) -> usize {
-        let virtual_position = match self.history_len.checked_add(block_position) {
-            Some(position) => position,
-            None => return MATCH_INDEX_NONE,
+    fn candidate_for(&self, block_position: usize, bytes: &[u8]) -> usize {
+        let Some(position) = self.history_len.checked_add(block_position) else {
+            return MATCH_INDEX_NONE;
         };
-        let Some(hash) = triple_hash(virtual_position, history, block) else {
+        let Some(hash) = triple_hash(position, bytes) else {
             return MATCH_INDEX_NONE;
         };
         self.heads.get(hash).copied().unwrap_or(MATCH_INDEX_NONE)
@@ -1768,13 +1768,8 @@ impl MatchIndex {
             .unwrap_or(MATCH_INDEX_NONE)
     }
 
-    fn record(
-        &mut self,
-        virtual_position: usize,
-        history: &VecDeque<u8>,
-        block: &[u8],
-    ) -> Result<(), DeflateRefusal> {
-        let Some(hash) = triple_hash(virtual_position, history, block) else {
+    fn record(&mut self, position: usize, bytes: &[u8]) -> Result<(), DeflateRefusal> {
+        let Some(hash) = triple_hash(position, bytes) else {
             return Ok(());
         };
         let head = self
@@ -1783,32 +1778,45 @@ impl MatchIndex {
             .ok_or(DeflateRefusal::InvalidProfile)?;
         let previous = self
             .previous
-            .get_mut(virtual_position)
+            .get_mut(position)
             .ok_or(DeflateRefusal::InvalidProfile)?;
         *previous = *head;
-        *head = virtual_position;
+        *head = position;
         Ok(())
     }
 }
 
-fn triple_hash(position: usize, history: &VecDeque<u8>, block: &[u8]) -> Option<usize> {
-    let first = virtual_byte(position, history, block)?;
-    let second = virtual_byte(position.checked_add(1)?, history, block)?;
-    let third = virtual_byte(position.checked_add(2)?, history, block)?;
-    let hash = usize::from(first)
+/// Hash of the three bytes at `position`, or `None` past the last triple.
+fn triple_hash(position: usize, bytes: &[u8]) -> Option<usize> {
+    let triple = bytes.get(position..position.checked_add(3)?)?;
+    let hash = usize::from(triple[0])
         .wrapping_mul(251)
-        .wrapping_add(usize::from(second))
+        .wrapping_add(usize::from(triple[1]))
         .wrapping_mul(251)
-        .wrapping_add(usize::from(third));
+        .wrapping_add(usize::from(triple[2]));
     Some(hash & (MATCH_HASH_ENTRIES - 1))
 }
 
-fn virtual_byte(position: usize, history: &VecDeque<u8>, block: &[u8]) -> Option<u8> {
-    if position < history.len() {
-        history.get(position).copied()
-    } else {
-        block.get(position.checked_sub(history.len())?).copied()
+/// Length of the common prefix of `left` and `right`, compared a word at a
+/// time.
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    let limit = left.len().min(right.len());
+    let (left, right) = (&left[..limit], &right[..limit]);
+    let mut matched = 0_usize;
+    for (left_word, right_word) in left.chunks_exact(8).zip(right.chunks_exact(8)) {
+        let difference = u64::from_le_bytes(left_word.try_into().unwrap_or([0; 8]))
+            ^ u64::from_le_bytes(right_word.try_into().unwrap_or([0; 8]));
+        if difference != 0 {
+            return matched + (difference.trailing_zeros() / 8) as usize;
+        }
+        matched += 8;
     }
+    matched
+        + left[matched..]
+            .iter()
+            .zip(&right[matched..])
+            .take_while(|(left_byte, right_byte)| left_byte == right_byte)
+            .count()
 }
 
 /// A bounded, deterministic streaming RFC 1950/RFC 1951 member encoder.
@@ -1824,7 +1832,11 @@ pub struct Deflater {
     profile: DeflateProfile,
     state: DeflateState,
     pending_input: Vec<u8>,
-    history: VecDeque<u8>,
+    /// The last `window_bytes` encoded bytes, oldest first.
+    history: Vec<u8>,
+    /// The retained history followed by the block being encoded, rebuilt for
+    /// each block so matching reads one slice (frankengit-g4a9).
+    match_bytes: Vec<u8>,
     accepted_input_bytes: usize,
     output_bytes: usize,
     work_units: u64,
@@ -1865,7 +1877,8 @@ impl Deflater {
             profile,
             state: DeflateState::Active,
             pending_input: Vec::new(),
-            history: VecDeque::new(),
+            history: Vec::new(),
+            match_bytes: Vec::new(),
             accepted_input_bytes: 0,
             output_bytes: 0,
             work_units: 0,
@@ -2022,9 +2035,7 @@ impl Deflater {
             self.charge_work_units(control, take)?;
             self.reserve_pending_input(take)?;
             self.pending_input.extend_from_slice(accepted_chunk);
-            for &byte in accepted_chunk {
-                self.adler32.update(byte);
-            }
+            self.adler32.update_slice(accepted_chunk);
             remaining = &remaining[take..];
 
             while self.pending_input.len() >= self.profile.block_bytes {
@@ -2107,49 +2118,52 @@ impl Deflater {
         let reserved = tokens.try_reserve(block.len()).map_err(|_| {
             deflate_resource_limit(Resource::Allocation, self.profile.block_bytes, block.len())
         });
-        let result = reserved.and_then(|()| {
-            // Header and end-of-block code, then each decision.
-            let mut fixed_bits = 3_u64 + u64::from(FIXED_SYMBOL_CODES[256].1);
-            let mut matcher = MatchIndex::new(&self.history, block)?;
-            let mut position = 0_usize;
-            while position < block.len() {
-                self.charge_work(control)?;
-                if let Some((length, distance)) =
-                    self.find_match(block, position, &matcher, control)?
-                {
-                    fixed_bits += fixed_match_bits(length, distance)?;
-                    tokens.push(FixedToken::Match {
-                        length: u16::try_from(length)
-                            .map_err(|_| DeflateRefusal::InvalidProfile)?,
-                        distance: u16::try_from(distance)
-                            .map_err(|_| DeflateRefusal::InvalidProfile)?,
-                    });
-                    matcher.record_emitted(position, length, &self.history, block)?;
-                    position += length;
-                } else {
-                    fixed_bits += u64::from(FIXED_SYMBOL_CODES[usize::from(block[position])].1);
-                    tokens.push(FixedToken::Literal(block[position]));
-                    matcher.record_emitted(position, 1, &self.history, block)?;
-                    position += 1;
-                }
-            }
-            let padding = (8 - (u64::from(self.writer.used_bits) + 3) % 8) % 8;
-            let stored_bits = 3 + padding + 32 + 8 * block.len() as u64;
-            if stored_bits < fixed_bits {
-                return self.encode_stored_block(block, final_block);
-            }
-            self.write_bits(u16::from(final_block), 1)?;
-            self.write_bits(1, 2)?;
-            for &token in &tokens {
-                match token {
-                    FixedToken::Literal(byte) => self.write_fixed_symbol(u16::from(byte))?,
-                    FixedToken::Match { length, distance } => {
-                        self.write_fixed_match(usize::from(length), usize::from(distance))?;
+        let mut bytes = std::mem::take(&mut self.match_bytes);
+        let result = reserved
+            .and_then(|()| self.load_match_bytes(&mut bytes, block))
+            .and_then(|history_len| {
+                // Header and end-of-block code, then each decision.
+                let mut fixed_bits = 3_u64 + u64::from(FIXED_SYMBOL_CODES[256].1);
+                let mut matcher = MatchIndex::new(&bytes, history_len)?;
+                let mut position = 0_usize;
+                while position < block.len() {
+                    if let Some((length, distance)) =
+                        self.find_match(&bytes, history_len, position, &matcher, control)?
+                    {
+                        fixed_bits += fixed_match_bits(length, distance)?;
+                        tokens.push(FixedToken::Match {
+                            length: u16::try_from(length)
+                                .map_err(|_| DeflateRefusal::InvalidProfile)?,
+                            distance: u16::try_from(distance)
+                                .map_err(|_| DeflateRefusal::InvalidProfile)?,
+                        });
+                        matcher.record_emitted(position, length, &bytes)?;
+                        position += length;
+                    } else {
+                        fixed_bits += u64::from(FIXED_SYMBOL_CODES[usize::from(block[position])].1);
+                        tokens.push(FixedToken::Literal(block[position]));
+                        matcher.record_emitted(position, 1, &bytes)?;
+                        position += 1;
                     }
                 }
-            }
-            self.write_fixed_symbol(256)
-        });
+                let padding = (8 - (u64::from(self.writer.used_bits) + 3) % 8) % 8;
+                let stored_bits = 3 + padding + 32 + 8 * block.len() as u64;
+                if stored_bits < fixed_bits {
+                    return self.encode_stored_block(block, final_block);
+                }
+                self.write_bits(u16::from(final_block), 1)?;
+                self.write_bits(1, 2)?;
+                for &token in &tokens {
+                    match token {
+                        FixedToken::Literal(byte) => self.write_fixed_symbol(u16::from(byte))?,
+                        FixedToken::Match { length, distance } => {
+                            self.write_fixed_match(usize::from(length), usize::from(distance))?;
+                        }
+                    }
+                }
+                self.write_fixed_symbol(256)
+            });
+        self.match_bytes = bytes;
         self.fixed_tokens = tokens;
         result
     }
@@ -2176,21 +2190,46 @@ impl Deflater {
     ) -> Result<(), DeflateRefusal> {
         self.write_bits(u16::from(final_block), 1)?;
         self.write_bits(1, 2)?;
-        let mut matcher = MatchIndex::new(&self.history, block)?;
-        let mut position = 0_usize;
-        while position < block.len() {
-            self.charge_work(control)?;
-            if let Some((length, distance)) = self.find_match(block, position, &matcher, control)? {
-                self.write_fixed_match(length, distance)?;
-                matcher.record_emitted(position, length, &self.history, block)?;
-                position += length;
-            } else {
-                self.write_fixed_symbol(u16::from(block[position]))?;
-                matcher.record_emitted(position, 1, &self.history, block)?;
-                position += 1;
-            }
-        }
-        self.write_fixed_symbol(256)
+        let mut bytes = std::mem::take(&mut self.match_bytes);
+        let result = self
+            .load_match_bytes(&mut bytes, block)
+            .and_then(|history_len| {
+                let mut matcher = MatchIndex::new(&bytes, history_len)?;
+                let mut position = 0_usize;
+                while position < block.len() {
+                    if let Some((length, distance)) =
+                        self.find_match(&bytes, history_len, position, &matcher, control)?
+                    {
+                        self.write_fixed_match(length, distance)?;
+                        matcher.record_emitted(position, length, &bytes)?;
+                        position += length;
+                    } else {
+                        self.write_fixed_symbol(u16::from(block[position]))?;
+                        matcher.record_emitted(position, 1, &bytes)?;
+                        position += 1;
+                    }
+                }
+                self.write_fixed_symbol(256)
+            });
+        self.match_bytes = bytes;
+        result
+    }
+
+    /// Fills `bytes` with the retained history followed by `block` and returns
+    /// the history length.
+    fn load_match_bytes(&self, bytes: &mut Vec<u8>, block: &[u8]) -> Result<usize, DeflateRefusal> {
+        let total = self
+            .history
+            .len()
+            .checked_add(block.len())
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        bytes.clear();
+        bytes
+            .try_reserve(total)
+            .map_err(|_| deflate_resource_limit(Resource::Allocation, total, total))?;
+        bytes.extend_from_slice(&self.history);
+        bytes.extend_from_slice(block);
+        Ok(self.history.len())
     }
 
     fn encode_dynamic_block(
@@ -2254,48 +2293,64 @@ impl Deflater {
         self.write_codebook_symbol(&literal_codebook, 256)
     }
 
+    /// The longest match at `position`, charging the decision's work: one
+    /// unit for the decision, one per chain candidate, and one per byte the
+    /// byte-by-byte extension compared after the first (each matching byte and
+    /// the mismatch that stopped it). The units are summed and charged once,
+    /// before every return, through the exact bulk charge, so the counter and
+    /// any refusal are what single charges would produce (frankengit-g4a9).
     fn find_match(
         &mut self,
-        block: &[u8],
+        bytes: &[u8],
+        history_len: usize,
         position: usize,
         matcher: &MatchIndex,
         control: &mut impl CancellationProbe,
     ) -> Result<Option<(usize, usize)>, DeflateRefusal> {
-        if self.profile.max_match_chain == 0 || position + 3 > block.len() {
+        let mut units = 1_usize;
+        let found = self.search_match(bytes, history_len, position, matcher, &mut units);
+        self.charge_units_exactly(control, units)?;
+        found
+    }
+
+    fn search_match(
+        &self,
+        bytes: &[u8],
+        history_len: usize,
+        position: usize,
+        matcher: &MatchIndex,
+        units: &mut usize,
+    ) -> Result<Option<(usize, usize)>, DeflateRefusal> {
+        let block_len = bytes
+            .len()
+            .checked_sub(history_len)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        if self.profile.max_match_chain == 0 || position + 3 > block_len {
             return Ok(None);
         }
-        let available = self.history.len().saturating_add(position);
-        let current = available;
-        let max_length = (block.len() - position).min(258);
+        let current = history_len.saturating_add(position);
+        let max_length = (block_len - position).min(258);
         let mut best = None;
-        let mut candidate = matcher.candidate_for(position, &self.history, block);
+        let mut candidate = matcher.candidate_for(position, bytes);
         let mut candidates_seen = 0_usize;
         while candidate != MATCH_INDEX_NONE && candidates_seen < self.profile.max_match_chain {
-            self.charge_work(control)?;
+            *units += 1;
             if candidate >= current {
                 return Err(DeflateRefusal::InvalidProfile);
             }
             let distance = current - candidate;
-            if distance > self.profile.window_bytes {
+            if distance > self.profile.window_bytes || bytes[candidate] != bytes[current] {
                 candidate = matcher.previous_candidate(candidate);
                 candidates_seen += 1;
                 continue;
             }
-            if self.match_source_byte(block, position, distance, 0) != Some(block[position]) {
-                candidate = matcher.previous_candidate(candidate);
-                candidates_seen += 1;
-                continue;
-            }
-            let mut length = 1_usize;
-            while length < max_length {
-                self.charge_work(control)?;
-                if self.match_source_byte(block, position, distance, length)
-                    != Some(block[position + length])
-                {
-                    break;
-                }
-                length += 1;
-            }
+            // The source may overlap the target, as an LZ77 copy does; both
+            // are bytes already in the buffer.
+            let length = 1 + common_prefix_len(
+                &bytes[candidate + 1..],
+                &bytes[current + 1..current + max_length],
+            );
+            *units += length - 1 + usize::from(length < max_length);
             if length >= 3 && best.is_none_or(|(best_length, _)| length > best_length) {
                 best = Some((length, distance));
                 if length == max_length {
@@ -2306,26 +2361,6 @@ impl Deflater {
             candidates_seen += 1;
         }
         Ok(best)
-    }
-
-    fn match_source_byte(
-        &self,
-        block: &[u8],
-        position: usize,
-        distance: usize,
-        offset: usize,
-    ) -> Option<u8> {
-        let source = self
-            .history
-            .len()
-            .checked_add(position)?
-            .checked_add(offset)?
-            .checked_sub(distance)?;
-        if source < self.history.len() {
-            self.history.get(source).copied()
-        } else {
-            block.get(source - self.history.len()).copied()
-        }
     }
 
     fn write_fixed_match(&mut self, length: usize, distance: usize) -> Result<(), DeflateRefusal> {
@@ -2383,11 +2418,15 @@ impl Deflater {
                 self.profile.window_bytes,
             )
         })?;
-        for &byte in block {
-            if self.history.len() == self.profile.window_bytes {
-                let _ = self.history.pop_front();
-            }
-            self.history.push_back(byte);
+        let window = self.profile.window_bytes;
+        if block.len() >= window {
+            self.history.clear();
+            self.history
+                .extend_from_slice(&block[block.len() - window..]);
+        } else {
+            let excess = (self.history.len() + block.len()).saturating_sub(window);
+            self.history.drain(..excess);
+            self.history.extend_from_slice(block);
         }
         Ok(())
     }
@@ -2508,6 +2547,39 @@ impl Deflater {
         Ok(())
     }
 
+    /// Charges `units` single units at once, refusing exactly where the first
+    /// unit over the ceiling would have: `observed` is the ceiling plus one and
+    /// the counter stops at the ceiling (frankengit-g4a9).
+    fn charge_units_exactly(
+        &mut self,
+        control: &mut impl CancellationProbe,
+        units: usize,
+    ) -> Result<(), DeflateRefusal> {
+        if units == 0 {
+            return Ok(());
+        }
+        let units = u64::try_from(units).unwrap_or(u64::MAX);
+        if self.probe_countdown < units {
+            if control.is_cancelled() {
+                return Err(DeflateRefusal::Cancelled);
+            }
+            self.probe_countdown = DEFLATE_CANCELLATION_PROBE_UNITS;
+        } else {
+            self.probe_countdown -= units;
+        }
+        let observed = self.work_units.saturating_add(units);
+        if observed > self.limits.max_work_units {
+            self.work_units = self.limits.max_work_units;
+            return Err(DeflateRefusal::ResourceLimit {
+                resource: Resource::WorkUnits,
+                limit: self.limits.max_work_units,
+                observed: self.limits.max_work_units.saturating_add(1),
+            });
+        }
+        self.work_units = observed;
+        Ok(())
+    }
+
     fn refuse(&mut self) {
         self.state = DeflateState::Refused;
         self.pending_input.clear();
@@ -2550,9 +2622,36 @@ impl Adler32 {
         Self { a: 1, b: 0 }
     }
 
+    /// Bytes [`Self::update_slice`] sums before reducing: zlib's NMAX, the
+    /// largest n with 255n(n+1)/2 + (n+1)(65520) <= 2^32 - 1, so neither sum can
+    /// overflow from reduced starting values.
+    const NMAX: usize = 5_552;
+
     fn update(&mut self, byte: u8) {
-        self.a = (self.a + u32::from(byte)) % Self::MODULUS;
-        self.b = (self.b + self.a) % Self::MODULUS;
+        // Both sums start reduced and grow by less than the modulus, so one
+        // conditional subtraction is the remainder (frankengit-g4a9).
+        self.a += u32::from(byte);
+        if self.a >= Self::MODULUS {
+            self.a -= Self::MODULUS;
+        }
+        self.b += self.a;
+        if self.b >= Self::MODULUS {
+            self.b -= Self::MODULUS;
+        }
+    }
+
+    /// [`Self::update`] for each byte, reducing once per run of at most
+    /// [`Self::NMAX`] bytes.
+    fn update_slice(&mut self, bytes: &[u8]) {
+        for run in bytes.chunks(Self::NMAX) {
+            let (mut a, mut b) = (self.a, self.b);
+            for &byte in run {
+                a += u32::from(byte);
+                b += a;
+            }
+            self.a = a % Self::MODULUS;
+            self.b = b % Self::MODULUS;
+        }
     }
 
     const fn value(self) -> u32 {
@@ -2625,8 +2724,9 @@ mod tests {
 
     use super::{
         Adler32, CancellationProbe, DeflateBlockKind, DeflateLimits, DeflateProfile,
-        DeflateRefusal, DeflateStreamProgress, Deflater, InflateLimits, InflateRefusal, Inflater,
-        MatchIndex, NeverCancel, Resource, StreamProgress, deflate_zlib, inflate_zlib,
+        DeflateRefusal, DeflateStreamProgress, Deflater, FixedToken, InflateLimits, InflateRefusal,
+        Inflater, MatchIndex, NeverCancel, RFC1951_MAX_WINDOW_BYTES, Resource, StreamProgress,
+        deflate_zlib, inflate_zlib,
     };
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -3413,19 +3513,415 @@ mod tests {
         }
     }
 
+    /// The fixed-block matcher exactly as it was before frankengit-g4a9: a
+    /// ring-buffer history read byte by byte, one work unit per compared byte.
+    mod reference_matcher {
+        use std::collections::VecDeque;
+
+        use super::super::{FixedToken, MATCH_HASH_ENTRIES, MATCH_INDEX_NONE};
+
+        struct MatchIndex {
+            heads: Vec<usize>,
+            previous: Vec<usize>,
+            history_len: usize,
+        }
+
+        impl MatchIndex {
+            fn new(history: &VecDeque<u8>, block: &[u8]) -> Self {
+                let mut index = Self {
+                    heads: vec![MATCH_INDEX_NONE; MATCH_HASH_ENTRIES],
+                    previous: vec![MATCH_INDEX_NONE; history.len() + block.len()],
+                    history_len: history.len(),
+                };
+                for position in 0..history.len() {
+                    index.record(position, history, block);
+                }
+                index
+            }
+
+            fn record_emitted(
+                &mut self,
+                block_position: usize,
+                length: usize,
+                history: &VecDeque<u8>,
+                block: &[u8],
+            ) {
+                for position in block_position..block_position + length {
+                    self.record(self.history_len + position, history, block);
+                }
+            }
+
+            fn candidate_for(
+                &self,
+                block_position: usize,
+                history: &VecDeque<u8>,
+                block: &[u8],
+            ) -> usize {
+                triple_hash(self.history_len + block_position, history, block)
+                    .map_or(MATCH_INDEX_NONE, |hash| self.heads[hash])
+            }
+
+            fn record(&mut self, position: usize, history: &VecDeque<u8>, block: &[u8]) {
+                let Some(hash) = triple_hash(position, history, block) else {
+                    return;
+                };
+                self.previous[position] = self.heads[hash];
+                self.heads[hash] = position;
+            }
+        }
+
+        fn triple_hash(position: usize, history: &VecDeque<u8>, block: &[u8]) -> Option<usize> {
+            let first = virtual_byte(position, history, block)?;
+            let second = virtual_byte(position.checked_add(1)?, history, block)?;
+            let third = virtual_byte(position.checked_add(2)?, history, block)?;
+            let hash = usize::from(first)
+                .wrapping_mul(251)
+                .wrapping_add(usize::from(second))
+                .wrapping_mul(251)
+                .wrapping_add(usize::from(third));
+            Some(hash & (MATCH_HASH_ENTRIES - 1))
+        }
+
+        fn virtual_byte(position: usize, history: &VecDeque<u8>, block: &[u8]) -> Option<u8> {
+            if position < history.len() {
+                history.get(position).copied()
+            } else {
+                block.get(position.checked_sub(history.len())?).copied()
+            }
+        }
+
+        fn source_byte(
+            history: &VecDeque<u8>,
+            block: &[u8],
+            position: usize,
+            distance: usize,
+            offset: usize,
+        ) -> Option<u8> {
+            let source = (history.len() + position + offset).checked_sub(distance)?;
+            if source < history.len() {
+                history.get(source).copied()
+            } else {
+                block.get(source - history.len()).copied()
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn find_match(
+            history: &VecDeque<u8>,
+            block: &[u8],
+            position: usize,
+            matcher: &MatchIndex,
+            window_bytes: usize,
+            max_match_chain: usize,
+            units: &mut u64,
+        ) -> Option<(usize, usize)> {
+            if max_match_chain == 0 || position + 3 > block.len() {
+                return None;
+            }
+            let current = history.len() + position;
+            let max_length = (block.len() - position).min(258);
+            let mut best = None;
+            let mut candidate = matcher.candidate_for(position, history, block);
+            let mut candidates_seen = 0_usize;
+            while candidate != MATCH_INDEX_NONE && candidates_seen < max_match_chain {
+                *units += 1;
+                let distance = current - candidate;
+                if distance > window_bytes {
+                    candidate = matcher.previous[candidate];
+                    candidates_seen += 1;
+                    continue;
+                }
+                if source_byte(history, block, position, distance, 0) != Some(block[position]) {
+                    candidate = matcher.previous[candidate];
+                    candidates_seen += 1;
+                    continue;
+                }
+                let mut length = 1_usize;
+                while length < max_length {
+                    *units += 1;
+                    if source_byte(history, block, position, distance, length)
+                        != Some(block[position + length])
+                    {
+                        break;
+                    }
+                    length += 1;
+                }
+                if length >= 3 && best.is_none_or(|(best_length, _)| length > best_length) {
+                    best = Some((length, distance));
+                    if length == max_length {
+                        return best;
+                    }
+                }
+                candidate = matcher.previous[candidate];
+                candidates_seen += 1;
+            }
+            best
+        }
+
+        /// One block's tokens and the work units the old encoder charged for
+        /// it: one for the block, one per decision, and the matcher's.
+        pub(super) fn block_tokens(
+            history: &VecDeque<u8>,
+            block: &[u8],
+            window_bytes: usize,
+            max_match_chain: usize,
+        ) -> (Vec<FixedToken>, u64) {
+            let mut units = 1_u64;
+            let mut matcher = MatchIndex::new(history, block);
+            let mut tokens = Vec::new();
+            let mut position = 0_usize;
+            while position < block.len() {
+                units += 1;
+                if let Some((length, distance)) = find_match(
+                    history,
+                    block,
+                    position,
+                    &matcher,
+                    window_bytes,
+                    max_match_chain,
+                    &mut units,
+                ) {
+                    tokens.push(FixedToken::Match {
+                        length: u16::try_from(length).unwrap(),
+                        distance: u16::try_from(distance).unwrap(),
+                    });
+                    matcher.record_emitted(position, length, history, block);
+                    position += length;
+                } else {
+                    tokens.push(FixedToken::Literal(block[position]));
+                    matcher.record_emitted(position, 1, history, block);
+                    position += 1;
+                }
+            }
+            (tokens, units)
+        }
+    }
+
+    /// frankengit-g4a9: the contiguous matcher makes the old matcher's
+    /// decisions and charges its work, block for block, over random,
+    /// repetitive, text, shifted and pathological inputs whose blocks carry
+    /// every history length from empty to the full window.
+    #[test]
+    fn the_contiguous_matcher_decides_and_charges_exactly_as_the_ring_buffer_matcher() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut random = |length: usize| -> Vec<u8> {
+            (0..length)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 24) as u8
+                })
+                .collect()
+        };
+        let text: Vec<u8> = (0..20_000_u32)
+            .flat_map(|line| format!("line {line} of a slowly shifting text\n").into_bytes())
+            .collect();
+        let mut inputs = vec![
+            vec![0_u8; 70_000],
+            random(90_000),
+            text.clone(),
+            [&text[7..30_000], &random(5_000)[..], &text[..40_000]].concat(),
+            (0..100_000_u32).map(|at| (at % 251) as u8).collect(),
+            (0..80_000_u32)
+                .map(|at| if at % 7 == 0 { 1 } else { 0 })
+                .collect(),
+            random(3),
+            Vec::new(),
+        ];
+        let mut mixed = Vec::new();
+        for round in 0..12 {
+            mixed.extend_from_slice(&random(700 + round * 13));
+            mixed.extend_from_slice(&text[round * 211..round * 211 + 3_000]);
+        }
+        inputs.push(mixed);
+        let (mut blocks, mut matches) = (0, 0);
+        for input in inputs {
+            for block_bytes in [RFC1951_MAX_WINDOW_BYTES, 4_096, 1_000] {
+                let profile = DeflateProfile {
+                    block_bytes,
+                    ..DeflateProfile::FIXED_OR_STORED
+                };
+                let mut encoder = Deflater::new(deflate_limits(), profile)
+                    .unwrap_or_else(|error| panic!("encoder: {error}"));
+                let mut control = NeverCancel;
+                let chunks: Vec<&[u8]> = input.chunks(block_bytes).collect();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let history: std::collections::VecDeque<u8> =
+                        encoder.history.iter().copied().collect();
+                    let (expected, expected_units) = reference_matcher::block_tokens(
+                        &history,
+                        chunk,
+                        profile.window_bytes,
+                        profile.max_match_chain,
+                    );
+                    encoder.pending_input.extend_from_slice(chunk);
+                    let before = encoder.work_units;
+                    encoder
+                        .encode_pending_prefix(chunk.len(), index + 1 == chunks.len(), &mut control)
+                        .unwrap_or_else(|error| panic!("block {index}: {error}"));
+                    assert_eq!(encoder.fixed_tokens, expected, "block {index}");
+                    assert_eq!(encoder.work_units - before, expected_units, "block {index}");
+                    blocks += 1;
+                    matches += expected
+                        .iter()
+                        .filter(|token| matches!(token, FixedToken::Match { .. }))
+                        .count();
+                }
+            }
+        }
+        assert!(
+            blocks > 100 && matches > 1_000,
+            "{blocks} blocks, {matches} matches"
+        );
+    }
+
+    /// A bulk charge of `n` compared bytes ends exactly as `n` single charges
+    /// do: the same refusal with the ceiling plus one observed, and the same
+    /// counter, from every starting count around the ceiling.
+    #[test]
+    fn a_bulk_compare_charge_ends_exactly_as_single_charges() {
+        let mut control = NeverCancel;
+        // A zero ceiling is a configuration refusal, not a budget.
+        for ceiling in [1_u64, 2, 7, 300] {
+            for start in [0_u64, 1, 5, 7, 299, 300] {
+                if start > ceiling {
+                    continue;
+                }
+                for units in [0_usize, 1, 2, 3, 8, 257, 258] {
+                    let limits = DeflateLimits {
+                        max_work_units: ceiling,
+                        ..deflate_limits()
+                    };
+                    let fresh = || {
+                        let mut encoder = Deflater::new(limits, DeflateProfile::FIXED_OR_STORED)
+                            .unwrap_or_else(|error| panic!("encoder: {error}"));
+                        encoder.work_units = start;
+                        encoder
+                    };
+                    let mut bulk = fresh();
+                    let bulk_outcome = bulk.charge_units_exactly(&mut control, units);
+                    let mut single = fresh();
+                    let single_outcome =
+                        (0..units).try_for_each(|_| single.charge_work(&mut control));
+                    assert_eq!(bulk_outcome, single_outcome, "{ceiling} {start} {units}");
+                    assert_eq!(
+                        bulk.work_units, single.work_units,
+                        "{ceiling} {start} {units}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whole members refuse on the work ceiling exactly below their cost.
+    #[test]
+    fn a_member_refuses_on_the_work_ceiling_exactly_below_its_cost() {
+        let input: Vec<u8> = (0..5_000_u32)
+            .flat_map(|line| format!("{line} repeated words repeated words\n").into_bytes())
+            .collect();
+        let encode = |ceiling: u64| {
+            let limits = DeflateLimits {
+                max_work_units: ceiling,
+                ..deflate_limits()
+            };
+            Deflater::new(limits, DeflateProfile::FIXED_OR_STORED).and_then(|mut encoder| {
+                let _ = encoder.push(&input)?;
+                encoder.finish()?;
+                Ok(encoder.work_units())
+            })
+        };
+        let exact = encode(deflate_limits().max_work_units)
+            .unwrap_or_else(|error| panic!("unbounded: {error}"));
+        assert_eq!(encode(exact), Ok(exact));
+        for ceiling in [
+            1,
+            2,
+            exact / 3,
+            exact / 2,
+            exact - 258,
+            exact - 2,
+            exact - 1,
+        ] {
+            assert!(
+                matches!(
+                    encode(ceiling),
+                    Err(DeflateRefusal::ResourceLimit {
+                        resource: Resource::WorkUnits,
+                        limit,
+                        ..
+                    }) if limit == ceiling
+                ),
+                "ceiling {ceiling}"
+            );
+        }
+    }
+
+    /// Single and bulk Adler-32 updates equal the per-byte modular definition
+    /// across run boundaries and on all-0xff input, the overflow worst case.
+    #[test]
+    fn adler32_single_and_bulk_updates_equal_the_modular_definition() {
+        let reference = |bytes: &[u8]| {
+            let (mut a, mut b) = (1_u32, 0_u32);
+            for &byte in bytes {
+                a = (a + u32::from(byte)) % 65_521;
+                b = (b + a) % 65_521;
+            }
+            (b << 16) | a
+        };
+        let mut seed = 0x51ed_270b_c6d1_a4e3_u64;
+        let mut inputs = vec![
+            vec![0xff_u8; 3 * Adler32::NMAX + 7],
+            Vec::new(),
+            vec![0_u8; 1],
+        ];
+        for length in [
+            1,
+            2,
+            Adler32::NMAX - 1,
+            Adler32::NMAX,
+            Adler32::NMAX + 1,
+            40_000,
+        ] {
+            inputs.push(
+                (0..length)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        (seed >> 24) as u8
+                    })
+                    .collect(),
+            );
+        }
+        for input in inputs {
+            let expected = reference(&input);
+            let mut single = Adler32::new();
+            input.iter().for_each(|&byte| single.update(byte));
+            assert_eq!(single.value(), expected);
+            for split in [0, 1, Adler32::NMAX, input.len() / 2, input.len()] {
+                let split = split.min(input.len());
+                let mut bulk = Adler32::new();
+                bulk.update_slice(&input[..split]);
+                bulk.update_slice(&input[split..]);
+                assert_eq!(bulk.value(), expected, "split {split} of {}", input.len());
+            }
+        }
+    }
+
     #[test]
     fn fixed_matcher_reaches_rfc_maximum_length_for_all_zero_input() {
         let input = vec![0_u8; 259];
         let mut encoder = Deflater::new(deflate_limits(), DeflateProfile::DEFAULT)
             .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
         let mut control = NeverCancel;
-        let mut matcher = MatchIndex::new(&encoder.history, &input)
+        let mut matcher = MatchIndex::new(&input, 0)
             .unwrap_or_else(|error| panic!("matcher construction: {error}"));
         matcher
-            .record_emitted(0, 1, &encoder.history, &input)
+            .record_emitted(0, 1, &input)
             .unwrap_or_else(|error| panic!("record first byte: {error}"));
         assert_eq!(
-            encoder.find_match(&input, 1, &matcher, &mut control),
+            encoder.find_match(&input, 0, 1, &matcher, &mut control),
             Ok(Some((258, 1)))
         );
 
@@ -3444,11 +3940,12 @@ mod tests {
         encoder
             .append_history(&history)
             .unwrap_or_else(|error| panic!("seed history: {error}"));
-        let matcher = MatchIndex::new(&encoder.history, &block)
+        let bytes = [encoder.history.as_slice(), &block].concat();
+        let matcher = MatchIndex::new(&bytes, encoder.history.len())
             .unwrap_or_else(|error| panic!("matcher construction: {error}"));
         let mut control = NeverCancel;
         assert_eq!(
-            encoder.find_match(&block, 0, &matcher, &mut control),
+            encoder.find_match(&bytes, encoder.history.len(), 0, &matcher, &mut control),
             Ok(Some((128, 128)))
         );
     }
