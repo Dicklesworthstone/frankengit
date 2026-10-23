@@ -23,7 +23,9 @@ use fgit_resource::kinds::{
     ObjectAdmissionPermit, ObjectClass, StructureVerdict,
 };
 use fgit_resource::{Grade, OpaqueHandle, ReservedObligation, ResourceVector};
-use fgit_types::{CANONICAL_CODEC_VERSION, Digest, GitOid, ObjectEnvelopeId, SegmentManifestId};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, Digest, DigestBytes, GitOid, ObjectEnvelopeId, SegmentManifestId,
+};
 
 use crate::fabric::{
     AuthenticatedRetentionRegistry, DeletionReceipt, FabricCapabilities, FabricCapability,
@@ -765,8 +767,7 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
                 Err(error)
             }
             Ok(ImmutableWrite::Created) => {
-                let strong_identity =
-                    payload_identity(object.envelope().object_kind(), object.payload())?;
+                let strong_identity = payload_identity(&object)?;
                 let receipt = AdmittedObject::verified(
                     &reservation,
                     object.identity(),
@@ -967,16 +968,14 @@ impl PlacementAttemptError {
     }
 }
 
-fn payload_identity(kind: ObjectKind, payload: &[u8]) -> Result<Digest, StoreRefusal> {
-    let kind = match kind {
-        ObjectKind::Commit => fgit_crypto::GitObjectKind::Commit,
-        ObjectKind::Tree => fgit_crypto::GitObjectKind::Tree,
-        ObjectKind::Blob => fgit_crypto::GitObjectKind::Blob,
-        ObjectKind::Tag => fgit_crypto::GitObjectKind::Tag,
-        ObjectKind::Internal => return Err(StoreRefusal::NativeObjectIdentityMismatch),
-    };
-    let identity = fgit_crypto::git_payload_commitment(kind, payload, CANONICAL_CODEC_VERSION);
-    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+/// Reuse only the commitment carried by an immutable, fully verified body.
+/// `VerifiedObject::new` already checked this exact domain/codec commitment,
+/// length and native OID. Its owned payload cannot change through its API.
+/// This is not a disk read or a substitute for any source/custody verification.
+fn payload_identity(object: &VerifiedObject) -> Result<Digest, StoreRefusal> {
+    let algorithm = fgit_crypto::IdentityDomain::GitPayloadCommitment.algorithm();
+    let bytes = DigestBytes::try_new(&object.envelope().payload_commitment())?;
+    Digest::new_checked(algorithm.id(), bytes, algorithm.digest_len()).map_err(StoreRefusal::from)
 }
 
 fn settle_admission_abort(
@@ -1256,6 +1255,279 @@ mod tests {
         )
         .expect("test envelope must be valid");
         VerifiedObject::new(envelope, payload.to_vec()).expect("test object must verify")
+    }
+
+    // The former local admission calculation, kept as an independent rehash
+    // oracle. The reference backend retains this same production calculation.
+    fn legacy_payload_identity(kind: ObjectKind, payload: &[u8]) -> Digest {
+        let kind = match kind {
+            ObjectKind::Commit => fgit_crypto::GitObjectKind::Commit,
+            ObjectKind::Tree => fgit_crypto::GitObjectKind::Tree,
+            ObjectKind::Blob => fgit_crypto::GitObjectKind::Blob,
+            ObjectKind::Tag => fgit_crypto::GitObjectKind::Tag,
+            ObjectKind::Internal => panic!("not a native object kind"),
+        };
+        let identity = fgit_crypto::git_payload_commitment(kind, payload, CANONICAL_CODEC_VERSION);
+        Digest::new(identity.algorithm(), *identity.digest())
+    }
+
+    fn native_kinds() -> [(ObjectKind, fgit_crypto::GitObjectKind); 4] {
+        [
+            (ObjectKind::Commit, fgit_crypto::GitObjectKind::Commit),
+            (ObjectKind::Tree, fgit_crypto::GitObjectKind::Tree),
+            (ObjectKind::Blob, fgit_crypto::GitObjectKind::Blob),
+            (ObjectKind::Tag, fgit_crypto::GitObjectKind::Tag),
+        ]
+    }
+
+    fn admission_envelope(
+        identity: GitOid,
+        kind: ObjectKind,
+        length: u64,
+        commitment: [u8; 32],
+    ) -> ObjectEnvelope {
+        ObjectEnvelope::new(
+            b"n".to_vec(),
+            identity,
+            kind,
+            length,
+            commitment,
+            b"raw".to_vec(),
+            commitment,
+            None,
+            &SegmentLimits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verified_commitment_reuse_preserves_full_algorithm_tagged_admission_evidence() {
+        let mut random = 0x4f62_510a_7c93_a84d_u64;
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for (kind, crypto_kind) in native_kinds() {
+                for length in [0, 1, 55, 56, 63, 64, 65, 4096, 65_537] {
+                    let payload: Vec<_> = (0..length)
+                        .map(|_| {
+                            random ^= random << 13;
+                            random ^= random >> 7;
+                            random ^= random << 17;
+                            random as u8
+                        })
+                        .collect();
+                    let native = fgit_crypto::git_object_id(format, crypto_kind, &payload);
+                    let legacy = legacy_payload_identity(kind, &payload);
+                    let commitment = legacy.bytes().as_bytes().try_into().unwrap();
+                    let envelope = admission_envelope(native, kind, length as u64, commitment);
+                    let object = VerifiedObject::new(envelope, payload).unwrap();
+                    let reservation = ObjectAdmission {
+                        class: ObjectClass::GitObject,
+                        declared_len: length as u64,
+                        staging: LocalFilesystemFabric::object_envelope_id(&object).unwrap(),
+                    };
+                    let expected = AdmittedObject::verified(
+                        &reservation,
+                        native,
+                        legacy,
+                        length as u64,
+                        StructureVerdict::Verified,
+                    )
+                    .unwrap();
+                    let actual = AdmittedObject::verified(
+                        &reservation,
+                        object.identity(),
+                        payload_identity(&object).unwrap(),
+                        object.payload().len() as u64,
+                        StructureVerdict::Verified,
+                    )
+                    .unwrap();
+                    assert_eq!(actual, expected, "{format:?}/{kind:?}/{length}");
+                    assert_eq!(actual.strong_digest().algorithm(), legacy.algorithm());
+                    assert_eq!(payload_identity(&object.clone()).unwrap(), legacy);
+                    // These are fabric identity/receipt cases, not claims that
+                    // arbitrary random commit/tree bodies form a valid graph.
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn verified_commitment_producer_remains_byte_identical_to_the_current_v1_contract() {
+        use crate::{CryptoDigest, DigestAlgorithm};
+        assert_eq!(CANONICAL_CODEC_VERSION, fgit_types::CodecVersion::new(1, 0));
+        for (kind, crypto_kind) in native_kinds() {
+            for payload in [b"".as_slice(), b"payload\0with\xffexact bytes".as_slice()] {
+                let original = fgit_crypto::git_payload_commitment(
+                    crypto_kind,
+                    payload,
+                    fgit_types::CodecVersion::new(1, 0),
+                );
+                assert_eq!(
+                    CryptoDigest
+                        .payload_commitment(kind, payload)
+                        .unwrap()
+                        .as_slice(),
+                    original.digest().as_bytes()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verified_commitment_reuse_cannot_admit_unverified_payload_domain_native_or_length() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for (kind, crypto_kind) in native_kinds() {
+                let payload = b"same length untrusted bytes";
+                let identity = fgit_crypto::git_object_id(format, crypto_kind, payload);
+                let strong = legacy_payload_identity(kind, payload);
+                let commitment = strong.bytes().as_bytes().try_into().unwrap();
+                let valid = admission_envelope(identity, kind, payload.len() as u64, commitment);
+                assert!(VerifiedObject::new(valid, payload.to_vec()).is_ok());
+
+                let mut changed = payload.to_vec();
+                changed[0] ^= 1;
+                assert_eq!(
+                    VerifiedObject::new(
+                        admission_envelope(identity, kind, payload.len() as u64, commitment),
+                        changed,
+                    ),
+                    Err(StoreRefusal::PayloadCommitmentMismatch)
+                );
+                let other_domain = fgit_crypto::internal_object_id(
+                    fgit_crypto::IdentityDomain::ObjectEnvelope,
+                    ENVELOPE_SCHEMA,
+                    CANONICAL_CODEC_VERSION,
+                    payload,
+                );
+                let other_commitment = other_domain.digest().as_bytes().try_into().unwrap();
+                assert_eq!(
+                    VerifiedObject::new(
+                        admission_envelope(identity, kind, payload.len() as u64, other_commitment),
+                        payload.to_vec(),
+                    ),
+                    Err(StoreRefusal::PayloadCommitmentMismatch)
+                );
+                let other_kind = if kind == ObjectKind::Blob {
+                    ObjectKind::Tag
+                } else {
+                    ObjectKind::Blob
+                };
+                assert_eq!(
+                    VerifiedObject::new(
+                        admission_envelope(identity, other_kind, payload.len() as u64, commitment),
+                        payload.to_vec(),
+                    ),
+                    Err(StoreRefusal::PayloadCommitmentMismatch)
+                );
+                let other_native = fgit_crypto::git_object_id(format, crypto_kind, b"another body");
+                assert_eq!(
+                    VerifiedObject::new(
+                        admission_envelope(other_native, kind, payload.len() as u64, commitment),
+                        payload.to_vec(),
+                    ),
+                    Err(StoreRefusal::NativeObjectIdentityMismatch)
+                );
+                assert_eq!(
+                    VerifiedObject::new(
+                        admission_envelope(identity, kind, payload.len() as u64 + 1, commitment),
+                        payload.to_vec(),
+                    ),
+                    Err(StoreRefusal::PayloadCommitmentMismatch)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verified_commitment_reuse_keeps_single_and_batch_framing_reopen_and_retry_identical() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let single_root = TestRoot::new();
+            let batch_root = TestRoot::new();
+            let single = fabric(single_root.path());
+            let batch = fabric(batch_root.path());
+            let mut objects: Vec<_> = native_kinds()
+                .into_iter()
+                .map(|(kind, crypto_kind)| {
+                    let payload = format!("exact {kind:?} payload").into_bytes();
+                    let identity = fgit_crypto::git_object_id(format, crypto_kind, &payload);
+                    let strong = legacy_payload_identity(kind, &payload);
+                    let commitment = strong.bytes().as_bytes().try_into().unwrap();
+                    VerifiedObject::new(
+                        admission_envelope(identity, kind, payload.len() as u64, commitment),
+                        payload,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            objects.sort_by_key(VerifiedObject::identity);
+            let singles = ledger();
+            for object in &objects {
+                assert!(matches!(
+                    single
+                        .put_if_absent(object.clone(), admission(&singles, object))
+                        .unwrap(),
+                    PutIfAbsent::Created { .. }
+                ));
+            }
+            assert_quiescent(singles);
+            let batches = ledger();
+            let bytes = objects
+                .iter()
+                .map(|object| object.payload().len() as u64)
+                .sum();
+            let grant = batches
+                .grant(ResourceVector::from_grades(&[
+                    (Grade::Bytes, bytes),
+                    (Grade::Objects, objects.len() as u64),
+                ]))
+                .unwrap();
+            assert!(
+                batch
+                    .put_batch_if_absent(
+                        &objects,
+                        PlacementAdmission::new(&batches, grant),
+                        &mut || true,
+                    )
+                    .unwrap()
+                    .iter()
+                    .all(|outcome| matches!(outcome, PutIfAbsent::Created { .. }))
+            );
+            assert_quiescent(batches);
+            let reopened = fabric(batch_root.path());
+            let retries = ledger();
+            for object in &objects {
+                // Original FGOB encoding, independent of either write path.
+                let envelope = object.envelope().encode().unwrap();
+                let mut expected = b"FGOB".to_vec();
+                expected.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
+                expected.extend_from_slice(&envelope);
+                expected.extend_from_slice(object.payload());
+                assert_eq!(
+                    fs::read(single.object_path(object.identity())).unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    fs::read(batch.object_path(object.identity())).unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    reopened.read_whole(object.identity()).unwrap().object,
+                    *object
+                );
+                assert!(matches!(
+                    reopened
+                        .put_if_absent(object.clone(), admission(&retries, object))
+                        .unwrap(),
+                    PutIfAbsent::AlreadyPresent { .. }
+                ));
+                assert_eq!(
+                    fs::read(reopened.object_path(object.identity())).unwrap(),
+                    expected
+                );
+            }
+            assert_quiescent(retries);
+            assert_staging_is_empty(&single);
+            assert_staging_is_empty(&reopened);
+        }
     }
 
     fn ledger() -> ObligationLedger {
