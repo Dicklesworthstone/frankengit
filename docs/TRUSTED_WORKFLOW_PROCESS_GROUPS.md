@@ -36,8 +36,19 @@ They are distinguished from live descendants and left to their operating-system
 reaper. All forced-stop paths still retain the workspace and a non-passing
 outcome, including when group members have stopped.
 
-Procfs observation has a 250-millisecond per-scan bound, at most 16,384 directory
-entries, and at most 4,096 bytes per stat record. Names in `/proc/<pid>/stat` are
+Normal completion inspects procfs once under the step or command's **remaining
+absolute execution deadline**, checking request cancellation throughout. It does
+not impose a shorter completion timer or discard a partial scan and restart it
+when the host deschedules the observer. The step, job and workflow limits still
+bound the operation; observation does not reset any execution budget. A request
+cancelled or timed out during that scan transfers to the independent forced
+drain, retains its workspace and preserves the interruption even if the caller's
+liveness predicate later returns true. The same rule applies to trusted shells
+and directly configured foreground commands.
+
+Forced cleanup inspects under its original three-second drain deadline. Every
+scan admits at most 16,384 directory entries and at most 4,096 bytes per stat
+record. These work bounds apply to normal completion too. Names in `/proc/<pid>/stat` are
 opaque: spaces, parentheses and newlines are not interpreted as field separators
 inside the command name. An unreadable, malformed, missing-leader, over-capacity
 or timed-out observation refuses rather than claiming complete cleanup. The
@@ -73,9 +84,14 @@ processes to exercise child/grandchild cancellation, timeout, orphaned success,
 signal termination, output exhaustion, clean joined-child behavior, unrelated
 group isolation, pre-spawn cancellation and liveness-callback unwind. Existing
 workflow, condition, matrix and runner-library tests remain applicable. Private
-procfs fixtures test exact entry/record limits, expired observations, missing
-leaders and zombie distinctions; separate real-child tests verify that repeated
-WNOWAIT observations retain the leader and competing reaping invalidates ownership.
+procfs fixtures test exact entry/record limits, caller deadline and cancellation,
+missing leaders and zombie distinctions. A deterministic clock advances beyond
+the former observation windows during a scan and checks that no progress is
+discarded while the caller budget remains. Separate real-child tests verify that
+repeated WNOWAIT observations retain the leader, competing reaping invalidates
+ownership, and interruption of terminal observation drains both public execution
+adapters without turning a zero exit into a pass. These tests do not claim that
+an arbitrarily starved host can complete within a finite caller or drain budget.
 
 The discovered `scripts/e2e/suites/workflow/process_groups.sh` campaign drives a
 prebuilt `FG_BIN` against persisted SHA-1 and SHA-256 nodes. It tests joined

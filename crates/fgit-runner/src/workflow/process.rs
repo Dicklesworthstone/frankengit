@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt;
 mod command;
 mod group;
 pub use command::{TrustedCommandObservation, TrustedCommandOutcome, run_trusted_command};
-use group::ProcessGroup;
+use group::{CompletionStop, ProcessGroup};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -97,22 +97,34 @@ pub fn run_trusted_step_with_context(
     loop {
         match child.exited() {
             Ok(true) => {
-                let (status, leftover) = child.complete().map_err(|error| {
-                    WorkerFailure::new(format!("process-group completion: {error}"), true)
-                })?;
+                let completion =
+                    child
+                        .complete(started + limits.timeout, live)
+                        .map_err(|error| {
+                            WorkerFailure::new(format!("process-group completion: {error}"), true)
+                        })?;
+                let status = completion.status;
                 result.exit_code = status.code();
-                result.retain_workspace = leftover || status.code().is_none();
-                result.outcome = if result.retain_workspace {
+                let containment_failure = completion.leftover || status.code().is_none();
+                result.outcome = if containment_failure {
                     StepOutcome::ContainmentFailure
-                } else if !live() {
+                } else if completion.stopped == Some(CompletionStop::Cancelled) || !live() {
                     StepOutcome::Cancelled
-                } else if started.elapsed() >= limits.timeout {
+                } else if completion.stopped == Some(CompletionStop::TimedOut)
+                    || started.elapsed() >= limits.timeout
+                {
                     StepOutcome::TimedOut
                 } else if status.success() {
                     StepOutcome::Succeeded
                 } else {
                     StepOutcome::Failed
                 };
+                result.retain_workspace = matches!(
+                    result.outcome,
+                    StepOutcome::ContainmentFailure
+                        | StepOutcome::Cancelled
+                        | StepOutcome::TimedOut
+                );
                 break;
             }
             Ok(false) => {}

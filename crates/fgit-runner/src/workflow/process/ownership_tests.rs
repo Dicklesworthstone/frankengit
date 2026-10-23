@@ -1,6 +1,7 @@
 //! Private procfs fixtures are scanner tests, not evidence of live containment.
 //! The separate real-child tests exercise the waitable ownership boundary.
 use super::*;
+use std::cell::Cell;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +28,7 @@ impl ProcRoot {
         .unwrap();
     }
     fn inspect(&self) -> io::Result<Snapshot> {
-        inspect_until(&self.0, 123, Instant::now() + Duration::from_secs(10), SCAN)
+        inspect_until(&self.0, 123, Instant::now() + Duration::from_secs(10))
     }
 }
 impl Drop for ProcRoot {
@@ -61,7 +62,7 @@ fn scan_rejects_incomplete_identity_oversized_records_and_expired_deadlines() {
     let root = ProcRoot::new();
     root.record(123, 123, b'Z');
     assert!(root.inspect().is_ok());
-    assert!(inspect(&root.0, 123, Instant::now()).is_err());
+    assert!(inspect_until(&root.0, 123, Instant::now()).is_err());
     let path = root.0.join("123/stat");
     let mut exact = fs::read(&path).unwrap();
     exact.resize(MAX_STAT_BYTES, b' ');
@@ -76,39 +77,80 @@ fn scan_rejects_incomplete_identity_oversized_records_and_expired_deadlines() {
     assert!(root.inspect().is_ok());
 }
 
-// frankengit-twuw: on a busy host one scan can outlive SCAN without saying
-// anything about the group. That is retried within the deadline; a
-// definitive failure is not.
+// frankengit-twuw: injected time advances through the real scanner, without
+// pretending a fixture directory proves live process containment. Observation
+// is one bounded traversal under the caller's budget, not a restart loop.
 #[test]
-fn expired_scans_retry_until_the_deadline_and_definitive_failures_do_not() {
+fn completion_scan_preserves_progress_through_descheduling_within_the_caller_budget() {
     let root = ProcRoot::new();
     root.record(123, 123, b'Z');
     root.record(42, 123, b'S');
-    // A window that has already closed is Expired, not a refusal.
-    assert!(matches!(
-        inspect(&root.0, 123, Instant::now()),
-        Err(ScanError::Expired)
-    ));
-    // A zero first window expires; the retry completes and still sees the
-    // live member, so quiescence is not granted.
-    let far = || Instant::now() + Duration::from_secs(3);
-    let live = inspect_until(&root.0, 123, far(), Duration::ZERO).unwrap();
+    let started = Instant::now();
+    let now = Cell::new(started);
+    let checkpoints = Cell::new(0);
+    let checkpoint = || {
+        let count = checkpoints.get() + 1;
+        checkpoints.set(count);
+        if count == 3 {
+            // Descheduled beyond BOTH former 250ms and 3s completion windows,
+            // but still within the execution time the caller already granted.
+            now.set(started + Duration::from_secs(4));
+        }
+        completion_checkpoint(started + Duration::from_secs(10), &|| true, &|| now.get())
+    };
+    let live = inspect(&root.0, 123, &checkpoint).unwrap();
     assert!(live.other && live.live_other);
+    assert_eq!(checkpoints.get(), 6, "one start, two per entry, one end");
     // The permitted twin: a zombie member is stopped, not live.
     root.record(42, 123, b'Z');
-    let settled = inspect_until(&root.0, 123, far(), Duration::ZERO).unwrap();
+    let settled = inspect(&root.0, 123, &checkpoint).unwrap();
     assert!(settled.other && !settled.live_other);
-    // The overall deadline still refuses with the original message.
-    let error = inspect_until(&root.0, 123, Instant::now(), SCAN).unwrap_err();
+    // A clean joined process has no other group member at all.
+    root.record(42, 321, b'S');
+    let joined = inspect(&root.0, 123, &checkpoint).unwrap();
+    assert!(!joined.other && !joined.live_other);
+}
+
+#[test]
+fn interrupted_scans_never_establish_quiescence_or_restart_with_a_fresh_budget() {
+    let root = ProcRoot::new();
+    root.record(123, 123, b'Z');
+    root.record(42, 123, b'S');
+    let started = Instant::now();
+    for stop in [CompletionStop::Cancelled, CompletionStop::TimedOut] {
+        let checkpoints = Cell::new(0);
+        let checkpoint = || {
+            let count = checkpoints.get() + 1;
+            checkpoints.set(count);
+            completion_checkpoint(
+                started + Duration::from_secs(10),
+                &|| count != 3 || stop != CompletionStop::Cancelled,
+                &|| {
+                    started
+                        + if count == 3 && stop == CompletionStop::TimedOut {
+                            Duration::from_secs(10)
+                        } else {
+                            Duration::ZERO
+                        }
+                },
+            )
+        };
+        assert!(matches!(
+            inspect(&root.0, 123, &checkpoint),
+            Err(ScanError::Stopped(reason)) if reason == stop
+        ));
+        assert_eq!(checkpoints.get(), 3, "interruption must remain latched");
+    }
+    // The non-cancellable forced drain retains its original absolute bound.
+    let error = inspect_until(&root.0, 123, Instant::now()).unwrap_err();
     assert_eq!(
         error.to_string(),
         "process-group observation limit exceeded"
     );
-    // A leader that left its group is definitive: refused promptly, never
-    // retried to the deadline.
+    // A leader that left its group remains a definitive refusal.
     root.record(123, 321, b'Z');
     let started = Instant::now();
-    let error = inspect_until(&root.0, 123, far(), Duration::ZERO).unwrap_err();
+    let error = root.inspect().unwrap_err();
     assert_eq!(
         error.to_string(),
         "direct child left its owned process group"
@@ -157,15 +199,41 @@ fn repeated_terminal_observation_keeps_pid_pinned_until_the_final_reap() {
             "WNOWAIT must retain the leader identity"
         );
     }
-    let (status, orphaned) = owned.complete().unwrap();
-    assert_eq!(status.code(), Some(7));
-    assert!(!orphaned);
+    let completion = owned
+        .complete(Instant::now() + Duration::from_secs(10), &|| true)
+        .unwrap();
+    assert_eq!(completion.status.code(), Some(7));
+    assert!(!completion.leftover);
+    assert!(completion.stopped.is_none());
     assert!(owned.finalized);
     assert!(owned.exited().is_err());
     assert!(
         owned.terminate().is_err(),
         "a reaped identity must never be signalled"
     );
+}
+
+#[test]
+fn terminal_child_interruption_drains_and_preserves_the_stop_reason() {
+    for reason in [CompletionStop::Cancelled, CompletionStop::TimedOut] {
+        let mut owned = terminal_child();
+        let pid = owned.pid.as_raw_pid();
+        let deadline = Instant::now()
+            + if reason == CompletionStop::TimedOut {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(10)
+            };
+        let completion = owned
+            .complete(deadline, &|| reason != CompletionStop::Cancelled)
+            .unwrap();
+        assert_eq!(completion.stopped, Some(reason));
+        assert_eq!(completion.status.code(), Some(7));
+        assert!(!completion.leftover);
+        assert!(owned.finalized);
+        assert!(!Path::new(&format!("/proc/{pid}/stat")).exists());
+        assert!(owned.exited().is_err());
+    }
 }
 
 #[test]

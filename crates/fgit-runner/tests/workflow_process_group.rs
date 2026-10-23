@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![cfg(target_os = "linux")]
-use fgit_runner::workflow::{StepLimits, StepObservation, StepOutcome, run_trusted_step};
+use fgit_runner::workflow::{
+    StepLimits, StepObservation, StepOutcome, TrustedCommandOutcome, run_trusted_command,
+    run_trusted_step,
+};
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -175,6 +179,126 @@ fn joined_children_and_ordinary_command_failure_preserve_exact_results() {
         assert_eq!(result.stdout, b"exact");
         assert!(result.output_complete);
         assert!(!result.retain_workspace);
+    }
+}
+
+#[test]
+fn cancellation_during_terminal_observation_is_latched_and_retains_both_adapters() {
+    for command_adapter in [false, true] {
+        let work = Work::new();
+        let terminal_observations = Cell::new(0);
+        let live = || {
+            let Some(pid) = fs::read_to_string(work.0.join("leader.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+            else {
+                return true;
+            };
+            let Ok(bytes) = fs::read(format!("/proc/{pid}/stat")) else {
+                return true;
+            };
+            let close = bytes.iter().rposition(|byte| *byte == b')').unwrap();
+            let state = bytes[close + 1..]
+                .split(|byte| byte.is_ascii_whitespace())
+                .find(|field| !field.is_empty())
+                .unwrap()[0];
+            if state == b'Z' {
+                let observations = terminal_observations.get() + 1;
+                terminal_observations.set(observations);
+                // The first terminal observation may race the outer waitid.
+                // The second occurs in completion, while PID custody remains.
+                // Return false only once: a later true cannot erase the stop.
+                return observations != 2;
+            }
+            true
+        };
+        let script = "echo $$ > leader.pid; exit 0";
+        if command_adapter {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .current_dir(&work.0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let result = run_trusted_command(&mut command, Duration::from_secs(5), &live).unwrap();
+            assert_eq!(result.outcome, TrustedCommandOutcome::Cancelled);
+            assert_eq!(result.status.unwrap().code(), Some(0));
+            assert!(result.retain_workspace);
+        } else {
+            let result = work.run(script, Duration::from_secs(5), 4096, &live);
+            assert_eq!(result.outcome, StepOutcome::Cancelled);
+            assert_eq!(result.exit_code, Some(0));
+            assert!(result.retain_workspace);
+        }
+        assert_eq!(terminal_observations.get(), 2);
+        assert!(
+            live(),
+            "later liveness is true but must not retroactively pass"
+        );
+        let pid = work.pid("leader.pid");
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}/stat")).exists(),
+            "cancelled completion must drain and reap before returning"
+        );
+    }
+}
+
+#[test]
+fn cancellation_after_final_reap_retains_the_workspace_beside_a_successful_twin() {
+    for command_adapter in [false, true] {
+        for cancelled in [false, true] {
+            let work = Work::new();
+            let post_reap_observed = Cell::new(false);
+            let live = || {
+                let Some(pid) = fs::read_to_string(work.0.join("leader.pid"))
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+                else {
+                    return true;
+                };
+                if std::path::Path::new(&format!("/proc/{pid}/stat")).exists() {
+                    return true;
+                }
+                post_reap_observed.set(true);
+                !cancelled
+            };
+            let script = "echo $$ > leader.pid; exit 0";
+            let timeout = Duration::from_secs(5);
+            if command_adapter {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", script])
+                    .current_dir(&work.0)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let result = run_trusted_command(&mut command, timeout, &live).unwrap();
+                assert_eq!(
+                    result.outcome,
+                    if cancelled {
+                        TrustedCommandOutcome::Cancelled
+                    } else {
+                        TrustedCommandOutcome::Exited
+                    }
+                );
+                assert_eq!(result.status.unwrap().code(), Some(0));
+                assert_eq!(result.retain_workspace, cancelled);
+            } else {
+                let result = work.run(script, timeout, 4096, &live);
+                assert_eq!(
+                    result.outcome,
+                    if cancelled {
+                        StepOutcome::Cancelled
+                    } else {
+                        StepOutcome::Succeeded
+                    }
+                );
+                assert_eq!(result.exit_code, Some(0));
+                assert_eq!(result.retain_workspace, cancelled);
+            }
+            assert!(post_reap_observed.get());
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 //! Arbitrary explicitly trusted foreground tools share the workflow process owner.
 use super::super::WorkerFailure;
-use super::group::ProcessGroup;
+use super::group::{CompletionStop, ProcessGroup};
 use std::os::unix::{ffi::OsStrExt, process::CommandExt};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -69,19 +69,23 @@ pub fn run_trusted_command(
     loop {
         match child.exited() {
             Ok(true) => {
-                let (status, leftover) = child.complete().map_err(|error| {
+                let completion = child.complete(started + timeout, live).map_err(|error| {
                     WorkerFailure::new(format!("process-group completion: {error}"), true)
                 })?;
-                let retain_workspace = leftover || status.code().is_none();
-                let outcome = if retain_workspace {
+                let status = completion.status;
+                let containment_failure = completion.leftover || status.code().is_none();
+                let outcome = if containment_failure {
                     TrustedCommandOutcome::ContainmentFailure
-                } else if !live() {
+                } else if completion.stopped == Some(CompletionStop::Cancelled) || !live() {
                     TrustedCommandOutcome::Cancelled
-                } else if started.elapsed() >= timeout {
+                } else if completion.stopped == Some(CompletionStop::TimedOut)
+                    || started.elapsed() >= timeout
+                {
                     TrustedCommandOutcome::TimedOut
                 } else {
                     TrustedCommandOutcome::Exited
                 };
+                let retain_workspace = !matches!(outcome, TrustedCommandOutcome::Exited);
                 return Ok(TrustedCommandObservation {
                     outcome,
                     status: Some(status),

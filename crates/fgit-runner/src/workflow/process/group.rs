@@ -12,9 +12,20 @@ use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
 const DRAIN: Duration = Duration::from_secs(3);
-const SCAN: Duration = Duration::from_millis(250);
 const MAX_PROC_ENTRIES: usize = 16_384;
 const MAX_STAT_BYTES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CompletionStop {
+    Cancelled,
+    TimedOut,
+}
+
+pub(super) struct Completion {
+    pub status: ExitStatus,
+    pub leftover: bool,
+    pub stopped: Option<CompletionStop>,
+}
 
 pub(super) struct ProcessGroup {
     child: Child,
@@ -61,21 +72,38 @@ impl ProcessGroup {
         ))
     }
 
-    /// Returns whether completion found leftover group members. Even successful
-    /// cleanup cannot retroactively turn an orphan-producing script into a pass.
-    pub(super) fn complete(&mut self) -> io::Result<(ExitStatus, bool)> {
+    /// Observe normal completion within the caller's existing execution budget.
+    /// A slow host does not acquire a second, shorter completion deadline, and
+    /// partial scans are never discarded and restarted. Cancellation or expiry
+    /// transfers to the independent bounded drain and remains a non-pass.
+    /// Even successful cleanup cannot turn an orphan-producing script into a pass.
+    pub(super) fn complete(
+        &mut self,
+        end: Instant,
+        live: &dyn Fn() -> bool,
+    ) -> io::Result<Completion> {
         if !self.exited()? {
             return Err(io::Error::other("process group is not ready to complete"));
         }
-        match inspect_until(
-            Path::new("/proc"),
-            self.pid.as_raw_pid() as u32,
-            Instant::now() + DRAIN,
-            SCAN,
-        ) {
-            Ok(snapshot) if !snapshot.other => Ok((self.reap()?, false)),
-            Ok(_) => Ok((self.terminate()?, true)),
-            Err(error) => {
+        match inspect(Path::new("/proc"), self.pid.as_raw_pid() as u32, &|| {
+            completion_checkpoint(end, live, &Instant::now)
+        }) {
+            Ok(snapshot) if !snapshot.other => Ok(Completion {
+                status: self.reap()?,
+                leftover: false,
+                stopped: None,
+            }),
+            Ok(_) => Ok(Completion {
+                status: self.terminate()?,
+                leftover: true,
+                stopped: None,
+            }),
+            Err(ScanError::Stopped(reason)) => Ok(Completion {
+                status: self.terminate()?,
+                leftover: false,
+                stopped: Some(reason),
+            }),
+            Err(ScanError::Failed(error)) => {
                 let _cleanup = self.terminate();
                 Err(error)
             }
@@ -108,8 +136,7 @@ impl ProcessGroup {
             // Kill the still-owned direct child too; never broaden to other PIDs.
             let _direct = kill_process(self.pid, Signal::KILL);
             let exited = self.exited()?;
-            let snapshot =
-                inspect_until(Path::new("/proc"), self.pid.as_raw_pid() as u32, end, SCAN);
+            let snapshot = inspect_until(Path::new("/proc"), self.pid.as_raw_pid() as u32, end);
             match snapshot {
                 Ok(snapshot) if exited && !snapshot.live_other => return self.reap(),
                 Ok(_) => {}
@@ -167,11 +194,11 @@ struct Snapshot {
     live_other: bool,
 }
 
-/// A scan that outlived its window says nothing about the group: a busy host
-/// can simply deschedule it. Every other failure is a definitive refusal.
+/// Interruption never establishes quiescence. The process owner must drain
+/// before returning a cancelled or timed-out observation.
 #[derive(Debug)]
 enum ScanError {
-    Expired,
+    Stopped(CompletionStop),
     Failed(io::Error),
 }
 impl From<io::Error> for ScanError {
@@ -180,40 +207,47 @@ impl From<io::Error> for ScanError {
     }
 }
 
-/// Retry expired scans, doubling the window, until `end`; refuse at once on a
-/// definitive failure. Quiescence still has to be proved by one complete scan
-/// (frankengit-twuw).
-fn inspect_until(
-    root: &Path,
-    leader: u32,
+fn completion_checkpoint(
     end: Instant,
-    first_window: Duration,
-) -> io::Result<Snapshot> {
-    let mut window = first_window;
-    loop {
-        match inspect(root, leader, end.min(Instant::now() + window)) {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(ScanError::Expired) if Instant::now() < end => {
-                window = window.saturating_mul(2).max(Duration::from_millis(1));
-            }
-            Err(ScanError::Expired) => {
-                return Err(io::Error::other("process-group observation limit exceeded"));
-            }
-            Err(ScanError::Failed(error)) => return Err(error),
-        }
+    live: &dyn Fn() -> bool,
+    now: &dyn Fn() -> Instant,
+) -> Result<(), ScanError> {
+    if !live() {
+        Err(ScanError::Stopped(CompletionStop::Cancelled))
+    } else if now() >= end {
+        Err(ScanError::Stopped(CompletionStop::TimedOut))
+    } else {
+        Ok(())
     }
 }
 
-fn inspect(root: &Path, leader: u32, end: Instant) -> Result<Snapshot, ScanError> {
+/// Forced cleanup has one non-cancellable drain deadline. One complete scan
+/// must fit in its remaining budget; it never retries with a fresh budget.
+fn inspect_until(root: &Path, leader: u32, end: Instant) -> io::Result<Snapshot> {
+    match inspect(root, leader, &|| {
+        completion_checkpoint(end, &|| true, &Instant::now)
+    }) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(ScanError::Stopped(_)) => {
+            Err(io::Error::other("process-group observation limit exceeded"))
+        }
+        Err(ScanError::Failed(error)) => Err(error),
+    }
+}
+
+fn inspect(
+    root: &Path,
+    leader: u32,
+    checkpoint: &dyn Fn() -> Result<(), ScanError>,
+) -> Result<Snapshot, ScanError> {
+    checkpoint()?;
     let mut snapshot = Snapshot::default();
     let mut saw_leader = false;
     for (count, entry) in fs::read_dir(root)?.enumerate() {
         if count >= MAX_PROC_ENTRIES {
             return Err(io::Error::other("process-group observation limit exceeded").into());
         }
-        if Instant::now() >= end {
-            return Err(ScanError::Expired);
-        }
+        checkpoint()?;
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -244,6 +278,7 @@ fn inspect(root: &Path, leader: u32, end: Instant) -> Result<Snapshot, ScanError
         if bytes.len() > MAX_STAT_BYTES {
             return Err(io::Error::other("process stat limit exceeded").into());
         }
+        checkpoint()?;
         let (group, state) = stat(&bytes, pid)?;
         if pid == leader {
             saw_leader = true;
@@ -258,9 +293,7 @@ fn inspect(root: &Path, leader: u32, end: Instant) -> Result<Snapshot, ScanError
     if !saw_leader {
         return Err(io::Error::other("incomplete process-group observation").into());
     }
-    if Instant::now() >= end {
-        return Err(ScanError::Expired);
-    }
+    checkpoint()?;
     Ok(snapshot)
 }
 fn stat(bytes: &[u8], expected: u32) -> io::Result<(u32, u8)> {
