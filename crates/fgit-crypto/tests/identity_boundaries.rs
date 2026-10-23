@@ -9,7 +9,7 @@ use fgit_crypto::{
     RESERVED_NON_IDENTITY_TAGS, RowStatus, SchemaFamily, SchemaId, Sha1, Sha256,
     UnregisteredDomainTag, git_object_id, git_payload_body, git_payload_commitment,
     internal_digest_in_domain, internal_digest_over_parts, internal_digest_value,
-    internal_object_id, internal_object_id_for_tag, parse_git_oid, resolve_domain,
+    internal_object_id, internal_object_id_for_tag, lowercase_hex, parse_git_oid, resolve_domain,
     verify_internal_object_id,
 };
 
@@ -535,6 +535,155 @@ fn the_payload_commitment_does_not_replace_the_native_identity() {
         "the stronger digest is additional evidence, never the visible identity"
     );
     assert_eq!(commitment.digest().len(), 32);
+}
+
+#[test]
+fn the_payload_api_matches_the_retained_materialized_body_at_hash_and_header_boundaries() {
+    // Every short length covers all SHA-256 block/padding positions, including
+    // the domain and Git headers. Larger cells cross decimal-width changes
+    // and repeated blocks. These are identity-byte cases, not parsed graphs.
+    let lengths: Vec<usize> = (0..=192)
+        .chain([
+            255, 256, 257, 511, 512, 513, 999, 1_000, 1_001, 4_095, 4_096, 4_097, 9_999, 10_000,
+            10_001, 65_535, 65_536, 65_537, 99_999, 100_000, 100_001, 999_999, 1_000_000,
+            1_000_001, 1_048_575, 1_048_576, 1_048_577,
+        ])
+        .collect();
+    let versions = [
+        CodecVersion::new(1, 0),
+        CodecVersion::new(1, 1),
+        CodecVersion::new(2, 0),
+        CodecVersion::new(u16::MAX, u16::MAX),
+    ];
+    for kind in GitObjectKind::ALL.iter().copied() {
+        for length in lengths.iter().copied() {
+            // The modulo explicitly bounds the conversion; no RNG or ambient
+            // state participates in this deterministic binary payload.
+            let content: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+            let materialized = git_payload_body(kind, &content);
+            for codec in versions {
+                // Keep this original public materialized path as the oracle:
+                // it never calls the optimized git_payload_commitment API.
+                let reference = internal_object_id(
+                    IdentityDomain::GitPayloadCommitment,
+                    GIT_PAYLOAD_SCHEMA,
+                    codec,
+                    &materialized,
+                );
+                let actual = git_payload_commitment(kind, &content, codec);
+                assert_eq!(actual, reference, "{kind:?}/{length}/{codec}");
+                assert_eq!(actual.codec_version(), codec);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_payload_api_matches_the_original_independently_derived_golden_rows() {
+    let corpus = include_str!("../goldens/internal_id_vectors.tsv");
+    let codec = CodecVersion::new(1, 0);
+    for (identifier, content) in [
+        ("IV-009", b"".as_slice()),
+        ("IV-010", b"hello world\n".as_slice()),
+    ] {
+        let row = corpus
+            .lines()
+            .find(|row| row.split('\t').next() == Some(identifier))
+            .expect("the original independent payload golden must remain present");
+        let fields: Vec<_> = row.split('\t').collect();
+        assert_eq!(fields.len(), 9);
+        let body = git_payload_body(GitObjectKind::Blob, content);
+        assert_eq!(format!("hex:{}", lowercase_hex(&body)), fields[5]);
+        let actual = git_payload_commitment(GitObjectKind::Blob, content, codec);
+        assert_eq!(actual.algorithm(), DigestAlgorithm::Sha256.id());
+        assert_eq!(actual.domain().as_str(), fields[1]);
+        assert_eq!(actual.codec_version(), codec);
+        assert_eq!(lowercase_hex(actual.digest().as_bytes()), fields[7]);
+        assert_eq!(
+            actual,
+            internal_object_id(
+                IdentityDomain::GitPayloadCommitment,
+                GIT_PAYLOAD_SCHEMA,
+                codec,
+                &body,
+            )
+        );
+    }
+}
+
+#[test]
+fn payload_commitment_verification_refuses_bit_kind_and_declared_length_twins() {
+    let content = b"hello world";
+    for kind in GitObjectKind::ALL.iter().copied() {
+        for codec in [CodecVersion::new(1, 0), CodecVersion::new(2, 7)] {
+            let actual = git_payload_commitment(kind, content, codec);
+            let body = git_payload_body(kind, content);
+            assert_eq!(
+                verify_internal_object_id(
+                    &actual,
+                    IdentityDomain::GitPayloadCommitment,
+                    GIT_PAYLOAD_SCHEMA,
+                    codec,
+                    &body,
+                ),
+                Ok(())
+            );
+            let mut changed = *content;
+            changed[5] ^= 1;
+            let bit_body = git_payload_body(kind, &changed);
+            let other_kind = if kind == GitObjectKind::Blob {
+                GitObjectKind::Tag
+            } else {
+                GitObjectKind::Blob
+            };
+            let kind_body = git_payload_body(other_kind, content);
+            let short = &content[..content.len() - 1];
+            let mut wrong_length_body = git_payload_body(kind, short);
+            // Retain the original eleven content bytes but declare ten. Both
+            // decimal headers have the same width, isolating the length byte.
+            wrong_length_body.push(*content.last().expect("the fixed payload is nonempty"));
+            for (changed_body, label) in [
+                (bit_body, "one bit"),
+                (kind_body, "object kind"),
+                (wrong_length_body, "declared length"),
+            ] {
+                assert!(
+                    matches!(
+                        verify_internal_object_id(
+                            &actual,
+                            IdentityDomain::GitPayloadCommitment,
+                            GIT_PAYLOAD_SCHEMA,
+                            codec,
+                            &changed_body,
+                        ),
+                        Err(InternalIdentityError::DigestMismatch { .. })
+                    ),
+                    "{kind:?}/{codec}: {label} must not borrow the original commitment"
+                );
+            }
+            // Legitimately changed objects receive their own identities. This
+            // verifier tests commitment binding, not Git syntax admission.
+            for (permitted_kind, permitted_content) in [
+                (kind, changed.as_slice()),
+                (other_kind, content.as_slice()),
+                (kind, short),
+            ] {
+                let permitted_body = git_payload_body(permitted_kind, permitted_content);
+                let permitted = git_payload_commitment(permitted_kind, permitted_content, codec);
+                assert_ne!(permitted, actual);
+                assert_eq!(
+                    verify_internal_object_id(
+                        &permitted,
+                        IdentityDomain::GitPayloadCommitment,
+                        GIT_PAYLOAD_SCHEMA,
+                        codec,
+                        &permitted_body,
+                    ),
+                    Ok(())
+                );
+            }
+        }
+    }
 }
 
 // --- allocation-free digest entry points ------------------------------------

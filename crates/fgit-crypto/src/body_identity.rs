@@ -398,18 +398,23 @@ pub fn internal_digest_in_domain(
 ///
 /// This adds independent evidence. It does not replace, translate, or upgrade
 /// the native identity, and it never touches historical signature semantics.
+/// The bounded Git header and borrowed content are hashed as ordered parts,
+/// without a payload-sized temporary. Git and domain headers still allocate.
 #[must_use]
 pub fn git_payload_commitment(
     kind: GitObjectKind,
     content: &[u8],
     codec_version: CodecVersion,
 ) -> InternalObjectId {
-    let body = git_payload_body(kind, content);
-    internal_object_id(
-        IdentityDomain::GitPayloadCommitment,
-        GIT_PAYLOAD_SCHEMA,
+    let length = u64::try_from(content.len())
+        .expect("a slice length always fits in u64 on supported targets");
+    let header = crate::native::object_header(kind, length);
+    let domain = IdentityDomain::GitPayloadCommitment;
+    InternalObjectId::new(
+        domain.algorithm().id(),
+        domain.domain_tag(),
         codec_version,
-        &body,
+        internal_digest_over_parts(domain, GIT_PAYLOAD_SCHEMA, &[&header, content]),
     )
 }
 
