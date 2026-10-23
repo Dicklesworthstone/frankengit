@@ -24,7 +24,7 @@ use crate::service_stop as stop_file;
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
-  [--allow-protection]
+  [--allow-protection] [--lfs-root <private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
@@ -73,13 +73,25 @@ for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
 regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
 table to rotate/revoke credentials without restarting. Already authenticated
 in-flight requests retain their bounded grant.
+
+On Linux, --lfs-root enables the Git LFS basic transfer API in an existing
+private (0700) artifact-fabric directory. It requires --credentials-file and
+independent lfs-read/lfs-write grants; neither grants Git reads or pushes.
+Stock Git LFS uses <repository-url>/info/lfs with Basic token-as-password or
+Bearer credentials. Payloads are SHA-256 verified before immutable publication
+and before download; interrupted uploads can be retried under the same identity.
+The bounded profile accepts objects up to 64 MiB, at most 100 objects per batch,
+and at most 64 MiB total declared payload bytes per batch. Payloads are retained
+permanently: pointer-aware collection, partial-upload resume and LFS locking are
+outside this profile. Git pointer files are never rewritten by the service.
+See docs/GIT_LFS_BASIC_TRANSFER.md for provisioning and custody/backup limits.
 
 Git requests authenticate with a Bearer token or Basic token-as-password; the
 native APIs accept only an explicit Bearer token. Any request other than GET or
@@ -260,6 +272,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 "--token-file"
                     | "--principal"
                     | "--credentials-file"
+                    | "--lfs-root"
                     | "--expected-incarnation"
                     | "--stop-file"
                     | "--max-sessions"
@@ -367,6 +380,13 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let allow_pulls = flags.contains_key("--allow-pulls");
     let allow_source = flags.contains_key("--allow-source");
     let allow_protection = flags.contains_key("--allow-protection");
+    if flags.contains_key("--lfs-root") {
+        if !matches!(&credentials, CredentialInput::Reloadable(_)) {
+            return Err("Git LFS requires explicit scopes in --credentials-file".into());
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err("the Git LFS artifact-fabric backend requires Linux".into());
+    }
     if (allow_issues || allow_outcomes || allow_pulls || allow_source || allow_protection)
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
@@ -453,6 +473,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         .with_selected_pack_byte_envelope(bytes("--pack-max-expanded-mib")?);
     if allow_protection {
         config = config.with_http_protection_admin();
+    }
+    if let Some(root) = flags.get("--lfs-root") {
+        config = config.with_http_lfs_root(PathBuf::from(*root));
     }
     if let Some(origin) = flags.get("--trusted-origin") {
         config = config.with_http_trusted_origin(
@@ -549,6 +572,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         CredentialInput::Static { token_file, .. } => Some(read_token(token_file)?),
         _ => None,
     };
+    let lfs_enabled = options.config.http_lfs_root().is_some();
     let mut node = OneNode::open_existing(options.config).map_err(|e| e.to_string())?;
     if matches!(&options.credentials, CredentialInput::HeaderOnly) {
         let authentication = node
@@ -575,6 +599,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             node.validate_smart_http_credentials_file(path)
                 .map_err(|e| e.to_string())?;
         }
+        node.validate_smart_http_lfs_storage()
+            .map_err(|e| e.to_string())?;
         let head = node
             .runtime()
             .block_on(node.authenticate_authority_head())
@@ -594,9 +620,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"lfs_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            options.allow_source, options.allow_protection, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
+            options.allow_source, options.allow_protection, lfs_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
         };
         if let Some(maintenance) = options.index_maintenance {
@@ -761,12 +787,47 @@ mod tests {
         assert!(!options.allow_protection);
         assert!(options.index_maintenance.is_none());
         assert!(!options.config.http_protection_admin_enabled());
+        assert!(options.config.http_lfs_root().is_none());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
         args.retain(|arg| arg != "--trusted-local");
         assert!(parse(&args).is_err());
     }
+    #[test]
+    fn lfs_requires_an_explicit_custody_root_and_scoped_credentials() {
+        let mut static_args = arguments();
+        static_args.extend(["--lfs-root".into(), "lfs-custody".into()]);
+        assert!(parse(&static_args).is_err());
+
+        let mut scoped = arguments()[..5].to_vec();
+        scoped.extend(
+            ["--credentials-file", "grants", "--lfs-root", "lfs-custody"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let options = parse(&scoped).unwrap();
+            assert_eq!(
+                options.config.http_lfs_root(),
+                Some(Path::new("lfs-custody"))
+            );
+            assert!(!options.allow_receive && !options.allow_source && !options.allow_pulls);
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert!(parse(&scoped).is_err());
+        scoped.extend(["--lfs-root".into(), "other".into()]);
+        assert!(parse(&scoped).is_err());
+        let mut header = arguments()[..5].to_vec();
+        header.extend(
+            ["--print-credentials-header", "--lfs-root", "lfs-custody"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert!(parse(&header).is_err());
+    }
+
     fn maintenance_arguments() -> Vec<String> {
         let mut args = arguments()[..5].to_vec();
         args.extend(

@@ -24,6 +24,7 @@ fgit-identity.workspace = true
 fgit-object-fabric.workspace = true
 fgit-pack.workspace = true
 fgit-resource.workspace = true
+fgit-schema.workspace = true
 fgit-runtime.workspace = true
 fgit-reference.workspace = true
 fgit-ssh.workspace = true

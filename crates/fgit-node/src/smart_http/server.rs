@@ -13,6 +13,8 @@ mod browser;
 mod credentials;
 mod events;
 mod issues;
+#[cfg(target_os = "linux")]
+mod lfs;
 mod lifetime;
 mod maintenance;
 mod outcomes;
@@ -72,6 +74,8 @@ struct Profile {
     allow_outcomes: bool,
     allow_pulls: bool,
     allow_source: bool,
+    #[cfg(target_os = "linux")]
+    lfs: Option<lfs::Service>,
     http: HttpLimits,
     maximum_response_bytes: u64,
     timeout: GitDaemonSessionTimeout,
@@ -173,6 +177,42 @@ impl OneNode {
         self.smart_http_credentials_source(path)
             .validate()
             .map_err(credential_error)
+    }
+
+    /// Validate explicitly enabled LFS custody before reporting readiness.
+    ///
+    /// The namespace comes from this already authenticated node, never from an
+    /// HTTP path or caller-provided incarnation. Validation creates no objects.
+    pub fn validate_smart_http_lfs_storage(&self) -> Result<(), NodeSmartHttpRefusal> {
+        #[cfg(target_os = "linux")]
+        {
+            self.smart_http_lfs_service().map(|_| ())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if self.service_config.http_lfs_root().is_some() {
+                return Err(invalid_configuration(
+                    "the Git LFS artifact-fabric backend requires Linux",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn smart_http_lfs_service(&self) -> Result<Option<lfs::Service>, NodeSmartHttpRefusal> {
+        self.service_config
+            .http_lfs_root()
+            .map(|root| {
+                lfs::Service::open(
+                    root,
+                    self.tenant_id,
+                    self.repository_id,
+                    self.repository_incarnation_id(),
+                )
+                .map_err(|error| io_error("open Git LFS custody", io::Error::other(error)))
+            })
+            .transpose()
     }
 
     /// Serve multiple explicitly granted principals on the same bounded node.
@@ -421,8 +461,19 @@ impl OneNode {
             ));
         }
         credentials.validate().map_err(credential_error)?;
-        let maximum_body = u64::try_from(self.git_daemon_receive_limits.pack.max_input_bytes)
-            .map_err(|_| invalid_configuration("HTTP input envelope is not representable"))?;
+        self.validate_smart_http_lfs_storage()?;
+        #[cfg(target_os = "linux")]
+        let lfs = self.smart_http_lfs_service()?;
+        let maximum_git_body =
+            u64::try_from(self.git_daemon_receive_limits.pack.max_input_bytes)
+                .map_err(|_| invalid_configuration("HTTP input envelope is not representable"))?;
+        // Git pack ceilings and the independently enabled LFS profile are
+        // separate. Each service still applies its own tighter body limit.
+        let maximum_body = if self.service_config.http_lfs_root().is_some() {
+            maximum_git_body.max(64 * 1024 * 1024)
+        } else {
+            maximum_git_body
+        };
         let maximum_wire = maximum_body
             .checked_add(FRAMING_ALLOWANCE)
             .ok_or_else(|| invalid_configuration("HTTP wire envelope overflow"))?;
@@ -452,6 +503,8 @@ impl OneNode {
             allow_outcomes,
             allow_pulls,
             allow_source,
+            #[cfg(target_os = "linux")]
+            lfs,
             http,
             maximum_response_bytes,
             timeout: self.git_daemon_session_timeout,
@@ -1029,6 +1082,18 @@ fn serve_connection(
         if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
         }
+        #[cfg(target_os = "linux")]
+        if lfs::is_route(envelope.target, &profile.route) {
+            return lfs::serve(
+                profile,
+                &envelope,
+                &bytes[envelope.consumed..],
+                &mut reader,
+                &mut writer,
+                &admission_deadline,
+                local,
+            );
+        }
         if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
             return Ok(());
         }
@@ -1501,6 +1566,8 @@ mod tests {
             allow_outcomes: false,
             allow_pulls: false,
             allow_source: false,
+            #[cfg(target_os = "linux")]
+            lfs: None,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,

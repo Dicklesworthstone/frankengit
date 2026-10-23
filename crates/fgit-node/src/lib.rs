@@ -6629,6 +6629,10 @@ pub struct NodeConfig {
     /// Explicit runtime-only ceiling for the scoped HTTP review-protection API.
     /// Disabled by default; token scopes and current administrators still apply.
     http_protection_admin: bool,
+    /// Explicit local artifact-fabric custody for the HTTP Git LFS basic
+    /// transfer profile. Disabled unless an operator selects a private root;
+    /// per-request LFS credentials remain independently required.
+    http_lfs_root: Option<PathBuf>,
     /// Which cell this process is, for answers it serves.
     ///
     /// `frankengit-1egm`. Unset by default and typed as such: a deployment that
@@ -6677,6 +6681,7 @@ impl NodeConfig {
             git_daemon_receive_principal: None,
             http_trusted_origin: None,
             http_protection_admin: false,
+            http_lfs_root: None,
         }
     }
 
@@ -6833,6 +6838,24 @@ impl NodeConfig {
     #[must_use]
     pub const fn http_protection_admin_enabled(&self) -> bool {
         self.http_protection_admin
+    }
+
+    /// Enables Git LFS basic transfers in the authenticated HTTP service.
+    ///
+    /// The existing private directory holds immutable artifact-fabric payloads,
+    /// isolated by tenant, repository and authenticated incarnation. This grants
+    /// no token scope and publishes no Git refs. The current backend is Linux
+    /// only; unsupported hosts refuse service startup explicitly.
+    #[must_use]
+    pub fn with_http_lfs_root(mut self, root: PathBuf) -> Self {
+        self.http_lfs_root = Some(root);
+        self
+    }
+
+    /// The explicitly selected Git LFS custody root, if enabled.
+    #[must_use]
+    pub fn http_lfs_root(&self) -> Option<&Path> {
+        self.http_lfs_root.as_deref()
     }
 
     /// The selected git-daemon receive-processing budget (300 s unless an

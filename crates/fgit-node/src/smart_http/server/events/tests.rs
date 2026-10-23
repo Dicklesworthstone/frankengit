@@ -135,6 +135,8 @@ impl Scratch {
             allow_outcomes: false,
             allow_pulls: true,
             allow_source: false,
+            #[cfg(target_os = "linux")]
+            lfs: None,
             http: HttpLimits::default(),
             maximum_response_bytes: 2 * 1024 * 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,

@@ -898,6 +898,7 @@ dependencies = [
  "fgit-resource",
  "fgit-runner",
  "fgit-runtime",
+ "fgit-schema",
  "fgit-ssh",
  "fgit-statistics",
  "fgit-treefs",

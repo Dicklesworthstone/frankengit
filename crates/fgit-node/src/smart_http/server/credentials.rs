@@ -58,6 +58,8 @@ pub(super) struct Grant {
     merges_write: bool,
     protection_read: bool,
     protection_write: bool,
+    lfs_read: bool,
+    lfs_write: bool,
 }
 impl Grant {
     pub const fn permits(self, service: Service) -> bool {
@@ -106,6 +108,14 @@ impl Grant {
     /// It never permits inspecting another principal's transaction namespace.
     pub const fn permits_outcomes(self) -> bool {
         self.outcomes_read
+    }
+    /// Artifact custody is independent from Git ref publication and metadata.
+    pub const fn permits_lfs(self, mutation: bool) -> bool {
+        if mutation {
+            self.lfs_write
+        } else {
+            self.lfs_read
+        }
     }
 }
 
@@ -168,6 +178,8 @@ impl CredentialSource {
                     merges_write: false,
                     protection_read: false,
                     protection_write: false,
+                    lfs_read: false,
+                    lfs_write: false,
                 })
             }
             Self::File { path, binding } => {
@@ -368,6 +380,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
         merges_write: false,
         protection_read: false,
         protection_write: false,
+        lfs_read: false,
+        lfs_write: false,
     };
     let mut previous = 0;
     for scope in scopes.split(',') {
@@ -386,6 +400,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
             "merges-write" => (10, &mut grant.merges_write),
             "protection-read" => (11, &mut grant.protection_read),
             "protection-write" => (12, &mut grant.protection_write),
+            "lfs-read" => (13, &mut grant.lfs_read),
+            "lfs-write" => (14, &mut grant.lfs_write),
             _ => return Err(CredentialFailure::InvalidFile),
         };
         if rank <= previous {
@@ -714,6 +730,39 @@ mod tests {
             assert!(!entry.grant.permits_issues(true));
             assert!(!entry.grant.permits_outcomes());
         }
+    }
+    #[test]
+    fn lfs_grants_are_independent_and_never_implicit() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let read = grant(principal, "lfs-read").unwrap();
+        assert!(read.permits_lfs(false));
+        assert!(!read.permits_lfs(true));
+        let write = grant(principal, "lfs-write").unwrap();
+        assert!(!write.permits_lfs(false));
+        assert!(write.permits_lfs(true));
+        let both = grant(principal, "lfs-read,lfs-write").unwrap();
+        assert!(both.permits_lfs(false) && both.permits_lfs(true));
+        for selected in [read, write, both] {
+            assert!(!selected.permits(Service::UploadPack));
+            assert!(!selected.permits(Service::ReceivePack));
+            assert!(!selected.permits_reviewed_merge());
+            assert!(!selected.permits_protection(true));
+        }
+        for scopes in ["read", "receive", "read,receive", "protection-write"] {
+            let selected = grant(principal, scopes).unwrap();
+            assert!(!selected.permits_lfs(false) && !selected.permits_lfs(true));
+        }
+        for scopes in ["lfs-write,lfs-read", "lfs-read,lfs-read", "lfs-read,read"] {
+            assert!(grant(principal, scopes).is_err());
+        }
+        let token = "a".repeat(64);
+        let selected = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        }
+        .authenticate(Some(&format!("Bearer {token}")))
+        .unwrap();
+        assert!(!selected.permits_lfs(false) && !selected.permits_lfs(true));
     }
     #[test]
     fn issue_grants_never_imply_git_or_each_other() {

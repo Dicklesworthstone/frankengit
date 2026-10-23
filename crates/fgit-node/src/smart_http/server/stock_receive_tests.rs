@@ -22,6 +22,8 @@ fn profile() -> Profile {
         allow_outcomes: false,
         allow_pulls: false,
         allow_source: false,
+        #[cfg(target_os = "linux")]
+        lfs: None,
         http: HttpLimits::default(),
         maximum_response_bytes: 1024,
         timeout: GitDaemonSessionTimeout::DEFAULT,
