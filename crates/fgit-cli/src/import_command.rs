@@ -9,6 +9,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// The largest `--max-expanded-mib` profile.
+const MAX_EXPANDED_MIB: u64 = 16_384;
+
 const USAGE: &str = "usage: fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>\n\
   [--expected-incarnation <id>] [--timeout-secs <positive-integer>] [--max-expanded-mib <1..16384>] [--json]\n\
 Without a local or leading global --timeout-secs, reserve the bounded import profile using the node's receive work budget.\n\
@@ -101,7 +104,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 let mib = value
                     .parse::<u64>()
                     .ok()
-                    .filter(|mib| (1..=16384).contains(mib))
+                    .filter(|mib| (1..=MAX_EXPANDED_MIB).contains(mib))
                     .ok_or("--max-expanded-mib requires an integer in 1..=16384")?;
                 options.maximum_bytes = Some(mib * 1024 * 1024);
             }
@@ -163,10 +166,8 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         signals,
     );
     let cleanup = node.shutdown().err().map(|e| e.to_string());
-    let decision = result.map_err(|error| {
-        format!(
-            "{error}; signal observer error: {observer_error:?}; shutdown error: {cleanup:?}. An interrupted publication is not proof of non-commit; retry the identical source refs and key or use fg outcome."
-        )
+    let decision = result.map_err(|failure| {
+        describe_failure(failure, observer_error.as_deref(), cleanup.as_deref())
     })?;
     lifecycle::finish(
         &mut io::stdout().lock(),
@@ -176,6 +177,24 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         cleanup.as_deref(),
         observer_error.as_deref(),
     )
+}
+
+/// The command's error text for an import with no terminal decision. Only a
+/// failure after admission began carries the non-commit caveat; a refusal
+/// before the import was sealed published nothing (frankengit-6sl7).
+fn describe_failure(
+    failure: lifecycle::Failure,
+    observer_error: Option<&str>,
+    cleanup: Option<&str>,
+) -> String {
+    match failure {
+        lifecycle::Failure::Refused(error) => format!(
+            "{error}; signal observer error: {observer_error:?}; shutdown error: {cleanup:?}. Refused before the import was sealed: nothing was published."
+        ),
+        lifecycle::Failure::Uncertain(error) => format!(
+            "{error}; signal observer error: {observer_error:?}; shutdown error: {cleanup:?}. An interrupted publication is not proof of non-commit; retry the identical source refs and key or use fg outcome."
+        ),
+    }
 }
 
 #[cfg(test)]

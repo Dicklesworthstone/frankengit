@@ -19,7 +19,7 @@ fge_context non_claim 'Source-fixture and scoped local import evidence, not gene
 WORK="$(fge_tempdir packed-import-profiles)"
 fge_phase action
 fge_run_timeout 1800 PACKED-IMPORT-001 python3 - "$FG_BIN" "$WORK" <<'PY'
-import hashlib, json, os, pathlib, shutil, subprocess, sys, time
+import hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 fg, root = sys.argv[1], pathlib.Path(sys.argv[2])
 tenant, repository, principal = '1' * 32, '2' * 32, '3' * 32
 home = root / 'home'; home.mkdir()
@@ -94,6 +94,14 @@ def campaign(format, blob_bytes, large, single=False):
     if not large:
         small = list(args); small[small.index('--max-expanded-mib') + 1] = '1'
         run(label + '-small-limit', [fg, *small], expected=2)
+        # The refusal names the profile flag with the lower bound it proves,
+        # and promises nothing was published (frankengit-6sl7).
+        refused = (root / f'{sequence:03d}-{label}-small-limit.err').read_text()
+        observed = int(re.search(r'reachable object bytes (\d+) exceed import limit', refused).group(1))
+        at_least = -(-observed // (1024 * 1024))
+        assert f'rerun with --max-expanded-mib {at_least} or more' in refused, refused
+        assert 'nothing was published' in refused and 'not proof of non-commit' not in refused, refused
+        assert at_least <= int(profile), (at_least, profile)
         refs = json.loads(run(label + '-unchanged', [fg, 'refs', store, tenant, repository, '--trusted-local', '--object-format', format]))
         assert refs['references'] == []
     receipt = json.loads(run(label + '-admit', [fg, *args]))

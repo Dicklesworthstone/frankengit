@@ -1,17 +1,69 @@
 //! One import budget, one request-local stop owner, and independent finalization.
 //! A cleanup failure never erases an authenticated terminal publication result.
-use super::{Options, receipt};
+use super::{MAX_EXPANDED_MIB, Options, receipt};
 use crate::publication_support::{describe, write_terminal_receipt};
-use fgit_node::{NodeRequestContext, OneNode};
+use fgit_node::{LooseGitImportRefusal, NodeRequestContext, NodeSourceImportRefusal, OneNode};
 use fgit_types::{DecisionOutcome, RepositoryIncarnationId};
 use std::io::Write;
+
+/// Why an import produced no terminal decision (frankengit-6sl7).
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum Failure {
+    /// Refused before the source import was sealed: nothing was published.
+    Refused(String),
+    /// Admission had begun, so the outcome is unknown until it is resolved.
+    Uncertain(String),
+}
+
+/// Classify a node refusal by the boundary that produced it. Only admission
+/// can leave the outcome unknown: staging, validation, closure, identity and
+/// cell-state refusals all precede sealing.
+pub(super) fn failure(error: &NodeSourceImportRefusal, maximum_bytes: Option<u64>) -> Failure {
+    match error {
+        NodeSourceImportRefusal::Admission(_) => Failure::Uncertain(error.to_string()),
+        NodeSourceImportRefusal::Staging(staging) => {
+            let hint = match staging.as_ref() {
+                LooseGitImportRefusal::TotalObjectBytesExceeded { limit, observed } => {
+                    profile_hint(*limit, *observed, maximum_bytes)
+                }
+                _ => String::new(),
+            };
+            Failure::Refused(format!("{error}{hint}"))
+        }
+        NodeSourceImportRefusal::Idempotency(_)
+        | NodeSourceImportRefusal::ObjectCountOutOfRange { .. }
+        | NodeSourceImportRefusal::ClosureRoot(_)
+        | NodeSourceImportRefusal::Validation(_)
+        | NodeSourceImportRefusal::CellState(_) => Failure::Refused(error.to_string()),
+    }
+}
+
+/// Name the profile flag after a byte-limit refusal. The import stops at the
+/// first object past the limit, so `observed` is a lower bound on what the
+/// source needs, not its size.
+fn profile_hint(limit: u64, observed: u64, maximum_bytes: Option<u64>) -> String {
+    const MIB: u64 = 1024 * 1024;
+    let profile = match maximum_bytes {
+        None => format!("the default import profile admits {} MiB", limit / MIB),
+        Some(_) => format!("the selected profile admits {} MiB", limit / MIB),
+    };
+    let at_least = observed.div_ceil(MIB);
+    if at_least > MAX_EXPANDED_MIB {
+        return format!(
+            "; {profile}, and this source needs more than the largest profile (--max-expanded-mib {MAX_EXPANDED_MIB})"
+        );
+    }
+    format!(
+        "; {profile}: rerun with --max-expanded-mib {at_least} or more (at most {MAX_EXPANDED_MIB}) to select a bounded disk-backed profile. The import stops counting at the first object past the limit, so the source may need more than {at_least} MiB"
+    )
+}
 
 pub(super) fn execute(
     node: &OneNode,
     options: &Options,
     #[cfg(unix)] signals: fgit_node::TerminationSignals,
 ) -> (
-    Result<receipt::AtomicImportDecision, String>,
+    Result<receipt::AtomicImportDecision, Failure>,
     Option<String>,
 ) {
     // Preserve the import's byte/work profile and absolute deadline. The signal
@@ -22,9 +74,9 @@ pub(super) fn execute(
     };
     let parent = match parent {
         Ok(parent) => parent,
-        Err(error) => return (Err(error.to_string()), None),
+        Err(error) => return (Err(Failure::Refused(error.to_string())), None),
     };
-    let work = |request: &NodeRequestContext| -> Result<receipt::AtomicImportDecision, String> {
+    let work = |request: &NodeRequestContext| -> Result<receipt::AtomicImportDecision, Failure> {
         let admission = match options.maximum_bytes {
             None => node
                 .runtime()
@@ -45,7 +97,7 @@ pub(super) fn execute(
                     ))
             }
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| failure(&error, options.maximum_bytes))?;
         // A source import is atomic. Validate its complete returned mapping,
         // not an empty or mixed collection mistaken for successful publication.
         receipt::checked_atomic(
@@ -58,7 +110,9 @@ pub(super) fn execute(
                 .collect::<Vec<_>>(),
         )
         .map_err(|error| {
-            format!("{error}; publication may already have occurred; recover with fg outcome")
+            Failure::Uncertain(format!(
+                "{error}; publication may already have occurred; recover with fg outcome"
+            ))
         })
     };
     #[cfg(unix)]
@@ -68,7 +122,9 @@ pub(super) fn execute(
             // The observer acknowledges readiness before invoking work. A failed
             // startup admits no import; the caller still shuts down its node.
             Err(error) => (
-                Err(format!("import signal observer startup failed: {error}")),
+                Err(Failure::Refused(format!(
+                    "import signal observer startup failed: {error}"
+                ))),
                 None,
             ),
         }

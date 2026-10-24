@@ -184,3 +184,77 @@ fn output_failure_retains_all_cleanup_errors_and_known_transaction() {
         assert!(error.contains(&describe(tx_id(), &decision(true).terminal)));
     }
 }
+
+/// A byte-limit refusal names --max-expanded-mib with the lower bound the
+/// refusal proves. Every refusal before sealing is classified as publishing
+/// nothing; the command text keeps the non-commit caveat only for a failure
+/// after admission began (frankengit-6sl7).
+#[test]
+fn byte_limit_refusals_name_the_profile_flag_and_only_admission_failures_are_uncertain() {
+    use fgit_node::{LooseGitImportRefusal, NodeSourceImportRefusal};
+    const MIB: u64 = 1024 * 1024;
+    let limit_refusal = |limit: u64, observed: u64| {
+        NodeSourceImportRefusal::Staging(Box::new(
+            LooseGitImportRefusal::TotalObjectBytesExceeded { limit, observed },
+        ))
+    };
+
+    // charmed.git under the default profile: the walk stopped at 538,027,779.
+    let Failure::Refused(text) = failure(&limit_refusal(512 * MIB, 538_027_779), None) else {
+        panic!("a staging refusal precedes sealing");
+    };
+    assert!(text.starts_with("reachable object bytes 538027779 exceed import limit 536870912"));
+    assert!(
+        text.contains("the default import profile admits 512 MiB"),
+        "{text}"
+    );
+    assert!(
+        text.contains("rerun with --max-expanded-mib 514 or more"),
+        "{text}"
+    );
+    assert!(text.contains("may need more than 514 MiB"), "{text}");
+
+    // An explicit profile one byte short names the next MiB.
+    let Failure::Refused(text) = failure(&limit_refusal(MIB, MIB + 1), Some(MIB)) else {
+        panic!("a staging refusal precedes sealing");
+    };
+    assert!(text.contains("the selected profile admits 1 MiB"), "{text}");
+    assert!(
+        text.contains("rerun with --max-expanded-mib 2 or more"),
+        "{text}"
+    );
+
+    // Past the largest profile there is no flag value to suggest.
+    let largest = 16_384 * MIB;
+    let Failure::Refused(text) = failure(&limit_refusal(largest, largest + 1), Some(largest))
+    else {
+        panic!("a staging refusal precedes sealing");
+    };
+    assert!(
+        text.contains("needs more than the largest profile"),
+        "{text}"
+    );
+    assert!(!text.contains("rerun with"), "{text}");
+
+    // Other refusals before sealing carry no hint.
+    for refusal in [
+        NodeSourceImportRefusal::Staging(Box::new(LooseGitImportRefusal::ObjectLimitExceeded {
+            limit: 5,
+        })),
+        NodeSourceImportRefusal::Validation(RefusalCode::ExpectedOldRefMismatch),
+        NodeSourceImportRefusal::ObjectCountOutOfRange { count: 7 },
+    ] {
+        assert_eq!(
+            failure(&refusal, None),
+            Failure::Refused(refusal.to_string())
+        );
+    }
+
+    let refused = super::super::describe_failure(Failure::Refused("staged".into()), None, None);
+    assert!(refused.contains("nothing was published"), "{refused}");
+    assert!(!refused.contains("not proof of non-commit"), "{refused}");
+    let uncertain =
+        super::super::describe_failure(Failure::Uncertain("admission".into()), None, None);
+    assert!(uncertain.contains("not proof of non-commit"), "{uncertain}");
+    assert!(!uncertain.contains("nothing was published"), "{uncertain}");
+}
