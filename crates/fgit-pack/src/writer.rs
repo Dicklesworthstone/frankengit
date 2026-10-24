@@ -784,7 +784,6 @@ impl PackPlanner {
     /// at most [`MAX_THIN_BASES_PER_TARGET`] bases, not the pack. Decisions
     /// and emission share the planned path's code. The sink receives the
     /// complete pack and is promoted only after the trailer.
-    #[allow(clippy::too_many_arguments)]
     pub fn stream_selected_thin(
         &self,
         source: &impl CanonicalObjectSource,
@@ -4832,7 +4831,7 @@ mod tests {
             PackWriteProfile::COMPRESSED_V5_THIN.delta_window_bytes,
             PackWriteProfile::COMPRESSED_V5.delta_window_bytes
         );
-        assert!(PackWriteProfile::COMPRESSED_V5_THIN.thin);
+        const { assert!(PackWriteProfile::COMPRESSED_V5_THIN.thin) };
         for corpus in delta_corpora() {
             let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
             let source = FixtureSource::with(corpus);

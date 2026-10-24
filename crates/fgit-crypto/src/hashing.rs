@@ -282,17 +282,17 @@ fn sha1_schedule(block: &[u8; BLOCK_BYTES]) -> [u32; 80] {
     schedule
 }
 
-#[inline(always)]
+#[inline]
 const fn sha1_choose(x: u32, y: u32, z: u32) -> u32 {
     (x & y) | (!x & z)
 }
 
-#[inline(always)]
+#[inline]
 const fn sha1_parity(x: u32, y: u32, z: u32) -> u32 {
     x ^ y ^ z
 }
 
-#[inline(always)]
+#[inline]
 const fn sha1_majority(x: u32, y: u32, z: u32) -> u32 {
     (x & y) | (x & z) | (y & z)
 }
@@ -356,50 +356,60 @@ fn sha1_rounds_streamed(state: [u32; 5], block: &[u8; BLOCK_BYTES]) -> [u32; 5] 
 }
 
 /// The 80 SHA-1 rounds, added into `state`; `word(n)` is called once per
-/// round, in order.
-#[inline(always)]
+/// round, in order. `wa`..`we` are FIPS 180-4's working variables a..e.
+#[inline]
 fn sha1_rounds_with(state: [u32; 5], mut word: impl FnMut(usize) -> u32) -> [u32; 5] {
-    let [mut a, mut b, mut c, mut d, mut e] = state;
-    sha1_phase!(sha1_choose, SHA1_ROUND_CONSTANTS[0], word, 0, a, b, c, d, e);
+    let [mut wa, mut wb, mut wc, mut wd, mut we] = state;
+    sha1_phase!(
+        sha1_choose,
+        SHA1_ROUND_CONSTANTS[0],
+        word,
+        0,
+        wa,
+        wb,
+        wc,
+        wd,
+        we
+    );
     sha1_phase!(
         sha1_parity,
         SHA1_ROUND_CONSTANTS[1],
         word,
         20,
-        a,
-        b,
-        c,
-        d,
-        e
+        wa,
+        wb,
+        wc,
+        wd,
+        we
     );
     sha1_phase!(
         sha1_majority,
         SHA1_ROUND_CONSTANTS[2],
         word,
         40,
-        a,
-        b,
-        c,
-        d,
-        e
+        wa,
+        wb,
+        wc,
+        wd,
+        we
     );
     sha1_phase!(
         sha1_parity,
         SHA1_ROUND_CONSTANTS[3],
         word,
         60,
-        a,
-        b,
-        c,
-        d,
-        e
+        wa,
+        wb,
+        wc,
+        wd,
+        we
     );
     [
-        state[0].wrapping_add(a),
-        state[1].wrapping_add(b),
-        state[2].wrapping_add(c),
-        state[3].wrapping_add(d),
-        state[4].wrapping_add(e),
+        state[0].wrapping_add(wa),
+        state[1].wrapping_add(wb),
+        state[2].wrapping_add(wc),
+        state[3].wrapping_add(wd),
+        state[4].wrapping_add(we),
     ]
 }
 
@@ -474,7 +484,8 @@ impl Sha256Hasher {
     /// One block. Each schedule word is computed as its round needs it from
     /// a ring of the last sixteen: `W[t]` replaces `W[t - 16]`, and
     /// `W[t - 2]`, `W[t - 7]` and `W[t - 15]` sit at `t + 14`, `t + 9` and
-    /// `t + 1` modulo 16 (frankengit-0dq9).
+    /// `t + 1` modulo 16 (frankengit-0dq9). `wa`..`wh` are FIPS 180-4's
+    /// working variables a..h.
     fn compress(&mut self, block: &[u8; BLOCK_BYTES]) {
         let mut ring = [0_u32; 16];
         for (word, source) in ring.iter_mut().zip(block.as_slice().as_chunks::<4>().0) {
@@ -495,20 +506,29 @@ impl Sha256Hasher {
             ring[round & 15] = next;
             next
         };
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+        let [
+            mut wa,
+            mut wb,
+            mut wc,
+            mut wd,
+            mut we,
+            mut wf,
+            mut wg,
+            mut wh,
+        ] = self.state;
         let mut round = 0;
         while round < 64 {
-            sha256_round!(word, round, a, b, c, d, e, f, g, h);
-            sha256_round!(word, round + 1, h, a, b, c, d, e, f, g);
-            sha256_round!(word, round + 2, g, h, a, b, c, d, e, f);
-            sha256_round!(word, round + 3, f, g, h, a, b, c, d, e);
-            sha256_round!(word, round + 4, e, f, g, h, a, b, c, d);
-            sha256_round!(word, round + 5, d, e, f, g, h, a, b, c);
-            sha256_round!(word, round + 6, c, d, e, f, g, h, a, b);
-            sha256_round!(word, round + 7, b, c, d, e, f, g, h, a);
+            sha256_round!(word, round, wa, wb, wc, wd, we, wf, wg, wh);
+            sha256_round!(word, round + 1, wh, wa, wb, wc, wd, we, wf, wg);
+            sha256_round!(word, round + 2, wg, wh, wa, wb, wc, wd, we, wf);
+            sha256_round!(word, round + 3, wf, wg, wh, wa, wb, wc, wd, we);
+            sha256_round!(word, round + 4, we, wf, wg, wh, wa, wb, wc, wd);
+            sha256_round!(word, round + 5, wd, we, wf, wg, wh, wa, wb, wc);
+            sha256_round!(word, round + 6, wc, wd, we, wf, wg, wh, wa, wb);
+            sha256_round!(word, round + 7, wb, wc, wd, we, wf, wg, wh, wa);
             round += 8;
         }
-        for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+        for (slot, value) in self.state.iter_mut().zip([wa, wb, wc, wd, we, wf, wg, wh]) {
             *slot = slot.wrapping_add(value);
         }
     }
@@ -716,12 +736,7 @@ mod tests {
                 padded.push(0);
             }
             padded.extend_from_slice(&((message.len() as u64) * 8).to_be_bytes());
-            padded
-                .as_chunks::<BLOCK_BYTES>()
-                .0
-                .iter()
-                .copied()
-                .collect()
+            padded.as_chunks::<BLOCK_BYTES>().0.to_vec()
         }
     }
 

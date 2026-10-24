@@ -1803,9 +1803,8 @@ fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
     let limit = left.len().min(right.len());
     let (left, right) = (&left[..limit], &right[..limit]);
     let mut matched = 0_usize;
-    for (left_word, right_word) in left.chunks_exact(8).zip(right.chunks_exact(8)) {
-        let difference = u64::from_le_bytes(left_word.try_into().unwrap_or([0; 8]))
-            ^ u64::from_le_bytes(right_word.try_into().unwrap_or([0; 8]));
+    for (left_word, right_word) in left.as_chunks::<8>().0.iter().zip(right.as_chunks::<8>().0) {
+        let difference = u64::from_le_bytes(*left_word) ^ u64::from_le_bytes(*right_word);
         if difference != 0 {
             return matched + (difference.trailing_zeros() / 8) as usize;
         }
@@ -2683,7 +2682,7 @@ mod tests {
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         for round in 0..200 {
             let mut writes = Vec::new();
-            for _ in 0..(round % 37) + 1 {
+            for _ in 0..=(round % 37) {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
@@ -3723,9 +3722,7 @@ mod tests {
             text.clone(),
             [&text[7..30_000], &random(5_000)[..], &text[..40_000]].concat(),
             (0..100_000_u32).map(|at| (at % 251) as u8).collect(),
-            (0..80_000_u32)
-                .map(|at| if at % 7 == 0 { 1 } else { 0 })
-                .collect(),
+            (0..80_000_u32).map(|at| u8::from(at % 7 == 0)).collect(),
             random(3),
             Vec::new(),
         ];
@@ -3897,7 +3894,9 @@ mod tests {
         for input in inputs {
             let expected = reference(&input);
             let mut single = Adler32::new();
-            input.iter().for_each(|&byte| single.update(byte));
+            for &byte in &input {
+                single.update(byte);
+            }
             assert_eq!(single.value(), expected);
             for split in [0, 1, Adler32::NMAX, input.len() / 2, input.len()] {
                 let split = split.min(input.len());
