@@ -38,4 +38,5 @@ workflow:
       verification_debt:
         statuses: [in_progress, batch_pending]
         soft: 28
-        hard: 36
+        # 36 -> 40: owner decision 2026-10-23 (frankengit-root-doctrine-x2mv.4.56)
+        hard: 40
