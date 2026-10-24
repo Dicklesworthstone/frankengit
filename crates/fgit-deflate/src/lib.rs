@@ -15,7 +15,6 @@ use std::sync::Arc;
 pub const RFC1951_MAX_WINDOW_BYTES: usize = 32_768;
 const MAX_HUFFMAN_BITS: u8 = 15;
 const HUFFMAN_LENGTH_SLOTS: usize = 16;
-const HUFFMAN_LOOKUP_ENTRIES: usize = 1_usize << MAX_HUFFMAN_BITS;
 const HUFFMAN_LOOKUP_MISSING: u16 = u16::MAX;
 const HUFFMAN_LOOKUP_SYMBOL_BITS: u8 = 9;
 const MATCH_HASH_ENTRIES: usize = 32_768;
@@ -573,6 +572,16 @@ impl BitReader {
     }
 }
 
+/// One decoding table: `2^M` slots, `M` being the longest code length in the
+/// set (one slot for an empty set). A code of length `L` fills every slot whose
+/// low `L` bits are its bit-reversed code.
+///
+/// The decoder reads up to 15 bits and looks up `bits mod 2^M` through
+/// [`Self::entry`]. No code is longer than `M`, so that is exactly the slot a
+/// table of all `2^15` slots would hold at `bits`. Lookups, the bits consumed,
+/// the work charged and every refusal are therefore unchanged, but a fixed
+/// literal/length table is 512 slots and a fixed distance table 32, instead
+/// of 32,768 each (frankengit-6kgs).
 #[derive(Clone, Debug)]
 struct HuffmanTable {
     lookup: Vec<u16>,
@@ -601,6 +610,7 @@ impl HuffmanTable {
         }
         let mut counts = [0_u16; HUFFMAN_LENGTH_SLOTS];
         let mut non_zero = 0_usize;
+        let mut longest = 0_u8;
         for &length in lengths {
             if length > MAX_HUFFMAN_BITS {
                 return Err(InflateRefusal::InvalidCodeLength);
@@ -608,17 +618,19 @@ impl HuffmanTable {
             if length != 0 {
                 counts[usize::from(length)] += 1;
                 non_zero += 1;
+                longest = longest.max(length);
             }
         }
+        let entries = 1_usize << longest;
         let mut lookup = Vec::new();
         lookup
-            .try_reserve_exact(HUFFMAN_LOOKUP_ENTRIES)
+            .try_reserve_exact(entries)
             .map_err(|_| InflateRefusal::ResourceLimit {
                 resource: Resource::Allocation,
-                limit: u64::try_from(HUFFMAN_LOOKUP_ENTRIES).unwrap_or(u64::MAX),
-                observed: u64::try_from(HUFFMAN_LOOKUP_ENTRIES).unwrap_or(u64::MAX),
+                limit: u64::try_from(entries).unwrap_or(u64::MAX),
+                observed: u64::try_from(entries).unwrap_or(u64::MAX),
             })?;
-        lookup.resize(HUFFMAN_LOOKUP_ENTRIES, HUFFMAN_LOOKUP_MISSING);
+        lookup.resize(entries, HUFFMAN_LOOKUP_MISSING);
         if non_zero == 0 {
             return match policy {
                 HuffmanSetPolicy::DistanceMayBeEmpty => Ok(Self { lookup }),
@@ -671,7 +683,7 @@ impl HuffmanTable {
                 u16::try_from(symbol).map_err(|_| InflateRefusal::InvalidCodeLength)?,
                 bit_len,
             );
-            let suffix_count = 1_usize << (MAX_HUFFMAN_BITS - bit_len);
+            let suffix_count = 1_usize << (longest - bit_len);
             for suffix in 0..suffix_count {
                 let lookup_index = usize::from(reversed_bits) | (suffix << bit_len);
                 let slot = lookup
@@ -684,6 +696,13 @@ impl HuffmanTable {
             }
         }
         Ok(Self { lookup })
+    }
+
+    /// The slot a decoder that has read `bits` sees; see the type.
+    fn entry(&self, bits: u16) -> Option<u16> {
+        self.lookup
+            .get(usize::from(bits) & (self.lookup.len() - 1))
+            .copied()
     }
 
     fn fixed_literal_length(limits: InflateLimits) -> Result<Self, InflateRefusal> {
@@ -1263,11 +1282,8 @@ impl Inflater {
                 return Ok(None);
             };
             bits |= next_bit << (bit_len - 1);
-            let lookup_index = usize::from(bits);
             let entry = table
-                .lookup
-                .get(lookup_index)
-                .copied()
+                .entry(bits)
                 .ok_or(InflateRefusal::InvalidHuffmanCode)?;
             if entry != HUFFMAN_LOOKUP_MISSING && unpack_huffman_length(entry) <= bit_len {
                 return Ok(Some(unpack_huffman_symbol(entry)));
@@ -3514,6 +3530,277 @@ mod tests {
 
     /// The fixed-block matcher exactly as it was before frankengit-g4a9: a
     /// ring-buffer history read byte by byte, one work unit per compared byte.
+    /// The former table builder, kept verbatim as the oracle for the sized
+    /// tables (frankengit-6kgs): every table had all `2^15` slots and the
+    /// decoder indexed it with `bits` directly.
+    mod reference_huffman {
+        use super::super::{
+            HUFFMAN_LENGTH_SLOTS, HUFFMAN_LOOKUP_MISSING, HuffmanSetPolicy, InflateLimits,
+            InflateRefusal, MAX_HUFFMAN_BITS, Resource, pack_huffman_lookup, reverse_low_bits,
+        };
+
+        const HUFFMAN_LOOKUP_ENTRIES: usize = 1_usize << MAX_HUFFMAN_BITS;
+
+        pub fn build(
+            lengths: &[u8],
+            limits: InflateLimits,
+            policy: HuffmanSetPolicy,
+        ) -> Result<Vec<u16>, InflateRefusal> {
+            if lengths.len() > limits.max_huffman_symbols {
+                return Err(InflateRefusal::ResourceLimit {
+                    resource: Resource::HuffmanSymbols,
+                    limit: u64::try_from(limits.max_huffman_symbols).unwrap_or(u64::MAX),
+                    observed: u64::try_from(lengths.len()).unwrap_or(u64::MAX),
+                });
+            }
+            let mut counts = [0_u16; HUFFMAN_LENGTH_SLOTS];
+            let mut non_zero = 0_usize;
+            for &length in lengths {
+                if length > MAX_HUFFMAN_BITS {
+                    return Err(InflateRefusal::InvalidCodeLength);
+                }
+                if length != 0 {
+                    counts[usize::from(length)] += 1;
+                    non_zero += 1;
+                }
+            }
+            let mut lookup = vec![HUFFMAN_LOOKUP_MISSING; HUFFMAN_LOOKUP_ENTRIES];
+            if non_zero == 0 {
+                return match policy {
+                    HuffmanSetPolicy::DistanceMayBeEmpty => Ok(lookup),
+                    HuffmanSetPolicy::Complete
+                    | HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode
+                    | HuffmanSetPolicy::DistanceMayUseSingleBitCode => {
+                        Err(InflateRefusal::IncompleteHuffmanSet)
+                    }
+                };
+            }
+            let mut available = 1_i32;
+            for &count in counts.iter().skip(1) {
+                available = (available * 2) - i32::from(count);
+                if available < 0 {
+                    return Err(InflateRefusal::OversubscribedHuffmanSet);
+                }
+            }
+            if available != 0 {
+                let single_one_bit_symbol = non_zero == 1 && counts[1] == 1;
+                let is_permitted = match policy {
+                    HuffmanSetPolicy::Complete | HuffmanSetPolicy::DistanceMayBeEmpty => false,
+                    HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode
+                    | HuffmanSetPolicy::DistanceMayUseSingleBitCode => single_one_bit_symbol,
+                };
+                if !is_permitted {
+                    return Err(InflateRefusal::IncompleteHuffmanSet);
+                }
+            }
+            let mut next = [0_u16; HUFFMAN_LENGTH_SLOTS];
+            let mut code = 0_u16;
+            for bit_len in 1..=usize::from(MAX_HUFFMAN_BITS) {
+                code = (code + counts[bit_len - 1]) << 1;
+                next[bit_len] = code;
+            }
+            for (symbol, &bit_len) in lengths.iter().enumerate() {
+                if bit_len == 0 {
+                    continue;
+                }
+                let index = usize::from(bit_len);
+                let canonical = next[index];
+                next[index] += 1;
+                let reversed_bits = reverse_low_bits(canonical, bit_len);
+                let packed = pack_huffman_lookup(
+                    u16::try_from(symbol).map_err(|_| InflateRefusal::InvalidCodeLength)?,
+                    bit_len,
+                );
+                for suffix in 0..1_usize << (MAX_HUFFMAN_BITS - bit_len) {
+                    let slot = lookup
+                        .get_mut(usize::from(reversed_bits) | (suffix << bit_len))
+                        .ok_or(InflateRefusal::InvalidHuffmanCode)?;
+                    if *slot != HUFFMAN_LOOKUP_MISSING {
+                        return Err(InflateRefusal::OversubscribedHuffmanSet);
+                    }
+                    *slot = packed;
+                }
+            }
+            Ok(lookup)
+        }
+    }
+
+    /// Every code-length set, valid or not, builds to the same result as the
+    /// former 2^15-slot builder, and every one of the 2^15 lookups the decoder
+    /// can make answers the same slot (frankengit-6kgs). Sets: the fixed
+    /// tables, edge cases, random complete codes, and perturbations of them
+    /// that are oversubscribed, incomplete or over-long; each under all four
+    /// policies and under a symbol limit that refuses the larger alphabets.
+    #[test]
+    fn sized_huffman_tables_answer_every_lookup_exactly_as_the_full_tables() {
+        use super::{HuffmanSetPolicy, HuffmanTable, MAX_HUFFMAN_BITS};
+
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: usize| -> usize {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let mut fixed_literal = vec![8_u8; 288];
+        fixed_literal[144..256].fill(9);
+        fixed_literal[256..280].fill(7);
+        let mut cases: Vec<Vec<u8>> = vec![
+            fixed_literal,
+            vec![5; 32],
+            Vec::new(),
+            vec![0; 19],
+            vec![1],
+            vec![0, 1],
+            vec![1, 1],
+            vec![1, 1, 1],
+            vec![2, 2, 2],
+            vec![15, 15],
+            vec![16],
+            vec![1, 16],
+        ];
+        for _ in 0..240 {
+            let symbols = 2 + next(310);
+            let leaves = 2 + next(symbols - 1);
+            let mut depths = vec![0_u8];
+            while depths.len() < leaves {
+                let open: Vec<usize> = (0..depths.len())
+                    .filter(|&at| depths[at] < MAX_HUFFMAN_BITS)
+                    .collect();
+                if open.is_empty() {
+                    break;
+                }
+                let depth = depths.swap_remove(open[next(open.len())]) + 1;
+                depths.extend([depth, depth]);
+            }
+            let mut positions: Vec<usize> = (0..symbols).collect();
+            for at in (1..symbols).rev() {
+                positions.swap(at, next(at + 1));
+            }
+            let mut lengths = vec![0_u8; symbols];
+            for (&depth, &position) in depths.iter().zip(&positions) {
+                lengths[position] = depth;
+            }
+            let used: Vec<usize> = (0..symbols).filter(|&at| lengths[at] != 0).collect();
+            let pick = used[next(used.len())];
+            let mut shorter = lengths.clone();
+            shorter[pick] -= 1;
+            let mut longer = lengths.clone();
+            longer[pick] += 1;
+            let mut dropped = lengths.clone();
+            dropped[pick] = 0;
+            cases.extend([lengths, shorter, longer, dropped]);
+            cases.push((0..symbols).map(|_| next(17) as u8).collect());
+        }
+
+        let policies = [
+            HuffmanSetPolicy::Complete,
+            HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode,
+            HuffmanSetPolicy::DistanceMayUseSingleBitCode,
+            HuffmanSetPolicy::DistanceMayBeEmpty,
+        ];
+        let narrow = InflateLimits {
+            max_huffman_symbols: 30,
+            ..limits()
+        };
+        let (mut built, mut refused) = (0_usize, 0_usize);
+        for lengths in &cases {
+            for policy in policies {
+                for limit in [limits(), narrow] {
+                    match (
+                        reference_huffman::build(lengths, limit, policy),
+                        HuffmanTable::build(lengths, limit, policy),
+                    ) {
+                        (Ok(full), Ok(table)) => {
+                            built += 1;
+                            assert!(table.lookup.len().is_power_of_two());
+                            for bits in 0..1_u16 << MAX_HUFFMAN_BITS {
+                                assert_eq!(
+                                    table.entry(bits),
+                                    Some(full[usize::from(bits)]),
+                                    "lengths {lengths:?} policy {policy:?} bits {bits}"
+                                );
+                            }
+                        }
+                        (Err(expected), Err(observed)) => {
+                            refused += 1;
+                            assert_eq!(observed, expected, "lengths {lengths:?} policy {policy:?}");
+                        }
+                        (expected, observed) => panic!(
+                            "lengths {lengths:?} policy {policy:?}: reference {:?}, sized {:?}",
+                            expected.map(|_| "table"),
+                            observed.map(|_| "table")
+                        ),
+                    }
+                }
+            }
+        }
+        assert!(
+            built > 500 && refused > 1_000,
+            "built {built}, refused {refused}"
+        );
+        assert_eq!(
+            HuffmanTable::fixed_literal_length(limits()).map(|table| table.lookup.len()),
+            Ok(512)
+        );
+        assert_eq!(
+            HuffmanTable::fixed_distance(limits()).map(|table| table.lookup.len()),
+            Ok(32)
+        );
+    }
+
+    /// The literal/length table of `zero_distance_dynamic_member` holds one
+    /// one-bit code (end of block, `0`), so the code `1` is unused. As with the
+    /// former 2^15-slot table, the decoder reads up to fifteen bits before it
+    /// refuses that code, and a stream that ends sooner asks for more input
+    /// (frankengit-6kgs).
+    #[test]
+    fn an_unused_code_reads_fifteen_bits_before_it_is_refused() {
+        let header = |deflate: &mut BitPacker| {
+            deflate.push_bits(1, 1);
+            deflate.push_bits(2, 2);
+            deflate.push_bits(0, 5);
+            deflate.push_bits(0, 5);
+            deflate.push_bits(14, 4);
+            for &index in super::CODE_LENGTH_ORDER.iter().take(18) {
+                deflate.push_bits(u16::from(index == 0 || index == 1), 3);
+            }
+            for _ in 0..256 {
+                deflate.push_bits(0, 1);
+            }
+            deflate.push_bits(1, 1);
+            deflate.push_bits(0, 1);
+        };
+        for extra_bits in 0..=20_u8 {
+            let mut deflate = BitPacker::default();
+            header(&mut deflate);
+            deflate.push_bits(1, 1);
+            for _ in 0..extra_bits {
+                deflate.push_bits(1, 1);
+            }
+            let mut member = vec![0x78, 0x01];
+            let body = deflate.finish();
+            // The bits after the unused code that the stream really carries,
+            // counting the zero padding of its last byte.
+            let available = body.len() * 8 - 329 - 1;
+            member.extend(body);
+            let Ok(mut inflater) = Inflater::new(limits()) else {
+                panic!("test limits are valid");
+            };
+            let pushed = inflater.push(&member);
+            if available >= 14 {
+                assert_eq!(
+                    pushed,
+                    Err(InflateRefusal::InvalidHuffmanCode),
+                    "{extra_bits}"
+                );
+            } else {
+                assert_eq!(pushed, Ok(StreamProgress::NeedInput), "{extra_bits}");
+                assert_eq!(inflater.finish(), Err(InflateRefusal::UnexpectedEnd));
+            }
+        }
+    }
+
     mod reference_matcher {
         use std::collections::VecDeque;
 
