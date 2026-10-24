@@ -211,7 +211,7 @@ impl PackedObjectSources {
         &mut self,
         identity: GitOid,
         control: &ImportControl<'_>,
-    ) -> Result<Option<fgit_git_object::LooseObject>, LooseGitImportRefusal> {
+    ) -> Result<Option<fgit_crypto::IdentifiedGitObject>, LooseGitImportRefusal> {
         control.checkpoint()?;
         let Some(source_index) = self
             .sources
@@ -223,7 +223,10 @@ impl PackedObjectSources {
         self.load(source_index, control)?;
         let result = match self.sources[source_index].verified_objects.as_mut() {
             Some(pack) => match pack.entries.get(&identity).copied() {
-                Some(entry) => pack.spool.read(identity, entry, control).map(Some),
+                Some(entry) => pack
+                    .spool
+                    .read_identified(identity, entry, control)
+                    .map(Some),
                 None => Ok(None),
             },
             None => Ok(None),

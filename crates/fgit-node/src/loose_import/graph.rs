@@ -11,8 +11,19 @@ use fgit_git_object::{
 use fgit_pack::Deadline;
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
 
+use fgit_crypto::IdentifiedGitObject;
+
 use super::control::ImportControl;
 use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS};
+
+/// What a graph loader read. A loose file is unverified, and the graph hashes
+/// it. An object read back from private disk custody arrives with the
+/// identity that read computed from its bytes, so the graph compares that
+/// identity instead of hashing again (frankengit-fhh5).
+pub(super) enum SourceObject {
+    Unverified(LooseObject),
+    Identified(IdentifiedGitObject),
+}
 
 /// Maximum native bytes retained by one verified reachable-source closure.
 /// This is independent of the tighter eager pack-decoder/cache envelope: a
@@ -95,12 +106,13 @@ pub(super) fn validate_typed_controlled(
     load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
     control: &ImportControl<'_>,
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
+    let mut load = load;
     validate_typed_with_custody(
         roots,
         format,
         parse_limits,
         limits,
-        load,
+        |identity| load(identity).map(SourceObject::Unverified),
         |_, object| Ok(object),
         control,
     )
@@ -114,7 +126,7 @@ pub(super) fn validate_typed_with_custody<T>(
     format: GitHashAlgorithm,
     parse_limits: &ParseLimits,
     limits: Limits,
-    mut load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    mut load: impl FnMut(GitOid) -> Result<SourceObject, LooseGitImportRefusal>,
     mut retain: impl FnMut(GitOid, LooseObject) -> Result<T, LooseGitImportRefusal>,
     control: &ImportControl<'_>,
 ) -> Result<ValidatedImport<T>, LooseGitImportRefusal> {
@@ -151,8 +163,20 @@ pub(super) fn validate_typed_with_custody<T>(
     while let Some(identity) = pending.pop_first() {
         control.checkpoint()?;
         let loaded = load(identity);
-        let object = control.after(loaded, |error| error)?;
-        let observed = fgit_crypto::git_object_id(format, object.object_type, &object.body);
+        let (observed, object) = match control.after(loaded, |error| error)? {
+            SourceObject::Unverified(object) => (
+                fgit_crypto::git_object_id(format, object.object_type, &object.body),
+                object,
+            ),
+            SourceObject::Identified(identified) => (
+                identified.identity(),
+                LooseObject {
+                    object_type: identified.kind(),
+                    declared_size: identified.body().len(),
+                    body: identified.into_body(),
+                },
+            ),
+        };
         control.checkpoint()?;
         if observed != identity {
             return Err(LooseGitImportRefusal::ObjectIdentityMismatch {

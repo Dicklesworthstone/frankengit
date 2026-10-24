@@ -269,7 +269,7 @@ impl OneNode {
         for (identity, entry) in validated.objects {
             // Flush before reading an object that would exceed the chunk budget.
             placements.prepare(entry.length(), control)?;
-            let object = spool.read(identity, entry, control)?;
+            let object = spool.read_identified(identity, entry, control)?;
             placements.push(identity, object, control)?;
         }
         placements.flush(control)?;

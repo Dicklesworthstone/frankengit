@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use fgit_crypto::IdentifiedGitObject;
 use fgit_git_object::{LooseObject, ObjectType};
 use fgit_types::{GitOid, RefusalCode};
 
@@ -126,6 +127,23 @@ impl Spool {
         entry: Entry,
         control: &ImportControl<'_>,
     ) -> Result<LooseObject, LooseGitImportRefusal> {
+        let identified = self.read_identified(identity, entry, control)?;
+        Ok(LooseObject {
+            object_type: identified.kind(),
+            declared_size: identified.body().len(),
+            body: identified.into_body(),
+        })
+    }
+
+    /// Read one retained object back from disk custody and verify it against
+    /// its identity. The verified bytes carry that identity onward, so nothing
+    /// downstream hashes them again (frankengit-fhh5).
+    pub(super) fn read_identified(
+        &mut self,
+        identity: GitOid,
+        entry: Entry,
+        control: &ImportControl<'_>,
+    ) -> Result<IdentifiedGitObject, LooseGitImportRefusal> {
         control.checkpoint()?;
         if entry
             .offset
@@ -151,19 +169,15 @@ impl Spool {
             })?;
         }
         control.checkpoint()?;
-        let observed = fgit_crypto::git_object_id(identity.algorithm(), entry.kind, &body);
+        let identified = IdentifiedGitObject::identify(identity.algorithm(), entry.kind, body);
         control.checkpoint()?;
-        if observed != identity {
+        if identified.identity() != identity {
             return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
                 expected: identity,
-                observed,
+                observed: identified.identity(),
             });
         }
-        Ok(LooseObject {
-            object_type: entry.kind,
-            declared_size: body.len(),
-            body,
-        })
+        Ok(identified)
     }
 
     /// Append bytes that are not yet a native object: a delta program waiting

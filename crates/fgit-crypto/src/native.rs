@@ -479,6 +479,54 @@ pub fn git_object_id(format: GitObjectFormat, kind: GitObjectKind, content: &[u8
     }
 }
 
+/// A Git object body and the native identity computed from exactly these
+/// bytes. Only [`Self::identify`] makes one, and the body is never exposed
+/// mutably, so holding one proves the identity without hashing the body
+/// again (frankengit-fhh5).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentifiedGitObject {
+    identity: AnyGitOid,
+    kind: GitObjectKind,
+    body: Vec<u8>,
+}
+
+impl IdentifiedGitObject {
+    /// Hash `body` as a `kind` object in `format`.
+    #[must_use]
+    pub fn identify(format: GitObjectFormat, kind: GitObjectKind, body: Vec<u8>) -> Self {
+        let identity = git_object_id(format, kind, &body);
+        Self {
+            identity,
+            kind,
+            body,
+        }
+    }
+
+    /// The native identity of [`Self::body`].
+    #[must_use]
+    pub const fn identity(&self) -> AnyGitOid {
+        self.identity
+    }
+
+    /// The object type the identity was computed for.
+    #[must_use]
+    pub const fn kind(&self) -> GitObjectKind {
+        self.kind
+    }
+
+    /// The exact bytes the identity was computed over.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Give up the proof and keep the bytes.
+    #[must_use]
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+}
+
 /// The exact header Git writes before an object's content: type label, space,
 /// decimal length, and a terminating zero byte.
 pub fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
@@ -489,4 +537,29 @@ pub fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
     header.extend_from_slice(decimal.as_bytes());
     header.push(0);
     header
+}
+
+#[cfg(test)]
+mod identified_tests {
+    use super::{GitObjectFormat, GitObjectKind, IdentifiedGitObject, git_object_id};
+
+    #[test]
+    fn an_identified_object_carries_exactly_the_identity_of_its_bytes() {
+        for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+            for kind in [
+                GitObjectKind::Blob,
+                GitObjectKind::Tree,
+                GitObjectKind::Commit,
+                GitObjectKind::Tag,
+            ] {
+                for body in [Vec::new(), b"a".to_vec(), vec![7_u8; 1_000]] {
+                    let identified = IdentifiedGitObject::identify(format, kind, body.clone());
+                    assert_eq!(identified.identity(), git_object_id(format, kind, &body));
+                    assert_eq!(identified.kind(), kind);
+                    assert_eq!(identified.body(), body.as_slice());
+                    assert_eq!(identified.into_body(), body);
+                }
+            }
+        }
+    }
 }

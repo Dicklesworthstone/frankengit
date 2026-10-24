@@ -158,14 +158,20 @@ fn multiple_packs_reuse_exact_disk_custody_after_sources_are_removed() {
         }
         let mut sources = scratch.sources(format, 30009, &control);
         for (id, body) in &expected {
-            assert_eq!(&sources.read(*id, &control).unwrap().unwrap().body, body);
+            assert_eq!(
+                sources.read(*id, &control).unwrap().unwrap().body(),
+                body.as_slice()
+            );
         }
         assert_eq!(sources.loaded_resolved_bytes, 30009);
         assert_eq!(sources.loaded_objects, 3);
         assert!(std::mem::size_of::<spool::Entry>() <= 32);
         fs::remove_dir_all(scratch.0.join("source")).unwrap();
         for (id, body) in expected.into_iter().rev() {
-            assert_eq!(sources.read(id, &control).unwrap().unwrap().body, body);
+            assert_eq!(
+                sources.read(id, &control).unwrap().unwrap().into_body(),
+                body
+            );
         }
         assert_eq!(sources.loaded_resolved_bytes, 30009);
         sources.finish().unwrap();
@@ -225,7 +231,7 @@ fn larger_total_profiles_do_not_weaken_per_pack_decoder_bounds() {
             ));
             assert!(sources.sources[0].verified_objects.is_none());
         } else {
-            assert_eq!(result.unwrap().unwrap().body.len(), 100);
+            assert_eq!(result.unwrap().unwrap().body().len(), 100);
         }
         sources.finish().unwrap();
         scratch.cleaned();

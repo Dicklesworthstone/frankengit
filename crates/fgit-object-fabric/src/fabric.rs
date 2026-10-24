@@ -795,6 +795,44 @@ impl VerifiedObject {
         Ok(Self { envelope, payload })
     }
 
+    /// Seal bytes whose native identity is already proven. This computes the
+    /// strong payload commitment once and builds the identity-encoded envelope
+    /// from it: the stored bytes are the payload, so the logical content
+    /// identity is the payload commitment. The result is exactly what
+    /// [`Self::new`] accepts for that envelope. `new` remains the check for an
+    /// envelope that comes from anywhere else (frankengit-fhh5).
+    pub fn seal(
+        namespace: Vec<u8>,
+        object: fgit_crypto::IdentifiedGitObject,
+        codec_namespace: Vec<u8>,
+        limits: &SegmentLimits,
+    ) -> Result<Self, StoreRefusal> {
+        let object_kind = match object.kind() {
+            fgit_crypto::GitObjectKind::Commit => ObjectKind::Commit,
+            fgit_crypto::GitObjectKind::Tree => ObjectKind::Tree,
+            fgit_crypto::GitObjectKind::Blob => ObjectKind::Blob,
+            fgit_crypto::GitObjectKind::Tag => ObjectKind::Tag,
+        };
+        let declared_len =
+            u64::try_from(object.body().len()).map_err(|_| StoreRefusal::LengthOverflow)?;
+        let commitment = CryptoDigest.payload_commitment(object_kind, object.body())?;
+        let envelope = ObjectEnvelope::new(
+            namespace,
+            object.identity(),
+            object_kind,
+            declared_len,
+            commitment,
+            codec_namespace,
+            commitment,
+            None,
+            limits,
+        )?;
+        Ok(Self {
+            envelope,
+            payload: object.into_body(),
+        })
+    }
+
     #[must_use]
     pub const fn identity(&self) -> GitOid {
         self.envelope.object_identity()
@@ -1435,6 +1473,84 @@ const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `seal` makes from a proven identity exactly the object `new` accepts
+    /// for the envelope a caller builds by hashing the bytes and committing
+    /// to them, for every kind, both formats and lengths around the block
+    /// sizes. It refuses an envelope limit exactly as that construction does
+    /// (frankengit-fhh5).
+    #[test]
+    fn sealing_a_proven_identity_equals_verifying_the_hashed_envelope() {
+        use fgit_crypto::{GitObjectKind, IdentifiedGitObject, git_object_id};
+        use fgit_types::GitHashAlgorithm;
+
+        let limits = SegmentLimits::default();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let build = |format, kind, fabric_kind, payload: &[u8], namespace: &[u8]| {
+            let commitment = CryptoDigest
+                .payload_commitment(fabric_kind, payload)
+                .expect("commitment is available for a native kind");
+            ObjectEnvelope::new(
+                namespace.to_vec(),
+                git_object_id(format, kind, payload),
+                fabric_kind,
+                u64::try_from(payload.len()).expect("payload length fits u64"),
+                commitment,
+                b"codec".to_vec(),
+                commitment,
+                None,
+                &limits,
+            )
+            .map_err(StoreRefusal::Fabric)
+            .and_then(|envelope| VerifiedObject::new(envelope, payload.to_vec()))
+        };
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for (kind, fabric_kind) in [
+                (GitObjectKind::Blob, ObjectKind::Blob),
+                (GitObjectKind::Tree, ObjectKind::Tree),
+                (GitObjectKind::Commit, ObjectKind::Commit),
+                (GitObjectKind::Tag, ObjectKind::Tag),
+            ] {
+                for length in [0_usize, 1, 55, 56, 64, 1_000, 70_000] {
+                    let payload: Vec<u8> = (0..length)
+                        .map(|_| {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 7;
+                            seed ^= seed << 17;
+                            (seed >> 24) as u8
+                        })
+                        .collect();
+                    let expected = build(format, kind, fabric_kind, &payload, b"n")
+                        .expect("hashed envelope verifies");
+                    let sealed = VerifiedObject::seal(
+                        b"n".to_vec(),
+                        IdentifiedGitObject::identify(format, kind, payload),
+                        b"codec".to_vec(),
+                        &limits,
+                    )
+                    .expect("proven identity seals");
+                    assert_eq!(sealed, expected, "{format:?} {kind:?} {length}");
+                }
+            }
+        }
+        let wide = vec![b'n'; limits.max_namespace_bytes + 1];
+        let payload = b"x".to_vec();
+        let built = build(
+            GitHashAlgorithm::Sha1,
+            GitObjectKind::Blob,
+            ObjectKind::Blob,
+            &payload,
+            &wide,
+        );
+        let sealed = VerifiedObject::seal(
+            wide,
+            IdentifiedGitObject::identify(GitHashAlgorithm::Sha1, GitObjectKind::Blob, payload),
+            b"codec".to_vec(),
+            &limits,
+        );
+        assert!(built.is_err());
+        assert_eq!(format!("{sealed:?}"), format!("{built:?}"));
+    }
     use std::collections::BTreeMap;
 
     use asupersync::CancelKind;

@@ -392,7 +392,7 @@ fn cancelled_pack_decoding_never_installs_a_partial_verified_cache_or_stages_obj
         };
         let control = ImportControl::new(&mut counting);
         let expected = baseline.read(source.tip, &control).unwrap().unwrap();
-        assert_eq!(expected.body, source.objects[&source.tip].body);
+        assert_eq!(expected.body(), source.objects[&source.tip].body.as_slice());
         let total = probes.get();
         assert!(total > 8);
         for stop_at in [1, 3, total / 2, total - 1] {

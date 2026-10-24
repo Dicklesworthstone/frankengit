@@ -1,12 +1,10 @@
 //! Import placement through bounded, fully settled object batches.
 use super::{ImportControl, LooseGitImportRefusal, OneNode};
-use crate::{NodeRefusal, OBJECT_CODEC_NAMESPACE, crypto_object_kind, fabric_object_kind};
-use fgit_crypto::{git_object_id, git_payload_commitment};
-use fgit_git_object::LooseObject;
-use fgit_object_fabric::ObjectEnvelope;
-use fgit_object_fabric::fabric::{PlacementAdmission, StoreRefusal, VerifiedObject};
+use crate::{NodeRefusal, OBJECT_CODEC_NAMESPACE};
+use fgit_crypto::IdentifiedGitObject;
+use fgit_object_fabric::fabric::{PlacementAdmission, VerifiedObject};
 use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
-use fgit_types::{CANONICAL_CODEC_VERSION, GitOid};
+use fgit_types::GitOid;
 
 const CHUNK_OBJECTS: usize = 256;
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -44,14 +42,15 @@ impl Placements<'_> {
     pub(super) fn push(
         &mut self,
         expected: GitOid,
-        object: LooseObject,
+        object: IdentifiedGitObject,
         control: &ImportControl<'_>,
     ) -> Result<(), LooseGitImportRefusal> {
-        self.prepare(object.body.len(), control)?;
-        if object.body.len() > CHUNK_BYTES {
+        self.prepare(object.body().len(), control)?;
+        if object.body().len() > CHUNK_BYTES {
+            let kind = object.kind();
             let stored = self
                 .node
-                .put_git_object(object.object_type, object.body)
+                .put_git_object(kind, object.into_body())
                 .map_err(node_error)?;
             if stored.identity() != expected {
                 return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
@@ -70,44 +69,31 @@ impl Placements<'_> {
     fn verify(
         &self,
         expected: GitOid,
-        object: LooseObject,
+        object: IdentifiedGitObject,
     ) -> Result<VerifiedObject, LooseGitImportRefusal> {
-        let offered = object.body.len() as u64;
+        let offered = object.body().len() as u64;
         if offered > self.node.max_object_bytes {
             return Err(node_error(NodeRefusal::ObjectTooLarge {
                 offered,
                 maximum: self.node.max_object_bytes,
             }));
         }
-        let kind = crypto_object_kind(object.object_type);
-        let identity = git_object_id(self.node.object_format, kind, &object.body);
-        if identity != expected {
+        // The custody read computed this identity from these exact bytes.
+        if object.identity() != expected {
             return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
                 expected,
-                observed: identity,
+                observed: object.identity(),
             });
         }
-        let commitment = git_payload_commitment(kind, &object.body, CANONICAL_CODEC_VERSION);
-        let bytes: [u8; 32] = commitment
-            .digest()
-            .as_bytes()
-            .try_into()
-            .map_err(|_| node_error(NodeRefusal::ObjectLengthOverflow))?;
         // Byte-identical to the established single-object envelope. Tests pin
         // all envelope fields as well as native identities and stored payloads.
-        let envelope = ObjectEnvelope::new(
+        VerifiedObject::seal(
             self.node.namespace.clone(),
-            identity,
-            fabric_object_kind(object.object_type),
-            offered,
-            bytes,
+            object,
             OBJECT_CODEC_NAMESPACE.to_vec(),
-            bytes,
-            None,
             &self.node.segment_limits,
         )
-        .map_err(|e| node_error(NodeRefusal::from(StoreRefusal::Fabric(e))))?;
-        VerifiedObject::new(envelope, object.body).map_err(|e| node_error(NodeRefusal::from(e)))
+        .map_err(|e| node_error(NodeRefusal::from(e)))
     }
 
     pub(super) fn flush(

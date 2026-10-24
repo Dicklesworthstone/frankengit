@@ -695,3 +695,70 @@ fn valid_submodule_import_publishes_and_reopens_through_the_original_durable_api
 }
 
 mod ref_roots;
+
+/// An object read back from disk custody arrives with its identity already
+/// computed (frankengit-fhh5). The graph validates the same objects and
+/// bytes as when it hashes every body itself, and still refuses an
+/// identified object whose identity is not the one it asked for.
+#[test]
+fn identified_custody_reads_validate_like_hashed_reads_and_mismatches_still_refuse() {
+    let mut live = || true;
+    let control = ImportControl::new(&mut live);
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut objects = Objects::default();
+        let blob = objects.put(format, ObjectType::Blob, b"identified\n".to_vec());
+        let tree = objects.tree(format, "100644", blob);
+        let base = objects.commit(format, tree, &[], "base");
+        let tip = objects.commit(format, tree, &[base], "tip");
+        let roots = [(tip, Some(ObjectType::Commit))];
+        let identify = |object: LooseObject| {
+            SourceObject::Identified(IdentifiedGitObject::identify(
+                format,
+                object.object_type,
+                object.body,
+            ))
+        };
+        let hashed = validate_typed_with_custody(
+            roots,
+            format,
+            &limits(format),
+            Limits::default(),
+            |id| objects.load(id).map(SourceObject::Unverified),
+            |_, object| Ok(object),
+            &control,
+        )
+        .unwrap();
+        let identified = validate_typed_with_custody(
+            roots,
+            format,
+            &limits(format),
+            Limits::default(),
+            |id| objects.load(id).map(identify),
+            |_, object| Ok(object),
+            &control,
+        )
+        .unwrap();
+        assert_eq!(identified.total_bytes, hashed.total_bytes);
+        assert_eq!(identified.objects, hashed.objects);
+        assert_eq!(identified.objects.len(), 4);
+
+        let refused = validate_typed_with_custody(
+            roots,
+            format,
+            &limits(format),
+            Limits::default(),
+            |id| {
+                objects
+                    .load(if id == tree { blob } else { id })
+                    .map(identify)
+            },
+            |_, object| Ok(object),
+            &control,
+        );
+        assert!(matches!(
+            refused,
+            Err(LooseGitImportRefusal::ObjectIdentityMismatch { expected, observed })
+                if expected == tree && observed == blob
+        ));
+    }
+}

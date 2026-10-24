@@ -69,7 +69,7 @@ fn disk_custody_matches_memory_oracle_in_both_native_domains() {
             format,
             &ParseLimits::default(),
             limits,
-            |id| Ok(objects[&id].clone()),
+            |id| Ok(graph::SourceObject::Unverified(objects[&id].clone())),
             |id, object| spool.retain(id, object, &control),
             &control,
         )

@@ -1,7 +1,9 @@
 use super::*;
 use crate::NodeConfig;
+use fgit_crypto::git_object_id;
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::ImmutableObjectFabric;
+use fgit_object_fabric::fabric::StoreRefusal;
 use fgit_types::{GitHashAlgorithm, RepositoryId, TenantId};
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -43,11 +45,7 @@ fn batched_envelopes_equal_the_single_object_encoder_in_both_hash_domains() {
             let verified = placement
                 .verify(
                     stored.identity(),
-                    LooseObject {
-                        object_type: kind,
-                        declared_size: body.len(),
-                        body,
-                    },
+                    IdentifiedGitObject::identify(format, kind, body),
                 )
                 .unwrap();
             assert_eq!(
@@ -83,11 +81,11 @@ fn import_chunks_flush_at_object_and_payload_bounds_before_next_spool_read() {
         placement
             .push(
                 *id,
-                LooseObject {
-                    object_type: ObjectType::Blob,
-                    declared_size: body.len(),
-                    body: body.clone(),
-                },
+                IdentifiedGitObject::identify(
+                    GitHashAlgorithm::Sha1,
+                    ObjectType::Blob,
+                    body.clone(),
+                ),
                 &control,
             )
             .unwrap();
@@ -98,11 +96,11 @@ fn import_chunks_flush_at_object_and_payload_bounds_before_next_spool_read() {
     placement
         .push(
             input[256].0,
-            LooseObject {
-                object_type: ObjectType::Blob,
-                declared_size: input[256].1.len(),
-                body: input[256].1.clone(),
-            },
+            IdentifiedGitObject::identify(
+                GitHashAlgorithm::Sha1,
+                ObjectType::Blob,
+                input[256].1.clone(),
+            ),
             &control,
         )
         .unwrap();
@@ -120,11 +118,7 @@ fn import_chunks_flush_at_object_and_payload_bounds_before_next_spool_read() {
     placement
         .push(
             id,
-            LooseObject {
-                object_type: ObjectType::Blob,
-                declared_size: body.len(),
-                body: body.clone(),
-            },
+            IdentifiedGitObject::identify(GitHashAlgorithm::Sha1, ObjectType::Blob, body.clone()),
             &control,
         )
         .unwrap();
@@ -148,11 +142,7 @@ fn a_cancelled_pending_chunk_does_not_create_any_placement() {
     placement
         .push(
             id,
-            LooseObject {
-                object_type: ObjectType::Blob,
-                declared_size: body.len(),
-                body,
-            },
+            IdentifiedGitObject::identify(GitHashAlgorithm::Sha256, ObjectType::Blob, body),
             &control,
         )
         .unwrap();
@@ -171,5 +161,24 @@ fn a_cancelled_pending_chunk_does_not_create_any_placement() {
         node.fabric.read_whole(id).unwrap().object.payload(),
         b"pending"
     );
+    close(node, root);
+}
+
+/// Placement still compares the custody read's identity with the one it was
+/// asked to place, and refuses a proof for another object before sealing
+/// anything (frankengit-fhh5).
+#[test]
+fn a_proof_for_another_identity_is_refused_before_sealing() {
+    let (node, root) = node(GitHashAlgorithm::Sha1);
+    let placement = Placements::new(&node);
+    let proven = git_object_id(GitHashAlgorithm::Sha1, ObjectType::Blob, b"proof");
+    let other = git_object_id(GitHashAlgorithm::Sha1, ObjectType::Blob, b"other");
+    let object =
+        IdentifiedGitObject::identify(GitHashAlgorithm::Sha1, ObjectType::Blob, b"proof".to_vec());
+    assert!(matches!(
+        placement.verify(other, object),
+        Err(LooseGitImportRefusal::ObjectIdentityMismatch { expected, observed })
+            if expected == other && observed == proven
+    ));
     close(node, root);
 }

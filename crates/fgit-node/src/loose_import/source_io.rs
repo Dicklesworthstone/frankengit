@@ -541,7 +541,7 @@ pub(super) fn read_local_object(
     max_object_bytes: u64,
     packed: &mut PackedObjectSources,
     control: &ImportControl<'_>,
-) -> Result<fgit_git_object::LooseObject, LooseGitImportRefusal> {
+) -> Result<super::graph::SourceObject, LooseGitImportRefusal> {
     control.checkpoint()?;
     if let Some(object) = try_read_loose_object(
         git_directory,
@@ -550,10 +550,11 @@ pub(super) fn read_local_object(
         max_object_bytes,
         control,
     )? {
-        return Ok(object);
+        return Ok(super::graph::SourceObject::Unverified(object));
     }
     packed
         .read(identity, control)?
+        .map(super::graph::SourceObject::Identified)
         .ok_or(LooseGitImportRefusal::ObjectMissing(identity))
 }
 

@@ -166,8 +166,8 @@ pub use merkle::{
     verify_ref_state_non_membership, verify_ref_state_non_membership_under,
 };
 pub use native::{
-    GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,
-    Sha1, Sha256, git_object_id, parse_git_oid,
+    GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, IdentifiedGitObject,
+    NativeObjectIdentity, Sha1, Sha256, git_object_id, parse_git_oid,
 };
 pub use registry::{
     ALGORITHM_REGISTRY, AlgorithmRow, AlgorithmUsage, CORPUS_RESERVED_CODE_POINTS, DOMAIN_REGISTRY,
