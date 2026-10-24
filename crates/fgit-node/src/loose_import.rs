@@ -266,13 +266,19 @@ impl OneNode {
         // All required local edges and object bodies have now verified. Only
         // placement failures or cancellation can leave verified, noncanonical objects.
         let mut placements = placement::Placements::new(self);
-        for (identity, entry) in validated.objects {
-            // Flush before reading an object that would exceed the chunk budget.
-            placements.prepare(entry.length(), control)?;
-            let object = spool.read_identified(identity, entry, control)?;
-            placements.push(identity, object, control)?;
+        let placed = (|| {
+            for (identity, entry) in validated.objects {
+                // Flush before reading an object that would exceed the chunk budget.
+                placements.prepare(entry.length(), control)?;
+                let object = spool.read_identified(identity, entry, control)?;
+                placements.push(identity, object, control)?;
+            }
+            placements.finish(control)
+        })();
+        // A batch still in flight is settled, never left to its drop.
+        if let Err(refusal) = placed {
+            return Err(placements.abandon(refusal));
         }
-        placements.flush(control)?;
 
         spool.finish()?;
         control.checkpoint()?;

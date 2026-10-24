@@ -93,6 +93,13 @@ fn import_chunks_flush_at_object_and_payload_bounds_before_next_spool_read() {
     assert_eq!(placement.objects.len(), 256);
     placement.prepare(input[256].1.len(), &control).unwrap();
     assert!(placement.objects.is_empty());
+    // The full chunk is staged and syncing; no name is linked until it
+    // settles (frankengit-ai60).
+    assert!(placement.in_flight.is_some());
+    assert!(matches!(
+        node.fabric.read_whole(input[0].0),
+        Err(StoreRefusal::ObjectAbsent)
+    ));
     placement
         .push(
             input[256].0,
@@ -106,9 +113,14 @@ fn import_chunks_flush_at_object_and_payload_bounds_before_next_spool_read() {
         .unwrap();
     placement.prepare(CHUNK_BYTES + 1, &control).unwrap();
     assert!(placement.objects.is_empty());
-    for (id, body) in input {
-        assert_eq!(node.fabric.read_whole(id).unwrap().object.payload(), body);
+    // Staging the second chunk settled the first; the second is in flight.
+    for (id, body) in input.iter().take(256) {
+        assert_eq!(node.fabric.read_whole(*id).unwrap().object.payload(), *body);
     }
+    assert!(matches!(
+        node.fabric.read_whole(input[256].0),
+        Err(StoreRefusal::ObjectAbsent)
+    ));
     let body = vec![b'x'; CHUNK_BYTES + 1];
     let id = git_object_id(
         GitHashAlgorithm::Sha1,
@@ -122,7 +134,12 @@ fn import_chunks_flush_at_object_and_payload_bounds_before_next_spool_read() {
             &control,
         )
         .unwrap();
+    // Placing an oversized object directly first settled the chunk in flight.
     assert!(placement.objects.is_empty());
+    assert!(placement.in_flight.is_none());
+    for (id, body) in input {
+        assert_eq!(node.fabric.read_whole(id).unwrap().object.payload(), body);
+    }
     assert_eq!(node.fabric.read_whole(id).unwrap().object.payload(), body);
     close(node, root);
 }
@@ -156,7 +173,7 @@ fn a_cancelled_pending_chunk_does_not_create_any_placement() {
         node.fabric.read_whole(id),
         Err(StoreRefusal::ObjectAbsent)
     ));
-    placement.flush(&control).unwrap();
+    placement.finish(&control).unwrap();
     assert_eq!(
         node.fabric.read_whole(id).unwrap().object.payload(),
         b"pending"
@@ -180,5 +197,82 @@ fn a_proof_for_another_identity_is_refused_before_sealing() {
         Err(LooseGitImportRefusal::ObjectIdentityMismatch { expected, observed })
             if expected == other && observed == proven
     ));
+    close(node, root);
+}
+
+/// A batch in flight is staged but unlinked. Abandoning it after a refusal,
+/// or settling it once the import is cancelled, links no name, removes every
+/// staged file and settles every reservation; the refusal survives. The same
+/// objects then place normally (frankengit-ai60).
+#[test]
+fn an_in_flight_batch_links_nothing_when_abandoned_or_cancelled() {
+    let (node, root) = node(GitHashAlgorithm::Sha1);
+    let mut active = || true;
+    let control = ImportControl::new(&mut active);
+    let mut stopped = || false;
+    let cancelled = ImportControl::new(&mut stopped);
+    let mut blobs: Vec<_> = (0..3)
+        .map(|i| {
+            let body = format!("in flight {i}").into_bytes();
+            (
+                git_object_id(GitHashAlgorithm::Sha1, ObjectType::Blob, &body),
+                body,
+            )
+        })
+        .collect();
+    blobs.sort_by_key(|(id, _)| *id);
+    let staging = root.join("staging");
+    let stage = |placement: &mut Placements<'_>| {
+        for (id, body) in &blobs {
+            placement
+                .push(
+                    *id,
+                    IdentifiedGitObject::identify(
+                        GitHashAlgorithm::Sha1,
+                        ObjectType::Blob,
+                        body.clone(),
+                    ),
+                    &control,
+                )
+                .unwrap();
+        }
+        placement.flush(&control).unwrap();
+        assert!(placement.in_flight.is_some());
+        assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 3);
+    };
+    let unlinked = || {
+        for (id, _) in &blobs {
+            assert!(matches!(
+                node.fabric.read_whole(*id),
+                Err(StoreRefusal::ObjectAbsent)
+            ));
+        }
+        assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+    };
+
+    let mut placement = Placements::new(&node);
+    stage(&mut placement);
+    let refusal = placement.abandon(LooseGitImportRefusal::ObjectLimitExceeded { limit: 7 });
+    assert!(matches!(
+        refusal,
+        LooseGitImportRefusal::ObjectLimitExceeded { limit: 7 }
+    ));
+    assert!(placement.in_flight.is_none());
+    unlinked();
+
+    stage(&mut placement);
+    assert!(matches!(
+        placement.settle(&cancelled),
+        Err(LooseGitImportRefusal::Interrupted { .. })
+    ));
+    assert!(placement.in_flight.is_none());
+    unlinked();
+
+    stage(&mut placement);
+    placement.finish(&control).unwrap();
+    for (id, body) in &blobs {
+        assert_eq!(node.fabric.read_whole(*id).unwrap().object.payload(), *body);
+    }
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
     close(node, root);
 }

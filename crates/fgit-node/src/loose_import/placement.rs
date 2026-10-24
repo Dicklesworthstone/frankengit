@@ -1,8 +1,14 @@
 //! Import placement through bounded, fully settled object batches.
+//!
+//! One batch at a time is in flight: staged, with its files syncing in the
+//! background and no name linked. It is settled before the next batch stages
+//! and before placement returns, so reading, hashing and sealing the next
+//! batch overlaps that sync (frankengit-ai60).
 use super::{ImportControl, LooseGitImportRefusal, OneNode};
 use crate::{NodeRefusal, OBJECT_CODEC_NAMESPACE};
 use fgit_crypto::IdentifiedGitObject;
 use fgit_object_fabric::fabric::{PlacementAdmission, VerifiedObject};
+use fgit_object_fabric::local::StagedBatch;
 use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
 use fgit_types::GitOid;
 
@@ -13,13 +19,22 @@ pub(super) struct Placements<'a> {
     node: &'a OneNode,
     objects: Vec<VerifiedObject>,
     bytes: usize,
+    in_flight: Option<InFlight>,
 }
+
+/// A staged batch and the ledger holding its reservations.
+struct InFlight {
+    batch: StagedBatch,
+    ledger: ObligationLedger,
+}
+
 impl<'a> Placements<'a> {
     pub(super) fn new(node: &'a OneNode) -> Self {
         Self {
             node,
             objects: Vec::new(),
             bytes: 0,
+            in_flight: None,
         }
     }
     pub(super) fn prepare(
@@ -96,11 +111,15 @@ impl Placements<'_> {
         .map_err(|e| node_error(NodeRefusal::from(e)))
     }
 
+    /// Settles the batch in flight, then stages the pending objects as the
+    /// next batch in flight. Nothing staged here is durable until
+    /// [`Self::finish`].
     pub(super) fn flush(
         &mut self,
         control: &ImportControl<'_>,
     ) -> Result<(), LooseGitImportRefusal> {
         control.checkpoint()?;
+        self.settle(control)?;
         if self.objects.is_empty() {
             return Ok(());
         }
@@ -128,18 +147,64 @@ impl Placements<'_> {
                 return Err(node_error(NodeRefusal::from(error)));
             }
         };
-        let result = self.node.fabric.put_batch_if_absent(
-            &self.objects,
+        let staged = self.node.fabric.stage_batch_if_absent(
+            std::mem::take(&mut self.objects),
             PlacementAdmission::new(&ledger, grant),
             &mut || control.is_live(),
         );
-        let closed = ledger.close();
-        if !closed.is_quiescent() {
+        self.bytes = 0;
+        match staged {
+            Ok(batch) => {
+                self.in_flight = Some(InFlight { batch, ledger });
+                Ok(())
+            }
+            Err(error) => {
+                if !ledger.close().is_quiescent() {
+                    return Err(node_error(NodeRefusal::ResourceContainment));
+                }
+                control.after(Err(error), |e| node_error(NodeRefusal::from(e)))
+            }
+        }
+    }
+
+    /// Places the pending objects and settles every batch. Only after this
+    /// returns is each placed object durable under its immutable name.
+    pub(super) fn finish(
+        &mut self,
+        control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
+        self.flush(control)?;
+        self.settle(control)
+    }
+
+    /// Settles a batch left in flight by `refusal`: waits for its syncs and
+    /// aborts its reservations, linking nothing. A leaked reservation, then a
+    /// refused abort, outranks `refusal`, as in a single batch placement.
+    pub(super) fn abandon(&mut self, refusal: LooseGitImportRefusal) -> LooseGitImportRefusal {
+        let Some(InFlight { batch, ledger }) = self.in_flight.take() else {
+            return refusal;
+        };
+        let aborted = batch.abandon();
+        if !ledger.close().is_quiescent() {
+            return node_error(NodeRefusal::ResourceContainment);
+        }
+        aborted.map_or_else(|error| node_error(NodeRefusal::from(error)), |()| refusal)
+    }
+
+    /// Waits for the batch in flight to sync, then links its names and syncs
+    /// their directories.
+    fn settle(&mut self, control: &ImportControl<'_>) -> Result<(), LooseGitImportRefusal> {
+        let Some(InFlight { batch, ledger }) = self.in_flight.take() else {
+            return Ok(());
+        };
+        let result = self
+            .node
+            .fabric
+            .publish_staged_batch(batch, &mut || control.is_live());
+        if !ledger.close().is_quiescent() {
             return Err(node_error(NodeRefusal::ResourceContainment));
         }
         control.after(result, |e| node_error(NodeRefusal::from(e)))?;
-        self.objects.clear();
-        self.bytes = 0;
         Ok(())
     }
 }

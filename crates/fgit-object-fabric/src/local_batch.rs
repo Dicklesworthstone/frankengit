@@ -11,10 +11,14 @@ use super::{
 };
 use fgit_resource::{BudgetGrant, ObligationLedger};
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 const MAX_BATCH_OBJECTS: usize = 256;
 const MAX_BATCH_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
-/// Upper bound on the scoped threads that sync one batch's staged files.
+/// Upper bound on the threads that sync one batch's staged files.
 const MAX_SYNC_THREADS: usize = 32;
 
 impl LocalFilesystemFabric {
@@ -41,71 +45,119 @@ impl LocalFilesystemFabric {
         live: &mut impl FnMut() -> bool,
     ) -> Result<Vec<PutIfAbsent>, StoreRefusal> {
         let (ledger, mut budget) = admission.into_parts();
-        let mut pending = Vec::new();
-        let staged = (|| {
-            let required = self.preflight_batch(objects, live)?;
-            if let Some(error) = budget.amount().first_deficit(&required) {
-                return Err(StoreRefusal::Resource(error));
-            }
-            if objects.is_empty() {
-                return Ok(());
-            }
-            // Bounded by the two native hash domains; no global directory cache.
-            let mut directories = BTreeSet::new();
-            batch_checkpoint(live)?;
-            self.create_directory(&self.staging_dir())?;
-            for object in objects {
-                batch_checkpoint(live)?;
-                let path = self.object_path(object.identity());
-                let parent = path.parent().ok_or(StoreRefusal::MalformedStoredObject)?;
-                if directories.insert(parent.to_path_buf()) {
-                    self.create_directory(parent)?;
-                }
-                let amount = batch_resources((object.payload().len() as u64).max(1), 1);
-                let grant = budget.split_off(&amount).map_err(StoreRefusal::Resource)?;
-                pending.push(self.stage_batch_object(object, ledger, grant)?);
-            }
-            batch_checkpoint(live)?;
-            sync_staged(&pending)?;
-            self.crash_if(LocalCrashPoint::AfterStageSync)?;
-            for (entry, object) in pending.iter_mut().zip(objects) {
-                batch_checkpoint(live)?;
-                entry.link(self, object)?;
-            }
-            for directory in directories {
-                batch_checkpoint(live)?;
-                sync_directory(&directory)?;
-            }
-            self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
-            self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
-            batch_checkpoint(live)
-        })();
+        let mut pending = Pending::default();
+        let staged = self
+            .stage_pending(objects, ledger, &mut budget, &mut pending, live)
+            .and_then(|()| SyncFence::start(&mut pending.entries).wait())
+            .and_then(|()| self.link_pending(objects, &mut pending, live));
+        let _released = budget.release();
+        settle(pending.entries, staged)
+    }
+
+    /// The first half of [`Self::put_batch_if_absent`], for a caller that
+    /// prepares its next batch while this one becomes durable
+    /// (frankengit-ai60). Preflight, reservation and staged writes are exactly
+    /// the blocking form's; every staged file's sync then starts on
+    /// background threads and this returns without linking any name. On a
+    /// refusal every reservation is already settled.
+    pub fn stage_batch_if_absent(
+        &self,
+        objects: Vec<VerifiedObject>,
+        admission: PlacementAdmission<'_>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<StagedBatch, StoreRefusal> {
+        let (ledger, mut budget) = admission.into_parts();
+        let mut pending = Pending::default();
+        let staged = self.stage_pending(&objects, ledger, &mut budget, &mut pending, live);
         let _released = budget.release();
         if let Err(error) = staged {
-            // Drain ALL prior reservations, even when one settlement refuses.
-            let mut failure = None;
-            for entry in pending {
-                if let Err(error) = entry.abort() {
-                    failure.get_or_insert(error);
-                }
-            }
-            return Err(failure.unwrap_or(error));
+            return Err(abort_all(pending.entries).err().unwrap_or(error));
         }
-        let mut results = Vec::with_capacity(pending.len());
-        let mut failure = None;
-        for entry in pending {
-            if failure.is_some() {
-                if let Err(error) = entry.abort() {
-                    failure = Some(error);
-                }
-            } else {
-                match entry.commit() {
-                    Ok(result) => results.push(result),
-                    Err(error) => failure = Some(error),
-                }
-            }
+        Ok(StagedBatch {
+            syncing: SyncFence::start(&mut pending.entries),
+            objects,
+            pending,
+        })
+    }
+
+    /// The second half: waits for every staged file of `batch` to sync, then
+    /// links, syncs each object directory and settles exactly as
+    /// [`Self::put_batch_if_absent`] does. No receipt escapes before that
+    /// fence; a refusal links nothing further and settles every reservation.
+    pub fn publish_staged_batch(
+        &self,
+        batch: StagedBatch,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<PutIfAbsent>, StoreRefusal> {
+        let StagedBatch {
+            mut syncing,
+            objects,
+            mut pending,
+        } = batch;
+        let staged = syncing
+            .wait()
+            .and_then(|()| self.link_pending(&objects, &mut pending, live));
+        settle(pending.entries, staged)
+    }
+
+    /// Preflights the whole batch, then reserves and writes each staged file
+    /// without syncing it. Objects already stored are reverified, not staged.
+    fn stage_pending(
+        &self,
+        objects: &[VerifiedObject],
+        ledger: &ObligationLedger,
+        budget: &mut BudgetGrant,
+        pending: &mut Pending,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), StoreRefusal> {
+        let required = self.preflight_batch(objects, live)?;
+        if let Some(error) = budget.amount().first_deficit(&required) {
+            return Err(StoreRefusal::Resource(error));
         }
-        failure.map_or(Ok(results), Err)
+        if objects.is_empty() {
+            return Ok(());
+        }
+        batch_checkpoint(live)?;
+        self.create_directory(&self.staging_dir())?;
+        for object in objects {
+            batch_checkpoint(live)?;
+            let path = self.object_path(object.identity());
+            let parent = path.parent().ok_or(StoreRefusal::MalformedStoredObject)?;
+            if pending.directories.insert(parent.to_path_buf()) {
+                self.create_directory(parent)?;
+            }
+            let amount = batch_resources((object.payload().len() as u64).max(1), 1);
+            let grant = budget.split_off(&amount).map_err(StoreRefusal::Resource)?;
+            pending
+                .entries
+                .push(self.stage_batch_object(object, ledger, grant)?);
+        }
+        batch_checkpoint(live)
+    }
+
+    /// Links every synced staged file under its immutable name, then syncs
+    /// each object directory once. The caller has synced every staged file.
+    fn link_pending(
+        &self,
+        objects: &[VerifiedObject],
+        pending: &mut Pending,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), StoreRefusal> {
+        if pending.entries.is_empty() {
+            return Ok(());
+        }
+        self.crash_if(LocalCrashPoint::AfterStageSync)?;
+        for (entry, object) in pending.entries.iter_mut().zip(objects) {
+            batch_checkpoint(live)?;
+            entry.link(self, object)?;
+        }
+        for directory in &pending.directories {
+            batch_checkpoint(live)?;
+            sync_directory(directory)?;
+        }
+        self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
+        self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
+        batch_checkpoint(live)
     }
 
     fn preflight_batch(
@@ -245,45 +297,160 @@ impl LocalFilesystemFabric {
 fn batch_resources(bytes: u64, count: u64) -> ResourceVector {
     ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::Objects, count)])
 }
-/// Syncs every staged file of one batch, concurrently on up to
-/// [`MAX_SYNC_THREADS`] scoped threads that all finish before this returns.
-/// A thread that cannot be started syncs its share inline instead.
-fn sync_staged(pending: &[PendingPlacement]) -> Result<(), StoreRefusal> {
-    let stages: Vec<&StageFile> = pending
-        .iter()
-        .filter_map(|entry| match entry {
-            PendingPlacement::Written { stage, .. } => Some(stage),
-            PendingPlacement::Existing(_) => None,
-        })
-        .collect();
-    let sync_all = |chunk: &[&StageFile]| chunk.iter().try_for_each(|stage| stage.sync_all());
-    let result = if stages.len() <= 1 {
-        sync_all(&stages)
-    } else {
-        let per_thread = stages.len().div_ceil(stages.len().min(MAX_SYNC_THREADS));
-        std::thread::scope(|scope| {
-            let mut first = Ok(());
-            let mut workers = Vec::new();
-            for chunk in stages.chunks(per_thread) {
-                match std::thread::Builder::new().spawn_scoped(scope, move || sync_all(chunk)) {
-                    Ok(worker) => workers.push(worker),
-                    Err(_) => {
-                        if let Err(error) = sync_all(chunk) {
-                            first = first.and(Err(error));
-                        }
+
+/// Aborts every reservation, draining ALL of them even when one settlement
+/// refuses; the first such refusal is returned.
+fn abort_all(entries: Vec<PendingPlacement>) -> Result<(), StoreRefusal> {
+    let mut failure = None;
+    for entry in entries {
+        if let Err(error) = entry.abort() {
+            failure.get_or_insert(error);
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+/// Settles a batch: on a refusal aborts every reservation (an abort refusal
+/// outranks the original one); otherwise commits each receipt in order.
+fn settle(
+    entries: Vec<PendingPlacement>,
+    staged: Result<(), StoreRefusal>,
+) -> Result<Vec<PutIfAbsent>, StoreRefusal> {
+    if let Err(error) = staged {
+        return Err(abort_all(entries).err().unwrap_or(error));
+    }
+    let mut results = Vec::with_capacity(entries.len());
+    let mut failure = None;
+    for entry in entries {
+        if failure.is_some() {
+            if let Err(error) = entry.abort() {
+                failure = Some(error);
+            }
+        } else {
+            match entry.commit() {
+                Ok(result) => results.push(result),
+                Err(error) => failure = Some(error),
+            }
+        }
+    }
+    failure.map_or(Ok(results), Err)
+}
+
+/// One batch's reservations and staged files, in object order.
+#[derive(Default)]
+struct Pending {
+    entries: Vec<PendingPlacement>,
+    /// Bounded by the two native hash domains; no global directory cache.
+    directories: BTreeSet<PathBuf>,
+}
+
+/// A batch staged by [`LocalFilesystemFabric::stage_batch_if_absent`]: every
+/// staged file is written and syncing on background threads, no immutable
+/// name is linked and no receipt exists. Settle it with
+/// [`LocalFilesystemFabric::publish_staged_batch`] or [`Self::abandon`].
+/// Dropping it unsettled still joins its syncs and removes its staged files,
+/// but its reservations then count as leaks in their ledger.
+#[must_use = "a staged batch holds reservations until it is published or abandoned"]
+pub struct StagedBatch {
+    // Declared first so a drop joins the syncs before removing staged files.
+    syncing: SyncFence,
+    objects: Vec<VerifiedObject>,
+    pending: Pending,
+}
+
+impl std::fmt::Debug for StagedBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedBatch")
+            .field("objects", &self.objects.len())
+            .field("directories", &self.pending.directories.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl StagedBatch {
+    /// Waits for every sync, then aborts every reservation and removes every
+    /// staged file. Links nothing.
+    pub fn abandon(mut self) -> Result<(), StoreRefusal> {
+        // A sync failure is moot: nothing staged here will be linked.
+        let _synced = self.syncing.wait();
+        abort_all(std::mem::take(&mut self.pending.entries))
+    }
+}
+
+/// Background syncs of one batch's staged files, on up to
+/// [`MAX_SYNC_THREADS`] threads. Each worker shares ownership of its files
+/// and they close once synced. Dropping the fence joins every worker, so no
+/// sync outlives its batch.
+struct SyncFence {
+    workers: Vec<JoinHandle<std::io::Result<()>>>,
+    /// The first failure among shares synced inline because no thread started.
+    inline: std::io::Result<()>,
+}
+
+impl SyncFence {
+    fn start(entries: &mut [PendingPlacement]) -> Self {
+        let files: Vec<File> = entries
+            .iter_mut()
+            .filter_map(|entry| match entry {
+                PendingPlacement::Written { stage, .. } => stage.take_file(),
+                PendingPlacement::Existing(_) => None,
+            })
+            .collect();
+        let mut fence = Self {
+            workers: Vec::new(),
+            inline: Ok(()),
+        };
+        if files.is_empty() {
+            return fence;
+        }
+        let per_thread = files.len().div_ceil(files.len().min(MAX_SYNC_THREADS));
+        let mut files = files.into_iter();
+        loop {
+            let share: Arc<[File]> = files.by_ref().take(per_thread).collect();
+            if share.is_empty() {
+                return fence;
+            }
+            let worker = Arc::clone(&share);
+            match std::thread::Builder::new()
+                .name("fgit-stage-sync".to_owned())
+                .spawn(move || sync_files(&worker))
+            {
+                Ok(handle) => fence.workers.push(handle),
+                // The share is still owned here: sync it on this thread.
+                Err(_) => {
+                    if let Err(error) = sync_files(&share)
+                        && fence.inline.is_ok()
+                    {
+                        fence.inline = Err(error);
                     }
                 }
             }
-            for worker in workers {
-                let synced = worker.join().unwrap_or_else(|_| {
-                    Err(std::io::Error::other("a staged-file sync thread panicked"))
-                });
-                first = first.and(synced);
-            }
-            first
-        })
-    };
-    result.map_err(|error| storage_error(StorageOperation::SyncStage, error))
+        }
+    }
+
+    /// Joins every worker; the first sync failure refuses the batch.
+    fn wait(&mut self) -> Result<(), StoreRefusal> {
+        let mut first = std::mem::replace(&mut self.inline, Ok(()));
+        for worker in self.workers.drain(..) {
+            let synced = worker.join().unwrap_or_else(|_| {
+                Err(std::io::Error::other("a staged-file sync thread panicked"))
+            });
+            first = first.and(synced);
+        }
+        first.map_err(|error| storage_error(StorageOperation::SyncStage, error))
+    }
+}
+
+impl Drop for SyncFence {
+    fn drop(&mut self) {
+        for worker in self.workers.drain(..) {
+            let _joined = worker.join();
+        }
+    }
+}
+
+fn sync_files(files: &[File]) -> std::io::Result<()> {
+    files.iter().try_for_each(File::sync_all)
 }
 
 fn batch_checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), StoreRefusal> {

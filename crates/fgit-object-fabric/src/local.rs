@@ -7,6 +7,7 @@
 
 #[path = "local_batch.rs"]
 mod batch;
+pub use batch::StagedBatch;
 
 #[path = "local_bounded_read.rs"]
 mod bounded_read;
@@ -88,6 +89,12 @@ impl StageFile {
 
     fn close(&mut self) {
         drop(self.file.take());
+    }
+
+    /// Hands the open handle to a sync worker. The path stays owned here, so
+    /// dropping this stage still removes it.
+    const fn take_file(&mut self) -> Option<File> {
+        self.file.take()
     }
 }
 

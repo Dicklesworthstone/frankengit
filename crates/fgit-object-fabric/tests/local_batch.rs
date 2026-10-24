@@ -4,7 +4,9 @@ use fgit_crypto::{GitObjectKind, git_object_id, git_payload_commitment};
 use fgit_object_fabric::fabric::{
     ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
 };
-use fgit_object_fabric::local::{LocalCrashPoint, LocalFilesystemConfig, LocalFilesystemFabric};
+use fgit_object_fabric::local::{
+    LocalCrashPoint, LocalFilesystemConfig, LocalFilesystemFabric, StagedBatch,
+};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_resource::{
     Grade, LeakDisposition, ObligationLedger, OpaqueHandle, RegionId, ResourceVector,
@@ -451,4 +453,171 @@ fn full_batch_byte_limit_and_per_file_framing_limit_refuse_before_any_link() {
             .len(),
         2
     );
+}
+
+fn ledger_for(
+    objects: &[VerifiedObject],
+    leaks: LeakDisposition,
+) -> (ObligationLedger, ResourceVector) {
+    let amount = ResourceVector::from_grades(&[
+        (
+            Grade::Bytes,
+            objects
+                .iter()
+                .map(|o| (o.payload().len() as u64).max(1))
+                .sum(),
+        ),
+        (Grade::Objects, objects.len() as u64),
+    ]);
+    (
+        ObligationLedger::root(RegionId::new(1), leaks, amount),
+        amount,
+    )
+}
+
+fn stage(
+    store: &LocalFilesystemFabric,
+    objects: &[VerifiedObject],
+    ledger: &ObligationLedger,
+    amount: ResourceVector,
+) -> StagedBatch {
+    let budget = ledger.grant(amount).unwrap();
+    store
+        .stage_batch_if_absent(
+            objects.to_vec(),
+            PlacementAdmission::new(ledger, budget),
+            &mut || true,
+        )
+        .unwrap()
+}
+
+/// Stages and publishes through the split form with a fail-fast ledger.
+fn run_split(
+    store: &LocalFilesystemFabric,
+    objects: &[VerifiedObject],
+) -> Result<Vec<PutIfAbsent>, StoreRefusal> {
+    let (ledger, amount) = ledger_for(objects, LeakDisposition::FailFast);
+    let batch = stage(store, objects, &ledger, amount);
+    let result = store.publish_staged_batch(batch, &mut || true);
+    assert!(ledger.close().is_quiescent());
+    result
+}
+
+fn stored_files(root: &Root) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, base, out);
+            } else {
+                out.push((
+                    path.strip_prefix(base).unwrap().to_path_buf(),
+                    fs::read(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&root.0.join("objects"), &root.0, &mut out);
+    out.sort();
+    out
+}
+
+/// The split form stores exactly what the blocking form stores and returns
+/// identical outcomes: fresh batches in both hash domains, a repeated batch
+/// and a batch mixing stored and new objects (frankengit-ai60).
+#[test]
+fn staging_then_publishing_stores_and_reports_exactly_what_one_blocking_batch_does() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let input = objects(format, 64);
+        let (blocking_root, split_root) = (Root::new(), Root::new());
+        let (blocking, split) = (blocking_root.fabric(None), split_root.fabric(None));
+        // Half stored first, then the full batch (mixed), then it again (repeated).
+        let first: Vec<_> = input.iter().step_by(2).cloned().collect();
+        for batch in [&first[..], &input[..], &input[..]] {
+            let expected = run(&blocking, batch, &mut || true).unwrap();
+            assert_eq!(run_split(&split, batch).unwrap(), expected);
+        }
+        assert_eq!(stored_files(&split_root), stored_files(&blocking_root));
+        assert_eq!(stored_files(&split_root).len(), 64);
+        split_root.clean();
+        blocking_root.clean();
+    }
+}
+
+/// A staged batch links no name before it is published. Abandoning it
+/// removes every staged file and settles every reservation under a
+/// fail-fast ledger; the same objects then publish normally.
+#[test]
+fn a_staged_batch_links_nothing_until_published_and_abandoning_it_settles_everything() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha256, 8);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage(&store, &input, &ledger, amount);
+    assert_eq!(fs::read_dir(root.0.join("staging")).unwrap().count(), 8);
+    for o in &input {
+        assert!(matches!(
+            store.read_whole(o.identity()),
+            Err(StoreRefusal::ObjectAbsent)
+        ));
+    }
+    batch.abandon().unwrap();
+    assert!(ledger.close().is_quiescent());
+    root.clean();
+    for o in &input {
+        assert!(matches!(
+            store.read_whole(o.identity()),
+            Err(StoreRefusal::ObjectAbsent)
+        ));
+    }
+    assert_eq!(run_split(&store, &input).unwrap().len(), 8);
+    for o in &input {
+        assert_eq!(store.read_whole(o.identity()).unwrap().object, *o);
+    }
+    root.clean();
+}
+
+/// Publication polls cancellation before each link exactly as the blocking
+/// form does: a cancelled publication links nothing, removes every staged
+/// file and settles every reservation.
+#[test]
+fn a_cancelled_publication_links_nothing_and_settles_every_reservation() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha1, 8);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage(&store, &input, &ledger, amount);
+    assert_eq!(
+        store.publish_staged_batch(batch, &mut || false),
+        Err(StoreRefusal::RuntimeCheckpointRejected)
+    );
+    assert!(ledger.close().is_quiescent());
+    root.clean();
+    for o in &input {
+        assert!(matches!(
+            store.read_whole(o.identity()),
+            Err(StoreRefusal::ObjectAbsent)
+        ));
+    }
+}
+
+/// Dropping a staged batch unsettled still joins its syncs and removes its
+/// staged files, but its reservations are reported as leaks: an unsettled
+/// batch can never pass for a settled one.
+#[test]
+fn an_unsettled_staged_batch_is_reported_as_leaked_and_leaves_no_staged_file() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha1, 4);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::RecordAndContinue);
+    drop(stage(&store, &input, &ledger, amount));
+    assert!(!ledger.close().is_quiescent());
+    root.clean();
+    for o in &input {
+        assert!(matches!(
+            store.read_whole(o.identity()),
+            Err(StoreRefusal::ObjectAbsent)
+        ));
+    }
 }
