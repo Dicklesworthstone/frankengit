@@ -306,7 +306,12 @@ mod unix {
         );
         fs::remove_dir(&path).unwrap();
 
-        rustix::fs::mkfifo(&path, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR).unwrap();
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
         let started = Instant::now();
         // No writer is opened. NOFOLLOW alone would not prevent this open
         // from blocking if the path changed to a FIFO after metadata checking.
