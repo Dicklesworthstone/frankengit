@@ -17,6 +17,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
+
+mod cache;
+pub use cache::{MemoizedPackEncoder, PackCacheStats, PackComputationCache};
 
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
 use fgit_deflate::{
@@ -570,6 +574,7 @@ pub struct PackPlanner {
     format: ObjectFormat,
     profile: PackWriteProfile,
     limits: PackLimits,
+    cache: Option<Arc<PackComputationCache>>,
 }
 
 impl PackPlanner {
@@ -580,7 +585,15 @@ impl PackPlanner {
             format,
             profile,
             limits,
+            cache: None,
         }
+    }
+
+    /// Reuse pure delta computations after ordinary selection and validation.
+    #[must_use]
+    pub fn with_computation_cache(mut self, cache: Arc<PackComputationCache>) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Walks canonical closure edges, verifies every supplied object identity,
@@ -854,6 +867,7 @@ impl PackPlanner {
                 requested: order.len(),
             })?;
         let mut selector = DeltaSelector::new(self.profile, &self.limits, None)?;
+        selector.cache = self.cache.clone();
         let mut total_object_bytes = 0_usize;
         let mut delta_count = 0_usize;
         for key in order {
@@ -1134,7 +1148,14 @@ impl PackPlanner {
         deadline: &mut impl Deadline,
     ) -> Result<PackPlan, PackWriteError> {
         objects.sort_unstable_by(compare_pack_objects);
-        let entries = select_deltas(&objects, external, self.profile, &self.limits, deadline)?;
+        let entries = select_deltas_cached(
+            &objects,
+            external,
+            self.profile,
+            &self.limits,
+            self.cache.clone(),
+            deadline,
+        )?;
         Ok(PackPlan {
             format: self.format,
             profile: self.profile,
@@ -1265,6 +1286,18 @@ pub trait PackEntryEncoder {
         deadline: &mut dyn Deadline,
         emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
     ) -> Result<DeflateReceipt, PackWriteError>;
+
+    /// Encodes a payload for an already verified native object. The default
+    /// preserves custom encoders; memoizing encoders also bind this identity.
+    fn encode_object_entry(
+        &mut self,
+        _id: ObjectId,
+        input: &[u8],
+        deadline: &mut dyn Deadline,
+        emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
+    ) -> Result<DeflateReceipt, PackWriteError> {
+        self.encode_entry(input, deadline, emit)
+    }
 }
 
 /// Adapter from the dependency-owned deterministic DEFLATE encoder to the
@@ -1297,6 +1330,18 @@ impl PackEntryEncoder for DeterministicPackEncoder {
         deadline: &mut dyn Deadline,
         emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
     ) -> Result<DeflateReceipt, PackWriteError> {
+        self.encode_with_work(input, deadline, emit)
+            .map(|(receipt, _)| receipt)
+    }
+}
+
+impl DeterministicPackEncoder {
+    fn encode_with_work(
+        &mut self,
+        input: &[u8],
+        deadline: &mut dyn Deadline,
+        emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
+    ) -> Result<(DeflateReceipt, u64), PackWriteError> {
         checkpoint(deadline)?;
         let mut encoder = Deflater::new(self.limits, self.profile)?;
         emit(&encoder.take_output())?;
@@ -1309,9 +1354,10 @@ impl PackEntryEncoder for DeterministicPackEncoder {
         let mut control = DeflateDeadline { deadline };
         encoder.finish_with_control(&mut control)?;
         emit(&encoder.take_output())?;
-        encoder
+        let receipt = encoder
             .receipt()
-            .ok_or(PackWriteError::MissingCompressionReceipt)
+            .ok_or(PackWriteError::MissingCompressionReceipt)?;
+        Ok((receipt, encoder.work_units()))
     }
 }
 
@@ -1532,7 +1578,9 @@ fn emit_planned_entry<S: PackArtifactSink>(
                 }
             };
             let receipt =
-                encoder.encode_entry(payload, deadline, &mut |bytes| emitter.emit_hashed(bytes))?;
+                encoder.encode_object_entry(entry.object.id, payload, deadline, &mut |bytes| {
+                    emitter.emit_hashed(bytes)
+                })?;
             Ok((receipt, entry.delta.is_some()))
         }
     }
@@ -1679,6 +1727,7 @@ fn compare_pack_objects(
         .then_with(|| left.id.cmp(&right.id))
 }
 
+#[cfg(test)]
 fn select_deltas(
     objects: &[CanonicalPackObject],
     external: &ExternalBases,
@@ -1686,7 +1735,19 @@ fn select_deltas(
     limits: &PackLimits,
     deadline: &mut impl Deadline,
 ) -> Result<Vec<PackPlanEntry>, PackWriteError> {
+    select_deltas_cached(objects, external, profile, limits, None, deadline)
+}
+
+fn select_deltas_cached(
+    objects: &[CanonicalPackObject],
+    external: &ExternalBases,
+    profile: PackWriteProfile,
+    limits: &PackLimits,
+    cache: Option<Arc<PackComputationCache>>,
+    deadline: &mut impl Deadline,
+) -> Result<Vec<PackPlanEntry>, PackWriteError> {
     let mut selector = DeltaSelector::new(profile, limits, Some(objects.len()))?;
+    selector.cache = cache;
     for object in objects {
         let delta = selector.decide(object, external, deadline)?;
         selector.push(PackPlanEntry {
@@ -1794,6 +1855,8 @@ struct DeltaSelector<'limits> {
     /// that base is still inside the window. Every target in the window would
     /// otherwise rebuild the same index, which is the whole cost of the search.
     indexes: VecDeque<(usize, Option<BaseDeltaIndex>)>,
+    cache: Option<Arc<PackComputationCache>>,
+    cache_fingerprint: [u8; 32],
 }
 
 impl<'limits> DeltaSelector<'limits> {
@@ -1832,6 +1895,8 @@ impl<'limits> DeltaSelector<'limits> {
                 resident_bytes: 0,
             },
             indexes: VecDeque::new(),
+            cache: None,
+            cache_fingerprint: cache::delta_fingerprint(profile, limits),
         })
     }
 
@@ -1845,11 +1910,11 @@ impl<'limits> DeltaSelector<'limits> {
     }
 
     /// The delta chosen for `object` after every entry already pushed.
-    fn decide(
+    fn decide<D: Deadline>(
         &mut self,
         object: &CanonicalPackObject,
         external: &ExternalBases,
-        deadline: &mut impl Deadline,
+        deadline: &mut D,
     ) -> Result<Option<PlannedDelta>, PackWriteError> {
         let profile = self.profile;
         let limits = self.limits;
@@ -1980,16 +2045,31 @@ impl<'limits> DeltaSelector<'limits> {
                     current.effective_len().min(object.body.len())
                 })
                 .saturating_sub(base.id.as_bytes().len());
-            let Some(program) = make_delta_program_with(
-                &base.body,
-                &object.body,
-                profile.delta_search,
-                index.as_ref(),
-                live.as_ref(),
-                bound,
-                deadline,
-            )?
-            else {
+            checkpoint(deadline)?;
+            let compute = |deadline: &mut D| {
+                make_delta_program_with(
+                    &base.body,
+                    &object.body,
+                    profile.delta_search,
+                    index.as_ref(),
+                    live.as_ref(),
+                    bound,
+                    deadline,
+                )
+            };
+            let program = match &self.cache {
+                Some(cache) => cache.delta(
+                    &self.cache_fingerprint,
+                    base.id,
+                    object.id,
+                    bound,
+                    deadline,
+                    compute,
+                )?,
+                None => compute(deadline)?,
+            };
+            checkpoint(deadline)?;
+            let Some(program) = program else {
                 continue;
             };
             // `program` is below `bound`, so this is strictly shorter in
@@ -2020,16 +2100,31 @@ impl<'limits> DeltaSelector<'limits> {
             let bound = selected.as_ref().map_or(object.body.len(), |current| {
                 current.effective_len().min(object.body.len())
             });
-            let Some(program) = make_delta_program_with(
-                &base.object.body,
-                &object.body,
-                profile.delta_search,
-                index,
-                live.as_ref(),
-                bound,
-                deadline,
-            )?
-            else {
+            checkpoint(deadline)?;
+            let compute = |deadline: &mut D| {
+                make_delta_program_with(
+                    &base.object.body,
+                    &object.body,
+                    profile.delta_search,
+                    index,
+                    live.as_ref(),
+                    bound,
+                    deadline,
+                )
+            };
+            let program = match &self.cache {
+                Some(cache) => cache.delta(
+                    &self.cache_fingerprint,
+                    base.object.id,
+                    object.id,
+                    bound,
+                    deadline,
+                    compute,
+                )?,
+                None => compute(deadline)?,
+            };
+            checkpoint(deadline)?;
+            let Some(program) = program else {
                 continue;
             };
             let candidate = PlannedDelta {
