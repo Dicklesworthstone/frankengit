@@ -19,12 +19,22 @@ async function fixture(t, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'fg-artifact-download-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const bytes = options.bytes ?? Buffer.from([0, 255, 13, 10, 38, 0x1b, 0xc3, 0xa9]), output = join(dir, 'output');
   const file = { path_hex: path, artifact_id_sha256: id, payload_sha256: hash(bytes), payload_bytes: bytes.length, executable: true };
-  const receipt = { type: 'trusted_workflow_artifact_receipt', manifest_id_sha256: '56'.repeat(32),
+  let receipt = { type: 'trusted_workflow_artifact_receipt', manifest_id_sha256: '56'.repeat(32),
     manifest: { type: 'trusted_workflow_artifact_provenance', schema_version: 1, producer: {
       tenant_id: scope.tenant_id, repository_id: scope.repository_id, repository_incarnation: scope.repository_incarnation_id },
     job_id_hex: job, outputs: [file], job_success_asserted: false, cache_reuse_authorized: false } };
+  const log = options.log ? { step_index: 2, step_name_hex: null, script_sha256: '78'.repeat(32),
+    stream: 'stdout', observed_step_outcome: 'failed', exit_code: 7, output_complete: true,
+    artifact_id_sha256: id, payload_sha256: hash(bytes), payload_bytes: bytes.length, ...options.log } : null;
+  if (log) {
+    const { outputs, ...manifest } = receipt.manifest;
+    receipt = { ...receipt, type: 'trusted_workflow_log_receipt', manifest: { ...manifest,
+      type: 'trusted_workflow_log_provenance', observed_job_outcome: options.jobOutcome ?? 'failed',
+      logs: [log, { ...log, stream: log.stream === 'stdout' ? 'stderr' : 'stdout',
+        artifact_id_sha256: '89'.repeat(32), payload_sha256: hash(Buffer.alloc(0)), payload_bytes: 0 }] } };
+  }
   const metadata = { type: 'artifact_metadata', schema_version: 1, ...scope, scope_sha256: '67'.repeat(32),
-    artifact_id: id, payload_sha256: file.payload_sha256, payload_bytes: bytes.length, media_type: 'text/html', kind: 'ci_artifact',
+    artifact_id: id, payload_sha256: file.payload_sha256, payload_bytes: bytes.length, media_type: 'text/html', kind: log ? 'build_log' : 'ci_artifact',
     build_capsule_sha256: null, check_receipt_sha256: null, source_rcr_sha256: null, retention_canonical_hex: '00',
     payload_verified: true, provenance_authenticated: false, canonical_repository_published: false,
     retention_enforced: false, read_only: true };
@@ -44,7 +54,8 @@ async function fixture(t, options = {}) {
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(r => server.close(r)); });
-  const input = { endpoint: `${options.tls ? 'https' : 'http'}://127.0.0.1:${server.address().port}/repo.git`, scope, job_id_hex: job, path_hex: path };
+  const input = { endpoint: `${options.tls ? 'https' : 'http'}://127.0.0.1:${server.address().port}/repo.git`, scope, job_id_hex: job,
+    ...(log ? { step_index: log.step_index, stream: log.stream } : { path_hex: path }) };
   const send = opts => downloadArtifact(input, receipt, token, output, opts);
   async function invoke(extra = [], control = {}) {
     for (const [name, value] of [['input', input], ['receipt', receipt]]) await writeFile(join(dir, name), JSON.stringify(value), { mode: 0o600 });
@@ -57,7 +68,7 @@ async function fixture(t, options = {}) {
     const code = await new Promise((r, j) => { child.once('error', j); child.once('close', r); }); clearTimeout(timer);
     return { code, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString() };
   }
-  return { dir, bytes, output, file, receipt, metadata, input, calls, send, invoke };
+  return { dir, bytes, output, file, log, receipt, metadata, input, calls, send, invoke };
 }
 for (const bytes of [Buffer.alloc(0), Buffer.from([0, 255, 13, 10, 38, 0xc3, 0xa9])]) {
   test(`API downloads selected complete binary payload (${bytes.length} bytes), never applies executable mode`, async t => {
@@ -212,4 +223,88 @@ test('CLI duplicate/widened options refuse before I/O', async t => {
     const f = await fixture(t), r = await f.invoke(args); assert.equal(r.code, 2);
     assert.equal(f.calls.length, 0); await assert.rejects(stat(f.output), { code: 'ENOENT' });
   }
+});
+
+for (const stream of ['stdout', 'stderr']) for (const complete of [true, false]) {
+  test(`log ${stream} preserves binary bytes and receipt completeness ${complete} without asserting job success`, async t => {
+    const f = await fixture(t, { log: { stream, output_complete: complete } });
+    const r = await f.send(); assert((await readFile(f.output)).equals(f.bytes));
+    assert.equal(r.payload_sha256_verified, true); assert.equal(r.job_success_asserted, false);
+    assert.equal(r.log_observation.stream, stream); assert.equal(r.log_observation.step_index, 2);
+    assert.equal(r.log_observation.output_complete, complete); assert.equal(r.log_observation.exit_code, 7);
+    assert.equal(r.log_observation.observed_step_outcome, 'failed'); assert.equal(r.log_observation.observed_job_outcome, 'failed');
+    assert.equal(r.provenance_authenticated, false); assert.equal(r.execution_performed, false);
+    assert.equal((await stat(f.output)).mode & 0o777, 0o600); assert.equal(f.calls.length, 2);
+  });
+}
+test('CLI retrieves an empty cancelled log as empty, preserving its non-success observation', async t => {
+  const f = await fixture(t, { bytes: Buffer.alloc(0), jobOutcome: 'cancelled',
+    log: { stream: 'stderr', observed_step_outcome: 'cancelled', exit_code: null, output_complete: false } });
+  const r = await f.invoke(); assert.equal(r.code, 0, r.stderr);
+  const v = JSON.parse(r.stdout); assert.equal(v.log_observation.observed_job_outcome, 'cancelled');
+  assert.equal(v.log_observation.output_complete, false); assert.equal(v.job_success_asserted, false);
+  assert.equal((await stat(f.output)).size, 0); assert.equal(f.calls.length, 2);
+});
+test('two empty streams may share one artifact ID; coordinates still select the exact stream', async t => {
+  const f = await fixture(t, { bytes: Buffer.alloc(0), log: { stream: 'stderr' } });
+  f.receipt.manifest.logs[1].artifact_id_sha256 = id;
+  const r = await f.send(); assert.equal(r.artifact_id, id); assert.equal(r.log_observation.stream, 'stderr');
+  assert.equal((await stat(f.output)).size, 0); assert.equal(f.calls.length, 2);
+});
+for (const patch of [{ step_index: '2' }, { step_index: -1 }, { step_index: 1.5 }, { stream: 'combined' },
+  { path_hex: path }, { job_id_hex: '00' }]) test(`refuse invalid or ambiguous log selector ${JSON.stringify(patch)}`, async t => {
+  const f = await fixture(t, { log: {} }); assert.throws(() => selectArtifact({ ...f.input, ...patch }, f.receipt));
+  assert.equal(f.calls.length, 0);
+});
+for (const change of [
+  m => { m.logs.push({ ...m.logs[0] }); },
+  m => { m.logs.pop(); },
+  m => { m.logs[1].script_sha256 = '90'.repeat(32); },
+  m => { m.logs[1].output_complete = false; },
+  m => { m.logs[1].exit_code = 0; },
+  m => { m.logs[0].payload_bytes = 64 * 1024 * 1024 + 1; },
+  m => { m.observed_job_outcome = 'green'; },
+]) test('refuse ambiguous, incomplete or inconsistent log receipt before I/O', async t => {
+  const f = await fixture(t, { log: {} }); change(f.receipt.manifest);
+  await assert.rejects(f.send()); assert.equal(f.calls.length, 0); await assert.rejects(stat(f.output), { code: 'ENOENT' });
+});
+test('file and log receipt/kind cannot be substituted even with identical bytes', async t => {
+  const log = await fixture(t, { log: {} }); log.metadata.kind = 'ci_artifact';
+  await assert.rejects(log.send()); assert.equal(log.calls.length, 1);
+  const file = await fixture(t); file.metadata.kind = 'build_log';
+  await assert.rejects(file.send()); assert.equal(file.calls.length, 1);
+  assert.throws(() => selectArtifact(file.input, log.receipt));
+  assert.throws(() => selectArtifact(log.input, file.receipt));
+});
+test('log hash mismatch and cancellation retain no output or local fallback', async t => {
+  const f = await fixture(t, { log: {}, content: Buffer.from('bad') }); await assert.rejects(f.send());
+  await assert.rejects(stat(f.output), { code: 'ENOENT' }); assert.equal(f.calls.length, 2);
+  const controller = new AbortController();
+  const p = await fixture(t, { log: {}, handle: ({ content, response }) => {
+    if (!content) return false; response.writeHead(200, { 'Content-Type': 'application/octet-stream',
+      'Content-Length': p.bytes.length, 'Content-Disposition': `attachment; filename="artifact-${id}"` });
+    response.write(p.bytes.subarray(0, 1)); controller.abort(); return true;
+  } });
+  await assert.rejects(p.send({ signal: controller.signal })); await assert.rejects(stat(p.output), { code: 'ENOENT' });
+});
+function nearManifestLimit(receipt) {
+  // Synthetic native-schema boundary, not evidence that the runner accepted
+  // this step name or produced this receipt. Native wraps its <=1MiB manifest.
+  const maximum = 1024 * 1024, before = Buffer.byteLength(JSON.stringify(receipt.manifest));
+  const name = '61'.repeat(Math.floor((maximum - before + 4) / 4));
+  for (const log of receipt.manifest.logs) log.step_name_hex = name;
+  const size = Buffer.byteLength(JSON.stringify(receipt.manifest));
+  assert(size <= maximum && size >= maximum - 3);
+  assert(Buffer.byteLength(JSON.stringify(receipt)) > maximum);
+}
+test('CLI accepts a bounded near1MiB log manifest plus its fixed receipt envelope', async t => {
+  const f = await fixture(t, { log: {} }); nearManifestLimit(f.receipt);
+  const r = await f.invoke(); assert.equal(r.code, 0, r.stderr); assert((await readFile(f.output)).equals(f.bytes));
+  assert.equal(f.calls.length, 2);
+});
+test('a manifest over1MiB refuses even if it fits the finite receipt envelope allowance', async t => {
+  const f = await fixture(t, { log: {} }); nearManifestLimit(f.receipt);
+  for (const log of f.receipt.manifest.logs) log.step_name_hex += '61';
+  assert(Buffer.byteLength(JSON.stringify(f.receipt.manifest)) > 1024 * 1024);
+  assert.throws(() => selectArtifact(f.input, f.receipt), /artifact_manifest_limit/); assert.equal(f.calls.length, 0);
 });

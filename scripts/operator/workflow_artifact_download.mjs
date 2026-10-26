@@ -10,7 +10,15 @@ import { outcomeEndpoint } from './transaction_outcome.mjs';
 import { absolute, directory, readPrivate, parseJson, writeNew } from './workflow_watch_io.mjs';
 
 const MAX = 64 * 1024 * 1024, JSON_MAX = 16 * 1024;
+const MANIFEST_MAX = 1024 * 1024;
+// Native bounds its compact manifest, then wraps it. The file receipt envelope
+// is the larger of the two fixed formats; do not charge it to the manifest.
+const RECEIPT_MAX = MANIFEST_MAX + Buffer.byteLength(JSON.stringify({
+  type: 'trusted_workflow_artifact_receipt', manifest_id_sha256: '0'.repeat(64), manifest: null,
+})) - 4;
 const TRUST = 'trusted-workflow-local-owner';
+const STEP_OUTCOMES = ['succeeded', 'failed', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'];
+const JOB_OUTCOMES = ['succeeded', 'failed', 'skipped', 'cancelled', 'timed_out', 'output_limit', 'refused'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export class ArtifactDownloadError extends Error {
   constructor(code) { super(code); this.name = 'ArtifactDownloadError'; this.code = code; }
@@ -31,21 +39,29 @@ function rawPath(value, maximum) {
 }
 // The independently supplied scope is never learned from the downloaded reply.
 export function selectArtifact(input, receipt) {
-  fields(input, ['endpoint', 'scope', 'job_id_hex', 'path_hex']);
+  const logs = input && (Object.hasOwn(input, 'step_index') || Object.hasOwn(input, 'stream'));
+  fields(input, ['endpoint', 'scope', 'job_id_hex', ...(logs ? ['step_index', 'stream'] : ['path_hex'])]);
   const endpoint = outcomeEndpoint(input.endpoint), scope = input.scope;
   fields(scope, ['tenant_id', 'repository_id', 'repository_incarnation_id', 'trust_domain']);
   for (const key of ['tenant_id', 'repository_id', 'repository_incarnation_id']) hex(scope[key], 32);
   if (scope.trust_domain !== TRUST) refuse('artifact_scope_invalid');
-  rawPath(input.job_id_hex, 256); rawPath(input.path_hex, 4096);
+  rawPath(input.job_id_hex, 256);
+  if (logs) {
+    if (!Number.isSafeInteger(input.step_index) || input.step_index < 0 || !['stdout', 'stderr'].includes(input.stream)) {
+      refuse('artifact_log_selector_invalid');
+    }
+  } else rawPath(input.path_hex, 4096);
   fields(receipt, ['type', 'manifest_id_sha256', 'manifest']);
   hex(receipt.manifest_id_sha256, 64);
   const m = receipt.manifest, p = m?.producer;
-  if (receipt.type !== 'trusted_workflow_artifact_receipt' || m?.type !== 'trusted_workflow_artifact_provenance' ||
-      m.schema_version !== 1 || m.job_id_hex !== input.job_id_hex ||
+  if (m?.schema_version !== 1 || m.job_id_hex !== input.job_id_hex ||
       p?.tenant_id !== scope.tenant_id || p.repository_id !== scope.repository_id ||
       p.repository_incarnation !== scope.repository_incarnation_id ||
-      m.job_success_asserted !== false || m.cache_reuse_authorized !== false ||
-      !Array.isArray(m.outputs) || !m.outputs.length || m.outputs.length > 64) refuse('artifact_receipt_mismatch');
+      m.job_success_asserted !== false || m.cache_reuse_authorized !== false) refuse('artifact_receipt_mismatch');
+  if (Buffer.byteLength(JSON.stringify(m)) > MANIFEST_MAX) refuse('artifact_manifest_limit');
+  if (logs) return selectLog(input, receipt, endpoint, scope);
+  if (receipt.type !== 'trusted_workflow_artifact_receipt' || m.type !== 'trusted_workflow_artifact_provenance' ||
+      Object.hasOwn(m, 'logs') || !Array.isArray(m.outputs) || !m.outputs.length || m.outputs.length > 64) refuse('artifact_receipt_mismatch');
   const seen = new Set(); let selected;
   for (const file of m.outputs) {
     fields(file, ['path_hex', 'artifact_id_sha256', 'payload_sha256', 'payload_bytes', 'executable']);
@@ -57,6 +73,38 @@ export function selectArtifact(input, receipt) {
   if (!selected) refuse('artifact_output_not_selected');
   return { endpoint, scope: { ...scope }, output: { ...selected }, manifest_id_sha256: receipt.manifest_id_sha256 };
 }
+function selectLog(input, receipt, endpoint, scope) {
+  const m = receipt.manifest;
+  if (receipt.type !== 'trusted_workflow_log_receipt' || m.type !== 'trusted_workflow_log_provenance' ||
+      Object.hasOwn(m, 'outputs') || !JOB_OUTCOMES.includes(m.observed_job_outcome) ||
+      !Array.isArray(m.logs) || !m.logs.length || m.logs.length > 8192) refuse('artifact_log_receipt_invalid');
+  const pairs = new Map(); let selected;
+  for (const log of m.logs) {
+    fields(log, ['step_index', 'step_name_hex', 'script_sha256', 'stream', 'observed_step_outcome', 'exit_code',
+      'output_complete', 'artifact_id_sha256', 'payload_sha256', 'payload_bytes']);
+    hex(log.script_sha256, 64); hex(log.artifact_id_sha256, 64); hex(log.payload_sha256, 64);
+    if (!Number.isSafeInteger(log.step_index) || log.step_index < 0 || !['stdout', 'stderr'].includes(log.stream) ||
+        !STEP_OUTCOMES.includes(log.observed_step_outcome) || typeof log.output_complete !== 'boolean' ||
+        (log.exit_code !== null && (!Number.isInteger(log.exit_code) || log.exit_code < -2147483648 || log.exit_code > 2147483647)) ||
+        !Number.isSafeInteger(log.payload_bytes) || log.payload_bytes < 0 || log.payload_bytes > MAX ||
+        (log.step_name_hex !== null && (typeof log.step_name_hex !== 'string' || log.step_name_hex.length > 1024 * 1024 ||
+          !/^(?:[0-9a-f]{2})*$/.test(log.step_name_hex)))) refuse('artifact_log_observation_invalid');
+    const pair = pairs.get(log.step_index) ?? new Map();
+    if (pair.has(log.stream)) refuse('artifact_log_duplicate');
+    const other = pair.values().next().value;
+    if (other && ['step_name_hex', 'script_sha256', 'observed_step_outcome', 'exit_code', 'output_complete']
+      .some(key => other[key] !== log[key])) refuse('artifact_log_observation_mismatch');
+    pair.set(log.stream, log); pairs.set(log.step_index, pair);
+    if (log.step_index === input.step_index && log.stream === input.stream) selected = log;
+  }
+  if ([...pairs.values()].some(pair => pair.size !== 2)) refuse('artifact_log_pair_incomplete');
+  if (!selected) refuse('artifact_output_not_selected');
+  return { endpoint, scope: { ...scope }, output: { ...selected }, manifest_id_sha256: receipt.manifest_id_sha256,
+    // Retained observations, not authenticated execution or a completeness upgrade.
+    log_observation: { step_index: selected.step_index, stream: selected.stream, script_sha256: selected.script_sha256,
+      observed_job_outcome: m.observed_job_outcome, observed_step_outcome: selected.observed_step_outcome,
+      exit_code: selected.exit_code, output_complete: selected.output_complete } };
+}
 function metadata(value, selected) {
   fields(value, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation_id', 'trust_domain',
     'scope_sha256', 'artifact_id', 'payload_sha256', 'payload_bytes', 'media_type', 'kind', 'build_capsule_sha256',
@@ -65,7 +113,7 @@ function metadata(value, selected) {
   if (value.type !== 'artifact_metadata' || value.schema_version !== 1 ||
       Object.keys(selected.scope).some(k => value[k] !== selected.scope[k]) ||
       value.artifact_id !== selected.output.artifact_id_sha256 || value.payload_sha256 !== selected.output.payload_sha256 ||
-      value.payload_bytes !== selected.output.payload_bytes || value.kind !== 'ci_artifact' ||
+      value.payload_bytes !== selected.output.payload_bytes || value.kind !== (selected.log_observation ? 'build_log' : 'ci_artifact') ||
       value.payload_verified !== true || value.provenance_authenticated !== false ||
       value.canonical_repository_published !== false || value.retention_enforced !== false || value.read_only !== true ||
       typeof value.media_type !== 'string' || value.media_type.length > 256) refuse('artifact_metadata_mismatch');
@@ -163,7 +211,8 @@ export async function downloadArtifact(input, receipt, token, destination, optio
     payload_sha256: selected.output.payload_sha256, payload_bytes: bytes.length, output: destination,
     payload_sha256_verified: true, scope_matches_expected: true, artifact_identity_independently_verified: false,
     provenance_authenticated: false, canonical_repository_published: false, job_success_asserted: false,
-    execution_performed: false, executable_mode_applied: false, retention_enforced: false };
+    execution_performed: false, executable_mode_applied: false, retention_enforced: false,
+    ...(selected.log_observation ? { log_observation: selected.log_observation } : {}) };
 }
 export async function artifactDownloadCommand(args, { signal } = {}) {
   const flags = {};
@@ -176,7 +225,7 @@ export async function artifactDownloadCommand(args, { signal } = {}) {
       (flags['--timeout-ms'] && !/^[1-9][0-9]{0,5}$/.test(flags['--timeout-ms']))) refuse('artifact_arguments_invalid');
   async function privateBytes(path, max) { absolute(path); await directory(dirname(path)); return readPrivate(path, max); }
   const input = parseJson(await privateBytes(flags['--input'], 16384));
-  const receipt = parseJson(await privateBytes(flags['--receipt'], 1024 * 1024), 1024 * 1024);
+  const receipt = parseJson(await privateBytes(flags['--receipt'], RECEIPT_MAX), RECEIPT_MAX);
   const bytes = await privateBytes(flags['--token-file'], 65);
   let token;
   try {

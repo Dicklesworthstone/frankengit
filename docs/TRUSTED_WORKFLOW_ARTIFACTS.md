@@ -359,6 +359,25 @@ or verify its artifact/manifest identity independently. Downloading never
 publishes a canonical check, authorizes cache reuse or enforces retention.
 Diagnostic outputs from a failed job can be downloaded under the same rule.
 
+To download a retained step stream, use the same `artifact-download` command
+with its `job-NNN-logs.json` receipt. In the private input, replace `path_hex`
+with `"step_index": 0` and `"stream": "stdout"` (or `"stderr"`). The exact
+job, nonnegative integer step index and stream select one log; mixed file/log
+selectors or receipt kinds refuse. The client requires consistent stdout/stderr
+pairs in the receipt and matching `build_log` metadata before downloading.
+It preserves arbitrary binary and empty stream bytes with the same scope,
+length/digest, TLS, cancellation and create-only output rules as file downloads.
+The reader bounds the compact decoded manifest to 1 MiB and reserves the fixed
+native receipt envelope separately; neither bound authenticates its identity.
+
+The result's `log_observation` copies the receipt's job/step outcome, exit code,
+script commitment and `output_complete` flag. These are retained observations,
+not authenticated execution. In particular, `output_complete: false` stays
+false even after the complete **retained payload** is downloaded and verified;
+the original process stream may have been truncated. A successful download of
+failed, cancelled or output-limited logs never changes the job or publishes a
+green check. Files without a log selector keep their original result fields.
+
 Exit 0 means the verified file was published and its result written; exit 2 is a
 refused input/response and exit 3 is cancellation/deadline or a local/output
 failure whose destination may already be visible. `bash

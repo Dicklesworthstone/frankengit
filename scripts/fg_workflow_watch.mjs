@@ -10,9 +10,12 @@ const USAGE = `usage: node scripts/fg_workflow_watch.mjs <once|serve|status|reco
 node scripts/fg_workflow_watch.mjs artifact-download --input PRIVATE_JSON
   --receipt PRIVATE_JOB_ARTIFACTS_JSON --token-file PRIVATE_TOKEN --output NEW_PRIVATE_FILE
   [--timeout-ms 1..300000] [--ca-file PRIVATE_PEM]
-Downloads one explicitly selected retained output through the native artifact API.
+Downloads one explicitly selected retained file or step stream through the native artifact API.
 Input: endpoint, scope {tenant_id, repository_id, repository_incarnation_id,
 trust_domain:"trusted-workflow-local-owner"}, job_id_hex, path_hex.
+For logs, replace path_hex with step_index (nonnegative JSON integer) and
+stream ("stdout" or "stderr"); select the matching job-NNN-logs.json receipt.
+Retained log completeness/outcomes remain receipt observations, never check authority.
 Whole bytes, length, SHA256 and scope must match before create-only 0600 publication.
 No local storage root or native executable is required for this read-only command.
 Artifacts and receipt assertions do not prove job success or authorize execution.
