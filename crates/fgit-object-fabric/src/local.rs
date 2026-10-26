@@ -283,6 +283,20 @@ impl LocalFilesystemFabric {
     }
 
     fn create_directory(&self, directory: &Path) -> Result<(), StoreRefusal> {
+        self.create_directory_syncing(directory, true)
+    }
+
+    /// [`Self::create_directory`] without the sync of a directory that already
+    /// existed, for a batch that syncs its object directories after linking.
+    pub(crate) fn create_directory_for_batch(&self, directory: &Path) -> Result<(), StoreRefusal> {
+        self.create_directory_syncing(directory, false)
+    }
+
+    fn create_directory_syncing(
+        &self,
+        directory: &Path,
+        sync_existing: bool,
+    ) -> Result<(), StoreRefusal> {
         let directories = directory_chain(&self.root, directory)?;
         let root_was_directory = self.root.is_dir();
         fs::create_dir_all(&self.root)
@@ -308,8 +322,10 @@ impl LocalFilesystemFabric {
                 sync_directory(created_or_parent)?;
             }
             Ok(())
-        } else {
+        } else if sync_existing {
             sync_directory(directory)
+        } else {
+            Ok(())
         }
     }
 
@@ -1226,6 +1242,34 @@ mod tests {
             .expect("new nested object directory must be made durable through the store root");
         assert!(namespace.is_dir());
         assert!(leaf.is_dir());
+    }
+
+    /// The batch form creates exactly what the general form creates. It only
+    /// skips syncing a directory that already existed (frankengit-pc9g).
+    #[test]
+    fn batch_directory_creation_creates_missing_chains_and_accepts_existing_directories() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let leaf = fabric.objects_dir().join("namespace").join("algorithm");
+        fabric
+            .create_directory_for_batch(&leaf)
+            .expect("a missing nested object directory is created");
+        assert!(leaf.is_dir());
+        fabric
+            .create_directory_for_batch(&leaf)
+            .expect("an existing object directory is accepted");
+        fabric
+            .create_directory_for_batch(&fabric.staging_dir())
+            .expect("the staging directory created at open is accepted");
+        let file = leaf.join("not-a-directory");
+        fs::write(&file, b"x").expect("fixture file writes");
+        assert!(matches!(
+            fabric.create_directory_for_batch(&file),
+            Err(StoreRefusal::StorageIo {
+                operation: StorageOperation::CreateDirectory,
+                kind: std::io::ErrorKind::AlreadyExists,
+            })
+        ));
     }
 
     #[test]
