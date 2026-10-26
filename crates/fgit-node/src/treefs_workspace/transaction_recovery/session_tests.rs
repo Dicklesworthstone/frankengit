@@ -69,6 +69,15 @@ fn generation(node: &OneNode) -> u64 {
         .generation()
         .get()
 }
+fn decisions(node: &OneNode) -> u64 {
+    node.runtime
+        .block_on(node.authenticate_authority_head())
+        .unwrap()
+        .body()
+        .unwrap()
+        .latest_decision_sequence
+        .map_or(0, |sequence| sequence.get())
+}
 fn query(node: &OneNode, key: &[u8]) -> SessionRecovery {
     node.runtime
         .block_on(node.recover_receive_session_in(&node.request_context(), &session(key)))
@@ -223,6 +232,7 @@ fn complete_mixed_session_recovers_original_order_after_reopening_without_servin
         let (mut node, _) = OneNode::init(configuration.clone()).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         let before = generation(&node);
+        let decided = decisions(&node);
         let original = push(&node, b"original-session").unwrap();
         assert!(matches!(
             original.commands[0].terminal.outcome,
@@ -234,9 +244,12 @@ fn complete_mixed_session_recovers_original_order_after_reopening_without_servin
                 DecisionOutcome::Committed { .. }
             ))
         );
+        // The session's three decisions share one successor head
+        // (frankengit-x0v8).
+        assert_eq!(generation(&node), before + 1);
         assert_eq!(
-            generation(&node),
-            before + 3,
+            decisions(&node),
+            decided + 3,
             "descriptor staging publishes no extra decision"
         );
         node.shutdown().unwrap();
@@ -264,7 +277,8 @@ fn complete_mixed_session_recovers_original_order_after_reopening_without_servin
             );
         }
         assert_eq!(query(&node, b"original-session"), recovered);
-        assert_eq!(generation(&node), before + 3);
+        assert_eq!(generation(&node), before + 1);
+        assert_eq!(decisions(&node), decided + 3);
         let foreign = LoopbackReceiveSession::authenticated(
             PrincipalId::from_bytes([0xb4; 16]),
             IdempotencyKey::new(b"original-session".to_vec()).unwrap(),

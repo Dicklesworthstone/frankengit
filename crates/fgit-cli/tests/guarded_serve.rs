@@ -86,9 +86,8 @@ fn fg_serve_rejects_a_stale_ref_but_commits_the_later_ref_and_reopens_it() {
             .runtime()
             .block_on(node.authenticate_authority_head())
             .unwrap()
-            .receipt()
-            .generation()
-            .get();
+            .body()
+            .unwrap();
         node.shutdown().unwrap();
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
@@ -214,7 +213,17 @@ fn fg_serve_rejects_a_stale_ref_but_commits_the_later_ref_and_reopens_it() {
             .runtime()
             .block_on(node.materialize_admission())
             .unwrap();
-        assert_eq!(selected.basis().generation().get(), before + 2);
+        // A non-atomic session's independent decisions, the refused stale ref
+        // and the accepted one, share one successor head (frankengit-x0v8).
+        let after = selected.basis().body();
+        assert_eq!(after.generation.get(), before.generation.get() + 1);
+        assert_eq!(
+            after.latest_decision_sequence.unwrap().get(),
+            before
+                .latest_decision_sequence
+                .map_or(0, |sequence| sequence.get())
+                + 2
+        );
         assert_eq!(selected.snapshot().refs.len(), 1);
         assert_eq!(
             selected.snapshot().refs[&RefName::try_new(b"refs/tags/accepted").unwrap()],
