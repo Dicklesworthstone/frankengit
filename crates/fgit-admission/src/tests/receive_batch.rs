@@ -82,6 +82,7 @@ struct AsyncMemory {
     lose_response: AtomicBool,
     race: Mutex<Option<Race>>,
     put_calls: AtomicUsize,
+    immutable_batches: Mutex<Vec<(usize, bool, usize)>>,
     interrupt_put_at: AtomicUsize,
     lose_put_response_at: AtomicUsize,
     immutable_created: AtomicUsize,
@@ -120,6 +121,32 @@ impl AsyncAuthorityStore for AsyncMemory {
                 result
             },
         )
+    }
+    async fn put_if_absent_batch(
+        &self,
+        cx: &(),
+        entries: &[(ImmutableKey, Vec<u8>)],
+    ) -> Result<Vec<PutOutcome>, fgit_authority::ImmutableBatchFailure> {
+        fgit_authority::validate_immutable_batch(entries, self.limits())?;
+        let seals = entries
+            .iter()
+            .all(|(key, _)| key.as_bytes().starts_with(fgit_authority::SEAL_KEY_PREFIX));
+        self.immutable_batches.lock().unwrap().push((
+            entries.len(),
+            seals,
+            self.publications.load(Ordering::SeqCst),
+        ));
+        let mut outcomes = Vec::with_capacity(entries.len());
+        for (key, body) in entries {
+            let outcome = self.put_if_absent(cx, key, body).await.map_err(|source| {
+                fgit_authority::ImmutableBatchFailure::Interrupted {
+                    completed: outcomes.len(),
+                    source,
+                }
+            })?;
+            outcomes.push(outcome);
+        }
+        Ok(outcomes)
     }
     fn read_immutable(
         &self,
@@ -397,6 +424,7 @@ fn setup(initial: &[(&[u8], u8)]) -> (AsyncMemory, SharedCanonical, Projection) 
             lose_response: AtomicBool::new(false),
             race: Mutex::new(None),
             put_calls: AtomicUsize::new(0),
+            immutable_batches: Mutex::new(Vec::new()),
             interrupt_put_at: AtomicUsize::new(0),
             lose_put_response_at: AtomicUsize::new(0),
             immutable_created: AtomicUsize::new(0),

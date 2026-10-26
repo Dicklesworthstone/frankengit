@@ -3,7 +3,8 @@
 //! publisher retains the full authority error after a possible head CAS.
 
 use fgit_authority::{
-    AmbiguityReason, AuthorityFailure, AuthorityRefusal, OutcomeFailure, SealFailure,
+    AmbiguityReason, AuthorityFailure, AuthorityRefusal, ImmutableBatchFailure, OutcomeFailure,
+    SealFailure,
 };
 use fgit_types::RefusalCode;
 
@@ -45,6 +46,10 @@ impl AdmissionError {
 fn seal_code(failure: &SealFailure, fallback: RefusalCode) -> RefusalCode {
     match failure {
         SealFailure::Store(failure) => authority_code(*failure, fallback),
+        SealFailure::Batch(failure) => match failure.as_ref() {
+            ImmutableBatchFailure::Bounds(_) => RefusalCode::ResourceBudgetExceeded,
+            ImmutableBatchFailure::Interrupted { source, .. } => authority_code(*source, fallback),
+        },
         _ => fallback,
     }
 }

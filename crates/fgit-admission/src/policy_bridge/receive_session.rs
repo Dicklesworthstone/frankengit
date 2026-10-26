@@ -20,7 +20,7 @@ use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
     AsyncAuthorityStore, IdempotencyKey, TerminalOutcome, bind_idempotency_key_async,
-    read_authority_head_body_async, read_decision_batch_body_async,
+    bind_idempotency_keys_async, read_authority_head_body_async, read_decision_batch_body_async,
 };
 use fgit_chronicle::{PublicationBasis, verify_pair};
 use fgit_codec::{CryptoBodyIdentity, RepositoryDecisionBatchBody};
@@ -303,9 +303,32 @@ where
         // logical transaction or publication authority.
         bind_idempotency_key_async(store, cx, &prepared.whole, identity).await?;
     }
-    for (lowered, identity) in plan.lowered.iter().zip(&plan.tx_ids) {
-        checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
-        bind_idempotency_key_async(store, cx, &seal_attempt(context, lowered), *identity).await?;
+    for (lowered, identities) in plan
+        .lowered
+        .chunks(fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS)
+        .zip(
+            plan.tx_ids
+                .chunks(fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS),
+        )
+    {
+        let mut attempts = Vec::with_capacity(lowered.len());
+        for request in lowered {
+            checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+            attempts.push(seal_attempt(context, request));
+        }
+        // The original whole-session key above settles separately before any
+        // child write. The bounded group here only changes physical storage:
+        // each child still has its exact key and independent identity. The
+        // backend checks the same request context inside its transaction.
+        let bindings = bind_idempotency_keys_async(store, cx, &attempts).await?;
+        for (binding, identity) in bindings.iter().zip(identities) {
+            checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+            if binding.tx_id() != *identity {
+                return Err(AdmissionError::MaterializationMismatch(
+                    "receive child binding identity",
+                ));
+            }
+        }
     }
     if let Some(prepared) = prepared {
         checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;

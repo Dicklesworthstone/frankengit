@@ -12,7 +12,7 @@ use fgit_authority::{
     CumulativeOutcomes, HeadRead, HeadReadReceipt, OutcomeLookup, PutOutcome, TerminalOutcome,
     indexed_outcome, indexed_outcome_async, read_authority_head_body,
     read_authority_head_body_async, read_decision_batch_body, read_decision_batch_body_async,
-    reconcile_outcome, seal_request,
+    reconcile_outcome, seal_requests,
 };
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
@@ -565,13 +565,21 @@ where
     // only while the exact store token matches, or after authority verifies our
     // own winning successor. A foreign head always requires a fresh collection.
     let mut cumulative_cache: Option<CumulativeOutcomes> = None;
-    let seals = plan
+    let mut seals = Vec::with_capacity(plan.lowered.len());
+    for lowered in plan
         .lowered
-        .iter()
-        .map(|lowered| {
-            seal_request(store, &seal_attempt(context, lowered)).map(|seal| seal.seal_id())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .chunks(fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS)
+    {
+        let attempts = lowered
+            .iter()
+            .map(|lowered| seal_attempt(context, lowered))
+            .collect::<Vec<_>>();
+        seals.extend(
+            seal_requests(store, &attempts)?
+                .iter()
+                .map(fgit_authority::SealAdmission::seal_id),
+        );
+    }
 
     for start in (0..plan.lowered.len()).step_by(chunk_size) {
         let end = (start + chunk_size).min(plan.lowered.len());
@@ -753,11 +761,19 @@ where
     let mut validation = input.validation_basis;
     let mut cumulative_cache: Option<CumulativeOutcomes> = None;
     let mut seals = Vec::with_capacity(plan.lowered.len());
-    for lowered in &plan.lowered {
-        seals.push(
-            fgit_authority::seal_request_async(store, cx, &seal_attempt(context, lowered))
+    for lowered in plan
+        .lowered
+        .chunks(fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS)
+    {
+        let attempts = lowered
+            .iter()
+            .map(|lowered| seal_attempt(context, lowered))
+            .collect::<Vec<_>>();
+        seals.extend(
+            fgit_authority::seal_requests_async(store, cx, &attempts)
                 .await?
-                .seal_id(),
+                .iter()
+                .map(fgit_authority::SealAdmission::seal_id),
         );
     }
 

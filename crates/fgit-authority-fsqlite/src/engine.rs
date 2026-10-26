@@ -74,6 +74,9 @@ use crate::token::{TokenMintError, mint_token, next_issuance_after};
 mod operation;
 use operation::{OperationGate, OperationLease};
 
+#[path = "immutable_batch.rs"]
+mod immutable_batch;
+
 #[path = "portable_store.rs"]
 pub mod portable_store;
 
@@ -1444,6 +1447,26 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
         with_transient_retry!(self.instance, cx, Self::put_if_absent(self, cx, key, body))
+    }
+
+    async fn put_if_absent_batch(
+        &self,
+        cx: &Self::Context,
+        entries: &[(ImmutableKey, Vec<u8>)],
+    ) -> Result<Vec<PutOutcome>, fgit_authority::ImmutableBatchFailure> {
+        fgit_authority::validate_immutable_batch(entries, self.limits)?;
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Retry one complete transaction from a fresh snapshot. An interrupted
+        // native batch exposes no individually settled prefix: its COMMIT may
+        // have executed, so the caller must reconcile every requested key.
+        with_transient_retry!(self.instance, cx, self.put_batch_once(cx, entries)).map_err(
+            |source| fgit_authority::ImmutableBatchFailure::Interrupted {
+                completed: 0,
+                source,
+            },
+        )
     }
 
     async fn read_immutable(

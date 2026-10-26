@@ -115,6 +115,34 @@ The full response is built and bounded before the first success byte; an
 over-limit response is refused, not truncated into an apparently complete
 session. All original and child bindings must verify for either version.
 
+## Bounded durable binding and sealing
+
+Large sessions group immutable child-key and seal writes into at most 64 items
+and 1 MiB of combined key/body bytes per storage call. The backend's independent
+body and slot limits still apply. The embedded FrankenSQLite backend performs
+each group in one owned SQL transaction, retaining its cancellation,
+rollback/recovery and immutable-cache checks. Other authority backends retain a
+portable ordered create-if-absent fallback. This reduces physical transactions
+for new session metadata without changing any key, canonical body, transaction
+identity or report position.
+
+The original whole-session key settles separately before the first child group.
+Every child binding settles before the descriptor is staged, and the descriptor
+precedes the first child seal or decision. A changed original key therefore
+cannot reserve a new set of child keys. Every seal group rechecks the same
+bindings before writing any seal. Conflicts remain exact per-key results;
+successful independent bindings can exist even if another key conflicts.
+
+No group operation publishes repository state. Only the existing
+exact-predecessor head CAS does that. A failed group returns no successful seal
+vector: portable backends can have a completed prefix, and a native commit with
+a lost response remains ambiguous. Repeating the same session key and request
+recovers every existing binding and seal through identical retry. A missing
+descriptor after interrupted binding remains `session_not_observed`, never
+proof that no immutable key was reserved. CPU checkpoints surround finite groups;
+the native backend also checks the caller's context during each item and
+transaction finalization.
+
 ## Compatibility and non-claims
 
 Atomic pushes still use `POST /api/v1/outcomes` with the original key. Existing

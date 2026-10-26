@@ -86,6 +86,26 @@ fn complete_4097_and_16384_sessions_keep_independent_decisions_and_recover_exact
         assert!(current_refs(&store, &staging).is_empty());
         let batches = count.div_ceil(crate::microbatch::MAX_BATCH_DECISIONS);
         assert_eq!(store.publications.load(Ordering::SeqCst), batches);
+        let immutable_chunks = count.div_ceil(fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS);
+        let metadata_batches = store.immutable_batches.lock().unwrap().clone();
+        assert_eq!(metadata_batches.len(), 3 * immutable_chunks);
+        assert_eq!(
+            metadata_batches
+                .iter()
+                .map(|(count, _, _)| count)
+                .sum::<usize>(),
+            3 * count
+        );
+        assert_eq!(
+            metadata_batches
+                .iter()
+                .filter(|(_, seals, _)| *seals)
+                .count(),
+            immutable_chunks
+        );
+        assert!(metadata_batches.iter().all(|(items, _, published)| {
+            *items > 0 && *items <= fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS && *published == 0
+        }));
         // This reference projection stages its canonical evidence separately in
         // SharedCanonical. Authority slots here are original+descriptor, one
         // child binding/seal/outcome per command, and batch+head per CAS. The
@@ -166,6 +186,42 @@ fn complete_4097_and_16384_sessions_keep_independent_decisions_and_recover_exact
                 "retry adds no decision"
             );
         }
+    }
+}
+
+#[test]
+fn child_binding_and_seal_groups_keep_original_order_before_publication() {
+    let (store, _, projection) = configured(AuthorityLimits::default().body_bytes);
+    let receive = large_receive(&store, 129);
+    let result = run(&store, &projection, &receive).unwrap();
+    assert_eq!(result.commands.len(), 129);
+    // The first three groups bind every child before descriptor staging.
+    // Sealing then repeats immutable bindings and writes seals in bounded
+    // groups, all before the first canonical decision. This override proves
+    // production admission dispatches the grouped backend API; a loop over
+    // single puts would leave this log empty and fail the test.
+    assert_eq!(
+        *store.immutable_batches.lock().unwrap(),
+        vec![
+            (64, false, 0),
+            (64, false, 0),
+            (1, false, 0),
+            (64, false, 0),
+            (64, true, 0),
+            (64, false, 0),
+            (64, true, 0),
+            (1, false, 0),
+            (1, true, 0),
+        ]
+    );
+    let SessionRecovery::Recovered(recovered) =
+        ready(recovery::recover(&store, &(), &context(), &|| Ok(()))).unwrap()
+    else {
+        panic!("complete descriptor precedes each child seal")
+    };
+    assert!(recovered.all_terminal());
+    for (expected, observed) in result.commands.iter().zip(recovered.commands()) {
+        assert_eq!(observed.recovery().terminal(), Some(expected.terminal));
     }
 }
 
@@ -376,7 +432,13 @@ fn a_cancelled_child_binding_loop_keeps_retryable_keys_and_no_published_prefix()
         AdmissionError::AsyncProjectionUnavailable(RefusalCode::ResourceBudgetExceeded)
     ));
     assert!(error.completed_commands().is_empty());
-    assert_eq!(store.immutable_created.load(Ordering::SeqCst), 2);
+    // The CPU checkpoint surrounds a finite group; a native store also checks
+    // its caller context during every item and transaction finalization. This
+    // callback trips after the first group, before a descriptor or any seal.
+    assert_eq!(
+        store.immutable_created.load(Ordering::SeqCst),
+        1 + fgit_authority::MAX_IMMUTABLE_BATCH_ITEMS
+    );
     assert_eq!(store.publications.load(Ordering::SeqCst), 0);
     assert_eq!(
         ready(recovery::recover(&store, &(), &context(), &|| Ok(()))).unwrap(),

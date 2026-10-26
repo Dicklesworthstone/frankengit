@@ -1,10 +1,22 @@
 use super::*;
 
-fn wrapped(failure: AuthorityFailure) -> [AdmissionError; 3] {
+fn wrapped(failure: AuthorityFailure) -> [AdmissionError; 5] {
     [
         AdmissionError::Authority(failure),
         AdmissionError::Seal(Box::new(SealFailure::Store(failure))),
         AdmissionError::Outcome(Box::new(OutcomeFailure::from(failure))),
+        AdmissionError::Seal(Box::new(SealFailure::Batch(Box::new(
+            ImmutableBatchFailure::Interrupted {
+                completed: 3,
+                source: failure,
+            },
+        )))),
+        AdmissionError::Outcome(Box::new(OutcomeFailure::Seal(Box::new(
+            SealFailure::Batch(Box::new(ImmutableBatchFailure::Interrupted {
+                completed: 0,
+                source: failure,
+            })),
+        )))),
     ]
 }
 
