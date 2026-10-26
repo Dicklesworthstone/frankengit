@@ -24,6 +24,12 @@ pub enum AuthRefusal {
     Unauthenticated,
     /// Requested service not permitted by credential scope.
     ScopeNotGranted { requested: DeployKeyScope },
+    /// The current authorization source could not be checked completely.
+    ///
+    /// A missing, malformed, interrupted or unavailable source never permits
+    /// reuse of an earlier grant. The diagnostic is fixed so filesystem paths
+    /// and untrusted source contents cannot escape through the SSH response.
+    AuthorizationSourceUnavailable,
 }
 
 impl Display for AuthRefusal {
@@ -40,6 +46,9 @@ impl Display for AuthRefusal {
                     "deploy key does not grant required scope `{requested}`"
                 )
             }
+            Self::AuthorizationSourceUnavailable => {
+                formatter.write_str("SSH command authorization source is unavailable")
+            }
         }
     }
 }
@@ -55,6 +64,68 @@ impl From<CryptoError> for AuthRefusal {
 impl From<DeployKeyRefusal> for AuthRefusal {
     fn from(err: DeployKeyRefusal) -> Self {
         Self::DeployKey(err)
+    }
+}
+
+/// Resolves a verified peer's grant at the Git command boundary.
+///
+/// [`crate::session::SshServerSession`] calls this only after verifying the
+/// peer's signature and parsing the repository and service. No principal,
+/// active Git command or successful exec response is installed until it returns
+/// `Ok`. The verified key, repository and service must all participate in the
+/// authorization decision; the SSH username never selects a principal.
+///
+/// The session owns no authorization I/O, executor or cache. This synchronous
+/// capability is supplied by its transport owner. A source performing bounded
+/// blocking I/O must run on the owner's blocking worker, with that owner's
+/// cancellation/deadline checks; it must not create a runtime or bridge async
+/// work with `block_on`. Failed checks must never fall back to a previous grant.
+///
+/// One successful call authorizes the session's single Git command. Its
+/// principal remains fixed through that command and rekey. Later sessions must
+/// consult their source again, so a live source can observe revocation,
+/// rotation and scope changes without altering an already admitted command.
+pub trait SshCommandAuthorizer: Send + Sync {
+    fn authorize_command(
+        &self,
+        authenticated_key: &[u8; 32],
+        repository_id: RepositoryId,
+        service: SshGitService,
+    ) -> Result<PrincipalId, AuthRefusal>;
+}
+
+/// Explicit fixed deploy-key grants for the lifetime of this source.
+///
+/// The caller declares this complete table to be the current authorization
+/// configuration. Replacing or revoking one of these static grants requires
+/// replacing the source. Continuously reloadable credentials instead provide
+/// their own [`SshCommandAuthorizer`] at the transport boundary.
+#[derive(Clone, Debug)]
+pub struct StaticDeployKeyAuthorizer {
+    bindings: Vec<DeployKeyBinding>,
+}
+
+impl StaticDeployKeyAuthorizer {
+    #[must_use]
+    pub const fn new(bindings: Vec<DeployKeyBinding>) -> Self {
+        Self { bindings }
+    }
+}
+
+impl SshCommandAuthorizer for StaticDeployKeyAuthorizer {
+    fn authorize_command(
+        &self,
+        authenticated_key: &[u8; 32],
+        repository_id: RepositoryId,
+        service: SshGitService,
+    ) -> Result<PrincipalId, AuthRefusal> {
+        authorize_deploy_key(
+            &self.bindings,
+            authenticated_key,
+            repository_id,
+            service,
+            RevocationEvidence::Live,
+        )
     }
 }
 

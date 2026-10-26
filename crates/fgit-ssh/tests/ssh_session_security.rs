@@ -7,6 +7,9 @@
 
 use std::sync::Arc;
 
+#[path = "ssh_session_security/authorization.rs"]
+mod authorization;
+
 use asupersync::util::{DetEntropy, EntropySource, OsEntropy};
 use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::{DeployKeyBinding, DeployKeyScope};
@@ -106,9 +109,22 @@ fn key_exchange(
     strict: bool,
     client_private: [u8; 32],
 ) -> (SshServerSession, Client, ed25519_dalek::SigningKey) {
+    key_exchange_with_authorizer(entropy, strict, client_private, None)
+}
+
+fn key_exchange_with_authorizer(
+    entropy: Arc<dyn EntropySource>,
+    strict: bool,
+    client_private: [u8; 32],
+    authorizer: Option<Arc<dyn fgit_ssh::SshCommandAuthorizer>>,
+) -> (SshServerSession, Client, ed25519_dalek::SigningKey) {
     let host = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
     let client_key = ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]);
-    let mut session = SshServerSession::new(host.clone(), vec![binding(&client_key)], entropy);
+    let mut session = if let Some(source) = authorizer {
+        SshServerSession::with_authorizer(host.clone(), source, entropy)
+    } else {
+        SshServerSession::new(host.clone(), vec![binding(&client_key)], entropy)
+    };
     session.start();
     let _banner = session.take_outgoing_bytes();
     session.handle_incoming_bytes(CLIENT_IDENT).expect("ident");

@@ -22,10 +22,11 @@ use asupersync::util::EntropySource;
 use ed25519_dalek::SigningKey;
 use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::DeployKeyBinding;
-use fgit_identity::revocation::RevocationEvidence;
 use fgit_types::{PrincipalId, RepositoryId};
 
-use crate::auth::{AuthRefusal, authorize_deploy_key, verify_client_signature};
+use crate::auth::{
+    AuthRefusal, SshCommandAuthorizer, StaticDeployKeyAuthorizer, verify_client_signature,
+};
 use crate::command::{CommandParseRefusal, SshGitCommand};
 use crate::crypto::{
     CIPHER_CHACHA20_POLY1305, CryptoError, Curve25519Kex, KEX_CURVE25519_SHA256,
@@ -168,7 +169,7 @@ pub struct SshServerSession {
     /// Discard exactly one incorrectly guessed first KEX packet (RFC 4253).
     discard_next_kex_packet: bool,
     server_signing_key: SigningKey,
-    deploy_keys: Vec<DeployKeyBinding>,
+    authorizer: Arc<dyn SshCommandAuthorizer>,
     server_ident: String,
     client_ident: Option<String>,
     server_kexinit_payload: Option<Vec<u8>>,
@@ -209,7 +210,10 @@ struct ChannelTeardown {
 }
 
 impl SshServerSession {
-    /// Creates a new SSH server session with given host signing key and deploy key bindings.
+    /// Creates a session with explicit fixed deploy-key grants.
+    ///
+    /// These bindings remain the authorization source for this session. Use
+    /// [`Self::with_authorizer`] for a live source checked when exec arrives.
     ///
     /// `entropy` supplies every per-session secret: the ephemeral Curve25519
     /// key, the KEXINIT cookie and packet padding. Production passes the
@@ -220,6 +224,29 @@ impl SshServerSession {
         deploy_keys: Vec<DeployKeyBinding>,
         entropy: Arc<dyn EntropySource>,
     ) -> Self {
+        Self::with_authorizer(
+            server_signing_key,
+            Arc::new(StaticDeployKeyAuthorizer::new(deploy_keys)),
+            entropy,
+        )
+    }
+
+    /// Creates a session whose verified key and parsed Git command are checked
+    /// against the supplied source at exec, before any active command exists.
+    ///
+    /// The source is not consulted during key exchange, public-key probes or
+    /// signature verification. Newly granted keys can therefore authenticate
+    /// without having appeared in a startup membership snapshot. Successful
+    /// command authorization fixes the principal until the session finishes.
+    ///
+    /// The owner drives this synchronous state machine in an execution context
+    /// appropriate for the source's effects; see [`SshCommandAuthorizer`].
+    #[must_use]
+    pub fn with_authorizer(
+        server_signing_key: SigningKey,
+        authorizer: Arc<dyn SshCommandAuthorizer>,
+        entropy: Arc<dyn EntropySource>,
+    ) -> Self {
         Self {
             phase: SessionPhase::Identification,
             rekey: RekeyState::default(),
@@ -228,7 +255,7 @@ impl SshServerSession {
             strict_kex: false,
             discard_next_kex_packet: false,
             server_signing_key,
-            deploy_keys,
+            authorizer,
             server_ident: SERVER_IDENTIFICATION.to_owned(),
             client_ident: None,
             server_kexinit_payload: None,
@@ -284,7 +311,7 @@ impl SshServerSession {
         bytes
     }
 
-    /// The authenticated principal, if publickey authentication has succeeded.
+    /// The principal selected by successful Git command authorization.
     #[must_use]
     pub const fn authenticated_principal(&self) -> Option<PrincipalId> {
         self.authenticated_principal
@@ -823,7 +850,9 @@ impl SshServerSession {
                         }
                     };
 
-                    // Authorize command against authenticated public key and deploy keys
+                    // Key possession is already proven. Resolve current grants
+                    // only now, after parsing the exact requested command and
+                    // before exposing an active command to the transport owner.
                     let pub_key = match self.authenticated_key {
                         Some(ref k) => k,
                         None => {
@@ -857,12 +886,10 @@ impl SshServerSession {
                             RepositoryId::from_bytes(repo_bytes)
                         };
 
-                    match authorize_deploy_key(
-                        &self.deploy_keys,
+                    match self.authorizer.authorize_command(
                         pub_key,
                         repo_id,
                         parsed_command.service(),
-                        RevocationEvidence::Live,
                     ) {
                         Ok(principal) => {
                             self.authenticated_principal = Some(principal);

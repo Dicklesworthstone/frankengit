@@ -32,12 +32,11 @@
 //! # What this module is not
 //!
 //! It holds the registration RECORD and the authorization PREDICATE. It holds
-//! no *secret* key material and performs no cryptography: nothing here signs or
-//! verifies, and the purpose-marker keys in `fgit-crypto` remain the only key
-//! authority (`KeyPurposeMarker`). A public key is public by construction, so
-//! recording the peer's half of the pair is not custody of anything. That split
-//! is deliberate — a record that could also mint or verify key material would
-//! be a second key authority.
+//! no *secret* key material and does not sign or verify signatures. The bounded
+//! table parser checks public-key encodings using the admitted Ed25519 primitive;
+//! the purpose-marker keys in `fgit-crypto` remain the key authority
+//! (`KeyPurposeMarker`). Recording the peer's public key does not provide
+//! custody of, or the ability to mint, credentials.
 
 use core::fmt::{self, Display, Formatter};
 
@@ -50,6 +49,12 @@ use fgit_crypto::{
 use fgit_types::{DomainTag, PrincipalId, RepositoryId, SchemaFamily};
 
 use crate::revocation::RevocationEvidence;
+
+mod table;
+pub use table::{
+    DeployKeyTableRefusal, MAX_DEPLOY_KEY_TABLE_BYTES, MAX_DEPLOY_KEY_TABLE_ROWS,
+    parse_deploy_key_table,
+};
 
 /// Wire tag for [`DeployKeyScope::Read`].
 ///
