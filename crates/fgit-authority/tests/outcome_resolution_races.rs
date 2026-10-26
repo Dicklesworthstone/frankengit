@@ -2,6 +2,9 @@
 //! authoritative head. These interleavings perform real atomic publications in
 //! the reference store; they do not manufacture terminal results for the race.
 
+#[path = "outcome_resolution_races/plural.rs"]
+mod plural;
+
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore,
     AuthorityVersionToken, CasOutcome, DuplicateAbsenceWitness, HeadInit, HeadKey, HeadRead,

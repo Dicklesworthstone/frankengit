@@ -9,7 +9,7 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthorityStore, AuthorityVersionToken, CumulativeOutcomes, HeadKey,
     HeadReadReceipt, OutcomeFailure, OutcomeLookup, PublicationOutcome, PublishedBatch,
     TerminalOutcome, publish_decisions, publish_decisions_async, publish_decisions_with_cumulative,
-    publish_decisions_with_cumulative_async, resolve_outcome, resolve_outcome_async,
+    publish_decisions_with_cumulative_async, resolve_outcomes, resolve_outcomes_async,
 };
 use fgit_types::{RepositoryDecisionBatchId, TenantId, TxId};
 
@@ -193,18 +193,12 @@ where
 
 /// Ask the authority whether any transaction in the candidate is decided.
 ///
-/// This resolves through `resolve_outcome`, which replays the authenticated
-/// decision stream **and** consults the accelerator, rather than through the
-/// accelerator alone.
-///
-/// The distinction is not academic, and an earlier version of this function
-/// got it wrong. The accelerator is written *after* the head moves, so a crash
-/// in that window leaves a transaction genuinely decided with no accelerator
-/// entry. Asking only the accelerator reads that as undecided and hands back
-/// [`LostCandidate::Replannable`] — telling the caller to replan a transaction
-/// that already committed, which is exactly how one sealed transaction
-/// acquires two terminal decisions. Replay is authoritative precisely because
-/// it would give the same answer on a node whose index was wiped.
+/// All candidate identities are resolved in one shared authoritative replay.
+/// Accelerator hints are observed before that replay selects its current head;
+/// absent hints still require replay and conflicting hints still fail closed.
+/// The walk stops when every requested transaction is found, or reaches genesis
+/// when any remains undecided. A CAS loss therefore does not replay the same
+/// history separately for every decision in the candidate.
 fn classify_loss<S>(
     store: &S,
     head_key: &HeadKey,
@@ -215,15 +209,19 @@ where
     S: AuthorityStore + ?Sized,
 {
     let repository_id = publication.batch().repository_id;
-    let mut decided = Vec::new();
-    for decision in &publication.batch().decisions {
-        if let OutcomeLookup::Decided(outcome) =
-            resolve_outcome(store, head_key, tenant_id, repository_id, decision.tx_id)?
-        {
-            decided.push((decision.tx_id, outcome));
-        }
-    }
-    Ok(classify_decided(decided))
+    let tx_ids: Vec<_> = publication
+        .batch()
+        .decisions
+        .iter()
+        .map(|decision| decision.tx_id)
+        .collect();
+    Ok(classify_decided(resolve_outcomes(
+        store,
+        head_key,
+        tenant_id,
+        repository_id,
+        &tx_ids,
+    )?))
 }
 
 /// The verdict a landed conditional replacement yields.
@@ -247,7 +245,14 @@ fn published_verdict(published: PublishedBatch) -> PublicationVerdict {
 /// [`classify_loss`] and [`classify_loss_async`] so the rule is written once;
 /// the two callers differ only in how they wait for each lookup, never in what
 /// they conclude from the same answers.
-fn classify_decided(decided: Vec<(TxId, TerminalOutcome)>) -> LostCandidate {
+fn classify_decided(outcomes: Vec<(TxId, OutcomeLookup)>) -> LostCandidate {
+    let decided: Vec<_> = outcomes
+        .into_iter()
+        .filter_map(|(tx_id, outcome)| match outcome {
+            OutcomeLookup::Decided(outcome) => Some((tx_id, outcome)),
+            OutcomeLookup::Undecided => None,
+        })
+        .collect();
     if decided.is_empty() {
         LostCandidate::Replannable
     } else {
@@ -339,10 +344,9 @@ where
 /// asynchronously.
 ///
 /// The asynchronous sibling of [`classify_loss`], resolving through
-/// [`resolve_outcome_async`] — which replays the authenticated decision stream
-/// **and** consults the accelerator — rather than through the accelerator
-/// alone. The classification itself is [`classify_decided`], shared with the
-/// synchronous sibling.
+/// [`resolve_outcomes_async`] so all candidate identities share one replay and
+/// retain the synchronous sibling's hint reconciliation and early stopping.
+/// The classification itself is [`classify_decided`], shared by both drivers.
 async fn classify_loss_async<S>(
     store: &S,
     cx: &S::Context,
@@ -354,20 +358,13 @@ where
     S: AsyncAuthorityStore + ?Sized,
 {
     let repository_id = publication.batch().repository_id;
-    let mut decided = Vec::new();
-    for decision in &publication.batch().decisions {
-        if let OutcomeLookup::Decided(outcome) = resolve_outcome_async(
-            store,
-            cx,
-            head_key,
-            tenant_id,
-            repository_id,
-            decision.tx_id,
-        )
-        .await?
-        {
-            decided.push((decision.tx_id, outcome));
-        }
-    }
-    Ok(classify_decided(decided))
+    let tx_ids: Vec<_> = publication
+        .batch()
+        .decisions
+        .iter()
+        .map(|decision| decision.tx_id)
+        .collect();
+    Ok(classify_decided(
+        resolve_outcomes_async(store, cx, head_key, tenant_id, repository_id, &tx_ids).await?,
+    ))
 }

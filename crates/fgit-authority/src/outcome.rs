@@ -67,6 +67,8 @@ use crate::vocabulary::{
 
 mod cumulative;
 pub use cumulative::{publish_decisions_with_cumulative, publish_decisions_with_cumulative_async};
+mod plural;
+pub use plural::{resolve_outcomes, resolve_outcomes_async};
 
 /// Namespace prefix of a per-identity outcome accelerator slot.
 pub const OUTCOME_KEY_PREFIX: &[u8] = b"fg/outcome/v1/";
