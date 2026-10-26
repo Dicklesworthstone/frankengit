@@ -4,8 +4,8 @@ import { open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { recoverGitBundle } from './lib/source-recovery.mjs';
-import { ATTESTATION_LIMITS, readAttestationFile, readAuthenticatedSourceBackup } from './lib/source-attestation.mjs';
+import { recoverGitBundle, recoverGitBundleFile } from './lib/source-recovery.mjs';
+import { ATTESTATION_LIMITS, readAttestationFile, readAuthenticatedSourceBackup, verifySourceAttestation } from './lib/source-attestation.mjs';
 import { SourceAttestationOptions, ATTESTATION_HELP } from './lib/source-attestation-options.mjs';
 import { NATIVE_BUNDLE_LIMITS, normalizeNativeBundleOptions } from './lib/native-bundle-verifier.mjs';
 import { normalizeNativeRecoveryRequest } from './lib/native-source-layout.mjs';
@@ -19,7 +19,10 @@ it never truncates mismatching files or replaces a published HEAD.
 This is Git source recovery, not FrankenGit forge/authority/capsule restore.
 
   --native-fg PATH           Select an absolute-path trusted native Rust fg build
-  --native-timeout-secs N    Whole native recovery, 1..300 seconds (default 60)
+  --native-timeout-secs N    Whole native recovery (default 60; see limits below)
+  --native-file-backed       Stream native verification and pack materialization
+  --native-max-input-mib N   File-backed input ceiling, 1..16384 (default 16)
+  --native-max-expanded-mib N File-backed expanded ceiling, 1..16384 (default 128)
   --resume                   Resume an exact interrupted recovery, never overwrite
   --head REF                 Explicit advertised refs/heads/... for HEAD
   --head-hex HEX             Byte-exact hexadecimal alternative to --head
@@ -31,8 +34,12 @@ This is Git source recovery, not FrankenGit forge/authority/capsule restore.
 ${ATTESTATION_HELP}  --                        Remaining arguments are literal paths
   --help                    Print help without opening files
 
-Input is bounded to 16 MiB; expanded object data to 128 MiB. No Git executable,
-network, hooks or checkout is used. HEAD is installed last. On failure, any
+Input defaults to 16 MiB; expanded object data to 128 MiB. Explicit native
+file-backed mode allows independently selected limits up to 16384 MiB and a
+1..3600-second deadline. Other native runs retain their 16/128 MiB limits and
+1..300-second deadline. Object/ref/report and individual-object limits remain
+bounded. The two byte-limit flags require --native-file-backed. No Git
+executable, network, hooks or checkout is used. HEAD is installed last. On failure, any
 incomplete destination is retained and its publication state is reported.
 Resume requires the same host/PID namespace and refuses live or unknown owners;
 it is not arbitrary repair, a force option or distributed lock takeover.
@@ -45,13 +52,17 @@ existing filesystem owner stages and publishes HEAD last. No JavaScript Git
 decoder is loaded on this path, and native failures never cause fallback.
 Native signed resume requires the same authenticated approval and trust policy;
 those are part of its saved plan identity, not authority learned from a marker.
-A native plan cannot resume a legacy plan. Without --native-fg, the existing
+The file-backed path uses the same filesystem owner and saved identity; exact
+small inputs can resume across native storage profiles. It retains one private
+verified snapshot through materialization and rechecks signed approval before
+HEAD publication. A native plan cannot resume a legacy plan. Without --native-fg, the existing
 legacy backend remains selected. The native executable is operator-trusted.
 `;
 async function parse(args) {
   if (args.length > 8240 || args.some(arg => arg.length > 8300 || arg.includes('\0'))
     || args.reduce((sum, arg) => sum + Buffer.byteLength(arg), 0) > 2 * 1024 * 1024) throw new Error('argument_limit');
-  let nativeFg = null, nativeTimeoutMs = 60000;
+  let nativeFg = null, nativeTimeoutMs = 60000, nativeFileBacked = false;
+  let nativeMaxInputMiB = 16, nativeMaxExpandedMiB = 128;
   const paths = [], expected = {}, seen = new Set(), signed = new SourceAttestationOptions(); let head = null, literal = false, resume = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -59,10 +70,13 @@ async function parse(args) {
     if (!literal && arg.startsWith('-')) {
       const next = signed.take(args, i); if (next !== i) { i = next; continue; }
       if (arg === '--resume') { if (resume) throw new Error('duplicate_option'); resume = true; continue; }
-      if (arg === '--exact-refs') {
-        if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg); expected.exact_refs = true; continue;
+      if (arg === '--exact-refs' || arg === '--native-file-backed') {
+        if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg);
+        if (arg === '--exact-refs') expected.exact_refs = true; else nativeFileBacked = true;
+        continue;
       }
-      if (!['--head', '--head-hex', '--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex', '--native-fg', '--native-timeout-secs'].includes(arg)) throw new Error('unknown_option');
+      if (!['--head', '--head-hex', '--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex', '--native-fg', '--native-timeout-secs',
+        '--native-max-input-mib', '--native-max-expanded-mib'].includes(arg)) throw new Error('unknown_option');
       const value = args[++i]; if (!value || value.startsWith('--') || value.length > 8300) throw new Error('invalid_option_value');
       const encode = text => { if (/[\uD800-\uDFFF]/u.test(text)) throw new Error('invalid_unicode'); return Buffer.from(text).toString('hex'); };
       if (arg === '--head' || arg === '--head-hex') {
@@ -75,8 +89,13 @@ async function parse(args) {
         if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg);
         if (arg === '--native-fg') nativeFg = value;
         else if (arg === '--native-timeout-secs') {
-          if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 300) throw new Error('native_timeout_limit');
+          if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 3600) throw new Error('native_timeout_limit');
           nativeTimeoutMs = Number(value) * 1000;
+        } else if (arg === '--native-max-input-mib' || arg === '--native-max-expanded-mib') {
+          if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+            throw new Error(arg === '--native-max-input-mib' ? 'native_input_limit' : 'native_expanded_limit');
+          }
+          if (arg === '--native-max-input-mib') nativeMaxInputMiB = Number(value); else nativeMaxExpandedMiB = Number(value);
         } else expected[arg === '--expect-sha256' ? 'sha256' : 'object_format'] = value;
       }
     } else paths.push(arg);
@@ -85,11 +104,16 @@ async function parse(args) {
   if (head === null || !head.startsWith('726566732f68656164732f')) throw new Error('explicit_branch_head_required');
   const attestation = signed.finish(), request = { head_ref_hex: head, ...(Object.keys(expected).length ? { expectations: expected } : {}) };
   if (nativeFg === null && seen.has('--native-timeout-secs')) throw new Error('native_fg_required_for_timeout');
+  const hasNativeLimits = ['--native-max-input-mib', '--native-max-expanded-mib'].some(flag => seen.has(flag));
+  if (nativeFg === null && (nativeFileBacked || hasNativeLimits)) throw new Error('native_fg_required_for_file_limits');
+  if (hasNativeLimits && !nativeFileBacked) throw new Error('native_file_backed_required_for_limits');
+  if (!nativeFileBacked && nativeTimeoutMs > 300000) throw new Error('native_timeout_limit');
+  const nativeLimits = { maxInputMiB: nativeMaxInputMiB, maxExpandedMiB: nativeMaxExpandedMiB };
   let legacyLimits = null;
   if (nativeFg !== null) {
     normalizeNativeRecoveryRequest(request);
     normalizeNativeBundleOptions({ fg: nativeFg, expected: request.expectations ?? null,
-      recoveryHead: head, maxInputMiB: 16, timeoutMs: nativeTimeoutMs });
+      recoveryHead: head, fileBacked: nativeFileBacked, ...nativeLimits, timeoutMs: nativeTimeoutMs });
   } else {
     const legacy = await import('../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs');
     const { bundleRef } = await import('../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs');
@@ -98,7 +122,7 @@ async function parse(args) {
     if (Object.keys(expected).length) legacy.normalizeBundleExpectation(expected);
     legacyLimits = legacy.BUNDLE_VERIFY_LIMITS;
   }
-  return { input: paths[0], destination: paths[1], resume, attestation, request, nativeFg, nativeTimeoutMs, legacyLimits };
+  return { input: paths[0], destination: paths[1], resume, attestation, request, nativeFg, nativeFileBacked, nativeLimits, nativeTimeoutMs, legacyLimits };
 }
 async function readBundle(path, signal, limits) {
   signal.throwIfAborted(); const file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -119,24 +143,50 @@ process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
 const pipeError = () => { controller.abort(); process.exitCode = 1; }; process.stdout.on('error', pipeError); process.stderr.on('error', pipeError);
 let result = null, resumeDestination = null, nativeTimer, nativeDeadline = null;
 function nativeCheckpoint() {
-  if (nativeDeadline !== null && performance.now() >= nativeDeadline) throw new Error('recovery_deadline');
-  controller.signal.throwIfAborted();
+  if (nativeDeadline !== null && performance.now() >= nativeDeadline) {
+    throw Object.assign(new Error('recovery_deadline'), { code: 'recovery_deadline' });
+  }
+  if (controller.signal.aborted) throw Object.assign(new Error('recovery_cancelled'), { code: 'recovery_cancelled' });
+}
+// File recovery authenticates only bounded controls here. The preparation owner
+// binds both signed artifact facts to its one private snapshot before exposing
+// a materialization plan, while retaining the original caller pin identity.
+async function readFileApproval(attestation, nativeLimits, request) {
+  nativeCheckpoint();
+  const policy = { ...attestation.policy }, options = { signal: controller.signal, maximumBytes: nativeLimits.maxInputMiB * 1024 * 1024 };
+  const encoded = await readAttestationFile(attestation.envelope, ATTESTATION_LIMITS.envelopeBytes, { signal: controller.signal });
+  nativeCheckpoint();
+  const key = await readAttestationFile(attestation.key, ATTESTATION_LIMITS.keyBytes, { signal: controller.signal });
+  nativeCheckpoint();
+  const checkCurrent = async () => {
+    nativeCheckpoint();
+    const authentication = await verifySourceAttestation(encoded, key, policy, options);
+    nativeCheckpoint(); return authentication;
+  };
+  const authentication = await checkCurrent(), artifact = {
+    sha256: authentication.statement.artifact.sha256, bytes: authentication.statement.artifact.bytes,
+  };
+  if (request.expectations?.sha256 !== undefined && request.expectations.sha256 !== artifact.sha256) {
+    throw new Error('native_expected_sha256_mismatch');
+  }
+  return { authentication, artifact, checkCurrent };
 }
 try {
   const args = process.argv.slice(2); let output;
   if (args.length === 1 && args[0] === '--help') output = HELP;
   else {
-    const { input, destination, request, resume, attestation, nativeFg, nativeTimeoutMs, legacyLimits } = await parse(args);
+    const { input, destination, request, resume, attestation, nativeFg, nativeFileBacked, nativeLimits, nativeTimeoutMs, legacyLimits } = await parse(args);
     if (resume) resumeDestination = destination;
     if (nativeFg !== null) {
       nativeDeadline = performance.now() + nativeTimeoutMs;
       nativeTimer = setTimeout(() => controller.abort(), nativeTimeoutMs);
     }
-    const signed = attestation === null ? null : await readAuthenticatedSourceBackup(input,
-      attestation.envelope, attestation.key, attestation.policy, { signal: controller.signal });
-    // Authentication and downstream native verification consume the SAME owned
-    // bytes. Neither the CLI nor fg reopens the original signed source path.
-    const bytes = signed !== null ? signed.bytes : nativeFg !== null
+    const signed = attestation === null ? null : nativeFileBacked
+      ? await readFileApproval(attestation, nativeLimits, request)
+      : await readAuthenticatedSourceBackup(input, attestation.envelope, attestation.key, attestation.policy, { signal: controller.signal });
+    // The file profile owns its snapshot through final materialization. Existing
+    // memory and legacy profiles keep their exact authenticated-byte boundary.
+    const bytes = nativeFileBacked ? null : signed !== null ? signed.bytes : nativeFg !== null
       ? await readAttestationFile(input, ATTESTATION_LIMITS.bundleBytes, { signal: controller.signal })
       : await readBundle(input, controller.signal, legacyLimits);
     nativeCheckpoint();
@@ -144,13 +194,17 @@ try {
       timeoutMs: Math.max(1, Math.ceil(nativeDeadline - performance.now())),
       ...(signed === null ? {} : { nativeApprovalBinding: createHash('sha256')
         .update(JSON.stringify(signed.authentication)).digest('hex') }) };
-    result = await recoverGitBundle(bytes, destination, request, { signal: controller.signal, resume, ...native,
-      ...(signed === null ? {} : { onProgress(event) {
+    const options = { signal: controller.signal, resume, ...native,
+      ...(signed === null ? {} : { async onProgress(event) {
         // No destination write occurs before verified. Check again when starting
         // prepublication validation. After HEAD is visible, finalize responsibility
         // even if the approval expires; expiry never retroactively rolls it back.
-        if (event.phase === 'verified' || event.phase === 'before_publication' || event.phase === 'publication_ready') signed.checkCurrent();
-      } }) });
+        if (event.phase === 'verified' || event.phase === 'before_publication' || event.phase === 'publication_ready') await signed.checkCurrent();
+      } }) };
+    result = nativeFileBacked
+      ? await recoverGitBundleFile(input, destination, request, { ...options, nativeLimits,
+        ...(signed === null ? {} : { nativeArtifact: signed.artifact }) })
+      : await recoverGitBundle(bytes, destination, request, options);
     if (signed !== null) result.source_attestation = signed.authentication;
     output = JSON.stringify(result, null, 2) + '\n';
   }
@@ -159,5 +213,7 @@ try {
   process.stderr.write(JSON.stringify({ type: 'frankengit-source-recovery-error-v1',
     code: error.code ?? error.message ?? 'recovery_failed',
     state: result?.state ?? (resumeDestination !== null && (!error.state || error.state === 'not_created') ? 'existing_unknown' : error.state ?? 'not_created'),
-    destination: result?.destination ?? error.destination ?? resumeDestination, cleanup_error: error.lock_cleanup_error ?? null }) + '\n'); process.exitCode = 1;
+    destination: result?.destination ?? error.destination ?? resumeDestination,
+    cleanup_error: error.lock_cleanup_error ?? error.snapshot_cleanup_error ?? null,
+    ...(error.snapshot_directory === undefined ? {} : { snapshot_directory: error.snapshot_directory }) }) + '\n'); process.exitCode = 1;
 } finally { clearTimeout(nativeTimer); process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }

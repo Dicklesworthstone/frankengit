@@ -154,6 +154,22 @@ node scripts/recover_git_bundle.mjs backup.bundle ./restored.git \
   --repository owner/project --minimum-sequence 42
 ```
 
+For a larger source backup, select file-backed recovery and explicit allowances:
+
+```sh
+node scripts/recover_git_bundle.mjs backup.bundle ./restored.git \
+  --native-fg "$PWD/target/release/fg" --native-file-backed \
+  --native-max-input-mib 4096 --native-max-expanded-mib 8192 \
+  --native-timeout-secs 1800 --head refs/heads/main \
+  --attestation backup.dsse.json --trust-key trusted-ed25519.pem \
+  --repository owner/project --minimum-sequence 42
+```
+
+The byte-limit flags require both `--native-fg` and `--native-file-backed`.
+They can precede or follow the mode flag; all options are validated before
+opening command files. Defaults remain 16 MiB input and 128 MiB expanded data.
+Each selected ceiling can be at most 16,384 MiB. No approval can increase it.
+
 The four approval arguments remain an all-or-nothing group. The unchanged
 Ed25519/DSSE verifier checks the independently trusted key, source repository,
 full-width sequence floor, lifetime, length and artifact hash before any native
@@ -163,13 +179,22 @@ Independent `--expect-*` pins still apply. To recover unsigned source, omit the
 entire approval group; the content checks are identical but do not authenticate
 an origin. Without `--native-fg`, legacy preparation remains the default.
 
-One 1..300-second deadline (default 60) covers authentication, reads, native
-preparation and filesystem publication. Expired or cancelled work does not gain a
-fresh budget at a stage boundary. Native child cancellation terminates, escalates
-and waits for closure; filesystem work is cooperative. Approval is checked again
+One deadline covers authentication, reads, native preparation and filesystem
+publication: 1..300 seconds for the owned-byte native path, or 1..3600 seconds
+for file-backed recovery, with a 60-second default for both. Expired or cancelled
+work does not gain a fresh budget at a stage boundary. Native child cancellation
+terminates, escalates and waits for closure; filesystem work is cooperative.
+Approval is checked again
 after native verification and at the last prepublication notification, after
 readback and immediately before the final liveness check and HEAD link. There is
 no claim of atomic wall-clock expiry enforcement across a blocking kernel call.
+
+Signed file-backed recovery authenticates captured, bounded approval/key bytes
+before opening the source. The signed length is checked before source allocation
+or native execution, and the signed digest binds the one private snapshot used
+for verification and every pack replay. A conflicting independent digest refuses
+before opening the source. Reauthentication uses the original captured controls;
+replacing approval or key paths during a run cannot change its permission.
 
 Add `--resume` with the **same source, branch, pins and approval arguments** to
 continue an interrupted operation. Native signed plans additionally bind the
@@ -195,7 +220,8 @@ is retained. A failed output pipe reports failure, not non-publication.
 ```sh
 node --test tests/operator/native-recovery-command.test.mjs \
   tests/operator/native-source-layout.test.mjs \
-  tests/operator/native-source-recovery.test.mjs
+  tests/operator/native-source-recovery.test.mjs \
+  tests/operator/native-file-source-recovery.test.mjs
 ```
 
 Command tests run the actual CLI, filesystem owner and real Ed25519 operations,
@@ -203,3 +229,8 @@ with a deliberately fake native-report process. A throwing import sentinel
 establishes that explicit native selection never loads the legacy decoder. The
 legacy-dispatch sentinel tests selection only, not Git semantics. These checks
 are not Rust build/execution, power-loss or full repository verification evidence.
+The file-backed command cases include a genuine fixture pack containing a
+17 MiB blob, both native hash domains, exact signed resume across storage
+profiles, refusal after prepublication approval expiry, and completion after
+postpublication expiry. The native child remains explicitly fake in those
+operator tests; optional `FG_NATIVE_BIN` tests exercise a supplied real build.

@@ -65,9 +65,9 @@ provide bytes and is **not permission to reopen a pathname for recovery**.
 large signed length. Without it, its previous 16 MiB limit is unchanged.
 `signSourceBackup`, `authenticateSourceBackup`, `readAuthenticatedSourceBackup`,
 and the owned-byte Git verification/recovery APIs keep their prior limits.
-The native operator verification command has the explicit file-backed profile
-below. Large streaming signature success cannot enlarge any consumer's selected
-resource allowance.
+The native operator verification and recovery commands have explicit file-backed
+profiles below. Large streaming signature success cannot enlarge any consumer's
+selected resource allowance.
 
 This increment does not claim Git pack/object/closure validation, a complete
 FrankenGit backup, streaming native `fg restore`, signature revocation, current
@@ -118,6 +118,50 @@ the input snapshot plus native scratch of up to twice the expanded allowance.
 This verifies portable Git source; it does not change source-recovery formats or
 restore forge/authority state. See the full
 [native operator verification profile](NATIVE_BUNDLE_OPERATOR_VERIFICATION.md).
+
+## Recover large signed source into a bare repository
+
+The recovery command creates and verifies its own private snapshot, then retains
+it through bounded pack materialization and HEAD-last publication:
+
+```sh
+node scripts/recover_git_bundle.mjs /backups/repository.bundle \
+  /recovery/restored.git --head refs/heads/main \
+  --native-fg "$PWD/target/release/fg" --native-file-backed \
+  --native-max-input-mib 10240 --native-max-expanded-mib 16384 \
+  --native-timeout-secs 1800 \
+  --attestation /backups/repository.dsse.json \
+  --trust-key /trusted/backup-public.pem \
+  --repository team/repository --minimum-sequence 42
+```
+
+The destination must be absent beneath an existing trusted parent. The command
+authenticates bounded captured controls before opening the source, checks the
+signed length, and binds native verification and every pack replay to the same
+private snapshot. It preserves the existing recovery owner's exact readback,
+ownership leases and no-replace HEAD publication. Only pack bytes are streamed;
+the bounded index and metadata remain in memory.
+
+Add `--resume` with the same source, branch, independent pins, approval and trust
+policy to continue an exact interrupted recovery. Every invocation re-verifies
+the source and approval. The v1 plan identity is unchanged, so inputs admitted by
+both modes can resume across native memory and file profiles. A mismatching
+retained prefix is never truncated or replaced.
+
+Approval is rechecked after verification and immediately before HEAD publication.
+After HEAD becomes visible, cancellation or expiry cannot skip synchronization
+and lease cleanup. Errors retain the publication state; a retained native
+snapshot is reported when its safe cleanup cannot finish. Recovery shares one
+deadline across authentication, snapshotting, native verification and the writer.
+The default is 60 seconds, with an explicit file-backed maximum of one hour.
+
+The input and expanded ceilings remain independently selected, each at most
+16,384 MiB. During preparation, disk must accommodate the input snapshot and
+native scratch; during publication, the snapshot and destination pack coexist.
+This restores portable Git source. It does not restore forge metadata, policy
+or native authority history. See
+[native bare-source recovery](NATIVE_BARE_SOURCE_RECOVERY.md) for limits, failure
+states, library APIs and executable evidence.
 
 
 ## Materialize an authenticated large bundle
