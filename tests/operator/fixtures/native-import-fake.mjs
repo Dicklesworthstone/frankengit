@@ -19,10 +19,13 @@ if (args[0] === 'bundle' && args[1] === 'verify') {
   for (let at = 0; at < args.length; at++) if (args[at] === '--expect-ref-hex') {
     const [ref_hex, object_id] = args[++at].split('='); pins.push({ ref_hex, object_id });
   }
-  const refs = [{ ref_hex: Buffer.from('refs/heads/main').toString('hex'), object_id: 'a'.repeat(width) }];
+  const refs = Array.from({ length: mode.referenceCount ?? 1 }, (_, index) => ({
+    ref_hex: Buffer.from(index === 0 ? 'refs/heads/main' : 'refs/heads/import-' + String(index).padStart(4, '0')).toString('hex'),
+    object_id: 'a'.repeat(width),
+  }));
   const report = { type: 'git_bundle_verification', schema_version: 1, profile: 'native-full-bundle-graph-v1',
     object_format: format, bundle_bytes: bytes.length, artifact_sha256: hash(bytes), pack_bytes: bytes.length,
-    pack_checksum: 'b'.repeat(width), object_count: 1, reference_count: 1, payload_bytes: bytes.length,
+    pack_checksum: 'b'.repeat(width), object_count: 1, reference_count: refs.length, payload_bytes: bytes.length,
     local_edges: 0, external_gitlinks: 0, delta_objects: 0, resolution_passes: 1, advertised_head: refs[0].object_id,
     references: refs, pack_checksum_verified: true, objects_verified: true, object_graph_verified: true,
     graph_scope: 'all-included-objects-and-advertised-direct-refs', gitlink_targets_verified: false,
@@ -62,7 +65,7 @@ if (args[0] === 'bundle' && args[1] === 'verify') {
     const bytes = readFileSync(args[5]);
     appendFileSync(join(root, 'submissions.jsonl'), JSON.stringify({ key, digest: hash(bytes), storage, transaction }) + '\n');
     decision = { outcome: mode.import === 'refuse' ? 'refused' : 'committed', transaction,
-      rcr: `rcr:${hash(bytes)}`, sequence: mode.sequence ?? '1', count: 1 };
+      rcr: `rcr:${hash(bytes)}`, sequence: mode.sequence ?? '1', count: mode.referenceCount ?? 1 };
     try { writeFileSync(saved, JSON.stringify(decision), { flag: 'wx', mode: 0o600 }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; decision = JSON.parse(readFileSync(saved)); }
   }

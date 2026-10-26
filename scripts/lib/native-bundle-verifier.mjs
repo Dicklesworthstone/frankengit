@@ -249,6 +249,7 @@ function validateReport(raw, digest, size, options) {
     || !hex(result.pack_checksum, result.object_format === 'sha1' ? 20 : 32)
     || (result.advertised_head !== null && !oid(result.advertised_head, result.object_format))) throw fail('native_invalid_report');
   const actual = validateReferences(result.references, result.object_format, options.maxRefs);
+  if (actual.size !== result.reference_count) throw fail('native_invalid_report');
   const expected = options.expected, echo = result.expectations;
   if (!onlyKeys(echo, ['artifact_sha256', 'object_format', 'ref_set', 'references'])
     || echo.artifact_sha256 !== digest || echo.object_format !== (expected.object_format ?? null)

@@ -29,8 +29,14 @@ sandbox it, grant a principal, or convert a local self-asserted principal into
 remote authentication. External artifact/reference pins are checked when supplied;
 an automatically computed snapshot hash is integrity, not provenance. A format
 alone is not an independent identity pin. The byte ceiling is 16 MiB, the direct
-reference ceiling is 64, and native expansion retains the existing bounded
-128 MiB profile. Parent and child allocations both matter for provisioning.
+reference ceiling is 4096, matching native direct-ref admission, and native
+expansion retains the existing bounded 128 MiB profile. Initial verification,
+saved-intent recovery and explicit retry use that same reference ceiling.
+The independent 1 MiB total CLI-argument and saved-intent limits remain in force;
+long ref names or extensive identity pins can reach a byte limit before the
+count ceiling. Native bundle/header, verification-report and admission-envelope
+byte bounds also remain enforced. Parent and child allocations both matter for
+provisioning.
 
 ## Responsibility before publication
 

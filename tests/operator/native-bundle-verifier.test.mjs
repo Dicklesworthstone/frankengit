@@ -67,6 +67,8 @@ else {
   if (mode === 'format') report.expectations.object_format = null;
   if (mode === 'refs') report.references = [];
   if (mode === 'count') report.object_count = 100001;
+  if (mode === 'ref-count') report.reference_count++;
+  if (mode === 'zero-ref-count') report.reference_count = 0;
   if (mode === 'substitute') { fs.unlinkSync(input); fs.writeFileSync(input + '.foreign', 'foreign'); fs.renameSync(input + '.foreign', input); }
   process.stdout.write(JSON.stringify(report) + '\\n');
 }
@@ -190,7 +192,7 @@ test('one deadline terminates and reaps the child rather than only racing a Prom
 test('rejects unsuccessful, malformed, over-budget and contradictory native reports', async t => {
   const directory = await sandbox(t);
   for (const mode of ['refuse', 'signal', 'large', 'stderr', 'utf8', 'duplicate', 'documents',
-    'hash', 'size', 'claim', 'incomplete', 'profile', 'extra', 'echo', 'format', 'refs', 'count']) {
+    'hash', 'size', 'claim', 'incomplete', 'profile', 'extra', 'echo', 'format', 'refs', 'count', 'ref-count', 'zero-ref-count']) {
     await t.test(mode, async () => {
       const mock = await fakeFg(directory, mode);
       await assert.rejects(verifyNativeGitBundle(opaque, { fg: mock.fg, maxReportBytes: mode === 'large' ? 2048 : 2 * 1024 * 1024,

@@ -38,6 +38,130 @@ async function failedImport(f, mode = 'fail-before') {
   await f.setMode({ import: mode });
   await assert.rejects(importNativeSource(f.source, f.config), error => error.details?.submission_attempted === true);
 }
+function referencePins(count, format = 'sha1') {
+  return Array.from({ length: count }, (_, index) => ({
+    ref_hex: Buffer.from(index === 0 ? 'refs/heads/main' : 'refs/heads/import-' + String(index).padStart(4, '0')).toString('hex'),
+    object_id: 'a'.repeat(format === 'sha1' ? 40 : 64),
+  }));
+}
+function importArguments(f, pins) {
+  return [CLI, 'import', f.source, '--trusted-local', '--fg', f.fg, '--storage', f.storage,
+    '--tenant', TENANT, '--repository-id', REPO, '--principal', PRINCIPAL, '--object-format', f.config.format,
+    '--recovery-directory', f.config.recovery, '--expect-sha256', sha(f.bytes), '--exact-refs',
+    ...pins.flatMap((pin, index) => index % 2
+      ? ['--expect-ref-hex', pin.ref_hex + '=' + pin.object_id]
+      : ['--expect-ref', Buffer.from(pin.ref_hex, 'hex').toString() + '=' + pin.object_id])];
+}
+for (const format of ['sha1', 'sha256']) for (const count of [65, 1024, 4096]) {
+  test('operator imports ' + count + ' direct refs with exact pins (' + format + ')', async t => {
+    const f = await fixture(t, { format, referenceCount: count });
+    const result = await importNativeSource(f.source, { ...f.config,
+      expected: { refs: referencePins(count, format), exact_refs: true } });
+    assert.equal(result.outcome, 'committed');
+    const saved = await manifest(f);
+    assert.equal(saved.content.declared_refs, count);
+    assert.equal(saved.expectations.refs.length, count);
+    assert.equal(saved.expectations.exact_refs, true);
+    assert.ok((await readFile(join(f.config.recovery, 'intent.json'))).length <= 1024 * 1024);
+    const calls = await f.calls(), verified = calls.find(args => args[1] === 'verify');
+    assert.equal(verified[verified.indexOf('--max-refs') + 1], '4096');
+    assert.equal(verified[verified.indexOf('--max-input-mib') + 1], '16');
+    assert.equal(verified.filter(arg => arg === '--expect-ref-hex').length, count);
+    assert.equal(calls.filter(args => args[1] === 'import').length, 1);
+  });
+}
+for (const count of [65, 1024, 4096]) test('CLI imports ' + count + ' mixed text/hex reference pins', async t => {
+  const f = await fixture(t, { format: 'sha256', referenceCount: count });
+  const result = spawnSync(process.execPath, importArguments(f, referencePins(count, 'sha256')),
+    { encoding: 'utf8', timeout: 30000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).outcome, 'committed');
+  assert.equal((await manifest(f)).content.declared_refs, count);
+});
+test('4097 pinned refs refuse before source reads, verification or recovery creation', async t => {
+  const f = await fixture(t), pins = referencePins(4097);
+  await assert.rejects(importNativeSource('/must-not-read-this-source', { ...f.config,
+    expected: { refs: pins, exact_refs: true } }), { code: 'native_expected_ref_limit' });
+  const result = spawnSync(process.execPath, importArguments(f, pins), { encoding: 'utf8', timeout: 10000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 2);
+  assert.equal(JSON.parse(result.stderr).error, 'native_import_reference_limit');
+  assert.equal((await readdir(f.root)).includes('calls.jsonl'), false);
+  await assert.rejects(stat(f.config.recovery), { code: 'ENOENT' });
+});
+test('an over-limit native reference report cannot reach target commands', async t => {
+  const f = await fixture(t, { referenceCount: 4097 });
+  await assert.rejects(importNativeSource(f.source, f.config), { code: 'native_invalid_report' });
+  assert.equal((await f.calls()).every(args => args[1] === 'verify'), true);
+  await assert.rejects(stat(f.config.recovery), { code: 'ENOENT' });
+});
+for (const format of ['sha1', 'sha256']) test('4096-ref pending retry retains exact intent, pins and key (' + format + ')', async t => {
+  const f = await fixture(t, { format, referenceCount: 4096 });
+  f.config.expected = { refs: referencePins(4096, format), exact_refs: true };
+  await failedImport(f);
+  const before = await readFile(join(f.config.recovery, 'intent.json')), saved = JSON.parse(before);
+  const recovery = { ...f.recovery, intentSha256: sha(before) };
+  assert.equal(saved.content.declared_refs, 4096);
+  await rm(f.source);
+  assert.equal((await readNativeImportOutcome(f.config.recovery, recovery)).outcome, 'unknown_pending');
+  await f.setMode({ import: 'commit' });
+  const result = await retryNativeSourceImport(f.config.recovery, recovery);
+  assert.equal(result.outcome, 'committed'); assert.equal(result.submission_attempted, true);
+  assert.deepEqual(await readFile(join(f.config.recovery, 'intent.json')), before);
+  const calls = await f.calls(), verifications = calls.filter(args => args[1] === 'verify');
+  assert.equal(verifications.length, 2);
+  for (const args of verifications) {
+    assert.equal(args[args.indexOf('--max-refs') + 1], '4096');
+    const pins = args.flatMap((arg, index) => arg === '--expect-ref-hex' ? [args[index + 1]] : []);
+    assert.deepEqual(pins, saved.expectations.refs.map(pin => pin.ref_hex + '=' + pin.object_id));
+  }
+  const attempts = (await readFile(join(f.root, 'attempts.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts.every(attempt => attempt.key === saved.idempotency_key
+    && attempt.path === join(f.config.recovery, 'source.bundle')), true);
+  const accepted = JSON.parse((await readFile(join(f.root, 'submissions.jsonl'), 'utf8')).trim());
+  assert.equal(accepted.digest, sha(f.bytes));
+  await rm(join(f.config.recovery, 'source.bundle'));
+  const terminal = await retryNativeSourceImport(f.config.recovery, recovery);
+  assert.equal(terminal.submission_attempted, false);
+  assert.equal(terminal.transaction_id, result.transaction_id);
+  assert.deepEqual(terminal.terminal, result.terminal);
+  assert.equal((await f.calls()).filter(args => args[1] === 'import').length, 2);
+});
+test('saved intents enforce the count ceiling, reverified count and independent byte ceiling', async t => {
+  const f = await fixture(t, { referenceCount: 65 }); await failedImport(f);
+  const path = join(f.config.recovery, 'intent.json'), saved = await manifest(f);
+  let calls = (await f.calls()).length;
+  saved.content.declared_refs = 4097;
+  await writeFile(path, JSON.stringify(saved) + '\n');
+  for (const recover of [readNativeImportOutcome, retryNativeSourceImport]) {
+    await assert.rejects(recover(f.config.recovery, f.recovery), { code: 'invalid_native_import_intent' });
+  }
+  assert.equal((await f.calls()).length, calls);
+  saved.content.declared_refs = 4096;
+  await writeFile(path, JSON.stringify(saved) + '\n');
+  await assert.rejects(retryNativeSourceImport(f.config.recovery, f.recovery), { code: 'native_import_verification_changed' });
+  assert.equal((await f.calls()).filter(args => args[1] === 'import').length, 1);
+  calls = (await f.calls()).length;
+  await writeFile(path, Buffer.alloc(1024 * 1024 + 1, 0x20));
+  for (const recover of [readNativeImportOutcome, retryNativeSourceImport]) {
+    await assert.rejects(recover(f.config.recovery, f.recovery), { code: 'native_import_file_size_or_type' });
+  }
+  assert.equal((await f.calls()).length, calls);
+});
+test('4096 long pins retain the independent one-MiB CLI argument ceiling', async t => {
+  const f = await fixture(t);
+  const pins = referencePins(4096).map(pin => ({ ...pin, ref_hex: pin.ref_hex + '78'.repeat(256) }));
+  const args = importArguments(f, pins);
+  assert.ok(args.slice(1).reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0) > 1024 * 1024);
+  const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 10000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 2);
+  assert.equal(JSON.parse(result.stderr).error, 'invalid_import_arguments');
+  assert.equal((await readdir(f.root)).includes('calls.jsonl'), false);
+  await assert.rejects(stat(f.config.recovery), { code: 'ENOENT' });
+});
 for (const format of ['sha1', 'sha256']) test(`import and read-only status preserve native identity (${format})`, async t => {
   const f = await fixture(t, { format });
   const result = await importNativeSource(f.source, { ...f.config, expected: { sha256: sha(f.bytes), refs: [
@@ -232,7 +356,7 @@ test('CLI receipt loss cannot erase the durable recovery directory', async t => 
   assert.equal(status.outcome, 'committed'); assert.equal(status.submission_attempted, false);
 });
 
-function realBundle(format) {
+function realBundle(format, referenceCount = 1) {
   const oid = (type, body) => createHash(format).update(`${type} ${body.length}\0`).update(body).digest();
   const blob = Buffer.from('native source restoration\n');
   const tree = Buffer.concat([Buffer.from('100644 restored.txt\0'), oid('blob', blob)]);
@@ -244,24 +368,30 @@ function realBundle(format) {
     return Buffer.concat([Buffer.from(header), deflateSync(body)]);
   };
   const pack = Buffer.concat([Buffer.from('5041434b0000000200000003', 'hex'), entry(3, blob), entry(2, tree), entry(1, commit)]);
-  const head = `# v3 git bundle\n@object-format=${format}\n${oid('commit', commit).toString('hex')} refs/heads/main\n\n`;
+  const refs = referencePins(referenceCount, format).map(ref => oid('commit', commit).toString('hex')
+    + ' ' + Buffer.from(ref.ref_hex, 'hex').toString() + '\n').join('');
+  const head = `# v3 git bundle\n@object-format=${format}\n${refs}\n`;
   return Buffer.concat([Buffer.from(head), pack, createHash(format).update(pack).digest()]);
 }
-test('actual native fg verification, import and canonical recovery in both hash domains', {
-  skip: !process.env.FG_NATIVE_BIN && 'FG_NATIVE_BIN not supplied: no native admission execution claimed', timeout: 120000,
+test('actual native fg verifies, imports and recovers one and 4096 refs in both hash domains', {
+  skip: !process.env.FG_NATIVE_BIN && 'FG_NATIVE_BIN not supplied: no native admission execution claimed', timeout: 300000,
 }, async t => {
   const fg = resolve(process.env.FG_NATIVE_BIN);
-  for (const format of ['sha1', 'sha256']) {
+  for (const format of ['sha1', 'sha256']) for (const count of [1, 4096]) {
     const f = await fixture(t, { format });
     // The node itself creates the storage root through its explicit init command.
     await rm(f.storage, { recursive: true });
     const initialized = spawnSync(fg, ['init', f.storage, TENANT, REPO, '--object-format', format], { encoding: 'utf8', timeout: 30000 });
     assert.equal(initialized.status, 0, initialized.stderr);
-    await chmod(f.storage, 0o700); await writeFile(f.source, realBundle(format));
+    await chmod(f.storage, 0o700); await writeFile(f.source, realBundle(format, count));
     const result = await importNativeSource(f.source, { ...f.config, fg, timeoutMs: 60000 });
     assert.equal(result.outcome, 'committed');
+    assert.equal((await manifest(f)).content.declared_refs, count);
+    await rm(f.source); await rm(join(f.config.recovery, 'source.bundle'));
     const status = await readNativeImportOutcome(f.config.recovery, { ...f.recovery, fg, timeoutMs: 30000 });
     assert.equal(status.transaction_id, result.transaction_id); assert.deepEqual(status.terminal, result.terminal);
+    const retried = await retryNativeSourceImport(f.config.recovery, { ...f.recovery, fg, timeoutMs: 30000 });
+    assert.equal(retried.submission_attempted, false); assert.deepEqual(retried.terminal, result.terminal);
   }
 });
 

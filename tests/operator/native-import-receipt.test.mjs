@@ -54,6 +54,17 @@ test('import requires the actual flat git_bundle_import receipt and exit code', 
     assert.throws(() => readNativeImportReceipt(processResult({ ...imported(), ...patch }, 0), intent));
   }
 });
+test('full-cap import receipts must bind every declared reference exactly', () => {
+  for (const count of [65, 1024, 4096]) {
+    const saved = { ...intent, content: { declared_refs: count } };
+    const receipt = { ...imported(), reference_count: count };
+    assert.equal(readNativeImportReceipt(processResult(receipt, 0), saved).outcome, 'committed');
+    for (const wrong of [count - 1, count + 1]) {
+      assert.throws(() => readNativeImportReceipt(processResult({ ...receipt, reference_count: wrong }, 0), saved),
+        { code: 'native_import_receipt_binding' });
+    }
+  }
+});
 test('JSON decoder preserves u64 tokens and rejects duplicates, precision loss and excessive nesting', () => {
   assert.equal(importJson(Buffer.from('{"sequence":18446744073709551615}')).sequence, 18446744073709551615n);
   for (const raw of ['{"x":1,"x":2}', '{"x":18446744073709551616}', '{"x":1e0}', '{"x":1}{}',

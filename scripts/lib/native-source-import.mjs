@@ -5,11 +5,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { normalizeNativeBundleOptions, verifyNativeGitBundle } from './native-bundle-verifier.mjs';
+import { NATIVE_BUNDLE_LIMITS, normalizeNativeBundleOptions, verifyNativeGitBundle } from './native-bundle-verifier.mjs';
 import { importError, importJson, importLifetime, runImportProcess } from './native-import-process.mjs';
 import { nativeKeyDigest, readNativeImportReceipt, readNativeOutcomeReceipt } from './native-import-receipt.mjs';
 import { APPROVAL_FILES, normalizeImportApproval, prepareImportApproval, recoverImportApproval, validateApprovalBinding } from './native-import-approval.mjs';
 
+// Match native direct-ref admission; independent byte and lifetime budgets still apply.
+export const NATIVE_SOURCE_IMPORT_MAX_REFS = NATIVE_BUNDLE_LIMITS.maxRefs;
 const INPUT_MAX = 16 * 1024 * 1024, INTENT_MAX = 1024 * 1024;
 const INTENT = 'intent.json', SNAPSHOT = 'source.bundle';
 const FIELDS = ['type', 'schema_version', 'storage', 'storage_identity', 'tenant_id', 'repository_id',
@@ -104,11 +106,11 @@ function options(value, recovery = false) {
   const expected = value.expected ?? {};
   if (expected.object_format !== undefined && expected.object_format !== value.format) throw importError('native_import_format_mismatch');
   const native = normalizeNativeBundleOptions({ fg: value.fg, expected: { ...expected, object_format: value.format },
-    signal: value.signal, maxInputMiB: 16, maxRefs: 64, timeoutMs });
+    signal: value.signal, maxInputMiB: 16, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS, timeoutMs });
   return { ...value, native, timeoutMs, live, approval: normalizeImportApproval(value.approval) };
 }
 function nativeOptions(intent, config) {
-  return { fg: config.fg, signal: config.signal, timeoutMs: config.live.remaining(), maxInputMiB: 16, maxRefs: 64,
+  return { fg: config.fg, signal: config.signal, timeoutMs: config.live.remaining(), maxInputMiB: 16, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS,
     expected: { ...intent.expectations, sha256: intent.artifact.sha256, object_format: intent.object_format } };
 }
 async function lookup(intent, config) {
@@ -144,13 +146,13 @@ function validateIntent(intent) {
     || !exactKeys(intent.artifact, ['bytes', 'sha256']) || !digest(intent.artifact.sha256)
     || !Number.isSafeInteger(intent.artifact.bytes) || intent.artifact.bytes < 1 || intent.artifact.bytes > INPUT_MAX
     || !exactKeys(intent.content, ['declared_refs', 'pack_bytes'])
-    || !Number.isSafeInteger(intent.content.declared_refs) || intent.content.declared_refs < 1 || intent.content.declared_refs > 64
+    || !Number.isSafeInteger(intent.content.declared_refs) || intent.content.declared_refs < 1 || intent.content.declared_refs > NATIVE_SOURCE_IMPORT_MAX_REFS
     || !Number.isSafeInteger(intent.content.pack_bytes) || intent.content.pack_bytes < 1 || intent.content.pack_bytes > intent.artifact.bytes) {
     throw importError('invalid_native_import_intent');
   }
   if (intent.schema_version === 2) validateApprovalBinding(intent.approval);
   pathValue(intent.storage, true);
-  const normalized = normalizeNativeBundleOptions({ fg: '/unused-native-fg', maxInputMiB: 16, maxRefs: 64, expected: intent.expectations });
+  const normalized = normalizeNativeBundleOptions({ fg: '/unused-native-fg', maxInputMiB: 16, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS, expected: intent.expectations });
   if (normalized.expected.object_format !== intent.object_format || JSON.stringify(normalized.expected) !== JSON.stringify(intent.expectations)
     || (normalized.expected.sha256 !== undefined && normalized.expected.sha256 !== intent.artifact.sha256)) throw importError('invalid_native_import_intent');
   return intent;

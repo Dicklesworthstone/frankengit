@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Explicit trusted-local source restoration through fg's existing admission.
-import { importNativeSource, readNativeImportOutcome, retryNativeSourceImport } from './lib/native-source-import.mjs';
+import { NATIVE_SOURCE_IMPORT_MAX_REFS, importNativeSource, readNativeImportOutcome, retryNativeSourceImport } from './lib/native-source-import.mjs';
 
 const USAGE = `Usage:
   node scripts/import_git_bundle_native.mjs import SOURCE.bundle --trusted-local
@@ -19,7 +19,8 @@ Import restores portable Git SOURCE into an already initialized node through
 native verification and one atomic absent-ref import. It never initializes,
 replaces, force-updates or restores forge/capsule state. The native executable
 is explicitly operator-trusted; no shell, upstream Git or decoder fallback.
-The input limit is 16 MiB with at most 64 direct references.
+The input limit is 16 MiB with at most ${NATIVE_SOURCE_IMPORT_MAX_REFS} direct references.
+Independent 1 MiB argument and saved-intent limits also apply.
 
 Before submission, an exclusive owner-only recovery directory retains and syncs
 one exact snapshot and immutable intent. KEEP this directory after interruption.
@@ -31,8 +32,10 @@ Do not replace/reinitialize the target while an import outcome is unresolved.
 Exit 0: committed; 3: canonical refusal; 4: unknown/nonterminal; 2: error.
 An error after submission can still mean the import committed. Use status.
 `;
+// Action/path plus every fixed import option, including the complete approval group.
+const MAX_ARGUMENTS = 30 + 2 * NATIVE_SOURCE_IMPORT_MAX_REFS;
 function parse(args) {
-  if (args.length < 2 || args.length > 170 || args.some(arg => arg.length > 8300 || arg.includes('\0'))
+  if (args.length < 2 || args.length > MAX_ARGUMENTS || args.some(arg => arg.length > 8300 || arg.includes('\0'))
     || args.reduce((n, arg) => n + Buffer.byteLength(arg), 0) > 1024 * 1024) throw new Error('invalid_import_arguments');
   const [action, path] = args;
   if (!['import', 'status', 'retry'].includes(action) || !path || path.startsWith('--')) throw new Error('invalid_import_action_or_path');
@@ -64,7 +67,7 @@ function parse(args) {
       if (split < 1 || split === value.length - 1 || /[\uD800-\uDFFF]/u.test(value)) throw new Error('invalid_import_reference_pin');
       const name = value.slice(0, split);
       expected.refs ??= [];
-      if (expected.refs.length === 64) throw new Error('native_import_reference_limit');
+      if (expected.refs.length >= NATIVE_SOURCE_IMPORT_MAX_REFS) throw new Error('native_import_reference_limit');
       expected.refs.push({ ref_hex: flag === '--expect-ref-hex' ? name : Buffer.from(name).toString('hex'), object_id: value.slice(split + 1) });
     } else options[common[flag] ?? initial[flag]] = value;
   }
