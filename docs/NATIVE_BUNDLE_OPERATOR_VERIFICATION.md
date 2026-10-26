@@ -103,6 +103,32 @@ test, explicitly skipped unless `FG_NATIVE_BIN` names an available built binary.
 No repository-wide, native-build, durability or bead-closure claim follows from
 adapter-test success.
 
+The discovered live suite exercises the signed operator command with a prebuilt
+Rust verifier, including valid bundles larger than 16 MiB in both hash domains:
+
+```sh
+FG_BIN="$qualified_fg" \
+FG_SIGNED_BUNDLE_SOURCE_CUT="$qualified_fg_source_commit" \
+FGE_NODE="$pinned_node" \
+  scripts/e2e/run_all.sh scripts/e2e/suites/recovery/native_signed_bundle.sh
+```
+
+`FGE_NODE` must match `tests/node-version`. The binary source cut is required
+provenance supplied by the caller; the suite cannot authenticate a build from
+its filename or infer it from the JavaScript checkout. It records that source
+cut, the executable digest and the actual client-module hashes separately.
+No compilation occurs in the suite.
+
+Its 18 checks cover default-budget refusal and explicit file-backed success,
+a direct Rust content read, wrong trust/ref pins, expansion exhaustion, correctly
+signed invalid native content, artifact tampering and expired approvals. All
+native processes use the selected executable; child PATH is empty. Process
+owners wait for group quiescence, and successful cases require snapshot/scratch
+cleanup. Raw command streams and a summary remain under the E2E artifact root.
+This establishes one signed-bundle entrypoint, not the complete `.4.59` operator
+lane. Generated packs are test inputs; no upstream-Git differential, signature
+key-management, memory benchmark or forge-recovery claim follows.
+
 ## Signed backup verification through the existing command
 
 The existing operator entry point now offers an explicit native selection:
