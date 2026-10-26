@@ -124,6 +124,35 @@ pub trait AuthorityStore {
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure>;
 
+    /// Group bounded independent immutable writes in their input order.
+    ///
+    /// Success returns exactly one create/retry/conflict outcome per entry.
+    /// Repeated keys observe earlier entries in this call. A backend may
+    /// amortize its durable transaction, but this operation does not publish a
+    /// repository head or promise all-or-nothing behavior across entries.
+    ///
+    /// The portable default validates the entire request before the first
+    /// write, then performs ordinary puts. Its distinct failure type preserves
+    /// an already completed prefix if a later call refuses or becomes
+    /// ambiguous. Retry the same bytes or read exact keys to recover.
+    fn put_if_absent_batch(
+        &self,
+        entries: &[(ImmutableKey, Vec<u8>)],
+    ) -> Result<Vec<PutOutcome>, crate::ImmutableBatchFailure> {
+        crate::validate_immutable_batch(entries, self.limits())?;
+        let mut outcomes = Vec::with_capacity(entries.len());
+        for (key, body) in entries {
+            let outcome = self.put_if_absent(key, body).map_err(|source| {
+                crate::ImmutableBatchFailure::Interrupted {
+                    completed: outcomes.len(),
+                    source,
+                }
+            })?;
+            outcomes.push(outcome);
+        }
+        Ok(outcomes)
+    }
+
     /// Read one immutable body by exact key.
     fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure>;
 

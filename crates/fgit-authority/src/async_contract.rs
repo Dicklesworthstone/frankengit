@@ -149,6 +149,34 @@ pub trait AsyncAuthorityStore: Sync {
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send;
 
+    /// Group bounded independent immutable writes in their input order.
+    ///
+    /// This mirrors [`AuthorityStore::put_if_absent_batch`], including exact
+    /// per-item create/retry/conflict results and a potentially completed
+    /// prefix on interruption. The same caller-owned context reaches every
+    /// portable operation. A native backend can use one owned transaction,
+    /// retaining cancellation, rollback and ambiguous-commit recovery.
+    fn put_if_absent_batch(
+        &self,
+        cx: &Self::Context,
+        entries: &[(ImmutableKey, Vec<u8>)],
+    ) -> impl Future<Output = Result<Vec<PutOutcome>, crate::ImmutableBatchFailure>> + Send {
+        async move {
+            crate::validate_immutable_batch(entries, self.limits())?;
+            let mut outcomes = Vec::with_capacity(entries.len());
+            for (key, body) in entries {
+                let outcome = self.put_if_absent(cx, key, body).await.map_err(|source| {
+                    crate::ImmutableBatchFailure::Interrupted {
+                        completed: outcomes.len(),
+                        source,
+                    }
+                })?;
+                outcomes.push(outcome);
+            }
+            Ok(outcomes)
+        }
+    }
+
     /// Read one immutable body by exact key.
     fn read_immutable(
         &self,

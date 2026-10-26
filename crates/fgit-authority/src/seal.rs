@@ -26,6 +26,12 @@
 //! identity-bearing body. It is a pointer, not an object, so it has no
 //! domain-separated identity of its own.
 
+mod batch;
+
+pub use batch::{
+    bind_idempotency_keys, bind_idempotency_keys_async, seal_requests, seal_requests_async,
+};
+
 use fgit_codec::wire::{CanonicalBody, encode_body};
 use fgit_codec::{CodecRefusal, DecodeLimits, Decoder, Encoder, TransactionSealBody, decode_body};
 use fgit_crypto::IdentityDomain;
@@ -95,6 +101,9 @@ pub enum SealFailure {
     Rejected(Box<RequestRejection>),
     /// The store refused or could not answer.
     Store(AuthorityFailure),
+    /// A bounded group of independent binding or seal writes could not
+    /// complete. Its exact prefix/ambiguity information is retained.
+    Batch(Box<crate::ImmutableBatchFailure>),
     /// An identity could not be derived.
     Identity(Box<IdentityRefusal>),
     /// A canonical body could not be encoded or decoded.
@@ -117,6 +126,7 @@ impl core::fmt::Display for SealFailure {
         match self {
             Self::Rejected(rejection) => write!(f, "{rejection}"),
             Self::Store(failure) => write!(f, "authority store: {failure}"),
+            Self::Batch(failure) => write!(f, "authority immutable batch: {failure}"),
             Self::Identity(refusal) => write!(f, "{refusal}"),
             Self::Codec(refusal) => write!(f, "canonical encoding refused: {refusal}"),
             Self::Key(error) => write!(f, "{error}"),
@@ -132,6 +142,12 @@ impl std::error::Error for SealFailure {}
 impl From<AuthorityFailure> for SealFailure {
     fn from(failure: AuthorityFailure) -> Self {
         Self::Store(failure)
+    }
+}
+
+impl From<crate::ImmutableBatchFailure> for SealFailure {
+    fn from(failure: crate::ImmutableBatchFailure) -> Self {
+        Self::Batch(Box::new(failure))
     }
 }
 

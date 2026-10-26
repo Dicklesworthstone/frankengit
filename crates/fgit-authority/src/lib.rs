@@ -68,6 +68,7 @@ mod contract;
 mod head_ancestry;
 pub mod history;
 mod identity;
+mod immutable_batch;
 mod injection;
 pub mod key_recovery;
 mod keys;
@@ -123,6 +124,10 @@ pub use crate::identity::{
     IdempotencyKey, IdentityRefusal, MAX_IDEMPOTENCY_KEY_BYTES, TxIdPreimage, canonical_body_id,
     canonical_request_digest, derive_tx_id,
 };
+pub use crate::immutable_batch::{
+    ImmutableBatchFailure, ImmutableBatchRefusal, MAX_IMMUTABLE_BATCH_BYTES,
+    MAX_IMMUTABLE_BATCH_ITEMS, validate_immutable_batch,
+};
 pub use crate::injection::{
     DuplicateDelivery, EffectLog, EffectRecord, FaultDirective, FaultKind, FaultLog, FaultPlan,
     FaultPosition, FaultRecord, OpCounting, OpIndex, SplitMix64,
@@ -174,8 +179,9 @@ pub use crate::schedule::{
 pub use crate::seal::{
     BODY_KEY_PREFIX, IDEMPOTENCY_BINDING_KEY_PREFIX, KeyBinding, RequestRejection, SEAL_KEY_PREFIX,
     SealAdmission, SealAttempt, SealFailure, admit_seal, admit_seal_async, bind_idempotency_key,
-    bind_idempotency_key_async, body_key, idempotency_binding_key, read_seal, read_seal_async,
-    seal_key, seal_request, seal_request_async,
+    bind_idempotency_key_async, bind_idempotency_keys, bind_idempotency_keys_async, body_key,
+    idempotency_binding_key, read_seal, read_seal_async, seal_key, seal_request,
+    seal_request_async, seal_requests, seal_requests_async,
 };
 pub use crate::suite::{
     CAPACITY_PROBE_LIMITS, ConformanceCheck, ConformanceReport, run_authority_conformance,
