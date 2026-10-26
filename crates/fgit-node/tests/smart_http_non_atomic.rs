@@ -227,7 +227,8 @@ fn refused_first_ref_allows_later_creates_and_deletes_with_reopenable_retries() 
             stale(&first, 0);
             committed(&first, 1);
             committed(&first, 2);
-            assert_eq!(state(&node).0.get(), before.get() + 3);
+            // Independent per-command outcomes now share one bounded batch.
+            assert_eq!(state(&node).0.get(), before.get() + 1);
             assert_eq!(state(&node).1.len(), 2);
             assert_eq!(
                 reports(&output),
@@ -355,7 +356,8 @@ fn consecutive_refusals_keep_their_real_reason_instead_of_authority_receipt_stal
         for index in 0..3 {
             stale(&result, index);
         }
-        assert_eq!(state(&node).0.get(), before.get() + 3);
+        // A refusal-only batch still contains three distinct terminal decisions.
+        assert_eq!(state(&node).0.get(), before.get() + 1);
         assert!(state(&node).1.is_empty());
         node.shutdown().unwrap();
     }

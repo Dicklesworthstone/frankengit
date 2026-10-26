@@ -432,3 +432,133 @@ fn hidden_absent_and_present_deletes_refuse_before_ref_state_evaluation() {
         assert_eq!(result.command_statuses(), vec![ReceiveCommandStatus::Ok]);
     }
 }
+
+#[test]
+fn default_branch_absent_delete_preserves_noop_protection_and_hidden_precedence() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        for atomic in [false, true] {
+            for present in [false, true] {
+                for hidden in [false, true] {
+                    let context = context_for(format, b"default-branch-absent-delete");
+                    let target = RefName::try_new(b"refs/heads/main").unwrap();
+                    let created = RefName::try_new(b"refs/heads/created").unwrap();
+                    let initial_refs = if present {
+                        BTreeMap::from([(target.clone(), native_oid(format, 7))])
+                    } else {
+                        BTreeMap::new()
+                    };
+                    let state = CanonicalRefState::new_with_head_target(
+                        initial_refs.clone(),
+                        target.clone(),
+                    )
+                    .unwrap();
+                    let mut initial_head = genesis(&context);
+                    initial_head.ref_root = canonical_ref_state_root(&state).unwrap();
+                    let staging = FailOnceCanonicalStore::default();
+                    staging
+                        .stage_ref_state(initial_head.ref_root, state)
+                        .unwrap();
+                    if hidden {
+                        let mut visibility = RefVisibility::new();
+                        visibility
+                            .push_rule(target.as_bytes(), &fgit_wire::WireLimits::default())
+                            .unwrap();
+                        staging
+                            .stage_hidden_ref_policy(initial_head.configuration_root, visibility);
+                    }
+                    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(83));
+                    initialize_repository(&store, &context.head_key, &initial_head).unwrap();
+                    let projection = CanonicalAdmissionProjection::new(
+                        staging.clone(),
+                        CanonicalFixtureEvidence,
+                    );
+                    let validated = receive(
+                        format,
+                        vec![
+                            command(format, target.as_bytes(), 0, 0),
+                            command(format, created.as_bytes(), 0, 8),
+                        ],
+                        atomic,
+                    );
+
+                    let result = admit_validated_receive(
+                        &store,
+                        &context,
+                        &validated,
+                        AdmissionLimits::default(),
+                        &projection,
+                    )
+                    .unwrap();
+                    let expected_refusal = if hidden {
+                        Some(RefusalCode::HiddenRefUnauthorized)
+                    } else if present {
+                        Some(RefusalCode::ProtectedRefTransitionDenied)
+                    } else {
+                        None
+                    };
+                    match expected_refusal {
+                        Some(expected) => assert!(matches!(
+                            result.commands[0].terminal.outcome,
+                            DecisionOutcome::Refused { code, .. } if code == expected,
+                        )),
+                        None => assert_eq!(result.command_statuses()[0], ReceiveCommandStatus::Ok),
+                    }
+                    let create_commits = expected_refusal.is_none() || !atomic;
+                    assert_eq!(
+                        result.command_statuses()[1] == ReceiveCommandStatus::Ok,
+                        create_commits,
+                        "the default-branch no-op must not drop a sibling create",
+                    );
+                    let current = staging
+                        .resolve_ref_state(head(&store, &context).ref_root)
+                        .unwrap();
+                    assert_eq!(current.head_target(), Some(&target));
+                    assert_eq!(current.refs().get(&target), initial_refs.get(&target));
+                    assert_eq!(current.refs().contains_key(&created), create_commits);
+                    let before_retry = head(&store, &context);
+                    assert_eq!(
+                        admit_validated_receive(
+                            &store,
+                            &context,
+                            &validated,
+                            AdmissionLimits::default(),
+                            &projection,
+                        )
+                        .unwrap(),
+                        result
+                    );
+                    assert_eq!(head(&store, &context), before_retry);
+
+                    if present && !hidden {
+                        // The zero-pair exception cannot weaken ordinary default
+                        // branch deletion protection when the expected old matches.
+                        let ordinary = context_for(format, b"ordinary-default-branch-delete");
+                        let denied = admit_validated_receive(
+                            &store,
+                            &ordinary,
+                            &receive(
+                                format,
+                                vec![command(format, target.as_bytes(), 7, 0)],
+                                atomic,
+                            ),
+                            AdmissionLimits::default(),
+                            &projection,
+                        )
+                        .unwrap();
+                        assert!(matches!(
+                            denied.commands[0].terminal.outcome,
+                            DecisionOutcome::Refused {
+                                code: RefusalCode::ProtectedRefTransitionDenied,
+                                ..
+                            },
+                        ));
+                        assert_eq!(
+                            refs(&store, &staging, &ordinary).get(&target),
+                            Some(&native_oid(format, 7))
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

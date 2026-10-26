@@ -2358,8 +2358,9 @@ impl AdmissionSnapshotProjection for DurableAdmissionMaterializer {
 /// One exact state loaded while an asynchronous admission attempt was prepared.
 ///
 /// This is request-scoped derived data, not a second authority store. It is
-/// replaced on every async snapshot and consumed by its matching commit
-/// materialization, so a CAS replan cannot reuse a predecessor's ref state.
+/// replaced on every async snapshot. Single-commit materialization consumes
+/// it; batch siblings retain only the matching basis and layout while the
+/// admission driver advances their ref overlay. A CAS replan must refresh it.
 #[derive(Clone, Debug)]
 struct AsyncMaterializedBasis {
     basis: PublicationBasis,
@@ -2400,6 +2401,90 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             context,
             prepared: Mutex::new(None),
         }
+    }
+    /// Stages a ref-only decision against an authenticated head and its
+    /// driver-owned ref overlay. Both single-command and microbatch entrypoints
+    /// use this path, preserving protection, evidence and durable staging.
+    async fn stage_ref_commit(
+        &self,
+        authority: &FsqliteAuthorityStore,
+        cx: &FsqliteCx,
+        basis: &PublicationBasis,
+        current: CanonicalRefState,
+        root_layout: RootLayoutVersion,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+        closure: &ValidatedClosure,
+    ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
+        fgit_admission::merge::native::protection::enforce_direct_at(
+            authority,
+            cx,
+            basis,
+            current.refs(),
+            fold,
+            &|| cx.checkpoint().is_err(),
+        )
+        .await?;
+        let stage_context = cx.create_child();
+        let is_cancelled = || stage_context.checkpoint().is_err();
+        let provider = self
+            .materializer
+            .stage_decision_evidence_in(
+                authority,
+                &stage_context,
+                self.context.clone(),
+                basis,
+                request,
+                fold,
+                &is_cancelled,
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        let evidence = provider
+            .commit_evidence(basis, request, fold)
+            .map_err(AsyncProjectionFailure::Unavailable)?;
+        let prepared = prepare_canonical_commit(
+            basis,
+            request,
+            fold,
+            closure,
+            current,
+            root_layout,
+            evidence,
+        )
+        .map_err(AsyncProjectionFailure::Refuse)?;
+        let ref_root = self
+            .materializer
+            .stage_ref_state_for_layout_in(
+                authority,
+                cx,
+                self.context.repository_id,
+                root_layout,
+                prepared.next_ref_state().clone(),
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        if ref_root != prepared.ref_root() {
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::InternalInvariantBreach,
+            ));
+        }
+        let closure_root = self
+            .materializer
+            .stage_permitted_object_closure_in(
+                authority,
+                cx,
+                self.context.repository_id,
+                prepared.object_closure().clone(),
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        if closure_root != prepared.object_closure_root() {
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::InternalInvariantBreach,
+            ));
+        }
+        Ok(prepared.into_materialization())
     }
 }
 
@@ -2456,6 +2541,51 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
         Ok(materialized.snapshot().clone())
     }
 
+    fn supports_ref_microbatching(&self) -> bool {
+        true
+    }
+
+    async fn materialize_batch_commit_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a FsqliteCx,
+        state: &'a fgit_admission::microbatch::BatchRefState,
+        request: &'a TransactionRequest,
+        fold: &'a TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
+        // Retain only the layout selected by the authenticated snapshot. The
+        // opaque admission state owns accepted prior ref effects; no staged
+        // intermediate root is passed off as an authenticated authority head.
+        let root_layout = {
+            let prepared = self.prepared.lock().map_err(|_| {
+                AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)
+            })?;
+            let prepared = prepared
+                .as_ref()
+                .ok_or(AsyncProjectionFailure::Unavailable(
+                    RefusalCode::EvidenceMissing,
+                ))?;
+            if prepared.basis != *state.basis() {
+                return Err(AsyncProjectionFailure::Unavailable(
+                    RefusalCode::AuthorityReceiptStale,
+                ));
+            }
+            prepared.root_layout
+        };
+        self.stage_ref_commit(
+            authority,
+            cx,
+            state.basis(),
+            state.refs().clone(),
+            root_layout,
+            request,
+            fold,
+            closure,
+        )
+        .await
+    }
+
     async fn materialize_commit_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -2478,75 +2608,17 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 RefusalCode::AuthorityReceiptStale,
             ));
         }
-        fgit_admission::merge::native::protection::enforce_direct_at(
+        self.stage_ref_commit(
             authority,
             cx,
             basis,
-            prepared_basis.ref_state.refs(),
-            fold,
-            &|| cx.checkpoint().is_err(),
-        )
-        .await?;
-        let stage_context = cx.create_child();
-        let is_cancelled = || stage_context.checkpoint().is_err();
-        let provider = self
-            .materializer
-            .stage_decision_evidence_in(
-                authority,
-                &stage_context,
-                self.context.clone(),
-                basis,
-                request,
-                fold,
-                &is_cancelled,
-            )
-            .await
-            .map_err(async_projection_unavailable)?;
-        let evidence = provider
-            .commit_evidence(basis, request, fold)
-            .map_err(AsyncProjectionFailure::Unavailable)?;
-        let prepared = prepare_canonical_commit(
-            basis,
+            prepared_basis.ref_state,
+            prepared_basis.root_layout,
             request,
             fold,
             closure,
-            prepared_basis.ref_state,
-            prepared_basis.root_layout,
-            evidence,
         )
-        .map_err(AsyncProjectionFailure::Refuse)?;
-        let ref_root = self
-            .materializer
-            .stage_ref_state_for_layout_in(
-                authority,
-                cx,
-                self.context.repository_id,
-                prepared_basis.root_layout,
-                prepared.next_ref_state().clone(),
-            )
-            .await
-            .map_err(async_projection_unavailable)?;
-        if ref_root != prepared.ref_root() {
-            return Err(AsyncProjectionFailure::Unavailable(
-                RefusalCode::InternalInvariantBreach,
-            ));
-        }
-        let closure_root = self
-            .materializer
-            .stage_permitted_object_closure_in(
-                authority,
-                cx,
-                self.context.repository_id,
-                prepared.object_closure().clone(),
-            )
-            .await
-            .map_err(async_projection_unavailable)?;
-        if closure_root != prepared.object_closure_root() {
-            return Err(AsyncProjectionFailure::Unavailable(
-                RefusalCode::InternalInvariantBreach,
-            ));
-        }
-        Ok(prepared.into_materialization())
+        .await
     }
 
     async fn materialize_refusal_async<'a>(

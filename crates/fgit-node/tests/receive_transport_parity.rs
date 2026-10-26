@@ -276,7 +276,8 @@ fn raw_mixed_create_delete_sessions_retry_over_http_and_recover_after_reopen() {
         let before = state(&node).0;
         let first = raw(&node, format, b"cross-create", &bytes).unwrap();
         mixed(&first);
-        assert_eq!(state(&node).0, before + 3);
+        // The three independent terminal decisions share one physical batch.
+        assert_eq!(state(&node).0, before + 1);
         assert_eq!(state(&node).1.len(), 2);
         let published = state(&node);
         assert_eq!(http(&node, b"cross-create", &bytes, true), first);
@@ -323,9 +324,9 @@ fn absent_ref_deletes_preserve_unborn_head_and_recover_after_reopen() {
             vec![fgit_wire::receive::ReceiveCommandStatus::Ok; 2]
         );
         assert_eq!(state(&node).1, before.1);
-        // Existing committed-noop semantics preserve a recoverable decision
-        // while leaving the selected refs and object closure unchanged.
-        assert_eq!(state(&node).0, before.0 + 2);
+        // Both no-ops retain independent recoverable decisions in one physical
+        // publication, leaving the selected refs and object closure unchanged.
+        assert_eq!(state(&node).0, before.0 + 1);
         let published = state(&node);
         let (retry, reply) = http_reply(&node, b"absent-only", &bytes);
         assert_eq!(retry.unwrap(), first);
@@ -367,7 +368,9 @@ fn absent_ref_deletes_do_not_discard_copushed_updates() {
                 vec![fgit_wire::receive::ReceiveCommandStatus::Ok; 2]
             );
             assert_eq!(result.session.tx_ids.len(), if atomic { 1 } else { 2 });
-            assert_eq!(state(&node).0, before + if atomic { 1 } else { 2 });
+            // Atomicity controls identity and outcome semantics; both modes
+            // can publish this bounded command list with one head transition.
+            assert_eq!(state(&node).0, before + 1);
             assert_eq!(
                 state(&node).1,
                 BTreeMap::from([(RefName::try_new(names[1].as_bytes()).unwrap(), oid)])

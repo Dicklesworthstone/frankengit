@@ -28,6 +28,8 @@ use std::time::Duration;
 mod absent_delete;
 #[path = "guarded_git_daemon/continuous.rs"]
 mod continuous;
+#[path = "guarded_git_daemon/microbatch.rs"]
+mod microbatch;
 #[path = "guarded_git_daemon/push_options.rs"]
 mod push_options;
 
@@ -287,7 +289,7 @@ fn real_tcp_mixed_pushes_continue_after_refusal_and_recover_across_restart() {
                 b"ok refs/tags/a\n".to_vec()
             ]
         );
-        assert_eq!(state(&node).0, before + 3);
+        assert_eq!(state(&node).0, before + 1);
         recovered(&node, &path, &commands, &first);
         let published = state(&node);
         node.shutdown().unwrap();
