@@ -58,10 +58,11 @@ git 2.54.0. Each run covers SHA-1 and SHA-256 repositories over
 one fresh node per transport. Assertion ids are
 `TCAP-{host,pinned}-{sha1,sha256}-{http,git,ssh}-<check>`.
 
-The push-option rows were added at **9db4d8bd** (frankengit-321s). With a
-release `fg` of that commit (sha256 `34b215232d61b39f…`), the suite's helper
-recorded 396 checks, 198 for each git (host 2.56.0 and pinned 2.54.0), and
-all passed. That run was the helper invoked directly, not the suite runner.
+The push-option rows were added at **9db4d8bd** (frankengit-321s), and the
+typed push-option refusal at **5a3a4d81** (frankengit-yrff). With a release
+`fg` of that code (sha256 `b0d3e0fb33d89acb…`), the suite's helper recorded
+684 checks, 342 for each git (host 2.56.0 and pinned 2.54.0), and all passed.
+That run was the helper invoked directly, not the suite runner.
 
 | Capability | Check ids (`<check>`) | Result at 05e29b11 |
 |---|---|---|
@@ -74,7 +75,7 @@ all passed. That run was the helper invoked directly, not the suite runner.
 | Atomic push | `atomic-success`, `atomic-all-or-nothing` | pass; a refname-conflict refusal of one update rejects both and leaves every ref unchanged |
 | Non-atomic push | `non-atomic-per-ref` | pass; the valid ref publishes, the conflicting one gets per-ref `[remote rejected]` |
 | Push options (`git push -o ci.skip -o key=value`) | `push-options` | pass at 9db4d8bd. Before it, every transport failed on the client ("the receiving end does not support push options"), because nothing advertised the capability. The options are sealed in client order into the request's canonical digest (node test `guarded_git_daemon` `push_options::advertised_push_options_are_sealed_exactly_and_in_client_order`) |
-| Push option past the sealable bound (1,025 bytes) | `push-option-bound` | refused with nothing published, beside a 1,024-byte twin that publishes (9db4d8bd). The git:// and SSH clients still see only the generic `receive failed before admission` line; the typed cause is frankengit-yrff |
+| Push option past the sealable bound (1,025 bytes) | `push-option-bound` | refused with nothing published, beside a 1,024-byte twin that publishes. Since 5a3a4d81 the client's first fatal line names the cause on every transport: `fatal: remote error: a push option is empty, longer than this server accepts, or contains NUL, CR or LF; no ref decision was attempted` (frankengit-yrff) |
 
 Divergence: fg serves filters without an `uploadpack.allowFilter` switch
 (DIV-TA-002). Non-claims: loopback only, one node per transport, filter
