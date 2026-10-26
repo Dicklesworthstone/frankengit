@@ -890,6 +890,16 @@ where
 
 /// Answer "what happened to this transaction" using both paths, and refuse to
 /// choose between them if they disagree.
+///
+/// Read the accelerator before selecting the current head for replay. Terminal
+/// hints and their head replacement become visible atomically, so a hint read
+/// first cannot describe a publication newer than that subsequent head. A
+/// publication between these reads can instead leave the observed hint absent;
+/// authoritative replay still finds its decision. Reversing this order can
+/// mistake an ordinary concurrent publication for accelerator corruption.
+///
+/// A present hint never replaces replay, and a genuine disagreement still
+/// fails closed through [`reconcile_outcome`].
 pub fn resolve_outcome<S>(
     store: &S,
     head_key: &HeadKey,
@@ -900,8 +910,8 @@ pub fn resolve_outcome<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    let replayed = replay_outcome(store, head_key, tx_id)?;
     let indexed = indexed_outcome(store, tenant_id, repository_id, tx_id)?;
+    let replayed = replay_outcome(store, head_key, tx_id)?;
     reconcile_outcome(indexed, replayed)
 }
 
@@ -3023,6 +3033,10 @@ where
 /// Both answers are handed to [`reconcile_outcome`], which is the same pure
 /// core the synchronous path uses. The two surfaces therefore cannot disagree
 /// about what a pair of reads means; they differ only in how they wait.
+/// As on the synchronous surface, the accelerator is read before replay selects
+/// its current head. Atomic head-and-outcome publication then prevents a newer
+/// hint from being compared with an older history snapshot. A missing hint is
+/// still resolved by replay, including a publication between the two reads.
 ///
 /// # Errors
 ///
@@ -3040,8 +3054,8 @@ pub async fn resolve_outcome_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let replayed = replay_outcome_async(store, cx, head_key, tx_id).await?;
     let indexed = indexed_outcome_async(store, cx, tenant_id, repository_id, tx_id).await?;
+    let replayed = replay_outcome_async(store, cx, head_key, tx_id).await?;
     reconcile_outcome(indexed, replayed)
 }
 
