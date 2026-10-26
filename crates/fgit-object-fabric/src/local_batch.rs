@@ -18,8 +18,13 @@ use std::thread::JoinHandle;
 
 const MAX_BATCH_OBJECTS: usize = 256;
 const MAX_BATCH_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
-/// Upper bound on the threads that sync one batch's staged files.
-const MAX_SYNC_THREADS: usize = 32;
+/// Upper bound on the threads that sync one batch's staged files: one per
+/// file. Every fsync of a batch is then in flight at once, so the journal
+/// commits it waits for are shared by the whole batch. With 32 threads, each
+/// thread of a full batch ran eight fsyncs in sequence (frankengit-pc9g).
+const MAX_SYNC_THREADS: usize = MAX_BATCH_OBJECTS;
+/// A sync thread only calls `fsync`; it needs a small stack, not the default.
+const SYNC_THREAD_STACK_BYTES: usize = 64 * 1024;
 
 impl LocalFilesystemFabric {
     /// Place up to 256 identity-sorted objects and 64 MiB of payloads with one
@@ -413,6 +418,7 @@ impl SyncFence {
             let worker = Arc::clone(&share);
             match std::thread::Builder::new()
                 .name("fgit-stage-sync".to_owned())
+                .stack_size(SYNC_THREAD_STACK_BYTES)
                 .spawn(move || sync_files(&worker))
             {
                 Ok(handle) => fence.workers.push(handle),
