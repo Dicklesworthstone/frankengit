@@ -19,7 +19,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 fge_init stock-transport-capabilities
 fge_kind e2e-binary
-fge_context bead frankengit-root-doctrine-x2mv.4.33
+fge_context bead 'frankengit-root-doctrine-x2mv.4.33 frankengit-l6mb'
 fge_context evidence_class e2e_binary_stock_client
 fge_context git_version "$(git --version)"
 fge_context ssh_version "$(ssh -V 2>&1)"

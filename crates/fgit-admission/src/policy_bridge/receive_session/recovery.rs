@@ -544,14 +544,28 @@ mod tests {
             // The absent assertion must survive: permitting an unspecified
             // old value would let recovery describe a deletion the wire never
             // authorized, including a ref created after the advertisement.
-            let unconditional = Descriptor {
-                request: build(RefCommand {
+            for invalid in [
+                RefCommand {
                     expected_old: ExpectedOld::Unspecified,
-                    ..command
-                }),
-                wire_order: vec![0],
-            };
-            assert!(unconditional.encode().is_err());
+                    ..command.clone()
+                },
+                RefCommand {
+                    expected_old: ExpectedOld::Exactly(
+                        GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap(),
+                    ),
+                    ..command.clone()
+                },
+                RefCommand {
+                    force: true,
+                    ..command.clone()
+                },
+            ] {
+                let invalid_descriptor = Descriptor {
+                    request: build(invalid),
+                    wire_order: vec![0],
+                };
+                assert!(invalid_descriptor.encode().is_err());
+            }
         }
     }
 

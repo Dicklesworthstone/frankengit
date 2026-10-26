@@ -152,6 +152,11 @@ pub fn receive_refusal(
     if !commands.iter().any(|command| {
         command.name == *target
             && matches!(command.proposed_new, fgit_authority::ProposedNew::Delete)
+            // A zero-old delete of an unborn target has no ref effect. It
+            // still passes the hidden-ref guard and the normal folder's
+            // expected-old check; it cannot delete a protected present ref.
+            && !(matches!(command.expected_old, fgit_authority::ExpectedOld::Absent)
+                && !refs_before.contains_key(target))
     }) {
         return None;
     }
@@ -351,6 +356,39 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn absent_deletion_is_noop_for_unborn_head_but_never_bypasses_present_head_protection() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let target = RefName::try_new(b"refs/heads/main").unwrap();
+        let absent_delete = RefCommand {
+            expected_old: ExpectedOld::Absent,
+            ..command(&target, true)
+        };
+        assert_eq!(
+            receive_refusal(
+                &target,
+                principal,
+                &BTreeMap::new(),
+                &[absent_delete.clone()]
+            ),
+            None,
+            "an unborn HEAD has no branch to delete"
+        );
+        let refs = BTreeMap::from([(
+            target.clone(),
+            GitOid::Sha1(GitOidSha1::from_bytes([1; 20])),
+        )]);
+        assert_eq!(
+            receive_refusal(&target, principal, &refs, &[absent_delete]),
+            Some(RefusalCode::ProtectedRefTransitionDenied),
+            "a zero old ID must not remove a protected branch that exists"
+        );
+        assert_eq!(
+            receive_refusal(&target, principal, &refs, &[command(&target, true)]),
+            Some(RefusalCode::ProtectedRefTransitionDenied)
+        );
     }
 
     #[test]

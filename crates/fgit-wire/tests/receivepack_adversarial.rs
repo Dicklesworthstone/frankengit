@@ -179,6 +179,21 @@ fn every_refusal_route_leaves_an_empty_quarantine() {
             vec![Packet::Data(b"not-a-command".to_vec())],
             |error| matches!(error, ReceiveError::MalformedCommand { .. }),
         ),
+        (
+            "absent deletion with an invalid ref name",
+            vec![command(
+                ZERO,
+                ZERO,
+                "refs/heads/../main",
+                Some("report-status"),
+            )],
+            |error| {
+                matches!(
+                    error,
+                    ReceiveError::Wire(fgit_wire::WireError::InvalidRefName)
+                )
+            },
+        ),
         ("empty command list", vec![Packet::Flush], |error| {
             matches!(error, ReceiveError::MissingCommands)
         }),

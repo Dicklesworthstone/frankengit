@@ -305,6 +305,142 @@ fn raw_mixed_create_delete_sessions_retry_over_http_and_recover_after_reopen() {
 }
 
 #[test]
+fn absent_ref_deletes_preserve_unborn_head_and_recover_after_reopen() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let node = start(config.clone(), false);
+        let (_, zero, _) = pack(format);
+        // main is the unborn HEAD target. A no-op is not a protected-branch
+        // deletion, and neither command requires or admits an object pack.
+        let names = ["refs/heads/main", "refs/tags/absent"];
+        let commands = [(zero, zero, names[0]), (zero, zero, names[1])];
+        let bytes = body(format, &commands, &[], false);
+        let before = state(&node);
+        let first = raw(&node, format, b"absent-only", &bytes).unwrap();
+        assert_eq!(
+            first.command_statuses(),
+            vec![fgit_wire::receive::ReceiveCommandStatus::Ok; 2]
+        );
+        assert_eq!(state(&node).1, before.1);
+        // Existing committed-noop semantics preserve a recoverable decision
+        // while leaving the selected refs and object closure unchanged.
+        assert_eq!(state(&node).0, before.0 + 2);
+        let published = state(&node);
+        let (retry, reply) = http_reply(&node, b"absent-only", &bytes);
+        assert_eq!(retry.unwrap(), first);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        for name in names {
+            assert!(reply.contains(&format!("ok {name}\n")), "{reply}");
+        }
+        recover(&node, b"absent-only", &first, &names);
+        assert_eq!(state(&node), published);
+        node.shutdown().unwrap();
+
+        let node = start(config, true);
+        recover(&node, b"absent-only", &first, &names);
+        assert_eq!(raw(&node, format, b"absent-only", &bytes).unwrap(), first);
+        assert_eq!(state(&node), published);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn absent_ref_deletes_do_not_discard_copushed_updates() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for atomic in [false, true] {
+            let root = Scratch::new();
+            let node = start(root.config(format), false);
+            let (oid, zero, pack) = pack(format);
+            let names = ["refs/heads/absent", "refs/tags/new"];
+            let bytes = body(
+                format,
+                &[(zero, zero, names[0]), (zero, oid, names[1])],
+                &pack,
+                atomic,
+            );
+            let before = state(&node).0;
+            let result = raw(&node, format, b"absent-and-create", &bytes).unwrap();
+            assert_eq!(result.session.atomic, atomic);
+            assert_eq!(
+                result.command_statuses(),
+                vec![fgit_wire::receive::ReceiveCommandStatus::Ok; 2]
+            );
+            assert_eq!(result.session.tx_ids.len(), if atomic { 1 } else { 2 });
+            assert_eq!(state(&node).0, before + if atomic { 1 } else { 2 });
+            assert_eq!(
+                state(&node).1,
+                BTreeMap::from([(RefName::try_new(names[1].as_bytes()).unwrap(), oid)])
+            );
+            let published = state(&node);
+            assert_eq!(http(&node, b"absent-and-create", &bytes, true), result);
+            assert_eq!(state(&node), published);
+            if !atomic {
+                recover(&node, b"absent-and-create", &result, &names);
+            }
+            node.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
+fn zero_old_deletes_refuse_present_refs_with_an_exact_old_permitted_twin() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for atomic in [false, true] {
+            let root = Scratch::new();
+            let node = start(root.config(format), false);
+            let (oid, zero, pack) = pack(format);
+            let present = "refs/tags/present";
+            let companion = "refs/tags/companion";
+            let seed = body(format, &[(zero, oid, present)], &pack, true);
+            raw(&node, format, b"seed-present", &seed).unwrap();
+            let before = state(&node).1;
+            let attempted = body(
+                format,
+                &[(zero, zero, present), (zero, oid, companion)],
+                &pack,
+                atomic,
+            );
+            let (result, reply) = http_reply(&node, b"stale-delete", &attempted);
+            let result = result.unwrap();
+            assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+            assert!(
+                reply.contains("ng refs/tags/present stale info\n"),
+                "{reply}"
+            );
+            assert!(matches!(
+                result.commands[0].terminal.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::ExpectedOldRefMismatch,
+                    ..
+                }
+            ));
+            let mut expected = before;
+            if atomic {
+                assert_eq!(result.commands[0], result.commands[1]);
+                assert!(reply.contains("ng refs/tags/companion stale info\n"));
+            } else {
+                assert!(matches!(
+                    result.commands[1].terminal.outcome,
+                    DecisionOutcome::Committed { .. }
+                ));
+                expected.insert(RefName::try_new(companion.as_bytes()).unwrap(), oid);
+            }
+            assert_eq!(state(&node).1, expected);
+            let correct = body(format, &[(oid, zero, present)], &[], atomic);
+            let permitted = raw(&node, format, b"exact-delete", &correct).unwrap();
+            assert_eq!(
+                permitted.command_statuses(),
+                [fgit_wire::receive::ReceiveCommandStatus::Ok]
+            );
+            expected.remove(&RefName::try_new(present.as_bytes()).unwrap());
+            assert_eq!(state(&node).1, expected);
+            node.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
 fn http_session_bindings_cannot_be_extended_shortened_or_reordered_through_raw_admission() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();

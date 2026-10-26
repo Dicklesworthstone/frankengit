@@ -141,6 +141,26 @@ fn command_goldens_preserve_create_delete_and_expected_old_semantics() {
 }
 
 #[test]
+fn absent_delete_cannot_hide_a_duplicate_create() {
+    let mut machine = ReceivePack::new(context(b"report-status delete-refs")).expect("machine");
+    machine
+        .push_packet(command(
+            ZERO,
+            ZERO,
+            "refs/heads/absent",
+            Some("report-status"),
+        ))
+        .expect("first command");
+    assert_eq!(
+        machine.push_packet(command(ZERO, NEW, "refs/heads/absent", None)),
+        Err(ReceiveError::DuplicateRefCommand {
+            ref_name: b"refs/heads/absent".to_vec(),
+        }),
+        "an absent delete must not be dropped before duplicate detection"
+    );
+}
+
+#[test]
 fn raw_git_send_pack_command_without_lf_is_accepted() {
     // Byte-for-byte command-section prefix captured from pinned Git 2.54.0
     // `send-pack --stateless-rpc`: it has no trailing LF and its NUL

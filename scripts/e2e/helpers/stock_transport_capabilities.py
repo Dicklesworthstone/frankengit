@@ -183,6 +183,42 @@ def porcelain(result: subprocess.CompletedProcess) -> dict[str, str]:
     return flags
 
 
+def absent_ref_deletes(git: Git, work: Path, url: str, env: dict,
+                      prefix: str, checks: Checks) -> None:
+    """The stock client sends zero->zero only when given the full absent name.
+
+    Short --delete names are rejected locally, so they cannot exercise the
+    receiver. Compare the entire remote ref map to catch silently dropped
+    companion updates as well as accidental removal of an unrelated ref.
+    """
+    head = git.out("-C", work, "rev-parse", "HEAD")
+    for atomic in (False, True):
+        label = "atomic" if atomic else "non-atomic"
+        options = ["--atomic"] if atomic else []
+        absent = f"refs/heads/absent-{label}"
+        companion = f"refs/heads/absent-delete-create-{label}"
+        before = ref_map(git, url, env)
+        assert absent not in before and companion not in before
+        alone = git.run("-C", work, "push", "--porcelain", *options,
+                        "origin", "--delete", absent, env=env)
+        after = ref_map(git, url, env)
+        flags = porcelain(alone)
+        checks.add(f"{prefix}-absent-delete-{label}",
+                   alone.returncode == 0 and after == before
+                   and flags.get(absent, "").startswith("-"),
+                   f"unchanged={after == before} flags={flags} {text(alone)}")
+        mixed = git.run("-C", work, "push", "--porcelain", *options, "origin",
+                        f":{absent}", f"HEAD:{companion}", env=env)
+        after = ref_map(git, url, env)
+        expected = dict(before, **{companion: head})
+        flags = porcelain(mixed)
+        checks.add(f"{prefix}-absent-delete-create-{label}",
+                   mixed.returncode == 0 and after == expected
+                   and flags.get(absent, "").startswith("-")
+                   and flags.get(companion, "").startswith("*"),
+                   f"published_only_companion={after == expected} flags={flags} {text(mixed)}")
+
+
 @contextlib.contextmanager
 def served(fg: str, transport: str, node: Path, root: Path):
     """Yield (url, extra git env) for one continuous fg service with receive enabled."""
@@ -367,26 +403,7 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
                    and flags.get("refs/heads/plain-a", "").startswith("*")
                    and flags.get("refs/heads/topic/conflict2", "").startswith("!"),
                    f"flags={flags} published_only_plain={after == expected} {text(partial)[-300:]}")
-        # Full refnames make stock git send zero/zero for an absent delete.
-        # That assertion is a no-op and must not discard its co-pushed create.
-        for atomic in (False, True):
-            mode = "atomic" if atomic else "non-atomic"
-            options = ["--atomic"] if atomic else []
-            absent = f"refs/heads/absent-{mode}"
-            created = f"refs/heads/absent-delete-create-{mode}"
-            before = ref_map(git, url, env)
-            deleted = git.run("-C", work, "push", "--porcelain", *options,
-                              "origin", f":{absent}", env=env)
-            after = ref_map(git, url, env)
-            checks.add(f"{prefix}-absent-delete-{mode}", deleted.returncode == 0 and after == before,
-                       f"unchanged={after == before} {text(deleted)}")
-            mixed = git.run("-C", work, "push", "--porcelain", *options,
-                            "origin", f":{absent}", f"HEAD:{created}", env=env)
-            after = ref_map(git, url, env)
-            expected = dict(before, **{created: head})
-            checks.add(f"{prefix}-absent-delete-create-{mode}",
-                       mixed.returncode == 0 and after == expected,
-                       f"only_create_published={after == expected} {text(mixed)}")
+        absent_ref_deletes(git, work, url, env, prefix, checks)
         # Push options (frankengit-321s): `git push -o` works only when the server
         # advertises push-options. The options are sealed with the request; one
         # past the sealable 1,024-byte bound is refused and publishes nothing,

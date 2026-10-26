@@ -92,16 +92,23 @@ mixed push it does not prevent another valid command from publishing. Atomic
 pushes still share one decision; non-atomic pushes retain independent command
 outcomes and recovery identities.
 
-The same command targeting a present ref receives `stale info` and cannot
-delete it. This preserves the old-ID assertion and is the explicit DIV-TA-004
-safety divergence below. Hidden-ref authorization runs before either the
+The same command targeting an otherwise permitted present ref receives
+`stale info` and cannot delete it. This preserves the old-ID assertion and is
+the explicit DIV-TA-004 safety divergence below. Hidden-ref authorization runs before either the
 no-op or expected-old comparison, so both hidden-present and hidden-absent
 targets receive the existing generic hidden-ref refusal.
+
+Default-branch protection still refuses deletion of an existing HEAD target,
+including a zero-old request. An unborn HEAD target has no branch to delete,
+so the conditional absent-ref no-op succeeds. No-op-only pushes use the
+existing committed-noop decision path: they change no ref or object closure,
+while retaining the sealed request and terminal outcome for retry and recovery.
 
 Authored regression coverage includes both native object formats, packless
 quarantine handoff, capability/name/count bounds, cancellation, mixed
 atomic/non-atomic outcomes, exact sealed identity, and recovery after a node
-restart. The stock-client helper above includes
+restart, including an unborn HEAD no-op retried through another receive
+adapter after reopening the node. The stock-client helper above includes
 `absent-delete-{atomic,non-atomic}` and
 `absent-delete-create-{atomic,non-atomic}` for each configured HTTP, git://,
 and SSH transport and hash format. These additions are not included in the
@@ -174,7 +181,8 @@ decision and target ref must still match:
 - DIV-TA-004: a raw all-zero old/new command targeting a present ref. Upstream
   permits a zero-old delete as an unconditional corruption-recovery operation.
   `fg` retains `ExpectedOld::Absent` and refuses with `stale info`, preserving
-  the present ref. An absent target succeeds in both implementations, and a
+  the present ref; existing default-branch and hidden-ref protections retain
+  their own refusals. An absent target succeeds in both implementations, and a
   delete carrying the correct nonzero old ID remains supported. This single
   precondition case deliberately differs in acceptance; it does not relax
   outcome parity for ordinary deletes, other commands, or hidden-ref policy.
