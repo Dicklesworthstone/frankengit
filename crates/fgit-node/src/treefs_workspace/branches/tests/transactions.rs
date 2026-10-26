@@ -198,6 +198,88 @@ fn transaction_limits_force_duplicates_formats_and_default_branch_remain_guarded
 }
 
 #[test]
+fn a_thousand_native_branch_commands_keep_one_atomic_outcome_and_caller_limits() {
+    const COUNT: usize = 1024;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, _, _) = fixture(&scratch, format);
+        let before = snapshot(&node);
+        let commands: Vec<_> = (0..COUNT)
+            .map(|index| create(&format!("refs/heads/many-{index:04}"), base))
+            .collect();
+        let smaller = AdmissionLimits {
+            max_commands: COUNT - 1,
+            ..AdmissionLimits::default()
+        };
+        let error = node
+            .runtime()
+            .block_on(node.admit_branch_transaction_durable_in(
+                &node.request_context(),
+                &session("many-smaller-limit"),
+                &commands,
+                smaller,
+            ))
+            .unwrap_err();
+        let NodeWorkspaceRefusal::WorkspacePublication(error) = error else {
+            panic!("the caller's smaller admission limit must be preserved: {error:?}");
+        };
+        let NodeReceiveTransportRefusal::Admission(error) = *error else {
+            panic!("expected an admission count refusal: {error:?}");
+        };
+        assert!(matches!(
+            *error,
+            fgit_admission::AdmissionError::CommandLimitExceeded { limit } if limit == COUNT - 1
+        ));
+        assert_eq!(snapshot(&node).basis(), before.basis());
+
+        let excessive: Vec<_> = (0..=OneNode::MAX_BRANCH_TRANSACTION_COMMANDS)
+            .map(|index| create(&format!("refs/heads/over-{index:04}"), base))
+            .collect();
+        assert!(matches!(
+            transact(&node, &excessive, "many-over-limit"),
+            Err(NodeWorkspaceRefusal::BranchOperation(_))
+        ));
+        assert_eq!(snapshot(&node).basis(), before.basis());
+
+        let committed = accepted(transact(&node, &commands, "many-atomic"));
+        assert_eq!(committed.commands.len(), COUNT);
+        assert!(
+            committed
+                .commands
+                .iter()
+                .all(|command| command == &committed.commands[0])
+        );
+        let after = snapshot(&node);
+        assert_eq!(
+            after.basis().generation().get(),
+            before.basis().generation().get() + 1
+        );
+        assert_eq!(
+            after.snapshot().refs.len(),
+            before.snapshot().refs.len() + COUNT
+        );
+        for command in &commands {
+            assert_eq!(after.snapshot().refs.get(&command.name), Some(&base));
+        }
+        assert_eq!(
+            after.selected_closure().closure(),
+            before.selected_closure().closure()
+        );
+        node.shutdown().unwrap();
+        fs::rename(scratch.0.join("source"), scratch.0.join("source-offline")).unwrap();
+
+        let node = OneNode::open_existing(scratch.config(format)).unwrap();
+        let reordered: Vec<_> = commands.into_iter().rev().collect();
+        assert_eq!(
+            transact(&node, &reordered, "many-atomic").unwrap(),
+            committed
+        );
+        assert_eq!(snapshot(&node).basis(), after.basis());
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn cancellation_cannot_publish_a_prefix_and_terminal_retry_precedes_quota() {
     let scratch = Scratch::new();
     let (mut node, base, _, _) = fixture(&scratch, GitHashAlgorithm::Sha256);

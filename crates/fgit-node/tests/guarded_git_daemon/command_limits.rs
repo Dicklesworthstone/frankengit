@@ -34,7 +34,7 @@ fn command_limit_reports_observed_and_maximum_without_any_ref_decision() {
                 "ERR receive command count exceeded: observed at least 3; maximum 2;"
             ));
             assert!(message.contains("split the push into batches of at most 2 commands"));
-            assert!(message.ends_with("no ref decision was attempted\n"));
+            assert!(message.ends_with("this invocation stopped before admission\n"));
             assert_eq!(state(&node), before);
 
             let (node, allowed, rows) =

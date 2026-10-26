@@ -210,6 +210,19 @@ including legacy forge-position and outbox checks, can still replay history.
 This improves warm closure selection; the remaining history-scaling work in
 `frankengit-uxo2` stays open.
 
+Non-atomic receives now publish independent ref decisions in bounded groups:
+at most 64 decisions and 1 MiB of canonical decision-batch bytes share one
+exact-predecessor authority-head CAS. Every command retains its own seal,
+transaction identity, terminal result and recovery selector. Earlier accepted
+ref changes are visible to later commands; a refused command does not poison
+its siblings. Atomic receives and native imports remain one transaction.
+The shared admission ceiling is 4,096 ref commands, with lower caller limits
+and independent request, descriptor, repeated push-option and response byte
+budgets still enforced.
+This is per-session batching. Cross-session combiner scheduling and the
+16,384-command session carrier required by the remaining `frankengit-x0v8`
+and `frankengit-p9b5` acceptance work are not implemented by this slice.
+
 **What still blocks the product:**
 
 - Merge preparation reads only the history above the merge base (rffg) and

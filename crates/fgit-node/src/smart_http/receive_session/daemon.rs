@@ -566,6 +566,84 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_command_parser_reports_its_limit_without_inventing_ref_outcomes() {
+        use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
+        use fgit_wire::{Capabilities, GitObjectFormat};
+        let limit = fgit_admission::MAX_ADMISSION_COMMANDS;
+        let receive_limits = ReceiveLimits {
+            max_commands: limit,
+            ..ReceiveLimits::default()
+        };
+        let capabilities =
+            Capabilities::parse_v1(b"report-status delete-refs", &receive_limits.wire).unwrap();
+        let context = ReceiveContext::new(
+            GitObjectFormat::Sha1,
+            capabilities,
+            receive_limits,
+            SignedPushProfile::Refuse,
+        )
+        .unwrap();
+        let mut permitted = ReceivePack::new(context.clone()).unwrap();
+        let mut exceeded = ReceivePack::new(context).unwrap();
+        let zero = "0".repeat(40);
+        for index in 0..limit {
+            let capabilities = if index == 0 {
+                "\0report-status delete-refs"
+            } else {
+                ""
+            };
+            let packet = Packet::Data(
+                format!("{zero} {zero} refs/tags/ref-{index}{capabilities}").into_bytes(),
+            );
+            permitted.push_packet(packet.clone()).unwrap();
+            exceeded.push_packet(packet).unwrap();
+        }
+        assert!(
+            permitted
+                .push_packet(Packet::Flush)
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| matches!(event, ReceiveEvent::RequestReady(_)))
+        );
+        let error = exceeded
+            .push_packet(Packet::Data(
+                format!("{zero} {zero} refs/tags/one-too-many").into_bytes(),
+            ))
+            .unwrap_err();
+        let refusal = NodeSmartHttpRefusal::from(error);
+        assert_eq!(command_limit::before_admission(&refusal), Some(limit));
+        let mut reply = Vec::new();
+        fatal(
+            &mut reply,
+            false,
+            false,
+            command_limit::before_admission(&refusal),
+            &WireLimits::default(),
+        )
+        .unwrap();
+        let payload = std::str::from_utf8(&reply[4..]).unwrap();
+        assert!(payload.starts_with("ERR receive command count exceeded:"));
+        assert!(payload.contains(&format!("observed at least {}; maximum {limit}", limit + 1)));
+        assert!(payload.contains("this invocation stopped before admission"));
+        assert!(payload.contains(&format!(
+            "split the push into batches of at most {limit} commands"
+        )));
+        // Even an accidentally supplied parser diagnostic cannot turn an
+        // already-started admission into a non-commit claim.
+        let mut unknown = Vec::new();
+        fatal(
+            &mut unknown,
+            true,
+            false,
+            Some(limit),
+            &WireLimits::default(),
+        )
+        .unwrap();
+        assert!(unknown[4..].starts_with(b"ERR receive outcome unknown"));
+    }
+
+    #[test]
     fn late_quarantine_verdict_uses_a_fresh_bounded_response_clock() {
         use fgit_types::RefusalCode;
         use fgit_wire::receive::{ReceiveCommand, ReceiveLimits, ReceiveRequest};

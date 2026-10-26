@@ -170,6 +170,158 @@ fn sixty_four_native_refs_share_one_publication_and_recover_exactly_after_restar
 }
 
 #[test]
+fn native_many_ref_receive_uses_bounded_chunks_and_recovers_after_restart() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let config = scratch.config(format, true);
+        let node = start(config.clone(), false);
+        let path = route(&node);
+        let before = head(&node);
+        let (oid, zero, pack) = pack(format);
+        // Cross two physical chunk boundaries while distinguishing wire order
+        // from the canonical order of the sealed request and final ref map.
+        let names = (0..129)
+            .rev()
+            .map(|index| format!("refs/tags/chunked-{index:03}"))
+            .collect::<Vec<_>>();
+        let commands = names
+            .iter()
+            .map(|name| (zero, oid, name.as_str()))
+            .collect::<Vec<_>>();
+        let prefix = prefix(format, &commands, false);
+        let (node, result, rows) = push(node, &prefix, &pack, false);
+        let result = result.unwrap().unwrap();
+        assert!(!result.session.atomic);
+        assert_eq!(result.commands.len(), commands.len());
+        assert_eq!(result.session.tx_ids.len(), commands.len());
+        assert_eq!(
+            result
+                .session
+                .tx_ids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            commands.len(),
+            "chunking must preserve independent transaction identities"
+        );
+        let mut expected_rows = vec![b"unpack ok\n".to_vec()];
+        expected_rows.extend(names.iter().map(|name| format!("ok {name}\n").into_bytes()));
+        assert_eq!(rows, expected_rows);
+
+        let published = head(&node);
+        assert_eq!(published.generation.get(), before.generation.get() + 3);
+        let prior_decisions = before
+            .latest_decision_sequence
+            .map_or(0, |sequence| sequence.get());
+        assert_eq!(
+            published.latest_decision_sequence.unwrap().get(),
+            prior_decisions + 129
+        );
+        assert_eq!(
+            published.latest_repository_sequence.unwrap().get(),
+            before
+                .latest_repository_sequence
+                .map_or(0, |sequence| sequence.get())
+                + 129
+        );
+
+        // This production API authenticates every predecessor, batch and
+        // committed evidence object. Inspect the actual immutable batches,
+        // rather than inferring their boundaries from the final generation.
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&node.request_context()))
+            .unwrap();
+        let batches = history
+            .iter()
+            .filter(|entry| entry.resulting_head_generation > before.generation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            batches
+                .iter()
+                .map(|entry| entry.batch.decisions.len())
+                .collect::<Vec<_>>(),
+            [64, 64, 1]
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .map(|entry| entry.batch.committed_rcrs.len())
+                .collect::<Vec<_>>(),
+            [64, 64, 1]
+        );
+        for (index, entry) in batches.iter().enumerate() {
+            assert_eq!(
+                entry.resulting_head_generation.get(),
+                before.generation.get() + u64::try_from(index).unwrap() + 1
+            );
+        }
+        assert_eq!(
+            batches.last().unwrap().resulting_head_id,
+            fgit_authority::authority_head_identity(&published).unwrap()
+        );
+        let decisions = batches
+            .iter()
+            .flat_map(|entry| &entry.batch.decisions)
+            .collect::<Vec<_>>();
+        let mut repository_commits = BTreeSet::new();
+        for (index, (decision, command)) in decisions.iter().zip(&result.commands).enumerate() {
+            assert_eq!(command.tx_id, result.session.tx_ids[index]);
+            assert_eq!(decision.tx_id, command.tx_id);
+            assert_eq!(
+                decision.decision_sequence,
+                command.terminal.decision_sequence
+            );
+            assert_eq!(decision.outcome, command.terminal.outcome);
+            assert_eq!(
+                command.terminal.decision_sequence.get(),
+                prior_decisions + u64::try_from(index).unwrap() + 1,
+                "chunk continuation must preserve original wire order"
+            );
+            let DecisionOutcome::Committed {
+                repository_commit_id,
+            } = command.terminal.outcome
+            else {
+                panic!("every native tag create must commit");
+            };
+            assert!(repository_commits.insert(repository_commit_id));
+        }
+        let expected_refs = names
+            .iter()
+            .map(|name| (RefName::try_new(name.as_bytes()).unwrap(), oid))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(state(&node).1, expected_refs);
+        let recovery = exact_recovery(&node, &path, &prefix, &commands, &result);
+        let (node, repeated, repeated_rows) = push(node, &prefix, &pack, false);
+        assert_eq!(repeated.unwrap().unwrap(), result);
+        assert_eq!(repeated_rows, rows);
+        assert_eq!(head(&node), published);
+        node.shutdown().unwrap();
+
+        let node = start(config, true);
+        assert_eq!(head(&node), published);
+        assert_eq!(state(&node).1, expected_refs);
+        assert_eq!(
+            node.runtime()
+                .block_on(node.snapshot_history_in(&node.request_context()))
+                .unwrap(),
+            history
+        );
+        assert_eq!(
+            exact_recovery(&node, &path, &prefix, &commands, &result),
+            recovery
+        );
+        let (node, repeated, repeated_rows) = push(node, &prefix, &pack, false);
+        assert_eq!(repeated.unwrap().unwrap(), result);
+        assert_eq!(repeated_rows, rows);
+        assert_eq!(head(&node), published);
+        assert_eq!(state(&node).1, expected_refs);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn native_mixed_batch_reads_prior_refs_without_poisoning_accepted_siblings() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();

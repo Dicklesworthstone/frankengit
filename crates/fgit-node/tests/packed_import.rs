@@ -999,7 +999,7 @@ fn loose_ref_input_bytes_are_bounded_without_advancing_authority() {
 
 #[test]
 fn packed_refs_input_bytes_are_bounded_by_the_command_profile() {
-    const MAX_SOURCE_COMMANDS: usize = fgit_authority::MAX_REF_COMMANDS;
+    const MAX_SOURCE_COMMANDS: usize = fgit_admission::MAX_ADMISSION_COMMANDS;
     const SHA1_HEX_BYTES: usize = 40;
     const PACKED_REFS_HEADER_BYTES: usize = 1_024;
     let direct_line_bytes = SHA1_HEX_BYTES + 1 + MAX_REF_NAME_LEN + 2;

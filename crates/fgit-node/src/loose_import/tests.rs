@@ -559,10 +559,76 @@ fn loose_import_refuses_packed_refs_over_the_direct_ref_limit() {
 
     assert!(matches!(
         node.stage_loose_git_import(&source),
-        Err(LooseGitImportRefusal::RefLimitExceeded { limit })
-            if limit == super::MAX_IMPORT_REFS
+        Err(LooseGitImportRefusal::RefLimitExceeded { observed, limit })
+            if limit == super::MAX_IMPORT_REFS && observed == limit + 1
     ));
     node.shutdown().expect("node drains");
+}
+
+#[test]
+fn a_smaller_caller_ref_limit_refuses_before_object_placement() {
+    let scratch = ScratchDirectory::new();
+    let source = scratch.0.join("source.git");
+    fs::create_dir_all(&source).unwrap();
+    let commit = write_loose_commit_repository(&source);
+    fs::write(source.join("refs/heads/second"), format!("{commit}\n")).unwrap();
+    let node = node(scratch.0.join("node"));
+    let before = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
+    let error = node
+        .stage_loose_git_import_with_ref_limit(&source, 1)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("this invocation stopped before admission")
+    );
+    assert!(matches!(
+        error,
+        LooseGitImportRefusal::RefLimitExceeded {
+            observed: 2,
+            limit: 1
+        }
+    ));
+    assert!(node.read_git_object(commit).is_err());
+    let after = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
+    assert_eq!(after.basis(), before.basis());
+    assert!(after.snapshot().refs.is_empty());
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn an_unsupported_ref_budget_is_not_reported_as_an_observed_source_count() {
+    let scratch = ScratchDirectory::new();
+    let source = scratch.0.join("missing-source.git");
+    let node = node(scratch.0.join("node"));
+    let error = node
+        .stage_loose_git_import_with_ref_limit(&source, super::MAX_IMPORT_REFS + 1)
+        .unwrap_err();
+    let diagnostic = error.to_string();
+    assert!(matches!(
+        error,
+        LooseGitImportRefusal::RefLimitInvalid { requested, maximum }
+            if requested == super::MAX_IMPORT_REFS + 1 && maximum == super::MAX_IMPORT_REFS
+    ));
+    assert!(diagnostic.contains("requested source import ref limit"));
+    assert!(diagnostic.contains("this invocation stopped before reading source refs"));
+    assert!(!diagnostic.contains("observed"));
+    let selected = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
+    assert_eq!(
+        selected.basis().generation(),
+        fgit_types::HeadGeneration::FIRST
+    );
+    assert!(selected.snapshot().refs.is_empty());
+    node.shutdown().unwrap();
 }
 
 #[test]

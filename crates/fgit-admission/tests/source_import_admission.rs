@@ -52,8 +52,8 @@ use std::sync::{Arc, Mutex};
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits,
     CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    PermittedObjectClosure, QuarantineValidator, RefusalMaterialization, SourceImportOrigin,
-    SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
+    MAX_ADMISSION_COMMANDS, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
+    SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
     ValidatedSourceImport, admit_validated_receive, admit_validated_source_import,
     canonical_ref_state_root, permitted_object_closure_root, validate_receive,
     validate_source_import,
@@ -532,7 +532,7 @@ fn many_ref_imports_commit_the_complete_ref_set_and_refuse_the_first_excess() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let tip = GitOid::from_hex(format, &"1".repeat(format.digest_len() * 2)).unwrap();
         let zero = GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
-        for count in [65, 1024, fgit_authority::MAX_REF_COMMANDS] {
+        for count in [65, 1024, MAX_ADMISSION_COMMANDS] {
             let context = AdmissionContext {
                 object_format: format,
                 ..context(b"many-ref-import")
@@ -596,7 +596,7 @@ fn many_ref_imports_commit_the_complete_ref_set_and_refuse_the_first_excess() {
             ..context(b"too-many-ref-import")
         };
         let (store, projection) = setup(&context, &[]);
-        let updates: Vec<_> = (0..=fgit_authority::MAX_REF_COMMANDS)
+        let updates: Vec<_> = (0..=MAX_ADMISSION_COMMANDS)
             .map(|index| SourceRefUpdate {
                 old: zero,
                 new: tip,
@@ -613,7 +613,7 @@ fn many_ref_imports_commit_the_complete_ref_set_and_refuse_the_first_excess() {
         let before = head_body(&store, &context.head_key);
         assert!(matches!(
             admit_validated_source_import(&store, &context, &validated, AdmissionLimits::default(), &projection),
-            Err(AdmissionError::CommandLimitExceeded { limit }) if limit == fgit_authority::MAX_REF_COMMANDS
+            Err(AdmissionError::CommandLimitExceeded { limit }) if limit == MAX_ADMISSION_COMMANDS
         ));
         assert_eq!(head_body(&store, &context.head_key), before);
     }
@@ -828,7 +828,7 @@ fn a_command_limit_above_the_authority_request_bound_is_refused() {
         &headless(),
         &context,
         &import_deleting_main(),
-        limits(fgit_authority::MAX_REF_COMMANDS + 1, 16),
+        limits(MAX_ADMISSION_COMMANDS + 1, 16),
         &projection,
     )
     .expect_err("a command limit past the authority request bound must be refused");
@@ -846,7 +846,7 @@ fn a_zero_replan_budget_is_refused() {
         &headless(),
         &context,
         &import_deleting_main(),
-        limits(64, 0),
+        limits(MAX_ADMISSION_COMMANDS, 0),
         &projection,
     )
     .expect_err("a session with no replan budget cannot survive a lost CAS and must be refused");
@@ -867,7 +867,7 @@ fn a_command_limit_at_exactly_the_authority_request_bound_is_admitted() {
         &store,
         &context,
         &import_deleting_main(),
-        limits(fgit_authority::MAX_REF_COMMANDS, 16),
+        limits(MAX_ADMISSION_COMMANDS, 16),
         &projection,
     )
     .expect("the exact authority request bound must be expressible");

@@ -5,7 +5,7 @@ use super::*;
 
 impl OneNode {
     /// Hard limit for a single local branch transaction before cloning commands.
-    pub const MAX_BRANCH_TRANSACTION_COMMANDS: usize = fgit_authority::MAX_REF_COMMANDS;
+    pub const MAX_BRANCH_TRANSACTION_COMMANDS: usize = fgit_admission::MAX_ADMISSION_COMMANDS;
 
     /// Publish up to [`Self::MAX_BRANCH_TRANSACTION_COMMANDS`] distinct branch
     /// changes in one sealed, atomic transaction.

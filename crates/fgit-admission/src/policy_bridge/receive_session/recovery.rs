@@ -17,7 +17,7 @@ use fgit_authority::{
 use fgit_codec::{DecodeLimits, Decoder, Encoder, decode_body, encode_body};
 use fgit_types::{RefName, RefusalCode, TxId};
 
-use crate::{AdmissionContext, AdmissionError, AdmissionLimits, SessionPlan, seal_attempt};
+use crate::{AdmissionContext, AdmissionError, MAX_ADMISSION_COMMANDS, SessionPlan, seal_attempt};
 
 const PREFIX: &[u8] = b"fg/receive-session/v1/";
 const VERSION: u32 = 1;
@@ -25,7 +25,7 @@ const MAX_BYTES: usize = 1024 * 1024;
 const LIMITS: DecodeLimits = DecodeLimits {
     frame_bytes: MAX_BYTES as u64,
     byte_string_bytes: MAX_BYTES as u64,
-    elements: fgit_authority::MAX_REF_COMMANDS as u64,
+    elements: MAX_ADMISSION_COMMANDS as u64,
     depth: 16,
 };
 
@@ -148,7 +148,7 @@ impl Descriptor {
     fn validate(&self) -> Result<(), AdmissionError> {
         let count = self.request.ref_commands().len();
         if count == 0
-            || count > AdmissionLimits::default().max_commands
+            || count > MAX_ADMISSION_COMMANDS
             || self.request.atomic()
             || self.request.request_schema() != fgit_authority::RECEIVE_ADMISSION_SCHEMA
             || !self.request.scoped_entries().is_empty()
@@ -559,7 +559,7 @@ mod tests {
                     wire_order: (0..count).rev().collect(),
                 }
             };
-            for count in [257, 1024, fgit_authority::MAX_REF_COMMANDS] {
+            for count in [257, 1024, MAX_ADMISSION_COMMANDS] {
                 let descriptor = build(count, 0);
                 let bytes = descriptor.encode().unwrap();
                 let recovered = Descriptor::decode(&bytes).unwrap();
@@ -567,7 +567,7 @@ mod tests {
                 assert_eq!(recovered.wire_order, descriptor.wire_order);
                 assert_eq!(recovered.encode().unwrap(), bytes);
             }
-            let oversized = build(fgit_authority::MAX_REF_COMMANDS, 1000);
+            let oversized = build(MAX_ADMISSION_COMMANDS, 1000);
             let expected_bytes = encode_body(&oversized.request).unwrap().len()
                 + 3 * size_of::<u32>()
                 + oversized.wire_order.len() * size_of::<u16>();
@@ -582,6 +582,109 @@ mod tests {
             let small_twin = build(256, 1000);
             assert!(Descriptor::decode(&small_twin.encode().unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn large_descriptors_roundtrip_and_reproduce_high_index_child_identities() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let oid = GitOid::from_hex(format, &"1".repeat(format.digest_len() * 2)).unwrap();
+            for count in [257, MAX_ADMISSION_COMMANDS] {
+                let commands = (0..count)
+                    .map(|index| RefCommand {
+                        name: RefName::try_new(format!("refs/tags/release-{index:04}").as_bytes())
+                            .unwrap(),
+                        expected_old: ExpectedOld::Absent,
+                        proposed_new: ProposedNew::Update(oid),
+                        force: false,
+                    })
+                    .collect();
+                let descriptor = Descriptor {
+                    request: SemanticRequest::build(
+                        fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                        format,
+                        false,
+                        commands,
+                        vec![PushOption::new(b"ordered-option".to_vec()).unwrap()],
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                    wire_order: (0..count).rev().collect(),
+                };
+                let bytes = descriptor.encode().unwrap();
+                assert!(bytes.len() < MAX_BYTES);
+                let decoded = Descriptor::decode(&bytes).unwrap();
+                assert_eq!(decoded.request, descriptor.request);
+                assert_eq!(decoded.wire_order, descriptor.wire_order);
+                assert_eq!(decoded.encode().unwrap(), bytes);
+                let context = AdmissionContext {
+                    head_key: fgit_authority::HeadKey::new(b"fg/head/large-descriptor".to_vec())
+                        .unwrap(),
+                    tenant_id: fgit_types::TenantId::from_bytes([1; 16]),
+                    repository_id: fgit_types::RepositoryId::from_bytes([2; 16]),
+                    principal_id: fgit_types::PrincipalId::from_bytes([3; 16]),
+                    idempotency_key: fgit_authority::IdempotencyKey::new(
+                        b"same-session-key".to_vec(),
+                    )
+                    .unwrap(),
+                    object_format: format,
+                };
+                for index in [0, 64, 255, count - 1] {
+                    let child = decoded.child_attempt(&context, index).unwrap();
+                    let expected = SealAttempt {
+                        tenant_id: context.tenant_id,
+                        repository_id: context.repository_id,
+                        authenticated_principal_id: context.principal_id,
+                        idempotency_key: crate::non_atomic_key(&context.idempotency_key, index)
+                            .unwrap(),
+                        request: SemanticRequest::build(
+                            fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                            format,
+                            false,
+                            vec![descriptor.request.ref_commands()[count - 1 - index].clone()],
+                            descriptor.request.push_options().to_vec(),
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                    };
+                    assert_eq!(child, expected);
+                    assert_eq!(child.derive().unwrap(), expected.derive().unwrap());
+                    assert_eq!(
+                        super::super::non_atomic_command_key(&context.idempotency_key, index)
+                            .unwrap(),
+                        expected.idempotency_key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_larger_command_ceiling_does_not_relax_the_descriptor_byte_budget() {
+        let commands = (0..1024)
+            .map(|index| RefCommand {
+                name: RefName::try_new(
+                    format!("refs/tags/{}-{index:04}", "x".repeat(1009)).as_bytes(),
+                )
+                .unwrap(),
+                expected_old: ExpectedOld::Absent,
+                proposed_new: ProposedNew::Delete,
+                force: false,
+            })
+            .collect();
+        let descriptor = Descriptor {
+            request: SemanticRequest::build(
+                fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                GitHashAlgorithm::Sha1,
+                false,
+                commands,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+            wire_order: (0..1024).collect(),
+        };
+        descriptor.validate().unwrap();
+        assert!(descriptor.encode().is_err());
     }
 
     #[test]

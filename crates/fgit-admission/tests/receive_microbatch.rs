@@ -5,6 +5,8 @@
 //! store. The validator declares an object catalog; it does not prove native
 //! object ingestion, transport interoperability, durable restart or throughput.
 
+#[path = "receive_microbatch/chunks.rs"]
+mod chunks;
 #[path = "receive_microbatch/continuation.rs"]
 mod continuation;
 #[path = "receive_microbatch/index_race.rs"]
@@ -206,8 +208,13 @@ struct Rival {
 /// window. An optional dropped response occurs after the real atomic mutation.
 struct Authority {
     inner: MemoryAuthorityStore,
+    immutable_writes: AtomicUsize,
     publications: AtomicUsize,
+    committed_publications: AtomicUsize,
     drop_response: AtomicBool,
+    drop_response_at: AtomicUsize,
+    interrupt_read_after_commit: AtomicUsize,
+    rival_at: AtomicUsize,
     rival: Mutex<Option<Rival>>,
     index_rival: Mutex<Option<(ImmutableKey, Rival)>>,
 }
@@ -252,6 +259,7 @@ impl AsyncAuthorityStore for Authority {
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        self.immutable_writes.fetch_add(1, Ordering::SeqCst);
         std::future::ready(self.inner.put_if_absent(key, body))
     }
     fn read_immutable(
@@ -286,6 +294,15 @@ impl AsyncAuthorityStore for Authority {
         _cx: &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        let interrupt_after = self.interrupt_read_after_commit.load(Ordering::SeqCst);
+        if interrupt_after != 0
+            && self.committed_publications.load(Ordering::SeqCst) >= interrupt_after
+        {
+            self.interrupt_read_after_commit.store(0, Ordering::SeqCst);
+            return std::future::ready(Err(AuthorityFailure::Ambiguous(
+                AmbiguityReason::Cancelled,
+            )));
+        }
         std::future::ready(self.inner.read_head(key))
     }
     fn compare_exchange_head(
@@ -318,20 +335,28 @@ impl AsyncAuthorityStore for Authority {
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
-        self.publications.fetch_add(1, Ordering::SeqCst);
-        let rival = self.rival.lock().unwrap().take();
+        let attempt = self.publications.fetch_add(1, Ordering::SeqCst) + 1;
+        let rival = if attempt == self.rival_at.load(Ordering::SeqCst) {
+            self.rival.lock().unwrap().take()
+        } else {
+            None
+        };
         if let Some(rival) = rival {
             self.run_rival(rival);
         }
         let result = self
             .inner
             .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness);
-        if matches!(&result, Ok(CasOutcome::Committed(_)))
-            && self.drop_response.swap(false, Ordering::SeqCst)
-        {
-            return std::future::ready(Err(AuthorityFailure::Ambiguous(
-                AmbiguityReason::Cancelled,
-            )));
+        if matches!(&result, Ok(CasOutcome::Committed(_))) {
+            let committed = self.committed_publications.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.drop_response.swap(false, Ordering::SeqCst)
+                || self.drop_response_at.load(Ordering::SeqCst) == committed
+            {
+                self.drop_response_at.store(0, Ordering::SeqCst);
+                return std::future::ready(Err(AuthorityFailure::Ambiguous(
+                    AmbiguityReason::Cancelled,
+                )));
+            }
         }
         std::future::ready(result)
     }
@@ -429,8 +454,13 @@ fn setup(
     (
         Authority {
             inner,
+            immutable_writes: AtomicUsize::new(0),
             publications: AtomicUsize::new(0),
+            committed_publications: AtomicUsize::new(0),
             drop_response: AtomicBool::new(false),
+            drop_response_at: AtomicUsize::new(0),
+            interrupt_read_after_commit: AtomicUsize::new(0),
+            rival_at: AtomicUsize::new(1),
             rival: Mutex::new(None),
             index_rival: Mutex::new(None),
         },

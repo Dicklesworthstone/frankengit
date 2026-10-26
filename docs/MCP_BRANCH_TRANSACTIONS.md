@@ -1,6 +1,6 @@
 # Atomic branch transactions through MCP
 
-`frankengit_branch_transaction` applies 1..64 distinct branch creations,
+`frankengit_branch_transaction` applies 1..4,096 distinct branch creations,
 fast-forward updates and deletions as one native atomic transaction. It is
 available only under the existing `--allow-source-writes` grant. That grant
 does not permit source reads, outcome queries, review, or protection changes.

@@ -197,8 +197,9 @@ impl OneNode {
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         control.checkpoint()?;
         if max_refs > MAX_IMPORT_REFS {
-            return Err(LooseGitImportRefusal::RefLimitExceeded {
-                limit: MAX_IMPORT_REFS,
+            return Err(LooseGitImportRefusal::RefLimitInvalid {
+                requested: max_refs,
+                maximum: MAX_IMPORT_REFS,
             });
         }
         profile::validate_limit(maximum_bytes)?;

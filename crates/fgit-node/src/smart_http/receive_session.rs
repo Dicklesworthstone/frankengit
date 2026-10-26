@@ -31,7 +31,8 @@ use crate::{
 impl OneNode {
     /// Derive the key needed to recover one non-atomic receive command.
     ///
-    /// The index is zero-based ORIGINAL wire order and must be below 64.
+    /// The index is zero-based ORIGINAL wire order and must be below
+    /// [`fgit_admission::MAX_ADMISSION_COMMANDS`].
     /// This is a pure selector over the admission lowerer's existing identity
     /// rule, not a credential, new transaction, or storage operation. A local
     /// client can then call `recover_transaction_in` with this key under the

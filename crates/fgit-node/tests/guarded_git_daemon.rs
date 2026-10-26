@@ -30,6 +30,8 @@ mod absent_delete;
 mod command_limits;
 #[path = "guarded_git_daemon/continuous.rs"]
 mod continuous;
+#[path = "guarded_git_daemon/limits.rs"]
+mod limits;
 #[path = "guarded_git_daemon/microbatch.rs"]
 mod microbatch;
 #[path = "guarded_git_daemon/push_options.rs"]
@@ -191,7 +193,10 @@ fn records(socket: &mut TcpStream) -> Vec<Vec<u8>> {
         if fatal {
             return rows;
         }
-        assert!(rows.len() <= 100, "bounded fixture response");
+        assert!(
+            rows.len() <= fgit_admission::MAX_ADMISSION_COMMANDS + 2,
+            "bounded fixture response"
+        );
     }
 }
 fn launch(

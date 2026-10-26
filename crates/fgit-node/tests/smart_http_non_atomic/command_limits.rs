@@ -30,7 +30,7 @@ pub(super) fn assert_limit_report(output: &[u8], limit: usize) {
     assert!(message.contains(&format!(
         "split the push into batches of at most {limit} commands"
     )));
-    assert!(message.ends_with("no ref decision was attempted\n"));
+    assert!(message.ends_with("this invocation stopped before admission\n"));
     assert!(output.ends_with(b"0000"));
 }
 

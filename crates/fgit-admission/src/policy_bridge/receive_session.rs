@@ -49,7 +49,7 @@ pub fn non_atomic_command_key(
     original: &IdempotencyKey,
     index: usize,
 ) -> Result<IdempotencyKey, AdmissionError> {
-    let limit = AdmissionLimits::default().max_commands;
+    let limit = crate::MAX_ADMISSION_COMMANDS;
     if index >= limit {
         return Err(AdmissionError::CommandLimitExceeded { limit });
     }
@@ -389,7 +389,7 @@ mod recovery_selector_tests {
         for bytes in [Vec::new(), b"opaque\0key\n\xff".to_vec(), vec![b'k'; 256]] {
             let original = IdempotencyKey::new(bytes).unwrap();
             let mut previous = None;
-            for index in 0..fgit_authority::MAX_REF_COMMANDS {
+            for index in 0..crate::MAX_ADMISSION_COMMANDS {
                 let selected = non_atomic_command_key(&original, index).unwrap();
                 assert_eq!(selected, crate::non_atomic_key(&original, index).unwrap());
                 assert_ne!(selected, original);
@@ -403,13 +403,14 @@ mod recovery_selector_tests {
     fn an_out_of_range_command_is_not_coerced_into_a_different_key() {
         let key = IdempotencyKey::new(b"original".to_vec()).unwrap();
         for index in [
-            fgit_authority::MAX_REF_COMMANDS,
-            fgit_authority::MAX_REF_COMMANDS + 1,
+            crate::MAX_ADMISSION_COMMANDS,
+            crate::MAX_ADMISSION_COMMANDS + 1,
             usize::MAX,
         ] {
             assert!(matches!(
                 non_atomic_command_key(&key, index),
-                Err(AdmissionError::CommandLimitExceeded { limit }) if limit == fgit_authority::MAX_REF_COMMANDS
+                Err(AdmissionError::CommandLimitExceeded { limit })
+                    if limit == crate::MAX_ADMISSION_COMMANDS
             ));
         }
     }

@@ -1,6 +1,6 @@
 # Atomic multi-branch HTTP transactions
 
-`POST {REPO_URL}/api/v1/source/branches/transaction` accepts 1..64 distinct
+`POST {REPO_URL}/api/v1/source/branches/transaction` accepts 1..4,096 distinct
 branch changes and invokes `OneNode::admit_branch_transaction_durable_in` once.
 All changes publish together or none do. It is not a loop of independent writes.
 The existing single-branch and atomic rename endpoints remain unchanged.
@@ -40,10 +40,11 @@ curl --fail-with-body --header @/secure/branch-writer.headers \
 ```
 
 One complete fixed-length or chunked form must arrive before any authority work.
-The body is bounded to 256 KiB and 65 fields, including the one object format;
+The body is bounded to 256 KiB and 4,097 fields, including the one object format;
 reference names are at most 4096 decoded bytes. The native command, wire, object,
 ancestry, quota and request limits still apply. A limit refusal never truncates
-an operation list into a smaller successful transaction.
+an operation list into a smaller successful transaction. The byte envelope can
+bind before the shared 4,096-command ceiling.
 
 ## Publication, outcomes and retry
 

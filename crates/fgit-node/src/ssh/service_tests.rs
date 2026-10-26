@@ -390,7 +390,7 @@ fn ssh_receive_command_limit_reports_counts_and_accepts_the_boundary_twin() {
                     "ERR receive command count exceeded: observed at least 3; maximum 2;"
                 ));
                 assert!(message.contains("split the push into batches of at most 2 commands"));
-                assert!(message.ends_with("no ref decision was attempted\n"));
+                assert!(message.ends_with("this invocation stopped before admission\n"));
                 assert_eq!(input.position() as usize, input.get_ref().len() - 4);
                 assert_eq!(
                     node.runtime()

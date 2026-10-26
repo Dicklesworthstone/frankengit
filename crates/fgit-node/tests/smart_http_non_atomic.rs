@@ -491,7 +491,7 @@ fn the_complete_command_limit_is_checked_before_any_command_is_admitted() {
     let scratch = Scratch::new();
     let node = start(config(&scratch, GitHashAlgorithm::Sha1), false);
     let (oid, zero, pack) = blob_pack(GitHashAlgorithm::Sha1);
-    let names: Vec<_> = (0..=fgit_authority::MAX_REF_COMMANDS)
+    let names: Vec<_> = (0..=fgit_admission::MAX_ADMISSION_COMMANDS)
         .map(|n| format!("refs/tags/ref-{n:05}"))
         .collect();
     let commands: Vec<_> = names
@@ -510,16 +510,28 @@ fn the_complete_command_limit_is_checked_before_any_command_is_admitted() {
         &mut output,
     )
     .unwrap_err();
-    let NodeSmartHttpRefusal::ReceiveInterrupted(error) = error else {
-        panic!("session planning preserves its typed failure")
+    let NodeSmartHttpRefusal::Rpc(error) = error else {
+        panic!("the shared receive ceiling must refuse before session admission");
     };
-    assert!(error.session().is_none());
-    assert!(error.completed_commands().is_empty());
     assert!(matches!(
-        error.admission_error(),
-        fgit_admission::AdmissionError::CommandLimitExceeded { limit } if *limit == fgit_authority::MAX_REF_COMMANDS
+        *error,
+        fgit_wire::smart_http::rpc::RpcError::Receive(
+            fgit_wire::receive::ReceiveError::TooManyCommands { limit }
+        ) if limit == fgit_admission::MAX_ADMISSION_COMMANDS
     ));
-    command_limits::assert_limit_report(&output, fgit_authority::MAX_REF_COMMANDS);
+    assert!(matches!(
+        node.runtime()
+            .block_on(node.recover_receive_session_in(
+                &node.request_context(),
+                &LoopbackReceiveSession::authenticated(
+                    PrincipalId::from_bytes([0xd3; 16]),
+                    IdempotencyKey::new(b"too-many-refs".to_vec()).unwrap(),
+                ),
+            ))
+            .unwrap(),
+        fgit_admission::policy_bridge::receive_session::recovery::SessionRecovery::NotObserved
+    ));
+    command_limits::assert_limit_report(&output, fgit_admission::MAX_ADMISSION_COMMANDS);
     assert_eq!(state(&node), before);
     node.shutdown().unwrap();
 }

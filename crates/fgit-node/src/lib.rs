@@ -4418,16 +4418,20 @@ impl std::fmt::Debug for PushQuota {
     }
 }
 
-/// The operator's receive envelope, with its push-option bounds narrowed to
-/// what one sealed request can carry.
+/// The operator's receive envelope, narrowed to what one sealed request can
+/// carry while preserving any stricter operator limits.
 ///
 /// The wire parser and the seal bound push options independently
 /// (`ReceiveLimits` allows 4,096-byte options, `fgit_authority::PushOption`
 /// 1,024). Without this narrowing an option between the two would be parsed
 /// and its pack read, only for sealing to refuse it after quarantine. Every
 /// receive transport reads the node's one envelope, so the narrowing happens
-/// once, here.
+/// once, here. A non-atomic session also binds its whole command list before
+/// publishing any child, so its command count must fit the same sealed format.
 fn sealable_receive_limits(mut limits: ReceiveLimits) -> ReceiveLimits {
+    limits.max_commands = limits
+        .max_commands
+        .min(fgit_admission::MAX_ADMISSION_COMMANDS);
     limits.max_push_options = limits
         .max_push_options
         .min(fgit_authority::MAX_PUSH_OPTIONS);

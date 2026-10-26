@@ -71,6 +71,14 @@ pub mod microbatch;
 pub mod policy_bridge;
 mod projection_failure;
 
+/// Largest ref command list admitted by the current request and recovery format.
+///
+/// Atomic receives and imports seal this list as one transaction. A non-atomic
+/// session seals one transaction per command, but its whole-session retry
+/// binding still uses the same bounded authority request vocabulary. Physical
+/// publication chunks are independently bounded by [`microbatch::MAX_BATCH_DECISIONS`].
+pub const MAX_ADMISSION_COMMANDS: usize = fgit_authority::MAX_REF_COMMANDS;
+
 // Non-atomic lowering preserves the ordered options in each independently
 // sealed child. Keep its aggregate allocation within the former 64-command
 // envelope even when many short ref commands are admitted (p9b5).
@@ -81,9 +89,9 @@ const MAX_SESSION_OPTION_COPY_BYTES: usize = 16 * 1024 * 1024;
 pub struct AdmissionLimits {
     /// Largest receive command list this layer lowers into transaction intents.
     ///
-    /// The authority request bound also applies to the whole-session retry
-    /// binding of a non-atomic push. Per-command publication is microbatched,
-    /// but does not bypass that single canonical request envelope.
+    /// At most [`MAX_ADMISSION_COMMANDS`], matching the authority's semantic
+    /// request and whole-session retry binding. Non-atomic publication uses
+    /// bounded chunks without changing this finite intake limit.
     pub max_commands: usize,
     /// Largest number of re-plans after losing a head compare-and-exchange.
     pub max_cas_replans: usize,
@@ -92,7 +100,7 @@ pub struct AdmissionLimits {
 impl Default for AdmissionLimits {
     fn default() -> Self {
         Self {
-            max_commands: fgit_authority::MAX_REF_COMMANDS,
+            max_commands: MAX_ADMISSION_COMMANDS,
             max_cas_replans: 16,
         }
     }
@@ -101,7 +109,7 @@ impl Default for AdmissionLimits {
 impl AdmissionLimits {
     const fn validate(self) -> Result<(), AdmissionError> {
         if self.max_commands == 0
-            || self.max_commands > fgit_authority::MAX_REF_COMMANDS
+            || self.max_commands > MAX_ADMISSION_COMMANDS
             || self.max_cas_replans == 0
         {
             return Err(AdmissionError::InvalidLimit);

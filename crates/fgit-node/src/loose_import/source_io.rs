@@ -294,7 +294,10 @@ pub(super) fn read_direct_refs(
         control,
     )?;
     if refs.len() > max_refs {
-        return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
+        return Err(LooseGitImportRefusal::RefLimitExceeded {
+            observed: refs.len(),
+            limit: max_refs,
+        });
     }
     Ok(refs)
 }
@@ -415,7 +418,10 @@ pub(super) fn read_packed_refs(
             )));
         }
         if refs.len() > max_refs {
-            return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
+            return Err(LooseGitImportRefusal::RefLimitExceeded {
+                observed: refs.len(),
+                limit: max_refs,
+            });
         }
     }
     Ok(refs)
@@ -475,7 +481,10 @@ pub(super) fn collect_loose_refs(
         let identity = parse_direct_ref(&path, &bytes, object_format)?;
         refs.insert(name, identity);
         if refs.len() > max_refs {
-            return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
+            return Err(LooseGitImportRefusal::RefLimitExceeded {
+                observed: refs.len(),
+                limit: max_refs,
+            });
         }
     }
     Ok(())

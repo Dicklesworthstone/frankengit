@@ -168,9 +168,13 @@ and current policy: a later race cannot turn the advertisement into authority.
 
 `admit_receive_session_durable_in` owns all command decisions. Non-atomic pushes
 bind their complete semantics and each wire-order child key before publication,
-and persist the existing recovery descriptor. Continuation retains the exact
-validation witness and advances only across this session's verified preceding
-committed or refused decision. Atomic pushes remain one sealed transaction.
+and persist the existing recovery descriptor. Continuation retains the
+validation witness and advances across complete verified publications belonging
+to this session, with every command's own terminal identity preserved. A retry
+recovers already decided commands and publishes only the remainder. Staging
+failure before a group's CAS publishes none of that group; an interruption
+between groups does not undo earlier decisions. Atomic pushes remain one
+sealed transaction.
 
 ## Terminal decisions versus transport errors
 

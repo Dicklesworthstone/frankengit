@@ -1,6 +1,6 @@
 # Atomic native branch transactions
 
-`fg branch transaction` publishes up to 64 distinct branch changes through one
+`fg branch transaction` publishes up to 4,096 distinct branch changes through one
 ordinary atomic receive admission, one sealed request and one authority-head
 publication. It does not loop over separate branch commands. This extends the
 native branch bootstrap surface for coordinated branch creation, advancement

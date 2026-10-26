@@ -143,9 +143,16 @@ pub enum LooseGitImportRefusal {
     /// An annotated tag reachable from a source ref lacked exactly one object
     /// edge.
     TagObjectMissing(GitOid),
+    /// The caller requested a staging ref bound above this implementation's
+    /// hard profile. No source ref count has been observed.
+    RefLimitInvalid { requested: usize, maximum: usize },
     /// The source exceeded the explicit direct-ref bound before more state was
     /// allocated.
-    RefLimitExceeded { limit: usize },
+    RefLimitExceeded {
+        /// Unique refs observed when traversal first exceeded the bound.
+        observed: usize,
+        limit: usize,
+    },
     /// The source exceeded the explicit reachable-object bound before another
     /// object was opened.
     ObjectLimitExceeded { limit: usize },
@@ -320,13 +327,14 @@ impl Display for LooseGitImportRefusal {
                     "reachable annotated tag {identity} has no unique object edge"
                 )
             }
-            Self::RefLimitExceeded { limit } => {
-                write!(
-                    formatter,
-                    "source has at least {} refs; this import admits at most {limit}; import a smaller ref set or push refs in bounded sessions",
-                    limit.saturating_add(1)
-                )
-            }
+            Self::RefLimitInvalid { requested, maximum } => write!(
+                formatter,
+                "requested source import ref limit {requested} exceeds supported staging maximum {maximum}; select a limit no greater than {maximum}; this invocation stopped before reading source refs"
+            ),
+            Self::RefLimitExceeded { observed, limit } => write!(
+                formatter,
+                "source import observed {observed} refs; limit is {limit}; reduce the source ref set or transfer refs in bounded receive requests; this invocation stopped before admission"
+            ),
             Self::ObjectLimitExceeded { limit } => {
                 write!(formatter, "reachable object count exceeds {limit}")
             }
@@ -385,6 +393,7 @@ impl Error for LooseGitImportRefusal {
             | Self::ObjectGraph { .. }
             | Self::CommitTreeMissing(_)
             | Self::TagObjectMissing(_)
+            | Self::RefLimitInvalid { .. }
             | Self::RefLimitExceeded { .. }
             | Self::ObjectLimitExceeded { .. }
             | Self::TotalObjectBytesExceeded { .. }

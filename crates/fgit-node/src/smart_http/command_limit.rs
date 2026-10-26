@@ -39,7 +39,7 @@ pub(super) fn message(limit: usize) -> Vec<u8> {
     format!(
         "ERR receive command count exceeded: observed at least {}; maximum {limit}; \
          split the push into batches of at most {limit} commands; \
-         no ref decision was attempted\n",
+         this invocation stopped before admission\n",
         limit.saturating_add(1),
     )
     .into_bytes()
