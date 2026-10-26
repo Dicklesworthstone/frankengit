@@ -14,7 +14,10 @@
     <p>Export a pinned snapshot or import a full Git bundle. Git objects and direct refs are transferred; issues, reviews, credentials and the default HEAD are not. Every publication uses the existing native authority.</p>
     <section aria-label="Connection">
       <label>Access token<input id="transfer-token" type="password" maxlength="64" autocomplete="off" spellcheck="false"></label>
+      <label><input id="transfer-recovery-only" type="checkbox">Recovery only, including a replacement credential</label>
+      <label>Original principal ID (independently known)<input id="transfer-original-principal" maxlength="32" autocomplete="off" spellcheck="false" disabled></label>
       <button id="transfer-connect" type="button">Connect</button><button id="transfer-disconnect" type="button">Disconnect</button>
+      <p id="transfer-connection-mode" class="hint">Disconnected. No credential is active.</p>
       <label>Repository object format<select id="transfer-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
       <button id="select-target" type="button">Select target snapshot</button><button id="cancel-transfer-read" type="button">Cancel read</button>
       <p class="hint">Source-read is required for selection/export, source-write for import/fetch, and outcomes-read for recovery. Deployment switches and native policy still apply. Tokens remain in page memory only. Use HTTPS outside trusted loopback.</p>
@@ -59,7 +62,8 @@
     </section>
     <section aria-labelledby="restore-heading">
       <h2 id="restore-heading">Recover an interrupted transfer</h2>
-      <p>Connect the original valid credential, then restore its saved receipt. A successful ref listing is not required for recovery. Restore checks the exact request commitment but never dispatches it. Existing requests retain their original bytes and key even when a newer preflight would reject those bytes; recovery is not a fresh verification claim. Keep the credential bound to the original principal.</p>
+      <p>Connect the original valid credential, then restore its saved receipt. If that credential has been revoked, choose Recovery only and enter the original principal ID from an independently retained record before connecting a replacement credential. The server must authenticate that same principal on every outcome response, including absence. The receipt does not select or authenticate the principal for you.</p>
+      <p>A successful ref listing is not required for recovery. Restore checks the exact request commitment but never dispatches it. Existing requests retain their original bytes and key even when a newer preflight would reject those bytes; recovery is not a fresh verification claim. Recovery-only connections can check the original outcome and save its receipt, but cannot read source, export bundles, prepare, discard or resend transfers. The restriction remains after a terminal result until an explicit ordinary reconnect.</p>
       <label>Original receipt (up to 24 MiB)<input id="receipt-file" type="file" accept=".json,application/json"></label>
       <button id="restore-transfer" type="button">Restore original request — do not send</button>
     </section>

@@ -43,7 +43,8 @@ export function intakeExpectations(algorithm, sha256, pins, encoding, exact) {
 }
 export function mountTransfers(doc, options = {}) {
   const client = options.client ?? new TransferClient({ href: options.href ?? globalThis.location.href });
-  const ids = ['transfer-token','transfer-connect','transfer-disconnect','transfer-format','select-target','transfer-selection','transfer-status','cancel-transfer-read',
+  const ids = ['transfer-token','transfer-connect','transfer-disconnect','transfer-recovery-only','transfer-original-principal','transfer-connection-mode',
+    'transfer-format','select-target','transfer-selection','transfer-status','cancel-transfer-read',
     'export-bundle','export-info','download-bundle','bundle-file','bundle-sha256','bundle-pins','bundle-pin-encoding','bundle-exact-refs','load-bundle','bundle-info','bundle-refs','mapping-rows','stage-import','stage-fetch',
     'pending-transfer','confirm-transfer','send-transfer','recover-transfer','discard-transfer','save-transfer','receipt-file','restore-transfer'];
   const c = Object.fromEntries(ids.map(id => { const node = doc.getElementById(id); if (!node) throw new Error(`Missing transfer control ${id}`); return [id, node]; }));
@@ -62,24 +63,37 @@ export function mountTransfers(doc, options = {}) {
     c['bundle-file'].value = ''; c['receipt-file'].value = ''; c['confirm-transfer'].checked = false; releaseDownloads();
   }
   function render() {
-    const p = client.pending, connected = client.connected, selected = client.selection;
-    c['transfer-connect'].disabled = busy; c['transfer-format'].disabled = busy || !connected || !!p;
-    c['select-target'].disabled = busy || !connected || !!p;
-    for (const id of ['export-bundle','bundle-file','bundle-sha256','bundle-pins','bundle-pin-encoding','bundle-exact-refs','load-bundle']) c[id].disabled = busy || !connected || !!p || !selected;
-    c['download-bundle'].disabled = busy || !connected || !exportSummary || !client.exported || client.exportVerification?.object_closure_verified !== true;
-    c['stage-import'].disabled = busy || !connected || !!p || !summary || client.bundleVerification?.object_closure_verified !== true || summary.refs.length > MAPPING_LIMIT;
-    c['stage-fetch'].disabled = busy || !connected || !!p || !summary || client.bundleVerification?.object_closure_verified !== true || !mappings.length;
-    for (const id of ['send-transfer','recover-transfer']) c[id].disabled = busy || !connected || !p;
-    c['confirm-transfer'].disabled = busy || !connected || !p;
-    c['discard-transfer'].disabled = busy || !p || p.sent || p.exported;
+    const p = client.pending, connected = client.connected, recovering = client.recoveryOnly, ordinary = connected && !recovering, selected = client.selection;
+    c['transfer-connect'].disabled = busy; c['transfer-recovery-only'].disabled = busy;
+    c['transfer-original-principal'].disabled = busy || !c['transfer-recovery-only'].checked;
+    c['transfer-original-principal'].required = c['transfer-recovery-only'].checked;
+    c['transfer-connection-mode'].textContent = !connected ? 'Disconnected. No credential is active.' : recovering
+      ? `RECOVERY ONLY: check the original outcome for principal ${client.recoveryPrincipal}. The server must authenticate that identity. Reconnect explicitly for ordinary work.`
+      : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is pressed.';
+    c['transfer-format'].disabled = busy || !ordinary || !!p;
+    c['select-target'].disabled = busy || !ordinary || !!p;
+    for (const id of ['export-bundle','bundle-file','bundle-sha256','bundle-pins','bundle-pin-encoding','bundle-exact-refs','load-bundle']) c[id].disabled = busy || !ordinary || !!p || !selected;
+    c['download-bundle'].disabled = busy || !ordinary || !exportSummary || !client.exported || client.exportVerification?.object_closure_verified !== true;
+    c['stage-import'].disabled = busy || !ordinary || !!p || !summary || client.bundleVerification?.object_closure_verified !== true || summary.refs.length > MAPPING_LIMIT;
+    c['stage-fetch'].disabled = busy || !ordinary || !!p || !summary || client.bundleVerification?.object_closure_verified !== true || !mappings.length;
+    c['send-transfer'].disabled = busy || !ordinary || !p;
+    c['recover-transfer'].disabled = busy || !connected || !p;
+    c['confirm-transfer'].disabled = busy || !ordinary || !p;
+    c['discard-transfer'].disabled = busy || recovering || !p || p.sent || p.exported;
     c['save-transfer'].disabled = busy || !p;
     c['restore-transfer'].disabled = busy || !connected || !!p;
     c['receipt-file'].disabled = busy || !connected || !!p;
-    c['pending-transfer'].textContent = p ? (connected ? visible(JSON.stringify(p, null, 2)) : 'An unresolved request is retained privately. Reconnect the original credential to inspect its effects, or save its recovery receipt before leaving.') : 'No outstanding publication.';
+    c['pending-transfer'].textContent = p ? (connected ? visible(JSON.stringify(p, null, 2)) : 'An unresolved request is retained privately. Reconnect the original credential or choose recovery-only access for its original principal. Save its recovery receipt before leaving.') : 'No outstanding publication.';
     c['send-transfer'].textContent = p?.sent ? 'Retry identical transfer' : 'Send prepared transfer';
-    for (const row of mappings) for (const control of [row.destination, row.encoding, row.old, row.remove]) control.disabled = busy || !!p;
+    for (const row of mappings) for (const control of [row.destination, row.encoding, row.old, row.remove]) control.disabled = busy || !ordinary || !!p;
   }
-  async function perform(work, settlement = false) {
+  function requireOrdinary() {
+    if (client.recoveryOnly) throw new Error('Recovery-only connection cannot read, export bundles, prepare, discard or resend transfers. Keep the original receipt and check its outcome.');
+  }
+  async function perform(work, settlement = false, kind = 'ordinary') {
+    if (client.recoveryOnly && !['connect', 'recover', 'restore'].includes(kind)) {
+      status('Recovery-only connection permits only original outcome lookup and receipt retention. Reconnect explicitly for ordinary work.'); render(); return;
+    }
     if (busy) return; busy = true; const started = generation, originalSession = session; render();
     const current = () => originalSession === session && (settlement || started === generation);
     try { await work(current); }
@@ -97,7 +111,7 @@ export function mountTransfers(doc, options = {}) {
     setTimeout(() => { if (urls.delete(url)) URL.revokeObjectURL(url); }, 30_000);
   }
   function addMapping(source) {
-    if (busy || client.pending || !summary || !client.connected) return;
+    if (busy || client.pending || !summary || !client.connected || client.recoveryOnly) return;
     try {
       if (mappings.length === MAPPING_LIMIT) throw new Error(`At most ${MAPPING_LIMIT} mappings are supported.`);
       if (!summary.refs.some(r => r.ref_hex === source)) throw new Error('Source is no longer in this bundle.');
@@ -115,7 +129,7 @@ export function mountTransfers(doc, options = {}) {
         control.addEventListener('input', () => { c['confirm-transfer'].checked = false; });
       }
       row.append(remove); c['mapping-rows'].append(row); mappings.push(entry);
-      remove.addEventListener('click', () => { if (busy || client.pending) return; mappings = mappings.filter(r => r !== entry); row.remove(); c['confirm-transfer'].checked = false; render(); });
+      remove.addEventListener('click', () => { if (busy || client.pending || client.recoveryOnly) return; mappings = mappings.filter(r => r !== entry); row.remove(); c['confirm-transfer'].checked = false; render(); });
       c['confirm-transfer'].checked = false; render(); status('Mapping added without a destination or old-tip assumption. Complete both explicitly.');
     } catch (error) { status(error.message); }
   }
@@ -136,14 +150,23 @@ export function mountTransfers(doc, options = {}) {
     generation++; session++; client.disconnect(); c['transfer-token'].value = ''; clearViews(); clearPins(); render();
     status(client.pending ? 'Disconnected. Original unresolved request remains in memory; save its receipt before leaving.' : 'Disconnected. Credentials, bundle bytes and visible data cleared.');
   }
-  c['transfer-connect'].addEventListener('click', () => perform(async current => {
-    const token = c['transfer-token'].value; c['transfer-token'].value = ''; clearViews(); clearPins();
-    await client.connect(token); if (!current()) return;
-    status(client.pending ? 'Original credential connected. Recover or retry the retained request.' : 'Connected. Select the target repository snapshot before loading or exporting a bundle.');
-  }));
+  c['transfer-connect'].addEventListener('click', () => {
+    const token = c['transfer-token'].value; c['transfer-token'].value = '';
+    const connection = c['transfer-recovery-only'].checked
+      ? { recoveryOnly: true, originalPrincipal: c['transfer-original-principal'].value } : {};
+    return perform(async current => {
+      clearViews(); clearPins(); await client.connect(token, connection); if (!current()) return;
+      status(client.recoveryOnly
+        ? 'Connected locally for recovery only. Restore the original receipt or check the retained request. The server must authenticate the independently selected original principal; no transfer was sent.'
+        : client.pending ? 'Original credential connected. Recover or retry the retained request.' : 'Connected. Select the target repository snapshot before loading or exporting a bundle.');
+    }, false, 'connect');
+  });
+  c['transfer-recovery-only'].addEventListener('change', render);
   c['transfer-disconnect'].addEventListener('click', disconnect);
   c['cancel-transfer-read'].addEventListener('click', () => {
-    generation++; client.cancel(); clearViews(); render(); status('Read cancelled. An outstanding publication, if any, is unchanged. Select a snapshot again for new work.');
+    generation++; client.cancel(); clearViews(); render(); status(client.recoveryOnly
+      ? 'Read cancelled. The original request is unchanged and recovery-only mode remains active.'
+      : 'Read cancelled. An outstanding publication, if any, is unchanged. Select a snapshot again for new work.');
   });
   c['transfer-format'].addEventListener('input', () => { generation++; client.cancel(); clearViews(); render(); status('Select the chosen hash domain explicitly.'); });
   c['select-target'].addEventListener('click', () => perform(async current => {
@@ -158,7 +181,7 @@ export function mountTransfers(doc, options = {}) {
     status('Complete snapshot-pinned export and reachable Git history verified. Download is ready; no forge state or default HEAD is transferred. Use the export-verification page for a complete reference-inventory audit.');
   }));
   c['download-bundle'].addEventListener('click', () => {
-    try { if (busy || !exportSummary || client.exportVerification?.object_closure_verified !== true) throw new Error('No stable verified export is ready.'); download(client.exportBytes(), 'repository.bundle', 'application/x-git-bundle'); status('Bundle offered for download. Verify the saved file before discarding your other copy.'); }
+    try { requireOrdinary(); if (busy || !exportSummary || client.exportVerification?.object_closure_verified !== true) throw new Error('No stable verified export is ready.'); download(client.exportBytes(), 'repository.bundle', 'application/x-git-bundle'); status('Bundle offered for download. Verify the saved file before discarding your other copy.'); }
     catch (error) { status(error.message); }
   });
   c['bundle-file'].addEventListener('change', () => { generation++; client.invalidateBundle(); clearBundle(); c['confirm-transfer'].checked = false; render(); status('File selection changed. Load and inspect these bytes explicitly.'); });
@@ -201,13 +224,16 @@ export function mountTransfers(doc, options = {}) {
     status(`Canonical ${result.outcome}: ${result.tx}. Delivery acknowledgement is not implied. Select a fresh snapshot explicitly for further work.`);
   }, true));
   c['recover-transfer'].addEventListener('click', () => perform(async current => {
+    c['confirm-transfer'].checked = false;
     const result = await client.recover(); if (!current()) return;
-    if (result.terminal) { clearViews(); status(`Recovered canonical ${result.outcome}: ${result.tx}.`); }
-    else status(`Still unresolved: ${result.state}. Absence is not proof of non-commit. Keep the original request.`);
-  }, true));
-  c['discard-transfer'].addEventListener('click', () => { try { client.discardUnsent(); c['confirm-transfer'].checked = false; render(); status('Unsent and unexported request discarded.'); } catch (error) { status(error.message); } });
+    if (result.terminal) { clearViews(); status(`Recovered canonical ${result.outcome}: ${result.tx}.` + (client.recoveryOnly ? ' Recovery-only mode remains active. Reconnect explicitly before ordinary work.' : '')); }
+    else status(`Still unresolved: ${result.state}. Absence is not proof of non-commit. Keep the original request.` + (client.recoveryOnly ? ' This credential cannot resend it.' : ''));
+  }, true, 'recover'));
+  c['discard-transfer'].addEventListener('click', () => { try { requireOrdinary(); client.discardUnsent(); c['confirm-transfer'].checked = false; render(); status('Unsent and unexported request discarded.'); } catch (error) { status(error.message); } });
   c['save-transfer'].addEventListener('click', () => {
-    try { const receipt = client.exportReceipt(); download(receipt, 'frankengit-transfer-retry.json', 'application/json'); status('Receipt offered for download. It contains private bundle bytes and mappings, not the token. Verify it was saved.'); render(); }
+    try { if (busy || client.busy) throw new Error('Finish the current operation before saving its stable receipt.'); const receipt = client.exportReceipt(); download(receipt, 'frankengit-transfer-retry.json', 'application/json'); status(client.recoveryOnly
+      ? 'Original recovery receipt offered for download with its unchanged key, bundle and credential fingerprint. It contains neither token. Keep it private; this connection remains outcome-only.'
+      : 'Receipt offered for download. It contains private bundle bytes and mappings, not the token. Verify it was saved.'); render(); }
     catch (error) { render(); status(error.message); }
   });
   c['receipt-file'].addEventListener('change', () => {
@@ -219,8 +245,10 @@ export function mountTransfers(doc, options = {}) {
     const file = c['receipt-file'].files?.[0];
     const bytes = await selectedBytes(file, RECEIPT_LIMIT, () => current() && client.connected && c['receipt-file'].files?.[0] === file);
     await client.restoreReceipt(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
-    if (!current()) return; clearViews(); status('Original transfer restored as possibly sent. No publication was dispatched. Recover or explicitly confirm an identical retry.');
-  }));
+    if (!current()) return; clearViews(); status(client.recoveryOnly
+      ? 'Original transfer restored for outcome lookup only. Its key, fingerprint, bundle and mappings are unchanged. No publication was dispatched; this credential cannot resend it.'
+      : 'Original transfer restored as possibly sent. No publication was dispatched. Recover or explicitly confirm an identical retry.');
+  }, false, 'restore'));
   const events = options.events ?? globalThis;
   events.addEventListener?.('pagehide', disconnect);
   events.addEventListener?.('beforeunload', event => { if (client.pending || summary) { event.preventDefault(); event.returnValue = ''; } });
