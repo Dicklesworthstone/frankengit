@@ -6,7 +6,7 @@ import { constants } from 'node:fs';
 import { resolve, dirname, basename, join } from 'node:path';
 import { webcrypto, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { prepareNativeGitBundleRecovery } from './native-source-layout.mjs';
+import { prepareNativeGitBundleRecovery, withNativeGitBundleFileRecovery } from './native-source-layout.mjs';
 
 export class SourceRecoveryError extends Error {
   constructor(code, state, destination, cause = null) {
@@ -19,6 +19,44 @@ const MARKER = '.frankengit-source-recovery.json', HEAD_STAGE = '.frankengit-sou
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const failure = code => { const error = new Error(code); error.code = code; throw error; };
 const flags = constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+// Only the native preparer creates streamed bodies. Its generator verifies the
+// complete source commitment at EOF; every consumer must drain it, including
+// a comparison against an existing shorter prefix. Metadata stays in memory.
+async function* bodyChunks(body, check) {
+  if (body instanceof Uint8Array) {
+    for (let offset = 0; offset < body.length; offset += 65536) {
+      check(); yield body.subarray(offset, Math.min(offset + 65536, body.length));
+    }
+    check(); return;
+  }
+  if (!body || !Number.isSafeInteger(body.length) || body.length < 1
+      || typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(body.sha256)
+      || typeof body.chunks !== 'function') failure('invalid_recovery_body');
+  let total = 0;
+  for await (const chunk of body.chunks(check)) {
+    check();
+    if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > 65536
+        || chunk.length > body.length - total) failure('invalid_recovery_body');
+    total += chunk.length; yield chunk;
+  }
+  if (total !== body.length) failure('recovery_source_length_mismatch');
+  check();
+}
+
+async function writeBody(handle, body, start, check, advanced) {
+  let position = 0;
+  for await (const chunk of bodyChunks(body, check)) {
+    let offset = Math.max(0, start - position);
+    while (offset < chunk.length) {
+      check();
+      const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset, position + offset);
+      if (!bytesWritten) failure('recovery_write_stalled');
+      offset += bytesWritten; await advanced(position + offset);
+    }
+    position += chunk.length;
+  }
+}
 
 async function checkedDirectory(path, identity) {
   const stat = await lstat(path);
@@ -33,22 +71,28 @@ async function syncDirectory(path, identity) {
     await handle.sync();
   } finally { await handle.close(); }
 }
-async function verifyFile(path, expected, check, identity = null) {
+async function verifyFile(path, expected, check, identity = null, length = expected.length) {
+  if (!Number.isSafeInteger(length) || length < 0 || length > expected.length) failure('invalid_recovery_body');
   check();
   const handle = await open(path, constants.O_RDONLY | flags);
   try {
     const before = await handle.stat();
-    if (!before.isFile() || before.size !== expected.length || (identity && !same(before, identity))) failure('recovery_file_changed');
-    const buffer = new Uint8Array(Math.min(65536, expected.length)); let offset = 0;
-    while (offset < expected.length) {
-      check(); const count = Math.min(buffer.length, expected.length - offset);
-      const { bytesRead } = await handle.read(buffer, 0, count, offset);
-      if (!bytesRead || !buffer.subarray(0, bytesRead).every((byte, index) => byte === expected[offset + index])) failure('recovery_file_mismatch');
-      offset += bytesRead;
+    if (!before.isFile() || before.size !== length || (identity && !same(before, identity))) failure('recovery_file_changed');
+    const buffer = new Uint8Array(Math.min(65536, length)); let position = 0;
+    for await (const chunk of bodyChunks(expected, check)) {
+      const count = Math.max(0, Math.min(chunk.length, length - position));
+      let offset = 0;
+      while (offset < count) {
+        check();
+        const { bytesRead } = await handle.read(buffer, 0, count - offset, position + offset);
+        if (!bytesRead || !buffer.subarray(0, bytesRead).every((byte, index) => byte === chunk[offset + index])) failure('recovery_file_mismatch');
+        offset += bytesRead;
+      }
+      position += chunk.length;
     }
     const after = await handle.stat(), pathStat = await lstat(path);
     if (!same(before, after) || !same(after, pathStat) || !pathStat.isFile() ||
-        after.size !== expected.length || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) failure('recovery_file_changed');
+        after.size !== length || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) failure('recovery_file_changed');
     check(); return after;
   } finally { await handle.close(); }
 }
@@ -56,12 +100,8 @@ async function writeNew(path, bytes, check, created = () => {}, advanced = async
   check(); const handle = await open(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | flags, 0o600);
   let identity;
   try {
-    identity = await handle.stat(); created(identity); let offset = 0;
-    while (offset < bytes.length) {
-      check(); const { bytesWritten } = await handle.write(bytes, offset, Math.min(65536, bytes.length - offset), offset);
-      if (!bytesWritten) failure('recovery_write_stalled'); offset += bytesWritten;
-      await advanced(offset);
-    }
+    identity = await handle.stat(); created(identity);
+    await writeBody(handle, bytes, 0, check, advanced);
     check(); await handle.sync();
   } finally { await handle.close(); }
   await verifyFile(path, bytes, check, identity); return identity;
@@ -185,7 +225,8 @@ async function inventory(target, plan, receiptBytes, check) {
 }
 async function validateExisting(path, expected, identity, check, complete) {
   if (complete && identity.size !== expected.length) failure('published_recovery_incomplete');
-  await verifyFile(path, expected.subarray(0, identity.size), check, identity);
+  if (expected instanceof Uint8Array) await verifyFile(path, expected.subarray(0, identity.size), check, identity);
+  else await verifyFile(path, expected, check, identity, identity.size);
 }
 async function appendVerified(path, expected, prior, check, advanced) {
   if (!prior) return { identity: await writeNew(path, expected, check, () => {}, advanced), reused: 0, appended: expected.length };
@@ -204,12 +245,7 @@ async function appendVerified(path, expected, prior, check, advanced) {
   try {
     const stat = await handle.stat();
     if (!same(stat, prior.identity) || stat.size !== reused || stat.mtimeMs !== prior.identity.mtimeMs || stat.ctimeMs !== prior.identity.ctimeMs) failure('recovery_file_changed');
-    let offset = reused;
-    while (offset < expected.length) {
-      check(); const { bytesWritten } = await handle.write(expected, offset, Math.min(65536, expected.length - offset), offset);
-      if (!bytesWritten) failure('recovery_write_stalled'); offset += bytesWritten;
-      await advanced(offset);
-    }
+    await writeBody(handle, expected, reused, check, advanced);
     check(); await handle.sync();
   } finally { await handle.close(); }
   return { identity: await verifyFile(path, expected, check, prior.identity), reused, appended: expected.length - reused };
@@ -373,13 +409,26 @@ function captureLegacyRequest(value) {
 // substitute for verified objects. The parent directory is operator-controlled
 // and must remain quiescent: Node's path APIs are not an openat-based sandbox.
 export async function recoverGitBundle(input, destination, request, options = {}) {
+  return await recover(input, destination, request, options, false);
+}
+
+/** Stream a native-verified local bundle through the same publication owner.
+ * Only PACK is file backed; approval identity, leases, exact resume and HEAD-last
+ * publication retain the existing contract. No legacy decoder is selected.
+ */
+export async function recoverGitBundleFile(input, destination, request, options = {}) {
+  return await recover(input, destination, request, options, true);
+}
+
+async function recover(input, destination, request, options, fileBacked) {
   let state = 'not_created', target = null, releaseLock = null;
   try {
     if (!options || typeof options !== 'object' || Array.isArray(options) ||
-        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume', 'nativeFg', 'nativeApprovalBinding'].includes(key))) failure('invalid_recovery_options');
+        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume', 'nativeFg', 'nativeApprovalBinding',
+          ...(fileBacked ? ['nativeLimits', 'nativeArtifact'] : [])].includes(key))) failure('invalid_recovery_options');
     const { signal, onProgress = () => {}, timeoutMs = 60000, verificationLimits = {}, resume = false } = options;
     if (typeof resume !== 'boolean' || (signal !== undefined && !(signal instanceof AbortSignal)) || typeof onProgress !== 'function' ||
-        !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) failure('invalid_recovery_options');
+        !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (fileBacked ? 3600000 : 300000)) failure('invalid_recovery_options');
     if (typeof destination !== 'string' || !destination || destination.length > 4096 ||
         destination.includes('\0') || /[\uD800-\uDFFF]/u.test(destination)) failure('invalid_recovery_destination');
     if (constants.O_NOFOLLOW === undefined || constants.O_DIRECTORY === undefined) failure('recovery_filesystem_profile_unsupported');
@@ -389,6 +438,99 @@ export async function recoverGitBundle(input, destination, request, options = {}
       if (performance.now() >= deadline) failure('recovery_deadline');
     };
     check();
+    const usePlan = async plan => {
+      check();
+      const requested = resolve(destination), parent = await realpath(dirname(requested));
+      if (dirname(requested) === requested) failure('invalid_recovery_destination');
+      target = join(parent, basename(requested));
+      const parentIdentity = await checkedDirectory(parent);
+      const progress = async (phase, details = {}) => { await onProgress(Object.freeze({ phase, destination: target, ...details })); check(); };
+      await progress('verified');
+      if (resume) {
+        state = 'existing_unknown';
+        const result = await resumePlan(plan, target, parent, parentIdentity, check, progress, signal,
+          release => { releaseLock = release; }, value => { state = value; }, onProgress);
+        await releaseLock(); state = 'complete'; return result;
+      }
+      // mkdir is the exclusive reservation. Existing files, directories and even
+      // dangling symlinks refuse; no existence-check/rename overwrite window.
+      await mkdir(target, { mode: 0o700 }); state = 'staging';
+      const directories = new Map([[target, await checkedDirectory(target)]]);
+      const rootIdentity = directories.get(target);
+      const checkRoot = () => checkedDirectory(target, rootIdentity);
+      let lockIdentity = null;
+      releaseLock = async () => {
+        if (!lockIdentity) return;
+        await checkRoot(); const path = join(target, LOCK), current = await lstat(path);
+        if (!current.isFile() || !same(current, lockIdentity)) failure('recovery_lock_changed');
+        await unlink(path); lockIdentity = null; await syncDirectory(target, rootIdentity);
+      };
+      const lockBytes = new TextEncoder().encode(JSON.stringify({ schema: 'frankengit-source-recovery-lock-v1',
+        hostname: hostname(), pid: process.pid, nonce: randomUUID(), plan_sha256: plan.plan_sha256 }) + '\n');
+      await writeNew(join(target, LOCK), lockBytes, check, identity => { lockIdentity = identity; });
+      const receiptBytes = new TextEncoder().encode(JSON.stringify({ ...plan.receipt, plan_sha256: plan.plan_sha256 }) + '\n');
+      await writeNew(join(target, MARKER), receiptBytes, check);
+      await progress('reserved');
+      for (const relative of plan.directories) {
+        check(); await checkRoot(); const path = join(target, relative);
+        await mkdir(path, { mode: 0o700 }); directories.set(path, await checkedDirectory(path));
+      }
+      const installed = [];
+      for (const file of plan.files) {
+        const relative = file.path === 'HEAD' ? HEAD_STAGE : file.path;
+        await progress(`before:${file.path}`); await checkRoot();
+        await checkedDirectory(dirname(join(target, relative)), directories.get(dirname(join(target, relative))));
+        const identity = await writeNew(join(target, relative), file.bytes, check, () => {}, written => progress(`writing:${file.path}`, { written, total: file.bytes.length }));
+        installed.push({ path: relative, bytes: file.bytes, identity });
+        await progress(`staged:${file.path}`);
+      }
+      for (const [path, identity] of [...directories].reverse()) { check(); await syncDirectory(path, identity); }
+      await progress('before_publication');
+      await checkRoot();
+      for (const file of installed) await verifyFile(join(target, file.path), file.bytes, check, file.identity);
+      await verifyFile(join(target, MARKER), receiptBytes, check);
+      for (const [path, identity] of directories) { check(); await checkedDirectory(path, identity); }
+      await progress('publication_ready');
+      check(); state = 'publication_unknown';
+      // A hard-link install is atomic and fails if HEAD already exists. Do not
+      // use rename(), which can replace another writer's destination on POSIX.
+      await link(join(target, HEAD_STAGE), join(target, 'HEAD')); state = 'published';
+      // Publication acquired responsibility. Drain/finalize despite cancellation;
+      // failures now report published, never pretend to roll the repository back.
+      let observerError = null;
+      try { await onProgress(Object.freeze({ phase: 'published', destination: target })); }
+      catch (error) { observerError = { error }; }
+      await syncDirectory(target, rootIdentity); await syncDirectory(parent, parentIdentity);
+      const head = installed.find(file => file.path === HEAD_STAGE);
+      await verifyFile(join(target, 'HEAD'), head.bytes, () => {}, head.identity);
+      await verifyFile(join(target, HEAD_STAGE), head.bytes, () => {}, head.identity);
+      await unlink(join(target, HEAD_STAGE)); await syncDirectory(target, rootIdentity);
+      await releaseLock();
+      // Finalization cannot turn a deferred observer failure into successful
+      // completion. Report the visible publication, as the resume path does.
+      if (observerError !== null) throw observerError.error;
+      state = 'complete';
+      return { type: 'frankengit-source-recovery-v1', state, destination: target, bare: true,
+        head_ref_hex: plan.receipt.head_ref_hex, plan_sha256: plan.plan_sha256,
+        files_synced: true, directories_synced: true, cancellation_requested: Boolean(signal?.aborted),
+        verification: plan.verification, forge_state_restored: false, native_authority_restored: false };
+    };
+    if (fileBacked) {
+      if (!Object.hasOwn(options, 'nativeFg')) failure('native_recovery_backend_required');
+      if (Object.hasOwn(options, 'verificationLimits')) failure('native_recovery_limits_not_supported');
+      const limits = Object.hasOwn(options, 'nativeLimits') ? options.nativeLimits : {};
+      if (!limits || typeof limits !== 'object' || Array.isArray(limits)
+          || Object.keys(limits).some(key => !['maxInputMiB', 'maxExpandedMiB', 'maxObjects', 'maxRefs'].includes(key))) {
+        failure('native_invalid_recovery_limits');
+      }
+      if (resume) state = 'existing_unknown';
+      check();
+      return await withNativeGitBundleFileRecovery(input, request, {
+        fg: options.nativeFg, signal, timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), ...limits,
+        ...(Object.hasOwn(options, 'nativeApprovalBinding') ? { approvalBinding: options.nativeApprovalBinding } : {}),
+        ...(Object.hasOwn(options, 'nativeArtifact') ? { artifact: options.nativeArtifact } : {}),
+      }, usePlan);
+    }
     let plan;
     if (Object.hasOwn(options, 'nativeFg')) {
       // An explicitly selected native backend never imports the legacy decoder,
@@ -410,86 +552,16 @@ export async function recoverGitBundle(input, destination, request, options = {}
       plan = await prepareGitBundleRecovery(captured, query, { cryptoImpl: webcrypto, signal,
         checkpoint: check, limits: verificationLimits });
     }
-    check();
-    const requested = resolve(destination), parent = await realpath(dirname(requested));
-    if (dirname(requested) === requested) failure('invalid_recovery_destination');
-    target = join(parent, basename(requested));
-    const parentIdentity = await checkedDirectory(parent);
-    const progress = async (phase, details = {}) => { await onProgress(Object.freeze({ phase, destination: target, ...details })); check(); };
-    await progress('verified');
-    if (resume) {
-      state = 'existing_unknown';
-      const result = await resumePlan(plan, target, parent, parentIdentity, check, progress, signal,
-        release => { releaseLock = release; }, value => { state = value; }, onProgress);
-      await releaseLock(); state = 'complete'; return result;
-    }
-    // mkdir is the exclusive reservation. Existing files, directories and even
-    // dangling symlinks refuse; no existence-check/rename overwrite window.
-    await mkdir(target, { mode: 0o700 }); state = 'staging';
-    const directories = new Map([[target, await checkedDirectory(target)]]);
-    const rootIdentity = directories.get(target);
-    const checkRoot = () => checkedDirectory(target, rootIdentity);
-    let lockIdentity = null;
-    releaseLock = async () => {
-      if (!lockIdentity) return;
-      await checkRoot(); const path = join(target, LOCK), current = await lstat(path);
-      if (!current.isFile() || !same(current, lockIdentity)) failure('recovery_lock_changed');
-      await unlink(path); lockIdentity = null; await syncDirectory(target, rootIdentity);
-    };
-    const lockBytes = new TextEncoder().encode(JSON.stringify({ schema: 'frankengit-source-recovery-lock-v1',
-      hostname: hostname(), pid: process.pid, nonce: randomUUID(), plan_sha256: plan.plan_sha256 }) + '\n');
-    await writeNew(join(target, LOCK), lockBytes, check, identity => { lockIdentity = identity; });
-    const receiptBytes = new TextEncoder().encode(JSON.stringify({ ...plan.receipt, plan_sha256: plan.plan_sha256 }) + '\n');
-    await writeNew(join(target, MARKER), receiptBytes, check);
-    await progress('reserved');
-    for (const relative of plan.directories) {
-      check(); await checkRoot(); const path = join(target, relative);
-      await mkdir(path, { mode: 0o700 }); directories.set(path, await checkedDirectory(path));
-    }
-    const installed = [];
-    for (const file of plan.files) {
-      const relative = file.path === 'HEAD' ? HEAD_STAGE : file.path;
-      await progress(`before:${file.path}`); await checkRoot();
-      await checkedDirectory(dirname(join(target, relative)), directories.get(dirname(join(target, relative))));
-      const identity = await writeNew(join(target, relative), file.bytes, check, () => {}, written => progress(`writing:${file.path}`, { written, total: file.bytes.length }));
-      installed.push({ path: relative, bytes: file.bytes, identity });
-      await progress(`staged:${file.path}`);
-    }
-    for (const [path, identity] of [...directories].reverse()) { check(); await syncDirectory(path, identity); }
-    await progress('before_publication');
-    await checkRoot();
-    for (const file of installed) await verifyFile(join(target, file.path), file.bytes, check, file.identity);
-    await verifyFile(join(target, MARKER), receiptBytes, check);
-    for (const [path, identity] of directories) { check(); await checkedDirectory(path, identity); }
-    await progress('publication_ready');
-    check(); state = 'publication_unknown';
-    // A hard-link install is atomic and fails if HEAD already exists. Do not
-    // use rename(), which can replace another writer's destination on POSIX.
-    await link(join(target, HEAD_STAGE), join(target, 'HEAD')); state = 'published';
-    // Publication acquired responsibility. Drain/finalize despite cancellation;
-    // failures now report published, never pretend to roll the repository back.
-    let observerError = null;
-    try { await onProgress(Object.freeze({ phase: 'published', destination: target })); }
-    catch (error) { observerError = { error }; }
-    await syncDirectory(target, rootIdentity); await syncDirectory(parent, parentIdentity);
-    const head = installed.find(file => file.path === HEAD_STAGE);
-    await verifyFile(join(target, 'HEAD'), head.bytes, () => {}, head.identity);
-    await verifyFile(join(target, HEAD_STAGE), head.bytes, () => {}, head.identity);
-    await unlink(join(target, HEAD_STAGE)); await syncDirectory(target, rootIdentity);
-    await releaseLock();
-    // Finalization cannot turn a deferred observer failure into successful
-    // completion. Report the visible publication, as the resume path does.
-    if (observerError !== null) throw observerError.error;
-    state = 'complete';
-    return { type: 'frankengit-source-recovery-v1', state, destination: target, bare: true,
-      head_ref_hex: plan.receipt.head_ref_hex, plan_sha256: plan.plan_sha256,
-      files_synced: true, directories_synced: true, cancellation_requested: Boolean(signal?.aborted),
-      verification: plan.verification, forge_state_restored: false, native_authority_restored: false };
+    return await usePlan(plan);
   } catch (error) {
     if (error instanceof SourceRecoveryError) throw error;
     // Keep a partial directory for inspection. Never recursively remove unknown
     // files, retry publication, replace an existing repository, or undo HEAD.
     const result = new SourceRecoveryError(error?.code ?? 'recovery_failed', state, target, error);
+    if (error?.code === 'native_snapshot_cleanup_refused') {
+      result.snapshot_cleanup_error = error.code;
+      result.snapshot_directory = error.details?.directory ?? null;
+    }
     try { await releaseLock?.(); } catch (cleanup) { result.lock_cleanup_error = cleanup.code ?? 'lock_cleanup_failed'; }
     throw result;
   }

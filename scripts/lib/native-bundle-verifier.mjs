@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdtemp, open, realpath, rmdir, unlink } from 'node:fs/promises';
+import { lstat, mkdtemp, open, opendir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -98,13 +98,14 @@ export function normalizeNativeRecoveryHead(value) {
  * No file, executable, signal listener or other resource is opened here.
  */
 export function normalizeNativeBundleOptions(options) {
-  if (!onlyKeys(options, ['fg', 'expected', 'signal', 'recoveryHead', 'fileBacked', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
+  if (!onlyKeys(options, ['fg', 'expected', 'expectedBytes', 'signal', 'recoveryHead', 'fileBacked', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
     || options.fg.length > 4096 || /[\0\r\n]/.test(options.fg)) throw fail('native_absolute_fg_path_required');
   const result = { ...NATIVE_BUNDLE_LIMITS, fileBacked: false, ...options };
   if (typeof result.fileBacked !== 'boolean') throw fail('native_invalid_file_profile');
   const maximumMiB = result.fileBacked ? 16384 : 128;
   integer(result.maxInputMiB, 1, maximumMiB, 'native_input_limit');
   integer(result.maxExpandedMiB, 1, maximumMiB, 'native_expanded_limit');
+  if (result.expectedBytes !== undefined) integer(result.expectedBytes, 1, result.maxInputMiB * MIB, 'native_invalid_expected_bytes');
   integer(result.maxObjects, 1, 100000, 'native_object_limit');
   integer(result.maxRefs, 1, 4096, 'native_ref_limit');
   integer(result.timeoutMs, 1, 3600000, 'native_timeout_limit');
@@ -137,6 +138,7 @@ async function readInput(path, options, live) {
   if (typeof path !== 'string' || path.length === 0 || path.length > 4096 || path.includes('\0')) throw fail('native_invalid_input_path');
   const named = await lstat(path, { bigint: true }); live.check();
   if (!named.isFile() || named.size < 1n || named.size > BigInt(options.maxInputMiB * MIB)) throw fail('native_input_size_or_type');
+  if (options.expectedBytes !== undefined && named.size !== BigInt(options.expectedBytes)) throw fail('native_expected_size_mismatch');
   const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
     const before = await file.stat({ bigint: true }); live.check();
@@ -324,10 +326,79 @@ async function cleanupSnapshot(directory, directoryIdentity, path, fileIdentity,
   }
 }
 
-async function verifySnapshot(options, live, stage) {
+function freezeReport(value) {
+  if (value !== null && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeReport(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+async function checkSnapshot(directory, directoryIdentity, path, file, staged) {
+  const currentDirectory = await lstat(directory, { bigint: true });
+  const current = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
+  if (!currentDirectory.isDirectory() || currentDirectory.dev !== directoryIdentity.dev
+    || currentDirectory.ino !== directoryIdentity.ino || currentDirectory.uid !== directoryIdentity.uid
+    || (currentDirectory.mode & 0o077n) || !named.isFile() || !sameFile(staged, current)
+    || !sameFile(current, named)) throw fail('native_snapshot_changed');
+}
+
+async function requireOnlySnapshot(directory) {
+  // The native report is not a directory-ownership witness. At most two
+  // entries can be observed before refusing, regardless of directory size.
+  let entries = 0;
+  const children = await opendir(directory, { bufferSize: 2 });
+  for await (const entry of children) {
+    if (++entries !== 1 || entry.name !== 'input.bundle' || !entry.isFile()) {
+      throw fail('native_snapshot_not_quiescent', { directory });
+    }
+  }
+  if (entries !== 1) throw fail('native_snapshot_changed');
+}
+
+async function consumeSnapshot(directory, directoryIdentity, path, file, staged, report, size, consume) {
+  let active = true, failed = false, failure, result;
+  const pending = new Set();
+  const read = (offset, length) => {
+    const operation = (async () => {
+      if (!active) throw fail('native_snapshot_closed');
+      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0
+        || length < 0 || length > COPY_BYTES || offset > size || length > size - offset) {
+        throw fail('native_snapshot_read_range');
+      }
+      // The consumer owns its effect-time cancellation checks. In particular,
+      // completing publication must remain possible after HEAD becomes visible.
+      await checkSnapshot(directory, directoryIdentity, path, file, staged);
+      const bytes = Buffer.alloc(length); let copied = 0;
+      while (copied < length) {
+        const { bytesRead } = await file.read(bytes, copied, length - copied, offset + copied);
+        if (!bytesRead) throw fail('native_snapshot_truncated');
+        copied += bytesRead;
+      }
+      await checkSnapshot(directory, directoryIdentity, path, file, staged);
+      return bytes;
+    })();
+    pending.add(operation);
+    operation.then(() => pending.delete(operation), () => pending.delete(operation));
+    return operation;
+  };
+  try { result = await consume(Object.freeze({ report: freezeReport(report), size, read })); }
+  catch (error) { failed = true; failure = error; }
+  active = false;
+  // Even a consumer that forgets to await a read cannot leave descriptor I/O
+  // racing cleanup. Escaped readers are revoked before this drain.
+  const drained = await Promise.allSettled([...pending]);
+  if (failed) throw failure;
+  const rejected = drained.find(result => result.status === 'rejected');
+  if (rejected !== undefined) throw rejected.reason;
+  await checkSnapshot(directory, directoryIdentity, path, file, staged);
+  return result;
+}
+
+async function verifySnapshot(options, live, stage, consume = undefined) {
   live.check();
   let directory = await mkdtemp(join(tmpdir(), 'fg-native-verify-'));
-  let directoryIdentity, fileIdentity, file, report, failure;
+  let directoryIdentity, fileIdentity, file, report, failure, failed = false, consuming = false;
   let path = join(directory, 'input.bundle');
   try {
     directoryIdentity = await lstat(directory, { bigint: true }); live.check();
@@ -341,7 +412,7 @@ async function verifySnapshot(options, live, stage) {
       throw fail('native_snapshot_changed');
     }
     directory = canonical; path = join(directory, 'input.bundle'); live.check();
-    file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    file = await open(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
     fileIdentity = await file.stat({ bigint: true });
     const { digest, size } = await stage(file);
     live.check();
@@ -355,23 +426,34 @@ async function verifySnapshot(options, live, stage) {
     if (!currentFile.isFile() || !sameFile(staged, after) || !sameFile(after, currentFile)) throw fail('native_snapshot_changed');
     report = validateReport(result, digest, size, options);
     live.check();
-  } catch (error) { failure = error; }
+    if (consume !== undefined) {
+      await requireOnlySnapshot(directory);
+      await checkSnapshot(directory, directoryIdentity, path, file, staged);
+      live.check(); consuming = true;
+      report = await consumeSnapshot(directory, directoryIdentity, path, file, staged, report, size, consume);
+      // No lifetime check here: the consumer may have crossed its publication
+      // point and finished responsibility despite cancellation or expiry.
+    }
+  } catch (error) { failed = true; failure = error; }
   try { await cleanupSnapshot(directory, directoryIdentity, path, fileIdentity, file); }
   catch (error) {
     error.details ??= { directory };
-    if (failure !== undefined) {
-      error.details.verification_error = String(failure.code ?? failure.message).slice(0, 256);
-      if (typeof failure.details?.diagnostic === 'string') error.details.native_diagnostic = failure.details.diagnostic.slice(0, 4096);
+    if (failed) {
+      error.cause = failure;
+      error.details[consuming ? 'consumer_error' : 'verification_error'] =
+        String(failure?.code ?? failure?.message ?? failure).slice(0, 256);
+      if (typeof failure?.details?.diagnostic === 'string') error.details.native_diagnostic = failure.details.diagnostic.slice(0, 4096);
     }
     throw error;
   }
-  if (failure !== undefined) throw failure;
+  if (failed) throw failure;
   return report;
 }
 
 async function verifyOwned(bytes, options, live) {
   live.check();
   if (bytes.length < 1 || bytes.length > options.maxInputMiB * MIB) throw fail('native_input_size_or_type');
+  if (options.expectedBytes !== undefined && bytes.length !== options.expectedBytes) throw fail('native_expected_size_mismatch');
   const digest = createHash('sha256').update(bytes).digest('hex'); live.check();
   if (options.expected.sha256 !== undefined && options.expected.sha256 !== digest) throw fail('native_expected_sha256_mismatch');
   return await verifySnapshot(options, live, async file => {
@@ -380,18 +462,20 @@ async function verifyOwned(bytes, options, live) {
   });
 }
 
-async function verifyFileBacked(path, options, live) {
+async function verifyFileBacked(path, options, live, consume = undefined) {
   live.check();
   if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined) throw fail('native_file_profile_unsupported');
   if (typeof path !== 'string' || path.length === 0 || path.length > 4096 || path.includes('\0')) throw fail('native_invalid_input_path');
   const named = await lstat(path, { bigint: true }); live.check();
   if (!named.isFile() || named.size < 1n || named.size > BigInt(options.maxInputMiB * MIB)) throw fail('native_input_size_or_type');
+  if (options.expectedBytes !== undefined && named.size !== BigInt(options.expectedBytes)) throw fail('native_expected_size_mismatch');
   const source = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0));
+  let result, failure, failed = false;
   try {
     const before = await source.stat({ bigint: true }); live.check();
     if (!before.isFile() || !sameFile(named, before)) throw fail('native_input_changed');
     const size = Number(before.size);
-    return await verifySnapshot(options, live, async destination => {
+    result = await verifySnapshot(options, live, async destination => {
       const buffer = Buffer.alloc(COPY_BYTES), digest = createHash('sha256');
       let position = 0;
       try {
@@ -411,8 +495,16 @@ async function verifyFileBacked(path, options, live) {
         if (!current.isFile() || !sameFile(before, after) || !sameFile(after, current)) throw fail('native_input_changed');
         return { digest: digest.digest('hex'), size };
       } finally { buffer.fill(0); }
-    });
-  } finally { await source.close(); }
+    }, consume);
+  } catch (error) { failed = true; failure = error; }
+  try { await source.close(); }
+  catch (error) {
+    const cleanup = fail('native_input_close_failed', { cleanup_error: String(error.code ?? error.message).slice(0, 256) });
+    if (failed) cleanup.cause = failure;
+    throw cleanup;
+  }
+  if (failed) throw failure;
+  return result;
 }
 
 /** Verify exactly these bytes through an explicitly selected local fg binary.
@@ -424,6 +516,7 @@ export async function verifyNativeGitBundle(bytes, options) {
   if (config.fileBacked) throw fail('native_file_backed_requires_file');
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > config.maxInputMiB * MIB) throw fail('native_input_size_or_type');
   if (bytes.buffer instanceof SharedArrayBuffer) throw fail('native_shared_input_refused');
+  if (config.expectedBytes !== undefined && bytes.byteLength !== config.expectedBytes) throw fail('native_expected_size_mismatch');
   const owned = Buffer.from(bytes); live.check();
   const report = await verifyOwned(owned, config, live);
   live.check(); return report;
@@ -440,4 +533,17 @@ export async function verifyNativeGitBundleFile(path, options) {
     ? await verifyFileBacked(path, config, live)
     : await verifyOwned(await readInput(path, config, live), config, live);
   live.check(); return report;
+}
+
+/** Verify a file-backed snapshot, then lend only bounded immutable-content reads
+ * to a scoped consumer. Native scratch must be gone before the consumer starts.
+ * The consumer owns publication-time cancellation/deadline semantics; reads are
+ * drained and revoked before owned cleanup, without a post-consume abort check.
+ * Cleanup failure retains the original consumer failure as its cause.
+ */
+export async function withVerifiedNativeGitBundleFile(path, options, consume) {
+  const config = normalizeNativeBundleOptions(options), live = lifetime(config); live.check();
+  if (!config.fileBacked) throw fail('native_file_backed_required');
+  if (typeof consume !== 'function') throw fail('native_invalid_consumer');
+  return await verifyFileBacked(path, config, live, consume);
 }

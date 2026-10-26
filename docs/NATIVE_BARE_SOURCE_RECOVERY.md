@@ -57,27 +57,89 @@ metadata or unexpected files refuse. Resuming a completed recovery does not
 replace HEAD. Same host/PID namespace and an operator-controlled quiescent local
 filesystem are required; this is not a hostile same-user namespace sandbox.
 
-The bounded profile accepts at most 16 MiB input, 128 MiB expanded native payload,
+The owned-byte profile accepts at most 16 MiB input, 128 MiB expanded native payload,
 100,000 objects, 4,096 refs and a 16 MiB native layout report. It retains input and
 layout bytes in memory. Filesystem operations and synchronous work remain
 cooperative; cancellation of a native child terminates, escalates and reaps it.
 No current-branch, Git-signature, external-gitlink, forge/authority restoration or
 power-loss guarantee is inferred from source-content verification.
 
+## File-backed recovery with the same filesystem owner
+
+The file API streams a larger native-verified pack through the existing recovery
+writer, including its ownership leases and HEAD-last publication:
+
+```js
+import { recoverGitBundleFile } from './scripts/lib/source-recovery.mjs';
+
+const result = await recoverGitBundleFile('./backup.bundle', './restored.git', {
+  head_ref_hex: Buffer.from('refs/heads/main').toString('hex'),
+  expectations: { sha256: independentlyKnownBundleHash },
+}, {
+  nativeFg: '/absolute/path/to/trusted/fg',
+  nativeLimits: { maxInputMiB: 4096, maxExpandedMiB: 8192 },
+  timeoutMs: 1800000,
+  resume: false,
+});
+```
+
+Input and expansion allowances can be selected up to 16,384 MiB each. Defaults
+remain 16 MiB input, 128 MiB expanded payload and 60 seconds; the file API permits
+up to one hour. Object, reference, metadata, per-object and native work limits
+remain independently bounded. The owned-byte API keeps its previous limits.
+
+The adapter copies a stable local file into an exclusive private snapshot in
+64 KiB chunks and verifies that snapshot with the existing Rust file-backed
+verifier and recovery planner. Native scratch must be gone before the filesystem
+owner is invoked. Only the pack is streamed during materialization; the bounded
+index and bare metadata remain in memory. The original source path is never
+reopened for writing or readback.
+
+Each complete pack replay checks length, SHA-256, the native pack checksum and
+snapshot identity. Comparing an existing partial pack drains the verified source
+through EOF before the owner can append. Every destination readback compares
+exact bytes; mismatch never truncates or replaces retained work. For a new recovery, an observed source change during capture, mutation of the
+retained snapshot, resource exhaustion or cancellation before publication leaves
+any created stage inspectable with HEAD absent. Once HEAD is visible, the same owner finishes its
+synchronization and lease cleanup even when cancellation has been requested.
+
+The canonical v1 plan, marker and expectation/approval binding are unchanged.
+For input admitted by both profiles, the same source, HEAD, caller constraints
+and approval produce the same plan identity. An explicit resume may therefore
+continue a matching memory-backed operation in file mode or vice versa. A saved
+marker never substitutes for fresh input verification or external approval.
+
+Library callers composing authentication can pass `nativeArtifact: { sha256,
+bytes }` and the existing `nativeApprovalBinding`. The artifact constraints must
+match before any destination writes. They are integrity constraints, not a
+signature verifier; the caller remains responsible for authenticating its
+approval and enforcing freshness through the existing prepublication callbacks.
+
+Preparation needs the private input snapshot plus native scratch of up to twice
+the selected expanded allowance. During publication, the snapshot remains open
+alongside the destination pack until the writer finishes. Cleanup removes only
+the identified snapshot and empty owned directories. Unexpected residue is
+retained. A cleanup error after publication preserves the recovery state and
+reports `snapshot_cleanup_error` and `snapshot_directory`; it never reports a
+rollback or removes the recovered repository.
+
 ## Executable evidence
 
 ```sh
 node --test tests/operator/native-source-layout.test.mjs \
-  tests/operator/native-source-recovery.test.mjs
+  tests/operator/native-source-recovery.test.mjs \
+  tests/operator/native-file-source-recovery.test.mjs
 FG_NATIVE_BIN="$PWD/target/release/fg" \
-  node --test tests/operator/native-source-recovery.test.mjs
+  node --test tests/operator/native-source-recovery.test.mjs \
+    tests/operator/native-file-source-recovery.test.mjs
 ```
 
 Default tests use an explicitly fake native process returning repository fixtures.
 They execute the actual adapter and filesystem owner, including process kills
 before and after HEAD publication, competing writers, exact resume, corruption
-refusal and cancellation. The pinned Git 2.47.3 oracle reads the resulting SHA-1
-and SHA-256 materializations, runs strict fsck and checks contents and tag peeling.
+refusal and cancellation. When `/usr/bin/git` is exactly version 2.47.3, the oracle reads the resulting
+SHA-1 and SHA-256 materializations, runs strict fsck and checks contents and tag
+peeling; otherwise those oracle cases explicitly skip.
 The SHA-256 index fixture matches the pre-existing metadata.json SHA-256 golden.
 This demonstrates fixture interoperability, not Rust execution. The separate
 actual-fg test is explicitly skipped unless a built `FG_NATIVE_BIN` is supplied.

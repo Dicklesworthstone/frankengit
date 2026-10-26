@@ -42,6 +42,10 @@ else {
     caller_expectations_matched: true, expectations: { artifact_sha256: value('--expect-sha256'),
       object_format: args.includes('--expect-format') ? value('--expect-format') : null,
       ref_set: pins.length ? args.includes('--exact-refs') ? 'exact' : 'contains' : null, references: pins } };
+  if (args.includes('--file-backed')) Object.assign(report, {
+    storage_profile: 'file-backed-native-full-bundle-v1', scratch_bytes: 512,
+    scratch_removed: true, pack_sha256: hash(bytes.subarray(packOffset)),
+  });
   if (args.includes('--recovery-head-hex')) {
     const head = value('--recovery-head-hex');
     report.recovery = { profile: 'native-bare-source-layout-v1', pack_offset: packOffset, head_ref_hex: head,

@@ -10,7 +10,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeNativeBundleExpectation, normalizeNativeBundleOptions, verifyNativeGitBundle, verifyNativeGitBundleFile } from '../../scripts/lib/native-bundle-verifier.mjs';
+import { normalizeNativeBundleExpectation, normalizeNativeBundleOptions, verifyNativeGitBundle, verifyNativeGitBundleFile, withVerifiedNativeGitBundleFile } from '../../scripts/lib/native-bundle-verifier.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cli = join(root, 'scripts/verify_git_bundle_native.mjs');
@@ -422,6 +422,117 @@ test('file-backed CLI uses explicit limits and canonicalizes its owned temporary
   await absent(dirname(log.input));
   const invalid = await runCli([path, '--fg', mock.fg, '--file-backed', '--file-backed']);
   assert.notEqual(invalid.code, 0); assert.equal(JSON.parse(invalid.stderr).error, 'duplicate_option');
+});
+
+
+test('declared artifact length refuses before source open, byte copy or native spawn', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  await writeFile(path, opaque);
+  for (const fileBacked of [false, true]) {
+    let opened = false;
+    await withSourceHandle(path, () => { opened = true; },
+      () => assert.rejects(verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked,
+        expectedBytes: opaque.length + 1 }), { code: 'native_expected_size_mismatch' }));
+    assert.equal(opened, false);
+  }
+  await assert.rejects(verifyNativeGitBundle(opaque, { fg: mock.fg, expectedBytes: opaque.length + 1 }),
+    { code: 'native_expected_size_mismatch' });
+  for (const expectedBytes of [0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER, 129 * 1024 * 1024]) {
+    assert.throws(() => normalizeNativeBundleOptions({ fg: mock.fg, expectedBytes }),
+      { code: 'native_invalid_expected_bytes' });
+  }
+  await absent(mock.log);
+});
+
+test('verified file lease exposes bounded private reads and revokes them after consumption', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  const bytes = Buffer.alloc(128 * 1024 + 17, 42); await writeFile(path, bytes);
+  let reader, snapshotPath;
+  const token = { consumed: true };
+  const result = await withVerifiedNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true,
+    expectedBytes: bytes.length }, async snapshot => {
+    assert.deepEqual(Object.keys(snapshot).sort(), ['read', 'report', 'size']);
+    assert.equal(Object.isFrozen(snapshot), true); assert.equal(Object.isFrozen(snapshot.report.references), true);
+    assert.equal(Object.isFrozen(snapshot.report.expectations.references), true);
+    assert.equal(snapshot.size, bytes.length);
+    reader = snapshot.read;
+    const log = JSON.parse(await readFile(mock.log)); snapshotPath = log.input;
+    assert.notEqual(snapshotPath, path); assert.throws(() => process.kill(log.pid, 0), { code: 'ESRCH' });
+    // The original is no longer an input to the consumer.
+    await writeFile(path, 'changed original');
+    let read = 0;
+    while (read < bytes.length) {
+      const part = await snapshot.read(read, Math.min(65536, bytes.length - read));
+      assert.deepEqual(part, bytes.subarray(read, read + part.length)); read += part.length;
+    }
+    assert.equal((await snapshot.read(bytes.length, 0)).length, 0);
+    for (const [offset, length] of [[-1, 1], [0, -1], [0, 65537], [bytes.length, 1],
+      [0.5, 1], [0, 1.5], [Number.MAX_SAFE_INTEGER, 1]]) {
+      await assert.rejects(snapshot.read(offset, length), { code: 'native_snapshot_read_range' });
+    }
+    return token;
+  });
+  assert.equal(result, token); await absent(dirname(snapshotPath));
+  await assert.rejects(reader(0, 1), { code: 'native_snapshot_closed' });
+});
+
+test('native scratch residue prevents consumer entry despite a success report', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory, 'file-residue'), path = join(directory, 'input.bundle');
+  await writeFile(path, opaque); let entered = false;
+  await assert.rejects(withVerifiedNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true },
+    async () => { entered = true; }), error => error.code === 'native_snapshot_cleanup_refused'
+      && error.cause?.code === 'native_snapshot_not_quiescent');
+  assert.equal(entered, false);
+  const log = JSON.parse(await readFile(mock.log));
+  t.after(() => rm(dirname(log.input), { recursive: true, force: true }));
+  await absent(log.input);
+  assert.equal(await readFile(join(dirname(log.input), '.fg-bundle-fake.scratch'), 'utf8'), 'retained native scratch');
+});
+
+test('consumer owns cancellation after verified handoff and can finish its result', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  const controller = new AbortController(); await writeFile(path, opaque);
+  const result = await withVerifiedNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true,
+    signal: controller.signal }, async snapshot => {
+    controller.abort();
+    assert.deepEqual(await snapshot.read(0, opaque.length), opaque);
+    return { state: 'complete' }; // Consumer lifecycle simulation, not a native publication.
+  });
+  assert.deepEqual(result, { state: 'complete' });
+  const log = JSON.parse(await readFile(mock.log)); await absent(dirname(log.input));
+});
+
+test('consumer failure is unchanged after successful cleanup', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  await writeFile(path, opaque);
+  const original = Object.assign(new Error('publication observer failed'), { code: 'observer_failed', state: 'published' });
+  await assert.rejects(withVerifiedNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true },
+    async () => { throw original; }), error => error === original);
+  const log = JSON.parse(await readFile(mock.log)); await absent(dirname(log.input));
+});
+
+test('cleanup failure retains the consumer cause and its publication state', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  await writeFile(path, opaque);
+  const original = Object.assign(new Error('publication observer failed'), { code: 'observer_failed', state: 'published' });
+  let snapshotPath;
+  await assert.rejects(withVerifiedNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true }, async () => {
+    const log = JSON.parse(await readFile(mock.log)); snapshotPath = log.input;
+    await writeFile(join(dirname(log.input), 'keep'), 'unrecognized retained entry');
+    throw original;
+  }), error => error.code === 'native_snapshot_cleanup_refused' && error.cause === original
+    && error.cause.state === 'published' && error.details.consumer_error === 'observer_failed'
+    && error.details.directory === dirname(snapshotPath));
+  t.after(() => rm(dirname(snapshotPath), { recursive: true, force: true }));
+  await absent(snapshotPath);
+  assert.equal(await readFile(join(dirname(snapshotPath), 'keep'), 'utf8'), 'unrecognized retained entry');
+});
+
+test('verified file consumer selection refuses before source access', async () => {
+  await assert.rejects(withVerifiedNativeGitBundleFile('/absent', { fg: '/fg' }, () => {}),
+    { code: 'native_file_backed_required' });
+  await assert.rejects(withVerifiedNativeGitBundleFile('/absent', { fg: '/fg', fileBacked: true }, null),
+    { code: 'native_invalid_consumer' });
 });
 
 function gitFixture(format) {
