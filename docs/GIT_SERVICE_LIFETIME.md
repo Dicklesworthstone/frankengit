@@ -58,7 +58,13 @@ bound accepted work. Raw Git and SSH both retain the existing flags:
 --receive-max-input-mib
 --receive-max-expanded-mib
 --pack-max-expanded-mib
+--pack-cache-mib
 ```
+
+The pack computation cache defaults to 64 MiB across a service's request
+children. `--pack-cache-mib` accepts 0..65536 MiB; zero disables retention.
+It changes disposable memory retention, not the request's selected objects,
+work limits or publication authority. Smart HTTP accepts the same option.
 
 SSH identification, authentication and command selection have the pre-command
 60-second idle ceiling and the accepted session's absolute deadline. Once a Git

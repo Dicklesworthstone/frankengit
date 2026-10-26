@@ -29,7 +29,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
-  [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..65536>]
+  [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..65536>] [--pack-cache-mib <0..65536>]
   [--trusted-origin <origin>]
   [--index-state-dir <private-directory> --index-state init|resume
    --index-profile lexical|symbols --index-format sha1|sha256
@@ -284,6 +284,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--receive-max-input-mib"
                     | "--receive-max-expanded-mib"
                     | "--pack-max-expanded-mib"
+                    | "--pack-cache-mib"
                     | "--trusted-origin"
                     | "--index-state-dir"
                     | "--index-state"
@@ -478,6 +479,11 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         config = config.with_selected_pack_byte_envelope(
             usize::try_from(mib * 1024 * 1024)
                 .map_err(|_| "byte envelope is not supported on this platform".to_owned())?,
+        );
+    }
+    if let Some(value) = flags.get("--pack-cache-mib") {
+        config = config.with_pack_cache_bytes(
+            fgit_cli::parse_pack_cache_mib(value).map_err(|error| error.to_string())?,
         );
     }
     if allow_protection {
@@ -1010,6 +1016,31 @@ mod tests {
         );
         assert!(!widened.contains("max_total_expanded_bytes: 4294967296"));
     }
+
+    #[test]
+    fn pack_cache_capacity_has_the_shared_default_and_zero_disables_it() {
+        assert_eq!(
+            parse(&arguments()).unwrap().config.pack_cache_bytes(),
+            64 << 20
+        );
+        for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
+            let mut args = arguments();
+            args.extend(["--pack-cache-mib".into(), value.into()]);
+            assert_eq!(parse(&args).unwrap().config.pack_cache_bytes(), bytes);
+        }
+        for value in ["65537", "18446744073709551615", "-1", "+1", "1.5"] {
+            let mut args = arguments();
+            args.extend(["--pack-cache-mib".into(), value.into()]);
+            assert!(parse(&args).is_err(), "{value}");
+        }
+        let mut duplicate = arguments();
+        duplicate.extend(["--pack-cache-mib", "0", "--pack-cache-mib", "1"].map(str::to_owned));
+        assert!(parse(&duplicate).is_err());
+        let mut missing = arguments();
+        missing.push("--pack-cache-mib".into());
+        assert!(parse(&missing).is_err());
+    }
+
     /// frankengit-root-doctrine-x2mv.4.31: the one trusted browser origin
     /// reaches the node configuration only in exact form, and only once.
     #[test]

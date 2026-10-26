@@ -58,6 +58,13 @@ scopes. It does not enable receives or metadata APIs by itself. Both static
 Git-only credentials and the reloadable scoped credential table are supported.
 The readiness record adds `lifetime: "bounded" | "continuous"`.
 
+`--pack-cache-mib <0..65536>` controls the process-local pack computation
+cache in either lifetime mode. Its 64 MiB default is shared across request
+children, including children that reopen the repository independently. Zero
+disables retention; a restart begins with an empty cache. The budget covers
+retained entries separately from in-flight request memory and scratch output,
+and does not alter authorization, selection, work limits or response bytes.
+
 ## One lifetime, not repeating bounded windows
 
 The two modes enter the same accept loop. Continuous mode does not simulate an

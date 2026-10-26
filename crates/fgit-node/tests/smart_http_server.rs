@@ -20,6 +20,9 @@ use fgit_types::{
 use fgit_wire::smart_http::{BodyDecoder, BodyFraming, HttpLimits};
 use fgit_wire::{Packet, PktLineDecoder, WireLimits, encode_packets};
 
+#[path = "smart_http_server/pack_cache.rs"]
+mod pack_cache;
+
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Scratch(PathBuf);

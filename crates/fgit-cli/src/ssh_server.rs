@@ -28,7 +28,7 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--max-in-flight <1..16>]
   [--continuous --stop-file <absent-path>]
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
-  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
+  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-cache-mib <0..65536>]";
 
 struct Prepared {
     configuration: NodeConfig,
@@ -435,6 +435,19 @@ mod tests {
             .collect()
         };
         let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
+        assert_eq!(
+            parse(&arguments(&[])).unwrap().configuration.pack_cache_bytes(),
+            64 << 20
+        );
+        for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
+            assert_eq!(
+                parse(&arguments(&["--pack-cache-mib", value]))
+                    .unwrap()
+                    .configuration
+                    .pack_cache_bytes(),
+                bytes,
+            );
+        }
         let continuous = parse(&arguments(&[
             "--continuous",
             "--stop-file",
@@ -470,6 +483,13 @@ mod tests {
         for flags in [
             vec!["--receive-max-input-mib", "0"],
             vec!["--session-timeout-secs", "0"],
+            vec!["--pack-cache-mib", "65537"],
+            vec!["--pack-cache-mib", "18446744073709551615"],
+            vec!["--pack-cache-mib", "-1"],
+            vec!["--pack-cache-mib", "+1"],
+            vec!["--pack-cache-mib", "1.5"],
+            vec!["--pack-cache-mib", "0", "--pack-cache-mib", "1"],
+            vec!["--pack-cache-mib"],
             vec![
                 "--pack-max-expanded-mib",
                 "1",

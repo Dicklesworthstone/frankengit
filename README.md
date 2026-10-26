@@ -70,6 +70,12 @@ candidates and 128 MiB of their bodies) bounds memory. A default-flag clone of a
 500 MiB repository of random blobs completed with 108 MiB peak server RSS
 (release fg of 25ba1840 built on ba7f09a3; one corpus, see
 docs/GUARDED_GIT_DAEMON.md).
+Serving commands also accept `--pack-cache-mib <0..65536>` for a shared,
+process-local cache of deterministic pack computations (64 MiB by default;
+zero disables retention). Independently reopened request children reuse it,
+while each request still authenticates and selects its permitted objects. This
+retained-entry budget is additional to the delta window and is not a total RSS
+limit; the measurements above predate the cache.
 The pre-advertisement walk reads blob headers, not blob bodies
 (frankengit-8xyq), so a repository larger than the envelope is still
 advertised and incrementally fetchable. A pack over the envelope is refused
@@ -193,6 +199,16 @@ vision goals to current code, evidence and existing owning work.
   evidence at `7fb8cf97`. The later cancellation-timer repair is present but
   not freshly executed by this audit. Historical Tier A remains 18 rows and
   624 checks at `18f77336`, over `git://` only.
+
+Admission closure materialization shares one authenticated history prefix across
+service connections. Reused closure data is bound to the repository, store and
+head slot; every intervening history transition must verify back to the exact
+cached basis. Cold starts, restarts and cache misses use the full-history
+fallback, which retains its 65,536 replay-step ceiling. Current refs,
+configuration and delivery are refreshed separately, and other projections,
+including legacy forge-position and outbox checks, can still replay history.
+This improves warm closure selection; the remaining history-scaling work in
+`frankengit-uxo2` stays open.
 
 **What still blocks the product:**
 

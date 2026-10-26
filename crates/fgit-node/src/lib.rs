@@ -53,6 +53,7 @@ use fgit_admission::{
 };
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod capsule_history;
+mod closure_selection;
 pub mod source_retrieval;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
@@ -113,8 +114,8 @@ use fgit_object_fabric::fabric::{
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_pack::{
-    CanonicalObjectSource, CanonicalPackObject, DeterministicPackEncoder,
-    MAX_THIN_BASES_PER_TARGET, PackBoundaryScanner, PackError, PackLimits, PackOrderKey,
+    CanonicalObjectSource, CanonicalPackObject, MAX_THIN_BASES_PER_TARGET, MemoizedPackEncoder,
+    PackBoundaryScanner, PackCacheStats, PackComputationCache, PackError, PackLimits, PackOrderKey,
     PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus,
     ThinBase,
 };
@@ -722,6 +723,9 @@ impl From<AdmissionUploadPackRefusal> for NodeAdmissionViewRefusal {
 pub struct DurableAdmissionMaterializer {
     materialized: RwLock<Option<MaterializedAdmissionState>>,
     cache_scope: CacheScope,
+    /// Service children share only a verified closure prefix; their exact
+    /// admission snapshots above remain independent.
+    closure_cache: Option<Arc<closure_selection::AdmissionClosureCache>>,
 }
 
 /// An [`AdmissionEvidence`] provider whose roots have been read from the
@@ -819,7 +823,10 @@ struct MaterializedAdmissionState {
     basis: PublicationBasis,
     cache_permit: CachePermit,
     ref_state: CanonicalRefState,
-    selected_closure: AuthoritySelectedClosure,
+    selected_closure: Arc<AuthoritySelectedClosure>,
+    /// Distinct committed roots in the verified prefix, not object authority
+    /// independently of `basis` and the cache permit.
+    closure_roots: Arc<BTreeSet<Digest>>,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
     root_layout: RootLayoutVersion,
@@ -1364,6 +1371,18 @@ impl DurableAdmissionMaterializer {
         Self {
             materialized: RwLock::new(None),
             cache_scope,
+            closure_cache: None,
+        }
+    }
+
+    const fn with_closure_cache(
+        cache_scope: CacheScope,
+        closure_cache: Arc<closure_selection::AdmissionClosureCache>,
+    ) -> Self {
+        Self {
+            materialized: RwLock::new(None),
+            cache_scope,
+            closure_cache: Some(closure_cache),
         }
     }
 
@@ -1896,9 +1915,16 @@ impl DurableAdmissionMaterializer {
             let ref_state =
                 decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
                     .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-            let (closure_roots, selection_source) =
-                select_authority_closure_in(authority, cx, body.clone(), &ref_state, is_cancelled)
-                    .await?;
+            let prefix = self.closure_prefix_for(authority.instance_id(), authenticated, basis)?;
+            let selection = closure_selection::select_in(
+                authority,
+                cx,
+                basis,
+                &ref_state,
+                prefix,
+                is_cancelled,
+            )
+            .await?;
             ensure_materializer_catch_up_live(is_cancelled)?;
             // `body.ref_root` is already the immutable lookup key regardless
             // of layout.  Keep the older structural guards above this
@@ -1979,56 +2005,9 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::InternalInvariantBreach,
                 ));
             }
-            // The genesis arm carries a computed root for the canonical empty
-            // closure, which has no stored frame; every other root names one
-            // committed record's immutable closure and is read and verified
-            // exactly as before. Several distinct roots union into one derived
-            // serving closure whose root is recomputed from the union.
-            let mut united = BTreeSet::new();
-            for closure_root in &closure_roots {
-                if selection_source == ClosureSelectionSource::EmptyGenesis {
-                    break;
-                }
-                ensure_materializer_catch_up_live(is_cancelled)?;
-                let closure_key = admission_immutable_key(
-                    ADMISSION_CLOSURE_KEY_PREFIX,
-                    repository_id,
-                    *closure_root,
-                )
-                .map_err(AdmissionMaterializationRefusal::Key)?;
-                let ImmutableRead::Present(closure_frame) = authority
-                    .read_immutable(cx, &closure_key)
-                    .await
-                    .map_err(AdmissionMaterializationRefusal::Authority)?
-                else {
-                    return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
-                        *closure_root,
-                    ));
-                };
-                let closure = decode_body::<PermittedObjectClosure>(
-                    &closure_frame,
-                    fgit_codec::DecodeLimits::DEFAULT,
-                )
-                .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-                if permitted_object_closure_root(&closure)
-                    .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
-                    != *closure_root
-                {
-                    return Err(AdmissionMaterializationRefusal::CanonicalRoot(
-                        RefusalCode::InternalInvariantBreach,
-                    ));
-                }
-                united.extend(closure.objects().iter().copied());
-            }
-            ensure_materializer_catch_up_live(is_cancelled)?;
-            let closure = PermittedObjectClosure::new(united);
-            let root = permitted_object_closure_root(&closure)
-                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
-            let selected_closure = AuthoritySelectedClosure {
-                root,
-                closure,
-                source: selection_source,
-            };
+            let (selected_closure, closure_roots) = selection
+                .materialize_in(authority, cx, repository_id, is_cancelled)
+                .await?;
             let delivery = fgit_admission::merge::native::delivery::read_in(
                 authority,
                 cx,
@@ -2063,7 +2042,8 @@ impl DurableAdmissionMaterializer {
                 basis: basis.clone(),
                 cache_permit,
                 ref_state,
-                selected_closure,
+                selected_closure: Arc::new(selected_closure),
+                closure_roots: Arc::new(closure_roots),
                 policy_epoch: body.policy_epoch,
                 configuration_root: body.configuration_root,
                 root_layout,
@@ -2080,11 +2060,72 @@ impl DurableAdmissionMaterializer {
         // No await follows this final catch-up checkpoint. A cancelled scope
         // therefore cannot install a readable partial materialization.
         ensure_materializer_catch_up_live(is_cancelled)?;
-        *self
+        let mut local = self
             .materialized
             .write()
-            .map_err(|_| AdmissionMaterializationRefusal::CachePoisoned)? = Some(state);
+            .map_err(|_| AdmissionMaterializationRefusal::CachePoisoned)?;
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        if let Some(cache) = &self.closure_cache {
+            cache.publish(&state, is_cancelled)?;
+        }
+        *local = Some(state);
         Ok(materialized)
+    }
+
+    fn closure_prefix_for(
+        &self,
+        store: StoreInstanceId,
+        selected: &AuthenticatedHead,
+        current: &PublicationBasis,
+    ) -> Result<Option<Arc<closure_selection::ClosurePrefix>>, AdmissionMaterializationRefusal>
+    {
+        let shared = match &self.closure_cache {
+            Some(cache) => cache.read()?,
+            None => None,
+        };
+        let local = self
+            .materialized
+            .read()
+            .map_err(|_| AdmissionMaterializationRefusal::CachePoisoned)?
+            .as_ref()
+            .map(|state| Arc::new(closure_selection::ClosurePrefix::from_state(state)));
+        // Prefer the service's latest eligible prefix, while preserving a
+        // private historical view if a sibling has already advanced beyond
+        // this request's exact basis. Both candidates have identical guards.
+        for cached in [shared, local].into_iter().flatten() {
+            let binding = CacheBinding::new(
+                cached.basis.body().repository_id,
+                cached.basis.id(),
+                cached.basis.generation(),
+                self.cache_scope,
+            );
+            // An otherwise identical head from another store/head slot cannot
+            // lend its decoded object set to this repository. A future snapshot
+            // also cannot prove an older selected head's closure.
+            if cached.authenticated.verified_against() != store
+                || selected.verified_against() != store
+                || cached.authenticated.receipt().key() != selected.receipt().key()
+                || cached.basis.body().repository_id != current.body().repository_id
+                || cached.basis.generation() > current.generation()
+                || CachePermit::require_matching(Some(&cached.cache_permit), binding).is_err()
+            {
+                continue;
+            }
+            let body = cached
+                .authenticated
+                .body()
+                .map_err(AdmissionMaterializationRefusal::HeadBody)?;
+            if body != *cached.basis.body()
+                || authority_head_id(&body)? != cached.basis.id()
+                || permitted_object_closure_root(&cached.selected.closure)
+                    .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+                    != cached.selected.root
+            {
+                continue;
+            }
+            return Ok(Some(cached));
+        }
+        Ok(None)
     }
 
     fn snapshot_for(
@@ -2894,6 +2935,9 @@ fn repository_commit_id(
 /// Every hop re-identifies the predecessor and verifies either its new decision
 /// batch or its exact state-preserving capsule activation. Both kinds of edge
 /// consume the authority replay bound before another immutable read.
+/// The pre-incremental full-history selector, retained only as the equivalence
+/// oracle for the production suffix projection.
+#[cfg(test)]
 async fn select_authority_closure_in<Authority>(
     authority: &Authority,
     cx: &Authority::Context,
@@ -6616,6 +6660,13 @@ pub struct NodeConfig {
     /// documented compatibility profile and a deployment widens it
     /// explicitly.
     selected_pack_limits: PackLimits,
+    /// Disposable deterministic pack computations, shared by this service's
+    /// independently reopened children. This cache never selects objects or
+    /// grants disclosure; each request authenticates its own selected closure.
+    pack_computation_cache: Arc<PackComputationCache>,
+    /// Verified historical closure prefix, shared across service children but
+    /// revalidated against each request's exact authority basis before reuse.
+    admission_closure_cache: Arc<closure_selection::AdmissionClosureCache>,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
     /// Work-proportional extension of the git-daemon session envelope: the
@@ -6692,6 +6743,8 @@ impl NodeConfig {
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             selected_pack_limits: default_selected_pack_limits(),
+            pack_computation_cache: Arc::new(PackComputationCache::new(DEFAULT_PACK_CACHE_BYTES)),
+            admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
@@ -6987,7 +7040,29 @@ impl NodeConfig {
             selected_pack_envelope(self.selected_pack_limits, max_expanded_bytes);
         self
     }
+
+    /// Selects the process-local pack computation cache capacity in bytes.
+    ///
+    /// The default is 64 MiB; zero disables retention. Clones of this
+    /// configuration share the cache across service children. Replacing the
+    /// capacity creates a fresh cache for this configuration and subsequent
+    /// clones, leaving existing siblings' capacity and entries unchanged.
+    #[must_use]
+    pub fn with_pack_cache_bytes(mut self, max_bytes: usize) -> Self {
+        self.pack_computation_cache = Arc::new(PackComputationCache::new(max_bytes));
+        self
+    }
+
+    /// The configured byte ceiling for retained pack computation entries.
+    #[must_use]
+    pub fn pack_cache_bytes(&self) -> usize {
+        self.pack_computation_cache.max_bytes()
+    }
 }
+
+/// Shared by a service and its reopened children, separately from each
+/// request's bounded delta window and private output spool.
+const DEFAULT_PACK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Default selected-pack envelope (frankengit-8xyq): 4 GiB of expanded
 /// objects. It bounds work and scratch disk; the delta window bounds memory.
@@ -7420,7 +7495,10 @@ impl OneNode {
             runtime,
             workspaces: treefs_workspace::NodeWorkspaceSessions::default(),
             authority,
-            admission_materializer: DurableAdmissionMaterializer::new(admission_cache_scope),
+            admission_materializer: DurableAdmissionMaterializer::with_closure_cache(
+                admission_cache_scope,
+                Arc::clone(&config.admission_closure_cache),
+            ),
             head_key,
             fabric,
             git_daemon_repository_path: config.git_daemon_repository_path,
@@ -7454,6 +7532,14 @@ impl OneNode {
     #[must_use]
     pub const fn serving_cell(&self) -> ServingCell {
         self.serving_cell
+    }
+
+    /// Observes this service's disposable pack computation cache, including
+    /// work performed by independently reopened children. Counters and cached
+    /// values do not participate in repository authority or object selection.
+    #[must_use]
+    pub fn pack_cache_stats(&self) -> PackCacheStats {
+        self.service_config.pack_computation_cache.stats()
     }
 
     /// What this cell may currently serve.
@@ -8643,7 +8729,9 @@ impl OneNode {
                 path_hash: 0,
             });
         }
-        let planner = PackPlanner::new(self.object_format, write_profile, limits.clone());
+        let cache = &self.service_config.pack_computation_cache;
+        let planner = PackPlanner::new(self.object_format, write_profile, limits.clone())
+            .with_computation_cache(Arc::clone(cache));
         let mut spool = pack_spool::PackSpool::new(self.storage_root());
         let receipt = planner
             .stream_selected_thin(
@@ -8651,7 +8739,7 @@ impl OneNode {
                 &keys,
                 &thin_bases,
                 &PackWriter::new(limits),
-                &mut DeterministicPackEncoder::for_profile(write_profile),
+                &mut MemoizedPackEncoder::for_profile(write_profile, Arc::clone(cache)),
                 &mut spool,
                 is_live,
             )
@@ -10128,6 +10216,7 @@ fn admission_cache_resources() -> ResourceVector {
 mod tests {
     mod admission_projection;
     mod capsule_history;
+    mod closure_selection;
     mod fabric_read_budget;
 
     #[test]

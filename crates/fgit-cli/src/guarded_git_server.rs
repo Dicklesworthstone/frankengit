@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-cache-mib <0..65536>]";
 
 struct Prepared {
     /// The operator explicitly accepted that any network peer can push as the
@@ -84,6 +84,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--receive-max-input-mib"
                     | "--receive-max-expanded-mib"
                     | "--pack-max-expanded-mib"
+                    | "--pack-cache-mib"
             ) {
                 return Err(USAGE.into());
             }
@@ -199,13 +200,14 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 /// Session-deadline and receive/pack byte-envelope flags shared by every raw
 /// Git transport (`fg serve` and `fg serve-ssh`), so the operator bounds each
 /// transport identically.
-pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 6] = [
+pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 7] = [
     "--session-timeout-secs",
     "--session-secs-per-mib",
     "--session-max-extension-secs",
     "--receive-max-input-mib",
     "--receive-max-expanded-mib",
     "--pack-max-expanded-mib",
+    "--pack-cache-mib",
 ];
 
 /// Apply [`SESSION_AND_ENVELOPE_FLAGS`] to a node configuration.
@@ -260,6 +262,11 @@ pub(crate) fn apply_session_and_envelope_flags(
     if let Some(value) = flags.get("--pack-max-expanded-mib") {
         configuration =
             configuration.with_selected_pack_byte_envelope(mib(value, "--pack-max-expanded-mib")?);
+    }
+    if let Some(value) = flags.get("--pack-cache-mib") {
+        configuration = configuration.with_pack_cache_bytes(
+            fgit_cli::parse_pack_cache_mib(value).map_err(|error| error.to_string())?,
+        );
     }
     Ok(configuration)
 }
@@ -442,6 +449,37 @@ mod tests {
                 .git_daemon_receive_processing_timeout(),
             GitDaemonReceiveProcessingTimeout::DEFAULT
         );
+    }
+
+    #[test]
+    fn pack_cache_capacity_is_explicit_bounded_and_can_be_disabled() {
+        assert_eq!(
+            parse(&arguments(&[]))
+                .unwrap()
+                .configuration
+                .pack_cache_bytes(),
+            64 << 20
+        );
+        for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
+            assert_eq!(
+                parse(&arguments(&["--pack-cache-mib", value]))
+                    .unwrap()
+                    .configuration
+                    .pack_cache_bytes(),
+                bytes,
+            );
+        }
+        for flags in [
+            vec!["--pack-cache-mib", "65537"],
+            vec!["--pack-cache-mib", "18446744073709551615"],
+            vec!["--pack-cache-mib", "-1"],
+            vec!["--pack-cache-mib", "+1"],
+            vec!["--pack-cache-mib", "1.5"],
+            vec!["--pack-cache-mib", "0", "--pack-cache-mib", "1"],
+            vec!["--pack-cache-mib"],
+        ] {
+            assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+        }
     }
 
     #[test]

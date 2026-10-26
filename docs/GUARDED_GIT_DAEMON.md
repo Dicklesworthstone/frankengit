@@ -48,6 +48,21 @@ the current object and its at most two client-held bases. The envelope bounds
 work and scratch disk. It was 128 MiB, and a memory bound, while packs were
 built in memory.
 
+`--pack-cache-mib <0..65536>` sets a separate byte budget for retained pack
+computations, 64 MiB by default (frankengit-grvl). The same flag is accepted by
+`fg serve-http` and `fg serve-ssh`. Zero disables retention. A service and its
+independently reopened request children share the cache; a process restart
+starts cold. Repeated or overlapping fetches can reuse deterministic compressed
+entries and delta outcomes, while every request still authenticates its own
+authority head and computes its permitted object selection. The cache does not
+make an object or base reachable or bypass work limits. Its capacity is separate
+from each request's delta window and output spool, and is not a total process
+RSS limit. `NodeConfig::with_pack_cache_bytes` exposes the same control to
+embedded callers, and `OneNode::pack_cache_stats` reports shared cache activity.
+No new wall-time, CPU, or peak-RSS improvement is claimed here.
+
+The following measurements predate this computation cache:
+
 Measured with a release fg of 25ba1840 built on ba7f09a3, on one commit of
 1 MiB random blobs, one `fg serve` session per clone, default flags:
 
