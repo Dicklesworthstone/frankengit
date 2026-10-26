@@ -28,7 +28,7 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--max-in-flight <1..16>]
   [--continuous --stop-file <absent-path>]
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
-  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-cache-mib <0..65536>]";
+  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]";
 
 struct Prepared {
     configuration: NodeConfig,
@@ -436,7 +436,31 @@ mod tests {
         };
         let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
         assert_eq!(
-            parse(&arguments(&[])).unwrap().configuration.pack_cache_bytes(),
+            parse(&arguments(&[]))
+                .unwrap()
+                .configuration
+                .selected_pack_blob_limit(),
+            None
+        );
+        for (value, bytes) in [
+            ("1", 1 << 20),
+            ("32", 32 << 20),
+            ("33", 33 << 20),
+            ("96", 96 << 20),
+        ] {
+            assert_eq!(
+                parse(&arguments(&["--pack-max-blob-mib", value]))
+                    .unwrap()
+                    .configuration
+                    .selected_pack_blob_limit(),
+                Some(bytes)
+            );
+        }
+        assert_eq!(
+            parse(&arguments(&[]))
+                .unwrap()
+                .configuration
+                .pack_cache_bytes(),
             64 << 20
         );
         for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
@@ -483,6 +507,13 @@ mod tests {
         for flags in [
             vec!["--receive-max-input-mib", "0"],
             vec!["--session-timeout-secs", "0"],
+            vec!["--pack-max-blob-mib", "0"],
+            vec!["--pack-max-blob-mib", "18446744073709551615"],
+            vec!["--pack-max-blob-mib", "-1"],
+            vec!["--pack-max-blob-mib", "+1"],
+            vec!["--pack-max-blob-mib", "1.5"],
+            vec!["--pack-max-blob-mib", "32", "--pack-max-blob-mib", "96"],
+            vec!["--pack-max-blob-mib"],
             vec!["--pack-cache-mib", "65537"],
             vec!["--pack-cache-mib", "18446744073709551615"],
             vec!["--pack-cache-mib", "-1"],

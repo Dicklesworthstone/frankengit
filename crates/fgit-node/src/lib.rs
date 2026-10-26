@@ -113,13 +113,13 @@ use fgit_git_object::{
 use fgit_object_fabric::fabric::{
     ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
 };
-use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
+use fgit_object_fabric::local::{LocalBlobStream, LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_pack::{
-    CanonicalObjectSource, CanonicalPackObject, MAX_THIN_BASES_PER_TARGET, MemoizedPackEncoder,
-    PackBoundaryScanner, PackCacheStats, PackComputationCache, PackError, PackLimits, PackOrderKey,
-    PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus,
-    ThinBase,
+    CanonicalBlobReader, CanonicalBlobStream, CanonicalObjectSource, CanonicalPackObject,
+    MAX_THIN_BASES_PER_TARGET, MemoizedPackEncoder, PackBoundaryScanner, PackCacheStats,
+    PackComputationCache, PackError, PackLimits, PackOrderKey, PackPlanner, PackWriteError,
+    PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus, ThinBase,
 };
 use fgit_reference::intent::TransactionRequest;
 use fgit_resource::{
@@ -3147,6 +3147,14 @@ struct VerifiedFabricPackSource<'a> {
 }
 
 impl VerifiedFabricPackSource<'_> {
+    /// Large selected blobs have their own chunked path. Raising that serving
+    /// envelope never raises the allocation/parser ceiling for metadata or
+    /// untyped ref-root bodies.
+    fn buffered_object_limit(&self) -> usize {
+        self.maximum_object_bytes
+            .min(DEFAULT_MAX_OBJECT_BYTES as usize)
+    }
+
     fn session_checkpoint(&self) -> Result<(), PackWriteError> {
         if self.session_is_live.is_none_or(|is_live| is_live()) {
             Ok(())
@@ -3184,6 +3192,7 @@ impl VerifiedFabricPackSource<'_> {
         id: &GitOid,
         ceiling: Option<&FabricReadCeiling<'_>>,
     ) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
+        let maximum = self.buffered_object_limit();
         // Preserve the outer-session → Database → synchronous fabric read →
         // outer-session → Database ordering. In particular, retain the fabric
         // result until both post-read probes ran, so an expiry cannot be
@@ -3195,9 +3204,7 @@ impl VerifiedFabricPackSource<'_> {
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
-        let read = self
-            .fabric
-            .read_whole_bounded(*id, self.maximum_object_bytes as u64);
+        let read = self.fabric.read_whole_bounded(*id, maximum as u64);
         if let (Some(ceiling), Ok(verified)) = (ceiling, &read) {
             ceiling.note_read(verified.object.payload().len());
             ceiling.rearm(self.database_context);
@@ -3210,17 +3217,17 @@ impl VerifiedFabricPackSource<'_> {
             StoreRefusal::StreamingBudgetExceeded { offered, .. } => {
                 PackWriteError::from(PackError::ObjectSizeLimit {
                     actual: usize::try_from(offered).unwrap_or(usize::MAX),
-                    limit: self.maximum_object_bytes,
+                    limit: maximum,
                 })
             }
             _ => PackWriteError::MissingCanonicalObject(*id),
         })?;
         let object_type = native_object_type(verified.object.envelope().object_kind())?;
         let payload = verified.object.payload();
-        if payload.len() > self.maximum_object_bytes {
+        if payload.len() > maximum {
             return Err(PackError::ObjectSizeLimit {
                 actual: payload.len(),
-                limit: self.maximum_object_bytes,
+                limit: maximum,
             }
             .into());
         }
@@ -3236,15 +3243,15 @@ impl VerifiedFabricPackSource<'_> {
     /// The kind and exact length of one stored object, from its envelope
     /// alone, under the same session and Database probes as a body read. The
     /// payload is neither read nor verified (frankengit-8xyq): a caller that
-    /// discloses or packs the bytes reads them through [`Self::read_object`].
+    /// discloses or packs bytes must finish a verified body read or blob stream.
     fn read_object_header(&self, id: &GitOid) -> Result<(ObjectType, usize), PackWriteError> {
         self.read_object_header_within(id, self.maximum_object_bytes)
     }
 
     /// Metadata reads keep the fabric's independent stored-file and envelope
     /// limits. A disclosure walk can retain an oversized blob's length without
-    /// allocating or reading its body; a selected body still uses the separate
-    /// payload bound enforced by `read_object`.
+    /// allocating or reading its body. Selected bodies retain the separate
+    /// planner payload bound, plus the buffered cap or verified stream checks.
     fn read_object_header_within(
         &self,
         id: &GitOid,
@@ -3278,6 +3285,52 @@ impl VerifiedFabricPackSource<'_> {
         Ok((native_object_type(header.kind)?, length))
     }
 
+    fn open_blob_within<'s>(
+        &'s self,
+        id: &GitOid,
+        ceiling: Option<&'s FabricReadCeiling<'s>>,
+    ) -> Result<Option<CanonicalBlobStream<'s>>, PackWriteError> {
+        if let Some(ceiling) = ceiling {
+            ceiling.rearm(self.database_context);
+        }
+        if self.read_object_header_within(id, usize::MAX)?.0 != ObjectType::Blob {
+            return Ok(None);
+        }
+        self.session_checkpoint()?;
+        if !self.database_read_is_live() {
+            return Err(PackError::DeadlineExceeded.into());
+        }
+        // Opening reads only bounded envelope metadata. The planner checks the
+        // selected per-object and aggregate ceilings before requesting bytes;
+        // oversized optional thin bases can therefore be skipped unread.
+        let opened = self.fabric.open_blob_stream_bounded(*id, u64::MAX);
+        self.session_checkpoint()?;
+        if !self.database_read_is_live() {
+            return Err(PackError::DeadlineExceeded.into());
+        }
+        let stream = opened.map_err(|_| PackWriteError::MissingCanonicalObject(*id))?;
+        let length =
+            usize::try_from(stream.declared_length()).map_err(|_| PackError::ObjectSizeLimit {
+                actual: usize::MAX,
+                limit: self.maximum_object_bytes,
+            })?;
+        Ok(Some(CanonicalBlobStream::new(
+            PackOrderKey {
+                id: *id,
+                object_type: ObjectType::Blob,
+                recency: 0,
+                path_hash: 0,
+            },
+            length,
+            VerifiedFabricBlobReader {
+                source: self,
+                stream,
+                ceiling,
+                credited: false,
+            },
+        )))
+    }
+
     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
         self.object_references_within(id, None)
     }
@@ -3287,6 +3340,15 @@ impl VerifiedFabricPackSource<'_> {
         id: &GitOid,
         ceiling: Option<&FabricReadCeiling<'_>>,
     ) -> Result<Vec<GitOid>, PackWriteError> {
+        // Blobs have no outgoing references. A local export can select them
+        // from bounded metadata just as a served request uses its disclosure
+        // graph; the pack writer verifies every selected body before promotion.
+        if let Some(ceiling) = ceiling {
+            ceiling.rearm(self.database_context);
+        }
+        if self.read_object_header_within(id, usize::MAX)?.0 == ObjectType::Blob {
+            return Ok(Vec::new());
+        }
         let (object_type, body) = self.read_object_within(id, ceiling)?;
         self.references_from_body(object_type, &body)
     }
@@ -3366,7 +3428,7 @@ impl VerifiedFabricPackSource<'_> {
 
     fn parse_limits(&self) -> ParseLimits {
         ParseLimits {
-            max_object_bytes: self.maximum_object_bytes,
+            max_object_bytes: self.buffered_object_limit(),
             tree_reference_bytes: match self.object_format {
                 GitHashAlgorithm::Sha1 => GitOidSha1::LEN,
                 GitHashAlgorithm::Sha256 => GitOidSha256::LEN,
@@ -3410,6 +3472,10 @@ fn is_gitlink_tree_mode(mode: &[u8]) -> bool {
 }
 
 impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
+    fn open_blob(&self, id: &GitOid) -> Result<Option<CanonicalBlobStream<'_>>, PackWriteError> {
+        self.open_blob_within(id, None)
+    }
+
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         let (object_type, body) = self.read_object(id)?;
         Ok(CanonicalPackObject::new(
@@ -3420,6 +3486,56 @@ impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
             0,
             0,
         ))
+    }
+}
+
+/// Tentative bytes go only into the pack's private scratch custody. Database
+/// time is credited once, after the fabric verifies exact EOF; unverified
+/// chunks cannot mint work allowance. Every read retains both budget probes.
+struct VerifiedFabricBlobReader<'s, 'a> {
+    source: &'s VerifiedFabricPackSource<'a>,
+    stream: LocalBlobStream,
+    ceiling: Option<&'s FabricReadCeiling<'s>>,
+    credited: bool,
+}
+
+impl CanonicalBlobReader for VerifiedFabricBlobReader<'_, '_> {
+    fn read(&mut self, output: &mut [u8]) -> Result<usize, PackWriteError> {
+        loop {
+            self.source.session_checkpoint()?;
+            if let Some(ceiling) = self.ceiling {
+                ceiling.rearm(self.source.database_context);
+            }
+            if !self.source.database_read_is_live() {
+                return Err(PackError::DeadlineExceeded.into());
+            }
+            let read = self.stream.read_tentative(output);
+            if matches!(read, Ok(0)) && self.stream.is_verified() && !self.credited {
+                if let Some(ceiling) = self.ceiling {
+                    ceiling.note_read(
+                        usize::try_from(self.stream.declared_length()).unwrap_or(usize::MAX),
+                    );
+                    ceiling.rearm(self.source.database_context);
+                }
+                self.credited = true;
+            }
+            self.source.session_checkpoint()?;
+            if !self.source.database_read_is_live() {
+                return Err(PackError::DeadlineExceeded.into());
+            }
+            match read {
+                Err(StoreRefusal::StorageIo {
+                    kind: io::ErrorKind::Interrupted,
+                    ..
+                }) => continue,
+                Err(_) => {
+                    return Err(PackWriteError::MissingCanonicalObject(
+                        self.stream.identity(),
+                    ));
+                }
+                Ok(count) => return Ok(count),
+            }
+        }
     }
 }
 
@@ -3647,6 +3763,19 @@ impl CeiledFabricSource<'_, '_> {
             .collect())
     }
 
+    /// Advisory negative filtering only: a blob want or have supplies no
+    /// commit/tree hint, so its bounded header is enough to skip it. A matching
+    /// metadata kind still requires the verified body read below; this header
+    /// cannot grant disclosure or authorize a client-held base.
+    fn hint_object_kind(&self, id: &GitOid) -> Result<ObjectType, PackWriteError> {
+        if let Some(ceiling) = self.ceiling {
+            ceiling.rearm(self.inner.database_context);
+        }
+        self.inner
+            .read_object_header_within(id, usize::MAX)
+            .map(|(kind, _)| kind)
+    }
+
     /// The root tree of a commit, or `None` for any other object.
     fn commit_tree(&self, id: &GitOid) -> Result<Option<GitOid>, PackWriteError> {
         Ok(self.commit_tree_and_parents(id)?.map(|(tree, _)| tree))
@@ -3657,6 +3786,9 @@ impl CeiledFabricSource<'_, '_> {
         &self,
         id: &GitOid,
     ) -> Result<Option<(GitOid, Vec<GitOid>)>, PackWriteError> {
+        if self.hint_object_kind(id)? != ObjectType::Commit {
+            return Ok(None);
+        }
         let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
         if object_type != ObjectType::Commit {
             return Ok(None);
@@ -3682,6 +3814,9 @@ impl CeiledFabricSource<'_, '_> {
 
     /// `(name, is_tree, id)` for every non-gitlink entry of a tree.
     fn tree_entries(&self, id: &GitOid) -> Result<Vec<(Vec<u8>, bool, GitOid)>, PackWriteError> {
+        if self.hint_object_kind(id)? != ObjectType::Tree {
+            return Ok(Vec::new());
+        }
         let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
         if object_type != ObjectType::Tree {
             return Ok(Vec::new());
@@ -3710,6 +3845,10 @@ impl CeiledFabricSource<'_, '_> {
 }
 
 impl CanonicalObjectSource for CeiledFabricSource<'_, '_> {
+    fn open_blob(&self, id: &GitOid) -> Result<Option<CanonicalBlobStream<'_>>, PackWriteError> {
+        self.inner.open_blob_within(id, self.ceiling)
+    }
+
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
         Ok(CanonicalPackObject::new(
@@ -6774,6 +6913,9 @@ pub struct NodeConfig {
     /// documented compatibility profile and a deployment widens it
     /// explicitly.
     selected_pack_limits: PackLimits,
+    /// An explicit selected-blob ceiling, separate from the eager import and
+    /// metadata ceiling. Only this opt-in widens the fabric's stored-file cap.
+    selected_pack_blob_limit: Option<usize>,
     /// Disposable deterministic pack computations, shared by this service's
     /// independently reopened children. This cache never selects objects or
     /// grants disclosure; each request authenticates its own selected closure.
@@ -6864,6 +7006,7 @@ impl NodeConfig {
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             selected_pack_limits: default_selected_pack_limits(),
+            selected_pack_blob_limit: None,
             pack_computation_cache: Arc::new(PackComputationCache::new(DEFAULT_PACK_CACHE_BYTES)),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
@@ -7180,6 +7323,37 @@ impl NodeConfig {
         self.selected_pack_limits =
             selected_pack_envelope(self.selected_pack_limits, max_expanded_bytes);
         self
+    }
+
+    /// Selects an explicit per-blob serving/export ceiling. Above 32 MiB the
+    /// node selects the V6 streaming profiles; commit/tree/tag parsing and
+    /// untyped ref-root reads retain their 32 MiB buffered ceiling. The local
+    /// stored-file bound includes independently bounded envelope/framing bytes.
+    /// Existing configurations keep their original profiles and 32 MiB limit.
+    /// Receive/import object limits and the total pack envelope are separate.
+    #[must_use]
+    pub fn with_selected_pack_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
+        self.selected_pack_limits.max_object_bytes = maximum_blob_bytes;
+        self.selected_pack_blob_limit = Some(maximum_blob_bytes);
+        self
+    }
+
+    /// The explicit selected-blob serving/export limit, if configured. None
+    /// keeps the original object envelope and its default 32 MiB ceiling.
+    #[must_use]
+    pub const fn selected_pack_blob_limit(&self) -> Option<usize> {
+        self.selected_pack_blob_limit
+    }
+
+    fn fabric_stored_object_limit(&self) -> u64 {
+        let Some(maximum_blob_bytes) = self.selected_pack_blob_limit else {
+            return self.max_object_bytes;
+        };
+        let stored = u64::try_from(maximum_blob_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(self.segment_limits.max_envelope_bytes as u64)
+            .saturating_add(8);
+        self.max_object_bytes.max(stored)
     }
 
     /// Selects the process-local pack computation cache capacity in bytes.
@@ -7658,7 +7832,7 @@ impl OneNode {
         let fabric = open_local_fabric(
             config.storage_root.clone(),
             namespace.clone(),
-            config.max_object_bytes,
+            config.fabric_stored_object_limit(),
             config.segment_limits.clone(),
         )?;
 
@@ -8717,9 +8891,10 @@ impl OneNode {
     /// Materializes a bounded Git pack from exactly one authority-selected closure.
     ///
     /// The closure is read through the authenticated head/RCR chain before any
-    /// fabric read.  The fabric provides only verified native object bodies;
-    /// `fgit-pack` applies the deterministic selected-set planner and writes a
-    /// temporary artifact before this payload becomes consumable.
+    /// fabric read. Buffered bodies are verified before use; streamed blobs
+    /// remain in private scratch until the fabric and pack writer verify exact
+    /// EOF. The deterministic selected-set pack becomes consumable only after
+    /// native identity checks, its trailer, and temporary artifact promotion.
     pub async fn authority_selected_pack_payload_in(
         &self,
         request: &NodeRequestContext,
@@ -8824,8 +8999,26 @@ impl OneNode {
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         // The operator-selected write envelope governs (frankengit-e6jj).
-        let limits = self.selected_pack_limits.clone();
+        let mut limits = self.selected_pack_limits.clone();
         let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
+        let blob_limit = self
+            .service_config
+            .selected_pack_blob_limit
+            .unwrap_or(configured_limit);
+        limits.max_object_bytes = limits.max_object_bytes.min(blob_limit);
+        let write_profile = if limits.max_object_bytes > DEFAULT_MAX_OBJECT_BYTES as usize {
+            if write_profile == PackWriteProfile::COMPRESSED_V5 {
+                PackWriteProfile::COMPRESSED_V6
+            } else if write_profile == PackWriteProfile::COMPRESSED_V5_THIN {
+                PackWriteProfile::COMPRESSED_V6_THIN
+            } else if write_profile == PackWriteProfile::COMPRESSED_NO_DELTA_V1 {
+                PackWriteProfile::COMPRESSED_NO_DELTA_V2
+            } else {
+                write_profile
+            }
+        } else {
+            write_profile
+        };
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
             object_format: self.object_format,
@@ -8903,7 +9096,7 @@ impl OneNode {
                 Some(kind) => kind,
                 None => {
                     source
-                        .read_object_header(id)
+                        .read_object_header_within(id, limits.max_object_bytes)
                         .map_err(NodePackMaterializationRefusal::from)?
                         .0
                 }
@@ -8918,6 +9111,12 @@ impl OneNode {
         let cache = &self.service_config.pack_computation_cache;
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone())
             .with_computation_cache(Arc::clone(cache));
+        let mut encoder = if write_profile.stream_blob_threshold.is_some() {
+            MemoizedPackEncoder::for_pack_limits(write_profile, &limits, Arc::clone(cache))
+                .map_err(NodePackMaterializationRefusal::from)?
+        } else {
+            MemoizedPackEncoder::for_profile(write_profile, Arc::clone(cache))
+        };
         let mut spool = pack_spool::PackSpool::new(self.storage_root());
         let receipt = planner
             .stream_selected_thin(
@@ -8925,7 +9124,7 @@ impl OneNode {
                 &keys,
                 &thin_bases,
                 &PackWriter::new(limits),
-                &mut MemoizedPackEncoder::for_profile(write_profile, Arc::clone(cache)),
+                &mut encoder,
                 &mut spool,
                 is_live,
             )
@@ -9938,7 +10137,7 @@ impl OneNode {
         let fabric = open_local_fabric(
             self.storage_root.clone(),
             namespace.clone(),
-            self.max_object_bytes,
+            self.service_config.fabric_stored_object_limit(),
             self.segment_limits.clone(),
         )?;
         self.fabric = fabric;
@@ -14675,6 +14874,35 @@ mod selected_pack_envelope_tests {
             plain.max_object_bytes,
             PackLimits::default().max_object_bytes
         );
+    }
+
+    #[test]
+    fn a_blob_serving_opt_in_preserves_import_and_metadata_limits() {
+        let mib = 1024 * 1024;
+        let base = NodeConfig::new(
+            PathBuf::from("/nonexistent"),
+            TenantId::from_bytes([0x41; 16]),
+            RepositoryId::from_bytes([0x42; 16]),
+        );
+        let original_receive = base.git_daemon_receive_limits.clone();
+        assert_eq!(base.selected_pack_blob_limit, None);
+        assert_eq!(base.fabric_stored_object_limit(), DEFAULT_MAX_OBJECT_BYTES);
+        let selected = base.clone().with_selected_pack_blob_limit(96 * mib);
+        assert_eq!(selected.max_object_bytes, base.max_object_bytes);
+        assert_eq!(selected.selected_pack_blob_limit, Some(96 * mib));
+        assert_eq!(selected.selected_pack_limits.max_object_bytes, 96 * mib);
+        assert_eq!(selected.git_daemon_receive_limits, original_receive);
+        assert_eq!(
+            selected.fabric_stored_object_limit(),
+            (96 * mib + selected.segment_limits.max_envelope_bytes + 8) as u64,
+        );
+        assert_eq!(
+            selected.selected_pack_limits.max_total_expanded_bytes,
+            base.selected_pack_limits.max_total_expanded_bytes,
+        );
+        let restricted = selected.with_max_object_bytes(4096);
+        assert_eq!(restricted.max_object_bytes, 4096);
+        assert!(restricted.fabric_stored_object_limit() > 96 * mib as u64);
     }
 
     fn pack_request(sideband: bool) -> PackRequest {

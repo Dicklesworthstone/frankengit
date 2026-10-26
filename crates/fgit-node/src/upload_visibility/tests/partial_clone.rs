@@ -3,6 +3,7 @@ use super::*;
 use fgit_wire::ObjectFilter;
 
 mod blob_limits;
+mod streaming_blobs;
 
 fn request(wants: Vec<GitOid>, haves: Vec<GitOid>, filter: Option<ObjectFilter>) -> PackRequest {
     PackRequest {

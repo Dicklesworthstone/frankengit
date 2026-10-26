@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-cache-mib <0..65536>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]";
 
 struct Prepared {
     /// The operator explicitly accepted that any network peer can push as the
@@ -84,6 +84,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--receive-max-input-mib"
                     | "--receive-max-expanded-mib"
                     | "--pack-max-expanded-mib"
+                    | "--pack-max-blob-mib"
                     | "--pack-cache-mib"
             ) {
                 return Err(USAGE.into());
@@ -200,13 +201,14 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 /// Session-deadline and receive/pack byte-envelope flags shared by every raw
 /// Git transport (`fg serve` and `fg serve-ssh`), so the operator bounds each
 /// transport identically.
-pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 7] = [
+pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 8] = [
     "--session-timeout-secs",
     "--session-secs-per-mib",
     "--session-max-extension-secs",
     "--receive-max-input-mib",
     "--receive-max-expanded-mib",
     "--pack-max-expanded-mib",
+    "--pack-max-blob-mib",
     "--pack-cache-mib",
 ];
 
@@ -262,6 +264,11 @@ pub(crate) fn apply_session_and_envelope_flags(
     if let Some(value) = flags.get("--pack-max-expanded-mib") {
         configuration =
             configuration.with_selected_pack_byte_envelope(mib(value, "--pack-max-expanded-mib")?);
+    }
+    if let Some(value) = flags.get("--pack-max-blob-mib") {
+        configuration = configuration.with_selected_pack_blob_limit(
+            fgit_cli::parse_pack_blob_mib(value).map_err(|error| error.to_string())?,
+        );
     }
     if let Some(value) = flags.get("--pack-cache-mib") {
         configuration = configuration.with_pack_cache_bytes(
@@ -439,16 +446,52 @@ mod tests {
             "8",
             "--pack-max-expanded-mib",
             "16",
+            "--pack-max-blob-mib",
+            "96",
         ]))
         .unwrap();
         assert_eq!(selected.limits.max_sessions(), 7);
         assert_eq!(selected.limits.max_in_flight(), 2);
+        assert_eq!(default.configuration.selected_pack_blob_limit(), None);
+        assert_eq!(
+            selected.configuration.selected_pack_blob_limit(),
+            Some(96 << 20)
+        );
         assert_eq!(
             default
                 .configuration
                 .git_daemon_receive_processing_timeout(),
             GitDaemonReceiveProcessingTimeout::DEFAULT
         );
+    }
+
+    #[test]
+    fn selected_blob_size_has_the_shared_boundaries_and_duplicate_refusals() {
+        for (value, bytes) in [
+            ("1", 1 << 20),
+            ("32", 32 << 20),
+            ("33", 33 << 20),
+            ("96", 96 << 20),
+        ] {
+            assert_eq!(
+                parse(&arguments(&["--pack-max-blob-mib", value]))
+                    .unwrap()
+                    .configuration
+                    .selected_pack_blob_limit(),
+                Some(bytes)
+            );
+        }
+        for flags in [
+            vec!["--pack-max-blob-mib", "0"],
+            vec!["--pack-max-blob-mib", "18446744073709551615"],
+            vec!["--pack-max-blob-mib", "-1"],
+            vec!["--pack-max-blob-mib", "+1"],
+            vec!["--pack-max-blob-mib", "1.5"],
+            vec!["--pack-max-blob-mib", "32", "--pack-max-blob-mib", "96"],
+            vec!["--pack-max-blob-mib"],
+        ] {
+            assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+        }
     }
 
     #[test]

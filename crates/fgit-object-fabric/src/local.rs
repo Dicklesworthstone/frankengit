@@ -12,6 +12,10 @@ pub use batch::StagedBatch;
 #[path = "local_bounded_read.rs"]
 mod bounded_read;
 
+#[path = "local_blob_stream.rs"]
+mod blob_stream;
+pub use blob_stream::LocalBlobStream;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};

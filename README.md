@@ -81,8 +81,15 @@ The pre-advertisement walk reads blob headers, not blob bodies
 advertised and incrementally fetchable. A blob reached through a verified tree
 or tag can also exceed the per-object serving limit without blocking ref
 listing, up-to-date fetches, or filters that omit it. Requesting that blob's
-body still refuses before any pack bytes are emitted; metadata parsing and
-storage-envelope limits remain enforced. A pack over the total envelope is refused
+body beyond the selected per-object limit still refuses before any pack bytes
+are emitted; metadata parsing and storage-envelope limits remain enforced.
+`--pack-max-blob-mib <non-zero>` on `serve`, `serve-http`, `serve-ssh` and `export`
+sets an independent per-blob limit; values above 32 MiB select V6 pack profiles.
+Larger blobs stream from a checked file through bounded compression chunks,
+with exact-length, native-identity and strong-payload verification before
+promotion. They are not buffered as delta candidates or cached compressed
+entries. Defaults stay at 32 MiB; receive/import and buffered metadata limits
+remain separate. Embedded callers use `NodeConfig::with_selected_pack_blob_limit`. A pack over the total envelope is refused
 on the side band with a message naming the limit and that flag, which git
 prints as `remote: pack needs ...`. A repository whose commit, tree and tag bytes
 alone exceed it is refused before the advertisement with one `ERR` packet
@@ -238,8 +245,7 @@ independent full-bead acceptance remain incomplete.
   unique-base query through the whole history. Bounded FIFO service also keeps
   skewed timestamps from starving the other side. Wide ancestry regions or
   multiple best bases can still exhaust the 4,096-commit bound and refuse,
-  never select a wrong base. Served packs refuse any single object over the
-  32 MiB per-object ceiling.
+  never select a wrong base.
 - Forge-position and outbox state have 16,384-entry bounds; the node writer
   gate is one. Required-check history scans are independently bounded.
   These do not establish sustained or extreme-scale operation.

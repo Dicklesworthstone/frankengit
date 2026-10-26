@@ -48,6 +48,33 @@ the current object and its at most two client-held bases. The envelope bounds
 work and scratch disk. It was 128 MiB, and a memory bound, while packs were
 built in memory.
 
+`--pack-max-blob-mib <non-zero>` sets the per-blob serving/export ceiling on
+`fg serve`, `fg serve-http`, `fg serve-ssh` and `fg export`. For example,
+`--pack-max-blob-mib 96` permits selected blobs up to 96 MiB; the default remains
+32 MiB. All paths use the same checked decimal parser and refuse zero,
+malformed, duplicate, missing or overflowing values before opening the node.
+The selected byte count must also fit the finite compression-work envelope.
+
+Embedded callers use `NodeConfig::with_selected_pack_blob_limit(maximum_blob_bytes)`,
+for example `.with_selected_pack_blob_limit(96 * 1024 * 1024)`. This separate policy
+also admits the corresponding stored file plus bounded envelope/framing bytes,
+without widening eager-import, receive, or metadata parser ceilings. The total
+pack envelope (`--pack-max-expanded-mib` or `with_selected_pack_byte_envelope`)
+remains independent.
+
+Above 32 MiB, that explicit configuration selects `git-pack-compressed-v6`, its
+thin variant, or `git-pack-compressed-no-delta-v2` according to the negotiated
+request. A selected blob above 32 MiB is read from one checked file descriptor
+and compressed in fixed 16 KiB input chunks. Its exact length, native Git
+identity and stronger payload commitment must all verify at EOF before the
+private pack can be promoted or sent. Each read checks both the outer session
+and Database budget; only the completed verified body earns read-work credit.
+Large blobs are whole base entries, clear the delta candidate window, are not
+retained as client-held thin bases, and bypass compressed-entry caching. Small
+objects preserve the previous profile's bytes; commit/tree/tag and untyped
+ref-root reads retain the original buffered limit, at most 32 MiB. Independent
+pack size, output, compression-work and deadline limits still refuse explicitly.
+
 `--pack-cache-mib <0..65536>` sets a separate byte budget for retained pack
 computations, 64 MiB by default (frankengit-grvl). The same flag is accepted by
 `fg serve-http` and `fg serve-ssh`. Zero disables retention. A service and its

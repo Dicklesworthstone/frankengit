@@ -405,6 +405,35 @@ against a 4,095-byte serving cap, with an exact-bound successful clone,
 malformed-header refusal, deleted-ref isolation and unchanged canonical state.
 These are native loopback packet tests, not a stock-client compatibility claim.
 
+**Explicit large selected blobs.** `fg export`, `fg serve` (library and guarded
+bindings), `fg serve-http` and `fg serve-ssh` accept the same checked
+`--pack-max-blob-mib <non-zero>` option. Embedded consumers use
+`NodeConfig::with_selected_pack_blob_limit(bytes)`. A limit above 32 MiB selects
+`git-pack-compressed-v6`, `git-pack-compressed-v6-thin` or
+`git-pack-compressed-no-delta-v2`; existing defaults and profile identities remain
+unchanged. Larger blobs are whole base entries read from a retained file
+descriptor and compressed in fixed 16 KiB chunks, never object-sized source
+buffers, delta candidates or retained compressed cache entries. They clear the
+candidate window and are skipped as optional client-held thin bases. Exact
+length, EOF, native identity and the stronger fabric payload commitment are
+verified before scratch promotion; cancellation, corruption, short/long reads,
+encoder receipt mismatches and sink failures abort custody. The explicit fabric
+stored-file allowance includes envelope/framing overhead while eager-import,
+receive and buffered metadata limits remain unchanged. Independent selected
+object, expanded-pack, output, compression-work and time limits still apply.
+
+The authored pack component tests cover both hashes, short-read-independent
+bytes, planned/streamed equivalence across delta-window barriers, malformed
+sources, cancellation, sink failures, thin-base skipping and bounded cache
+behavior. A generated 33 MiB source never allocates its full body. Native node
+fixtures also cover a 33 MiB sparse stored blob through the actual selected-pack
+consumer, exact-limit refusal and late-corruption cleanup, plus both-hash small
+exports and v0/v1/v2 fetches under the explicit configuration. CLI regressions
+cover shared 32/33-MiB boundaries, malformed/overflowing values, duplicate and
+missing options, command scope and application to every serving configuration.
+These fixtures are implementation coverage, not a claim that the stock-client or full native
+batch gates have run at this revision.
+
 The **upload read ceiling** (frankengit-root-doctrine-x2mv.4.53) bounds the
 object-fabric reads behind one served pack under the Database class, anchored
 at the session's greeting.
@@ -418,8 +447,10 @@ at the session's greeting.
   bounds everything.
 
 A clone of a few hundred MB therefore reads under a ceiling proportional to its
-size instead of failing at 15 s. The closure walk and the planner each read the
-selected blobs once.
+size instead of failing at 15 s. The disclosure walk reads typed blob headers;
+the selected-pack consumer reads and verifies the requested bodies. A streamed
+blob earns its verified-byte credit only at exact EOF, so unverified partial
+chunks cannot extend the Database ceiling.
 
 **Thin fetch packs** (frankengit-pazc). Upload-pack advertises `thin-pack` on
 every transport. A fetch that requested it, with `ofs-delta` and at least one

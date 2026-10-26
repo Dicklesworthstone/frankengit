@@ -96,6 +96,17 @@ pub(super) fn read_envelope(
     maximum_stored: u64,
     maximum_envelope: usize,
 ) -> Result<(Vec<u8>, u64), StoreRefusal> {
+    let (_, envelope, payload) = open_envelope(path, maximum_stored, maximum_envelope)?;
+    Ok((envelope, payload))
+}
+
+/// Retain the exact descriptor whose file length and envelope were checked,
+/// positioned at the first payload byte. No payload bytes are read here.
+pub(super) fn open_envelope(
+    path: &Path,
+    maximum_stored: u64,
+    maximum_envelope: usize,
+) -> Result<(File, Vec<u8>, u64), StoreRefusal> {
     let (mut file, length) = open_regular(path)?;
     let payload_start = read_framing(&mut file, length, maximum_stored, maximum_envelope)?;
     let payload = length
@@ -105,7 +116,7 @@ pub(super) fn read_envelope(
     let mut envelope =
         vec![0; usize::try_from(payload_start - 8).map_err(|_| StoreRefusal::LengthOverflow)?];
     file.read_exact(&mut envelope).map_err(eof_is_malformed)?;
-    Ok((envelope, payload))
+    Ok((file, envelope, payload))
 }
 
 /// Check the fixed FGOB prefix of an open object file and return where its

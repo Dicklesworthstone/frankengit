@@ -455,6 +455,17 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
 }
 
 fn fixture_with_public_body(format: GitHashAlgorithm, public_body: Vec<u8>) -> Fixture {
+    fixture_with_public_blob(format, |node| {
+        node.put_git_object(ObjectType::Blob, public_body)
+            .unwrap()
+            .identity()
+    })
+}
+
+fn fixture_with_public_blob(
+    format: GitHashAlgorithm,
+    public_blob: impl FnOnce(&OneNode) -> GitOid,
+) -> Fixture {
     let scratch = Scratch::new();
     let config = NodeConfig::new(
         scratch.0.clone(),
@@ -477,7 +488,7 @@ fn fixture_with_public_body(format: GitHashAlgorithm, public_body: Vec<u8>) -> F
         tree_bytes(&[(b"100644", b"private", private_blob)]),
     );
     let private = put(ObjectType::Commit, commit_bytes(private_tree, &[ancestor]));
-    let public_blob = put(ObjectType::Blob, public_body);
+    let public_blob = public_blob(&node);
     let public_tree = put(
         ObjectType::Tree,
         tree_bytes(&[

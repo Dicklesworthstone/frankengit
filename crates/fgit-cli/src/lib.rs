@@ -282,7 +282,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -1006,6 +1006,9 @@ struct ServeEnvelope {
     /// Selected-pack write ceiling in MiB (`--pack-max-expanded-mib`),
     /// accepted by `serve` and `export` (frankengit-e6jj).
     pack_max_expanded_mib: Option<u64>,
+    /// Explicit selected-blob serving/export cap, independent of receive and
+    /// aggregate pack limits. Values above 32 MiB select streaming profiles.
+    pack_max_blob_bytes: Option<usize>,
     /// Shared, process-local pack computation cache; zero disables retention.
     pack_cache_bytes: Option<usize>,
 }
@@ -1075,6 +1078,9 @@ impl ServeEnvelope {
             let bytes = serve_mib_to_bytes(mib, "--pack-max-expanded-mib")?;
             configuration = configuration.with_selected_pack_byte_envelope(bytes);
         }
+        if let Some(bytes) = self.pack_max_blob_bytes {
+            configuration = configuration.with_selected_pack_blob_limit(bytes);
+        }
         Ok(configuration)
     }
 }
@@ -1088,6 +1094,28 @@ fn serve_mib_to_bytes(mib: u64, field: &'static str) -> Result<usize, CliRefusal
             field,
             value: mib.to_string(),
         })
+}
+
+/// Parses the selected-blob serving/export flag shared by every transport.
+///
+/// Values are nonzero decimal MiB, checked against the platform byte width and
+/// the streaming codec's finite eight-work-units-per-byte envelope. This cap
+/// does not widen receive, eager-import, or buffered metadata limits.
+pub fn parse_pack_blob_mib(value: &str) -> Result<usize, CliRefusal> {
+    let refusal = || CliRefusal::InvalidServeLimit {
+        field: "--pack-max-blob-mib",
+        value: value.to_owned(),
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(refusal());
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(|mib| mib.checked_mul(1_048_576))
+        .filter(|bytes| *bytes != 0 && bytes.checked_mul(8).is_some())
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(refusal)
 }
 
 /// Parses the pack computation cache flag shared by all serving transports.
@@ -1114,7 +1142,7 @@ pub fn parse_pack_cache_mib(value: &str) -> Result<usize, CliRefusal> {
 
 /// Extracts the envelope flags, which are optional and position-free but
 /// scoped: the receive/session flags are meaningful only for `serve`, and
-/// `--pack-max-expanded-mib` for `serve` and `export`; anywhere else they
+/// selected-pack size flags for `serve` and `export`; anywhere else they
 /// stay in place and fall through to the usage refusal, so no other command
 /// silently accepts them.
 fn extract_serve_envelope(
@@ -1127,6 +1155,15 @@ fn extract_serve_envelope(
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
+        if (is_serve || is_export) && argument == "--pack-max-blob-mib" {
+            if envelope.pack_max_blob_bytes.is_some() {
+                return Err(CliRefusal::Usage);
+            }
+            let value = arguments.get(index + 1).ok_or(CliRefusal::Usage)?;
+            envelope.pack_max_blob_bytes = Some(parse_pack_blob_mib(value)?);
+            index += 2;
+            continue;
+        }
         if is_serve && argument == "--pack-cache-mib" {
             if envelope.pack_cache_bytes.is_some() {
                 return Err(CliRefusal::Usage);
@@ -2187,6 +2224,89 @@ mod tests {
         assert_eq!(envelope.session_max_extension_secs, Some(900));
         assert_eq!(envelope.receive_max_input_mib, Some(256));
         assert_eq!(envelope.receive_max_expanded_mib, Some(512));
+    }
+
+    #[test]
+    fn selected_blob_mib_is_checked_and_reaches_both_export_and_legacy_serve() {
+        for (value, bytes) in [
+            ("1", 1 << 20),
+            ("32", 32 << 20),
+            ("33", 33 << 20),
+            ("96", 96 << 20),
+        ] {
+            assert_eq!(super::parse_pack_blob_mib(value).unwrap(), bytes);
+            for command in ["serve", "export"] {
+                let mut argv = serve_argv(&["--pack-max-blob-mib", value]);
+                argv[0] = command.into();
+                let (retained, envelope) = super::extract_serve_envelope(&argv).unwrap();
+                assert_eq!(retained.len(), 5);
+                assert_eq!(envelope.pack_max_blob_bytes, Some(bytes));
+                assert_eq!(envelope.pack_max_expanded_mib, None);
+                assert_eq!(envelope.receive_max_expanded_mib, None);
+                let configuration = fgit_node::NodeConfig::new(
+                    PathBuf::from("not-opened"),
+                    fgit_types::TenantId::from_bytes([0x11; 16]),
+                    fgit_types::RepositoryId::from_bytes([0x22; 16]),
+                );
+                assert_eq!(configuration.selected_pack_blob_limit(), None);
+                let selected = if command == "export" {
+                    envelope.apply_pack_envelope(configuration)
+                } else {
+                    envelope.apply(configuration)
+                }
+                .unwrap();
+                assert_eq!(selected.selected_pack_blob_limit(), Some(bytes));
+            }
+        }
+        let maximum = (u64::MAX / 8 / 1_048_576).min(usize::MAX as u64 / 1_048_576);
+        assert_eq!(
+            super::parse_pack_blob_mib(&maximum.to_string()).unwrap(),
+            usize::try_from(maximum * 1_048_576).unwrap()
+        );
+        assert!(super::parse_pack_blob_mib(&(maximum + 1).to_string()).is_err());
+        for value in [
+            "",
+            "0",
+            "-1",
+            "+1",
+            "1.5",
+            " 1",
+            "1 ",
+            "18446744073709551615",
+            "18446744073709551616",
+        ] {
+            assert!(matches!(
+                super::parse_pack_blob_mib(value),
+                Err(CliRefusal::InvalidServeLimit {
+                    field: "--pack-max-blob-mib",
+                    ..
+                })
+            ));
+            assert!(
+                super::extract_serve_envelope(&serve_argv(&["--pack-max-blob-mib", value]))
+                    .is_err()
+            );
+        }
+        for command in ["serve", "export"] {
+            for flags in [
+                vec!["--pack-max-blob-mib"],
+                vec!["--pack-max-blob-mib", "32", "--pack-max-blob-mib", "96"],
+            ] {
+                let mut argv = serve_argv(&flags);
+                argv[0] = command.into();
+                assert!(matches!(
+                    super::extract_serve_envelope(&argv),
+                    Err(CliRefusal::Usage)
+                ));
+            }
+        }
+        for command in ["init", "doctor", "import"] {
+            let mut argv = serve_argv(&["--pack-max-blob-mib", "96"]);
+            argv[0] = command.into();
+            let (retained, envelope) = super::extract_serve_envelope(&argv).unwrap();
+            assert_eq!(retained, argv);
+            assert_eq!(envelope.pack_max_blob_bytes, None);
+        }
     }
 
     #[test]
