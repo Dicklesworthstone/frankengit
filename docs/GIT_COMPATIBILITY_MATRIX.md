@@ -46,7 +46,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
-## Executed stock-client rows: partial clone, notes, gitlinks, atomic push
+## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
 
 These rows come from one discovered suite, `suites-transport-stock_transport_capabilities`
 (`scripts/e2e/suites/transport/stock_transport_capabilities.sh`, helper
@@ -58,6 +58,11 @@ git 2.54.0. Each run covers SHA-1 and SHA-256 repositories over
 one fresh node per transport. Assertion ids are
 `TCAP-{host,pinned}-{sha1,sha256}-{http,git,ssh}-<check>`.
 
+The push-option rows were added at **9db4d8bd** (frankengit-321s). With a
+release `fg` of that commit (sha256 `34b215232d61b39f…`), the suite's helper
+recorded 396 checks, 198 for each git (host 2.56.0 and pinned 2.54.0), and
+all passed. That run was the helper invoked directly, not the suite runner.
+
 | Capability | Check ids (`<check>`) | Result at 05e29b11 |
 |---|---|---|
 | Partial clone, `blob:none` and `blob:limit=1k` (v2; `blob:none` also v0) | `filter-blob-none-*`, `filter-blob-limit-*`, `filter-blob-none-v0` | pass; the clone's missing set equals the source's own `rev-list --filter-print-omitted` |
@@ -68,6 +73,8 @@ one fresh node per transport. Assertion ids are
 | Submodule gitlinks, submodule objects absent by design | `gitlink-clone`, `gitlink-push` | pass; a push moving the gitlink publishes, and a fetch reads it back |
 | Atomic push | `atomic-success`, `atomic-all-or-nothing` | pass; a refname-conflict refusal of one update rejects both and leaves every ref unchanged |
 | Non-atomic push | `non-atomic-per-ref` | pass; the valid ref publishes, the conflicting one gets per-ref `[remote rejected]` |
+| Push options (`git push -o ci.skip -o key=value`) | `push-options` | pass at 9db4d8bd. Before it, every transport failed on the client ("the receiving end does not support push options"), because nothing advertised the capability. The options are sealed in client order into the request's canonical digest (node test `guarded_git_daemon` `push_options::advertised_push_options_are_sealed_exactly_and_in_client_order`) |
+| Push option past the sealable bound (1,025 bytes) | `push-option-bound` | refused with nothing published, beside a 1,024-byte twin that publishes (9db4d8bd). The git:// and SSH clients still see only the generic `receive failed before admission` line; the typed cause is frankengit-yrff |
 
 Divergence: fg serves filters without an `uploadpack.allowFilter` switch
 (DIV-TA-002). Non-claims: loopback only, one node per transport, filter
