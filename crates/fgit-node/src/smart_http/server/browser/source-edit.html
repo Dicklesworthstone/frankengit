@@ -8,6 +8,10 @@
 <p>This bounded editor changes an existing branch through native patch preparation, candidate inspection, and conditional publication. Read access does not grant write permission. No command bypasses native policy or ref admission.</p>
 <section><h2>Connect and select an immutable base</h2>
 <label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+<label><input id="recovery-only" type="checkbox"> Outcome lookup only — original token rotated or revoked</label>
+<label>Original principal ID <input id="original-principal" autocomplete="off" spellcheck="false" maxlength="32" pattern="[0-9a-f]{32}" aria-describedby="recovery-help" disabled></label>
+<p id="recovery-help">For recovery only, enter the original principal ID from an independently retained record or operator configuration. Use a current token for that same principal with its outcome-recovery grant. This permits no resend. Connection choices take effect only on Connect.</p>
+<p id="connection-mode" role="status" aria-live="polite"></p>
 <button id="connect" type="button">Connect</button><button id="disconnect" type="button">Disconnect and clear source data</button>
 <label>Branch <input id="branch" value="refs/heads/main" spellcheck="false"></label>
 <label>Object format <select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>

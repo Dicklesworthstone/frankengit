@@ -129,9 +129,21 @@ Read-only recovery posts the original key without a body. Key-not-observed,
 seal-not-observed, and undecided observations retain responsibility; none proves
 non-commit. An observed transaction/principal cannot be silently replaced later.
 Token-free recovery receipts preserve the original request across reloads and
-must be restored under the original credential, route, and incarnation. Restore
-sends nothing. A sent or exported request cannot be discarded as an unsent one.
-Receipts contain repository bytes and must be protected separately from tokens.
+remain bound to its original fingerprint, route and incarnation. Ordinary retry
+requires the original credential. Restore sends nothing. A sent or exported
+request cannot be discarded as an unsent one. Receipts contain repository bytes
+and must be protected separately from tokens.
+
+After credential rotation, select **Recovery only** and the independently retained
+original principal, then connect with a replacement token for that principal.
+An old receipt can be restored without listing refs or possessing the revoked
+token. The library form is `connect(token, { recoveryOnly: true,
+originalPrincipal })`. The shared transport allows only the original-key,
+bodyless outcome request and verifies the authenticated principal even for an
+absent or undecided result. Source selection, imports, preparation, sends and
+discard are blocked; saving the retained receipt remains available. Terminal
+recovery leaves the session restricted until an explicit ordinary reconnect.
+The replacement credential needs its independent `outcomes-read` grant.
 
 ## Bounds and unsupported operations
 
@@ -154,6 +166,8 @@ Repository-owned focused commands:
 
 ```sh
 node --test tests/browser/initial.test.mjs tests/browser/initial-view.test.mjs \
+  tests/browser/source-initial-credential-recovery.test.mjs \
+  tests/browser/source-initial-credential-view.test.mjs \
   tests/browser/initial-import.test.mjs tests/browser/initial-import-view.test.mjs \
   tests/browser/initial-import-http.test.mjs
 node tests/browser/initial-import-git-oracle.mjs \

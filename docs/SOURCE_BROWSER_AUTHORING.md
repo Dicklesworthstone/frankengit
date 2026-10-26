@@ -160,12 +160,26 @@ candidate. This is a consistency commitment, not a signature or authority grant;
 native admission remains mandatory. Receipt files contain repository data and
 must be handled accordingly.
 
-The bounded browser recovery profile requires the original token fingerprint;
-it does not yet provide same-principal recovery after token rotation. Outcome
-lookup needs its independent outcomes-read grant. A sent or exported request
-cannot be discarded as locally unsent. Disconnect clears source data and the
-credential but retains unresolved request responsibility for receipt export.
-No token is stored in URLs, browser persistent storage, or receipts.
+Ordinary retry requires the original token fingerprint. After token rotation,
+select **Recovery only** and enter the independently retained original principal
+before connecting with its replacement credential. An old receipt can then be
+restored without a ref listing or possession of the revoked token. Its original
+fingerprint, exact request bytes and key remain unchanged; the replacement
+credential does not create a new request identity.
+
+Recovery mode permits only a bodyless original-key outcome lookup, with the
+independent `outcomes-read` grant. The shared transport checks the selected
+principal on every response, including absent/nonterminal observations. Ordinary
+reads, edits, inspection, preparation, sends and discarding responsibility are
+disabled. Saving the original receipt remains available. A terminal result does
+not promote this connection to ordinary work; reconnect explicitly to do that.
+The library API is `connect(token, { recoveryOnly: true, originalPrincipal })`.
+
+A sent or exported request cannot be discarded as locally unsent. Disconnect
+clears source data and the credential but retains unresolved request responsibility
+for receipt export. No token is stored in URLs, browser persistent storage, or
+receipts. See [the native outcome contract](HTTP_OUTCOME_API.md) for principal
+namespaces, independent grants and the meaning of missing observations.
 
 ## Local checks and non-claims
 
@@ -174,6 +188,13 @@ Run client/DOM contract tests with:
 ```sh
 node --test tests/browser/*.test.mjs
 ```
+
+The focused source/initial credential-rotation checks are
+`tests/browser/source-initial-credential-recovery.test.mjs` and
+`tests/browser/source-initial-credential-view.test.mjs`, alongside
+`tests/browser/recovery-transport.test.mjs`. These exercise the real controllers,
+transport restrictions and view handlers with explicit HTTP/DOM doubles; they
+do not establish a live native-server or real-browser gate.
 
 An explicitly non-production Git differential lane applies generated patches in
 fresh disposable SHA-1/SHA-256 repositories. It requires the exact chosen Git
