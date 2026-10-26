@@ -45,6 +45,8 @@ impl Fixture {
             },
             outcomes: true,
             principal: Some(actor()),
+            artifacts: false,
+            artifact_root: None,
             max_messages: 64,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();

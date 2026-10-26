@@ -318,7 +318,8 @@ pub fn validate_tool_entry(entry: &McpToolEntry) -> Result<(), McpValidationErro
     }
 
     // 4. Authority position enforcement:
-    // - Paginated reads must bind exact snapshot tokens or version sequence.
+    // - Paginated reads bind snapshots/versions, or immutable artifact identity
+    //   inside a separately granted and currently authenticated incarnation.
     // - Mutations require a durable key and an exact authority basis, either a
     //   caller-supplied predecessor or a head selected inside canonical admission.
     match entry.read_mutation {
@@ -339,7 +340,11 @@ pub fn validate_tool_entry(entry: &McpToolEntry) -> Result<(), McpValidationErro
                     requirement: "mutations must require an idempotency key",
                 });
             }
-            if entry.authority_root == super::types::InputAuthorityRootRequirement::None {
+            if matches!(
+                entry.authority_root,
+                super::types::InputAuthorityRootRequirement::None
+                    | super::types::InputAuthorityRootRequirement::CurrentRepositoryIncarnation
+            ) {
                 return Err(McpValidationError::MissingAuthorityPosition {
                     tool: entry.name,
                     requirement: "mutations must require an exact predecessor authority root",
@@ -370,6 +375,7 @@ pub fn validate_tool_entry(entry: &McpToolEntry) -> Result<(), McpValidationErro
             || field.name == "explanation"
             || field.name == "text_utf8"
             || field.name == "bytes_hex"
+            || field.name == "content_hex"
             || field.name == "bundle_hex"
             || field.name == "patch";
 

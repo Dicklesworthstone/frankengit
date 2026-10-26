@@ -106,13 +106,16 @@ impl fmt::Display for ReadMutationClass {
 
 /// The capability required to invoke an operation.
 ///
-/// Must match one of the 13 foundational operation classes.
+/// Names a narrow MCP grant. Workflow artifact custody is explicitly separate
+/// from canonical-object/source reads and does not create an agent operation class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CapabilityRequirement(pub &'static str);
 
 impl CapabilityRequirement {
     pub const READ_CANONICAL_OBJECT: Self = Self("read_canonical_object");
     pub const READ_DERIVED_GENERATION: Self = Self("read_derived_generation");
+    /// Whole launch-selected trusted-workflow custody namespace, including hidden-ref outputs.
+    pub const READ_WORKFLOW_ARTIFACT: Self = Self("read_workflow_artifact");
     pub const TREEFS_WORKSPACE: Self = Self("treefs_workspace");
     pub const EXECUTE_SANDBOXED_PROCESS: Self = Self("execute_sandboxed_process");
     pub const NETWORK_DESTINATION: Self = Self("network_destination");
@@ -126,9 +129,10 @@ impl CapabilityRequirement {
     pub const CONSUME_BUDGET: Self = Self("consume_budget");
 
     /// All valid capability strings.
-    pub const ALL_VALID: [&'static str; 13] = [
+    pub const ALL_VALID: [&'static str; 14] = [
         "read_canonical_object",
         "read_derived_generation",
+        "read_workflow_artifact",
         "treefs_workspace",
         "execute_sandboxed_process",
         "network_destination",
@@ -231,6 +235,10 @@ pub enum InputAuthorityRootRequirement {
     /// The sealed append intent has no caller-supplied predecessor version;
     /// publication still requires head CAS and retries retain the original identity.
     ServerSelectedHead,
+    /// Read authenticates current repository configuration against a launch-pinned
+    /// incarnation. The artifact ID only selects immutable custody data; this
+    /// requirement grants no publication authority or producer/check authentication.
+    CurrentRepositoryIncarnation,
 }
 
 impl InputAuthorityRootRequirement {
@@ -243,6 +251,7 @@ impl InputAuthorityRootRequirement {
             Self::ExactPredecessorVersion => "exact_predecessor_version",
             Self::ExactPredecessorCommit => "exact_predecessor_commit",
             Self::ServerSelectedHead => "server_selected_head",
+            Self::CurrentRepositoryIncarnation => "current_repository_incarnation",
         }
     }
 }
@@ -331,7 +340,7 @@ pub enum PaginationRules {
     SnapshotBoundCursor,
     /// Paginated with monotone sequence number `after_version`.
     MonotoneVersionSequence,
-    /// Byte offset pagination with `offset` and `max_bytes`.
+    /// Byte offset pagination with `offset` and a bounded byte count (`limit` or `max_bytes`).
     OffsetBytes,
 }
 
@@ -395,6 +404,9 @@ pub enum EvidenceReceiptClass {
     HistoricalOutcomeRecord,
     /// Attested merge verification receipt.
     AttestedMergeReceipt,
+    /// Fully verified immutable artifact identity, complete payload and custody scope.
+    /// Stored provenance is not authenticated producer, check or publication evidence.
+    VerifiedArtifactCustody,
 }
 
 impl EvidenceReceiptClass {
@@ -406,6 +418,7 @@ impl EvidenceReceiptClass {
             Self::CanonicalDecisionDigest => "canonical_decision_digest",
             Self::HistoricalOutcomeRecord => "historical_outcome_record",
             Self::AttestedMergeReceipt => "attested_merge_receipt",
+            Self::VerifiedArtifactCustody => "verified_artifact_custody",
         }
     }
 }

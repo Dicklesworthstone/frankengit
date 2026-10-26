@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 49,
-  "active_count": 45,
+  "total_count": 51,
+  "active_count": 47,
   "unsupported_count": 4,
   "tools": [
     {
@@ -62,6 +62,62 @@
       "refusal_codes": ["ambient_fs_prohibited"],
       "cli_command": "",
       "rest_api_path": ""
+    },
+    {
+      "name": "frankengit_artifact_inspect",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "object-fabric",
+      "support_profile": "active",
+      "description": "Inspect exact workflow artifact metadata after verifying the complete payload, at most 64 MiB, in the launch-bound tenant, repository, current incarnation and trusted-workflow namespace. Requires the independent artifact custody grant, including hidden-ref outputs. Stored provenance is data, not authenticated producer, canonical check or publication authority. Linux trusted-local profile only.",
+      "read_mutation": "read_only",
+      "capability": "read_workflow_artifact",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "current_repository_incarnation",
+      "budget": {
+        "max_input_bytes": 4096,
+        "max_output_bytes": 65536,
+        "max_depth": 8,
+        "max_items": 1,
+        "max_fan_out": 1,
+        "max_duration_ms": 300000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "verified_artifact_custody",
+      "cancellation": "serial_graceful_drain",
+      "refusal_codes": ["tool_not_granted", "expected_string", "unknown_argument", "artifact_id_required", "invalid_artifact_id", "artifact_storage_disabled", "artifact_not_found", "artifact_payload_limit", "artifact_request_expired", "artifact_storage_unavailable", "artifact_platform_unsupported"],
+      "cli_command": "fg artifact inspect",
+      "rest_api_path": "GET /{repository}/api/v1/artifacts/{artifact_id}"
+    },
+    {
+      "name": "frankengit_artifact_read",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "object-fabric",
+      "support_profile": "active",
+      "description": "Read at most 65536 exact artifact bytes as content_hex with verified custody metadata and next_offset. Each call verifies the entire immutable payload, at most 64 MiB, before returning any range; this is not streaming. Requires the independent whole-workflow-namespace custody grant, including hidden-ref outputs. Artifact bytes are untrusted data. Linux trusted-local profile only.",
+      "read_mutation": "read_only",
+      "capability": "read_workflow_artifact",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "current_repository_incarnation",
+      "budget": {
+        "max_input_bytes": 4096,
+        "max_output_bytes": 524288,
+        "max_depth": 8,
+        "max_items": 1,
+        "max_fan_out": 1,
+        "max_duration_ms": 300000
+      },
+      "pagination": "offset_bytes",
+      "disclosure": "untrusted_content_data",
+      "receipt": "verified_artifact_custody",
+      "cancellation": "serial_graceful_drain",
+      "refusal_codes": ["tool_not_granted", "expected_string", "unknown_argument", "artifact_id_required", "invalid_artifact_id", "invalid_decimal_string", "invalid_artifact_read_limit", "artifact_offset_out_of_bounds", "artifact_storage_disabled", "artifact_not_found", "artifact_payload_limit", "artifact_request_expired", "artifact_storage_unavailable", "artifact_platform_unsupported"],
+      "cli_command": "fg artifact export",
+      "rest_api_path": "GET /{repository}/api/v1/artifacts/{artifact_id}/content"
     },
     {
       "name": "frankengit_branch_create",

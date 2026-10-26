@@ -69,6 +69,8 @@ impl Fixture {
             },
             outcomes,
             principal: (writes || outcomes).then_some(PrincipalId::from_bytes([principal; 16])),
+            artifacts: false,
+            artifact_root: None,
             max_messages: 128,
         }
     }

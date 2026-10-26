@@ -2,6 +2,7 @@
 //! Complete immutable MCP registry. Existing definitions remain byte-identical
 //! in core; explicit additional tools join them at compile time in canonical order.
 mod append;
+mod artifacts;
 mod core;
 use super::types;
 use types::{FieldClassification, McpField, McpToolEntry};
@@ -65,7 +66,12 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 2] = [TRANSACTION, append::ENTRY];
+const ADDITIONS: [McpToolEntry; 4] = [
+    artifacts::INSPECT,
+    artifacts::READ,
+    TRANSACTION,
+    append::ENTRY,
+];
 const fn assemble() -> [McpToolEntry; core::REGISTRY.len() + ADDITIONS.len()] {
     let mut result = [TRANSACTION; core::REGISTRY.len() + ADDITIONS.len()];
     let mut source = 0;

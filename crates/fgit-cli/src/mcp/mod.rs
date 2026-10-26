@@ -6,7 +6,7 @@ use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnat
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
 /// Independent launch-time mutation ceilings. None implies a read/recovery grant.
 #[derive(Clone, Copy, Debug, Default)]
@@ -33,6 +33,8 @@ struct Options {
     issues: bool,
     pulls: bool,
     source: bool,
+    artifacts: bool,
+    artifact_root: Option<PathBuf>,
     writes: WriteGrants,
     outcomes: bool,
     principal: Option<PrincipalId>,
@@ -40,8 +42,37 @@ struct Options {
 }
 impl Options {
     fn validate_access(&self) -> Result<(), String> {
-        if !(self.issues || self.pulls || self.source || self.writes.any() || self.outcomes) {
+        if !(self.issues
+            || self.pulls
+            || self.source
+            || self.artifacts
+            || self.writes.any()
+            || self.outcomes)
+        {
             return Err("at least one explicit MCP grant is required".into());
+        }
+        if self.artifacts != self.artifact_root.is_some() {
+            return Err("--allow-artifacts and --artifact-root must be supplied together".into());
+        }
+        if let Some(root) = &self.artifact_root {
+            if !cfg!(target_os = "linux") {
+                return Err("workflow artifact reads are supported only on Linux".into());
+            }
+            if self.incarnation.is_none() {
+                return Err("artifact reads require --expected-incarnation".into());
+            }
+            if !root.is_absolute()
+                || root.components().any(|part| {
+                    !matches!(
+                        part,
+                        std::path::Component::RootDir | std::path::Component::Normal(_)
+                    )
+                })
+            {
+                return Err(
+                    "artifact root must be an absolute path without parent traversal".into(),
+                );
+            }
         }
         let principal_scoped = self.writes.any() || self.outcomes;
         if principal_scoped && (self.principal.is_none() || self.incarnation.is_none()) {
@@ -85,7 +116,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     }
 }
 fn parse_options(arguments: &[String]) -> Result<Options, String> {
-    if arguments.len() < 3 || arguments.len() > 25 {
+    if arguments.len() < 3 || arguments.len() > 28 {
         return Err(USAGE.into());
     }
     if arguments.iter().any(|s| s.len() > 4096) || arguments[0].is_empty() {
@@ -108,8 +139,13 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             | "--allow-source-writes"
             | "--allow-review-writes"
             | "--allow-reviewed-merges"
-            | "--allow-outcomes" => "",
-            "--object-format" | "--expected-incarnation" | "--max-messages" | "--principal" => {
+            | "--allow-outcomes"
+            | "--allow-artifacts" => "",
+            "--object-format"
+            | "--expected-incarnation"
+            | "--max-messages"
+            | "--principal"
+            | "--artifact-root" => {
                 let value = arguments.get(at).ok_or("missing option value")?;
                 at += 1;
                 value.as_str()
@@ -153,6 +189,10 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
         issues: flags.contains_key("--allow-issues"),
         pulls: flags.contains_key("--allow-pulls"),
         source: flags.contains_key("--allow-source"),
+        artifacts: flags.contains_key("--allow-artifacts"),
+        artifact_root: flags
+            .get("--artifact-root")
+            .map(|value| PathBuf::from(*value)),
         writes: WriteGrants {
             issues: flags.contains_key("--allow-issue-writes"),
             pulls: flags.contains_key("--allow-pull-writes"),
@@ -329,3 +369,6 @@ mod mutation_grant_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod artifact_grant_tests;

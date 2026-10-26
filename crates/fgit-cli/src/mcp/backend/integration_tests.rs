@@ -103,6 +103,8 @@ fn real_mcp_reads_reopened_sha1_and_sha256_nodes_without_publishing() {
             writes: Default::default(),
             outcomes: false,
             principal: None,
+            artifacts: false,
+            artifact_root: None,
             max_messages: 16,
         })
         .unwrap();
@@ -311,6 +313,8 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
             writes: Default::default(),
             outcomes: false,
             principal: None,
+            artifacts: false,
+            artifact_root: None,
             max_messages: 32,
         })
         .unwrap();

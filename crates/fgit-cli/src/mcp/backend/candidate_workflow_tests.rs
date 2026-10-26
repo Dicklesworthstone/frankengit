@@ -87,6 +87,8 @@ impl Fixture {
             writes: WriteGrants::default(),
             outcomes: true,
             principal: Some(actor(OPENER)),
+            artifacts: false,
+            artifact_root: None,
             max_messages: 128,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();

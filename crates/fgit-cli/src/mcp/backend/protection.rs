@@ -107,6 +107,8 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
                 .map_err(|_| "invalid repository ID")?,
             format,
             incarnation: Some(incarnation),
+            artifacts: false,
+            artifact_root: None,
             max_messages: maximum as usize,
             issues: false,
             pulls: false,

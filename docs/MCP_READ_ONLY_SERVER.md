@@ -25,11 +25,17 @@ fgit-cli -- ...` continues to select `fg`; the second binary does not make the
 existing invocation ambiguous. Configuration comes only from launch arguments,
 not environment-driven repository discovery, client roots, or request bodies.
 The repository must already exist, authenticate, and match its supplied IDs.
-An optional incarnation pin is checked before any read tool is available.
+An optional incarnation pin is checked before repository read tools are available.
+The separate workflow artifact read grant requires an explicit incarnation pin.
 
 The operator independently selects **issue reads** (`--allow-issues`), **PR reads**
-(`--allow-pulls`), and **source reads** (`--allow-source`). At least one grant is
-required in this profile. A disabled group is absent from discovery and refused
+(`--allow-pulls`), **source reads** (`--allow-source`), and **workflow artifact reads**
+(`--allow-artifacts`, with an existing private absolute `--artifact-root` and
+`--expected-incarnation`). Artifact access covers the entire configured workflow
+namespace, including hidden-ref outputs; source permissions do not filter it.
+See [MCP_WORKFLOW_ARTIFACT_READ.md](MCP_WORKFLOW_ARTIFACT_READ.md) for its Linux
+profile, whole-payload verification, exact metadata and bounded byte ranges.
+At least one grant is required in this profile. A disabled group is absent from discovery and refused
 at dispatch; no group implies another and none permits mutation. The local
 operator must trust the process receiving these bytes. This is not remote
 authentication, per-issue ACLs, hostile process isolation, or a full Intent
@@ -145,7 +151,8 @@ handlers, check pagination and exact text, and assert unchanged authority head.
 Another test publishes a native initial patch, creates a branch/PR, reopens both
 hash domains, reads actual source ranges and PR metadata, and checks strict
 source versus retained PR behavior across a later ordinary write. Unit tests
-cover all eight read-grant combinations, hostile path/authority arguments,
+cover all eight issue/PR/source read-grant combinations, independent artifact
+root/grant/incarnation requirements, hostile path/authority arguments,
 byte-exact binary results, directory cursors and no implied merge approval.
 
 Suggested command: `cargo test --locked -p fgit-cli --bin fg-mcp`.

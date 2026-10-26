@@ -99,6 +99,8 @@ impl Fixture {
             writes: Default::default(),
             outcomes: false,
             principal: None,
+            artifacts: false,
+            artifact_root: None,
             max_messages: 64,
         })
         .unwrap();

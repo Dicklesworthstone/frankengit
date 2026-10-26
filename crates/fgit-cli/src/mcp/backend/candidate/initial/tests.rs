@@ -176,6 +176,8 @@ fn empty(format: GitHashAlgorithm) -> (Scratch, NodeTools) {
         writes: Default::default(),
         outcomes: false,
         principal: None,
+        artifacts: false,
+        artifact_root: None,
         max_messages: 32,
     })
     .unwrap();

@@ -1,4 +1,4 @@
-import hashlib, json, os, pathlib, signal, struct, subprocess, sys, time, zlib
+import contextlib, hashlib, http.client, json, os, pathlib, secrets, signal, struct, subprocess, sys, time, urllib.parse, zlib
 
 fg, root = sys.argv[1], pathlib.Path(sys.argv[2])
 root.chmod(0o700)
@@ -188,10 +188,209 @@ def native_tree(source, fmt, files):
         body += (b'40000' if directory else b'100644') + b' ' + name.encode() + b'\0' + bytes.fromhex(oid)
     return native_object(source, fmt, 'tree', body)
 
+def private_replace(path, body):
+    temporary = path.with_name(path.name + '.next')
+    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as output:
+        output.write(body)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(path)
+
+
+def artifact_grants(path, inc, tokens, reader_scope='artifact-read'):
+    body = f'frankengit-http-credentials-v1 {tenant} {repository} {inc}\n'
+    for token, scopes in [(tokens['artifact'], reader_scope), (tokens['git'], 'read,lfs-read')]:
+        if scopes is not None:
+            body += f'{hashlib.sha256(token.encode()).hexdigest()} {principal} {scopes}\n'
+    private_replace(path, body)
+
+
+def listener_records(path):
+    records = []
+    for line in path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+@contextlib.contextmanager
+def artifact_server(node, inc, grants, label):
+    global commands
+    stop = root / (label + '.stop')
+    stdout_path, stderr_path = root / (label + '.out'), root / (label + '.err')
+    arguments = [fg, 'serve-http', str(node), tenant, repository, '127.0.0.1:0',
+                 '--trusted-local', '--credentials-file', str(grants),
+                 '--artifact-root', str(store), '--expected-incarnation', inc,
+                 '--continuous', '--stop-file', str(stop), '--max-in-flight', '2',
+                 '--session-timeout-secs', '30']
+    commands += 1
+    with stdout_path.open('wb') as stdout, stderr_path.open('wb') as stderr:
+        child = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+        try:
+            until = time.monotonic() + 45
+            ready = []
+            while time.monotonic() < until:
+                ready = [r for r in listener_records(stdout_path) if r.get('type') == 'smart_http_listening']
+                if ready:
+                    break
+                assert child.poll() is None, (label, 'listener exited before readiness', stderr_path.read_text()[-8000:])
+                time.sleep(0.02)
+            assert len(ready) == 1, (label, 'missing or repeated readiness')
+            selected = ready[0]
+            assert selected['artifacts_enabled'] and selected['credential_mode'] == 'reloadable'
+            assert selected['repository_incarnation'] == inc and selected['lifetime'] == 'continuous'
+            assert not any(selected[name] for name in ['receive_enabled', 'issues_enabled', 'outcomes_enabled',
+                                                       'pulls_enabled', 'source_enabled', 'protection_enabled', 'lfs_enabled'])
+            url = urllib.parse.urlsplit(selected['url'])
+            assert url.scheme == 'http' and url.hostname == '127.0.0.1' and url.port
+            assert not url.username and not url.password and not url.query and not url.fragment
+            assert url.path.endswith('/' + repository + '.git')
+            yield selected['url']
+            private_replace(stop, 'artifact read campaign complete; drain accepted requests\n')
+            child.wait(timeout=45)
+            assert child.returncode == 0, (label, 'listener drain failed', stderr_path.read_text()[-8000:])
+            receipts = [r for r in listener_records(stdout_path) if r.get('type') == 'smart_http_drained']
+            assert len(receipts) == 1, (label, 'missing native drain receipt')
+            receipt = receipts[0]
+            assert receipt['accepted'] == receipt['completed_transports'] + receipt['refused_transports']
+            assert receipt['accepted'] > 0 and stop.is_file()
+        finally:
+            if child.poll() is None:
+                # Failed assertions never become a successful drain. Stop only
+                # this explicitly owned child, retaining its logs for diagnosis.
+                if not stop.exists():
+                    private_replace(stop, 'artifact read failure cleanup\n')
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=5)
+
+
+def artifact_http(url, suffix, token, expected=200, *, method='GET', extra=None):
+    endpoint = urllib.parse.urlsplit(url)
+    assert endpoint.scheme == 'http' and endpoint.hostname == '127.0.0.1'
+    headers = {'Connection': 'close'}
+    if token is not None:
+        headers['Authorization'] = 'Bearer ' + token
+    headers.update(extra or {})
+    connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=30)
+    try:
+        connection.request(method, endpoint.path + suffix, headers=headers)
+        response = connection.getresponse()
+        body = response.read(2 * 1024 * 1024 + 1)
+        assert len(body) <= 2 * 1024 * 1024, 'artifact reply exceeded campaign bound'
+        assert response.status == expected, (suffix, response.status, expected, body[:1000])
+        fields = dict(response.getheaders())
+        fields = {name.lower(): value for name, value in fields.items()}
+        assert int(fields['content-length']) == len(body)
+        if suffix.startswith('/api/v1/artifacts/'):
+            assert fields['cache-control'] == 'no-store' and fields['vary'] == 'Authorization'
+            assert fields['x-content-type-options'] == 'nosniff'
+            if expected != 200:
+                refusal = json.loads(body)
+                assert refusal['type'] == 'artifact_error' and refusal['read_only']
+                assert refusal['outcome_unknown'] is False and 'content_hex' not in refusal
+        return fields, body
+    finally:
+        connection.close()
+
+
+def verify_artifact_metadata(body, artifact_id, payload, inc, kind):
+    value = json.loads(body)
+    assert value['type'] == 'artifact_metadata' and value['schema_version'] == 1
+    assert value['artifact_id'] == artifact_id and value['kind'] == kind
+    assert value['payload_bytes'] == len(payload) and value['payload_sha256'] == hashlib.sha256(payload).hexdigest()
+    assert value['tenant_id'] == tenant and value['repository_id'] == repository
+    assert value['repository_incarnation_id'] == inc and value['trust_domain'] == 'trusted-workflow-local-owner'
+    assert value['scope_sha256'] == scope_id('trusted-workflow-local-owner', inc)
+    assert value['payload_verified'] and value['read_only']
+    assert not value['provenance_authenticated'] and not value['canonical_repository_published'] and not value['retention_enforced']
+    assert 'root' not in value and 'run_directory_hex' not in value
+    return value
+
+
+def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payload):
+    assert len(report['artifacts']) == 1
+    captured = report['artifacts'][0]
+    assert captured['job_id_hex'] == b'build'.hex() and len(captured['outputs']) == 1
+    output = captured['outputs'][0]
+    assert output['path_hex'] == b'dist/result'.hex() and output['payload_bytes'] == len(expected_payload)
+    assert output['payload_sha256'] == hashlib.sha256(expected_payload).hexdigest()
+    output_id, manifest_id = output['artifact_id_sha256'], captured['manifest_id_sha256']
+    saved_bytes = (directory / 'job-000-artifacts.json').read_bytes()
+    saved = json.loads(saved_bytes)
+    assert saved['type'] == 'trusted_workflow_artifact_receipt' and saved['manifest_id_sha256'] == manifest_id
+    prefix = ('{"type":"trusted_workflow_artifact_receipt","manifest_id_sha256":"' + manifest_id + '","manifest":').encode()
+    assert saved_bytes.startswith(prefix) and saved_bytes.endswith(b'}')
+    expected_manifest = saved_bytes[len(prefix):-1]
+    assert json.loads(expected_manifest) == saved['manifest']
+    tokens = {'artifact': secrets.token_hex(32), 'git': secrets.token_hex(32)}
+    grants = root / (fmt + '-artifact-http-grants')
+    artifact_grants(grants, inc, tokens)
+    output_route = '/api/v1/artifacts/' + output_id
+    manifest_route = '/api/v1/artifacts/' + manifest_id
+    original_metadata = {}
+    with artifact_server(node, inc, grants, fmt + '-artifact-http') as url:
+        for artifact_id, route, payload, kind in [(output_id, output_route, expected_payload, 'ci_artifact'),
+                                                (manifest_id, manifest_route, expected_manifest, 'provenance')]:
+            fields, metadata = artifact_http(url, route, tokens['artifact'])
+            assert fields['content-type'].startswith('application/json')
+            original_metadata[artifact_id] = verify_artifact_metadata(metadata, artifact_id, payload, inc, kind)
+            fields, content = artifact_http(url, route + '/content', tokens['artifact'])
+            assert content == payload
+            assert fields['content-type'] == 'application/octet-stream'
+            assert fields['content-disposition'] == f'attachment; filename="artifact-{artifact_id}"'
+            (root / (fmt + '-http-' + kind + '.metadata.json')).write_bytes(metadata)
+            (root / (fmt + '-http-' + kind + '.payload')).write_bytes(content)
+        for token, status in [(None, 401), (secrets.token_hex(32), 401), (tokens['git'], 403)]:
+            _, body = artifact_http(url, output_route + '/content', token, status)
+            assert expected_payload not in body
+        artifact_http(url, '/info/refs?service=git-upload-pack', tokens['artifact'], 403)
+        artifact_http(url, output_route + '?trust=trusted-ci', tokens['artifact'], 400)
+        artifact_http(url, output_route, tokens['artifact'], 405, method='POST')
+        artifact_http(url, output_route, tokens['artifact'], 400, extra={'Idempotency-Key': 'read-only'})
+        artifact_grants(grants, inc, tokens, None)
+        artifact_http(url, output_route + '/content', tokens['artifact'], 401)
+        artifact_grants(grants, inc, tokens, 'read')
+        artifact_http(url, output_route + '/content', tokens['artifact'], 403)
+        artifact_grants(grants, inc, tokens)
+        assert artifact_http(url, output_route + '/content', tokens['artifact'])[1] == expected_payload
+        stored = store / ('scope-' + scope_id('trusted-workflow-local-owner', inc)) / output_id
+        original = stored.read_bytes()
+        try:
+            stored.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+            for suffix in [output_route, output_route + '/content']:
+                _, body = artifact_http(url, suffix, tokens['artifact'], 503)
+                assert expected_payload not in body and json.loads(body)['code'] == 'artifact_storage_unavailable'
+        finally:
+            stored.write_bytes(original)
+        assert artifact_http(url, output_route + '/content', tokens['artifact'])[1] == expected_payload
+    with artifact_server(node, inc, grants, fmt + '-artifact-http-reopened') as url:
+        for artifact_id, route, payload in [(output_id, output_route, expected_payload),
+                                            (manifest_id, manifest_route, expected_manifest)]:
+            assert json.loads(artifact_http(url, route, tokens['artifact'])[1]) == original_metadata[artifact_id]
+            assert artifact_http(url, route + '/content', tokens['artifact'])[1] == payload
+    cases.append({'format': fmt, 'actual_workflow_output_and_manifest_downloaded': True,
+                  'artifact_id': output_id, 'manifest_id': manifest_id,
+                  'binary_bytes_match_producing_script': True, 'manifest_bytes_match_create_only_receipt': True,
+                  'independent_scope_and_live_revocation': True, 'trailing_corruption_never_disclosed': True,
+                  'verified_downloads_restored_after_corruption': True, 'http_reopen_preserves_exact_metadata_and_bytes': True})
+
+
 for fmt in ['sha1', 'sha256']:
     src, node, parent = root / (fmt + '-source'), root / (fmt + '-node'), root / (fmt + '-runs')
     parent.mkdir(mode=0o700)
-    workflow = b'name: archive evidence\non: workflow_dispatch\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf VERIFIED-NATIVE-EVIDENCE\n'
+    expected_workflow_output = b'WORKFLOW-ARTIFACT\0\xff\n'
+    workflow = b"name: archive evidence\non: workflow_dispatch\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: mkdir -p dist; printf 'WORKFLOW-ARTIFACT\\000\\377\\n' > dist/result; printf VERIFIED-NATIVE-EVIDENCE\n"
     tree = native_tree(src, fmt, {'.github/workflows/archive.yml': workflow})
     tip = native_object(src, fmt, 'commit', f'tree {tree}\nauthor Fixture <f@example.invalid> 1 +0000\ncommitter Fixture <f@example.invalid> 1 +0000\n\nartifact source\n'.encode())
     (src / 'refs/heads').mkdir(parents=True); (src / 'refs/heads/main').write_text(tip + '\n'); (src / 'HEAD').write_text('ref: refs/heads/main\n')
@@ -201,7 +400,7 @@ for fmt in ['sha1', 'sha256']:
     assert imported['state'] == 'committed'; inc = imported['repository_incarnation_id']
     before = run(fmt + '-refs-before', ['refs', *ns, '--trusted-local', '--object-format', fmt])
     nonce = '5' * 32
-    report = json.loads(run(fmt + '-workflow', ['workflow', 'run', *ns, 'refs/heads/main', '--trusted-local', '--workflow', '.github/workflows/archive.yml', '--run-parent', parent, '--run-id', nonce, '--input', '.github', '--object-format', fmt]))['run']
+    report = json.loads(run(fmt + '-workflow', ['workflow', 'run', *ns, 'refs/heads/main', '--trusted-local', '--workflow', '.github/workflows/archive.yml', '--run-parent', parent, '--run-id', nonce, '--input', '.github', '--object-format', fmt, '--artifact-root', store, '--artifact', '.github/workflows/archive.yml:build:dist/result']))['run']
     assert report['succeeded'] and report['workspaces_closed']
     directory = parent / ('workflow-' + nonce); marker = hashlib.sha256((directory / 'attempt.json').read_bytes()).hexdigest()
     history = json.loads(run(fmt + '-recover', ['workflow', 'recover', directory, tenant, repository, '--journal-id', marker]))
@@ -213,6 +412,7 @@ for fmt in ['sha1', 'sha256']:
     archive_id, archive_args = put_args(evidence, payload, 'provenance', ['--release-permanent'], b'\3', inc=inc, provenance=(None, None, rcr))
     archive = json.loads(run(fmt + '-archive-native-evidence', archive_args)); validate(archive, archive_id, payload, inc=inc)
     assert archive['source_rcr_sha256'] == rcr and archive['check_receipt_sha256'] is None
+    retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_workflow_output)
     assert run(fmt + '-refs-after', ['refs', *ns, '--trusted-local', '--object-format', fmt]) == before
     for path in [src, node, parent, evidence]: path.rename(path.with_name(path.name + '-offline'))
     validate(json.loads(run(fmt + '-offline-artifact-inspect', ['artifact', 'inspect', *scope(inc=inc), '--id', archive_id])), archive_id, payload, inc=inc)

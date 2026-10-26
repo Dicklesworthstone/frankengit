@@ -1,5 +1,6 @@
 //! Real node operations, not fixtures or a CLI subprocess. Grants and principal
 //! are fixed at launch; repository text never selects an admission identity.
+mod artifacts;
 mod candidate;
 mod checks;
 mod events;
@@ -47,12 +48,15 @@ impl NodeTools {
             fgit_schema::mcp::REGISTRY,
         )
         .map_err(|error| error.to_string())?;
-        let mut node = OneNode::open_existing(
+        let mut config =
             NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
                 .with_object_format(options.format)
-                .with_worker_threads(2),
-        )
-        .map_err(|_| "MCP repository could not be opened")?;
+                .with_worker_threads(2);
+        if let Some(root) = &options.artifact_root {
+            config = config.with_workflow_artifact_root(root.clone());
+        }
+        let mut node =
+            OneNode::open_existing(config).map_err(|_| "MCP repository could not be opened")?;
         let startup = (|| -> Result<(), String> {
             if options
                 .incarnation
@@ -66,6 +70,12 @@ impl NodeTools {
                 .runtime()
                 .block_on(node.authenticate_authority_head())
                 .map_err(|_| "MCP repository authority could not be authenticated")?;
+            #[cfg(target_os = "linux")]
+            if options.artifacts {
+                node.validate_workflow_artifact_storage().map_err(|error| {
+                    format!("MCP workflow artifact storage refused: {}", error.code())
+                })?;
+            }
             if node
                 .bring_into_service(head.receipt().generation())
                 .is_err()
@@ -114,6 +124,9 @@ impl NodeTools {
 
 pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     let mut tools = Vec::new();
+    if options.artifacts {
+        tools.extend(artifacts::tools());
+    }
     if options.issues {
         tools.extend(issues::tools());
     }
@@ -169,6 +182,8 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         issues: true,
         pulls: true,
         source: true,
+        artifacts: true,
+        artifact_root: None,
         writes: super::WriteGrants {
             issues: true,
             pulls: true,
@@ -232,6 +247,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.outcomes && name == outcomes::NAME {
             return outcomes::call(self, args);
+        }
+        if self.options.artifacts && artifacts::is_tool(name) {
+            return artifacts::call(self, name, args);
         }
         if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show")
         {
@@ -468,7 +486,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 45);
+        assert_eq!(server_names.len(), 47);
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
         let append = issue_writes::tools()

@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 49,
+  "total_tools": 51,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -24,6 +24,26 @@
       "capability": "treefs_workspace",
       "cli_command": "",
       "rest_api_path": ""
+    },
+    {
+      "tool": "frankengit_artifact_inspect",
+      "version": 1,
+      "owner_subsystem": "object-fabric",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_workflow_artifact",
+      "cli_command": "fg artifact inspect",
+      "rest_api_path": "GET /{repository}/api/v1/artifacts/{artifact_id}"
+    },
+    {
+      "tool": "frankengit_artifact_read",
+      "version": 1,
+      "owner_subsystem": "object-fabric",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_workflow_artifact",
+      "cli_command": "fg artifact export",
+      "rest_api_path": "GET /{repository}/api/v1/artifacts/{artifact_id}/content"
     },
     {
       "tool": "frankengit_branch_create",

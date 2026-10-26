@@ -63,7 +63,7 @@ fn identity(bytes: &[u8]) -> ArtifactIdentity {
         None,
         None,
         None,
-        RetentionProfile::Permanent,
+        RetentionProfile::ReleasePermanent,
     )
 }
 fn store(node: &OneNode, root: &Path, identity: &ArtifactIdentity, bytes: &[u8], trust: &str) {
