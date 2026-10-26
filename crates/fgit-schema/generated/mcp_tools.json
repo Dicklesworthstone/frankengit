@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 48,
-  "active_count": 44,
+  "total_count": 49,
+  "active_count": 45,
   "unsupported_count": 4,
   "tools": [
     {
@@ -258,6 +258,34 @@
       "refusal_codes": ["hidden_repair_prohibited"],
       "cli_command": "",
       "rest_api_path": ""
+    },
+    {
+      "name": "frankengit_issue_append_comment",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Append literal comment text to an existing issue without expected_version. Admission selects the exact predecessor at each head-CAS attempt; retry the identical issue number, body and original durable key to recover one terminal outcome without a duplicate comment.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "server_selected_head",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_issue_number_required", "invalid_idempotency_key", "body_required", "invalid_bounded_text", "invalid_issue_comment", "mutation_outcome_unknown"],
+      "cli_command": "fg issue append-comment",
+      "rest_api_path": "POST /{repository}/api/v1/issues/{number}/append-comment"
     },
     {
       "name": "frankengit_issue_assign",

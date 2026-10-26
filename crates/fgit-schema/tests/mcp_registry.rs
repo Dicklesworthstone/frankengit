@@ -55,7 +55,7 @@ const fn valid_prototype() -> McpToolEntry {
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 48);
+    assert_eq!(REGISTRY.len(), 49);
 
     // Verify strict alphabetical ASCII sort order
     for pair in REGISTRY.windows(2) {
@@ -372,15 +372,15 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 48"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 44"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 49"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 45"));
     assert!(mcp_tools.contents.contains("\"unsupported_count\": 4"));
 
     let mcp_parity = artifacts
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 48"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 49"));
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 44);
+    assert_eq!(active_names.len(), 45);
 
     // 1. Consistent twin passes.
     assert_eq!(validate_server_parity(&active_names, REGISTRY), Ok(()));

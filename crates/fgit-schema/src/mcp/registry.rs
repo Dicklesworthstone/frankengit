@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! Complete immutable MCP registry. Existing definitions remain byte-identical
-//! in core; the transaction entry joins them at compile time in canonical order.
+//! in core; explicit additional tools join them at compile time in canonical order.
+mod append;
 mod core;
 use super::types;
 use types::{FieldClassification, McpField, McpToolEntry};
@@ -64,64 +65,75 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const fn assemble() -> [McpToolEntry; core::REGISTRY.len() + 1] {
-    let mut result = [TRANSACTION; core::REGISTRY.len() + 1];
+const ADDITIONS: [McpToolEntry; 2] = [TRANSACTION, append::ENTRY];
+const fn assemble() -> [McpToolEntry; core::REGISTRY.len() + ADDITIONS.len()] {
+    let mut result = [TRANSACTION; core::REGISTRY.len() + ADDITIONS.len()];
     let mut source = 0;
+    let mut extra = 0;
     let mut target = 0;
-    let mut inserted = false;
-    while source < core::REGISTRY.len() {
-        if !inserted && less(TRANSACTION.name, core::REGISTRY[source].name) {
-            result[target] = TRANSACTION;
-            target += 1;
-            inserted = true;
+    while source < core::REGISTRY.len() || extra < ADDITIONS.len() {
+        if extra < ADDITIONS.len()
+            && (source == core::REGISTRY.len()
+                || less(ADDITIONS[extra].name, core::REGISTRY[source].name))
+        {
+            result[target] = ADDITIONS[extra];
+            extra += 1;
+        } else {
+            result[target] = core::REGISTRY[source];
+            source += 1;
         }
-        result[target] = core::REGISTRY[source];
         target += 1;
-        source += 1;
-    }
-    if !inserted {
-        result[target] = TRANSACTION;
     }
     result
 }
 /// The single public registry consumed by discovery, validation and generators.
 pub static REGISTRY: &[McpToolEntry] = &assemble();
 pub fn find_tool(name: &str) -> Option<&'static McpToolEntry> {
-    if name == TRANSACTION.name {
-        Some(&TRANSACTION)
-    } else {
-        core::find_tool(name)
-    }
+    ADDITIONS
+        .iter()
+        .find(|entry| entry.name == name)
+        .or_else(|| core::find_tool(name))
 }
 pub fn find_tool_version(name: &str, version: u32) -> Option<&'static McpToolEntry> {
-    if name == TRANSACTION.name {
-        if version == TRANSACTION.version {
-            Some(&TRANSACTION)
-        } else {
-            None
-        }
-    } else {
-        core::find_tool_version(name, version)
-    }
+    ADDITIONS
+        .iter()
+        .find(|entry| entry.name == name && entry.version == version)
+        .or_else(|| core::find_tool_version(name, version))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn composed_registry_preserves_every_existing_contract_and_inserts_exactly_one_tool() {
+    fn composed_registry_preserves_every_existing_contract_and_inserts_each_addition_once() {
         crate::mcp::validate_registry(REGISTRY).unwrap();
-        assert_eq!(REGISTRY.len(), core::REGISTRY.len() + 1);
+        assert_eq!(REGISTRY.len(), core::REGISTRY.len() + ADDITIONS.len());
         for old in core::REGISTRY {
+            assert_eq!(find_tool(old.name), core::find_tool(old.name));
+            assert_eq!(
+                find_tool_version(old.name, old.version),
+                core::find_tool_version(old.name, old.version)
+            );
             assert_eq!(find_tool_version(old.name, old.version), Some(old));
             assert!(REGISTRY.contains(old));
         }
-        assert_eq!(
-            REGISTRY
-                .iter()
-                .filter(|row| row.name == TRANSACTION.name)
-                .count(),
-            1
-        );
+        for addition in ADDITIONS {
+            assert_eq!(
+                REGISTRY
+                    .iter()
+                    .filter(|row| row.name == addition.name)
+                    .count(),
+                1
+            );
+            assert_eq!(find_tool(addition.name), Some(&addition));
+            assert_eq!(
+                find_tool_version(addition.name, addition.version),
+                Some(&addition)
+            );
+            assert!(find_tool_version(addition.name, 0).is_none());
+            assert!(find_tool_version(addition.name, addition.version + 1).is_none());
+        }
+        assert!(find_tool("frankengit_unknown_tool").is_none());
+        assert!(find_tool_version("frankengit_unknown_tool", 1).is_none());
         assert!(
             REGISTRY
                 .windows(2)

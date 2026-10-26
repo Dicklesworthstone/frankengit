@@ -319,7 +319,8 @@ pub fn validate_tool_entry(entry: &McpToolEntry) -> Result<(), McpValidationErro
 
     // 4. Authority position enforcement:
     // - Paginated reads must bind exact snapshot tokens or version sequence.
-    // - Mutations must require exact predecessor version or commit and durable key.
+    // - Mutations require a durable key and an exact authority basis, either a
+    //   caller-supplied predecessor or a head selected inside canonical admission.
     match entry.read_mutation {
         ReadMutationClass::ReadOnly => {
             if entry.pagination != super::types::PaginationRules::Unpaginated

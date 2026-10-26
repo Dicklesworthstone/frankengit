@@ -227,6 +227,10 @@ pub enum InputAuthorityRootRequirement {
     ExactPredecessorVersion,
     /// Mutation requires an exact predecessor commit ID (`expected_commit`).
     ExactPredecessorCommit,
+    /// Admission selects and authenticates an exact current head on every attempt.
+    /// The sealed append intent has no caller-supplied predecessor version;
+    /// publication still requires head CAS and retries retain the original identity.
+    ServerSelectedHead,
 }
 
 impl InputAuthorityRootRequirement {
@@ -238,6 +242,7 @@ impl InputAuthorityRootRequirement {
             Self::ExactSnapshotToken => "exact_snapshot_token",
             Self::ExactPredecessorVersion => "exact_predecessor_version",
             Self::ExactPredecessorCommit => "exact_predecessor_commit",
+            Self::ServerSelectedHead => "server_selected_head",
         }
     }
 }
@@ -479,7 +484,8 @@ impl fmt::Display for FieldClassification {
 pub struct McpField {
     /// Field property name.
     pub name: &'static str,
-    /// JSON schema data type (`string`, `integer`, `boolean`, `array`, `object`).
+    /// JSON primitive type (`string`, `integer`, `boolean`, `array`, `object`, `null`).
+    /// Nullable receipt descriptors use `string|null`; input fields use one type.
     pub field_type: &'static str,
     /// Security classification.
     pub classification: FieldClassification,

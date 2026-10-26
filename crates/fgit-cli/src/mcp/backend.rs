@@ -468,8 +468,36 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 44);
+        assert_eq!(server_names.len(), 45);
         assert!(server_names.contains(&source_writes::TRANSACTION));
+        assert!(server_names.contains(&"frankengit_issue_append_comment"));
+        let append = issue_writes::tools()
+            .into_iter()
+            .find(|tool| tool.name == "frankengit_issue_append_comment")
+            .unwrap();
+        let contract = fgit_schema::mcp::find_tool(append.name).unwrap();
+        let properties = append.schema.object().unwrap()["properties"]
+            .object()
+            .unwrap();
+        let declared: BTreeSet<_> = contract
+            .input_fields
+            .iter()
+            .map(|field| field.name)
+            .collect();
+        let served: BTreeSet<_> = properties.keys().map(String::as_str).collect();
+        assert_eq!(declared, served);
+        assert!(!served.contains("expected_version"));
+        // This is the exact parity gate open_authorized uses before opening a node.
+        // Omitting append from the registry must reproduce the startup refusal.
+        let missing_append: Vec<_> = REGISTRY
+            .iter()
+            .copied()
+            .filter(|entry| entry.name != append.name)
+            .collect();
+        assert_eq!(
+            validate_server_parity(&server_names, &missing_append),
+            Err(McpValidationError::ServerToolMissingFromRegistry { tool: append.name }),
+        );
         assert_eq!(validate_server_parity(&server_names, REGISTRY), Ok(()));
 
         // Also verify 1-for-1 set equality with committed mcp_parity_manifest.json active entries.
