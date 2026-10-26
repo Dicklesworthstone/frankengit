@@ -12,9 +12,11 @@ async function retryKey(root, fingerprint, scope, nonce, fields, upload, crypto)
   return `fginit1-${nonce}-${await digest(utf8.encode(input), crypto)}`;
 }
 export class InitialSourceClient {
-  #transport; #scope = null; #artifact = null; #pending = null; #busy = false; #serial = 0;
+  #transport; #recoveryPrincipal = null; #scope = null; #artifact = null; #pending = null; #busy = false; #serial = 0;
   constructor(options) { this.#transport = new Transport({ ...options, pageSuffix: '/ui/initial/' }); }
   get connected() { return this.#transport.connected; }
+  get recoveryOnly() { return this.#recoveryPrincipal !== null; }
+  get recoveryPrincipal() { return this.#recoveryPrincipal; }
   get busy() { return this.#busy; }
   get candidate() {
     const a = this.#artifact;
@@ -26,14 +28,32 @@ export class InitialSourceClient {
     return p ? copy({ fields: p.fields, scope: p.scope, key: p.key, bytes: p.bytes.length, requestSha256: p.requestSha256,
       sent: p.sent, exported: p.exported, observedTx: p.observedTx, observedPrincipal: p.observedPrincipal }) : null;
   }
-  async connect(token) { this.disconnect(); await this.#transport.connect(token, this.#pending?.fingerprint ?? null); }
-  disconnect() { this.#serial++; this.#transport.disconnect(); this.#scope = null; this.#artifact = null; }
+  async connect(token, options = {}) {
+    this.disconnect();
+    keys(options, ['recoveryOnly', 'originalPrincipal']);
+    const recovering = options.recoveryOnly === undefined ? false : options.recoveryOnly;
+    if (typeof recovering !== 'boolean' || (!recovering && options.originalPrincipal !== undefined)) fail('Choose an explicit recovery-only connection.');
+    const expected = recovering ? principal(options.originalPrincipal) : null;
+    if (expected && this.#pending?.observedPrincipal && expected !== this.#pending.observedPrincipal) fail('Selected original principal conflicts with the retained observation.');
+    // A current token may observe the selected original principal's outcome;
+    // it never inherits permission to replay that principal's command.
+    this.#recoveryPrincipal = expected;
+    const selected = expected && this.#pending ? { key: this.#pending.key, principal: expected } : null;
+    const connecting = this.#transport.connect(token, this.#pending?.fingerprint ?? null, selected);
+    const serial = this.#serial, epoch = this.#transport.epoch;
+    await connecting; this.#check(serial, epoch);
+  }
+  disconnect() { this.#recoveryPrincipal = null; this.#serial++; this.#transport.disconnect(); this.#scope = null; this.#artifact = null; }
   invalidateCandidate() { this.#serial++; this.#transport.cancelReads(); this.#artifact = null; }
   #check(serial, epoch) {
     if (!this.connected || serial !== this.#serial || epoch !== this.#transport.epoch) fail('Initial preparation cancelled or changed.');
   }
   #noPending() { if (this.#pending) fail('Resolve the original publication before creating another request.'); }
-  async #exclusive(work) {
+  #ordinary() {
+    if (this.recoveryOnly) fail('Recovery-only connection cannot read, prepare, discard or resend mutations. Reconnect explicitly for ordinary work.');
+  }
+  async #exclusive(work, recoveryAllowed = false) {
+    if (!recoveryAllowed) this.#ordinary();
     if (this.#busy) fail('An initial-commit operation is already running.');
     if (!this.connected) fail('Connect an explicitly scoped repository token first.');
     this.#busy = true; try { return await work(); } finally { this.#busy = false; }
@@ -68,6 +88,7 @@ export class InitialSourceClient {
     });
   }
   discardUnsent() {
+    this.#ordinary();
     if (this.#busy || !this.#pending || this.#pending.sent || this.#pending.exported) fail('Only an unsent, unexported request may be discarded.');
     this.#pending = null;
   }
@@ -94,9 +115,11 @@ export class InitialSourceClient {
   async recover() {
     return this.#exclusive(async () => {
       const p = this.#pending; if (!p) fail('No original request is available.');
+      if (!this.recoveryOnly && p.fingerprint !== this.#transport.fingerprint) fail('Use the original request credential.');
+      if (this.recoveryOnly && p.observedPrincipal && p.observedPrincipal !== this.#recoveryPrincipal) fail('Original recovery principal changed.');
       const { value } = await this.#transport.request('outcomes', { method: 'POST', key: p.key, maximum: 32 * 1024, read: false });
       return this.#settle(recovery(value, p), p);
-    });
+    }, true);
   }
   exportReceipt() {
     if (this.#busy || !this.#pending) fail('No stable initial publication can be saved.');
@@ -114,7 +137,9 @@ export class InitialSourceClient {
       const r = JSON.parse(encoded);
       keys(r, ['type', 'origin', 'route', 'fields', 'scope', 'fingerprint', 'nonce', 'key', 'bundle_base64', 'observedTx', 'observedPrincipal']);
       if (r.type !== 'frankengit-initial-source-retry-v1' || r.origin !== this.#transport.root.origin || r.route !== this.#transport.root.route ||
-          r.fingerprint !== this.#transport.fingerprint || typeof r.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(r.nonce)) fail('Initial receipt belongs to another route or credential.');
+          typeof r.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(r.fingerprint) ||
+          (!this.recoveryOnly && r.fingerprint !== this.#transport.fingerprint) || typeof r.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(r.nonce)) fail('Initial receipt belongs to another route or credential.');
+      if (this.recoveryOnly && r.observedPrincipal !== null && r.observedPrincipal !== this.#recoveryPrincipal) fail('Receipt principal conflicts with the selected original principal.');
       const fields = initialFields(r.fields, true), scope = receiptScope(r.scope);
       if (fields.object_format !== scope.format || (this.#scope && Object.keys(scope).some(k => scope[k] !== this.#scope[k]))) fail('Initial recovery repository changed.');
       const bundle = fromBase64(r.bundle_base64), upload = sourceUpload(fields, bundle, 'bundle', `fg-initial-apply-${r.nonce}`);
@@ -123,10 +148,12 @@ export class InitialSourceClient {
       if (key !== r.key) fail('Initial receipt changed its original request identity.');
       if (r.observedTx !== null) opaque(r.observedTx);
       if (r.observedPrincipal !== null) principal(r.observedPrincipal);
-      const requestSha256 = await digest(upload.bytes, crypto); this.#check(serial, epoch); this.invalidateCandidate();
+      const requestSha256 = await digest(upload.bytes, crypto); this.#check(serial, epoch);
+      if (this.recoveryOnly) this.#transport.restrictToRecovery({ key, principal: this.#recoveryPrincipal });
+      this.invalidateCandidate();
       this.#pending = { fields, scope, bundle, fingerprint: r.fingerprint, nonce: r.nonce, key, ...upload, requestSha256,
         sent: true, exported: true, observedTx: r.observedTx, observedPrincipal: r.observedPrincipal };
       return this.pending;
-    });
+    }, true);
   }
 }

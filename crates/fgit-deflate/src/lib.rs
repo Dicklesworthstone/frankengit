@@ -468,6 +468,18 @@ pub enum StreamProgress {
     Finished,
 }
 
+/// Progress of a decoder whose tentative output is drained in bounded pieces.
+/// The existing [`StreamProgress`] API continues to decode all available input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundedStreamProgress {
+    /// All currently decodable input was consumed; supply another input piece.
+    NeedInput,
+    /// Drain [`Inflater::take_output`], then resume with an empty input slice.
+    OutputReady,
+    /// The member trailer verified; any framing suffix remains unconsumed.
+    Finished,
+}
+
 #[derive(Clone, Debug)]
 struct BitReader {
     bytes: Vec<u8>,
@@ -918,6 +930,45 @@ impl Inflater {
         input: &[u8],
         control: &mut impl CancellationProbe,
     ) -> Result<StreamProgress, InflateRefusal> {
+        self.accept_input(input)?;
+        let progress = self.drive(control)?;
+        self.reader.compact();
+        Ok(progress)
+    }
+
+    /// Accepts compressed input while bounding the tentative output retained
+    /// before the caller can drain it. `output_limit` must be nonzero. A decode
+    /// step emits at most one 258-byte RFC 1951 match, so pending output after
+    /// a call is at most `output_limit + 257` bytes, provided the caller drained
+    /// the preceding output before resuming. No object-sized allocation is
+    /// required even when a tiny compressed member expands into a large blob.
+    ///
+    /// On [`BoundedStreamProgress::OutputReady`], drain `take_output()` and call
+    /// this method with an empty slice until it returns `NeedInput` or
+    /// `Finished`. Supplied input belongs to the decoder until then. A framed
+    /// consumer must use `consumed_input_bytes()` after `Finished` to retain
+    /// the exact suffix belonging to its enclosing protocol. Output remains
+    /// tentative until the zlib trailer verifies.
+    pub fn push_with_bounded_output(
+        &mut self,
+        input: &[u8],
+        output_limit: usize,
+        control: &mut impl CancellationProbe,
+    ) -> Result<BoundedStreamProgress, InflateRefusal> {
+        if output_limit == 0 {
+            return Err(InflateRefusal::ResourceLimit {
+                resource: Resource::Configuration,
+                limit: 1,
+                observed: 0,
+            });
+        }
+        self.accept_input(input)?;
+        let progress = self.drive_bounded(control, Some(output_limit))?;
+        self.reader.compact();
+        Ok(progress)
+    }
+
+    fn accept_input(&mut self, input: &[u8]) -> Result<(), InflateRefusal> {
         if matches!(self.state, State::Finished) && !input.is_empty() {
             return Err(InflateRefusal::TrailingGarbage);
         }
@@ -939,9 +990,7 @@ impl Inflater {
         self.reader
             .append(input, self.limits.max_pending_input_bytes)?;
         self.received_input_bytes = received;
-        let progress = self.drive(control)?;
-        self.reader.compact();
-        Ok(progress)
+        Ok(())
     }
 
     /// Verifies that the member is complete and returns a typed truncation
@@ -984,18 +1033,41 @@ impl Inflater {
         &mut self,
         control: &mut impl CancellationProbe,
     ) -> Result<StreamProgress, InflateRefusal> {
+        match self.drive_bounded(control, None)? {
+            BoundedStreamProgress::Finished => Ok(StreamProgress::Finished),
+            // There is no output ceiling on this path; only a demand for more
+            // input can stop it before the member trailer.
+            BoundedStreamProgress::NeedInput | BoundedStreamProgress::OutputReady => {
+                Ok(StreamProgress::NeedInput)
+            }
+        }
+    }
+
+    fn drive_bounded(
+        &mut self,
+        control: &mut impl CancellationProbe,
+        output_limit: Option<usize>,
+    ) -> Result<BoundedStreamProgress, InflateRefusal> {
         loop {
+            // Yield only between complete decode steps. A match is at most
+            // 258 bytes and its overlapping history semantics remain intact.
+            if output_limit.is_some_and(|limit| self.pending_output.len() >= limit) {
+                if control.is_cancelled() {
+                    return Err(InflateRefusal::Cancelled);
+                }
+                return Ok(BoundedStreamProgress::OutputReady);
+            }
             self.charge_work(control)?;
             match self.state.clone() {
                 State::ZlibHeader => {
                     let checkpoint = self.reader.checkpoint();
                     let Some(cmf) = self.reader.read_bits(8) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     let Some(flg) = self.reader.read_bits(8) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     let cmf = u8::try_from(cmf).map_err(|_| InflateRefusal::InvalidZlibHeader)?;
                     let flg = u8::try_from(flg).map_err(|_| InflateRefusal::InvalidZlibHeader)?;
@@ -1028,11 +1100,11 @@ impl Inflater {
                     let checkpoint = self.reader.checkpoint();
                     let Some(final_block) = self.reader.read_bits(1) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     let Some(block_type) = self.reader.read_bits(2) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     let final_block = final_block != 0;
                     self.state = match block_type {
@@ -1052,7 +1124,7 @@ impl Inflater {
                             else {
                                 self.reader.restore(dynamic_checkpoint);
                                 self.reader.restore(checkpoint);
-                                return Ok(StreamProgress::NeedInput);
+                                return Ok(BoundedStreamProgress::NeedInput);
                             };
                             State::Compressed {
                                 final_block,
@@ -1068,15 +1140,15 @@ impl Inflater {
                     let checkpoint = self.reader.checkpoint();
                     if !self.reader.align_to_byte() {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     }
                     let Some(length) = self.reader.read_bits(16) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     let Some(complement) = self.reader.read_bits(16) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     if length != !complement {
                         return Err(InflateRefusal::StoredLengthMismatch { length, complement });
@@ -1101,7 +1173,7 @@ impl Inflater {
                     let checkpoint = self.reader.checkpoint();
                     let Some(byte) = self.reader.read_bits(8) else {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     };
                     self.emit_byte_checked(
                         u8::try_from(byte).map_err(|_| InflateRefusal::InvalidHuffmanCode)?,
@@ -1124,20 +1196,20 @@ impl Inflater {
                         pending,
                         control,
                     )? {
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     }
                 }
                 State::Adler32 => {
                     let checkpoint = self.reader.checkpoint();
                     if !self.reader.align_to_byte() {
                         self.reader.restore(checkpoint);
-                        return Ok(StreamProgress::NeedInput);
+                        return Ok(BoundedStreamProgress::NeedInput);
                     }
                     let mut expected = 0_u32;
                     for _ in 0..4 {
                         let Some(byte) = self.reader.read_bits(8) else {
                             self.reader.restore(checkpoint);
-                            return Ok(StreamProgress::NeedInput);
+                            return Ok(BoundedStreamProgress::NeedInput);
                         };
                         expected = (expected << 8) | u32::from(byte);
                     }
@@ -1149,9 +1221,9 @@ impl Inflater {
                         return Err(InflateRefusal::TrailingGarbage);
                     }
                     self.state = State::Finished;
-                    return Ok(StreamProgress::Finished);
+                    return Ok(BoundedStreamProgress::Finished);
                 }
-                State::Finished => return Ok(StreamProgress::Finished),
+                State::Finished => return Ok(BoundedStreamProgress::Finished),
             }
         }
     }

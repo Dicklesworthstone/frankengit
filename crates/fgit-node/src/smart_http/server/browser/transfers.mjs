@@ -10,9 +10,11 @@ async function requestKey(root, fingerprint, scope, operation, nonce, upload, cr
   return `fgbundle1-${nonce}-${await digest(utf8.encode(input), crypto)}`;
 }
 export class TransferClient {
-  #transport; #scope = null; #selected = null; #bundle = null; #exported = null; #pending = null; #busy = false; #serial = 0;
+  #transport; #recoveryPrincipal = null; #scope = null; #selected = null; #bundle = null; #exported = null; #pending = null; #busy = false; #serial = 0;
   constructor(options) { this.#transport = new Transport({ ...options, pageSuffix: '/ui/transfers/' }); }
   get connected() { return this.#transport.connected; }
+  get recoveryOnly() { return this.#recoveryPrincipal !== null; }
+  get recoveryPrincipal() { return this.#recoveryPrincipal; }
   get busy() { return this.#busy; }
   get selection() { return this.#selected && copy(this.#selected); }
   get bundle() { return this.#bundle && copy(this.#bundle.summary); }
@@ -25,17 +27,37 @@ export class TransferClient {
       updates: p.updates, key: p.key, bundleBytes: p.bundle.length, sent: p.sent, exported: p.exported,
       observedTx: p.observedTx, observedPrincipal: p.observedPrincipal }) : null;
   }
-  async connect(token) { this.disconnect(); await this.#transport.connect(token, this.#pending?.fingerprint ?? null); }
+  // A replacement bearer may only look up the original outcome, after the
+  // operator selects the original principal from independently retained facts.
+  // Select this mode before restoring a receipt when the old bearer is revoked.
+  async connect(token, options = {}) {
+    this.disconnect();
+    keys(options, ['recoveryOnly', 'originalPrincipal']);
+    const recovering = options.recoveryOnly === undefined ? false : options.recoveryOnly;
+    if (typeof recovering !== 'boolean' || (!recovering && options.originalPrincipal !== undefined)) fail('Choose an explicit recovery-only connection.');
+    const expected = recovering ? principal(options.originalPrincipal) : null;
+    if (expected && this.#pending?.observedPrincipal && expected !== this.#pending.observedPrincipal) fail('Selected original principal conflicts with the retained observation.');
+    const selected = expected && this.#pending ? { key: this.#pending.key, principal: expected } : null;
+    this.#recoveryPrincipal = expected; // Restrict before credential hashing can yield.
+    const serial = this.#serial, connecting = this.#transport.connect(token, this.#pending?.fingerprint ?? null, selected);
+    const epoch = this.#transport.epoch;
+    await connecting; this.#check(serial, epoch);
+    this.#scope = this.#pending ? copy(this.#pending.scope) : null;
+  }
   cancel() { this.#serial++; this.#transport.cancelReads(); this.#selected = null; this.#bundle = null; this.#exported = null; }
-  disconnect() { this.cancel(); this.#transport.disconnect(); this.#scope = null; }
+  disconnect() { this.cancel(); this.#transport.disconnect(); this.#recoveryPrincipal = null; this.#scope = null; }
   invalidateBundle() { this.#serial++; this.#transport.cancelReads(); this.#bundle = null; }
   #check(serial, epoch) { if (!this.connected || serial !== this.#serial || epoch !== this.#transport.epoch) fail('Transfer cancelled or selection changed.'); }
+  #ordinary() {
+    if (this.recoveryOnly) fail('Recovery-only connection cannot read, export bundles, prepare, discard or resend transfers. Reconnect explicitly for ordinary work.');
+  }
   #noPending() { if (this.#pending) fail('Resolve the original transfer before preparing another.'); }
   async #exclusive(work) {
     if (!this.connected || this.#busy) fail('Connect first and finish the current transfer operation.');
     this.#busy = true; try { return await work(); } finally { this.#busy = false; }
   }
   async select(algorithm) {
+    this.#ordinary();
     return this.#exclusive(async () => {
       this.#noPending(); this.cancel(); format(algorithm);
       const serial = this.#serial, epoch = this.#transport.epoch;
@@ -50,6 +72,7 @@ export class TransferClient {
     });
   }
   async load(input, options = {}) {
+    this.#ordinary();
     return this.#exclusive(async () => {
       this.#noPending(); this.invalidateBundle();
       if (!this.#selected) fail('Select the target repository first.');
@@ -67,6 +90,7 @@ export class TransferClient {
     });
   }
   async exportBundle({ verifyInventory = false, verifyClosure = false } = {}) {
+    this.#ordinary();
     return this.#exclusive(async () => {
       this.#noPending(); this.#exported = null;
       if (!this.#selected) fail('Select a repository snapshot before exporting.');
@@ -99,12 +123,14 @@ export class TransferClient {
       } finally { clearTimeout(timer); }
     });
   }
-  exportBytes() { if (!this.connected || !this.#exported) fail('No complete verified export is available.'); return this.#exported.bytes.slice(); }
+  exportBytes() { this.#ordinary(); if (!this.connected || !this.#exported) fail('No complete verified export is available.'); return this.#exported.bytes.slice(); }
   exportManifest() {
+    this.#ordinary();
     if (this.#busy || !this.connected || !this.#exported) fail('No stable verified snapshot export is available.');
     return exportManifest(this.#transport.root, this.#exported.summary);
   }
   async stage(operation, mappings = [], options = {}) {
+    this.#ordinary();
     return this.#exclusive(async () => {
       this.#noPending(); if (!this.#bundle || !this.#selected) fail('Select a target and inspect the exact bundle first.');
       keys(options, ['requireVerified']);
@@ -123,16 +149,18 @@ export class TransferClient {
     });
   }
   discardUnsent() {
+    this.#ordinary();
     if (this.#busy || !this.#pending || this.#pending.sent || this.#pending.exported) fail('Only an unsent, unexported transfer can be discarded.');
     this.#pending = null;
   }
   #settle(result, pending) {
     if (pending !== this.#pending) fail('Original transfer changed.');
     if (result.terminal) { this.#pending = null; this.cancel(); }
-    else { if (result.tx) pending.observedTx = result.tx; if (result.principal) pending.observedPrincipal = result.principal; }
+    else { if (result.tx) { pending.observedTx = result.tx; pending.sent = true; } if (result.principal) pending.observedPrincipal = result.principal; }
     return result;
   }
   async send() {
+    this.#ordinary();
     return this.#exclusive(async () => {
       const p = this.#pending; if (!p || p.fingerprint !== this.#transport.fingerprint) fail('Restore the original transfer and credential.');
       p.sent = true;
@@ -147,7 +175,7 @@ export class TransferClient {
   }
   async recover() {
     return this.#exclusive(async () => {
-      const p = this.#pending; if (!p || p.fingerprint !== this.#transport.fingerprint) fail('Restore the original transfer and credential.');
+      const p = this.#pending; if (!p || (!this.recoveryOnly && p.fingerprint !== this.#transport.fingerprint)) fail('Restore the original transfer and credential.');
       const { value } = await this.#transport.request('outcomes', { method: 'POST', key: p.key, maximum: 32 * 1024, read: false });
       return this.#settle(recovery(value, p), p);
     });
@@ -168,9 +196,13 @@ export class TransferClient {
       const r = JSON.parse(encoded);
       keys(r, ['type', 'origin', 'route', 'operation', 'mappings', 'scope', 'nonce', 'fingerprint', 'key', 'bundle_base64', 'observedTx', 'observedPrincipal']);
       if (r.type !== 'frankengit-transfer-retry-v1' || r.origin !== this.#transport.root.origin || r.route !== this.#transport.root.route ||
-          r.fingerprint !== this.#transport.fingerprint || typeof r.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(r.nonce)) fail('Transfer receipt belongs to another route or credential.');
+          typeof r.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(r.fingerprint) ||
+          (!this.recoveryOnly && r.fingerprint !== this.#transport.fingerprint) || typeof r.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(r.nonce) ||
+          typeof r.key !== 'string' || !/^fgbundle1-[0-9a-f]{32}-[0-9a-f]{64}$/.test(r.key)) fail('Transfer receipt belongs to another route or credential.');
       const scope = receiptScope(r.scope);
       if (this.#scope && Object.keys(scope).some(k => scope[k] !== this.#scope[k])) fail('Target repository identity changed.');
+      if (r.observedTx !== null) opaque(r.observedTx); if (r.observedPrincipal !== null) principal(r.observedPrincipal);
+      if (this.recoveryOnly && r.observedPrincipal !== null && r.observedPrincipal !== this.#recoveryPrincipal) fail('Receipt principal conflicts with the selected original principal.');
       const serial = this.#serial, epoch = this.#transport.epoch, crypto = this.#transport.crypto;
       const plan = await inspectBundle(fromBase64(r.bundle_base64), crypto, () => this.#check(serial, epoch));
       if (plan.summary.object_format !== scope.format) fail('Receipt bundle hash domain changed.');
@@ -180,8 +212,11 @@ export class TransferClient {
       const upload = multipart(form(command.fields), plan.bytes, `fg-transfer-${r.nonce}`);
       const key = await requestKey(this.#transport.root, r.fingerprint, scope, r.operation, r.nonce, upload, crypto);
       this.#check(serial, epoch); if (key !== r.key) fail('Transfer receipt no longer commits to the original request.');
-      if (r.observedTx !== null) opaque(r.observedTx); if (r.observedPrincipal !== null) principal(r.observedPrincipal);
+      // Keep the original fingerprint/key/body. Selection is not an observed
+      // identity: every authenticated outcome, including absence, must match it.
+      if (this.recoveryOnly) this.#transport.restrictToRecovery({ key, principal: this.#recoveryPrincipal });
       this.cancel();
+      this.#scope = scope;
       this.#pending = { ...command, operation: r.operation, scope, bundle: plan.bytes, nonce: r.nonce, fingerprint: r.fingerprint, key,
         ...upload, sent: true, exported: true, observedTx: r.observedTx, observedPrincipal: r.observedPrincipal }; return this.pending;
     });

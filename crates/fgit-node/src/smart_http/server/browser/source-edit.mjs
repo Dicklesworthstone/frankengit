@@ -1,7 +1,7 @@
 // A source-authoring session owns one inspected candidate and at most one exact
 // unresolved publication. Transport failure is never a rollback receipt.
 import { Transport, fail, keys, record, copy, integer, opaque, hex, unhex, utf8,
-  binding, pinned, oid, reference, form, branch, format, text } from './pulls-core.mjs';
+  binding, pinned, oid, reference, form, branch, format, text, principal } from './pulls-core.mjs';
 import { makeBoundary, digest } from './pulls-candidate.mjs';
 import { recovery, base64, fromBase64, receiptScope, RECEIPT_LIMIT } from './pulls-actions.mjs';
 import { FILE_LIMIT, PATCH_LIMIT, EDIT_LIMIT, fileBytes, sourcePath, fullFilePatch } from './source-edit-patch.mjs';
@@ -90,12 +90,14 @@ function importTreePage(reply, selection, path, tree, after) {
 }
 
 export class SourceEditClient {
-  #transport; #scope = null; #selection = null; #artifact = null; #pending = null; #busy = false; #serial = 0; #importTimeout;
+  #transport; #recoveryPrincipal = null; #scope = null; #selection = null; #artifact = null; #pending = null; #busy = false; #serial = 0; #importTimeout;
   constructor(options) {
     this.#transport = new Transport({ ...options, pageSuffix: '/ui/source/' });
     this.#importTimeout = integer(options.importTimeoutMs ?? IMPORT_TIMEOUT_MS, 'project import timeout', 1, 300_000);
   }
   get connected() { return this.#transport.connected; }
+  get recoveryOnly() { return this.#recoveryPrincipal !== null; }
+  get recoveryPrincipal() { return this.#recoveryPrincipal; }
   get busy() { return this.#busy; }
   get selection() { return this.#selection ? copy(this.#selection) : null; }
   get candidate() {
@@ -110,12 +112,23 @@ export class SourceEditClient {
       bytes: p.bytes.length, sent: p.sent, exported: p.exported, observedTx: p.observedTx,
       observedPrincipal: p.observedPrincipal });
   }
-  async connect(token) {
+  async connect(token, options = {}) {
     this.disconnect();
-    await this.#transport.connect(token, this.#pending?.fingerprint ?? null);
+    keys(options, ['recoveryOnly', 'originalPrincipal']);
+    const recovering = options.recoveryOnly === undefined ? false : options.recoveryOnly;
+    if (typeof recovering !== 'boolean' || (!recovering && options.originalPrincipal !== undefined)) fail('Choose an explicit recovery-only connection.');
+    const expected = recovering ? principal(options.originalPrincipal) : null;
+    if (expected && this.#pending?.observedPrincipal && expected !== this.#pending.observedPrincipal) fail('Selected original principal conflicts with the retained observation.');
+    // Select from independent retained facts, never the replacement token's
+    // first response. Latch restrictions before the token-hashing await.
+    this.#recoveryPrincipal = expected;
+    const selected = expected && this.#pending ? { key: this.#pending.key, principal: expected } : null;
+    const connecting = this.#transport.connect(token, this.#pending?.fingerprint ?? null, selected);
+    const serial = this.#serial, epoch = this.#transport.epoch;
+    await connecting; this.#check(serial, epoch);
   }
   disconnect() {
-    this.#serial += 1; this.#transport.disconnect(); this.#selection = null;
+    this.#recoveryPrincipal = null; this.#serial += 1; this.#transport.disconnect(); this.#selection = null;
     this.#artifact = null; this.#scope = null;
     // A request that may have reached admission survives loss of credentials.
   }
@@ -127,7 +140,11 @@ export class SourceEditClient {
     if (serial !== this.#serial || epoch !== this.#transport.epoch || !this.connected) fail('Source operation cancelled or selection changed.');
   }
   #noPending() { if (this.#pending) fail('Resolve the saved publication before replacing it.'); }
-  async #exclusive(work) {
+  #ordinary() {
+    if (this.recoveryOnly) fail('Recovery-only connection cannot read, prepare, discard or resend mutations. Reconnect explicitly for ordinary work.');
+  }
+  async #exclusive(work, recoveryAllowed = false) {
+    if (!recoveryAllowed) this.#ordinary();
     if (this.#busy) fail('A source operation is already in progress.');
     if (!this.connected) fail('Connect a repository credential first.');
     this.#busy = true;
@@ -333,6 +350,7 @@ export class SourceEditClient {
     });
   }
   discardUnsent() {
+    this.#ordinary();
     if (this.#busy || !this.#pending || this.#pending.sent || this.#pending.exported) fail('Only an unsent, unexported local request can be discarded.');
     this.#pending = null;
   }
@@ -361,9 +379,11 @@ export class SourceEditClient {
   async recover() {
     return this.#exclusive(async () => {
       const pending = this.#pending; if (!pending) fail('No original request is available to recover.');
+      if (!this.recoveryOnly && pending.fingerprint !== this.#transport.fingerprint) fail('Use the original request credential.');
+      if (this.recoveryOnly && pending.observedPrincipal && pending.observedPrincipal !== this.#recoveryPrincipal) fail('Original recovery principal changed.');
       const { value } = await this.#transport.request('outcomes', { method: 'POST', key: pending.key, maximum: 32 * 1024, read: false });
       return this.#settle(recovery(value, pending), pending);
-    });
+    }, true);
   }
   exportReceipt() {
     if (this.#busy || !this.#pending) fail('No stable request receipt is available.');
@@ -381,7 +401,9 @@ export class SourceEditClient {
       const receipt = JSON.parse(encoded);
       keys(receipt, ['type', 'origin', 'route', 'fields', 'scope', 'fingerprint', 'nonce', 'key', 'bundle_base64', 'observedTx', 'observedPrincipal']);
       if (receipt.type !== 'frankengit-source-retry-v1' || receipt.origin !== this.#transport.root.origin || receipt.route !== this.#transport.root.route ||
-          receipt.fingerprint !== this.#transport.fingerprint || !/^[0-9a-f]{32}$/.test(receipt.nonce)) fail('Recovery receipt belongs to another route or credential.');
+          typeof receipt.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(receipt.fingerprint) ||
+          (!this.recoveryOnly && receipt.fingerprint !== this.#transport.fingerprint) || !/^[0-9a-f]{32}$/.test(receipt.nonce)) fail('Recovery receipt belongs to another route or credential.');
+      if (this.recoveryOnly && receipt.observedPrincipal !== null && receipt.observedPrincipal !== this.#recoveryPrincipal) fail('Receipt principal conflicts with the selected original principal.');
       const scope = receiptScope(receipt.scope), fields = coordinates(receipt.fields);
       if (!fields.candidate_commit || fields.object_format !== scope.format || (this.#scope && ['tenant', 'repository', 'incarnation', 'format'].some(key => scope[key] !== this.#scope[key]))) fail('Recovery scope changed.');
       const bundle = fromBase64(receipt.bundle_base64), upload = sourceUpload(fields, bundle, 'bundle', `fg-source-edit-${receipt.nonce}`);
@@ -393,11 +415,15 @@ export class SourceEditClient {
         if (!/^[0-9a-f]{32}$/.test(receipt.observedPrincipal)) fail('Invalid recovered principal.');
       }
       const requestSha256 = await digest(upload.bytes, this.#transport.crypto); this.#check(serial, epoch);
+      // Keep the original credential-bound commitment. Narrow the transport
+      // only after the complete receipt validates; never relabel a selection as
+      // an authenticated observation or permit a resend with its new token.
+      if (this.recoveryOnly) this.#transport.restrictToRecovery({ key, principal: this.#recoveryPrincipal });
       this.invalidateCandidate(); this.#selection = null;
       this.#pending = { fields, scope, bundle, nonce: receipt.nonce, fingerprint: receipt.fingerprint,
         key, ...upload, requestSha256, sent: true, exported: true,
         observedTx: receipt.observedTx, observedPrincipal: receipt.observedPrincipal };
       return this.pending;
-    });
+    }, true);
   }
 }

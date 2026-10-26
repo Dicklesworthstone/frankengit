@@ -66,7 +66,11 @@ pub use pack::{
 };
 pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
 pub use scan::{PackBoundaryScanner, ScanStatus};
-pub use stream::{StreamPackEntry, StreamPackError, StreamPackReceipt, read_streamed_pack};
+pub use stream::{
+    STREAM_PACK_CHUNK_BYTES, StreamPackEntry, StreamPackEntryEnd, StreamPackEntryStart,
+    StreamPackError, StreamPackEvent, StreamPackReceipt, read_streamed_pack,
+    read_streamed_pack_chunks,
+};
 pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
 };

@@ -54,7 +54,56 @@ fingerprint, origin/route, scope, operation and exact multipart bytes. This is a
 request commitment, not a signature. Restore checks the full commitment and
 never sends automatically. Sent or exported requests cannot be discarded as
 unsent. Preserve the receipt before page closure; page memory is not durable.
-The original valid credential is required and must not be reassigned.
+An ordinary retry still requires the original credential fingerprint. If that
+bearer is revoked, an explicitly selected recovery-only connection can use a
+replacement credential for the same original principal, with outcome-read access.
+
+## Recovery after credential rotation
+
+Select the original principal from an independently retained record. Neither a
+receipt nor the newly entered token supplies that selection. For a fresh client
+session with a saved receipt:
+
+```js
+await client.connect(replacementToken, {
+  recoveryOnly: true,
+  originalPrincipal: independentlyRetainedPrincipalId,
+});
+await client.restoreReceipt(savedReceipt);
+const outcome = await client.recover();
+```
+
+If the original pending transfer is already retained in the same client, connect
+in recovery-only mode and call `recover()` directly without importing another
+receipt. `recoveryOnly` and `recoveryPrincipal` expose the active local mode and
+selected principal; they do not establish authenticated identity or permissions.
+The original principal must be a 32-character lowercase hexadecimal ID.
+
+Restore validates the original request commitment before narrowing the transport
+to its key. It preserves the original credential fingerprint, nonce, key, scope,
+bundle bytes, mappings and multipart command. A replacement token never creates
+a new request identity or rewrites an old lease. The only permitted network
+operation is a bodyless `POST outcomes` carrying the original idempotency key.
+Every response must identify the selected original principal, including missing
+keys/seals and undecided states. A wrong or malformed principal refuses without
+releasing the retained request. Existing repository-scope and observed-transaction
+checks still apply, and a selected principal is never recorded as an observation
+until a matching response arrives.
+
+Recovery-only mode forbids source reads, bundle loading/export/download,
+preparation, discard and send/retry before receipt selection, while the outcome
+is unresolved, and after a terminal result. A terminal result clears the pending
+transfer but does not widen the credential's mode. Reconnect explicitly with
+ordinary options before beginning new work; while a request remains unresolved,
+ordinary access still requires its original credential fingerprint. No response
+or absence automatically dispatches a transfer.
+
+Saving the stable original receipt remains available in recovery-only mode and
+after disconnect. This preserves responsibility without changing the request or
+including either bearer token. Exporting a receipt still makes it potentially
+sendable elsewhere with the original credential and therefore prevents unsent
+discard. An observed transaction also prevents later unsent discard even when
+this page never sent or exported the preparation.
 
 ## Bounds and verification
 
@@ -109,16 +158,43 @@ preparation sends a mutation. Once prepared, effects and original key are fixed;
 separate confirmation is required for every Send and identical retry.
 
 Saving a receipt is explicit and makes the request potentially sendable from
-another session. Restore does not require a successful ref listing and does not
-send; it permits an original-credential outcome lookup or explicit retry. Read
-cancellation never cancels a dispatched publication. Disconnect clears visible
-bundle data, credentials and file controls while retaining a private unresolved
-request so its token-free receipt can still be saved. Pending effects are hidden
-until the original credential reconnects. Download URLs are revoked on clearing
-or page exit and expire after 30 seconds; no persistent browser storage is used.
+another session. Restore does not require a successful ref listing and never
+sends. With the original credential, lookup or an explicit identical retry is
+available. For a replacement credential, choose Recovery only and enter the
+independently retained original principal before pressing Connect. The page does
+not fill that field from a receipt. Restore or retain the original request, then
+use Check canonical outcome; no source listing or mutation is dispatched.
 
-Run the combined interaction lane with
-`node --test tests/browser/transfers.test.mjs tests/browser/transfers-view.test.mjs`.
+The active mode is shown separately from the connection form. Changing the
+checkbox or principal only selects the next explicit connection. Ordinary source
+controls and send/discard remain unavailable in recovery-only mode, including
+after terminal recovery. Handler checks enforce this before local file reads,
+bundle downloads or preparation even if a disabled control receives a synthetic
+event. Save recovery receipt remains an explicit, separate operation and cannot
+trigger a send; it refuses while the current operation is still settling.
+
+Read cancellation never cancels a dispatched publication. Disconnect clears
+visible bundle data, credentials and file controls while retaining a private
+unresolved request so its token-free receipt can still be saved. Pending effects
+are hidden until the original credential reconnects or an explicit recovery-only
+connection is selected. Download URLs are revoked on clearing or page exit and
+expire after 30 seconds; no persistent browser storage is used.
+
+Run the combined interaction lane with:
+
+```sh
+node --test tests/browser/transfers.test.mjs \
+  tests/browser/transfers-view.test.mjs \
+  tests/browser/transfers-credential-recovery.test.mjs \
+  tests/browser/transfers-recovery-view.test.mjs
+```
+
+The credential-recovery cases cover both hash domains, import and mapped fetch,
+unchanged original receipts and commands, principal refusal for absent and
+nonterminal outcomes, revocation, cancellation, observed-transaction retention,
+blocked forced controls, and explicit ordinary reconnection after a terminal
+result. They use the actual client/controller and bounded local fixtures; their
+HTTP responses do not establish live native-server acceptance.
 The UI tests exercise actual controllers/clients with explicit DOM, File and
 HTTP doubles. Three Rust static-handler tests cover scope, framing, resource
 limits and inert assets; they were added but not run in this environment because

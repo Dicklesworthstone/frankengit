@@ -28,7 +28,7 @@ export function displayBytes(bytes, maximum = 4096) {
 }
 export function mountInitialEditor(doc, options = {}) {
   const client = options.client ?? new InitialSourceClient({ href: options.href ?? globalThis.location.href });
-  const ids = ['token','connect','disconnect','branch','format','expected-head','expected-absent','path','path-kind','file-mode','input-kind','file-text','line-endings','file',
+  const ids = ['token','connect','disconnect','recovery-only','original-principal','connection-mode','branch','format','expected-head','expected-absent','path','path-kind','file-mode','input-kind','file-text','line-endings','file',
     'queue','clear','files','batch-files','directory-files','import-prefix','import-mode','import-files','import-directory','author','committer','timestamp','message','prepare','cancel','candidate','stage','confirm-send','send','recover','discard','save','receipt','restore','pending','status'];
   const c = Object.fromEntries(ids.map(id => { const el = doc.getElementById(id); if (!el) throw new Error(`Missing initial control ${id}`); return [id, el]; }));
   let files = new Map(), busy = false, revision = 0;
@@ -37,26 +37,38 @@ export function mountInitialEditor(doc, options = {}) {
   const editable = ['branch','format','expected-head','expected-absent','path','path-kind','file-mode','input-kind','file-text','line-endings','file','batch-files','directory-files','import-prefix','import-mode','author','committer','timestamp','message'];
   function clearFiles() { files.clear(); c.file.value = ''; c['batch-files'].value = ''; c['directory-files'].value = ''; c['file-text'].value = ''; c.candidate.replaceChildren(); }
   function render() {
-    const p = client.pending, a = client.candidate;
-    for (const id of editable) c[id].disabled = busy || !client.connected || !!p;
-    for (const id of ['queue','clear','prepare','import-files','import-directory']) c[id].disabled = busy || !client.connected || !!p;
+    const p = client.pending, a = client.candidate, recovering = client.recoveryOnly, connected = client.connected && !recovering;
+    c.token.disabled = busy; c['recovery-only'].disabled = busy;
+    c['original-principal'].disabled = busy || !c['recovery-only'].checked;
+    c['original-principal'].required = c['recovery-only'].checked;
+    c['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
+      ? 'RECOVERY ONLY: only the original outcome may be checked. Reconnect explicitly before editing or sending another request.'
+      : 'Ordinary connection. Connection choices take effect only on Connect.';
+    for (const id of editable) c[id].disabled = busy || !connected || !!p;
+    for (const id of ['queue','clear','prepare','import-files','import-directory']) c[id].disabled = busy || !connected || !!p;
     c.prepare.disabled ||= files.size === 0 || !c['expected-absent'].checked;
-    c.stage.disabled = busy || !client.connected || !!p || !a;
-    c.connect.disabled = busy; c.cancel.disabled = !busy || !!p;
-    for (const id of ['send','recover']) c[id].disabled = busy || !client.connected || !p;
-    c.discard.disabled = busy || !p || p.sent || p.exported;
+    c.stage.disabled = busy || !connected || !!p || !a;
+    c.connect.disabled = busy; c.cancel.disabled = recovering || !busy || !!p;
+    c.send.disabled = busy || !connected || !p; c.recover.disabled = busy || !client.connected || !p;
+    c['confirm-send'].disabled = busy || !connected || !p;
+    if (recovering) c['confirm-send'].checked = false;
+    c.discard.disabled = recovering || busy || !p || p.sent || p.exported;
+    c.receipt.disabled = busy || !client.connected || !!p;
     c.save.disabled = busy || !p; c.restore.disabled = busy || !client.connected || !!p;
     c.pending.textContent = p ? JSON.stringify(p, null, 2) : 'No outstanding initial publication.';
     c.files.replaceChildren();
     for (const [path, value] of files) {
-      const row = el('li'), preview = el('details'), remove = el('button', 'Remove'); remove.type = 'button'; remove.disabled = busy || !!p;
+      const row = el('li'), preview = el('details'), remove = el('button', 'Remove'); remove.type = 'button'; remove.disabled = recovering || busy || !!p;
       preview.append(el('summary', `${displayBytes(unhex(path, 4096))} [${path}] — ${value.bytes.length} bytes, mode ${value.mode.toString(8)}`), el('pre', displayBytes(value.bytes)));
       row.append(preview, remove); c.files.append(row);
-      remove.addEventListener('click', () => { if (busy || client.pending) return; files.delete(path); changed(); });
+      remove.addEventListener('click', () => { if (client.recoveryOnly || busy || client.pending) return; files.delete(path); changed(); });
     }
   }
-  function changed() { revision++; client.invalidateCandidate(); c.candidate.replaceChildren(); c['confirm-send'].checked = false; render(); }
-  async function perform(work) {
+  function changed() { if (client.recoveryOnly) return; revision++; client.invalidateCandidate(); c.candidate.replaceChildren(); c['confirm-send'].checked = false; render(); }
+  async function perform(work, recoveryAllowed = false) {
+    if (client.recoveryOnly && !recoveryAllowed) {
+      status('Recovery-only connection cannot prepare, discard or resend mutations. Keep the original request and use outcome lookup.'); render(); return;
+    }
     if (busy) return; busy = true; render();
     try { await work(); }
     catch (error) { status(`${error.outcomeUnknown ? 'Outcome unknown. Keep the original request and recover it. ' : ''}${error.message}`); }
@@ -67,13 +79,16 @@ export function mountInitialEditor(doc, options = {}) {
     status(client.pending ? 'Disconnected. The original publication is retained; save its recovery receipt before leaving.' : 'Disconnected. Credentials and initial file bytes cleared.');
   }
   c.connect.addEventListener('click', () => perform(async () => {
-    const token = c.token.value; c.token.value = ''; revision++; clearFiles(); await client.connect(token);
-    status('Connected. Choose an absent branch and queue initial files, or restore an original publication.');
-  }));
+    const connection = c['recovery-only'].checked ? { recoveryOnly: true, originalPrincipal: c['original-principal'].value } : {};
+    const token = c.token.value; c.token.value = ''; revision++; clearFiles(); await client.connect(token, connection);
+    status(client.recoveryOnly ? 'Connected for outcome lookup only. Restore the original receipt or check the retained request. The server must authenticate the selected original principal.'
+      : 'Connected. Choose an absent branch and queue initial files, or restore an original publication.');
+  }, true));
+  c['recovery-only'].addEventListener('change', render);
   c.disconnect.addEventListener('click', disconnect);
   for (const id of editable) c[id].addEventListener(['file','batch-files','directory-files'].includes(id) ? 'change' : 'input', changed);
   c.receipt.addEventListener('change', () => { revision++; });
-  c.cancel.addEventListener('click', () => { if (client.pending) return; changed(); status('Read/import cancelled. No publication was sent.'); });
+  c.cancel.addEventListener('click', () => { if (client.recoveryOnly || client.pending) return; changed(); status('Read/import cancelled. No publication was sent.'); });
   c.queue.addEventListener('click', () => perform(async () => {
     if (client.pending) throw new Error('Resolve the original publication before editing.');
     changed(); // A failed replacement cannot leave an older candidate enabled.
@@ -121,7 +136,7 @@ export function mountInitialEditor(doc, options = {}) {
   }
   c['import-files'].addEventListener('click', () => perform(() => importSelection(false)));
   c['import-directory'].addEventListener('click', () => perform(() => importSelection(true)));
-  c.clear.addEventListener('click', () => { if (!busy && !client.pending) { clearFiles(); changed(); } });
+  c.clear.addEventListener('click', () => { if (!client.recoveryOnly && !busy && !client.pending) { clearFiles(); changed(); } });
   c.prepare.addEventListener('click', () => perform(async () => {
     if (!c['expected-absent'].checked) throw new Error('Confirm branch absence explicitly.');
     const fields = { ref: c.branch.value, object_format: c.format.value, expected_absent: true };
@@ -146,8 +161,8 @@ export function mountInitialEditor(doc, options = {}) {
   }));
   c.recover.addEventListener('click', () => perform(async () => {
     const result = await client.recover(); if (result.terminal) clearFiles();
-    status(result.terminal ? `Recovered canonical ${result.outcome}: ${result.tx}.` : `Unresolved: ${result.state}. Absence does not prove non-commit. Keep the original request.`);
-  }));
+    status(result.terminal ? `Recovered canonical ${result.outcome}: ${result.tx}.${client.recoveryOnly ? ' Recovery-only mode remains active; reconnect explicitly for ordinary work.' : ''}` : `Unresolved: ${result.state}. Absence does not prove non-commit. Keep the original request.`);
+  }, true));
   c.discard.addEventListener('click', () => { try { client.discardUnsent(); c['confirm-send'].checked = false; render(); status('Unsent, unexported request discarded.'); } catch (e) { status(e.message); } });
   c.save.addEventListener('click', () => {
     try {
@@ -157,15 +172,17 @@ export function mountInitialEditor(doc, options = {}) {
         const url = URL.createObjectURL(new Blob([value], { type: 'application/json' })), link = el('a');
         link.href = url; link.download = 'frankengit-initial-retry.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 0);
       }
-      render(); status('Token-free receipt saved. It contains repository data; protect it and keep the original token separately.');
+      render(); status('Token-free receipt saved. Protect its repository data and retain the original principal independently. Sending still requires the original token.');
     } catch (e) { status(e.message); }
   });
   c.restore.addEventListener('click', () => perform(async () => {
     const selected = c.receipt.files?.[0], started = revision;
     const bytes = await readInitialFile(selected, RECEIPT_LIMIT, () => started === revision && client.connected && c.receipt.files?.[0] === selected);
     await client.restoreReceipt(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
-    clearFiles(); c['confirm-send'].checked = false; status('Original creation-only request restored, not executed. Recover or explicitly confirm an unchanged retry.');
-  }));
+    clearFiles(); c['confirm-send'].checked = false; status(client.recoveryOnly
+      ? 'Original creation-only request restored without sending. Only its original outcome may be checked with this credential.'
+      : 'Original creation-only request restored, not executed. Recover or explicitly confirm an unchanged retry.');
+  }, true));
   const events = options.events ?? globalThis;
   events.addEventListener?.('pagehide', disconnect);
   events.addEventListener?.('beforeunload', e => { if (files.size || client.pending) { e.preventDefault(); e.returnValue = ''; } });

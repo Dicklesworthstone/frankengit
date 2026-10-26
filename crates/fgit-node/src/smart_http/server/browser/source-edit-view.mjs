@@ -53,7 +53,7 @@ function contentLabel(bytes) { return editableText(bytes) ?? `Binary/non-text by
 export function mountSourceEditor(doc, options = {}) {
   const client = options.client ?? new SourceEditClient({ href: options.href ?? globalThis.location.href });
   const byId = id => { const element = doc.getElementById(id); if (!element) throw new Error(`Missing source editor control ${id}`); return element; };
-  const controls = Object.fromEntries(['token','connect','disconnect','branch','format','select-base','base','path','path-kind','load-file',
+  const controls = Object.fromEntries(['token','connect','disconnect','recovery-only','original-principal','connection-mode','branch','format','select-base','base','path','path-kind','load-file',
     'change-kind','rename-options','rename-path','rename-path-kind','file-mode','file-text','file-hex','content-mode','text-editor','hex-editor','file-info','save-file','line-endings','replacement','queue-file','edits','clear-edits','author','committer','timestamp','message',
     'prepare-edits','patch','prepare-patch','candidate','stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore-receipt','pending','status'].map(id => [id, byId(id)]));
   let edits = new Map(), renames = new Map(), loaded = null, replacement = null, replacementFile = null, revision = 0, textDirty = false, busy = false, viewMode = 'text';
@@ -100,10 +100,17 @@ export function mountSourceEditor(doc, options = {}) {
     controls.candidate.replaceChildren(); controls.edits.replaceChildren(); controls.base.textContent = '';
   }
   function changed() {
+    if (client.recoveryOnly) return;
     revision += 1; client.invalidateCandidate(); controls.candidate.replaceChildren(); controls['confirm-send'].checked = false; render();
   }
   function render() {
-    const pending = client.pending, candidate = client.candidate, connected = client.connected;
+    const pending = client.pending, candidate = client.candidate, recovering = client.recoveryOnly, connected = client.connected && !recovering;
+    controls.token.disabled = busy; controls['recovery-only'].disabled = busy;
+    controls['original-principal'].disabled = busy || !controls['recovery-only'].checked;
+    controls['original-principal'].required = controls['recovery-only'].checked;
+    controls['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
+      ? 'RECOVERY ONLY: only the original outcome may be checked. Reconnect explicitly before reading, editing or sending another request.'
+      : 'Ordinary connection. Connection choices take effect only on Connect.';
     for (const id of ['branch','format','path','path-kind','change-kind','rename-path','rename-path-kind','file-mode','file-text','file-hex','content-mode','line-endings','replacement','author','committer','timestamp','message','patch']) controls[id].disabled = busy || !connected || !!pending;
     controls['rename-options'].hidden = controls['change-kind'].value !== 'rename';
     for (const id of ['rename-path', 'rename-path-kind']) controls[id].disabled ||= controls['change-kind'].value !== 'rename';
@@ -115,10 +122,13 @@ export function mountSourceEditor(doc, options = {}) {
     for (const id of ['load-file','queue-file','clear-edits','prepare-edits','prepare-patch']) controls[id].disabled = busy || !connected || !!pending || !client.selection;
     controls.stage.disabled = busy || !connected || !!pending || !candidate;
     controls.send.disabled = busy || !connected || !pending;
-    controls.recover.disabled = busy || !connected || !pending;
-    controls.discard.disabled = busy || !pending || pending.sent || pending.exported;
+    controls.recover.disabled = busy || !client.connected || !pending;
+    controls.discard.disabled = recovering || busy || !pending || pending.sent || pending.exported;
+    controls['confirm-send'].disabled = busy || !connected || !pending;
+    if (recovering) controls['confirm-send'].checked = false;
     controls['save-receipt'].disabled = busy || !pending;
-    controls['restore-receipt'].disabled = busy || !connected || !!pending;
+    controls['restore-file'].disabled = busy || !client.connected || !!pending;
+    controls['restore-receipt'].disabled = busy || !client.connected || !!pending;
     controls.pending.textContent = pending ? JSON.stringify(pending, null, 2) : 'No outstanding publication.';
     controls.edits.replaceChildren();
     for (const [key, edit] of edits) {
@@ -127,13 +137,16 @@ export function mountSourceEditor(doc, options = {}) {
       const after = pair ? edits.get(pair[1]).after : edit.after;
       const action = pair ? `Rename ${label(pair[0])} → ${label(pair[1])} (two paths)`
         : `${edit.before === null ? 'Create' : edit.after === null ? 'Delete' : 'Edit'} ${label(key)}`;
-      const row = element('li'), remove = element('button', 'Remove'); remove.type = 'button'; remove.disabled = busy || !!pending;
+      const row = element('li'), remove = element('button', 'Remove'); remove.type = 'button'; remove.disabled = recovering || busy || !!pending;
       row.append(element('span', `${action}; ${edit.before?.bytes.length ?? 0} → ${after?.bytes.length ?? 0} bytes${editableText(after?.bytes ?? edit.before.bytes) === null ? ' (binary/raw)' : ''} `), remove);
-      remove.addEventListener('click', () => { if (busy || client.pending) return; removeQueued(key); changed(); });
+      remove.addEventListener('click', () => { if (client.recoveryOnly || busy || client.pending) return; removeQueued(key); changed(); });
       controls.edits.append(row);
     }
   }
-  async function perform(work) {
+  async function perform(work, recoveryAllowed = false) {
+    if (client.recoveryOnly && !recoveryAllowed) {
+      status('Recovery-only connection cannot read, prepare, discard or resend mutations. Keep the original request and use outcome lookup.'); render(); return;
+    }
     if (busy) return; busy = true; render();
     try { await work(); }
     catch (error) { status(`${error.outcomeUnknown ? 'Outcome unknown; keep the original request and use recovery. ' : ''}${error.message}`); }
@@ -191,9 +204,13 @@ export function mountSourceEditor(doc, options = {}) {
   const metadata = () => ({ author: controls.author.value, committer: controls.committer.value,
     timestamp: decimal(controls.timestamp.value, 'explicit timestamp'), message: controls.message.value });
   controls.connect.addEventListener('click', () => perform(async () => {
+    const connection = controls['recovery-only'].checked ? { recoveryOnly: true, originalPrincipal: controls['original-principal'].value } : {};
     const token = controls.token.value; controls.token.value = ''; revision += 1; clearDraft();
-    await client.connect(token); status('Connected. Select a branch base or restore an original request.');
-  }));
+    await client.connect(token, connection); status(client.recoveryOnly
+      ? 'Connected for outcome lookup only. Restore the original receipt or check the retained request. The server must authenticate the selected original principal.'
+      : 'Connected. Select a branch base or restore an original request.');
+  }, true));
+  controls['recovery-only'].addEventListener('change', render);
   function disconnect() {
     revision += 1; client.disconnect(); controls.token.value = ''; controls['confirm-send'].checked = false; clearDraft(); render();
     status(client.pending ? 'Disconnected. The outstanding original request is retained; save its recovery receipt.' : 'Disconnected; source bytes and credentials cleared.');
@@ -204,16 +221,17 @@ export function mountSourceEditor(doc, options = {}) {
     controls.base.textContent = JSON.stringify(selected, null, 2); status('Immutable base selected. Every queued edit will use this exact parent.');
   }));
   for (const id of ['path','path-kind','change-kind']) controls[id].addEventListener('input', () => {
+    if (client.recoveryOnly) return;
     loaded = null; replacement = null; replacementFile = null; controls.replacement.value = ''; controls['file-text'].value = ''; controls['file-hex'].value = ''; controls['file-info'].textContent = 'No file bytes loaded.'; textDirty = false; changed();
   });
   for (const id of ['file-text','file-hex','line-endings']) controls[id].addEventListener('input', () => {
-    if (client.pending || busy || (id === 'file-hex' ? viewMode !== 'hex' : viewMode !== 'text')) return;
+    if (client.recoveryOnly || client.pending || busy || (id === 'file-hex' ? viewMode !== 'hex' : viewMode !== 'text')) return;
     textDirty = true; replacement = null; replacementFile = null; controls.replacement.value = '';
     controls['file-info'].textContent = 'Edited draft; queue or download to validate its complete bytes.'; changed();
   });
   controls['content-mode'].addEventListener('change', () => {
     const requested = controls['content-mode'].value;
-    if (busy || client.pending || !client.connected) { controls['content-mode'].value = viewMode; return; }
+    if (client.recoveryOnly || busy || client.pending || !client.connected) { controls['content-mode'].value = viewMode; return; }
     try {
       if (!['text', 'hex'].includes(requested)) throw new Error('Choose text or exact hex view.');
       const bytes = draftBytes(); showBytes(bytes, requested);
@@ -222,7 +240,7 @@ export function mountSourceEditor(doc, options = {}) {
     } catch (error) { controls['content-mode'].value = viewMode; status(error.message); render(); }
   });
   for (const id of ['rename-path','rename-path-kind','file-mode','author','committer','timestamp','message']) controls[id].addEventListener('input', changed);
-  for (const id of ['branch','format']) controls[id].addEventListener('input', () => { client.clearSelection(); clearDraft(); changed(); status('Select the new branch and format explicitly before editing.'); });
+  for (const id of ['branch','format']) controls[id].addEventListener('input', () => { if (client.recoveryOnly) return; client.clearSelection(); clearDraft(); changed(); status('Select the new branch and format explicitly before editing.'); });
   controls['load-file'].addEventListener('click', () => perform(async () => {
     const selectedPath = path(), started = ++revision; client.invalidateCandidate(); loaded = null; replacement = null; replacementFile = null;
     controls.replacement.value = ''; controls['file-text'].value = ''; controls['file-hex'].value = '';
@@ -233,7 +251,7 @@ export function mountSourceEditor(doc, options = {}) {
       : 'Complete native-identity-verified file loaded. Unedited bytes retain their exact newline form.');
   }));
   controls.replacement.addEventListener('change', () => {
-    if (client.pending || !client.connected) { status('Connect and resolve any original publication before replacing file bytes.'); return; }
+    if (client.recoveryOnly || client.pending || !client.connected) { status('Connect for ordinary work and resolve any original publication before replacing file bytes.'); return; }
     // Invalidate even when an earlier read is still busy. A failed or superseded
     // selection must never fall back to the previous successful replacement.
     replacement = null; replacementFile = controls.replacement.files?.[0] ?? null; changed();
@@ -248,7 +266,7 @@ export function mountSourceEditor(doc, options = {}) {
   });
   controls['save-file'].addEventListener('click', () => {
     try {
-      if (busy || !client.connected || client.pending || !client.selection) throw new Error('Select an editable base before downloading a draft.');
+      if (client.recoveryOnly || busy || !client.connected || client.pending || !client.selection) throw new Error('Select an editable base before downloading a draft.');
       const bytes = draftBytes();
       if (options.saveFile) options.saveFile(bytes.slice());
       else download(bytes, 'application/octet-stream', 'frankengit-file.bin');
@@ -279,7 +297,7 @@ export function mountSourceEditor(doc, options = {}) {
     fullFilePatch([...next.values()], { allowBinary: true }); if (next.size > EDIT_LIMIT) throw new Error('Too many edited paths.');
     edits = next; renames = nextRenames; changed(); status(`${edits.size} exact file effect(s) queued. Nothing has been submitted.`);
   }));
-  controls['clear-edits'].addEventListener('click', () => { if (!busy && !client.pending) { edits.clear(); renames.clear(); changed(); } });
+  controls['clear-edits'].addEventListener('click', () => { if (!client.recoveryOnly && !busy && !client.pending) { edits.clear(); renames.clear(); changed(); } });
   controls['prepare-edits'].addEventListener('click', () => perform(async () => {
     const prepared = await client.prepareEdits([...edits.values()], metadata()); inspectView(prepared);
     status('Native preparation and inspection completed. Inspect every changed path before preparing publication.');
@@ -302,8 +320,8 @@ export function mountSourceEditor(doc, options = {}) {
   }));
   controls.recover.addEventListener('click', () => perform(async () => {
     const result = await client.recover(); if (result.terminal) clearDraft();
-    status(result.terminal ? `Recovered canonical ${result.outcome}: ${result.tx}.` : `Still unresolved: ${result.state}. Absence does not prove non-commit. Keep the original request.`);
-  }));
+    status(result.terminal ? `Recovered canonical ${result.outcome}: ${result.tx}.${client.recoveryOnly ? ' Recovery-only mode remains active; reconnect explicitly for ordinary work.' : ''}` : `Still unresolved: ${result.state}. Absence does not prove non-commit. Keep the original request.`);
+  }, true));
   controls.discard.addEventListener('click', () => { try { client.discardUnsent(); status('Unsent, unexported local request discarded.'); render(); } catch (error) { status(error.message); } });
   controls['save-receipt'].addEventListener('click', () => {
     try {
@@ -317,8 +335,9 @@ export function mountSourceEditor(doc, options = {}) {
     const started = ++revision; const bytes = await chosenBytes(controls['restore-file'].files?.[0], RECEIPT_LIMIT, () => started === revision && client.connected);
     const encoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     await client.restoreReceipt(encoded); clearDraft(); controls['confirm-send'].checked = false;
-    status('Original request restored, not executed. Query its outcome or explicitly confirm an unchanged retry.');
-  }));
+    status(client.recoveryOnly ? 'Original request restored without sending. Only its original outcome may be checked with this credential.'
+      : 'Original request restored, not executed. Query its outcome or explicitly confirm an unchanged retry.');
+  }, true));
   (options.events ?? globalThis).addEventListener?.('pagehide', disconnect);
   (options.events ?? globalThis).addEventListener?.('beforeunload', event => {
     if (client.pending || edits.size || replacement !== null || replacementFile || textDirty) { event.preventDefault(); event.returnValue = ''; }
