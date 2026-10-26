@@ -21,15 +21,13 @@ function endpoint(value) {
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.hash) fail('backup_upload_url');
   return url;
 }
-export function repositoryBackupUploadOptions(raw) {
-  const allowed = ['input', 'approval', 'trustKey', 'policy', 'target', 'caFile', 'checkpoint',
-    'maximumBytes', 'maximumTotalBytes', 'timeoutMs', 'signal', 'now', 'onProgress'];
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !allowed.includes(k))) fail('backup_upload_options');
-  if (!exact(raw.target, ['archive', 'approval'])) fail('backup_upload_target');
+// One parameter-only URL contract shared by direct and durable-job publication.
+export function repositoryBackupUploadTarget(raw) {
+  if (!exact(raw, ['archive', 'approval'])) fail('backup_upload_target');
   const target = {}; let textBytes = 0;
   for (const kind of ['archive', 'approval']) {
-    if (!exact(raw.target[kind], ['get', 'put'])) fail('backup_upload_target');
-    const get = endpoint(raw.target[kind].get), put = endpoint(raw.target[kind].put);
+    if (!exact(raw[kind], ['get', 'put'])) fail('backup_upload_target');
+    const get = endpoint(raw[kind].get), put = endpoint(raw[kind].put);
     // Signed query strings may differ by method, but the logical object may not.
     if (get.origin !== put.origin || get.pathname !== put.pathname) fail('backup_upload_target_mismatch');
     textBytes += Buffer.byteLength(get.href) + Buffer.byteLength(put.href);
@@ -37,6 +35,13 @@ export function repositoryBackupUploadOptions(raw) {
   }
   if (textBytes > 32768 || new URL(target.archive.get).origin + new URL(target.archive.get).pathname
     === new URL(target.approval.get).origin + new URL(target.approval.get).pathname) fail('backup_upload_target_mismatch');
+  return Object.freeze(target);
+}
+export function repositoryBackupUploadOptions(raw) {
+  const allowed = ['input', 'approval', 'trustKey', 'policy', 'target', 'caFile', 'checkpoint',
+    'maximumBytes', 'maximumTotalBytes', 'timeoutMs', 'signal', 'now', 'onProgress'];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !allowed.includes(k))) fail('backup_upload_options');
+  const target = repositoryBackupUploadTarget(raw.target);
   const paths = Object.fromEntries(['input', 'approval', 'trustKey'].map(k => [k, resolve(backupPath(raw[k]))]));
   if (raw.caFile !== undefined) paths.caFile = resolve(backupPath(raw.caFile));
   for (const path of Object.values(paths)) backupPath(path);

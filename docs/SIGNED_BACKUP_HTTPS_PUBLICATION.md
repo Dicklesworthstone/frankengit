@@ -7,6 +7,18 @@ independently controlled recovery copies in comprehensive plan section 21.8.
 It is a trusted-local operator, not a Rust object-fabric backend, repository
 publication protocol, signing service, cloud-provider adapter or native restore.
 
+## Retained jobs for restart and multiple destinations
+
+[Resumable offsite backup publication](RESUMABLE_OFFSITE_BACKUP_PUBLICATION.md)
+adds `repository_backup_upload_job.mjs seal|run` around this uploader. Seal
+retains a private authenticated archive/approval pair and publishes an immutable
+intent last. Each explicit run requires independent trust and policy, accepts
+refreshed query capabilities for the exact sealed logical destination set, and
+rechecks actual remote objects. Completed-target receipts survive later failures;
+original source files are unnecessary after a successful seal. The job keeps
+this uploader's conditional archive-before-approval publication and uncertainty
+rules, with one aggregate payload budget and deadline across up to 16 targets.
+
 ## Explicit conditional object service
 
 The service must implement HTTPS GET and conditional PUT with
