@@ -1,10 +1,22 @@
-import contextlib, hashlib, http.client, json, os, pathlib, secrets, signal, struct, subprocess, sys, time, urllib.parse, zlib
+import contextlib, hashlib, http.client, json, os, pathlib, secrets, shutil, signal, struct, subprocess, sys, time, urllib.parse, zlib
 
 fg, root = sys.argv[1], pathlib.Path(sys.argv[2])
 root.chmod(0o700)
 tenant, repository, incarnation, principal = '1' * 32, '2' * 32, '3' * 32, '4' * 32
 commands = 0
 cases = []
+operator_calls = []
+repo = pathlib.Path(__file__).resolve().parents[3]
+node_bin = os.environ.get('NODE_BIN') or shutil.which('node')
+assert node_bin, 'artifact operator coverage requires NODE_BIN or node on PATH'
+node_version = subprocess.run([node_bin, '--version'], capture_output=True, timeout=10)
+(root / 'node-version.out').write_bytes(node_version.stdout)
+(root / 'node-version.err').write_bytes(node_version.stderr)
+expected_node = 'v' + (repo / 'tests/node-version').read_text().strip()
+if node_version.returncode != 0 or node_version.stdout.decode(errors='replace').strip() != expected_node:
+    print(json.dumps({'type': 'artifact_operator_runtime_refusal', 'code': 'node_version_mismatch',
+                      'expected': expected_node, 'native_commands_started': 0}), file=sys.stderr)
+    sys.exit(3)
 store = root / 'artifacts'
 store.mkdir(mode=0o700)
 
@@ -278,7 +290,7 @@ def artifact_server(node, inc, grants, label):
 def artifact_http(url, suffix, token, expected=200, *, method='GET', extra=None):
     endpoint = urllib.parse.urlsplit(url)
     assert endpoint.scheme == 'http' and endpoint.hostname == '127.0.0.1'
-    headers = {'Connection': 'close'}
+    headers = {'Connection': 'close', 'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)'}
     if token is not None:
         headers['Authorization'] = 'Bearer ' + token
     headers.update(extra or {})
@@ -318,6 +330,52 @@ def verify_artifact_metadata(body, artifact_id, payload, inc, kind):
     return value
 
 
+def operator_download(label, url, inc, token, receipt, output, payload, expected=0, *, log=None, job_id_hex=None, job_outcome=None):
+    # This is the real production operator over the owned native HTTP listener,
+    # with the native producing job's unchanged create-only receipt.
+    config_path, token_path = root / (label + '.input.json'), root / (label + '.token')
+    destination = root / (label + '.payload')
+    private_replace(config_path, json.dumps({
+        'endpoint': url.rstrip('/'),
+        'scope': {'tenant_id': tenant, 'repository_id': repository,
+                  'repository_incarnation_id': inc, 'trust_domain': 'trusted-workflow-local-owner'},
+        'job_id_hex': job_id_hex or b'build'.hex(),
+        **({'path_hex': output['path_hex']} if log is None else
+           {'step_index': log['step_index'], 'stream': log['stream']}),
+    }))
+    private_replace(token_path, token)
+    result = subprocess.run([node_bin, str(repo / 'scripts/fg_workflow_watch.mjs'), 'artifact-download',
+                             '--input', str(config_path), '--receipt', str(receipt),
+                             '--token-file', str(token_path), '--output', str(destination),
+                             '--timeout-ms', '10000'], capture_output=True, timeout=20)
+    (root / (label + '.out')).write_bytes(result.stdout)
+    (root / (label + '.err')).write_bytes(result.stderr)
+    assert result.returncode == expected, (label, result.returncode, expected, result.stderr.decode(errors='replace'))
+    assert token.encode() not in result.stdout + result.stderr
+    operator_calls.append({'label': label, 'exit': result.returncode,
+                           'stdout_sha256': hashlib.sha256(result.stdout).hexdigest(),
+                           'stderr_sha256': hashlib.sha256(result.stderr).hexdigest()})
+    if expected == 0:
+        value = json.loads(result.stdout)
+        assert value['type'] == 'workflow_artifact_download'
+        assert value['artifact_id'] == output['artifact_id_sha256']
+        assert value['payload_sha256'] == hashlib.sha256(payload).hexdigest()
+        assert value['payload_bytes'] == len(payload) and value['payload_sha256_verified']
+        assert not value['artifact_identity_independently_verified']
+        assert not value['provenance_authenticated'] and not value['canonical_repository_published']
+        assert not value['job_success_asserted'] and not value['execution_performed'] and not value['executable_mode_applied']
+        if log is not None:
+            observation = value['log_observation']
+            assert observation['observed_job_outcome'] == job_outcome
+            for key in ['step_index', 'stream', 'script_sha256', 'observed_step_outcome', 'exit_code', 'output_complete']:
+                assert observation[key] == log[key]
+        assert destination.read_bytes() == payload and destination.stat().st_mode & 0o777 == 0o600
+    else:
+        value = json.loads(result.stderr)
+        assert value['type'] == 'workflow_artifact_download_error'
+        assert not destination.exists(), 'refused operator download exposed a destination'
+
+
 def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payload):
     assert len(report['artifacts']) == 1
     captured = report['artifacts'][0]
@@ -340,6 +398,10 @@ def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payl
     manifest_route = '/api/v1/artifacts/' + manifest_id
     original_metadata = {}
     with artifact_server(node, inc, grants, fmt + '-artifact-http') as url:
+        receipt_path = directory / 'job-000-artifacts.json'
+        operator_download(fmt + '-operator-download', url, inc, tokens['artifact'], receipt_path, output, expected_payload)
+        other_inc = ('f' if inc[0] != 'f' else 'e') + inc[1:]
+        operator_download(fmt + '-operator-wrong-scope', url, other_inc, tokens['artifact'], receipt_path, output, expected_payload, 2)
         for artifact_id, route, payload, kind in [(output_id, output_route, expected_payload, 'ci_artifact'),
                                                 (manifest_id, manifest_route, expected_manifest, 'provenance')]:
             fields, metadata = artifact_http(url, route, tokens['artifact'])
@@ -360,6 +422,7 @@ def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payl
         artifact_http(url, output_route, tokens['artifact'], 400, extra={'Idempotency-Key': 'read-only'})
         artifact_grants(grants, inc, tokens, None)
         artifact_http(url, output_route + '/content', tokens['artifact'], 401)
+        operator_download(fmt + '-operator-revoked', url, inc, tokens['artifact'], receipt_path, output, expected_payload, 2)
         artifact_grants(grants, inc, tokens, 'read')
         artifact_http(url, output_route + '/content', tokens['artifact'], 403)
         artifact_grants(grants, inc, tokens)
@@ -371,9 +434,12 @@ def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payl
             for suffix in [output_route, output_route + '/content']:
                 _, body = artifact_http(url, suffix, tokens['artifact'], 503)
                 assert expected_payload not in body and json.loads(body)['code'] == 'artifact_storage_unavailable'
+            operator_download(fmt + '-operator-corrupt', url, inc, tokens['artifact'], receipt_path, output, expected_payload, 2)
         finally:
             stored.write_bytes(original)
         assert artifact_http(url, output_route + '/content', tokens['artifact'])[1] == expected_payload
+        operator_download(fmt + '-operator-restored', url, inc, tokens['artifact'], receipt_path, output, expected_payload)
+        assert (directory / 'job-000-artifacts.json').read_bytes() == saved_bytes
     with artifact_server(node, inc, grants, fmt + '-artifact-http-reopened') as url:
         for artifact_id, route, payload in [(output_id, output_route, expected_payload),
                                             (manifest_id, manifest_route, expected_manifest)]:
@@ -384,6 +450,9 @@ def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payl
                   'binary_bytes_match_producing_script': True, 'manifest_bytes_match_create_only_receipt': True,
                   'independent_scope_and_live_revocation': True, 'trailing_corruption_never_disclosed': True,
                   'verified_downloads_restored_after_corruption': True, 'http_reopen_preserves_exact_metadata_and_bytes': True})
+    cases.append({'format': fmt, 'production_operator_downloaded_native_workflow_bytes': True,
+                  'wrong_scope_revoked_and_corrupt_downloads_absent': True,
+                  'saved_native_receipt_unchanged': True, 'operator_provenance_not_promoted': True})
 
 
 
@@ -393,7 +462,7 @@ def retrieve_workflow_logs(fmt, label, node, inc, report, directory, expected):
     jobs = {job['id']: job for job in report['execution']['jobs']}
     assert len(report['artifact_logs']) == sum(bool(job['steps']) for job in jobs.values())
     assert not report['execution']['authoritative_check']
-    seen, payloads, metadata_before = set(), {}, {}
+    seen, payloads, metadata_before, operator_logs = set(), {}, {}, []
     for captured in report['artifact_logs']:
         job_id = bytes.fromhex(captured['job_id_hex']).decode()
         job = jobs[job_id]
@@ -426,6 +495,10 @@ def retrieve_workflow_logs(fmt, label, node, inc, report, directory, expected):
         assert manifest['producer']['source_commit'] == report['source_commit']
         assert not manifest['job_success_asserted'] and not manifest['cache_reuse_authorized']
         assert manifest['build_input_capsule_id'] is None and manifest['check_receipt_id'] is None
+        for log in captured['logs']:
+            operator_logs.append((captured['job_id_hex'], directory / f'job-{index:03d}-logs.json',
+                                  log, expected[(job_id, log['step_index'], log['stream'])],
+                                  captured['observed_job_outcome']))
         payloads[manifest_id] = payload, 'provenance'
     assert seen == set(expected)
     assert json.loads((directory / 'report.json').read_bytes()) == report
@@ -455,8 +528,23 @@ def retrieve_workflow_logs(fmt, label, node, inc, report, directory, expected):
             for suffix in ['', '/content']:
                 _, body = artifact_http(url, '/api/v1/artifacts/' + corrupt_id + suffix, tokens['artifact'], 503)
                 assert binary not in body and json.loads(body)['code'] == 'artifact_storage_unavailable'
+            job_hex, receipt, log, payload, outcome = next(row for row in operator_logs if row[2]['artifact_id_sha256'] == corrupt_id)
+            operator_download(fmt + '-' + label + '-operator-corrupt-log', url, inc, tokens['artifact'], receipt,
+                              log, payload, 2, log=log, job_id_hex=job_hex, job_outcome=outcome)
         finally:
             container.write_bytes(original)
+    # Keep the same bounded server profile; the operator's process/file I/O
+    # gets its own listener interval rather than extending existing deadlines.
+    with artifact_server(node, inc, grants, fmt + '-' + label + '-operator-logs') as url:
+        first_job = operator_logs[0][0]
+        first_step = min(row[2]['step_index'] for row in operator_logs if row[0] == first_job)
+        for job_hex, receipt, log, payload, outcome in operator_logs:
+            if job_hex != first_job or log['step_index'] != first_step:
+                continue
+            saved = receipt.read_bytes()
+            operator_download(fmt + '-' + label + '-operator-' + log['stream'], url, inc, tokens['artifact'],
+                              receipt, log, payload, log=log, job_id_hex=job_hex, job_outcome=outcome)
+            assert receipt.read_bytes() == saved
     with artifact_server(node, inc, grants, fmt + '-' + label + '-logs-reopened') as url:
         for artifact_id, (payload, _) in payloads.items():
             route = '/api/v1/artifacts/' + artifact_id
@@ -519,4 +607,5 @@ for fmt in ['sha1', 'sha256']:
     validate(json.loads(run(fmt + '-offline-artifact-export', ['artifact', 'export', *scope(inc=inc), '--id', archive_id, '--output', restored])), archive_id, payload, inc=inc)
     assert restored.read_bytes() == payload
     cases.append({'format': fmt, 'native_workflow_evidence_archived': True, 'artifact_id': archive_id, 'original_node_run_and_source_not_used_for_recovery': True, 'refs_unchanged': True})
-(root / 'results.json').write_text(json.dumps({'native_commands': commands, 'cases': cases, 'native_peers_are_fixtures': False}, indent=2) + '\n')
+(root / 'results.json').write_text(json.dumps({'native_commands': commands, 'operator_calls': operator_calls,
+                                             'cases': cases, 'native_peers_are_fixtures': False}, indent=2) + '\n')

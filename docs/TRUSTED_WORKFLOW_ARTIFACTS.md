@@ -298,6 +298,103 @@ workspace even when collection refuses.
 
 ## Inspect or export after cleanup
 
+The existing workflow-watch operator also has a remote download command. It
+requires a separately retained private `job-NNN-artifacts.json` receipt and
+independently selected endpoint and scope; it needs no server filesystem root
+or local `fg` executable. Put this input in a private JSON file, replacing all
+placeholder IDs and selecting the exact job/path bytes from the receipt:
+
+```json
+{
+  "endpoint": "https://forge.example/team/repo.git",
+  "scope": {
+    "tenant_id": "11111111111111111111111111111111",
+    "repository_id": "22222222222222222222222222222222",
+    "repository_incarnation_id": "33333333333333333333333333333333",
+    "trust_domain": "trusted-workflow-local-owner"
+  },
+  "job_id_hex": "6275696c64",
+  "path_hex": "646973742f726573756c74"
+}
+```
+
+```sh
+node scripts/fg_workflow_watch.mjs artifact-download \
+  --input /private/operator/selected-output.json \
+  --receipt /private/operator/job-000-artifacts.json \
+  --token-file /private/operator/artifact-token \
+  --output /private/operator/downloaded-output
+```
+
+Input, receipt and token must be owned private regular files in owned nonsymlink
+`0700` directories. The output parent must already have the same protection;
+the destination must be new. The token is exactly 64 lowercase hex characters,
+optionally followed by one LF. It must carry the independently provisioned
+`artifact-read` grant, which authorizes the complete selected custody namespace,
+including hidden-ref outputs. A source/Git grant does not substitute for it.
+
+The command selects the receipt's exact job and raw path, rejects ambiguous
+outputs and compares its producer scope with the separately supplied scope.
+It fetches metadata by **artifact ID**, checks scope, kind, digest and length,
+then downloads the payload and verifies complete HTTP framing, exact byte count
+and raw SHA-256 before synced create-only publication. Empty and arbitrary binary
+payloads work. The file is private `0600`; the receipt's executable bit is never
+applied and content is never executed. An existing or racing destination is
+preserved.
+
+Only canonical HTTPS or numeric-loopback HTTP is accepted. TLS certificate and
+hostname checks remain enabled; `--ca-file` may select an explicit private CA
+bundle. `--timeout-ms 1..300000` bounds both network requests together (default
+30000). SIGINT/SIGTERM cancel outstanding reads. A refusal, corrupt/partial
+response or cancellation before publication leaves no new destination. There is
+no redirect, retry, alternate-ID or local-custody fallback. Once verified file
+publication begins it completes through cleanup; a late stop or output/sync
+failure cannot erase a visible file. Error output conservatively reports that
+the destination may exist; inspect it before choosing another output.
+
+The saved receipt is an operator-selected expectation, not authenticated
+provenance or proof that a job succeeded. This client verifies raw payload
+bytes against that expectation; it does not reconstruct the native container
+or verify its artifact/manifest identity independently. Downloading never
+publishes a canonical check, authorizes cache reuse or enforces retention.
+Diagnostic outputs from a failed job can be downloaded under the same rule.
+
+To download a retained step stream, use the same `artifact-download` command
+with its `job-NNN-logs.json` receipt. In the private input, replace `path_hex`
+with `"step_index": 0` and `"stream": "stdout"` (or `"stderr"`). The exact
+job, nonnegative integer step index and stream select one log; mixed file/log
+selectors or receipt kinds refuse. The client requires consistent stdout/stderr
+pairs in the receipt and matching `build_log` metadata before downloading.
+It preserves arbitrary binary and empty stream bytes with the same scope,
+length/digest, TLS, cancellation and create-only output rules as file downloads.
+The reader bounds the compact decoded manifest to 1 MiB and reserves the fixed
+native receipt envelope separately; neither bound authenticates its identity.
+
+The result's `log_observation` copies the receipt's job/step outcome, exit code,
+script commitment and `output_complete` flag. These are retained observations,
+not authenticated execution. In particular, `output_complete: false` stays
+false even after the complete **retained payload** is downloaded and verified;
+the original process stream may have been truncated. A successful download of
+failed, cancelled or output-limited logs never changes the job or publishes a
+green check. Files without a log selector keep their original result fields.
+
+Exit 0 means the verified file was published and its result written; exit 2 is a
+refused input/response and exit 3 is cancellation/deadline or a local/output
+failure whose destination may already be visible. `bash
+scripts/verify_workflow_artifact_download.sh` runs the bounded client/CLI
+contract tests with explicit HTTP peers. This is not native HTTP acceptance,
+filesystem power-loss proof or the complete `verify.sh operator` lane.
+
+The existing native artifact-custody campaign also drives this command with
+actual producing-job receipts and the native HTTP listener, in both Git hash
+formats. It checks expected bytes, independent scope, live revocation, corrupted
+storage refusal/restoration and unchanged refs. Run it through
+`scripts/e2e/suites/object-fabric/artifact_custody.sh` with a qualified current
+`FG_BIN` and `NODE_BIN` matching `tests/node-version` (or that exact Node on
+`PATH`). A mismatched Node refuses with exit 3 before native commands start.
+The campaign requires the native artifact routes; a client-only test pass does
+not satisfy it.
+
 For authenticated remote inspection and downloads on Linux, the operator can
 start `fg serve-http` with this existing `--artifact-root` and grant a separate
 `artifact-read` credential. Use the result or saved receipt's exact output, log or

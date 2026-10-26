@@ -2,9 +2,23 @@
 // Repository code is executed only after the operator selects the trusted-host profile.
 import { pathToFileURL } from 'node:url';
 import { loadConfiguration, once, reconcile, serve, status } from './operator/workflow_watch.mjs';
+import { artifactDownloadCommand, ArtifactDownloadError } from './operator/workflow_artifact_download.mjs';
 
 const USAGE = `usage: node scripts/fg_workflow_watch.mjs <once|serve|status|reconcile> --config <absolute-private-file> --trusted-local
   [--poll-millis <100..60000> --max-polls <1..1000000>] (serve only)
+
+node scripts/fg_workflow_watch.mjs artifact-download --input PRIVATE_JSON
+  --receipt PRIVATE_JOB_ARTIFACTS_JSON --token-file PRIVATE_TOKEN --output NEW_PRIVATE_FILE
+  [--timeout-ms 1..300000] [--ca-file PRIVATE_PEM]
+Downloads one explicitly selected retained file or step stream through the native artifact API.
+Input: endpoint, scope {tenant_id, repository_id, repository_incarnation_id,
+trust_domain:"trusted-workflow-local-owner"}, job_id_hex, path_hex.
+For logs, replace path_hex with step_index (nonnegative JSON integer) and
+stream ("stdout" or "stderr"); select the matching job-NNN-logs.json receipt.
+Retained log completeness/outcomes remain receipt observations, never check authority.
+Whole bytes, length, SHA256 and scope must match before create-only 0600 publication.
+No local storage root or native executable is required for this read-only command.
+Artifacts and receipt assertions do not prove job success or authorize execution.
 
 Observe one selected branch and dispatch its previously unseen commit through fg.
 The configuration must explicitly trust selected branch code with host-user privileges.
@@ -37,6 +51,19 @@ function write(stream, value) {
 }
 export async function main(args, { stdout = process.stdout, stderr = process.stderr } = {}) {
   if (args.length === 1 && args[0] === '--help') { await write(stdout, { usage: USAGE }); return 0; }
+  if (args[0] === 'artifact-download') {
+    const stop = new AbortController(), abort = () => stop.abort();
+    process.on('SIGTERM', abort); process.on('SIGINT', abort);
+    try {
+      const value = await artifactDownloadCommand(args.slice(1), { signal: stop.signal });
+      await write(stdout, value); return 0;
+    } catch (error) {
+      const code = error instanceof ArtifactDownloadError ? error.code : 'artifact_download_local_or_output_failure';
+      try { await write(stderr, { type: 'workflow_artifact_download_error', schema_version: 1, code,
+        output_may_exist: true, execution_performed: false, canonical_repository_published: false }); } catch { /* Preserve any published file. */ }
+      return /cancelled|timeout|local_or_output/.test(code) ? 3 : 2;
+    } finally { process.removeListener('SIGTERM', abort); process.removeListener('SIGINT', abort); }
+  }
   if (![4, 6, 8].includes(args.length) || !['once', 'serve', 'status', 'reconcile'].includes(args[0]) ||
       args[1] !== '--config' || args[3] !== '--trusted-local' || (args[0] !== 'serve' && args.length !== 4)) {
     await write(stderr, { error: USAGE }); return 2;
