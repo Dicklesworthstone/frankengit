@@ -189,6 +189,7 @@ def exercise(fg: str, root: Path) -> dict:
     public = base64.b64decode(key.with_suffix(".pub").read_text().split()[1])[-32:].hex()
     deploy = root / "deploy_keys"
     deploy.write_text(f"{public} {PRINCIPAL} read,write\n")
+    deploy.chmod(0o600)
     host = root / "host_key.hex"
     host.write_text(secrets.token_hex(32))
     port = free_port()

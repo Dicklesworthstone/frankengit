@@ -127,7 +127,11 @@ clone, fetch and push:
 - `fg serve-http` is loopback-only and uses an operator token or a scoped
   credentials file. It has a `--continuous` mode that drains on a stop file,
   SIGTERM or SIGINT.
-- `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. A
+- `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. Its
+  private `--deploy-keys-file` is reloaded before each Git command, so key
+  revocation, rotation and scope changes take effect without restarting the
+  listener. [Live-key configuration](docs/GIT_SERVICE_LIFETIME.md#live-ssh-deploy-keys)
+  describes the file format, atomic replacement and refusal behavior. A
   connection that has not yet started a Git command is dropped after 60 s of
   silence. Once a command runs, reads and writes use the remaining absolute
   session budget (`--session-timeout-secs`, default 300 s, plus the configured

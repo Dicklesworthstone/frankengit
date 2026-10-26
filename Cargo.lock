@@ -907,6 +907,7 @@ dependencies = [
  "fgit-verified-read",
  "fgit-wire",
  "fsqlite-types",
+ "rustix",
 ]
 
 [[package]]
