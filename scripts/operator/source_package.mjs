@@ -1,6 +1,7 @@
 // Selected-source acquisition for the existing offline verifier and verified-edit
 // consumer. Saved search coordinates are candidates, never verification receipts.
 import { createHash, webcrypto } from 'node:crypto';
+import { prepareNativePackageRead, verifyNativePackageRead } from './source_package_native.mjs';
 import { Transport, keys, oid, principal, rootFor, snapshot, integer } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { coordinates, selection as sourceSelection, pathHex, FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/search-data.mjs';
 import { acquireContextPackage, contextPackageCost, readSourcePackage, sourcePackageLimits,
@@ -126,20 +127,21 @@ function receipt(bytes, verified, plan) {
     verified, context_excerpt_bytes_verified: true, excerpt_count: plan.excerptCount, excerpt_bytes: plan.excerptBytes,
     search_evidence_verified: false, remote_mutation_attempted: false, source_executed: false };
 }
-function operation(options) {
-  exact(options, ['limits', 'signal'], []);
+function operation(options, allowNative = false) {
+  exact(options, ['limits', 'signal', ...(allowNative ? ['nativeFg'] : [])], []);
   const limits = packageAcquisitionLimits(options.limits), signal = options.signal;
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('invalid cancellation signal.');
   const deadline = performance.now() + limits.timeoutMs;
   const check = () => { signal?.throwIfAborted(); if (performance.now() >= deadline) fail('total operation deadline exceeded.'); };
-  check(); return { limits, signal, check, deadline };
+  check(); return { limits, signal, check, deadline, nativeFg: options.nativeFg };
 }
 // Read exactly the previously captured selection, with a fresh native permission
 // check on every page. No retries, source refresh, extraction or mutation lane.
 export async function captureSourcePackage(contextBytes, contextHash, selected, expected, token, options = {}) {
-  const { limits, signal, check, deadline } = operation(options);
+  const { limits, signal, check, deadline, nativeFg } = operation(options, true);
   if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') fail('TLS verification must not be disabled.');
   const plan = contextPlan(contextBytes, contextHash, selected, expected, limits, check);
+  const native = nativeFg === undefined ? null : await prepareNativePackageRead(nativeFg, plan, limits.package.maxBlobRequests, check);
   const transport = new Transport({ href: `${plan.selected.endpoint}/ui/search/`, pageSuffix: '/ui/search/',
     cryptoImpl: webcrypto, timeoutMs: limits.timeoutMs });
   const stop = () => transport.disconnect();
@@ -151,8 +153,11 @@ export async function captureSourcePackage(contextBytes, contextHash, selected, 
       async (path, options) => { check(); const reply = await transport.request(path, options); check(); return reply; },
       webcrypto, check, limits.package);
     checkExcerpts(result.package, result.verified, plan, check); check();
+    const nativeRead = native === null ? null : await verifyNativePackageRead(native, plan, result.package, result.verified, token, deadline, signal, check);
+    check();
     const bytes = Buffer.from(result.serialized); check();
-    return { bytes, receipt: receipt(bytes, result.verified, plan), metrics: result.metrics };
+    return { bytes, receipt: { ...receipt(bytes, result.verified, plan), ...(nativeRead === null ? {} : { native_read: nativeRead }) },
+      metrics: { ...result.metrics, ...(nativeRead === null ? {} : { nativeProofRequests: nativeRead.files }) } };
   } finally {
     clearTimeout(timer); signal?.removeEventListener('abort', stop); transport.disconnect();
   }
