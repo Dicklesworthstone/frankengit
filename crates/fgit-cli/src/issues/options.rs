@@ -1,8 +1,9 @@
-//! Parse complete versioned commands without opening the node or input files.
+//! Parse exact-version commands and explicit append intents before node or file IO.
 use fgit_authority::IdempotencyKey;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_forge::event::issue::{
-    IssueAction, IssueCommand, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
+    IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES,
+    MAX_LABELS,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
@@ -23,13 +24,14 @@ pub(super) struct Options {
 #[derive(Debug)]
 pub(super) enum Operation {
     Mutate(Mutation),
+    AppendComment(Mutation<IssueCommentIntent>),
     Read(ReadOptions),
 }
 #[derive(Debug)]
-pub(super) struct Mutation {
+pub(super) struct Mutation<C = IssueCommand> {
     pub principal: PrincipalId,
     pub key: Vec<u8>,
-    pub command: IssueCommand,
+    pub command: C,
     pub body_file: Option<PathBuf>,
 }
 #[derive(Debug)]
@@ -56,7 +58,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     let action = arguments[0].as_str();
     let mutate = matches!(
         action,
-        "open" | "edit" | "close" | "reopen" | "comment" | "assign" | "unassign"
+        "open" | "edit" | "close" | "reopen" | "comment" | "append-comment" | "assign" | "unassign"
     );
     if !mutate && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
@@ -100,12 +102,11 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         }
         let allowed = flag == "--object-format"
             || if mutate {
-                matches!(
-                    flag,
-                    "--principal" | "--idempotency-key" | "--expected-version"
-                ) || (matches!(action, "open" | "edit") && matches!(flag, "--title" | "--label"))
+                matches!(flag, "--principal" | "--idempotency-key")
+                    || (action != "append-comment" && flag == "--expected-version")
+                    || (matches!(action, "open" | "edit") && matches!(flag, "--title" | "--label"))
                     || (matches!(action, "assign" | "unassign") && flag == "--assignee")
-                    || (matches!(action, "open" | "edit" | "comment")
+                    || (matches!(action, "open" | "edit" | "comment" | "append-comment")
                         && matches!(flag, "--body" | "--body-file"))
             } else {
                 matches!(flag, "--expected-head" | "--limit")
@@ -160,20 +161,6 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             .map_err(|_| "invalid principal ID")?;
         let key = required(&flags, "--idempotency-key")?.as_bytes().to_vec();
         IdempotencyKey::new(key.clone()).map_err(|_| "invalid bounded idempotency key")?;
-        let version = decimal(required(&flags, "--expected-version")?)?;
-        if (action == "open") != (version == 0) {
-            return Err(
-                "open requires version 0; all other changes require a positive exact version"
-                    .to_owned(),
-            );
-        }
-        let expected_version = if version == 0 {
-            ExpectedVersion::NewStream
-        } else {
-            let version = AggregateVersion::try_new(version).ok_or("invalid version")?;
-            version.next().map_err(|_| "issue version is exhausted")?;
-            ExpectedVersion::Exactly(version)
-        };
         let body_file = flags
             .get("--body-file")
             .map(|path| {
@@ -189,60 +176,92 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         }
         let body = flags.get("--body").map(|value| (*value).to_owned());
         let supplied_body = body.is_some() || body_file.is_some();
-        if matches!(action, "open" | "comment") && !supplied_body {
+        if matches!(action, "open" | "comment" | "append-comment") && !supplied_body {
             return Err(
                 "--body or --body-file is required; an empty opening body is explicit".to_owned(),
             );
         }
-        let title = flags.get("--title").map(|value| (*value).to_owned());
-        let action = match action {
-            "open" => IssueAction::Open {
-                title: title.ok_or("--title is required")?,
+        if action == "append-comment" {
+            let command = IssueCommentIntent {
+                number: number.ok_or("missing issue number")?,
                 body: body.unwrap_or_default(),
-                labels,
-            },
-            "edit" => IssueAction::Edit(IssueEdit {
-                title,
-                body: if supplied_body {
-                    Some(body.unwrap_or_default())
-                } else {
-                    None
+            };
+            let mut probe = command.clone();
+            if body_file.is_some() {
+                probe.body = "file-body-probe".to_owned();
+            }
+            probe.validate().map_err(|_| "invalid issue comment body")?;
+            Operation::AppendComment(Mutation {
+                principal,
+                key,
+                command,
+                body_file,
+            })
+        } else {
+            let version = decimal(required(&flags, "--expected-version")?)?;
+            if (action == "open") != (version == 0) {
+                return Err(
+                    "open requires version 0; all other changes require a positive exact version"
+                        .to_owned(),
+                );
+            }
+            let expected_version = if version == 0 {
+                ExpectedVersion::NewStream
+            } else {
+                let version = AggregateVersion::try_new(version).ok_or("invalid version")?;
+                version.next().map_err(|_| "issue version is exhausted")?;
+                ExpectedVersion::Exactly(version)
+            };
+            let title = flags.get("--title").map(|value| (*value).to_owned());
+            let action = match action {
+                "open" => IssueAction::Open {
+                    title: title.ok_or("--title is required")?,
+                    body: body.unwrap_or_default(),
+                    labels,
                 },
-                labels: if clear_labels || !labels.is_empty() {
-                    Some(labels)
-                } else {
-                    None
+                "edit" => IssueAction::Edit(IssueEdit {
+                    title,
+                    body: if supplied_body {
+                        Some(body.unwrap_or_default())
+                    } else {
+                        None
+                    },
+                    labels: if clear_labels || !labels.is_empty() {
+                        Some(labels)
+                    } else {
+                        None
+                    },
+                }),
+                "comment" => IssueAction::Comment {
+                    body: body.unwrap_or_default(),
                 },
-            }),
-            "comment" => IssueAction::Comment {
-                body: body.unwrap_or_default(),
-            },
-            "close" => IssueAction::Close,
-            "reopen" => IssueAction::Reopen,
-            "assign" => IssueAction::Assign { assignees },
-            "unassign" => IssueAction::Unassign { assignees },
-            _ => unreachable!("action whitelist"),
-        };
-        let command = IssueCommand {
-            number: number.ok_or("missing issue number")?,
-            expected_version,
-            action,
-        };
-        // Only the syntax probe gets a placeholder. Actual file bytes replace
-        // the command's body and are validated before any node is opened.
-        let mut probe = command.clone();
-        if body_file.is_some() {
-            *body_slot(&mut probe)? = "file-body-probe".to_owned();
+                "close" => IssueAction::Close,
+                "reopen" => IssueAction::Reopen,
+                "assign" => IssueAction::Assign { assignees },
+                "unassign" => IssueAction::Unassign { assignees },
+                _ => unreachable!("action whitelist"),
+            };
+            let command = IssueCommand {
+                number: number.ok_or("missing issue number")?,
+                expected_version,
+                action,
+            };
+            // Only the syntax probe gets a placeholder. Actual file bytes replace
+            // the command's body and are validated before any node is opened.
+            let mut probe = command.clone();
+            if body_file.is_some() {
+                *body_slot(&mut probe)? = "file-body-probe".to_owned();
+            }
+            probe
+                .proposed_event(principal)
+                .map_err(|_| "invalid issue title, body, labels, or action/version combination")?;
+            Operation::Mutate(Mutation {
+                principal,
+                key,
+                command,
+                body_file,
+            })
         }
-        probe
-            .proposed_event(principal)
-            .map_err(|_| "invalid issue title, body, labels, or action/version combination")?;
-        Operation::Mutate(Mutation {
-            principal,
-            key,
-            command,
-            body_file,
-        })
     } else {
         let after = flags
             .get(if action == "list" {

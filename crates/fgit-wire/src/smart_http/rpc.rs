@@ -16,7 +16,8 @@ use super::{
 };
 use crate::receive::{
     ReceiveCancellation, ReceiveCompletion, ReceiveContext, ReceiveError, ReceiveEvent,
-    ReceivePack, ReceiveQuarantineHandoff, ReceiveRequest, advertise_receive_pack,
+    ReceivePack, ReceiveQuarantine, ReceiveQuarantineHandoff, ReceiveRequest,
+    advertise_receive_pack,
 };
 use crate::{
     AdvertisedRef, Capabilities, LegacyUploadPack, PackRequest, Packet, PktLineDecoder, Transition,
@@ -412,7 +413,8 @@ impl UploadReply {
 
 /// HTTP receive-pack body decoder composed with the real native quarantine.
 /// Parsing may stage only the native transaction-local quarantine; the caller's
-/// handoff is unavailable until `finish_with_handoff` validates HTTP EOF.
+/// handoff is unavailable until `finish_with_handoff` or `into_quarantine`
+/// validates the complete HTTP message boundary.
 pub struct ReceiveRpc {
     body: BodyDecoder,
     machine: Option<ReceivePack>,
@@ -503,6 +505,24 @@ impl ReceiveRpc {
         let finished = machine.finish_with_handoff(handoff, cancellation);
         self.refused = matches!(finished, Err(ReceiveError::AuthoritativeRefusal(_)));
         Ok(finished?)
+    }
+
+    /// Finish the HTTP envelope and native structural quarantine before the
+    /// host acquires writer capacity or selects an authority basis.
+    ///
+    /// This consumes the RPC, preserving one owner for the decoded pack.
+    /// Incomplete HTTP framing, corrupt packs, resource refusals and
+    /// cancellation cannot yield a handoff owner. The returned command list
+    /// is non-authoritative; only its later native handoff may validate it.
+    pub fn into_quarantine<C: ReceiveCancellation>(
+        mut self,
+        cancellation: &mut C,
+    ) -> Result<ReceiveQuarantine, RpcError> {
+        let machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
+        checkpoint(cancellation)?;
+        self.body.finish()?;
+        checkpoint(cancellation)?;
+        Ok(machine.into_quarantine(cancellation)?)
     }
 
     /// The fully received request that the handoff refused with an

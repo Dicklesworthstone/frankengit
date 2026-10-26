@@ -83,14 +83,14 @@ const result = await recoverGitBundleFile('./backup.bundle', './restored.git', {
 });
 ```
 
-Input, expansion and ordinary base-blob allowances can be selected independently
+Input, expansion and streamed-blob allowances can be selected independently
 from 1 through 16,384 MiB. Defaults remain 16 MiB input, 128 MiB expanded payload,
 32 MiB per streamed blob and 60 seconds; the file API permits up to one hour.
 The blob allowance does not raise total expansion, object/reference counts,
-metadata or native work limits. Metadata objects, delta programs, delta bases
-and reconstructed delta results retain the 32 MiB buffered-object bound. A pack
-that needs a larger blob as a delta base still refuses. The owned-byte API keeps
-its previous limits.
+metadata or native work limits. Metadata objects and delta programs retain the
+32 MiB buffered-object bound. Larger blob delta bases/results use authenticated
+scratch chunks and one bounded base-block index; actual random reads consume
+the shared work budget. The owned-byte API keeps its previous limits.
 
 The adapter copies a stable local file into an exclusive private snapshot in
 64 KiB chunks and verifies that snapshot with the existing Rust file-backed
@@ -174,9 +174,9 @@ They can precede or follow the mode flag; all options are validated before
 opening command files. Values must be canonical positive decimal integers.
 Defaults remain 16 MiB input, 128 MiB expanded data and 32 MiB per streamed blob.
 Each selected ceiling can be at most 16,384 MiB. `--native-max-blob-mib` permits
-larger ordinary base blobs while metadata and delta reconstruction retain their
-32 MiB memory bound; input and total expansion remain separate allowances. No
-approval can increase any selected ceiling.
+larger blobs and blob delta bases/results without whole-body allocations.
+Metadata and delta programs retain their 32 MiB memory bound; input, expansion
+and reconstruction work remain separate allowances. No approval raises a ceiling.
 
 The four approval arguments remain an all-or-nothing group. The unchanged
 Ed25519/DSSE verifier checks the independently trusted key, source repository,

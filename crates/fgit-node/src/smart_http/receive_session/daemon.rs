@@ -452,17 +452,21 @@ impl OneNode {
             let processing = crate::GitDaemonReceiveProcessingDeadline::new(
                 self.git_daemon_receive_processing_timeout,
             );
-            let writer_permit = crate::admit_writer(writers, processing.deadline())?;
-            let request = NodeRequestContext {
-                authority: self
-                    .receive_admission_authority_context(input_bytes, processing.deadline()),
-            };
             let mut live = || {
                 let alive = !processing.expired();
                 if !alive {
                     processing_expired.set(true);
                 }
                 alive
+            };
+            // Structural pack inflate/checksum work owns only this request's
+            // bounded quarantine and can run alongside other writers. Select
+            // the authoritative validation basis only after writer admission.
+            let quarantine = machine.into_quarantine(&mut live)?;
+            let writer_permit = crate::admit_writer(writers, processing.deadline())?;
+            let request = NodeRequestContext {
+                authority: self
+                    .receive_admission_authority_context(input_bytes, processing.deadline()),
             };
             let selected = drive_request_while(
                 self,
@@ -483,7 +487,7 @@ impl OneNode {
                 .map_err(ReceiveError::AuthoritativeRefusal)?;
             let mut handoff =
                 ProductionReceiveQuarantineHandoff::new(validator, selected.basis().clone());
-            let completion = match machine.finish_with_handoff(&mut handoff, &mut live) {
+            let completion = match quarantine.handoff(&mut handoff, &mut live) {
                 Err(ReceiveError::AuthoritativeRefusal(code)) => {
                     // The verdict needs no further authority writes. Raw TCP
                     // and SSH must not reserve writer capacity during delivery.
@@ -503,7 +507,6 @@ impl OneNode {
                 completion => completion?,
             };
             let validated = handoff.into_validated_receive()?;
-            drop(machine);
             admission_started = true;
             let outcome = admit(&request, &session, &validated, &mut live)?;
             // Publication and outcome resolution are complete. A stalled

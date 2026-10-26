@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//! Two real HTTP editors of one exact version; no racing fixture projection.
+//! Real HTTP races: strict edits have one winner; additive comments all publish.
+//! Both profiles retain their original outcomes across exact retries and reopen.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -11,7 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use fgit_crypto::sha256_digest;
-use fgit_forge::IssueNumber;
+use fgit_forge::event::issue::IssueAction;
+use fgit_forge::{ForgeEventPayload, IssueNumber};
 use fgit_node::{GitDaemonServerLimits, GitDaemonSessionTimeout, NodeConfig, OneNode};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId, TenantId};
 
@@ -78,6 +80,16 @@ fn request(
 
 #[test]
 fn competing_editors_and_their_retries_do_not_overwrite_the_winners_issue() {
+    concurrent_issue_mutations("edit");
+}
+
+#[test]
+fn simultaneous_append_comments_all_publish_once_without_an_expected_version() {
+    concurrent_issue_mutations("append-comment");
+}
+
+fn concurrent_issue_mutations(action: &'static str) {
+    let append = action == "append-comment";
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let tenant = TenantId::from_bytes([0x71; 16]);
@@ -135,10 +147,14 @@ fn competing_editors_and_their_retries_do_not_overwrite_the_winners_issue() {
             let token = token.clone();
             editors.push(thread::spawn(move || {
                 barrier.wait();
-                let body = format!("expected_version=1&title={title}");
+                let body = if append {
+                    format!("body={title}")
+                } else {
+                    format!("expected_version=1&title={title}")
+                };
                 (
                     title,
-                    request(address, &route, &token, "edit", title, &body),
+                    request(address, &route, &token, action, title, &body),
                 )
             }));
         }
@@ -149,7 +165,11 @@ fn competing_editors_and_their_retries_do_not_overwrite_the_winners_issue() {
             .collect();
         let mut statuses = replies.iter().map(|(_, reply)| reply.0).collect::<Vec<_>>();
         statuses.sort_unstable();
-        assert_eq!(statuses, [200, 409], "{replies:?}");
+        assert_eq!(
+            statuses,
+            if append { [200, 200] } else { [200, 409] },
+            "{replies:?}"
+        );
         let winner = replies.iter().find(|(_, reply)| reply.0 == 200).unwrap().0;
         for (title, reply) in &replies {
             assert!(reply.1.contains(if reply.0 == 200 {
@@ -161,9 +181,13 @@ fn competing_editors_and_their_retries_do_not_overwrite_the_winners_issue() {
                 address,
                 &route,
                 &token,
-                "edit",
+                action,
                 title,
-                &format!("expected_version=1&title={title}"),
+                &if append {
+                    format!("body={title}")
+                } else {
+                    format!("expected_version=1&title={title}")
+                },
             );
             assert_eq!(
                 &retry, reply,
@@ -186,7 +210,7 @@ fn competing_editors_and_their_retries_do_not_overwrite_the_winners_issue() {
         assert_eq!(
             state.basis().generation().get(),
             before.get() + 3,
-            "open, winning edit and losing refusal, never retry decisions"
+            "open and two canonical outcomes, never retry decisions"
         );
         let page = node
             .runtime()
@@ -199,10 +223,36 @@ fn competing_editors_and_their_retries_do_not_overwrite_the_winners_issue() {
             ))
             .unwrap();
         let issue = page.issue.unwrap();
-        assert_eq!(issue.title, winner);
+        assert_eq!(issue.title, if append { "Before" } else { winner });
         assert_eq!(issue.body, "immutable");
-        assert_eq!(issue.version.get(), 2);
-        assert_eq!(page.events.len(), 2);
+        assert_eq!(issue.version.get(), if append { 3 } else { 2 });
+        assert_eq!(page.events.len(), if append { 3 } else { 2 });
+        assert_eq!(issue.comments, if append { 2 } else { 0 });
+        if append {
+            let mut comments = page
+                .events
+                .iter()
+                .filter_map(|event| {
+                    if let ForgeEventPayload::IssueChangedNative(issue) = &event.payload
+                        && let IssueAction::Comment { body } = &issue.action
+                    {
+                        Some(body.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            comments.sort_unstable();
+            assert_eq!(
+                comments,
+                ["Left", "Right"],
+                "both distinct intents must survive in canonical history"
+            );
+            for (_, reply) in &replies {
+                assert!(reply.1.contains("\"action\":\"append-comment\""));
+                assert!(reply.1.contains("\"expected_version\":null"));
+            }
+        }
         assert!(state.snapshot().refs.is_empty());
         node.shutdown().unwrap();
     }

@@ -3,7 +3,8 @@
 
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_forge::event::issue::{
-    IssueAction, IssueCommand, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
+    IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES,
+    MAX_LABELS,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
@@ -35,6 +36,14 @@ pub enum Operation<'a> {
         number: IssueNumber,
         action: &'a str,
     },
+}
+
+/// Keep versioned mutations and append-only intents distinct through admission
+/// and receipt rendering. A caller cannot silently discard an exact version.
+#[derive(Debug)]
+pub(super) enum Command {
+    Versioned(IssueCommand),
+    AppendComment(IssueCommentIntent),
 }
 
 #[derive(Debug)]
@@ -104,7 +113,14 @@ impl<'a> Request<'a> {
                     .ok_or_else(ApiError::not_found)?;
                 if !matches!(
                     action,
-                    "open" | "edit" | "close" | "reopen" | "comment" | "assign" | "unassign"
+                    "open"
+                        | "edit"
+                        | "close"
+                        | "reopen"
+                        | "comment"
+                        | "append-comment"
+                        | "assign"
+                        | "unassign"
                 ) {
                     return Err(ApiError::not_found());
                 }
@@ -126,7 +142,7 @@ impl<'a> Request<'a> {
         matches!(self.operation, Operation::Mutate { .. })
     }
 
-    pub(super) fn command(&self, body: &[u8]) -> Result<IssueCommand, ApiError> {
+    pub(super) fn command(&self, body: &[u8]) -> Result<Command, ApiError> {
         let Operation::Mutate { number, action } = self.operation else {
             return Err(ApiError::bad("not_a_mutation"));
         };
@@ -136,9 +152,11 @@ impl<'a> Request<'a> {
         let mut assignees = Vec::new();
         for (key, value) in fields {
             match key.as_str() {
-                "expected_version" => set_once(&mut version, decimal(&value)?)?,
+                "expected_version" if action != "append-comment" => {
+                    set_once(&mut version, decimal(&value)?)?
+                }
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
-                "body" if matches!(action, "open" | "edit" | "comment") => {
+                "body" if matches!(action, "open" | "edit" | "comment" | "append-comment") => {
                     set_once(&mut text, value)?;
                 }
                 "label" if matches!(action, "open" | "edit") => {
@@ -161,6 +179,16 @@ impl<'a> Request<'a> {
                 }
                 _ => return Err(ApiError::bad("unknown_or_inapplicable_field")),
             }
+        }
+        if action == "append-comment" {
+            let intent = IssueCommentIntent {
+                number,
+                body: text.ok_or_else(|| ApiError::bad("body_required"))?,
+            };
+            intent
+                .validate()
+                .map_err(|_| ApiError::bad("invalid_issue_content"))?;
+            return Ok(Command::AppendComment(intent));
         }
         let version = version.ok_or_else(|| ApiError::bad("expected_version_required"))?;
         if (action == "open") != (version == 0) {
@@ -214,11 +242,11 @@ impl<'a> Request<'a> {
         action
             .validate()
             .map_err(|_| ApiError::bad("invalid_issue_content"))?;
-        Ok(IssueCommand {
+        Ok(Command::Versioned(IssueCommand {
             number,
             expected_version,
             action,
-        })
+        }))
     }
 }
 
@@ -403,7 +431,7 @@ mod tests {
         }
     }
 
-    fn command(action: &str, form: &[u8]) -> Result<IssueCommand, ApiError> {
+    fn parsed_command(action: &str, form: &[u8]) -> Result<Command, ApiError> {
         let bytes = format!(
             "POST /repo.git/api/v1/issues/1/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
             form.len()
@@ -412,6 +440,49 @@ mod tests {
             .unwrap()
             .unwrap();
         Request::parse(&head)?.unwrap().command(form)
+    }
+
+    fn command(action: &str, form: &[u8]) -> Result<IssueCommand, ApiError> {
+        match parsed_command(action, form)? {
+            Command::Versioned(command) => Ok(command),
+            Command::AppendComment(_) => panic!("expected a strict versioned command"),
+        }
+    }
+
+    #[test]
+    fn append_comment_accepts_only_an_immutable_body_and_preserves_strict_comments() {
+        let Command::AppendComment(intent) =
+            parsed_command("append-comment", b"body=Hello+%F0%9F%A6%80%0A%252f").unwrap()
+        else {
+            panic!("append comment");
+        };
+        assert_eq!(intent.number.get(), 1);
+        assert_eq!(intent.body, "Hello 🦀\n%2f");
+        for invalid in [
+            b"".as_slice(),
+            b"body=",
+            b"body=+%0A",
+            b"body=x&body=y",
+            b"body=x&expected_version=1",
+            b"body=x&expected_version=0",
+            b"body=x&title=ignored",
+            b"body=x&principal=admin",
+            b"body=x&label=bug",
+            b"body=%00",
+            b"body=%FF",
+        ] {
+            assert!(parsed_command("append-comment", invalid).is_err());
+        }
+        assert_eq!(
+            command("comment", b"body=x").unwrap_err().code,
+            "expected_version_required"
+        );
+        let strict = command("comment", b"expected_version=7&body=x").unwrap();
+        assert_eq!(
+            strict.expected_version,
+            ExpectedVersion::Exactly(AggregateVersion::try_new(7).unwrap())
+        );
+        assert_eq!(strict.action, IssueAction::Comment { body: "x".into() });
     }
 
     #[test]

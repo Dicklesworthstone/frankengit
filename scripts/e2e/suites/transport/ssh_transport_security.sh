@@ -7,6 +7,7 @@
 # 2. Deploy key authentication and scope enforcement (read vs write, unknown key, wrong repo)
 # 3. Quiescent teardown and bounded connection limits
 # 4. HTTP vs SSH differential clone equivalence
+# 5. Live deploy-key revocation, rotation, scope downgrade, and fail-closed repair
 set -euo pipefail
 
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -87,12 +88,16 @@ RO_HEX=$(printf "%s" "$RO_B64" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' 
 RW_B64=$(cut -d' ' -f2 "$WORK/client_rw.pub")
 RW_HEX=$(printf "%s" "$RW_B64" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' \n')
 
+UNKNOWN_B64=$(cut -d' ' -f2 "$WORK/client_unknown.pub")
+UNKNOWN_HEX=$(printf "%s" "$UNKNOWN_B64" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' \n')
+
 # Create deploy keys configuration file
 DEPLOY_KEYS_FILE="$WORK/deploy_keys.txt"
 cat <<EOF > "$DEPLOY_KEYS_FILE"
 $RO_HEX $PRINCIPAL read
 $RW_HEX $PRINCIPAL read,write
 EOF
+chmod 0600 "$DEPLOY_KEYS_FILE"
 
 fge_phase action
 
@@ -220,6 +225,120 @@ fge_assert_eq FG-047B-SEC-021 "$OID_SRC" "$OID_CLONE" 'SSH transferred ref ident
 DIFF_RC=0
 diff -r --exclude=.git "$SRC" "$CLONE" >/dev/null 2>&1 || DIFF_RC=$?
 fge_assert_eq FG-047B-SEC-022 0 "$DIFF_RC" 'checked-out worktree is byte-identical to source'
+
+# 7. Live table changes affect the next signed Git command on this exact
+# listener. Use fresh connections, only the selected private key, and a fixed
+# client deadline so neither an agent nor a reused control socket masks reloads.
+LIVE_SERVER_PID=$SERVE_PID
+LIVE_REMOTE="ssh://git@127.0.0.1:$SSH_PORT/$REPOID.git"
+LIVE_COMMAND_TIMEOUT=60
+LIVE_SSH="ssh -F /dev/null -p $SSH_PORT -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$WORK/known_hosts_pinned -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o LogLevel=ERROR"
+fge_context live_key_listener_pid "$LIVE_SERVER_PID"
+fge_context live_key_command_timeout_s "$LIVE_COMMAND_TIMEOUT"
+
+# Stage the whole table privately, then rename within the same directory. An
+# empty replacement is valid and revokes every row. No server restart occurs.
+replace_deploy_keys() {
+  local replacement
+  replacement=$(mktemp "$WORK/deploy-keys.XXXXXX")
+  chmod 0600 "$replacement"
+  cat > "$replacement"
+  mv -f -- "$replacement" "$DEPLOY_KEYS_FILE"
+}
+live_ls_remote() {
+  local key=$1 label=$2
+  LIVE_RC=0
+  LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$LIVE_SSH -i $WORK/$key" \
+    timeout -k 5 "$LIVE_COMMAND_TIMEOUT" git ls-remote "$LIVE_REMOTE" \
+    >"$WORK/$label.refs" 2>"$WORK/$label.err" || LIVE_RC=$?
+}
+live_push() {
+  local key=$1 label=$2 ref=$3
+  LIVE_RC=0
+  LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$LIVE_SSH -i $WORK/$key" \
+    timeout -k 5 "$LIVE_COMMAND_TIMEOUT" git -C "$SRC" push "$LIVE_REMOTE" "main:$ref" \
+    >"$WORK/$label.out" 2>"$WORK/$label.err" || LIVE_RC=$?
+}
+refused_before_deadline() {
+  local rc=$1 stderr_path=$2
+  # Require a live original listener and an exec/auth refusal from the server.
+  # A connection, host-key, timeout, or launcher failure cannot pass this oracle.
+  case "$rc" in
+    0|124|125|126|127|137) return 1 ;;
+  esac
+  kill -0 "$LIVE_SERVER_PID" 2>/dev/null || return 1
+  if grep -Eq '^ssh: connect to host |Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|^ssh: Could not resolve hostname |^kex_exchange_identification:|^banner exchange:|Permission denied' "$stderr_path"; then
+    return 1
+  fi
+  # OpenSSH may stop at CHANNEL_FAILURE before displaying extended-data stderr.
+  grep -Eq 'exec request failed on channel [0-9]+|ERR: (deploy key authorization refusal:|deploy key does not grant required scope|SSH command authorization source is unavailable)' "$stderr_path"
+}
+
+live_ls_remote client_rw live-initial
+fge_assert_eq FG-047B-SEC-040 0 "$LIVE_RC" 'the initial write-capable key can read on the existing listener'
+fge_assert_cmd FG-047B-SEC-041 'the initial live-key read returns the imported main ref' \
+  grep -q "^$(git -C "$SRC" rev-parse main)[[:space:]]refs/heads/main\$" "$WORK/live-initial.refs"
+live_ls_remote client_unknown live-unknown
+fge_assert_cmd FG-047B-SEC-042 'the future rotation key is refused before it is granted' refused_before_deadline "$LIVE_RC" "$WORK/live-unknown.err"
+fge_assert_cmd FG-047B-SEC-043 'the unknown key receives no ref advertisement' test ! -s "$WORK/live-unknown.refs"
+
+replace_deploy_keys </dev/null
+live_ls_remote client_rw live-revoked
+fge_assert_cmd FG-047B-SEC-044 'an empty replacement revokes the previously admitted key without restarting SSH' refused_before_deadline "$LIVE_RC" "$WORK/live-revoked.err"
+fge_assert_cmd FG-047B-SEC-045 'the revoked key receives no ref advertisement' test ! -s "$WORK/live-revoked.refs"
+
+replace_deploy_keys <<EOF
+$RO_HEX $PRINCIPAL read
+$UNKNOWN_HEX $PRINCIPAL read,write # newly rotated grant
+EOF
+live_ls_remote client_unknown live-rotated
+fge_assert_eq FG-047B-SEC-046 0 "$LIVE_RC" 'the previously unknown key is admitted after atomic table rotation'
+fge_assert_cmd FG-047B-SEC-047 'rotation returns exactly the original ref advertisement' \
+  cmp -s "$WORK/live-initial.refs" "$WORK/live-rotated.refs"
+live_ls_remote client_rw live-retired
+fge_assert_cmd FG-047B-SEC-048 'rotation does not revive the retired key from a stale cache' refused_before_deadline "$LIVE_RC" "$WORK/live-retired.err"
+fge_assert_cmd FG-047B-SEC-049 'the retired key still receives no refs' test ! -s "$WORK/live-retired.refs"
+
+LIVE_GRANTED_REF=refs/heads/live-key-write
+LIVE_DENIED_REF=refs/heads/live-key-denied
+live_push client_unknown live-write-granted "$LIVE_GRANTED_REF"
+fge_assert_eq FG-047B-SEC-050 0 "$LIVE_RC" 'the rotated read-write key can publish a real branch before downgrade'
+live_ls_remote client_unknown live-before-downgrade
+fge_assert_eq FG-047B-SEC-051 0 "$LIVE_RC" 'the newly published branch can be read before downgrade'
+fge_assert_cmd FG-047B-SEC-052 'the granted write published the expected branch tip' \
+  grep -q "^$(git -C "$SRC" rev-parse main)[[:space:]]$LIVE_GRANTED_REF\$" "$WORK/live-before-downgrade.refs"
+
+replace_deploy_keys <<EOF
+$RO_HEX $PRINCIPAL read
+$UNKNOWN_HEX $PRINCIPAL read # write access revoked
+EOF
+live_push client_unknown live-write-denied "$LIVE_DENIED_REF"
+fge_assert_cmd FG-047B-SEC-053 'downgrading the same key to read-only refuses its next push' refused_before_deadline "$LIVE_RC" "$WORK/live-write-denied.err"
+live_ls_remote client_unknown live-after-downgrade
+fge_assert_eq FG-047B-SEC-054 0 "$LIVE_RC" 'the downgraded key retains read access on the same listener'
+fge_assert_cmd FG-047B-SEC-055 'the refused write left the full advertised ref map unchanged' \
+  cmp -s "$WORK/live-before-downgrade.refs" "$WORK/live-after-downgrade.refs"
+
+# A valid matching first row must not hide a malformed later row. The whole
+# table is untrusted until validation finishes; previous grants cannot survive.
+replace_deploy_keys <<EOF
+$UNKNOWN_HEX $PRINCIPAL read
+$RW_HEX $PRINCIPAL read,write unexpected-field
+EOF
+live_ls_remote client_unknown live-invalid
+fge_assert_cmd FG-047B-SEC-056 'a malformed replacement fails closed even after a matching valid row' refused_before_deadline "$LIVE_RC" "$WORK/live-invalid.err"
+fge_assert_cmd FG-047B-SEC-057 'an invalid replacement leaks no ref advertisement' test ! -s "$WORK/live-invalid.refs"
+
+replace_deploy_keys <<EOF
+$RO_HEX $PRINCIPAL read
+$UNKNOWN_HEX $PRINCIPAL read # repaired source
+EOF
+live_ls_remote client_unknown live-repaired
+fge_assert_eq FG-047B-SEC-058 0 "$LIVE_RC" 'repairing the table restores reads without restarting the listener'
+fge_assert_cmd FG-047B-SEC-059 'repair preserves the repository state from before the invalid table' \
+  cmp -s "$WORK/live-before-downgrade.refs" "$WORK/live-repaired.refs"
+fge_assert_cmd FG-047B-SEC-060 'the original listener PID survived revocation, rotation, downgrade, refusal, and repair' \
+  kill -0 "$LIVE_SERVER_PID"
 
 # Quiescent teardown: reap the listening SSH server
 fge_reap "$SSH_NAME"

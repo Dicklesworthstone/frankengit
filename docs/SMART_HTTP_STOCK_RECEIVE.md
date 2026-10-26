@@ -53,6 +53,28 @@ not add TLS, organization IAM, unlimited serving, or a protocol-v2 push service.
 It does not change the native transaction identity formula or any canonical
 schema.
 
+## Structural preparation and writer admission
+
+The HTTP adapter completes the entire fixed-length or chunked message and
+validates the native pack before waiting for the server's writer permit. The
+same bounded parser is used by immediate handoffs and the consuming
+`ReceiveRpc::into_quarantine` path. Its private `ReceiveQuarantine` owns only
+the parsed request, structural receipt and checked entries; it grants no ref,
+object-visibility or policy authority.
+
+After the wait, the node materializes a fresh authenticated head and passes the
+quarantine once to the ordinary native validator. Cancellation during the wait
+is checked again before the handoff. Native object validation, staging, sealing
+and publication still use the existing one-writer envelope. A malformed pack
+cannot spend that capacity, and a successful or ambiguous authority result is
+not rewritten because response delivery is cancelled. This preparation split
+does not implement the remaining cross-session combiner.
+
+The existing pack ceilings apply independently to each admitted connection.
+When increasing `--max-in-flight`, budget for multiple decoded quarantines
+waiting on the writer, using their expanded-byte limits rather than compressed
+request sizes. No unbounded preparation workers are introduced.
+
 ## Verification
 
 Focused adapter, authorization and resource tests:

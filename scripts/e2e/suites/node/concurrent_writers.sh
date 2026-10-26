@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# e2e: sixteen concurrent writers against one persisted fg serve-http node.
+# e2e: contested writers and eight additive comments on one persisted HTTP node.
 # Bead: frankengit-root-doctrine-x2mv.4.27 (acceptance 2 and 3)
 #
 # Eight stock git clients push distinct children of one base to
 # refs/heads/main while eight HTTP clients edit issue #1 at the same expected
 # version, all released by one barrier (scripts/e2e/concurrent_writers_smoke.py).
-# Every client then repeats its exact command before and after a server
-# restart. Proves exactly one winner per contested target, typed refusals for
+# A second barrier releases eight append-comment requests on the same issue;
+# every comment must publish without a caller-supplied expected version.
+# Strict edits and additive comments repeat exactly before and after restart.
+# Checks exactly one winner per contested target, typed refusals for
 # the losers, no unknown outcomes, no duplicate publication, idempotent exact
 # retries on a persisted node, and (acceptance 2) that a reply lost after a
 # successful CAS is recovered by `fg outcome` from its key alone.
@@ -21,7 +23,7 @@ fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.27
 fge_context evidence_class e2e_binary_stock_client
 fge_context git_version "$(git --version)"
-fge_context non_claim 'One node, one host, 16 writers on two contested targets (one branch, one issue); not a throughput, multi-node or hostile-network claim.'
+fge_context non_claim 'One node, one host: 16 writers on two contested targets followed by 8 concurrent comments on the same issue; not a throughput, multi-node or hostile-network claim.'
 
 fge_phase setup
 FG_BIN="${FG_BIN:-}"
@@ -33,13 +35,14 @@ WORK="$(fge_tempdir concurrent-writers)"
 SUMMARY="$WORK/summary.json"
 fge_run_timeout 1800 campaign python3 "$E2E_ROOT/concurrent_writers_smoke.py" \
   --fg "$FG_BIN" --summary "$SUMMARY" || true
-fge_assert_exit CW-002 0 "$FGE_LAST_EXIT" 'the 16-writer campaign ran to completion'
+fge_assert_exit CW-002 0 "$FGE_LAST_EXIT" 'the contested-write and additive-comment campaigns ran to completion'
 field() {
   python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' \
     "$SUMMARY" "$1" 2>/dev/null || echo missing
 }
 fge_context campaign_artifacts "$(field artifacts)"
 fge_context slowest_writer_s "$(field slowest_writer_s)"
+fge_context slowest_comment_s "$(field slowest_comment_s)"
 
 fge_assert_eq CW-010 1 "$(field push_winners)" 'exactly one of 8 concurrent pushes to refs/heads/main wins'
 fge_assert_eq CW-011 7 "$(field push_typed_refusals)" 'the other 7 pushes receive a typed report-status refusal'
@@ -60,6 +63,19 @@ fge_assert_eq CW-034 True "$(field unknown_pushes_resolved_by_retry)" 'a push th
 fge_assert_eq CW-040 True "$(field main_survives_restart)" 'refs/heads/main is unchanged after a server restart'
 fge_assert_eq CW-041 True "$(field issue_survives_restart)" 'issue #1 is unchanged after a server restart'
 fge_assert_eq CW-042 True "$(field edit_retries_identical_after_restart)" 'exact edit retries after restart return the original replies'
+fge_assert_eq CW-060 8 "$(field comment_committed)" 'all 8 concurrent append-comment intents commit'
+fge_assert_eq CW-061 0 "$(field comment_refused)" 'additive comments have no stale-version losers'
+fge_assert_eq CW-062 0 "$(field comment_unknown)" 'each comment returns its typed canonical terminal receipt'
+fge_assert_eq CW-063 True "$(field comment_transactions_unique)" 'distinct comments retain distinct canonical transaction identities'
+fge_assert_eq CW-064 10 "$(field issue_version_after_comments)" 'eight appends advance the open-and-edit issue to version 10'
+fge_assert_eq CW-065 10 "$(field issue_events_after_comments)" 'history contains open, winning edit and exactly eight comments'
+fge_assert_eq CW-066 8 "$(field issue_comment_count)" 'canonical state counts each appended comment exactly once'
+fge_assert_eq CW-067 True "$(field comment_history_exact)" 'canonical comments retain each authenticated actor and exact body in contiguous versions'
+fge_assert_eq CW-068 True "$(field comments_preserve_issue_fields)" 'comments preserve the winning title, body, labels, state and assignments'
+fge_assert_eq CW-070 True "$(field comment_retries_identical)" 'each comment retry returns its original receipt byte for byte'
+fge_assert_eq CW-071 True "$(field comments_unchanged_by_retries)" 'same-server retries append no duplicate comments'
+fge_assert_eq CW-072 True "$(field comment_retries_identical_after_restart)" 'comment retries after restart retain the original terminal replies'
+fge_assert_eq CW-073 True "$(field comments_unchanged_after_restart_retries)" 'post-restart retries preserve the exact canonical issue and comment history'
 # Acceptance 2: a lost response after a successful CAS is recovered by key.
 fge_assert_eq CW-050 True "$(field planted_lost_reply_committed)" 'an edit whose client closed before reading its reply still commits'
 fge_assert_eq CW-051 True "$(field planted_lost_reply_logged)" 'the server records that the reply was lost after the canonical outcome'

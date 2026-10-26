@@ -11,9 +11,11 @@
 //! [`ReceiveQuarantineHandoff`] receives the structural quarantine result while
 //! it is still transaction-local, and FG-019b supplies the authoritative
 //! expected-old, reachability, object-identity, signature, and ref-policy
-//! decisions. Returning from that handoff drops both raw bytes and the
-//! [`fgit_pack::QuarantinedPack`] unless the handoff's own transactional owner
-//! has consumed them.
+//! decisions. [`ReceiveQuarantine`] can own the structurally checked request
+//! between parsing and that handoff, so a serving process need not hold its
+//! publication permit while inflating untrusted input. Its consuming handoff
+//! drops the [`fgit_pack::QuarantinedPack`] on every result. Neither a structural
+//! receipt nor possession of that quarantine grants publication authority.
 
 use std::{
     collections::BTreeSet,
@@ -327,6 +329,72 @@ pub struct QuarantineReceipt {
     pub delete_only: bool,
 }
 
+/// Exclusive custody of one structurally verified receive-pack request.
+///
+/// Constructed only by the native parser after the complete bounded request,
+/// pack framing, DEFLATE streams and native trailer have been checked. Raw
+/// input bytes are already discarded; decoded entries stay private until the
+/// consuming [`Self::handoff`]. This owner is deliberately neither cloneable
+/// nor an admission proof: expected-old, visibility, native object identities,
+/// connectivity and policy remain the authoritative handoff's responsibility.
+///
+/// A host may finish this independent work before acquiring writer capacity,
+/// then select a fresh authority basis and hand the same quarantine to its
+/// validator. Dropping it before handoff discards all local entries without
+/// staging objects, creating a seal or publishing a decision.
+#[derive(Debug)]
+#[must_use]
+pub struct ReceiveQuarantine {
+    request: ReceiveRequest,
+    receipt: QuarantineReceipt,
+    pack: Option<QuarantinedPack>,
+}
+
+impl ReceiveQuarantine {
+    /// The fully parsed command list, which carries no authority decision.
+    #[must_use]
+    pub const fn request(&self) -> &ReceiveRequest {
+        &self.request
+    }
+
+    /// Structural facts checked by the parser that created this quarantine.
+    #[must_use]
+    pub const fn receipt(&self) -> &QuarantineReceipt {
+        &self.receipt
+    }
+
+    /// Transfer this request to exactly one caller-owned authoritative handoff.
+    ///
+    /// Cancellation is checked again after any wait between parsing and
+    /// handoff. The same live deadline is forwarded into native validation.
+    /// Once the handoff returns, its result is preserved without another
+    /// cancellation check: a late cancellation cannot undo a possible effect.
+    pub fn handoff<Handoff, Cancellation>(
+        self,
+        handoff: &mut Handoff,
+        cancellation: &mut Cancellation,
+    ) -> Result<ReceiveCompletion, ReceiveError>
+    where
+        Handoff: ReceiveQuarantineHandoff,
+        Cancellation: ReceiveCancellation,
+    {
+        if !cancellation.checkpoint() {
+            return Err(ReceiveError::Cancelled);
+        }
+        let mut deadline = PackDeadline { cancellation };
+        handoff.handoff_with_deadline(
+            &self.request,
+            self.pack.as_ref(),
+            &self.receipt,
+            &mut deadline,
+        )?;
+        Ok(ReceiveCompletion {
+            request: self.request,
+            quarantine: self.receipt,
+        })
+    }
+}
+
 /// The synchronous boundary from structural quarantine to authoritative
 /// admission. Implementations may inspect entries but must not infer a ref
 /// commit from this call alone.
@@ -493,6 +561,24 @@ impl ReceivePack {
             self.refuse();
         }
         result
+    }
+
+    /// Finish bounded structural validation without acquiring publication
+    /// authority or invoking an admission handoff.
+    ///
+    /// Consumes the wire machine and transfers the decoded pack into one
+    /// non-cloneable quarantine owner. The caller must retain that owner while
+    /// waiting for admission, select the authority basis after that wait, and
+    /// call [`ReceiveQuarantine::handoff`] with a live cancellation boundary.
+    /// A failure consumes and discards the request; retry starts a new parser.
+    pub fn into_quarantine<Cancellation>(
+        mut self,
+        cancellation: &mut Cancellation,
+    ) -> Result<ReceiveQuarantine, ReceiveError>
+    where
+        Cancellation: ReceiveCancellation,
+    {
+        self.prepare_quarantine(cancellation)
     }
 
     fn push_bytes_inner(&mut self, input: &[u8]) -> Result<ReceiveTransition, ReceiveError> {
@@ -750,6 +836,19 @@ impl ReceivePack {
         Handoff: ReceiveQuarantineHandoff,
         Cancellation: ReceiveCancellation,
     {
+        let quarantine = self.prepare_quarantine(cancellation)?;
+        let completion = quarantine.handoff(handoff, cancellation)?;
+        self.phase = ReceivePhase::Complete;
+        Ok(completion)
+    }
+
+    fn prepare_quarantine<Cancellation>(
+        &mut self,
+        cancellation: &mut Cancellation,
+    ) -> Result<ReceiveQuarantine, ReceiveError>
+    where
+        Cancellation: ReceiveCancellation,
+    {
         self.decoder.finish().map_err(ReceiveError::Wire)?;
         let request = match self.phase {
             ReceivePhase::Ready | ReceivePhase::Pack => self.request()?,
@@ -780,11 +879,10 @@ impl ReceivePack {
         }
         let mut deadline = PackDeadline { cancellation };
         if request.deletes_only() {
-            handoff.handoff_with_deadline(&request, None, &receipt, &mut deadline)?;
-            self.phase = ReceivePhase::Complete;
-            return Ok(ReceiveCompletion {
+            return Ok(ReceiveQuarantine {
                 request,
-                quarantine: receipt,
+                receipt,
+                pack: None,
             });
         }
         let pack = read_verified_pack(
@@ -799,11 +897,10 @@ impl ReceivePack {
             object_count: pack.header.object_count,
             ..receipt
         };
-        handoff.handoff_with_deadline(&request, Some(&pack), &receipt, &mut deadline)?;
-        self.phase = ReceivePhase::Complete;
-        Ok(ReceiveCompletion {
+        Ok(ReceiveQuarantine {
             request,
-            quarantine: receipt,
+            receipt,
+            pack: Some(pack),
         })
     }
 

@@ -46,14 +46,14 @@ node scripts/verify_git_bundle_native.mjs ./large.bundle \
   --expect-sha256 "$KNOWN_BUNDLE_SHA256"
 ```
 
-This permits input, expanded-payload and ordinary base-blob limits up to 16,384
+This permits input, expanded-payload and streamed-blob limits up to 16,384
 MiB each. Selecting the mode alone leaves the input/expanded defaults at 128 MiB
 and the blob default at 32 MiB; each larger allowance must be requested explicitly.
 The blob allowance is independent: increasing it never increases total expansion,
-buffered metadata, delta-program, delta-base, reconstructed-delta, object-count,
-reference or report budgets. A blob must fit both its own allowance and the
-remaining aggregate budget. Larger delta bases or results still refuse under
-their existing limits.
+buffered metadata, delta-program, object-count, reference or report budgets.
+Blob delta bases/results above the ordinary memory cap use authenticated scratch
+chunks and a bounded block-hash index. Every physical random read is charged to
+the shared work budget. A blob must fit its own allowance and the aggregate budget.
 
 The public `verifyNativeGitBundleFile` adapter accepts `fileBacked: true` and
 `maxBlobMiB`. The byte-array API retains its original limits and refuses the
@@ -77,9 +77,9 @@ original source remains in place. Native inflation now delivers ordinary blobs
 to private scratch in bounded chunks, computes their native identities while
 writing, and re-reads them with bounded buffers for scratch-integrity and graph
 verification. Exact length, EOF, pack trailer and native identity checks remain
-mandatory before a successful report or recovery layout. Metadata and delta
-reconstruction still use their separately bounded memory. These limits are
-allowances, not reservations or promises of available space.
+mandatory before a successful report or recovery layout. Large blob deltas use
+a verified block index and bounded scratch chunks. Metadata and delta programs
+retain separate memory bounds. Limits do not reserve or promise available space.
 
 Cancellation/deadline covers source reads, snapshot staging and child execution.
 The adapter requests termination and escalates to a kill after 500 milliseconds,
@@ -188,8 +188,8 @@ node scripts/verify_git_bundle.mjs ./large.bundle \
 The signature cannot enlarge the operator's allowance. Native-only options
 require `--native-fg`; invalid combinations refuse before file access or legacy
 decoder loading. `--native-max-blob-mib` requires the file-backed mode and selects
-the same independently bounded streamed-base-blob allowance described above.
-It never widens metadata, delta reconstruction or total expansion. Object,
+the same independently bounded streamed-blob allowance described above, including
+blob delta bases/results. It never widens metadata, delta programs or total expansion. Object,
 reference and report limits stay in force. The separate `verify_git_bundle_native.mjs` command defaults to 128 MiB
 input and does not consume detached approvals itself.
 

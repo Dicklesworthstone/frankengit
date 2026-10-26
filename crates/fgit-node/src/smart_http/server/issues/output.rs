@@ -2,13 +2,14 @@
 
 use fgit_admission::merge::native::issues::{IssueHistoryPage, IssuePage};
 use fgit_authority::TerminalOutcome;
-use fgit_forge::event::issue::{
-    IssueAction, IssueCommand, IssueSnapshot, IssueState, validate_assignees,
-};
+use fgit_forge::event::issue::{IssueAction, IssueSnapshot, IssueState, validate_assignees};
 use fgit_forge::{AggregateId, ForgeEventPayload, IssueNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 
-use super::{ApiError, request::Page};
+use super::{
+    ApiError,
+    request::{Command, Page},
+};
 use crate::OneNode;
 
 pub(super) const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
@@ -125,7 +126,7 @@ fn action(value: &IssueAction, render: Option<super::rendered::Rendering>) -> St
 pub(super) fn mutation(
     node: &OneNode,
     principal: PrincipalId,
-    command: &IssueCommand,
+    command: &Command,
     tx: TxId,
     terminal: TerminalOutcome,
 ) -> String {
@@ -148,9 +149,15 @@ pub(super) fn mutation(
             quote(&format!("{code:?}")),
         ),
     };
-    let expected = match command.expected_version {
-        fgit_forge::ExpectedVersion::NewStream => 0,
-        fgit_forge::ExpectedVersion::Exactly(version) => version.get(),
+    let (number, expected, action) = match command {
+        Command::Versioned(command) => {
+            let expected = match command.expected_version {
+                fgit_forge::ExpectedVersion::NewStream => 0,
+                fgit_forge::ExpectedVersion::Exactly(version) => version.get(),
+            };
+            (command.number, expected.to_string(), command.action.name())
+        }
+        Command::AppendComment(intent) => (intent.number, "null".to_owned(), "append-comment"),
     };
     format!(
         concat!(
@@ -162,9 +169,9 @@ pub(super) fn mutation(
         quote(&node.tenant_id.to_string()),
         quote(&node.repository_id.to_string()),
         quote(&principal.to_string()),
-        command.number.get(),
+        number.get(),
         expected,
-        quote(command.action.name()),
+        quote(action),
         quote(&tx.to_string()),
         quote(outcome),
         terminal.decision_sequence.get(),

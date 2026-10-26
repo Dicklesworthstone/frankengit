@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fgit_identity::deploy_key::DeployKeyBinding;
-use fgit_ssh::SigningKey;
 use fgit_ssh::command::SshGitService;
 use fgit_ssh::session::{SessionPhase, SshServerSession, SshSessionError};
-use fgit_types::PrincipalId;
+use fgit_ssh::{AuthRefusal, SigningKey, SshCommandAuthorizer, StaticDeployKeyAuthorizer};
+use fgit_types::{PrincipalId, RepositoryId};
 use fgit_wire::{UploadPackRepository, WireLimits};
 
 use crate::{
@@ -30,7 +30,10 @@ use crate::{
 };
 
 mod deadline;
+mod deploy_keys;
 mod lifetime;
+
+pub use deploy_keys::{FileDeployKeyAuthorizer, FileDeployKeyRefusal};
 
 use lifetime::{Acceptance, Completion, Pending, reap};
 
@@ -314,6 +317,35 @@ impl ReceiveResponseWriter for SshWriter<'_> {
     }
 }
 
+/// The accepted session owns both the authorization effect and its remaining
+/// time/liveness capability. A source may complete after its caller disappears;
+/// that result must not activate a command or disclose a successful exec reply.
+struct SessionCommandAuthorizer {
+    source: Arc<dyn SshCommandAuthorizer>,
+    deadline: GitDaemonSessionDeadline,
+    peer: TcpStream,
+}
+
+impl SshCommandAuthorizer for SessionCommandAuthorizer {
+    fn authorize_command(
+        &self,
+        authenticated_key: &[u8; 32],
+        repository_id: RepositoryId,
+        service: SshGitService,
+    ) -> Result<PrincipalId, AuthRefusal> {
+        if self.deadline.expired() || !crate::tcp_peer_connected(&self.peer) {
+            return Err(AuthRefusal::AuthorizationSourceUnavailable);
+        }
+        let grant = self
+            .source
+            .authorize_command(authenticated_key, repository_id, service);
+        if self.deadline.expired() || !crate::tcp_peer_connected(&self.peer) {
+            return Err(AuthRefusal::AuthorizationSourceUnavailable);
+        }
+        grant
+    }
+}
+
 impl OneNode {
     /// Serves SSH until the finite acceptance budget is exhausted, then drains.
     /// The caller retains ownership of the listening socket.
@@ -325,12 +357,35 @@ impl OneNode {
         deploy_keys: Vec<DeployKeyBinding>,
         allow_receive: bool,
     ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        self.serve_ssh_with_authorizer_bounded(
+            listener,
+            limits,
+            server_signing_key,
+            Arc::new(StaticDeployKeyAuthorizer::new(deploy_keys)),
+            allow_receive,
+        )
+    }
+
+    /// Serves a bounded number of sessions using an explicit authorization source.
+    ///
+    /// The source is consulted for each session's exec after cryptographic key
+    /// verification. It runs inside the owned blocking session worker; the
+    /// accepted deadline and peer liveness are checked before and after the call.
+    /// A live file source observes complete replacements on subsequent commands.
+    pub fn serve_ssh_with_authorizer_bounded(
+        &self,
+        listener: &TcpListener,
+        limits: SshServerLimits,
+        server_signing_key: SigningKey,
+        authorizer: Arc<dyn SshCommandAuthorizer>,
+        allow_receive: bool,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
         let limits = SshServerLimits::try_new(limits.max_sessions, limits.max_in_flight)?;
         self.serve_ssh_with_lifetime(
             listener,
             limits.max_in_flight,
             server_signing_key,
-            deploy_keys,
+            authorizer,
             allow_receive,
             Acceptance::Bounded(limits.max_sessions),
         )
@@ -350,12 +405,36 @@ impl OneNode {
         allow_receive: bool,
         should_stop: &dyn Fn() -> io::Result<bool>,
     ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        self.serve_ssh_with_authorizer_until_stopped(
+            listener,
+            max_in_flight,
+            server_signing_key,
+            Arc::new(StaticDeployKeyAuthorizer::new(deploy_keys)),
+            allow_receive,
+            should_stop,
+        )
+    }
+
+    /// Serves a live authorization source until controlled retirement.
+    ///
+    /// Stopping acceptance closes the listener before draining accepted work.
+    /// Each accepted session keeps its existing finite deadline and authorizes
+    /// its single command against the current source at exec time.
+    pub fn serve_ssh_with_authorizer_until_stopped(
+        &self,
+        listener: TcpListener,
+        max_in_flight: usize,
+        server_signing_key: SigningKey,
+        authorizer: Arc<dyn SshCommandAuthorizer>,
+        allow_receive: bool,
+        should_stop: &dyn Fn() -> io::Result<bool>,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
         SshServerLimits::try_new(1, max_in_flight)?;
         self.serve_ssh_with_lifetime(
             listener,
             max_in_flight,
             server_signing_key,
-            deploy_keys,
+            authorizer,
             allow_receive,
             Acceptance::UntilStopped(should_stop),
         )
@@ -366,7 +445,7 @@ impl OneNode {
         listener: L,
         max_in_flight: usize,
         server_signing_key: SigningKey,
-        deploy_keys: Vec<DeployKeyBinding>,
+        authorizer: Arc<dyn SshCommandAuthorizer>,
         allow_receive: bool,
         acceptance: Acceptance<'_>,
     ) -> Result<SshServerReceipt, NodeSshRefusal> {
@@ -441,7 +520,7 @@ impl OneNode {
             };
             let child_nodes = Arc::clone(&nodes);
             let host_key = server_signing_key.clone();
-            let keys = deploy_keys.clone();
+            let child_authorizer = Arc::clone(&authorizer);
             let child_writers = Arc::clone(&writers);
             let child_quota = Arc::clone(&quota);
 
@@ -450,7 +529,7 @@ impl OneNode {
                 completion.success = Self::serve_one_ssh_session(
                     stream,
                     host_key,
-                    keys,
+                    child_authorizer,
                     &child_nodes,
                     allow_receive,
                     &child_writers,
@@ -518,7 +597,7 @@ impl OneNode {
     fn serve_one_ssh_session(
         mut stream: TcpStream,
         host_key: SigningKey,
-        deploy_keys: Vec<DeployKeyBinding>,
+        authorizer: Arc<dyn SshCommandAuthorizer>,
         nodes: &crate::node_lanes::NodeLanes,
         allow_receive: bool,
         writers: &crate::WriterGate,
@@ -528,9 +607,20 @@ impl OneNode {
         if stream.set_nonblocking(false).is_err() || deadline.expired() {
             return false;
         }
+        let Ok(peer) = stream.try_clone() else {
+            return false;
+        };
+        let authorizer = Arc::new(SessionCommandAuthorizer {
+            source: authorizer,
+            deadline: deadline.clone(),
+            peer,
+        });
         // Per-session secrets come from the runtime's OS entropy source.
-        let mut session =
-            SshServerSession::new(host_key, deploy_keys, Arc::new(asupersync::util::OsEntropy));
+        let mut session = SshServerSession::with_authorizer(
+            host_key,
+            authorizer,
+            Arc::new(asupersync::util::OsEntropy),
+        );
         session.start();
 
         let initial_bytes = session.take_outgoing_bytes();
@@ -567,6 +657,9 @@ impl OneNode {
             }
         }
 
+        if deadline.expired() || !crate::tcp_peer_connected(&stream) {
+            return false;
+        }
         let command = match session.active_command() {
             Some(cmd) => cmd.clone(),
             None => return false,
@@ -882,6 +975,8 @@ fn ssh_git_service(
     crate::git_protocol_service(is_upload, git_protocol.split(|byte| *byte == b':'))
 }
 
+#[cfg(test)]
+mod authorization_tests;
 #[cfg(test)]
 mod service_tests;
 

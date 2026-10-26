@@ -133,6 +133,45 @@ and every edited path must be included in that package. Native preparation still
 owns patch semantics, policy and candidate generation. Preparation does not grant
 publication authority; the existing stage/apply/recover steps remain separate.
 
+## Native authority-head verification at capture
+
+The same capture command accepts an explicit `--native-fg /absolute/path/to/fg`.
+Use an owner-controlled executable without symlink aliases or group/other write
+permissions. In this mode, `selection.json` must include an independently retained
+`expected_head`; a head copied from the response being checked is not a trust
+anchor. The endpoint must be numeric-loopback HTTP, matching the current native
+`fg verify-read` client profile. HTTPS, DNS names and implicit head discovery are
+refused before acquisition rather than downgraded to another client.
+
+After the existing complete package and excerpt checks, every selected path is
+read again through Rust `verify-read`. That engine authenticates the exact head,
+configuration and ref membership and checks the original commit/tree/blob path.
+Its receipt must name the independent head, expected commit, blob, kind and byte
+count; its complete bytes must equal the selected package body. Empty files also
+require a native receipt. A failed proof, changed snapshot, denied credential,
+wrong executable response, deadline or cancellation prevents package publication.
+No native refusal falls back to the JavaScript-only capture path.
+
+The native calls share the original total deadline and each consumes one slot
+from `package.maxBlobRequests` in addition to the existing blob pages. This total
+is checked before source requests. There are at most 32 native calls; each also
+retains the native verified-blob profile's closed proof/metadata/tree limits.
+The selected source-byte and portable-package limits do not increase. Native
+processes use the existing request/drain/finalize owner. A private token snapshot
+and verified output files are finalized only after child quiescence; containment
+failure or unknown scratch contents retain the directory and report
+`native_scratch`, never recursively remove it. The executable is operator-trusted,
+not sandboxed or authenticated by its filename.
+
+Capture stdout includes `native_read` with the independently supplied head,
+executable SHA-256, selected file count and `verified_at_capture:true`. Retain this
+capture receipt if needed. The package format is unchanged and carries **no
+retained authority proof**; its ordinary `verified.authorityVerified` stays false.
+Offline `inspect`, the generic verifier and editing consumers continue to check
+Git content/membership and do not recreate or attest the native capture event.
+This mode does not prove search completeness, author signatures, a qualified
+native build, current freshness after capture, or a complete Context Packet.
+
 ## Limits, custody and failure handling
 
 An optional private `--limits` JSON file accepts the following defaults and hard
@@ -185,6 +224,10 @@ bounded phase rather than echoing private parser inputs or server prose.
 
 ```sh
 bash scripts/verify_source_packages.sh
+
+# Require real native HTTP/proof scenarios with the current pinned Node:
+FG_BIN="$qualified_fg" FGE_NODE="$pinned_node" \
+  scripts/e2e/suites/verify/selected_source_native.sh
 ```
 
 The tests run complete production modules with real HTTP sockets, Fetch,
@@ -194,8 +237,19 @@ pagination, empty/raw-path/shared bodies, corruption, exact/one-under bounds,
 revocation, cancellation, competing publishers and output failure. The actual
 preexisting offline verifier consumes captured output in a fresh process.
 
-This verifies client acquisition/custody/interchange behavior, not a Rust server
-or native authorization/CAS implementation. It does not establish search coverage,
-ranking/declaration semantics, authority, freshness, signatures, a complete
+Without `FG_NATIVE_BIN`, the package lane explicitly skips the two native
+scenarios. The discovered E2E suite requires a supplied binary and pinned Node,
+refuses skipped cases, and runs both hash domains through real `fg serve-http`
+and `fg verify-read` processes. Its generated saved context selects imported
+native objects; it is not an independent Initial-search oracle. It covers
+CLI create-only publication, offline interchange, proof tampering, native-read
+cancellation, stale pins and grant denial. Peer/provider controls are labeled;
+their results are not native engine evidence. Evidence must name the actual
+client source and supplied binary/source cut separately.
+
+The fixture-only cases verify client acquisition/custody/interchange behavior,
+not a native authorization/CAS implementation. Neither profile establishes search coverage,
+ranking/declaration semantics, retained authority proofs, ongoing freshness,
+author signatures, a complete
 repository backup, end-to-end native editing or a complete agent Context Packet.
 Those claims remain explicitly false or outside this command's scope.

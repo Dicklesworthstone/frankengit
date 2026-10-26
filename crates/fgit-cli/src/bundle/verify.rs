@@ -28,7 +28,7 @@ pub(super) const USAGE: &str = "usage: fg bundle verify <bundle-file> [OPTIONS]
   --scratch-dir DIR      Existing private Unix directory; required with --file-backed
   --max-input-mib N       Whole input ceiling, default 128; file-backed max 16384
   --max-expanded-mib N    Expanded payload ceiling, default 128; file-backed max 16384
-  --max-blob-mib N        Streamed base blob ceiling, 1..16384, default 32; file-backed only
+  --max-blob-mib N        Streamed blob/base/result ceiling, 1..16384, default 32; file-backed only
   --max-objects N         Included object count, 1..100000 (default 100000)
   --max-refs N            Direct refs plus optional HEAD, 1..4096 (default 4096)
   --timeout-secs N        Whole read/verification deadline, 1..3600 (default 300)
@@ -47,14 +47,15 @@ typed; submodule gitlinks are external and are not fetched. Full v2/v3 SHA-1/SHA
 bundles only; prerequisites/filters/borrowed bases refuse. The default profile
 retains input and resolved payloads in memory with ceilings of 128 MiB.
 --file-backed explicitly selects seekable input and private disk-backed resolution.
-Input, total expanded and explicitly streamed base-blob ceilings may increase,
-to 16384 MiB each. Buffered metadata, graph, delta depth, base reconstruction
+Input, total expanded and explicitly streamed blob ceilings may increase,
+to 16384 MiB each. Buffered metadata, delta programs, graph, delta depth
 and resolution-work caps remain independently bounded.
 Scratch can require up to twice the expanded ceiling; it must fit on local storage.
 No complete input or complete resolved-payload set is retained in memory in that
-profile. Ordinary base blobs are inflated, hashed and graph-verified in bounded
-chunks. Delta programs, reconstructed delta objects and metadata retain their
-separate memory limits; --max-blob-mib does not enlarge them or the total budget.
+profile. Ordinary blobs and large blob delta bases/results use bounded chunks.
+Large delta bases have a verified 16 KiB block index; every actual random read
+rechecks its block digest and charges the shared work budget. Metadata and delta
+programs retain their memory limits. --max-blob-mib does not raise total expansion.
 
 Success emits one JSON content-verification report. It does not authenticate the
 origin, prove branch freshness, verify signatures or restore forge/authority state.

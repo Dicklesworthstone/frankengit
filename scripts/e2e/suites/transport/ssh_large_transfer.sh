@@ -67,6 +67,7 @@ hex_key() { cut -d' ' -f2 "$1" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' 
   printf '%s %s read,write\n' "$(hex_key "$WORK/client_rw.pub")" "$PRINCIPAL"
   printf '%s %s read\n' "$(hex_key "$WORK/client_ro.pub")" "$PRINCIPAL"
 } > "$WORK/deploy_keys.txt"
+chmod 0600 "$WORK/deploy_keys.txt"
 
 fge_phase action
 SSH_PORT=''

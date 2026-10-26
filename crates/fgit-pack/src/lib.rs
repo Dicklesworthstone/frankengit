@@ -41,8 +41,10 @@ pub use commit_graph::{
     CommitGraphVerification,
 };
 pub use delta::{
-    CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ResolutionBudget,
-    ScalarResolver, apply_delta, apply_delta_to_charged_base_with_budget, apply_delta_with_budget,
+    CachedResolver, DeltaBase, DeltaObject, DeltaStreamIo, ExternalBaseLookup, PackObject,
+    ResolutionBudget, STREAM_DELTA_CHUNK_BYTES, ScalarResolver, StreamDeltaError, apply_delta,
+    apply_delta_streamed_to_charged_base_with_budget, apply_delta_to_charged_base_with_budget,
+    apply_delta_with_budget, delta_declared_sizes,
 };
 /// The bounded compression primitives shared by pack and transport envelopes.
 /// Adapters use the same admitted decoder rather than a second DEFLATE engine.

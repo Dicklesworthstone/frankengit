@@ -25,7 +25,7 @@ use crate::{
     LoopbackReceiveSession, NodeReceiveTransportRefusal, OneNode,
 };
 pub(super) use rendered::Rendering;
-use request::Operation;
+use request::{Command, Operation};
 pub(super) use request::{Page, Request};
 
 // Sibling forge adapters reuse the same hostile-input and JSON primitives.
@@ -341,16 +341,31 @@ pub(super) fn execute(
         }
         Operation::Mutate { .. } => {
             let command = command.ok_or_else(|| ApiError::bad("missing_command"))?;
-            command
-                .proposed_event(principal)
-                .map_err(|_| ApiError::bad("invalid_issue_command"))?;
-            let (tx, terminal) = drive_request_while(
-                node,
-                &context,
-                node.admit_issue_durable_in(&context, session, &command, Default::default()),
-                &mut live,
-            )
-            .map_err(admission_error)?;
+            let result = match &command {
+                Command::Versioned(command) => {
+                    command
+                        .proposed_event(principal)
+                        .map_err(|_| ApiError::bad("invalid_issue_command"))?;
+                    drive_request_while(
+                        node,
+                        &context,
+                        node.admit_issue_durable_in(&context, session, command, Default::default()),
+                        &mut live,
+                    )
+                }
+                Command::AppendComment(intent) => drive_request_while(
+                    node,
+                    &context,
+                    node.admit_issue_comment_durable_in(
+                        &context,
+                        session,
+                        intent,
+                        Default::default(),
+                    ),
+                    &mut live,
+                ),
+            };
+            let (tx, terminal) = result.map_err(admission_error)?;
             let body = output::mutation(node, principal, &command, tx, terminal);
             if body.len() > maximum {
                 eprintln!("Issue HTTP response limit after canonical outcome for transaction {tx}");

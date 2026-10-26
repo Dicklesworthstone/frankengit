@@ -39,6 +39,11 @@ fgit-wire.workspace = true
 # direct edge adds no new dependency surface.
 fsqlite-types = { version = "=0.4.0", default-features = false, features = ["native"] }
 
+[target.'cfg(unix)'.dependencies]
+# DEP-118: bounded deploy-key reads reject symlinks/FIFOs before reading.
+# Reuses the admitted std/fs capability; no new package or feature is added.
+rustix.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Compose the already-admitted descriptor-relative trusted workspace adapter.
 fgit-runner.workspace = true

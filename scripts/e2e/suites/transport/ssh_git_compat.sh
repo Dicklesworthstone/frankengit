@@ -107,6 +107,7 @@ printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' > "$WO
 ssh-keygen -t ed25519 -N "" -f "$WORK/client_rw" -C rw -q
 hex_key() { cut -d' ' -f2 "$1" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' \n'; }
 printf '%s %s read,write\n' "$(hex_key "$WORK/client_rw.pub")" "$PRINCIPAL" > "$WORK/deploy_keys.txt"
+chmod 0600 "$WORK/deploy_keys.txt"
 
 fge_phase action
 SSH_PORT=''

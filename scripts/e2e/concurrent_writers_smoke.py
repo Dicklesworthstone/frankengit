@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Sixteen concurrent writers against one persisted fg serve-http node.
+"""Contested writes and concurrent additive comments on one persisted HTTP node.
 
 x2mv.4.27 acceptance 3. Eight stock git clients push distinct children of
 one base to refs/heads/main while eight HTTP clients edit issue #1 at the same
-expected version, all released by one barrier. Every client then repeats its
-exact command, before and after a server restart. The campaign records facts
-and prints one JSON summary; scripts/e2e/suites/node/concurrent_writers.sh
+expected version, all released by one barrier. A second barrier releases eight
+append-comment requests against that same issue, with distinct actors and keys
+and no expected versions. Strict edits and additive comments repeat their exact
+requests before and after a server restart. The campaign records facts and
+prints one JSON summary; scripts/e2e/suites/node/concurrent_writers.sh
 asserts each property under its own acceptance ID.
 """
 
@@ -175,12 +177,49 @@ def exercise(fg: str, git: str, root: Path) -> dict:
                    fields={"expected_version": "1", "title": f"Edited by writer {editor}"},
                    key=f"contested-edit-{editor}")
 
+    def append_comment(url: str, index: int):
+        writer = PUSHERS + index
+        return api(url, "/api/v1/issues/1/append-comment", tokens[writer],
+                   fields={"body": f"Appended by writer {writer}"},
+                   key=f"concurrent-comment-{writer}")
+
+    def comment_receipt(response, index: int) -> dict:
+        status, body = response
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(value, dict) or value.get("type") != "issue_publication":
+            return {}
+        outcome = value.get("outcome")
+        if (value.get("schema_version") != 1 or value.get("tenant_id") != TENANT
+                or value.get("repository_id") != REPOSITORY or value.get("number") != 1
+                or value.get("principal_id") != principal(PUSHERS + index + 1)
+                or value.get("action") != "append-comment"
+                or value.get("expected_version", "missing") is not None
+                or not isinstance(value.get("tx_id"), str) or not value["tx_id"]
+                or outcome not in ("committed", "refused")
+                or status != (200 if outcome == "committed" else 409)):
+            return {}
+        record = "repository_commit_id" if outcome == "committed" else "refusal_record_id"
+        return value if isinstance(value.get(record), str) and value[record] else {}
+
+    def issue_observation(response) -> tuple:
+        status, body = response
+        require(status == 200, f"issue history read failed: {status} {body[:400]}")
+        value = json.loads(body)
+        require(value.get("type") == "issue_history" and value.get("found") is True,
+                "issue history is not a canonical observation")
+        require(value.get("next_after_version") is None, "issue history was truncated")
+        return value["issue"], value["events"]
+
     def remote_main(url: str) -> str | None:
         refs = checked([git, "-c", f"http.extraHeader=Authorization: Bearer {admin}",
                         "ls-remote", url, "refs/heads/main"], env)
         return refs.split()[0] if refs else None
 
-    summary: dict = {"type": "concurrent_writers_summary", "writers": PUSHERS + ISSUE_EDITORS}
+    summary: dict = {"type": "concurrent_writers_summary", "writers": PUSHERS + ISSUE_EDITORS,
+                     "comment_writers": ISSUE_EDITORS}
     with serve(fg, node, root, grants, 1) as url:
         setup = run([git, "-c", f"http.extraHeader=Authorization: Bearer {admin}", "-C", base,
                      "push", url, "HEAD:refs/heads/main"], env)
@@ -240,6 +279,46 @@ def exercise(fg: str, git: str, root: Path) -> dict:
         events = find(issue, "events")
         summary["issue_events"] = len(events) if isinstance(events, list) else None
 
+        # Additive twin: all commenters start together on the now-edited issue.
+        # They preserve that edit and each other's text rather than competing
+        # for its observed predecessor. There are no mutation auto-retries.
+        comment_barrier = threading.Barrier(ISSUE_EDITORS)
+        def comment_contest(index: int):
+            comment_barrier.wait(timeout=120)
+            started = time.monotonic()
+            reply = append_comment(url, index)
+            return (index, reply, time.monotonic() - started)
+        with ThreadPoolExecutor(max_workers=ISSUE_EDITORS) as pool:
+            comments = list(pool.map(comment_contest, range(ISSUE_EDITORS)))
+        (root / "comments.json").write_text(json.dumps(
+            [{"client": index, "status": reply[0], "output": reply[1], "seconds": seconds}
+             for index, reply, seconds in comments], indent=1))
+        receipts = [comment_receipt(reply, index) for index, reply, _ in comments]
+        summary["comment_committed"] = sum(receipt.get("outcome") == "committed" for receipt in receipts)
+        summary["comment_refused"] = sum(receipt.get("outcome") == "refused" for receipt in receipts)
+        summary["comment_unknown"] = sum(not receipt for receipt in receipts)
+        summary["comment_transactions_unique"] = len({receipt.get("tx_id") for receipt in receipts if receipt}) == ISSUE_EDITORS
+        summary["slowest_comment_s"] = round(max(seconds for _, _, seconds in comments), 3)
+        comment_history = issue_observation(api(url, "/api/v1/issues/1?limit=100", admin))
+        current, events = comment_history
+        summary["issue_version_after_comments"] = current["version"]
+        summary["issue_events_after_comments"] = len(events)
+        summary["issue_comment_count"] = current["comments"]
+        summary["comments_preserve_issue_fields"] = all(
+            current[field] == issue["issue"][field] for field in ("title", "body", "labels", "state", "assignees"))
+        appended = [event for event in events if event["action"]["name"] == "comment"]
+        expected_comments = {(principal(PUSHERS + index + 1), f"Appended by writer {PUSHERS + index}")
+                             for index in range(ISSUE_EDITORS)}
+        summary["comment_history_exact"] = (
+            len(appended) == ISSUE_EDITORS
+            and {(event["actor"], event["action"]["body"]) for event in appended} == expected_comments
+            and [event["version"] for event in appended] == list(range(3, 3 + ISSUE_EDITORS)))
+        comment_retries = [append_comment(url, index) for index, _, _ in comments]
+        summary["comment_retries_identical"] = all(
+            retry == reply for retry, (_, reply, _) in zip(comment_retries, comments))
+        summary["comments_unchanged_by_retries"] = issue_observation(
+            api(url, "/api/v1/issues/1?limit=100", admin)) == comment_history
+
         # Exact retries before restart: each client repeats its command. A
         # terminal original must replay byte-identically; an original with
         # no reported outcome must now resolve to a terminal one.
@@ -267,9 +346,13 @@ def exercise(fg: str, git: str, root: Path) -> dict:
     # Restart on the same persisted node: state and exact retries survive.
     with serve(fg, node, root, grants, 2) as url:
         summary["main_survives_restart"] = remote_main(url) == winning_tip is not None
-        status, shown = api(url, "/api/v1/issues/1", admin)
-        summary["issue_survives_restart"] = status == 200 and find(
-            json.loads(shown), "version") == summary["issue_version"]
+        summary["issue_survives_restart"] = issue_observation(
+            api(url, "/api/v1/issues/1?limit=100", admin)) == comment_history
+        comment_retries = [append_comment(url, index) for index, _, _ in comments]
+        summary["comment_retries_identical_after_restart"] = all(
+            retry == reply for retry, (_, reply, _) in zip(comment_retries, comments))
+        summary["comments_unchanged_after_restart_retries"] = issue_observation(
+            api(url, "/api/v1/issues/1?limit=100", admin)) == comment_history
         edit_retries = [edit(url, r[1]) for r in edits]
         summary["edit_retries_identical_after_restart"] = all(
             (retry[0], retry[1]) == (r[2], r[3])
@@ -326,6 +409,8 @@ def main() -> None:
     parser.add_argument("--summary", type=Path, help="also write the JSON summary here")
     options = parser.parse_args()
     PUSHERS, ISSUE_EDITORS = options.pushers, options.editors
+    if not (1 <= PUSHERS <= 16 and 1 <= ISSUE_EDITORS <= 16):
+        parser.error("pushers and editors must each be between 1 and 16")
     root = Path(tempfile.mkdtemp(prefix="fg-concurrent-writers-"))
     try:
         summary = exercise(options.fg, options.git, root)

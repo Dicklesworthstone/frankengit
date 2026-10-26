@@ -2,8 +2,10 @@
 use super::options::{Mutation, Options, ReadOptions, expected_version, head_token};
 use crate::publication_support::quote;
 use fgit_authority::TerminalOutcome;
-use fgit_forge::event::issue::{IssueAction, IssueSnapshot, IssueState, validate_assignees};
-use fgit_forge::{AggregateId, ForgeEvent, ForgeEventPayload};
+use fgit_forge::event::issue::{
+    IssueAction, IssueCommentIntent, IssueSnapshot, IssueState, validate_assignees,
+};
+use fgit_forge::{AggregateId, ForgeEvent, ForgeEventPayload, IssueNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
 fn labels(values: &[String]) -> String {
@@ -72,6 +74,55 @@ pub(super) fn mutation(
     terminal: &TerminalOutcome,
     cleanup: Option<&str>,
 ) -> String {
+    publication(
+        options,
+        ReceiptCommand {
+            principal: mutation.principal,
+            number: mutation.command.number,
+            expected_version: Some(expected_version(&mutation.command)),
+            action: action(&mutation.command.action),
+        },
+        tx,
+        terminal,
+        cleanup,
+    )
+}
+pub(super) fn append_comment(
+    options: &Options,
+    mutation: &Mutation<IssueCommentIntent>,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> String {
+    publication(
+        options,
+        ReceiptCommand {
+            principal: mutation.principal,
+            number: mutation.command.number,
+            expected_version: None,
+            action: format!(
+                "{{\"name\":\"append-comment\",\"body\":{}}}",
+                quote(&mutation.command.body)
+            ),
+        },
+        tx,
+        terminal,
+        cleanup,
+    )
+}
+struct ReceiptCommand {
+    principal: PrincipalId,
+    number: IssueNumber,
+    expected_version: Option<u64>,
+    action: String,
+}
+fn publication(
+    options: &Options,
+    command: ReceiptCommand,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> String {
     let (outcome, committed, rcr, refusal, code) = match terminal.outcome {
         DecisionOutcome::Committed {
             repository_commit_id,
@@ -110,11 +161,13 @@ pub(super) fn mutation(
         code,
         quote(&options.tenant.to_string()),
         quote(&options.repository.to_string()),
-        quote(&mutation.principal.to_string()),
+        quote(&command.principal.to_string()),
         quote(options.format.as_str()),
-        mutation.command.number.get(),
-        expected_version(&mutation.command),
-        action(&mutation.command.action),
+        command.number.get(),
+        command
+            .expected_version
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        command.action,
         cleanup.is_none(),
         cleanup.map_or_else(|| "null".to_owned(), quote)
     )

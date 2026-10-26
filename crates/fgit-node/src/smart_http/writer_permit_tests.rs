@@ -3,6 +3,8 @@
 //! writer tries to acquire the same gate before accepting any response bytes;
 //! retaining the old permit makes that finite acquisition fail deterministically.
 
+mod structural_quarantine;
+
 use std::io::{self, Cursor, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

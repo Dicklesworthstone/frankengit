@@ -36,7 +36,7 @@ Verify a complete local Git bundle without Git, network, or repository writes.
   --native-file-backed       Stream a private snapshot to native file-backed verification
   --native-max-input-mib N   Input ceiling (default 16; file-backed maximum 16384)
   --native-max-expanded-mib N Expanded payload ceiling (default 128; same maximum)
-  --native-max-blob-mib N    Streamed base-blob ceiling (default 32; file-backed only)
+  --native-max-blob-mib N    Streamed blob/base/result ceiling (default 32; file-backed only)
 Optional expectations must come from a separately trusted source:
   --expect-sha256 HEX         Exact SHA-256 of the entire bundle
   --expect-format sha1|sha256 Required when supplying native reference pins
@@ -59,8 +59,8 @@ and unsigned native inputs default to a 16 MiB input ceiling. Explicit native
 limits may select up to 128 MiB in memory, or up to 16384 MiB with the explicit
 file-backed profile. File-backed mode owns its private snapshot and scratch; it
 does not raise object, reference, report or individual-object memory limits.
---native-max-blob-mib independently permits larger ordinary base blobs in that
-profile, while total expansion, metadata and delta-reconstruction limits remain.
+--native-max-blob-mib permits larger blobs and blob delta bases/results in that
+profile. Total expansion, metadata, delta-program and work limits remain separate.
 Native processing reaps its child on cancellation. The input hash sent to fg
 binds a snapshot. Independent pins constrain content identity; a detached
 approval authenticates the separately trusted signer.

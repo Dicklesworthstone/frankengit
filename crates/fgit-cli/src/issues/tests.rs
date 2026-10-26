@@ -476,3 +476,163 @@ fn body_files_preserve_utf8_and_empty_content_and_refuse_overflow_or_symlinks() 
     assert!(read_body_file(&root).is_err());
     fs::remove_dir_all(root).unwrap();
 }
+
+fn append_input() -> Vec<String> {
+    let mut args = input("comment");
+    args[0] = "append-comment".into();
+    let version = args
+        .iter()
+        .position(|arg| arg == "--expected-version")
+        .unwrap();
+    args.drain(version..version + 2);
+    args
+}
+fn append_mutation(options: &Options) -> &Mutation<IssueCommentIntent> {
+    let Operation::AppendComment(mutation) = &options.operation else {
+        panic!("append-comment fixture");
+    };
+    mutation
+}
+#[test]
+fn append_comment_is_an_explicit_version_independent_intent_in_both_formats() {
+    for format in ["sha1", "sha256"] {
+        let mut args = append_input();
+        let body = "literal {\"method\":\"shell\"}\r\né 🦀\n";
+        replace(&mut args, "--body", body);
+        args.extend(["--object-format", format].map(str::to_owned));
+        let parsed = parse(&args).unwrap();
+        let mutation = append_mutation(&parsed);
+        assert_eq!(mutation.command.number.get(), 7);
+        assert_eq!(mutation.command.body, body);
+        assert_eq!(mutation.key, b"private-issue-key");
+        assert_eq!(mutation.principal, PrincipalId::from_bytes([0x33; 16]));
+        assert_eq!(parsed.format.as_str(), format);
+        mutation.command.validate().unwrap();
+    }
+    let mut old = input("comment");
+    let at = old
+        .iter()
+        .position(|arg| arg == "--expected-version")
+        .unwrap();
+    old.drain(at..at + 2);
+    assert!(
+        parse(&old).is_err(),
+        "existing comment still requires its predecessor"
+    );
+}
+#[test]
+fn append_comment_refuses_predecessors_and_unrelated_mutation_fields() {
+    for (flag, value) in [
+        ("--expected-version", "0"),
+        ("--expected-version", "1"),
+        ("--title", "not a title edit"),
+        ("--label", "bug"),
+        ("--assignee", "44444444444444444444444444444444"),
+        ("--expected-head", "not a caller-selected snapshot"),
+    ] {
+        let mut args = append_input();
+        args.extend([flag, value].map(str::to_owned));
+        assert!(parse(&args).is_err(), "{flag}");
+    }
+    let mut args = append_input();
+    args.push("--clear-labels".into());
+    assert!(parse(&args).is_err());
+    for flag in ["--principal", "--idempotency-key", "--body"] {
+        let mut args = append_input();
+        let at = args.iter().position(|arg| arg == flag).unwrap();
+        args.drain(at..at + 2);
+        assert!(parse(&args).is_err(), "{flag}");
+    }
+    let mut args = append_input();
+    args.retain(|arg| arg != "--trusted-local");
+    assert!(parse(&args).is_err());
+}
+#[test]
+fn append_comment_bounds_literal_text_and_validates_body_files_before_opening_node() {
+    for body in ["", " \r\n\t", "a\0b"] {
+        let mut args = append_input();
+        replace(&mut args, "--body", body);
+        assert!(parse(&args).is_err());
+    }
+    let mut args = append_input();
+    replace(&mut args, "--body", &"x".repeat(MAX_BODY_BYTES));
+    assert!(parse(&args).is_ok());
+    replace(&mut args, "--body", &"x".repeat(MAX_BODY_BYTES + 1));
+    assert!(parse(&args).is_err());
+    let mut args = append_input();
+    args.extend(["--body-file", "unread-append-body"].map(str::to_owned));
+    assert!(parse(&args).is_err());
+    let at = args.iter().position(|arg| arg == "--body").unwrap();
+    args.drain(at..at + 2);
+    let parsed = parse(&args).unwrap();
+    assert_eq!(append_mutation(&parsed).command.body, "");
+    assert_eq!(
+        append_mutation(&parsed).body_file.as_deref(),
+        Some(Path::new("unread-append-body"))
+    );
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "fg-append-comment-body-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).unwrap();
+    let body = root.join("body");
+    fs::write(&body, " \r\n\t").unwrap();
+    replace(&mut args, "--body-file", body.to_str().unwrap());
+    args[1] = root.join("must-not-open").to_str().unwrap().into();
+    assert_eq!(
+        run(&args).unwrap_err(),
+        "invalid issue comment or file contents"
+    );
+    assert!(!root.join("must-not-open").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn append_receipts_keep_intent_identity_and_known_terminal_outcomes_on_output_failure() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let parsed = parse(&append_input()).unwrap();
+    let mutation = append_mutation(&parsed);
+    for committed in [true, false] {
+        let (tx, terminal) = terminal(committed);
+        let receipt = output::append_comment(&parsed, mutation, tx, &terminal, None);
+        assert!(receipt.contains("\"expected_version\":null"));
+        assert!(receipt.contains("\"name\":\"append-comment\""));
+        assert!(receipt.contains("\"body\":\"Exact comment\\u000a\""));
+        assert!(!receipt.contains("private-issue-key"));
+        let mut bytes = Vec::new();
+        assert_eq!(
+            finish_append_comment(&mut bytes, &parsed, mutation, tx, &terminal, None).unwrap(),
+            if committed { 0 } else { 3 }
+        );
+        let error = finish_append_comment(
+            &mut Broken,
+            &parsed,
+            mutation,
+            tx,
+            &terminal,
+            Some("shutdown-marker"),
+        )
+        .unwrap_err();
+        assert!(error.contains(&tx.to_string()) && error.contains("shutdown-marker"));
+        assert!(error.contains(if committed {
+            "is committed"
+        } else {
+            "canonical refusal"
+        }));
+    }
+    let old = parse(&input("comment")).unwrap();
+    let (tx, terminal) = terminal(true);
+    let receipt = output::mutation(&old, self::mutation(&old), tx, &terminal, None);
+    assert!(receipt.contains("\"expected_version\":1"));
+    assert!(receipt.contains("\"name\":\"comment\""));
+}

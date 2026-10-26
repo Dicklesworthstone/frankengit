@@ -2,13 +2,16 @@
 //! are learned exclusively from locally reconstructed bytes, never an index or
 //! an external object source. Cycles and missing bases cannot make progress.
 
+mod stream;
+
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, Write};
 
 use fgit_crypto::{GitObjectHasher, NativeObjectIdentity, Sha1, Sha256, git_object_id};
 use fgit_pack::{
     PackError, ParsedDeltaBase, ResolutionBudget, StreamPackEntryEnd, StreamPackEntryStart,
-    StreamPackEvent, apply_delta_to_charged_base_with_budget, object_type_from_base_entry,
+    StreamPackEvent, apply_delta_to_charged_base_with_budget, delta_declared_sizes,
+    object_type_from_base_entry,
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
@@ -316,61 +319,84 @@ impl Inventory {
                         limit: limits.pack.max_delta_depth,
                     }));
                 }
-                let mut maximum = limits
+                let buffered_maximum = limits
                     .pack
                     .max_object_bytes
                     .min(limits.graph.max_object_bytes);
-                if base.kind == ObjectKind::Blob {
-                    maximum = maximum.min(limits.max_streamed_blob_bytes);
-                }
-                if base.span.length() > maximum {
-                    return Err(BundleVerifyError::Pack(PackError::ObjectSizeLimit {
-                        actual: base.span.length(),
-                        limit: maximum,
-                    }));
-                }
-                let base_body = scratch.read(base.span, maximum, live)?;
-                let actual = git_object_id(format, base.kind, &base_body);
-                checkpoint(live)?;
-                if actual != base.id {
-                    return Err(BundleVerifyError::ScratchChanged);
-                }
                 let program = scratch.read(
                     self.entries[at].original,
                     limits.pack.max_object_bytes,
                     live,
                 )?;
-                let mut delta_limits = limits.pack.clone();
-                delta_limits.max_object_bytes = maximum;
-                // Every inventory base was charged once when accepted or
-                // reconstructed, and its scratch bytes and native identity
-                // were just checked. Reuse consumes work, not another copy of
-                // the unique expanded-payload allowance.
-                let result = apply_delta_to_charged_base_with_budget(
-                    &base_body,
-                    &program,
-                    &delta_limits,
-                    &mut self.budget,
-                    live,
-                );
+                let sizes = delta_declared_sizes(&program, live);
                 checkpoint(live)?;
-                let result = result.map_err(BundleVerifyError::Pack)?;
-                drop(program);
-                drop(base_body);
-                self.charge_payload(result.len(), limits)?;
-                let id = git_object_id(format, base.kind, &result);
-                checkpoint(live)?;
-                if self.by_id.contains_key(&id) {
-                    return Err(BundleVerifyError::DuplicateObject(id));
+                let (_, result_length) = sizes.map_err(BundleVerifyError::Pack)?;
+                let resolved = if base.kind == ObjectKind::Blob
+                    && (base.span.length() > buffered_maximum || result_length > buffered_maximum)
+                {
+                    // The entire graph-payload allowance is reserved before
+                    // scratch output. Streamed execution separately charges
+                    // unique expansion, base verification, output and random
+                    // block-read work to the same operation-wide pack budget.
+                    self.charge_payload(result_length, limits)?;
+                    stream::resolve(
+                        scratch,
+                        base,
+                        &program,
+                        format,
+                        depth,
+                        limits,
+                        &mut self.budget,
+                        live,
+                    )?
+                } else {
+                    let maximum = if base.kind == ObjectKind::Blob {
+                        buffered_maximum.min(limits.max_streamed_blob_bytes)
+                    } else {
+                        buffered_maximum
+                    };
+                    if base.span.length() > maximum {
+                        return Err(BundleVerifyError::Pack(PackError::ObjectSizeLimit {
+                            actual: base.span.length(),
+                            limit: maximum,
+                        }));
+                    }
+                    let base_body = scratch.read(base.span, maximum, live)?;
+                    let actual = git_object_id(format, base.kind, &base_body);
+                    checkpoint(live)?;
+                    if actual != base.id {
+                        return Err(BundleVerifyError::ScratchChanged);
+                    }
+                    let mut delta_limits = limits.pack.clone();
+                    delta_limits.max_object_bytes = maximum;
+                    // Retain the buffered oracle and its exact work accounting
+                    // for objects that already fit the ordinary memory bound.
+                    let result = apply_delta_to_charged_base_with_budget(
+                        &base_body,
+                        &program,
+                        &delta_limits,
+                        &mut self.budget,
+                        live,
+                    );
+                    checkpoint(live)?;
+                    let result = result.map_err(BundleVerifyError::Pack)?;
+                    drop(base_body);
+                    self.charge_payload(result.len(), limits)?;
+                    let id = git_object_id(format, base.kind, &result);
+                    checkpoint(live)?;
+                    let span = scratch.append(&result, live)?;
+                    Resolved {
+                        id,
+                        kind: base.kind,
+                        span,
+                        depth,
+                    }
+                };
+                if self.by_id.contains_key(&resolved.id) {
+                    return Err(BundleVerifyError::DuplicateObject(resolved.id));
                 }
-                let span = scratch.append(&result, live)?;
-                self.entries[at].resolved = Some(Resolved {
-                    id,
-                    kind: base.kind,
-                    span,
-                    depth,
-                });
-                self.by_id.insert(id, at);
+                self.by_id.insert(resolved.id, at);
+                self.entries[at].resolved = Some(resolved);
                 progress = true;
             }
             if self.by_id.len() == self.entries.len() {

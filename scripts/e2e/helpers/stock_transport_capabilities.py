@@ -263,6 +263,7 @@ def served(fg: str, transport: str, node: Path, root: Path):
         public = base64.b64decode(Path(f"{key}.pub").read_text().split()[1])[-32:].hex()
         deploy = root / f"{label}.deploy"
         deploy.write_text(f"{public} {PRINCIPAL} read,write\n")
+        deploy.chmod(0o600)
         host = root / f"{label}.host"
         host.write_text(secrets.token_hex(32))
         args = [fg, "serve-ssh", node, TENANT, REPOSITORY, f"127.0.0.1:{port}", "--host-key-file", host,

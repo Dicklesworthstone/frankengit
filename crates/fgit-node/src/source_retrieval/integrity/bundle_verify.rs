@@ -38,8 +38,9 @@ pub struct BundleVerifyLimits {
     pub envelope: FullBundleLimits,
     pub pack: PackLimits,
     pub graph: GraphLimits,
-    /// Independent per-blob ceiling for the file-backed verifier. Metadata,
-    /// delta programs, and delta reconstruction keep the existing object
+    /// Independent per-blob ceiling for the file-backed verifier, including
+    /// blob delta bases/results reconstructed through authenticated scratch
+    /// chunks. Metadata and delta programs keep the existing buffered object
     /// limits. The byte-slice verifier does not use this allowance.
     pub max_streamed_blob_bytes: usize,
 }

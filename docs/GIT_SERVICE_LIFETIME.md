@@ -27,6 +27,69 @@ Without these new flags, raw Git still defaults to one session and one in-flight
 client, and SSH retains its existing bounded defaults. The bounded raw Git
 human-readable completion line remains compatible with the bring-up script.
 
+## Live SSH deploy keys
+
+On Unix, `--deploy-keys-file` selects a live authorization source in both bounded
+and continuous service modes. The server validates the complete file at startup
+and again before each Git command, after the peer proves possession of its SSH
+key and before a successful exec reply or repository data. The listener retains
+the source path, not a cached grant table. A relative path is anchored to the
+startup working directory.
+
+Each non-comment row has three whitespace-separated fields:
+
+```text
+<64-hex-character-Ed25519-public-key> <32-hex-character-principal-id> <scopes>
+```
+
+Scopes are `read`, `write`, or a comma-separated combination. `write` does not
+imply `read`; pushing also requires the server's `--allow-receive` flag. Blank
+lines, full-line `#` comments and whitespace-separated trailing `#` comments are
+accepted. The complete UTF-8 file is limited to 64 KiB and 256 unique public keys.
+Repeated public keys, even identical rows, and any malformed row refuse the
+whole file. A valid first row never hides an invalid later row.
+
+Use a regular file in an operator-owned directory, with no group or other
+permission bits (`chmod 600`). Symlinks, directories, FIFOs and other special
+files are refused. The reader opens without following a final symlink or waiting
+for a FIFO writer, reads only the finite byte envelope, and checks the opened
+file and named path for changes. This profile relies on trusted parent directories
+and local filesystem availability; it does not impose a kernel-level deadline
+on a stalled filesystem operation. The session checks its remaining deadline
+and peer connection before and after authorization, and discards a late result.
+
+Replace the whole table atomically to rotate or revoke keys. For example, with
+`PUBLIC_KEY_HEX` and `PRINCIPAL_ID_HEX` already selected:
+
+```sh
+umask 077
+key_dir=/run/frankengit
+next=$(mktemp "$key_dir/deploy-keys.XXXXXXXX")
+printf '%s %s %s\n' "$PUBLIC_KEY_HEX" "$PRINCIPAL_ID_HEX" read,write > "$next"
+chmod 600 "$next"
+mv -- "$next" "$key_dir/deploy-keys"
+```
+
+That replacement authorizes only the listed key. Preserve other rows explicitly
+when they should remain authorized. An empty or comment-only replacement revokes
+all keys. A missing, unreadable, oversized, unsafe or malformed replacement
+refuses subsequent commands; the server never falls back to its previous grants.
+A later valid replacement restores access without a restart. A concurrent file
+change can refuse that attempt, so use a fresh command after completing the
+replacement.
+
+A connection that proved its SSH key before the replacement still consults the
+current file when it selects a Git command. An already authorized command keeps
+its selected principal and completes under its existing bounded lifetime; file
+replacement does not retroactively cancel a push or establish its outcome.
+
+Inline `--deploy-key --principal --scopes` remains an explicit static profile.
+It cannot be combined with `--deploy-keys-file`, and changing an inline grant
+requires replacing the configured service. File-backed authorization returns an
+unsupported-platform refusal outside Unix; the static API remains available.
+This operator-controlled table supplies live deploy-key authorization, not a
+hosted account, organization or team administration service.
+
 ## Stop and drain
 
 Create the selected regular file, send SIGTERM, or send SIGINT to request drain.

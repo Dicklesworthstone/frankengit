@@ -316,8 +316,12 @@ fn canonical_issue_lifecycle_retries_refusals_and_recovery_survive_reopen_in_bot
 fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     let f = Fixture::new(GitHashAlgorithm::Sha256);
     let mut writer = NodeTools::open(f.options(true, false, false, 0xa3)).unwrap();
-    assert_eq!(writer.tools().len(), 7);
-    for name in ["frankengit_issue_assign", "frankengit_issue_unassign"] {
+    assert_eq!(writer.tools().len(), 8);
+    for name in [
+        "frankengit_issue_assign",
+        "frankengit_issue_unassign",
+        "frankengit_issue_append_comment",
+    ] {
         assert!(writer.tools().iter().any(|tool| tool.name == name));
         assert!(writer.is_mutation(name));
     }
@@ -363,6 +367,11 @@ fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     assert!(reader.call("frankengit_issue_open", &args).is_err());
     assert!(reader.call("frankengit_issue_assign", &args).is_err());
     assert!(reader.call("frankengit_issue_unassign", &args).is_err());
+    assert!(
+        reader
+            .call("frankengit_issue_append_comment", &args)
+            .is_err()
+    );
     let mut injected = key;
     injected.insert("principal".into(), text("other"));
     assert!(reader.call(outcomes::NAME, &injected).unwrap_err().invalid);
@@ -540,4 +549,174 @@ fn lost_stdio_reply_preserves_real_commit_and_prevents_the_next_mutation() {
     );
     assert_eq!(before, current_head(&backend));
     backend.close().unwrap();
+}
+
+fn append_command(key: &str, body: &str) -> Value {
+    object([
+        ("number", text("7")),
+        ("idempotency_key", text(key)),
+        ("body", text(body)),
+    ])
+}
+#[test]
+fn explicit_append_survives_independent_edits_and_recovers_once_after_reopen_in_both_formats() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format);
+        let mut backend = NodeTools::open(f.options(true, true, true, 0xa3)).unwrap();
+        let mut server = initialized(&mut backend);
+        let append = append_command(
+            "append-original",
+            "exact é\r\ncomment without a predecessor",
+        );
+        let opened = invoke(
+            &mut server,
+            &mut backend,
+            2,
+            "frankengit_issue_open",
+            opening(),
+        );
+        assert!(!failed(&opened));
+        let edited = invoke(
+            &mut server,
+            &mut backend,
+            3,
+            "frankengit_issue_edit",
+            command(
+                "7",
+                "1",
+                "independent-edit",
+                &[("title", text("Edited independently"))],
+            ),
+        );
+        assert!(!failed(&edited));
+        let appended = invoke(
+            &mut server,
+            &mut backend,
+            4,
+            "frankengit_issue_append_comment",
+            append.clone(),
+        );
+        assert!(!failed(&appended), "{appended:?}");
+        assert_eq!(structured(&appended)["outcome"].text(), Some("committed"));
+        assert_eq!(
+            structured(&appended)["action"].text(),
+            Some("append-comment")
+        );
+        assert_eq!(structured(&appended)["expected_version"], Value::Null);
+        assert_eq!(structured(&appended)["refs_changed"], Value::Bool(false));
+
+        // Existing exact-version comments still refuse a stale predecessor.
+        let stale = invoke(
+            &mut server,
+            &mut backend,
+            5,
+            "frankengit_issue_comment",
+            command(
+                "7",
+                "1",
+                "strict-stale",
+                &[("body", text("Must not append"))],
+            ),
+        );
+        assert!(failed(&stale));
+        assert_eq!(structured(&stale)["outcome"].text(), Some("refused"));
+        assert_eq!(structured(&stale)["action"].text(), Some("comment"));
+        assert_eq!(structured(&stale)["expected_version"].text(), Some("1"));
+        let closed = invoke(
+            &mut server,
+            &mut backend,
+            6,
+            "frankengit_issue_close",
+            command("7", "3", "independent-close", &[]),
+        );
+        assert!(!failed(&closed));
+        let held = current_head(&backend);
+        let replay = invoke(
+            &mut server,
+            &mut backend,
+            7,
+            "frankengit_issue_append_comment",
+            append.clone(),
+        );
+        assert_eq!(structured(&replay), structured(&appended));
+        assert_eq!(current_head(&backend), held);
+        let changed = invoke(
+            &mut server,
+            &mut backend,
+            8,
+            "frankengit_issue_append_comment",
+            append_command("append-original", "changed under the same key"),
+        );
+        assert!(failed(&changed));
+        assert_eq!(structured(&changed)["outcome_unknown"], Value::Bool(true));
+        assert_eq!(current_head(&backend), held);
+        let reinterpreted = invoke(
+            &mut server,
+            &mut backend,
+            9,
+            "frankengit_issue_comment",
+            command(
+                "7",
+                "4",
+                "append-original",
+                &[("body", text("exact é\r\ncomment without a predecessor"))],
+            ),
+        );
+        assert!(failed(&reinterpreted));
+        assert_eq!(current_head(&backend), held);
+        backend.close().unwrap();
+
+        // Historical append recovery precedes current service-intake gates.
+        let mut stopped = NodeTools {
+            node: OneNode::open_existing(f.config()).unwrap(),
+            options: f.options(true, true, true, 0xa3),
+        };
+        let replay = stopped
+            .call("frankengit_issue_append_comment", append.object().unwrap())
+            .unwrap();
+        assert_eq!(replay.object().unwrap(), structured(&appended));
+        let fresh = append_command("fresh-stopped", "must still pass intake");
+        assert!(
+            !stopped
+                .call("frankengit_issue_append_comment", fresh.object().unwrap())
+                .unwrap_err()
+                .invalid
+        );
+        stopped.close().unwrap();
+
+        let mut backend = NodeTools::open(f.options(true, true, true, 0xa3)).unwrap();
+        let mut server = initialized(&mut backend);
+        let recovered = recover(&mut server, &mut backend, 2, "append-original");
+        assert_eq!(
+            structured(&recovered)["tx_id"],
+            structured(&appended)["tx_id"]
+        );
+        let replay = invoke(
+            &mut server,
+            &mut backend,
+            3,
+            "frankengit_issue_append_comment",
+            append,
+        );
+        assert_eq!(structured(&replay), structured(&appended));
+        let shown = invoke(
+            &mut server,
+            &mut backend,
+            4,
+            "frankengit_issue_show",
+            object([("number", text("7"))]),
+        );
+        assert!(!failed(&shown));
+        let issue = structured(&shown)["issue"].object().unwrap();
+        assert_eq!(issue["version"].text(), Some("4"));
+        assert_eq!(issue["comments"].text(), Some("1"));
+        assert_eq!(issue["title"].text(), Some("Edited independently"));
+        assert_eq!(
+            issue["body"].text(),
+            Some("literal {\"method\":\"shell\"}\r\nnot authority")
+        );
+        assert_eq!(issue["state"].text(), Some("closed"));
+        assert_eq!(current_head(&backend), held);
+        backend.close().unwrap();
+    }
 }

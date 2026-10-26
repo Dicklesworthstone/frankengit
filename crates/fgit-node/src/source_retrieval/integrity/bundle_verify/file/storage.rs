@@ -2,7 +2,8 @@
 //! no scratch pathname, object-store placement, or publication is interpreted.
 
 use super::super::{BundleVerifyError, BundleVerifyLimits, checkpoint};
-use fgit_crypto::{DigestHasher, Sha256Hasher};
+use fgit_crypto::{DigestHasher, Sha256Hasher, sha256_digest};
+use fgit_pack::{PackLimits, ResolutionBudget, STREAM_DELTA_CHUNK_BYTES};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
@@ -122,6 +123,17 @@ pub(super) struct Append {
     length: usize,
     written: usize,
     hash: Sha256Hasher,
+}
+
+/// A bounded index derived from one fully verified span. Its hashes are only
+/// usable after the complete span commitment and caller's native identity
+/// check succeed. Every random read authenticates a whole indexed block before
+/// returning any requested bytes; the one retained block is an owned copy.
+pub(super) struct IndexedSpan {
+    span: Span,
+    hashes: Vec<[u8; 32]>,
+    cached: Option<usize>,
+    cache: [u8; STREAM_DELTA_CHUNK_BYTES],
 }
 
 /// Exact range custody. The digest is rechecked on the actual descriptor's
@@ -263,6 +275,29 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         checkpoint(live)
     }
 
+    /// Delta execution alternates reads of an older span and writes to this
+    /// uncommitted result. Restore the result cursor explicitly before writing.
+    pub(super) fn resume_append(
+        &mut self,
+        append: &Append,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), BundleVerifyError> {
+        if append.offset != self.end || append.written > append.length {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        let offset = append
+            .offset
+            .checked_add(append.written as u64)
+            .ok_or(BundleVerifyError::ScratchChanged)?;
+        seek(
+            self.file,
+            SeekFrom::Start(offset),
+            "resume scratch output",
+            live,
+        )?;
+        Ok(())
+    }
+
     pub(super) fn finish_append(
         &mut self,
         append: Append,
@@ -376,6 +411,119 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         }
         checkpoint(live)?;
         Ok(body)
+    }
+
+    /// Verify a complete base once and derive one SHA-256 per 16 KiB block.
+    /// The caller prepaid this sequential pass in the shared delta work budget
+    /// and verifies the native identity through `observe`. The index has at
+    /// most ceil(maximum / 16 KiB) entries and lives for one reconstruction.
+    pub(super) fn index_span(
+        &mut self,
+        span: Span,
+        maximum: usize,
+        observe: &mut impl FnMut(&[u8]) -> Result<(), BundleVerifyError>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<IndexedSpan, BundleVerifyError> {
+        checkpoint(live)?;
+        if span.length > maximum {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        let count = span.length.div_ceil(STREAM_DELTA_CHUNK_BYTES);
+        let mut hashes = Vec::new();
+        hashes
+            .try_reserve_exact(count)
+            .map_err(|_| BundleVerifyError::Allocation)?;
+        let mut reader = self.reader(span, maximum, live)?;
+        let mut buffer = [0_u8; STREAM_DELTA_CHUNK_BYTES];
+        let mut remaining = span.length;
+        while remaining != 0 {
+            checkpoint(live)?;
+            let length = remaining.min(buffer.len());
+            let mut filled = 0;
+            while filled < length {
+                let read = reader.read(&mut buffer[filled..length], live)?;
+                if read == 0 {
+                    return Err(BundleVerifyError::ScratchChanged);
+                }
+                filled += read;
+            }
+            observe(&buffer[..length])?;
+            hashes.push(sha256_digest(&buffer[..length]));
+            remaining -= length;
+        }
+        // The span reader authenticates its original full SHA-256 only at EOF,
+        // including an empty base. Never return the tentative block hashes early.
+        if reader.read(&mut buffer[..1], live)? != 0 {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        checkpoint(live)?;
+        Ok(IndexedSpan {
+            span,
+            hashes,
+            cached: None,
+            cache: [0_u8; STREAM_DELTA_CHUNK_BYTES],
+        })
+    }
+
+    /// Authenticate the actual random-read bytes before a delta can copy them.
+    /// A one-byte request can require a complete block read; charge that whole
+    /// physical read before I/O, so alternating tiny copies cannot hide work.
+    pub(super) fn read_indexed(
+        &mut self,
+        index: &mut IndexedSpan,
+        offset: usize,
+        output: &mut [u8],
+        budget: &mut ResolutionBudget,
+        limits: &PackLimits,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<usize, BundleVerifyError> {
+        checkpoint(live)?;
+        if output.is_empty() || offset >= index.span.length {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        let block = offset / STREAM_DELTA_CHUNK_BYTES;
+        let start = block * STREAM_DELTA_CHUNK_BYTES;
+        let length = (index.span.length - start).min(STREAM_DELTA_CHUNK_BYTES);
+        if index.cached != Some(block) {
+            budget
+                .charge_work(length, limits)
+                .map_err(BundleVerifyError::Pack)?;
+            let position = index
+                .span
+                .offset
+                .checked_add(start as u64)
+                .ok_or(BundleVerifyError::ScratchChanged)?;
+            self.flush(live)?;
+            seek(
+                self.file,
+                SeekFrom::Start(position),
+                "seek indexed scratch base",
+                live,
+            )?;
+            index.cached = None;
+            let mut filled = 0;
+            while filled < length {
+                checkpoint(live)?;
+                let read = self.file.read(&mut index.cache[filled..length]);
+                checkpoint(live)?;
+                match read {
+                    Ok(0) => return Err(BundleVerifyError::ScratchChanged),
+                    Ok(count) if count <= length - filled => filled += count,
+                    Ok(_) => return Err(BundleVerifyError::ScratchChanged),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(io_error("read indexed scratch base", error)),
+                }
+            }
+            if index.hashes.get(block) != Some(&sha256_digest(&index.cache[..length])) {
+                return Err(BundleVerifyError::ScratchChanged);
+            }
+            index.cached = Some(block);
+        }
+        let within = offset - start;
+        let count = output.len().min(length - within);
+        output[..count].copy_from_slice(&index.cache[within..within + count]);
+        checkpoint(live)?;
+        Ok(count)
     }
 
     fn flush(&mut self, live: &mut impl FnMut() -> bool) -> Result<(), BundleVerifyError> {

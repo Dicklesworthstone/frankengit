@@ -11,6 +11,7 @@ import { captureSourcePackage, inspectSourcePackage, packageAcquisitionLimits, p
 const USAGE = `node scripts/fg_source_package.mjs capture --selection PRIVATE_JSON
   --context PRIVATE_CONTEXT --context-sha256 RETAINED_HASH --expect PRIVATE_EXPECTATION
   --token-file PRIVATE_TOKEN --output ABSENT_PACKAGE [--limits PRIVATE_JSON]
+  [--native-fg /absolute/path/to/fg]
 node scripts/fg_source_package.mjs inspect --selection PRIVATE_JSON
   --context PRIVATE_CONTEXT --context-sha256 RETAINED_HASH --expect PRIVATE_EXPECTATION
   --package PRIVATE_PACKAGE --package-sha256 RETAINED_HASH [--limits PRIVATE_JSON]
@@ -20,6 +21,12 @@ private, singly linked regular files. Capture creates a new 0600 package only
 AFTER complete verification. Keep the original expectation independently; never
 infer its commit or selected path/blob IDs from the package being checked.
 Capture performs extra full-file and parent-tree reads at the original snapshot.
+With --native-fg, independently retain expected_head in the selection. Every
+selected file additionally passes Rust verify-read at that head before package
+publication. Native mode requires numeric-loopback HTTP and a trusted native
+executable; refusal never falls back. Each proof consumes one blob-request slot.
+The portable package does not retain authority proofs; native_read in the capture
+receipt describes verification at capture only.
 Inspect is offline, accepts no token, and rechecks the original saved excerpts.
 Limits: {timeoutMs:30000,package:{maxSourceBytes:8388608,maxBlobRequests:160,
   membership:{maxRequests:512,maxTrees:128,maxEntries:16384,maxTreeBytes:4194304}}}.
@@ -37,7 +44,7 @@ function options(args) {
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096) || !['capture', 'inspect'].includes(args[0])) fail();
   const common = ['--selection', '--context', '--context-sha256', '--expect'];
   const required = [...common, ...(args[0] === 'capture' ? ['--token-file', '--output'] : ['--package', '--package-sha256'])];
-  const allowed = [...required, '--limits'], flags = new Map();
+  const allowed = [...required, '--limits', ...(args[0] === 'capture' ? ['--native-fg'] : [])], flags = new Map();
   for (let at = 1; at < args.length; at += 2) {
     const name = args[at], value = args[at + 1];
     if (!allowed.includes(name) || flags.has(name) || !value || value.startsWith('--')) fail();
@@ -89,7 +96,8 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     const selected = packageAcquisitionSelection(parseJson(await read(f.get('--selection'), 32768, check)));
     const expectation = await read(f.get('--expect'), 128 * 1024, check), expected = parseJson(expectation);
     const expectedHash = hash(expectation), context = await read(f.get('--context'), PACKAGE_CONTEXT_BYTES, check);
-    const contextHash = f.get('--context-sha256'), local = () => ({ limits: { ...limits, timeoutMs: remaining() }, signal: stop.signal });
+    const contextHash = f.get('--context-sha256'), local = () => ({ limits: { ...limits, timeoutMs: remaining() }, signal: stop.signal,
+      ...(f.has('--native-fg') ? { nativeFg: f.get('--native-fg') } : {}) });
     if (op === 'inspect') {
       const bytes = await read(f.get('--package'), SOURCE_PACKAGE_BYTES, check);
       phase = 'inspect';
@@ -116,14 +124,17 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const verified = await inspectSourcePackage(await read(output, SOURCE_PACKAGE_BYTES), attempted.package_sha256,
         context, contextHash, selected, expected, { limits });
       receipt = { ...verified, package_path: output, expected_input_sha256: expectedHash,
-        read_metrics: result.metrics, stop_requested: stop.signal.aborted };
+        read_metrics: result.metrics, stop_requested: stop.signal.aborted,
+        ...(result.receipt.native_read ? { native_read: result.receipt.native_read } : {}) };
     }
     phase = 'stdout'; await emit(stdout, summary(receipt)); return 0;
-  } catch {
+  } catch (error) {
     const code = receipt || attempted ? 4 : stop.signal.aborted ? 3 : 2;
     try {
       await emit(stderr, { type: 'source_package_error', phase, exit_code: code,
         remote_mutation_attempted: false, source_executed: false, stop_requested: stop.signal.aborted,
+        ...(error?.nativeCode ? { native_code: error.nativeCode } : {}),
+        ...(error?.nativeScratch ? { native_scratch: error.nativeScratch } : {}),
         ...(receipt ? { retained_receipt: summary(receipt) } : attempted ? { publication_unconfirmed: attempted } : {}) });
     } catch { /* The original destination and retained hashes remain unchanged. */ }
     return code;

@@ -9,14 +9,16 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fgit_cli::CliOutcome;
 use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::{DeployKeyBinding, DeployKeyScope};
 use fgit_node::{
-    NodeConfig, OneNode, RepositoryResolutionInput, SshServerLimits, SshServerReceipt,
+    FileDeployKeyAuthorizer, NodeConfig, OneNode, RepositoryResolutionInput, SshServerLimits,
+    SshServerReceipt,
 };
-use fgit_ssh::SigningKey;
+use fgit_ssh::{SigningKey, SshCommandAuthorizer, StaticDeployKeyAuthorizer};
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
 const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-id> <listen-address>
@@ -35,7 +37,7 @@ struct Prepared {
     listen: String,
     limits: SshServerLimits,
     host_signing_key: SigningKey,
-    deploy_keys: Vec<DeployKeyBinding>,
+    authorizer: Arc<dyn SshCommandAuthorizer>,
     allow_receive: bool,
     stop_file: Option<PathBuf>,
 }
@@ -58,6 +60,9 @@ fn parse_hex_key_32(hex_str: &str, desc: &str) -> Result<[u8; 32], String> {
             "invalid {desc}: expected 64 hex characters (32 bytes), got {}",
             clean.len()
         ));
+    }
+    if !clean.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("invalid {desc}: expected ASCII hex characters"));
     }
     let mut bytes = [0u8; 32];
     for (i, byte) in bytes.iter_mut().enumerate() {
@@ -99,45 +104,6 @@ fn parse_scopes(text: &str) -> Result<Vec<DeployKeyScope>, String> {
         return Err("no deploy key scopes specified".into());
     }
     Ok(scopes)
-}
-
-fn read_deploy_keys_file(
-    path: &Path,
-    repo_id: RepositoryId,
-    route_repo_id: RepositoryId,
-) -> Result<Vec<DeployKeyBinding>, String> {
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("cannot read deploy keys file: {e}"))?;
-    let mut bindings = Vec::new();
-    for (line_no, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() < 3 {
-            return Err(format!(
-                "invalid deploy keys file line {}: expected `<pubkey-hex> <principal-hex> <scopes>`",
-                line_no + 1
-            ));
-        }
-        let pub_bytes = parse_hex_key_32(parts[0], "deploy public key")?;
-        let principal = PrincipalId::from_hex(parts[1])
-            .map_err(|e| format!("line {}: invalid principal: {e}", line_no + 1))?;
-        let scopes = parse_scopes(parts[2])?;
-
-        let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
-        let b1 = DeployKeyBinding::register(repo_id, principal, fgit_key, &scopes)
-            .map_err(|e| format!("line {}: cannot register deploy key: {e}", line_no + 1))?;
-        bindings.push(b1);
-
-        if route_repo_id != repo_id {
-            let b2 = DeployKeyBinding::register(route_repo_id, principal, fgit_key, &scopes)
-                .map_err(|e| format!("line {}: cannot register deploy key: {e}", line_no + 1))?;
-            bindings.push(b2);
-        }
-    }
-    Ok(bindings)
 }
 
 fn parse(arguments: &[String]) -> Result<Prepared, String> {
@@ -236,13 +202,22 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     route_repo_bytes.copy_from_slice(&route_digest[..16]);
     let route_repo_id = RepositoryId::from_bytes(route_repo_bytes);
 
-    let mut deploy_keys = Vec::new();
-    if let Some(path_str) = flags.get("--deploy-keys-file") {
-        deploy_keys.extend(read_deploy_keys_file(
-            Path::new(path_str),
-            repository,
-            route_repo_id,
-        )?);
+    let authorizer: Arc<dyn SshCommandAuthorizer> = if let Some(path) =
+        flags.get("--deploy-keys-file")
+    {
+        if ["--deploy-key", "--principal", "--scopes"]
+            .iter()
+            .any(|flag| flags.contains_key(flag))
+        {
+            return Err(
+                "--deploy-keys-file cannot be combined with --deploy-key, --principal or --scopes"
+                    .into(),
+            );
+        }
+        Arc::new(
+            FileDeployKeyAuthorizer::try_new(PathBuf::from(*path), repository, route_repo_id)
+                .map_err(|error| format!("cannot load deploy keys file: {error}"))?,
+        )
     } else if let Some(key_hex) = flags.get("--deploy-key") {
         let principal_hex = flags
             .get("--principal")
@@ -258,16 +233,17 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
         let b1 = DeployKeyBinding::register(repository, principal, fgit_key, &scopes)
             .map_err(|e| format!("cannot register deploy key: {e}"))?;
-        deploy_keys.push(b1);
+        let mut deploy_keys = vec![b1];
 
         if route_repo_id != repository {
             let b2 = DeployKeyBinding::register(route_repo_id, principal, fgit_key, &scopes)
                 .map_err(|e| format!("cannot register deploy key: {e}"))?;
             deploy_keys.push(b2);
         }
+        Arc::new(StaticDeployKeyAuthorizer::new(deploy_keys))
     } else {
         return Err("either --deploy-key or --deploy-keys-file must be provided".into());
-    }
+    };
 
     let mut configuration = NodeConfig::new(PathBuf::from(*root), tenant, repository);
     if let Some(value) = flags.get("--expected-incarnation") {
@@ -284,7 +260,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         listen: (*listen).to_owned(),
         limits,
         host_signing_key,
-        deploy_keys,
+        authorizer,
         allow_receive,
         stop_file,
     })
@@ -325,20 +301,20 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         drop(out);
 
         if let Some(control) = control {
-            node.serve_ssh_until_stopped(
+            node.serve_ssh_with_authorizer_until_stopped(
                 listener,
                 prepared.limits.max_in_flight,
                 prepared.host_signing_key,
-                prepared.deploy_keys,
+                prepared.authorizer,
                 prepared.allow_receive,
                 &|| control.should_stop(),
             )
         } else {
-            node.serve_ssh_bounded(
+            node.serve_ssh_with_authorizer_bounded(
                 &listener,
                 prepared.limits,
                 prepared.host_signing_key,
-                prepared.deploy_keys,
+                prepared.authorizer,
                 prepared.allow_receive,
             )
         }
@@ -384,6 +360,10 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         )),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "ssh_server/live_keys_tests.rs"]
+mod live_keys_tests;
 
 #[cfg(test)]
 mod tests {

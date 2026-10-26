@@ -23,7 +23,7 @@ export function mountIssues(document, location, options = {}) {
     byId('discard-change').disabled = !pending || pending.sent || pending.exported || client.busy;
     byId('send-change').textContent = pending?.sent ? 'Retry identical change' : 'Send prepared change';
     byId('prepared-summary').textContent = pending ? [
-      `Issue #${pending.number} · ${pending.action} · expected version ${pending.expected_version}`,
+      `Issue #${pending.number} · ${pending.action} · ${pending.expected_version === null ? "no expected version" : `expected version ${pending.expected_version}`}`,
       `Idempotency-Key: ${pending.key}`,
       pending.sent ? 'Dispatched or restored: canonical outcome unresolved.' : pending.exported
         ? 'Receipt exported. Preserve this identity; other sessions may send it.' : 'Prepared locally. Nothing sent.',
@@ -33,21 +33,26 @@ export function mountIssues(document, location, options = {}) {
   function configureEditor() {
     const action = byId('change-action').value;
     const full = ['open', 'edit'].includes(action);
+    byId('change-version').disabled = action === 'append-comment';
+    byId('change-version').required = action !== 'append-comment';
     byId('title-field').hidden = !full;
     byId('labels-field').hidden = !full;
-    byId('body-field').hidden = !full && action !== 'comment';
+    byId('body-field').hidden = !full && action !== 'append-comment';
     byId('assignees-field').hidden = !['assign', 'unassign'].includes(action);
     byId('replace-body-label').hidden = action !== 'edit';
   }
   function edit(issue, action) {
-    byId('change-number').value = String(issue.number); byId('change-version').value = String(issue.version);
+    byId('change-number').value = String(issue.number);
+    byId('change-version').value = action === 'append-comment' ? '' : String(issue.version);
     byId('change-action').value = action;
     byId('change-title').value = issue.title;
-    byId('change-body').value = action === 'comment' ? '' : issue.body;
+    byId('change-body').value = action === 'append-comment' ? '' : issue.body;
     byId('change-labels').value = issue.labels.join('\n');
     byId('change-assignees').value = action === 'unassign' ? (issue.assignees ?? []).join('\n') : '';
     for (const field of ['replace-title', 'replace-body', 'replace-labels']) byId(field).checked = true;
-    configureEditor(); status(`Preparing against issue #${issue.number} version ${issue.version}. Nothing sent.`);
+    configureEditor();
+    status(action === 'append-comment' ? `Preparing a comment on issue #${issue.number}. Nothing sent.`
+      : `Preparing against issue #${issue.number} version ${issue.version}. Nothing sent.`);
   }
   function issueTable(issues, head) {
     const table = node('table');
@@ -88,7 +93,7 @@ export function mountIssues(document, location, options = {}) {
           node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`),
           node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
         const actions = node('div'); actions.className = 'issue-actions';
-        for (const [label, action] of [['Comment', 'comment'], ['Edit issue', 'edit'], ['Add assignees', 'assign'], ['Remove assignees', 'unassign'],
+        for (const [label, action] of [['Comment', 'append-comment'], ['Edit issue', 'edit'], ['Add assignees', 'assign'], ['Remove assignees', 'unassign'],
           [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen']]) {
           actions.append(button(label, () => edit(issue, action)));
         }
@@ -202,13 +207,13 @@ export function mountIssues(document, location, options = {}) {
         if (action === 'open' || byId('replace-labels').checked) {
           const labels = byId('change-labels').value; fields.labels = labels === '' ? [] : labels.split('\n');
         }
-      } else if (action === 'comment') fields.body = byId('change-body').value;
+      } else if (action === 'append-comment') fields.body = byId('change-body').value;
       else if (action === 'assign' || action === 'unassign') {
         const ids = byId('change-assignees').value;
         fields.assignees = ids === '' ? [] : ids.split('\n');
       }
       await client.stage(decimal(byId('change-number').value, 'issue number', 1),
-        decimal(byId('change-version').value, 'expected version'), action, fields);
+        action === 'append-comment' ? null : decimal(byId('change-version').value, 'expected version'), action, fields);
       if (current !== session) return;
       status('Prepared locally. Save the recovery receipt, review the exact request, then send explicitly.');
       syncPending();

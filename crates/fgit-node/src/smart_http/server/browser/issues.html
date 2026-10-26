@@ -35,12 +35,12 @@
     <nav id="issue-paging" aria-label="Issue pagination"></nav>
 
     <section aria-labelledby="change-heading">
-      <h2 id="change-heading">Prepare a version-checked change</h2>
-      <p class="hint">New issue numbers are explicit, not guessed from a page. Choose open with version 0 for a new issue. Existing issues require their exact version; reopening or editing never bypasses a conflict.</p>
+      <h2 id="change-heading">Prepare an issue change</h2>
+      <p class="hint">Choose an explicit issue number and version 0 to open a new issue. Comments append without an expected version, so other people can comment while you write. Editing fields, changing assignees, closing, and reopening require the exact issue version.</p>
       <form id="issue-change" class="issue-editor">
         <label>Issue number<input id="change-number" inputmode="numeric" autocomplete="off" required></label>
-        <label>Expected version<input id="change-version" inputmode="numeric" autocomplete="off" required></label>
-        <label>Action<select id="change-action"><option value="open">Open new issue</option><option value="edit">Edit fields</option><option value="comment">Comment</option><option value="close">Close issue</option><option value="reopen">Reopen issue</option><option value="assign">Add assignees</option><option value="unassign">Remove assignees</option></select></label>
+        <label>Expected version (not used for comments)<input id="change-version" inputmode="numeric" autocomplete="off" required></label>
+        <label>Action<select id="change-action"><option value="open">Open new issue</option><option value="edit">Edit fields</option><option value="append-comment">Comment</option><option value="close">Close issue</option><option value="reopen">Reopen issue</option><option value="assign">Add assignees</option><option value="unassign">Remove assignees</option></select></label>
         <fieldset id="title-field"><legend>Title (256 UTF-8 bytes maximum)</legend><label><input type="checkbox" id="replace-title" checked>Replace title when editing</label><input id="change-title" maxlength="256" autocomplete="off"></fieldset>
         <fieldset id="body-field"><legend>Body or comment (64 KiB maximum)</legend><label id="replace-body-label"><input type="checkbox" id="replace-body" checked>Replace body when editing</label><textarea id="change-body" rows="8" maxlength="65536"></textarea></fieldset>
         <fieldset id="labels-field"><legend>Labels (one per line; at most 32, each 64 UTF-8 bytes)</legend><label><input type="checkbox" id="replace-labels" checked>Replace labels when editing (empty clears all)</label><textarea id="change-labels" rows="3" maxlength="4096"></textarea></fieldset>

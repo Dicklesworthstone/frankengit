@@ -785,6 +785,57 @@ obligation atomically. Derived snapshots expose the sorted `assignees` set at
 their selected authority head, while history retains the original deltas.
 Cancellation and missing evidence cannot become partial successful snapshots.
 
+### 20.2.1 Native issue append-comment intents
+
+`IssueCommentIntent` is a separate version-independent request profile for adding
+one comment to an existing issue. It binds the issue number, authenticated actor
+and exact UTF-8 body (at most 65,536 bytes), together with the ordinary tenant,
+repository, object format and idempotency key. It carries no selected issue
+predecessor. Adapters MUST reject an `expected_version` field for this profile;
+legacy exact-version `IssueCommand` requests with `IssueAction::Comment` and
+saved receipts retain
+their original encoding and stale-predecessor behavior.
+
+The profile uses the existing canonical native Comment event encoding with a
+fixed **version 2** solely as an identity commitment template. Version 1 remains
+reserved for issue creation. The single-event batch root of that template is
+the value of the `forge` scoped request entry `issue.append-comment.v1`; legacy
+commands retain `issue.event-batch-root`. The append request has no ref updates
+or push options and retains atomic admission. The fixed template is neither a
+publication position nor an expected predecessor. Independent preparation MUST
+reconstruct and compare the complete append seal, including actor, issue, body
+and request profile, before admitting a planned event. A Comment payload alone
+does not authorize relaxing the predecessor of a strict request.
+
+At each preparation attempt, the shared metadata owner authenticates the current
+authority head, reads its forge positions and canonical issue history, and plans
+the next checked issue version. The ordinary issue validator then applies the
+comment against that same history. Missing issues refuse with `EvidenceStale`;
+version exhaustion refuses with `ResourceBudgetExceeded`. Comments may be added
+to open or closed issues and do not change title, body, labels, assignments,
+lifecycle state, Git refs or policy epoch. Any intervening edit is preserved.
+
+A head-CAS loser repeats this validation with the **same sealed request, TxId,
+actor and body**. Neither the observed head nor the newly planned event position
+enters its original request digest. Cancellation, unavailable evidence, exhausted
+CAS-replan budgets and ambiguous storage responses retain the existing
+undecided/recovery contract; they do not fabricate a terminal refusal. Exact
+retries recover the original canonical terminal outcome, including after
+restart or stopped intake. Reusing a key with a different body, issue or request
+profile cannot create another comment. Two different request identities with
+the same text remain two comments.
+
+The CALM rule table classifies only this explicit profile as eligible for
+additive replanning; unknown profiles, strict comments, field replacement,
+assignment, lifecycle changes and all other current forge operations preserve
+their existing preconditions. Every operation remains `HeadCasRequired` for
+canonical publication. Logical comment membership grows by transaction identity;
+the serialized history, event positions, event roots, authorization and terminal
+outcomes still depend on the chosen authority head. This does not claim a
+commutative canonical history root or implement observed-remove label sets.
+The shared publication owner atomically records each admitted event and its
+single outbox obligation; retries cannot manufacture a second terminal decision.
+
 ### 20.3 Native protected-review quorums
 
 Repository review protection binds a sorted set of eligible reviewer principals

@@ -177,7 +177,9 @@ mod upload_visibility;
 mod verified_reads;
 pub mod webhook;
 
-pub use ssh::{NodeSshRefusal, SshServerLimits, SshServerReceipt};
+pub use ssh::{
+    FileDeployKeyAuthorizer, FileDeployKeyRefusal, NodeSshRefusal, SshServerLimits, SshServerReceipt,
+};
 pub use webhook::{DeadLetterQueue, WebhookDeliveryDestination};
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
