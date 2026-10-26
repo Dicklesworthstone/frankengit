@@ -295,6 +295,16 @@ scripts/verify_workflow_artifact_download.sh` runs the bounded client/CLI
 contract tests with explicit HTTP peers. This is not native HTTP acceptance,
 filesystem power-loss proof or the complete `verify.sh operator` lane.
 
+The existing native artifact-custody campaign also drives this command with
+actual producing-job receipts and the native HTTP listener, in both Git hash
+formats. It checks expected bytes, independent scope, live revocation, corrupted
+storage refusal/restoration and unchanged refs. Run it through
+`scripts/e2e/suites/object-fabric/artifact_custody.sh` with a qualified current
+`FG_BIN` and `NODE_BIN` matching `tests/node-version` (or that exact Node on
+`PATH`). A mismatched Node refuses with exit 3 before native commands start.
+The campaign requires the native artifact routes; a client-only test pass does
+not satisfy it.
+
 For authenticated remote inspection and downloads on Linux, the operator can
 start `fg serve-http` with this existing `--artifact-root` and grant a separate
 `artifact-read` credential. Use the result or saved receipt's exact output or
