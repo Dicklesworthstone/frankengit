@@ -31,6 +31,7 @@ class NativeVerificationTools(unittest.TestCase):
                     "CARGO_BUILD_TARGET": "wasm32-unknown-unknown",
                     "CARGO_MANIFEST_DIR": str(self.base / "remote checkout/tools/registry-check")}
         self.env.pop("RCH_CARGO_WRAPPER_BYPASS", None)
+        self.env.pop("CARGO_BUILD_JOBS", None)
         for name in ["scripts/verify.sh", "scripts/check_toolchain_bootstrap_links.sh",
                      "rust-toolchain.toml", "tooling-rust-bootstrap-links.md"]:
             destination = self.root / name
@@ -128,6 +129,13 @@ test -x "$FG_BIN" && test -x "$FG_MCP_BIN"
         self.assertEqual(len(builds), 1)
         self.assertEqual(builds[0]["args"], ["build", "--locked", "--target", HOST,
                                             "-p", "fgit-cli", "--bin", "fg", "--bin", "fg-mcp"])
+
+    def test_native_build_job_cap_is_explicit_for_remote_compiler_and_scheduler(self):
+        for lane in ["docs", "e2e"]:
+            with self.subTest(lane=lane):
+                _, rows = self.invoke(lane, changes={"CARGO_BUILD_JOBS": "1"})
+                build = [r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build"][-1]
+                self.assertEqual(build["args"][1:6], ["--locked", "--target", HOST, "--jobs", "1"])
 
     def test_release_runs_probe_and_stays_dormant(self):
         _, rows = self.invoke("release", 3)

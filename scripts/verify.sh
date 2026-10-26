@@ -75,11 +75,22 @@ native_binary_path() {
   printf '%s/%s/debug/%s%s\n' "$VERIFY_TARGET_DIRECTORY" "$VERIFY_NATIVE_HOST" "$1" "$suffix"
 }
 
+build_native_tools() {
+  # RCH estimates and forwards Cargo's argv. An ambient CARGO_BUILD_JOBS may
+  # not reach the worker, so make the caller's requested compiler cap explicit
+  # for both actual compilation and its matching scheduler reservation.
+  if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
+    cargo build --locked --target "$VERIFY_NATIVE_HOST" --jobs "$CARGO_BUILD_JOBS" "$@"
+  else
+    cargo build --locked --target "$VERIFY_NATIVE_HOST" "$@"
+  fi
+}
+
 run_native_tool() {
   local package="$1" binary="$2" executable
   shift 2
   prepare_native_tools
-  cargo build --locked --target "$VERIFY_NATIVE_HOST" -p "$package" --bin "$binary"
+  build_native_tools -p "$package" --bin "$binary"
   executable="$(native_binary_path "$binary")"
   if [[ ! -x "$executable" ]]; then
     printf 'verify: no returned native executable at %s\n' "$executable" >&2
@@ -139,7 +150,7 @@ run_e2e() {
   # fg-mcp is built with fg: the MCP suites drive both executables.
   echo_step "Building the fg and fg-mcp binaries once for the product suites"
   prepare_native_tools
-  cargo build --locked --target "$VERIFY_NATIVE_HOST" -p fgit-cli --bin fg --bin fg-mcp
+  build_native_tools -p fgit-cli --bin fg --bin fg-mcp
   local executable binary fg_binary mcp_binary
   for binary in fg fg-mcp; do
     executable="$(native_binary_path "$binary")"

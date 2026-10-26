@@ -41,6 +41,8 @@ including files excluded from a worker's source projection. The configured
 and workspace compilation; it does not select the host that runs these tools.
 Python 3.11+ is required by the bootstrap preflight; Python also parses Cargo's
 target metadata without losing spaces, quotes or backslashes in paths.
+When `CARGO_BUILD_JOBS` is set, native tool builds pass it explicitly as Cargo
+`--jobs`, so remote compilation and scheduler admission use the same bound.
 
 - `docs`: Markdown links, fences, required status/contract phrases, registry schemas/rows, and workflow portability.
 - `constitution`: required files, first-party unsafe/FFI/foreign-Git source scan, manifest and Cargo.lock closed-world dependency checks, toolchain pin, and forbidden artifacts. Layering, license-compatibility, and claim-registry checks join this lane as the corresponding machinery lands; they are not implemented yet.
