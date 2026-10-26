@@ -818,3 +818,49 @@ object list, which made every pass quadratic in CPU.
 
 **Revisit when** a lookup path walks the pack per probe again, or a probe is
 shown to charge less than the work it performs.
+
+### NEG-038 — sealing an import batch on several threads does not shorten an fsync-bound import (frankengit-pc9g)
+
+**Hypothesis.** SHA hashing on the main thread (about 48% of `fg import`'s
+main-thread samples at 1574a9d5) is on the import's critical path. Verifying
+each batch's custody bytes and sealing their envelopes on up to eight threads,
+with identical output, therefore shortens the import.
+
+**Disposition: REFUTED on this host's disk (ext4 on NVMe); it holds only where
+durability is nearly free.** The candidate split each batch into contiguous
+shares of about equal bytes and kept the first refusal in object order, so
+batches, envelopes and refusals equalled one-at-a-time sealing (six planted
+negatives caught). Release-perf builds of 7ab43fc3 (A) and A plus the
+candidate (B), each built in its own target directory, alternated three times
+at load 7-20:
+- charmed.git (7,566 objects, 532.5 MiB expanded): A 15.5-16.8 s, B 15.3-16.1 s;
+  user CPU 9.2-9.5 s for both.
+- A 1,200-commit corpus (4,800 objects): A 3.31-3.48 s, B 3.34-3.47 s.
+- With every fsync of a batch already concurrent (the replacement below, S),
+  adding the candidate changed nothing: charmed 13.1-13.5 s against
+  12.8-13.7 s, the corpus 1.76-1.84 s against 1.78-1.80 s.
+- Control with the node on tmpfs, where fsync is nearly free: charmed A
+  11.3 s, B 8.8-9.0 s (-21%); the corpus 0.54 s for both.
+- gdb samples of the main thread during a charmed import (0.1 s): B moved
+  hashing off it (32% of samples to 16%; the rest is the graph walk's identity
+  hash), while its waits in `publish_staged_batch` on the previous batch's
+  fsyncs grew from 35% to 48%. One sample waited for a sealing thread.
+- Every pair stored byte-identical objects once each node's namespace was
+  normalized (with an A/A control), and the receipts matched.
+
+Hashing the next batch already overlaps the previous batch's fsyncs
+(frankengit-ai60), so finishing it sooner only lengthens that wait. The
+candidate was not landed.
+
+**Replacement.** Every staged file of a batch now syncs on its own thread, so
+all of a batch's fsyncs share journal commits, where 32 threads each ran up
+to eight in sequence (fgit-object-fabric `MAX_SYNC_THREADS`, commit 18672988). With identical
+stored bytes, alternating three times against A: the corpus 3.60-3.81 s to
+1.76-1.97 s, charmed 16.4-17.7 s to 13.7-14.9 s, and a stock push of one
+24,000-file commit over git:// 16.3-17.0 s to 8.2-8.8 s. System CPU rose by
+25-55%; user CPU did not change.
+
+**Revisit when** durability no longer bounds a batch on the target disk, for
+example once a batch becomes one durable unit (frankengit-pc9g). The tmpfs
+control shows hashing is then on the critical path for repositories of large
+objects again.
