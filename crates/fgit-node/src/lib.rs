@@ -158,6 +158,7 @@ use fgit_wire::{
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
+mod blob_placement;
 mod loose_import;
 #[cfg(test)]
 mod merge_delivery;
@@ -10353,7 +10354,9 @@ impl OneNode {
         outcome.map(|_| ()).map_err(NodeRefusal::from)
     }
 
-    /// Reads one exact immutable Git object from the local fabric.
+    /// Reads one exact immutable Git object under the node's buffered limit.
+    /// A larger streamed-blob storage allowance does not widen this allocation
+    /// boundary. Large blobs use [`Self::open_git_blob_stream`] instead.
     pub fn read_git_object(&self, identity: GitOid) -> Result<VerifiedObject, NodeRefusal> {
         if identity.algorithm() != self.object_format {
             return Err(NodeRefusal::from(
@@ -10361,7 +10364,7 @@ impl OneNode {
             ));
         }
         self.fabric
-            .read_whole(identity)
+            .read_whole_bounded(identity, self.max_object_bytes)
             .map(|read| read.object)
             .map_err(NodeRefusal::from)
     }

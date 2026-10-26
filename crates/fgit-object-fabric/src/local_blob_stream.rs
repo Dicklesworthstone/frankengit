@@ -27,13 +27,13 @@ pub struct LocalBlobStream {
 }
 
 #[derive(Debug)]
-enum NativeHash {
+pub(super) enum NativeHash {
     Sha1(GitObjectHasher<Sha1>),
     Sha256(GitObjectHasher<Sha256>),
 }
 
 impl NativeHash {
-    fn new(id: GitOid, length: u64) -> Self {
+    pub(super) fn new(id: GitOid, length: u64) -> Self {
         match id.algorithm() {
             fgit_types::GitHashAlgorithm::Sha1 => {
                 Self::Sha1(GitObjectHasher::new(GitObjectKind::Blob, length))
@@ -44,7 +44,7 @@ impl NativeHash {
         }
     }
 
-    fn update(&mut self, bytes: &[u8]) -> Result<(), StoreRefusal> {
+    pub(super) fn update(&mut self, bytes: &[u8]) -> Result<(), StoreRefusal> {
         match self {
             Self::Sha1(hash) => hash.update(bytes),
             Self::Sha256(hash) => hash.update(bytes),
@@ -52,7 +52,7 @@ impl NativeHash {
         .map_err(|_| StoreRefusal::NativeObjectIdentityMismatch)
     }
 
-    fn finish(self) -> Result<GitOid, StoreRefusal> {
+    pub(super) fn finish(self) -> Result<GitOid, StoreRefusal> {
         match self {
             Self::Sha1(hash) => hash.finish().map(|id| id.erase()),
             Self::Sha256(hash) => hash.finish().map(|id| id.erase()),
@@ -99,20 +99,7 @@ impl LocalFilesystemFabric {
                 maximum: maximum_payload_bytes,
             });
         }
-        // The registered strong commitment hashes the domain header followed
-        // by Git's type/length/NUL framing and the exact payload. Header space
-        // is bounded independently of the blob size.
-        let native_header = format!("blob {stored}\0");
-        let framed_length = stored
-            .checked_add(native_header.len() as u64)
-            .ok_or(StoreRefusal::LengthOverflow)?;
-        let mut strong = Sha256Hasher::new();
-        strong.update(&fgit_crypto::internal_id_preimage_header(
-            IdentityDomain::GitPayloadCommitment,
-            fgit_crypto::GIT_PAYLOAD_SCHEMA,
-            framed_length,
-        ));
-        strong.update(native_header.as_bytes());
+        let strong = strong_hasher(stored)?;
         Ok(LocalBlobStream {
             file,
             envelope,
@@ -134,6 +121,16 @@ impl LocalBlobStream {
     #[must_use]
     pub const fn declared_length(&self) -> u64 {
         self.envelope.declared_length()
+    }
+
+    /// The envelope's claimed payload commitment, authenticated only at EOF.
+    #[must_use]
+    pub const fn payload_commitment(&self) -> [u8; 32] {
+        self.envelope.payload_commitment()
+    }
+
+    pub(super) const fn envelope(&self) -> &ObjectEnvelope {
+        &self.envelope
     }
 
     #[must_use]
@@ -217,6 +214,22 @@ impl LocalBlobStream {
         self.consumed += count as u64;
         Ok(count)
     }
+}
+
+/// Registered strong commitment framing shared by bounded blob reads/writes.
+pub(super) fn strong_hasher(length: u64) -> Result<Sha256Hasher, StoreRefusal> {
+    let native_header = format!("blob {length}\0");
+    let framed_length = length
+        .checked_add(native_header.len() as u64)
+        .ok_or(StoreRefusal::LengthOverflow)?;
+    let mut strong = Sha256Hasher::new();
+    strong.update(&fgit_crypto::internal_id_preimage_header(
+        IdentityDomain::GitPayloadCommitment,
+        fgit_crypto::GIT_PAYLOAD_SCHEMA,
+        framed_length,
+    ));
+    strong.update(native_header.as_bytes());
+    Ok(strong)
 }
 
 fn io_refusal(error: std::io::Error) -> StoreRefusal {

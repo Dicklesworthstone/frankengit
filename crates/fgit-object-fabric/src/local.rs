@@ -16,6 +16,9 @@ mod bounded_read;
 mod blob_stream;
 pub use blob_stream::LocalBlobStream;
 
+#[path = "local_blob_write.rs"]
+mod blob_write;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
