@@ -10,6 +10,8 @@ import { main } from '../fg_source_package.mjs';
 import { fixture, peer, TOKEN, sha256 } from './source_package_fixture.mjs';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = join(ROOT, 'scripts/fg_source_package.mjs');
+// Capture before MockTimers replaces globals: the safety watchdog stays real.
+const realSetTimeout = globalThis.setTimeout, realClearTimeout = globalThis.clearTimeout;
 async function inputs(t, p) {
   const dir = await mkdtemp(join(tmpdir(), 'fg-source-package-')); await chmod(dir, 0o700);
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -154,11 +156,42 @@ test('SIGTERM during a real HTTP read exits cancelled before local publication',
   assert.equal(p.requests.length, 1); await absent(i.files.package);
 });
 
-test('an operation deadline aborts a held HTTP response without partial output', async t => {
-  const p = await peer(t, fixture(), (_value, call) => { call.res.writeHead(200, { 'Content-Type': 'application/json' }); call.res.write('{'); return false; });
+test('deterministic 200ms deadline aborts an entered HTTP response without partial output', { timeout: 10000 }, async t => {
+  let entered, now = 0;
+  const reading = new Promise(resolveRead => { entered = resolveRead; });
+  const p = await peer(t, fixture(), (_value, call) => {
+    call.res.writeHead(200, { 'Content-Type': 'application/json' }); call.res.write('{'); entered(); return false;
+  });
   const i = await inputs(t, p); await writeFile(i.files.limits, '{"timeoutMs":200}', { mode: 0o600 });
-  const result = await run(t, [...i.capture, '--limits', i.files.limits]); assert.equal(result.code, 2);
-  assert.equal(result.stdout, ''); await absent(i.files.package); assert.equal(p.requests.length, 1);
+  // Host scheduling can expire the whole budget during private-input reads.
+  // Control only the clock; keep the real files, HTTP body, deadline and abort.
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let watchdog;
+  const expired = new Promise((_resolve, reject) => {
+    watchdog = realSetTimeout(() => { process.emit('SIGTERM'); reject(new Error('Held-response test exceeded its real 10s guard.')); }, 10000);
+  });
+  t.after(() => realClearTimeout(watchdog));
+  const guarded = promise => Promise.race([promise, expired]);
+  const stdout = sink(), stderr = sink(); let completed = false;
+  const pending = main([...i.capture, '--limits', i.files.limits], { stdout: stdout.stream, stderr: stderr.stream });
+  pending.then(() => { completed = true; });
+  await guarded(reading); assert.equal(p.requests.length, 1);
+  now = 199; t.mock.timers.tick(199); await new Promise(setImmediate);
+  assert.equal(completed, false, 'held body remains pending before the unchanged deadline');
+  now = 200; t.mock.timers.tick(1);
+  assert.equal(await guarded(pending), 2); assert.equal(JSON.parse(stderr.text()).phase, 'capture');
+  assert.equal(stdout.text(), ''); await absent(i.files.package); assert.equal(p.requests.length, 1);
+});
+
+test('the same 200ms budget includes preflight before any HTTP request', { timeout: 10000 }, async t => {
+  const p = await peer(t), i = await inputs(t, p), stdout = sink(), stderr = sink(); let now = 0;
+  await writeFile(i.files.limits, '{"timeoutMs":200}', { mode: 0o600 });
+  t.mock.method(performance, 'now', () => now);
+  const pending = main([...i.capture, '--limits', i.files.limits], { stdout: stdout.stream, stderr: stderr.stream });
+  now = 201;
+  assert.equal(await pending, 2); assert.equal(JSON.parse(stderr.text()).phase, 'private_inputs');
+  assert.equal(stdout.text(), ''); assert.equal(p.requests.length, 0); await absent(i.files.package);
 });
 
 test('stdout failure retains the published file and original inspection hashes', async t => {
