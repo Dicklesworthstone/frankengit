@@ -495,6 +495,83 @@ fn equal_or_missing_dates_prepare_and_review_a_recent_base_in_long_histories() {
 }
 
 #[test]
+fn skewed_dates_prepare_and_review_a_recent_base_in_long_histories() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (source, dates, main, topic, base) = long_history(format, 10_000, 10);
+        for pattern in 0..4 {
+            let mut hints = dates.clone();
+            match pattern {
+                0 => hints.values_mut().for_each(|hint| *hint = -*hint),
+                1 => {
+                    hints.insert(topic, i64::MIN);
+                }
+                2 => {
+                    hints.insert(main, i64::MIN);
+                }
+                _ => {
+                    let base_date = dates[&base];
+                    for (id, hint) in &mut hints {
+                        *hint = if *hint <= base_date || *id == topic {
+                            i64::MAX
+                        } else {
+                            i64::MIN
+                        };
+                    }
+                }
+            }
+            let observed = Dated {
+                source: &source,
+                dates: hints,
+                reads: Cell::new(0),
+            };
+            assert_eq!(
+                source_merge_bases(&observed, format, main, topic, limits()),
+                Ok(MergeBaseResult::Bases(vec![base]))
+            );
+            assert!(
+                observed.reads.get() <= 1024,
+                "{format:?}, pattern={pattern}"
+            );
+            observed.reads.set(0);
+            let prepared = prepare_merge(
+                &observed,
+                format,
+                main,
+                topic,
+                &metadata(),
+                PreparationLimits::default(),
+            )
+            .unwrap();
+            assert!(matches!(
+                prepared,
+                MergePreparation::Clean(PreparedMerge { base: selected, .. }) if selected == base
+            ));
+            assert!(
+                observed.reads.get() <= 1027,
+                "{format:?}, pattern={pattern}"
+            );
+            observed.reads.set(0);
+            let reviewed = compare_source(
+                &observed,
+                format,
+                main,
+                topic,
+                &ReviewOptions {
+                    mode: ComparisonMode::MergeBase,
+                    ..ReviewOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(reviewed.compared_before, base);
+            assert!(
+                observed.reads.get() <= 1027,
+                "{format:?}, pattern={pattern}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_base_beyond_the_profile_refuses_typed_beside_a_permitted_twin() {
     let format = GitHashAlgorithm::Sha256;
     let refused = |result: Result<MergePreparation, PreparationError>| {

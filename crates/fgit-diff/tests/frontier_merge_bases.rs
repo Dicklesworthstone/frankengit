@@ -294,6 +294,92 @@ fn seeded_dags_match_the_oracle_scalar_and_index_under_every_visit_order() {
     assert!(unrelated > 100, "{unrelated} unrelated queries");
 }
 
+#[test]
+fn arbitrary_parent_shortcuts_and_extreme_hints_match_all_three_oracles() {
+    let mut generator = Generator(0x7a6b_5c4d_3e2f_1098);
+    let mut queries = 0;
+    for round in 0..120 {
+        let count = 96 + generator.below(64);
+        let mut dag = Dag::random(&mut generator, count);
+        // Parent distance is independent of either discovery depth or hint.
+        // Long shortcuts and octopus parents defeat depth-based pruning.
+        for node in 1..count {
+            for _ in 0..generator.below(9) {
+                let parent = generator.below(node);
+                if !dag.parents[node].contains(&parent) {
+                    dag.parents[node].push(parent);
+                }
+            }
+        }
+        let ancestors = dag.ancestor_sets();
+        for order in ORDERS {
+            let mut graph = dag.graph(order, &mut generator);
+            for (position, id) in dag.ids.iter().enumerate() {
+                if position % 3 == 0 {
+                    graph.hints.insert(
+                        *id,
+                        if position % 2 == 0 {
+                            i64::MIN
+                        } else {
+                            i64::MAX
+                        },
+                    );
+                }
+            }
+            let index = CommitAncestryIndex::build(&graph, dag.ids.iter().copied(), generous())
+                .expect("generated graph is complete and acyclic");
+            let mut scratch = AncestryQueryScratch::default();
+            for _ in 0..16 {
+                let (left, right) = (generator.below(count), generator.below(count));
+                let expected = dag.oracle(&ancestors, left, right);
+                let mut probes = 0;
+                let mut work = AncestryQueryWork::default();
+                graph.reads.set(0);
+                let actual = frontier_merge_bases_all(
+                    &graph,
+                    dag.ids[left],
+                    dag.ids[right],
+                    generous(),
+                    &mut work,
+                    || {
+                        probes += 1;
+                        Ok(())
+                    },
+                );
+                assert_eq!(
+                    actual.as_ref(),
+                    Ok(&expected),
+                    "round {round}, {order:?}, {left} / {right}"
+                );
+                assert_eq!(graph.reads.get(), work.visited_commits);
+                assert!(work.visited_commits <= count);
+                // Requeues and stale references remain linear in admitted
+                // vertices/edges, including dominance and cycle checks.
+                assert!(
+                    probes <= 32 * (work.visited_commits + work.examined_edges) + 4,
+                    "{probes} probes for {work:?}"
+                );
+                assert_eq!(
+                    merge_bases_all(&graph, dag.ids[left], dag.ids[right], generous()),
+                    Ok(expected.clone())
+                );
+                assert_eq!(
+                    index.merge_bases_all(
+                        &dag.ids[left],
+                        &dag.ids[right],
+                        &mut scratch,
+                        generous(),
+                        || Ok::<(), Fault>(())
+                    ),
+                    Ok(expected)
+                );
+                queries += 1;
+            }
+        }
+    }
+    assert_eq!(queries, 120 * ORDERS.len() * 16);
+}
+
 /// main is commits 0..count, each the parent of the next, dated in order.
 /// topic (id `count`) is newer and branches from main~`back`.
 fn chain_with_topic(count: u64, back: u64) -> Graph {
@@ -391,7 +477,9 @@ fn a_base_beyond_the_profile_refuses_typed_beside_a_permitted_twin() {
     let graph = chain_with_topic(COUNT, 4000);
     let (result, work) = frontier(&graph, COUNT - 1, COUNT, profile());
     assert_eq!(result, Ok(MergeBaseResult::Bases(vec![COUNT - 4001])));
-    assert_eq!(work.visited_commits, 4003);
+    // Bounded FIFO service can inspect a few ancestors below the eventual
+    // base, while the date-priority lane keeps this permitted twin in profile.
+    assert!((4003..=4096).contains(&work.visited_commits), "{work:?}");
     // 5,000 do not, and the refusal names the commit limit it exhausted.
     let graph = chain_with_topic(COUNT, 5000);
     let (result, work) = frontier(&graph, COUNT - 1, COUNT, profile());
@@ -410,7 +498,7 @@ fn a_base_beyond_the_profile_refuses_typed_beside_a_permitted_twin() {
         },
     );
     assert_eq!(result, Ok(MergeBaseResult::Bases(vec![COUNT - 5001])));
-    assert_eq!(work.visited_commits, 5003);
+    assert!((5003..=5100).contains(&work.visited_commits), "{work:?}");
 }
 
 #[test]
@@ -499,47 +587,74 @@ fn commit_and_edge_limits_are_inclusive_and_report_the_work_spent() {
 }
 
 #[test]
-fn adversarial_dates_cost_work_but_flat_dates_stop_at_the_known_common_frontier() {
-    const COUNT: u64 = 2_000;
+fn reversed_and_extreme_dates_cannot_starve_a_recent_base_in_long_histories() {
+    const COUNT: u64 = 100_000;
+    let base = COUNT - 11;
+    let expected = MergeBaseResult::Bases(vec![base]);
     let honest = chain_with_topic(COUNT, 10);
-    let (expected, cheap) = frontier(&honest, COUNT - 1, COUNT, generous());
-    assert_eq!(expected, Ok(MergeBaseResult::Bases(vec![COUNT - 11])));
-    let mut reversed = chain_with_topic(COUNT, 10);
-    for hint in reversed.hints.values_mut() {
-        *hint = -*hint;
-    }
-    let mut flat = chain_with_topic(COUNT, 10);
-    flat.hints.clear();
-    for graph in [&honest, &reversed, &flat] {
-        assert_eq!(
-            merge_bases_all(graph, COUNT - 1, COUNT, generous()),
-            expected
-        );
-        assert_eq!(frontier(graph, COUNT - 1, COUNT, generous()).0, expected);
-    }
-    let (_, work) = frontier(&reversed, COUNT - 1, COUNT, generous());
-    assert!(
-        work.visited_commits > 10 * cheap.visited_commits,
-        "{work:?} vs {cheap:?}"
-    );
-    // Misleading dates can still send one side far below the base before the
-    // other side reaches it. Exhaustion refuses rather than guessing a base.
     assert_eq!(
-        frontier(
-            &reversed,
-            COUNT - 1,
-            COUNT,
-            MergeBaseLimits {
-                max_commits: 100,
-                max_edges: 400
-            }
-        )
-        .0,
-        Err(MergeBaseError::CommitLimitExceeded { limit: 100 })
+        merge_bases_all(&honest, COUNT - 1, COUNT, generous()),
+        Ok(expected.clone())
     );
-    let (result, flat_work) = frontier(&flat, COUNT - 1, COUNT, profile());
-    assert_eq!(result, expected);
-    assert!(flat_work.visited_commits <= 2 * cheap.visited_commits);
+    for pattern in 0..5 {
+        let mut graph = chain_with_topic(COUNT, 10);
+        match pattern {
+            0 => graph.hints.values_mut().for_each(|hint| *hint = -*hint),
+            1 => {
+                graph.hints.insert(COUNT, i64::MIN);
+            }
+            2 => {
+                graph.hints.insert(COUNT - 1, i64::MIN);
+            }
+            3 => {
+                // Every commit on main above the base looks older than the
+                // whole shared history. Fair service must advance that path
+                // repeatedly, not merely give each initial tip one turn.
+                for (id, hint) in &mut graph.hints {
+                    *hint = if *id <= base || *id == COUNT {
+                        i64::MAX
+                    } else {
+                        i64::MIN
+                    };
+                }
+            }
+            _ => {
+                for (id, hint) in &mut graph.hints {
+                    *hint = if id % 2 == 0 { i64::MIN } else { i64::MAX };
+                }
+            }
+        }
+        for (left, right) in [(COUNT - 1, COUNT), (COUNT, COUNT - 1)] {
+            let (result, work) = frontier(&graph, left, right, profile());
+            assert_eq!(result.as_ref(), Ok(&expected), "pattern {pattern}");
+            assert!(work.visited_commits <= 1024, "pattern {pattern}: {work:?}");
+            assert_eq!(work.examined_edges, work.visited_commits);
+            assert_eq!(frontier(&graph, left, right, profile()), (result, work));
+            let exact = MergeBaseLimits {
+                max_commits: work.visited_commits,
+                max_edges: work.examined_edges,
+            };
+            assert_eq!(
+                frontier(&graph, left, right, exact),
+                (Ok(expected.clone()), work)
+            );
+            assert_eq!(
+                frontier(
+                    &graph,
+                    left,
+                    right,
+                    MergeBaseLimits {
+                        max_commits: work.visited_commits - 1,
+                        ..exact
+                    }
+                )
+                .0,
+                Err(MergeBaseError::CommitLimitExceeded {
+                    limit: work.visited_commits - 1
+                })
+            );
+        }
+    }
 }
 
 #[test]
@@ -669,6 +784,14 @@ fn every_checkpoint_propagates_its_stop_and_a_fresh_query_still_succeeds() {
     let graph = chain_with_topic(40, 6);
     let mut flat = chain_with_topic(120, 20);
     flat.hints.clear();
+    let mut skewed = chain_with_topic(160, 8);
+    for (id, hint) in &mut skewed.hints {
+        *hint = if *id <= 151 || *id == 160 {
+            i64::MAX
+        } else {
+            i64::MIN
+        };
+    }
     // Pick a pair with two bases so the drain's checkpoints are covered too.
     let mut generator = Generator(0x0123_4567_89ab_cdef);
     let (dag, pair) = (0..100)
@@ -687,6 +810,7 @@ fn every_checkpoint_propagates_its_stop_and_a_fresh_query_still_succeeds() {
     for (graph, left, right) in [
         (&graph, 39, 40),
         (&flat, 119, 120),
+        (&skewed, 159, 160),
         (&random, dag.ids[pair.0], dag.ids[pair.1]),
     ] {
         let calls = Cell::new(0_usize);
