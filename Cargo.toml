@@ -175,6 +175,15 @@ format_collect = { level = "allow", priority = 1 }
 single_match_else = { level = "allow", priority = 1 }
 too_many_arguments = { level = "allow", priority = 1 }
 
+# Dev and test builds compile every dependency (not workspace members)
+# optimized. Unoptimized, fsqlite's WAL validation and BLAKE3 made debug test
+# binaries run production budgets out: at 7ab43fc3 two microbatch recovery
+# tests failed with ResourceBudgetExceeded after 36 s of CPU and passed in
+# 10 s with this setting. First-party crates keep opt-level 0, debug
+# assertions and overflow checks.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = true
