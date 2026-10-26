@@ -8,9 +8,11 @@ on the hosting GitHub repository's issue tracker.
 
 ## Open, discuss, edit, close, and reopen
 
-All mutations supply an explicit positive issue number, principal, stable
-idempotency key, and expected predecessor version. Opening uses version zero.
-The node, not the command line, decides whether the predecessor is still current.
+All mutations supply an explicit positive issue number, principal, and stable
+idempotency key. Exact-version actions also require an expected predecessor;
+opening uses version zero. `append-comment` explicitly omits the issue version.
+The node decides whether an exact predecessor is still current and selects the
+append intent's predecessor inside canonical admission.
 Numbers are supplied by the caller; this interface does not allocate one by a
 racy read of the current maximum.
 
@@ -57,6 +59,34 @@ opening body. Comments, edits, close and reopen all advance the same issue versi
 so competing operations cannot silently lose one another. Closing an already
 closed issue and reopening an open issue do not create invented transitions.
 
+## Append discussion independently of issue edits
+
+```sh
+fg issue append-comment "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
+  --trusted-local --principal "$PRINCIPAL_ID" \
+  --idempotency-key issue-17-append-1 \
+  --body 'Additional reproduction details, independent of the title edit.'
+```
+
+Use `append-comment` when adding discussion should not depend on an issue version
+observed earlier. It accepts an existing issue number and nonblank literal body
+(or `--body-file`), and rejects `--expected-version`. Independent issue edits do
+not invalidate this intent. Admission selects the issue predecessor and records
+an ordinary versioned comment through the same canonical publication boundary.
+The issue's other fields survive; the comment advances its version and count.
+
+The original `comment` command continues to require an exact positive version.
+An existing pending `comment` request must be recovered or retried as `comment`,
+with its original version, body and key. Switching it to `append-comment` changes
+the intent. For an append retry, retain the identical issue number, body, principal
+and original key; a later issue edit or close does not duplicate the comment.
+Use `fg outcome` with that principal and key when the original body is unavailable.
+
+Both comment forms preserve exact text and use the same body bounds. The append
+receipt identifies `action.name: "append-comment"` and `expected_version: null`;
+it does not invent a caller-selected predecessor or report a guessed current
+version. Read `fg issue show` for the canonical event and current issue state.
+
 ## Assign and unassign issue work
 
 ```sh
@@ -82,7 +112,7 @@ records the explicitly requested action and advances the issue version.
 Assignments work on open and closed issues. They are metadata: they neither
 check account existence nor grant access, membership or credentials. The
 command's authenticated `--principal` remains its actor. Assignment changes
-share the exact version and retry contract of all other issue actions.
+share the exact version and retry contract of the existing versioned actions.
 Snapshots expose `assignees: []` for unassigned issues, including histories
 created before these actions were supported, and history retains each delta.
 The byte and upgrade contract is [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
@@ -129,8 +159,9 @@ obligation but does not modify Git refs. An outbox obligation is not delivery:
 receipts deliberately report `delivery_acknowledged:null`.
 
 Successful mutations return `issue_publication` JSON with `tx_id`, canonical
-`decision_sequence`, repository commit or refusal identity, number, exact expected
-version, action, and cleanup state. The raw idempotency key is not echoed. A retry
+`decision_sequence`, repository commit or refusal identity, number, action, and
+cleanup state. `expected_version` is the supplied integer for exact-version actions
+and `null` for the explicit append intent. The raw idempotency key is not echoed. A retry
 of the identical scoped command recovers its original result even after the issue
 has changed. It cannot append a duplicate comment, reopen something again, or
 rewrite an earlier canonical refusal into success. Changing bytes under an existing

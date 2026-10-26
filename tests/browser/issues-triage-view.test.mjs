@@ -100,8 +100,9 @@ test('a triaged issue opens its canonical history at the search snapshot', async
   assert.equal(target.pathname, '/repo.git/api/v1/issues/1'); assert.equal(target.searchParams.get('expected_head'), head);
   assert.match(ui.get('issue-content').textContent, /Canonical event history/);
   await button(ui.get('issue-content'), 'Comment').fire('click');
-  assert.equal(ui.get('change-number').value, '1'); assert.equal(ui.get('change-version').value, '1');
-  assert.equal(ui.get('change-action').value, 'comment'); assert.equal(ui.calls.length, 2);
+  assert.equal(ui.get('change-number').value, '1'); assert.equal(ui.get('change-version').value, '');
+  assert.equal(ui.get('change-version').disabled, true);
+  assert.equal(ui.get('change-action').value, 'append-comment'); assert.equal(ui.calls.length, 2);
 });
 
 test('search text and hostile issue titles remain inert DOM text', async () => {

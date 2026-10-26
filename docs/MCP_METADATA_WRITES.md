@@ -34,16 +34,35 @@ text, tool argument, or annotation can widen the launch grants.
 
 The write group exposes `frankengit_issue_open`, `frankengit_issue_edit`,
 `frankengit_issue_close`, `frankengit_issue_reopen`,
-`frankengit_issue_comment`, `frankengit_issue_assign` and
-`frankengit_issue_unassign`. Each requires a positive `number`, exact
-`expected_version`, and `idempotency_key`. Numbers and versions are canonical
-unsigned decimal **strings**, not JSON numbers or implicit latest values.
+`frankengit_issue_comment`, `frankengit_issue_append_comment`,
+`frankengit_issue_assign` and `frankengit_issue_unassign`. Each requires a positive
+`number` and `idempotency_key`. All except the explicit append tool require an
+exact `expected_version`. Numbers and versions are canonical unsigned decimal
+**strings**, not JSON numbers.
 
 Opening requires version `"0"`, `title`, and an explicit `body` (possibly empty).
-Other actions require a positive, nonexhausted predecessor version. Editing
+Other exact-version actions require a positive, nonexhausted predecessor. Editing
 accepts one or more of `title`, `body`, and `labels`; omitted fields survive,
 `body: ""` clears the body, and `labels: []` clears labels. Commenting requires
 nonblank body text. Close/reopen accept none of those content fields.
+
+`frankengit_issue_append_comment` requires only `number`, `body`, and
+`idempotency_key`; `expected_version` is rejected. Use it to add discussion to an
+existing issue independently of intervening title, body, assignment or state
+changes. The node selects the predecessor inside canonical admission and publishes
+a regular versioned comment, preserving other issue fields. The result identifies
+`action: "append-comment"` and `expected_version: null`.
+
+```json
+{"jsonrpc":"2.0","id":"append-attempt-1","method":"tools/call","params":{"name":"frankengit_issue_append_comment","arguments":{"number":"7","idempotency_key":"append-issue-7-details","body":"Additional reproduction details, independent of the title edit."}}}
+```
+
+The original `frankengit_issue_comment` remains an exact-version operation. Keep
+pending requests bound to their original tool, number, version, body and key;
+switching a pending request to the append tool changes its intent. Retrying an
+append uses its original number, body and key, even after another writer changes
+the issue. Successful recovery returns the original terminal decision without
+adding another comment.
 
 Assign/unassign require `assignees`, an array of 1–16 distinct principal IDs
 encoded as exactly 32 lowercase hexadecimal characters. IDs are sorted before
@@ -65,7 +84,7 @@ order is normalized and duplicate values are rejected. Titles retain the native
 256-byte bound. MCP bodies are narrowed to 16 KiB by the existing JSON profile;
 NUL is refused. Source text is data, never executable instructions. Unknown or
 inapplicable fields, filesystem inputs, ambient principal selectors, and missing
-predecessors are rejected before admission.
+predecessors on exact-version tools are rejected before admission.
 
 After the initialization handshake, an example `tools/call` is:
 
@@ -75,7 +94,8 @@ After the initialization handshake, an example `tools/call` is:
 
 The durable key is 1..256 printable ASCII bytes without spaces. A retry uses a
 **new JSON-RPC ID**, the **same durable key**, and the **identical complete
-command**. Never refresh the expected version on a retry. Key reuse with changed
+command** and original tool name. Never refresh the expected version on an
+exact-version retry; append retries continue to omit it. Key reuse with changed
 semantics cannot alias the original command; it remains an error. Notifications
 never execute tools, and duplicate JSON-RPC IDs cannot execute again.
 
@@ -119,7 +139,10 @@ field presence, label normalization, mutation annotations, canonical refusals,
 ambiguous failures, response limits, notifications and lost output. Real-node
 tests cover both native hash formats, lifecycle publication, unchanged exact
 retries, stale refusals, principal isolation, stopped intake, reopen recovery,
-and a genuinely lost stdio reply after a native issue commit.
+and a genuinely lost stdio reply after a native issue commit. Append regressions
+cover independent edits, preservation of strict-comment refusals, unchanged
+retries after close and reopen, changed-key-content refusal, stopped-intake
+recovery, explicit schema fields and both native hash formats.
 
 Run `cargo test --locked -p fgit-cli --bin fg-mcp` in the admitted Rust environment.
 These Rust tests were written but not executed in the authoring session because

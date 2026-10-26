@@ -11,8 +11,10 @@ Outcome recovery additionally requires its existing endpoint switch.
 ## Workflow
 
 List issues and page their canonical event history at one explicit snapshot.
-Open an issue with an explicit number and version zero, or select an existing
-issue to prepare a comment, field edit, assignment, close or reopen at its exact version.
+Open an issue with an explicit number and version zero. Select an existing issue
+to prepare a comment without an expected version; the browser uses the explicit
+`append-comment` intent so concurrent commenters can all publish. Field edits,
+assignment changes, close and reopen still require the exact displayed version.
 Title, body and labels can be replaced independently; an explicitly selected
 empty label replacement clears the set. Preparation makes no HTTP mutation.
 Inspect the prepared request, save its private recovery receipt, and send it
@@ -45,6 +47,10 @@ prevents a modified saved request from reusing the original key. This is not a
 signature or server authority proof. Restoring does not dispatch work, and an
 exported or restored request cannot be discarded as definitely unsent. Recovery
 requires the original token; operators must not reassign it to another principal.
+Existing saved `comment` receipts retain their exact version, original route,
+body and key. Restoring or retrying them never converts them to `append-comment`.
+New append receipts have `expected_version: null`; changing either profile in a
+saved receipt fails the original request commitment check.
 
 Tokens live only in page memory. Disconnect clears tokens, visible data and
 editors while retaining an unresolved token-free request for recovery. No

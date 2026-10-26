@@ -25,7 +25,7 @@ const history = (extra = {}) => ({ ...ids, type: 'issue_history', object_format:
   found: true, issue: state(), after_version: 0, limit: 20, next_after_version: null,
   events: [{ version: 1, actor, action: { name: 'open', title: state().title, body: state().body, labels: ['bug'] } }], ...extra });
 const committed = (extra = {}) => ({ ...ids, type: 'issue_publication', principal_id: actor, number: 1,
-  expected_version: 1, action: 'comment', tx_id: 'tx-1', outcome: 'committed', decision_sequence: 2,
+  expected_version: null, action: 'append-comment', tx_id: 'tx-1', outcome: 'committed', decision_sequence: 2,
   repository_commit_id: 'rcr-1', refusal_code: null, refusal_record_id: null, delivery_acknowledged: null, ...extra });
 const undecided = { ...ids, type: 'transaction_outcome', repository_incarnation: '4'.repeat(32), principal_id: actor,
   selector: 'transaction', command_index: null, state: 'key_not_observed', terminal: false, transaction: null, decision: null,
@@ -51,7 +51,7 @@ function harness(respond = () => json(page())) {
   });
   return { elements, lifecycle, document, calls, receipts, ...mounted,
     async connect(secret = token) { elements['issue-token'].value = secret; await elements['issue-connection'].fire('submit'); },
-    async prepare(action = 'comment', fields = {}) {
+    async prepare(action = 'append-comment', fields = {}) {
       elements['change-number'].value = '1'; elements['change-version'].value = action === 'open' ? '0' : '1';
       elements['change-action'].value = action; elements['change-title'].value = fields.title ?? 'New title';
       elements['change-body'].value = fields.body ?? 'New comment'; elements['change-labels'].value = fields.labels ?? '';
@@ -80,20 +80,27 @@ test('issue pages carry the original head and exact cursor, not an inferred next
   await h.connect(); click(h.elements['issue-paging'], 'Next issue page'); await settled();
   const query = new URL(h.calls[1].url).searchParams; assert.equal(query.get('after'), '29'); assert.equal(query.get('expected_head'), head);
 });
-test('comment selection uses the actual issue version; preparation does not publish', async () => {
+test('comment selection requires no issue version; preparation does not publish', async () => {
   const h = harness(call => json(call.url.includes('/issues?') ? page() : history())); await h.connect();
   click(h.elements['issue-content'], '#1 <img onerror=alert(1)>'); await settled(); click(h.elements['issue-content'], 'Comment');
-  assert.equal(h.elements['change-version'].value, '1'); assert.equal(h.elements['change-body'].value, '');
+  assert.equal(h.elements['change-version'].value, ''); assert.equal(h.elements['change-body'].value, '');
+  assert.equal(h.elements['change-version'].disabled, true); assert.equal(h.elements['change-version'].required, false);
+  assert.equal(h.elements['change-action'].value, 'append-comment');
+  h.elements['change-version'].value = 'a stale or invalid version is irrelevant';
   h.elements['change-body'].value = '<svg onload=alert(1)>'; await h.elements['issue-change'].fire('submit');
   assert.equal(h.calls.length, 2); assert.equal(h.client.pending.sent, false);
+  assert.equal(h.client.pending.expected_version, null); assert.equal(h.client.pending.action, 'append-comment');
+  assert.equal(new URLSearchParams(h.client.pending.body).has('expected_version'), false);
   assert.ok(h.elements['prepared-summary'].textContent.includes('<svg onload=alert(1)>'));
   assert.equal(h.elements['prepare-change'].disabled, true); assert.equal(h.elements['send-change'].disabled, false);
 });
 test('explicit send publishes the exact prepared draft even after editing the form again', async () => {
   const h = harness(call => json(call.method === 'GET' ? page() : committed())); await h.connect();
-  await h.prepare('comment', { body: 'original' }); h.elements['change-body'].value = 'changed later';
+  await h.prepare('append-comment', { body: 'original' }); h.elements['change-body'].value = 'changed later';
   h.elements['send-change'].fire('click'); await settled();
   assert.equal(new URLSearchParams(h.calls[1].body).get('body'), 'original');
+  assert.equal(new URLSearchParams(h.calls[1].body).has('expected_version'), false);
+  assert.ok(h.calls[1].url.endsWith('/issues/1/append-comment'));
   assert.match(h.elements['issue-status'].textContent, /^Committed/); assert.equal(h.client.pending, null);
   assert.equal(h.elements['change-version'].value, ''); assert.equal(h.elements['issue-content'].textContent, '');
 });
@@ -106,7 +113,7 @@ test('edit checkboxes preserve omitted fields and explicitly clear empty labels'
 test('assignment controls display principals and publish the prepared exact-version delta', async () => {
   const a = '11'.repeat(16), b = '22'.repeat(16);
   const detail = history({ issue: state(1, { assignees: [a] }) });
-  const h = harness(call => json(call.method === 'POST' ? committed({ action: 'assign' }) : call.url.includes('/issues?') ? page() : detail));
+  const h = harness(call => json(call.method === 'POST' ? committed({ action: 'assign', expected_version: 1 }) : call.url.includes('/issues?') ? page() : detail));
   await h.connect(); click(h.elements['issue-content'], '#1 <img onerror=alert(1)>'); await settled();
   assert.ok(h.elements['issue-content'].textContent.includes(`Assigned principals: ${a}`));
   click(h.elements['issue-content'], 'Remove assignees');
@@ -116,6 +123,7 @@ test('assignment controls display principals and publish the prepared exact-vers
   assert.equal(h.elements['assignees-field'].hidden, false);
   assert.equal(h.elements['body-field'].hidden, true);
   assert.equal(h.elements['change-version'].value, '1');
+  assert.equal(h.elements['change-version'].disabled, false); assert.equal(h.elements['change-version'].required, true);
   h.elements['change-assignees'].value = `${b}\n${a}`;
   await h.elements['issue-change'].fire('submit');
   assert.equal(h.calls.length, 2);
@@ -162,7 +170,7 @@ test('native HTTP-409 terminal refusal is never shown as committed', async () =>
   assert.match(h.elements['issue-status'].textContent, /^Refused/); assert.equal(h.client.pending, null);
 });
 test('receipt save contains the exact request but no secret; import never executes it', async () => {
-  const old = harness(); await old.connect(); await old.prepare('comment', { body: 'private draft' });
+  const old = harness(); await old.connect(); await old.prepare('append-comment', { body: 'private draft' });
   old.elements['save-receipt'].fire('click'); assert.equal(old.receipts.length, 1);
   const receipt = old.receipts[0]; assert.equal(receipt.includes(token), false); assert.ok(receipt.includes('private draft'));
   const h = harness(); await h.connect(); const bytes = new TextEncoder().encode(receipt);

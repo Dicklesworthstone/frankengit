@@ -81,25 +81,31 @@ POST {REPO_URL}/api/v1/issues/{number}/edit
 POST {REPO_URL}/api/v1/issues/{number}/close
 POST {REPO_URL}/api/v1/issues/{number}/reopen
 POST {REPO_URL}/api/v1/issues/{number}/comment
+POST {REPO_URL}/api/v1/issues/{number}/append-comment
 POST {REPO_URL}/api/v1/issues/{number}/assign
 POST {REPO_URL}/api/v1/issues/{number}/unassign
 ```
 
-The caller supplies a positive issue number. There is no implicit allocator or
-latest-version refresh. Bodies use `application/x-www-form-urlencoded`, optionally
-with `; charset=utf-8`. UTF-8 is decoded strictly, percent escapes are decoded
+The caller supplies a positive issue number; there is no implicit allocator.
+Versioned commands never silently refresh their expected predecessor. Bodies use
+`application/x-www-form-urlencoded`, optionally with `; charset=utf-8`. UTF-8 is decoded strictly, percent escapes are decoded
 once, and `+` denotes a space. Fixed-length and chunked HTTP bodies are accepted;
 trailers, incomplete framing, and buffered suffixes are refused before admission.
 
-Every mutation requires an explicit `Idempotency-Key` header and
-`expected_version` form field. Open requires version `0` (absent stream); all
-other actions require the exact positive predecessor version.
+Every mutation requires an explicit `Idempotency-Key` header. Versioned actions
+require the `expected_version` form field: open requires `0` (absent stream),
+while edit, comment, close, reopen, assign and unassign require the exact positive
+predecessor. The separate `append-comment` action accepts only `body` and rejects
+`expected_version`; it binds an immutable comment intent and appends against the
+current canonical issue state. Independent appends can all commit while strict
+edits or strict comments still refuse a stale predecessor.
 
 | Action | Additional form fields |
 |---|---|
 | `open` | Required `title` and `body`; optional repeated `label`. An empty opening body is explicit. |
 | `edit` | At least one of `title`, `body`, repeated `label`, or `clear_labels=true`. Omitted fields are preserved. `body=` clears a body. |
-| `comment` | Required nonblank `body`. |
+| `comment` | Required nonblank `body`, with the exact `expected_version`. |
+| `append-comment` | Required nonblank `body` only; `expected_version` is forbidden. |
 | `close`, `reopen` | No fields besides `expected_version`. |
 | `assign`, `unassign` | Required repeated `assignee`: 1–16 distinct 32-character lowercase hexadecimal principal IDs. |
 
@@ -137,6 +143,23 @@ server's hashed grant file. Curl selects the URL-encoded content type when
 `--data-urlencode` is used. Inspect the JSON response even when the HTTP status
 is non-successful.
 
+For an additive comment, preserve the body and key without choosing a version:
+
+```sh
+curl --fail-with-body --header @/secure/issue-writer.headers \
+  --header 'Idempotency-Key: issue-41-comment-attempt-1' \
+  --data-urlencode 'body=The transport round trip succeeded.' \
+  "$REPO_URL/api/v1/issues/41/append-comment"
+```
+
+Append receipts carry `action: "append-comment"` and `expected_version: null`.
+Canonical history still records ordinary versioned `comment` events, so existing
+history readers need no new event kind. An absent issue is a canonical refusal;
+append does not create it. Changing the body or switching between `comment` and
+`append-comment` under an existing key is an idempotency conflict. This profile
+uses the same principal, issue-write scope, policy, quota and recovery boundary
+as versioned commands.
+
 A committed operation returns HTTP 200 and `type: "issue_publication"`, with
 `outcome: "committed"`, the canonical `tx_id`, decision sequence, and repository
 commit ID. A canonical refusal returns HTTP 409 with the same receipt type and
@@ -150,7 +173,8 @@ canonical refusal. Syntax errors are 400; missing credentials are 401;
 insufficient scope/disabled service is 403; resource ceilings are 413; unsupported
 media types are 415; throttling is 429. Infrastructure failures return 503.
 
-**Retry the identical command, expected version, and key after a lost reply.**
+**Retry the identical action, body and key after a lost reply; retain the exact
+expected version for versioned actions.**
 Do not refresh the expected version or replace the key while resolving an
 ambiguous attempt. A token rotation for the same principal preserves identity;
 a different principal is a different caller. The API returns the existing

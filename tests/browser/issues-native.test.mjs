@@ -130,3 +130,94 @@ test('bounded JSON refuses invalid UTF-8 and cancels oversized streams', async (
     { headers: { 'Content-Type': 'application/json' } });
   await assert.rejects(readJson(response, null, 10)); assert.equal(cancelled, true);
 });
+
+
+test('append comments require a null version and never relax canonical history grammar', () => {
+  const append = mutationRequest(1, null, 'append-comment', { body: 'A & B 🦀\n%2F' });
+  assert.equal(append.expected_version, null); assert.equal(append.action, 'append-comment');
+  const form = new URLSearchParams(append.body);
+  assert.deepEqual([...form.keys()], ['body']); assert.equal(form.get('body'), 'A & B 🦀\n%2F');
+  for (const version of [undefined, 0, 1, '1', NaN]) {
+    assert.throws(() => mutationRequest(1, version, 'append-comment', { body: 'x' }));
+  }
+  for (const fields of [{}, { body: ' \n' }, { body: 'x', expected_version: 1 }, { body: 'x', principal: 'admin' }]) {
+    assert.throws(() => mutationRequest(1, null, 'append-comment', fields));
+  }
+  assert.throws(() => mutationRequest(1, null, 'comment', { body: 'x' }));
+  const history = { ...ids, type: 'issue_history', snapshot_token: head, after_version: 1,
+    limit: 20, found: true, issue: { ...row, version: 2, comments: 1 }, next_after_version: null,
+    events: [{ version: 2, actor: 'actor', action: { name: 'comment', body: 'x' } }] };
+  assert.equal(issueHistory(history, 1, { after: 1 }).reply.events[0].action.name, 'comment');
+  assert.throws(() => issueHistory({ ...history,
+    events: [{ ...history.events[0], action: { name: 'append-comment', body: 'x' } }] }, 1, { after: 1 }));
+});
+test('append receipt survives response loss and reload with one exact key and body', async () => {
+  const calls = [], appendTerminal = { ...terminal, action: 'append-comment', expected_version: null };
+  const client = fresh(async (url, options) => {
+    calls.push({ url: String(url), ...options }); throw new TypeError('reply lost');
+  });
+  await client.connect(token); await client.stage(1, null, 'append-comment', { body: 'original' });
+  assert.equal(calls.length, 0); await assert.rejects(client.send());
+  const receipt = client.exportReceipt();
+  const restored = fresh(async (url, options) => {
+    calls.push({ url: String(url), ...options }); return json(appendTerminal);
+  });
+  await restored.connect(token); await restored.restoreReceipt(receipt);
+  assert.equal(restored.pending.expected_version, null); assert.equal(restored.pending.sent, true);
+  assert.equal((await restored.send()).outcome, 'committed'); assert.equal(restored.pending, null);
+  assert.ok(calls.every(call => call.url.endsWith('/issues/1/append-comment')));
+  assert.equal(calls[0].body, 'body=original'); assert.equal(calls[1].body, calls[0].body);
+  assert.equal(calls[1].headers['Idempotency-Key'], calls[0].headers['Idempotency-Key']);
+  const changed = JSON.parse(receipt);
+  changed.request.action = 'comment'; changed.request.expected_version = 1;
+  changed.request.body = 'expected_version=1&body=original';
+  const other = fresh(() => assert.fail('a receipt import dispatched'));
+  await other.connect(token); await assert.rejects(other.restoreReceipt(JSON.stringify(changed)));
+  assert.equal(other.pending, null);
+});
+test('the original versioned comment receipt remains byte-identical after append support', async () => {
+  // Frozen v1 receipt/key from the original exact-version request grammar.
+  const original = {"schema": "frankengit-issue-retry-v1", "origin": "https://forge.example", "route": "/repo.git", "request": {"number": 1, "expected_version": 7, "action": "comment", "fields": {"body": "Legacy\n%2F"}, "body": "expected_version=7&body=Legacy%0A%252F", "key": "fgui-01010101010101010101010101010101-67619d8664aecd901ff4781ade913475b2827eed209f5f997a9723b0903a18f6", "binding": {"tenant": "tenant", "repository": "repo"}, "sent": true, "exported": true, "credential_fingerprint": "52b6419d27bd7f547cee3b92f8c17a908b8a49601ecbec161e5030de1dfe9e0a"}};
+  const calls = [], client = fresh(async (url, options) => {
+    calls.push({ url: String(url), ...options }); return json({ ...terminal, expected_version: 7 });
+  });
+  await client.connect(token); await client.restoreReceipt(JSON.stringify(original));
+  assert.equal(client.pending.action, 'comment'); assert.equal(client.pending.expected_version, 7);
+  assert.equal(client.pending.key, original.request.key);
+  assert.equal((await client.send()).outcome, 'committed');
+  assert.equal(calls[0].url.endsWith('/issues/1/comment'), true);
+  assert.equal(calls[0].body, original.request.body);
+  assert.equal(calls[0].headers['Idempotency-Key'], original.request.key);
+  original.request.action = 'append-comment'; original.request.expected_version = null;
+  original.request.body = 'body=Legacy%0A%252F';
+  const changed = fresh(() => assert.fail('dispatched')); await changed.connect(token);
+  await assert.rejects(changed.restoreReceipt(JSON.stringify(original)));
+});
+test('append outcome lookup preserves unknown responsibility and canonical recovery settles it', async () => {
+  let settled = false; const calls = [];
+  const client = fresh(async (url, options) => {
+    calls.push({ url: String(url), ...options });
+    return json({ ...ids, type: 'transaction_outcome', repository_incarnation: 'inc', principal_id: 'actor',
+      selector: 'transaction', command_index: null, state: settled ? 'committed' : 'key_not_observed', terminal: settled,
+      transaction: settled ? { tx_id: 'tx' } : null,
+      decision: settled ? { kind: 'committed', decision_sequence: 2, repository_commit_id: 'rcr' } : null,
+      read_only: true, request_reexecuted: false, absence_proves_non_commit: false, session_completeness_established: false });
+  });
+  await client.connect(token); await client.stage(1, null, 'append-comment', { body: 'recover me' });
+  const pending = client.pending;
+  assert.equal((await client.recover()).terminal, false); assert.deepEqual(client.pending, pending);
+  settled = true; assert.equal((await client.recover()).outcome, 'committed'); assert.equal(client.pending, null);
+  for (const call of calls) {
+    assert.equal(call.url.endsWith('/outcomes'), true); assert.equal(call.body, undefined);
+    assert.equal(call.headers['Idempotency-Key'], pending.key);
+  }
+});
+test('append publication rejects strict-comment and invented-version terminal envelopes', async () => {
+  for (const reply of [terminal, { ...terminal, action: 'append-comment' },
+    { ...terminal, expected_version: null }]) {
+    const client = fresh(async () => json(reply)); await client.connect(token);
+    await client.stage(1, null, 'append-comment', { body: 'x' });
+    const key = client.pending.key; await assert.rejects(client.send());
+    assert.equal(client.pending.key, key); assert.equal(client.pending.sent, true);
+  }
+});

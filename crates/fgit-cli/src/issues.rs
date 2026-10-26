@@ -6,7 +6,7 @@ mod search;
 mod tests;
 use crate::publication_support::{describe, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
-use fgit_forge::event::issue::MAX_BODY_BYTES;
+use fgit_forge::event::issue::{IssueCommentIntent, MAX_BODY_BYTES};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{DecisionOutcome, HeadGeneration, TxId};
 use options::{Mutation, Operation, Options};
@@ -24,6 +24,11 @@ usage: fg issue <open|edit|close|reopen|comment|assign|unassign> <storage-root> 
   close/reopen: positive version; no title, body or label options
   assign/unassign: positive version; --assignee <principal-id> ... (1..16 IDs)
 
+usage: fg issue append-comment <storage-root> <tenant-id> <repository-id> <number>
+  --trusted-local --principal <id> --idempotency-key <key>
+  (--body <text> | --body-file <file>) [--object-format sha1|sha256]
+  Appends to an existing issue without an expected version; exact retries never duplicate it.
+
 usage: fg issue list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--limit <1..100>] [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 usage: fg issue show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
@@ -34,7 +39,8 @@ usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-loca
 
 Edits preserve omitted fields; --body '' clears a body; --clear-labels clears labels.
 Show returns current issue state plus paged, exact actions/comments at one snapshot.
-Every mutation requires a stable retry key and explicit predecessor. No latest-version refresh.
+Every mutation requires a stable retry key. Only append-comment omits the issue predecessor.
+Existing comment and other changes retain their exact-version semantics; never refresh a retry.
 Exit 0: committed/read; 3: canonical refusal; 4: missing issue; 2: input/infrastructure/output error.
 This is a trusted local repository interface, not remote authentication or an issue ACL.";
 
@@ -55,6 +61,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     | "close"
                     | "reopen"
                     | "comment"
+                    | "append-comment"
                     | "assign"
                     | "unassign"
                     | "list"
@@ -64,15 +71,27 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         return write_read(&mut std::io::stdout().lock(), USAGE).map(|()| 0);
     }
     let mut options = options::parse(arguments)?;
-    if let Operation::Mutate(mutation) = &mut options.operation {
-        if let Some(path) = &mutation.body_file {
-            let bytes = read_body_file(path)?;
-            *options::body_slot(&mut mutation.command)? = bytes;
+    match &mut options.operation {
+        Operation::Mutate(mutation) => {
+            if let Some(path) = &mutation.body_file {
+                let bytes = read_body_file(path)?;
+                *options::body_slot(&mut mutation.command)? = bytes;
+            }
+            mutation
+                .command
+                .proposed_event(mutation.principal)
+                .map_err(|_| "invalid issue command or file contents")?;
         }
-        mutation
-            .command
-            .proposed_event(mutation.principal)
-            .map_err(|_| "invalid issue command or file contents")?;
+        Operation::AppendComment(mutation) => {
+            if let Some(path) = &mutation.body_file {
+                mutation.command.body = read_body_file(path)?;
+            }
+            mutation
+                .command
+                .validate()
+                .map_err(|_| "invalid issue comment or file contents")?;
+        }
+        Operation::Read(_) => {}
     }
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
@@ -85,21 +104,43 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             .map_err(|error| error.to_string());
         let request = fgit_cli::command_request_context(&node);
         match &options.operation {
-            Operation::Mutate(mutation) => {
+            Operation::Mutate(_) | Operation::AppendComment(_) => {
                 // A historical decision precedes new-publication eligibility
                 // inside the node API. Do not discard it because service intake
                 // now refuses. Unknown commands still hit that same intake gate.
+                let (principal, key) = match &options.operation {
+                    Operation::Mutate(mutation) => (mutation.principal, &mutation.key),
+                    Operation::AppendComment(mutation) => (mutation.principal, &mutation.key),
+                    Operation::Read(_) => unreachable!("mutation branch"),
+                };
                 let session = LoopbackReceiveSession::authenticated(
-                    mutation.principal,
-                    IdempotencyKey::new(mutation.key.clone()).map_err(|_| "invalid retry key")?,
+                    principal,
+                    IdempotencyKey::new(key.clone()).map_err(|_| "invalid retry key")?,
                 );
                 node.runtime()
-                    .block_on(node.admit_issue_durable_in(
-                        &request,
-                        &session,
-                        &mutation.command,
-                        Default::default(),
-                    ))
+                    .block_on(async {
+                        match &options.operation {
+                            Operation::Mutate(mutation) => {
+                                node.admit_issue_durable_in(
+                                    &request,
+                                    &session,
+                                    &mutation.command,
+                                    Default::default(),
+                                )
+                                .await
+                            }
+                            Operation::AppendComment(mutation) => {
+                                node.admit_issue_comment_durable_in(
+                                    &request,
+                                    &session,
+                                    &mutation.command,
+                                    Default::default(),
+                                )
+                                .await
+                            }
+                            Operation::Read(_) => unreachable!("mutation branch"),
+                        }
+                    })
                     .map(Completed::Mutation)
                     .map_err(|error| match service {
                         Ok(()) => error.to_string(),
@@ -159,6 +200,16 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             &terminal,
             cleanup.as_deref(),
         ),
+        (Operation::AppendComment(mutation), Ok(Completed::Mutation((tx, terminal)))) => {
+            finish_append_comment(
+                &mut std::io::stdout().lock(),
+                &options,
+                mutation,
+                tx,
+                &terminal,
+                cleanup.as_deref(),
+            )
+        }
         (Operation::Read(_), Ok(Completed::Read(receipt, exit))) => {
             if let Some(error) = cleanup {
                 return Err(format!("issue read shutdown failed: {error}"));
@@ -170,14 +221,16 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             let cleanup = cleanup.map_or_else(String::new, |value| {
                 format!("; shutdown also failed: {value}")
             });
-            if matches!(operation, Operation::Mutate(_)) {
-                Err(format!(
+            match operation {
+                Operation::Mutate(_) => Err(format!(
                     "no terminal issue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover using fg outcome with the same principal and key, or retry the identical command, version and content. Do not replace the key or refresh the expected version"
-                ))
-            } else {
-                Err(format!(
+                )),
+                Operation::AppendComment(_) => Err(format!(
+                    "no terminal issue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover using fg outcome with the same principal and key, or retry append-comment with the identical issue number and body. Do not replace the key or change the command"
+                )),
+                Operation::Read(_) => Err(format!(
                     "issue read failed: {error}{cleanup}; no complete result returned"
-                ))
+                )),
             }
         }
         _ => Err(format!(
@@ -198,7 +251,27 @@ fn finish_mutation(
     cleanup: Option<&str>,
 ) -> Result<u8, String> {
     let receipt = output::mutation(options, mutation, tx, terminal, cleanup);
-    if let Err(error) = write_terminal_receipt(output, &receipt, tx, terminal) {
+    finish_receipt(output, &receipt, tx, terminal, cleanup)
+}
+fn finish_append_comment(
+    output: &mut impl Write,
+    options: &Options,
+    mutation: &Mutation<IssueCommentIntent>,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> Result<u8, String> {
+    let receipt = output::append_comment(options, mutation, tx, terminal, cleanup);
+    finish_receipt(output, &receipt, tx, terminal, cleanup)
+}
+fn finish_receipt(
+    output: &mut impl Write,
+    receipt: &str,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> Result<u8, String> {
+    if let Err(error) = write_terminal_receipt(output, receipt, tx, terminal) {
         return Err(format!(
             "{error}{}",
             cleanup.map_or_else(String::new, |value| format!(

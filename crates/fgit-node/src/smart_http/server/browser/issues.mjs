@@ -82,10 +82,17 @@ export function issueAction(name, fields) {
 }
 export function mutationRequest(number, version, action, fields) {
   natural(number, 'issue number', 1);
-  natural(version, 'expected issue version', 0, Number.MAX_SAFE_INTEGER - 1);
-  if ((action === 'open') !== (version === 0)) fail('Only a new issue uses expected version zero.');
-  const checked = issueAction(action, fields);
-  const form = new URLSearchParams({ expected_version: String(version) });
+  const append = action === 'append-comment';
+  if (append) {
+    if (version !== null) fail('Appending a comment has no expected version.');
+  } else {
+    natural(version, 'expected issue version', 0, Number.MAX_SAFE_INTEGER - 1);
+    if ((action === 'open') !== (version === 0)) fail('Only a new issue uses expected version zero.');
+  }
+  // Append is an intent profile; canonical history still contains Comment
+  // events. Legacy exact-version comment receipts retain their original bytes.
+  const checked = issueAction(append ? 'comment' : action, fields);
+  const form = new URLSearchParams(append ? {} : { expected_version: String(version) });
   for (const name of ['title', 'body']) if (own(checked, name)) form.append(name, checked[name]);
   if (checked.labels) {
     for (const label of checked.labels) form.append('label', label);
