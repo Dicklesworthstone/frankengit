@@ -3238,13 +3238,25 @@ impl VerifiedFabricPackSource<'_> {
     /// payload is neither read nor verified (frankengit-8xyq): a caller that
     /// discloses or packs the bytes reads them through [`Self::read_object`].
     fn read_object_header(&self, id: &GitOid) -> Result<(ObjectType, usize), PackWriteError> {
+        self.read_object_header_within(id, self.maximum_object_bytes)
+    }
+
+    /// Metadata reads keep the fabric's independent stored-file and envelope
+    /// limits. A disclosure walk can retain an oversized blob's length without
+    /// allocating or reading its body; a selected body still uses the separate
+    /// payload bound enforced by `read_object`.
+    fn read_object_header_within(
+        &self,
+        id: &GitOid,
+        maximum_payload_bytes: usize,
+    ) -> Result<(ObjectType, usize), PackWriteError> {
         self.session_checkpoint()?;
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
         let read = self
             .fabric
-            .read_header_bounded(*id, self.maximum_object_bytes as u64);
+            .read_header_bounded(*id, maximum_payload_bytes as u64);
         self.session_checkpoint()?;
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
@@ -3253,7 +3265,7 @@ impl VerifiedFabricPackSource<'_> {
             StoreRefusal::StreamingBudgetExceeded { offered, .. } => {
                 PackWriteError::from(PackError::ObjectSizeLimit {
                     actual: usize::try_from(offered).unwrap_or(usize::MAX),
-                    limit: self.maximum_object_bytes,
+                    limit: maximum_payload_bytes,
                 })
             }
             _ => PackWriteError::MissingCanonicalObject(*id),
@@ -3261,7 +3273,7 @@ impl VerifiedFabricPackSource<'_> {
         let length =
             usize::try_from(header.payload_length).map_err(|_| PackError::ObjectSizeLimit {
                 actual: usize::MAX,
-                limit: self.maximum_object_bytes,
+                limit: maximum_payload_bytes,
             })?;
         Ok((native_object_type(header.kind)?, length))
     }

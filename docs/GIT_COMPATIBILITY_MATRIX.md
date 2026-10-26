@@ -384,6 +384,19 @@ naming the limit (diagnosable, not an unexplained early EOF); without
 sideband the connection ends as in upstream mid-service failure. `fg export`
 prints the typed refusal directly.
 
+The per-object body ceiling does not reject unselected blobs reached through
+verified tree or tag edges during the pre-advertisement metadata walk. Their
+bounded envelope reads still check identity, namespace, kind and exact file
+length; bodies selected for a pack still pass the original size and native
+identity checks before publication. Thus ref listing, up-to-date fetches and
+filters omitting a large blob remain usable without widening body limits.
+Untyped ref-root objects and commit/tree/tag parsing retain their limits.
+The authored `upload_visibility::tests::partial_clone::blob_limits` regressions
+exercise protocol v0/v1/v2 and both native hash formats using a 4,096-byte blob
+against a 4,095-byte serving cap, with an exact-bound successful clone,
+malformed-header refusal, deleted-ref isolation and unchanged canonical state.
+These are native loopback packet tests, not a stock-client compatibility claim.
+
 The **upload read ceiling** (frankengit-root-doctrine-x2mv.4.53) bounds the
 object-fabric reads behind one served pack under the Database class, anchored
 at the session's greeting.

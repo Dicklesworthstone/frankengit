@@ -78,7 +78,11 @@ retained-entry budget is additional to the delta window and is not a total RSS
 limit; the measurements above predate the cache.
 The pre-advertisement walk reads blob headers, not blob bodies
 (frankengit-8xyq), so a repository larger than the envelope is still
-advertised and incrementally fetchable. A pack over the envelope is refused
+advertised and incrementally fetchable. A blob reached through a verified tree
+or tag can also exceed the per-object serving limit without blocking ref
+listing, up-to-date fetches, or filters that omit it. Requesting that blob's
+body still refuses before any pack bytes are emitted; metadata parsing and
+storage-envelope limits remain enforced. A pack over the total envelope is refused
 on the side band with a message naming the limit and that flag, which git
 prints as `remote: pack needs ...`. A repository whose commit, tree and tag bytes
 alone exceed it is refused before the advertisement with one `ERR` packet
@@ -228,8 +232,10 @@ and `frankengit-p9b5` acceptance work are not implemented by this slice.
 - Merge preparation reads only the history above the merge base (rffg) and
   merge publication validates only what a merge adds above the selected
   closure (lh8z), so 100,000-commit and 100,000-file repositories prepare and
-  publish. Merge-base ordering uses committer dates as hints: equal or skewed
-  dates can exhaust the 4,096-commit bound and refuse, never select a wrong
+  publish. Merge-base discovery retires already-read ancestors as soon as a
+  common base dominates them, so equal or missing dates do not force a recent
+  unique-base query through the whole history. Skewed dates or multiple best
+  bases can still exhaust the 4,096-commit bound and refuse, never select a wrong
   base. Served packs refuse any single object over the 32 MiB per-object
   ceiling.
 - Forge-position and outbox state have 16,384-entry bounds; the node writer

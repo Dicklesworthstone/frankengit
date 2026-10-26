@@ -236,10 +236,13 @@ fn disclosure_walk_checks_edge_blobs_by_header_and_reads_root_blobs_whole() {
             max_object_bytes: 4095,
             ..PackLimits::default()
         };
-        // An over-limit blob refuses from its header, without its body.
-        expect_code(
-            project_visible_closure(&source, &source.admitted(), [commit], &bounded),
-            RefusalCode::ResourceBudgetExceeded,
+        // A typed blob edge needs only bounded envelope metadata. Its body
+        // limit applies only if the eventual request selects that blob.
+        let visible =
+            project_visible_closure(&source, &source.admitted(), [commit], &bounded).unwrap();
+        assert_eq!(
+            visible.objects(),
+            &BTreeSet::from([large, small, tree, commit])
         );
         assert!(source.header_reads.borrow().contains(&large));
         assert!(!source.reads.borrow().contains(&large));
@@ -252,6 +255,13 @@ fn disclosure_walk_checks_edge_blobs_by_header_and_reads_root_blobs_whole() {
         assert_eq!(
             visible.objects(),
             &BTreeSet::from([large, small, tree, commit])
+        );
+
+        // An untyped root still needs a verified body to establish its kind.
+        // This does not raise metadata or root-object parsing limits.
+        expect_code(
+            project_visible_closure(&source, &source.admitted(), [large], &bounded),
+            RefusalCode::ResourceBudgetExceeded,
         );
 
         // A blob-mode entry naming a tree is caught by the header's kind.
@@ -352,16 +362,20 @@ fn disclosure_walk_bounds_unique_nodes_frontier_and_aggregate_bytes_inclusively(
 #[test]
 fn disclosure_walk_preserves_cancellation_without_returning_partial_permission() {
     let mut source = MemorySource::new(GitHashAlgorithm::Sha1);
-    let blob = source.put(ObjectType::Blob, b"body".to_vec());
+    let blob = source.put(ObjectType::Blob, vec![b'x'; 4096]);
     let tree = source.tree(&[(b"100644", b"file", blob)]);
     let admitted = source.admitted();
-    project_visible_closure(&source, &admitted, [tree], &PackLimits::default()).unwrap();
+    let limits = PackLimits {
+        max_object_bytes: 4095,
+        ..PackLimits::default()
+    };
+    project_visible_closure(&source, &admitted, [tree], &limits).unwrap();
     let polls = source.polls.get();
     for stop in 1..=polls {
         source.polls.set(0);
         source.stop_at.set(stop);
         assert!(
-            matches!(project_visible_closure(&source, &admitted, [tree], &PackLimits::default()),
+            matches!(project_visible_closure(&source, &admitted, [tree], &limits),
             Err(NodePackMaterializationRefusal::Pack(error)) if matches!(*error, PackWriteError::Pack(PackError::DeadlineExceeded)))
         );
     }
@@ -437,6 +451,10 @@ struct Fixture {
     visible: BTreeSet<GitOid>,
 }
 fn fixture(format: GitHashAlgorithm) -> Fixture {
+    fixture_with_public_body(format, b"current public content".to_vec())
+}
+
+fn fixture_with_public_body(format: GitHashAlgorithm, public_body: Vec<u8>) -> Fixture {
     let scratch = Scratch::new();
     let config = NodeConfig::new(
         scratch.0.clone(),
@@ -459,7 +477,7 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
         tree_bytes(&[(b"100644", b"private", private_blob)]),
     );
     let private = put(ObjectType::Commit, commit_bytes(private_tree, &[ancestor]));
-    let public_blob = put(ObjectType::Blob, b"current public content".to_vec());
+    let public_blob = put(ObjectType::Blob, public_body);
     let public_tree = put(
         ObjectType::Tree,
         tree_bytes(&[

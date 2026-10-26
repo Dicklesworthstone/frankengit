@@ -198,7 +198,11 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
         &self,
         id: GitOid,
     ) -> Result<(ObjectType, usize), NodePackMaterializationRefusal> {
-        self.read_object_header(&id)
+        // The fabric bounds and validates the envelope and stored file. This
+        // header-only read allocates no payload. The selected-pack payload
+        // ceiling must not reject blobs that a filtered or up-to-date request
+        // will never read; every selected body still passes `read_object`.
+        self.read_object_header_within(&id, usize::MAX)
             .map_err(NodePackMaterializationRefusal::from)
     }
 }
@@ -290,9 +294,10 @@ fn project_visible_graph(
             let header = source.load_header(id);
             source.checkpoint()?;
             let (kind, size) = header?;
-            if size > limits.max_object_bytes || size > parse_limits.max_object_bytes {
-                return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
-            }
+            // A typed blob has no outgoing edges. Retain its exact size for
+            // filter selection without applying a body-allocation limit to
+            // metadata. The pack source checks that limit before any selected
+            // body allocation, and verifies the body before emitting bytes.
             require_kind(kind, ObjectType::Blob)?;
             known.insert(id, kind);
             objects.insert(

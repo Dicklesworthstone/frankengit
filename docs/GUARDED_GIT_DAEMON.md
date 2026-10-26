@@ -87,7 +87,15 @@ a tree or tag (frankengit-8xyq). A blob body is read and verified only when a
 pack selects it. The envelope bounds the commit, tree and tag bytes of this
 walk. So `ls-remote`, and a fetch that needs only a small pack, do not depend
 on blob bytes: a repository larger than the envelope is still advertised and
-incrementally fetchable.
+incrementally fetchable. The per-object payload ceiling also applies only
+when a pack selects a blob reached through one of those typed edges. An
+oversized blob therefore does not prevent `ls-remote`, an up-to-date fetch,
+`blob:none`, or a `blob:limit` filter that omits it. A full clone or an explicit
+lazy want for that same blob still receives the typed object-size refusal
+before any pack bytes are emitted. Header reads remain independently bounded
+by the fabric's stored-file and envelope profiles and verify namespace, OID,
+kind and exact stored length. Commit, tree, tag and untyped ref-root bodies
+retain their existing parsing limits. Filtering changes no retention root.
 
 A request whose pack exceeds the envelope is refused after the advertisement,
 on the side band. git prints it and then stops, for example under
