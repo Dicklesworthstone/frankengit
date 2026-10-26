@@ -1,11 +1,10 @@
 //! Hold one opened archive across all passes. Path replacement never switches
 //! the input, and in-place changes are detected by rechecking the trusted pin.
-//! Only bounded metadata survives a pass; records borrow one reusable buffer.
+//! Only bounded metadata survives a pass; blob bodies pass through bounded readers.
 use super::super::regular;
-use super::archive::{
-    Record,
-    stream::{Seal, StreamDecoder, StreamHeader, TransferLimits},
-};
+#[cfg(test)]
+use super::archive::Record;
+use super::archive::stream::{RecordHeader, Seal, StreamDecoder, StreamHeader, TransferLimits};
 use super::profile::Deadline;
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use std::fs::File;
@@ -53,7 +52,16 @@ impl<R: Read + Seek> PinnedArchive<R> {
         input.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let mut live = || deadline.check();
         let mut decoded = StreamDecoder::new(&mut input, limits, &mut live)?;
-        while decoded.record(&mut live)?.is_some() {}
+        while decoded.visit_record(&mut live, |_, body| {
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                deadline.check()?;
+                if body.read(&mut buffer).map_err(|e| e.to_string())? == 0 {
+                    break;
+                }
+            }
+            deadline.check()
+        })? {}
         let (header, seal) = decoded.finish(expected, &mut live)?;
         if seal != initial {
             return Err("repository backup changed between checksum and validation".into());
@@ -73,6 +81,31 @@ impl<R: Read + Seek> PinnedArchive<R> {
     }
     /// The visitor may compute or stage, never publish: this pass is tentative
     /// until EOF and the whole-file pin validate, even after an earlier pass.
+    /// Record readers authenticate their native and strong commitments at EOF;
+    /// callers must consume them completely before this pass can succeed.
+    pub fn scan_stream(
+        &mut self,
+        deadline: Deadline,
+        mut visit: impl FnMut(RecordHeader, &mut dyn Read) -> Result<(), String>,
+    ) -> Result<(), String> {
+        deadline.check()?;
+        self.input
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| format!("backup input seek failed: {e}"))?;
+        let mut live = || deadline.check();
+        let mut decoded = StreamDecoder::new(&mut self.input, self.limits, &mut live)?;
+        if decoded.header() != &self.header {
+            return Err("repository backup metadata changed between passes".into());
+        }
+        while decoded.visit_record(&mut live, |header, body| visit(header, body))? {}
+        let (_, seal) = decoded.finish(self.seal.digest, &mut live)?;
+        if seal != self.seal {
+            return Err("repository backup length changed between passes".into());
+        }
+        Ok(())
+    }
+    /// Bounded compatibility oracle used by the original buffered tests.
+    #[cfg(test)]
     pub fn scan(
         &mut self,
         deadline: Deadline,
@@ -137,3 +170,7 @@ fn check_checksum(
 #[cfg(test)]
 #[path = "input_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "input_stream_tests.rs"]
+mod stream_tests;

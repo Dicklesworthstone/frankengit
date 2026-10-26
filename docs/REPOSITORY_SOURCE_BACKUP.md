@@ -25,11 +25,19 @@ cargo run --locked -p fgit-node --bin fg-repository-backup -- \
   --destination-instance "$UNUSED_DESTINATION_INSTANCE"
 ```
 
-Both commands accept `--max-archive-bytes` and `--timeout-secs`. For an explicitly
-selected 2 GiB archive budget and a 30-minute cooperative operation deadline,
-append `--max-archive-bytes 2147483648 --timeout-secs 1800` to each command. Limits
-are operator input, never automatically enlarged to fit an archive. Integers
-must be positive canonical decimal; duplicate or unsupported flags refuse.
+The same operations are available as `fg backup export` and `fg backup restore`.
+Export, verification and restore accept `--max-archive-bytes`, `--max-blob-bytes`
+and `--timeout-secs`. For a 2 GiB archive containing blobs up to 512 MiB, with a
+30-minute cooperative operation deadline, append the following to each command:
+
+```sh
+--max-archive-bytes 2147483648 --max-blob-bytes 536870912 --timeout-secs 1800
+```
+
+Limits are explicit operator input and are never enlarged automatically to fit
+an archive. Integers must be positive canonical decimal; duplicate or
+unsupported flags refuse. Omitting `--max-blob-bytes` retains the 32 MiB per-blob
+default, independently of the archive budget.
 
 Export's native format defaults to SHA-1; SHA-256 is explicit. A mismatch with
 the authenticated repository configuration refuses. Restore takes repository,
@@ -63,12 +71,16 @@ safety, all signed capsule requirements, or `git fsck --strict` parity.
 
 The complete uncompressed transport budget defaults to **1 GiB**, with explicit
 values from 1 byte through 1 TiB. This replaces the former 64 MiB whole-archive
-buffer ceiling. Each object remains bounded at 32 MiB, the inventory at 100,000
-objects, refs at 100,000, and inspected graph edges at 1,000,000. Authority
-metadata keeps its separate 64 MiB encoded-field bound; portable-store row/body
-and canonical-codec limits additionally apply and can refuse sooner. Selecting
-a larger archive does not enlarge these independent limits. An export must fit
-the same decoder envelope that restore uses.
+buffer ceiling. Blob payloads have a separate `--max-blob-bytes` ceiling:
+32 MiB by default, with explicit values from 1 byte through 1 TiB. Commit, tree
+and tag bodies retain their 32 MiB limit even when a larger blob is allowed.
+The inventory remains bounded at 100,000 objects, refs at 100,000, and inspected
+graph edges at 1,000,000. Authority metadata keeps its separate 64 MiB
+encoded-field bound; portable-store row/body and canonical-codec limits
+additionally apply and can refuse sooner. Both blob and total archive limits
+must hold, so a payload exactly as large as the archive ceiling cannot fit once
+framing and authority metadata are included. An export must fit the same
+selected decoder profile that verification and restore use.
 
 The cooperative deadline defaults to 300 seconds, with explicit values from
 1 through 86,400 seconds. All verification passes share one original deadline;
@@ -77,12 +89,15 @@ forcibly interrupted, and inherited runtime budgets may refuse earlier. Cleanup
 still runs when the operation refuses. Partial results are refused, never
 silently truncated or downgraded to a byte-only audit.
 
-Payload processing is streaming. The decoder retains one reusable object buffer
-and bounded authority metadata, not an archive-sized payload buffer or inventory
-of payload slices. Graph verification still needs its separately bounded object
-and edge tables; node placement/readback and hashing may use additional bounded
-per-object buffers. This is not a claim that total process memory is 32 MiB or
-that metadata/allocator overhead is measured by the archive byte counter.
+Blob payloads stream through bounded chunks during export, verification and
+restore, including immutable fabric placement and readback. Raising the blob
+ceiling does not allocate a blob-sized buffer. Native object identity and the
+original independent payload commitment are checked against the complete bytes;
+record visitors cannot publish authority before the entire archive checksum and
+exact EOF also validate. Commit, tree and tag parsing retains one bounded
+metadata-object buffer. Authority metadata, graph object/edge tables, storage
+and runtime state have their own bounds. The archive byte counter is not a
+measurement or limit of total process memory.
 
 ## Snapshot and publication rules
 
@@ -114,7 +129,8 @@ Restore atomically reserves a new private root, imports authority into
 must equal the canonical selected set exactly; missing **and extra** records
 refuse. A complete graph-and-checksum pass precedes all object placement. A
 separate, rehashed pass places objects only inside the selected set and reads
-each back byte-for-byte. Visitor results remain tentative until the pass's
+each back against the archive's native identity, kind, length and original
+independent payload commitment. Visitor results remain tentative until the pass's
 checksum and EOF validate; neither tentative metadata nor an object placement
 publishes final authority. The quarantined node is closed, reopened, verified
 again and closed again.
@@ -173,7 +189,9 @@ remain test-only compatibility oracles, and tests compare exact emitted bytes
 in both hash domains. Existing small FGSRC001 archives are readable. Older
 binaries still refuse archives exceeding their former 64 MiB envelope; the
 unchanged format does not imply that every historical implementation supports
-the newer resource profile.
+the newer resource profile. The blob ceiling changes no wire bytes: newer
+binaries read large blob records only when the operator explicitly selects a
+sufficient `--max-blob-bytes` value. Commit/tree/tag limits remain separate.
 
 The transport is intentionally not a `CanonicalBody`. Host file locations and
 these transport bytes never replace the existing canonical authority, object,

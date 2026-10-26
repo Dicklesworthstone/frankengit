@@ -206,9 +206,14 @@ checksum-pinned command behavior and receipt fields.
 The native transfer defaults remain 1 GiB and 300 seconds. The existing
 `--max-archive-bytes` permits 1 through 1099511627776 bytes; the native leaf
 `--timeout-secs` permits 1 through 86400 seconds. These native limits are distinct
-from the JavaScript issuer/wrapper's 3600-second ceiling. Authority metadata
-retains its independent 64 MiB bound, and native object/graph limits remain in
-force. Control input is bounded separately to 16 KiB per approval envelope,
+from the JavaScript issuer/wrapper's 3600-second ceiling. The native commands
+also accept `--max-blob-bytes` from 1 through 1099511627776 bytes, defaulting to
+32 MiB. This independently permits larger blob payloads through chunked native
+verification and restore; commit, tree and tag bodies retain their 32 MiB
+limit. The total archive ceiling still applies. Authority metadata retains its
+independent 64 MiB bound, and the existing object-count/reference/graph limits
+remain in force. Selecting larger budgets changes neither the signed archive
+identity nor its original payload commitments. Control input is bounded separately to 16 KiB per approval envelope,
 4096 bytes per decoded signed payload and 8192 bytes per trusted public-key
 file. Reading and verification use one operation deadline; no subsequent
 approval check renews it.

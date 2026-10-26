@@ -41,11 +41,19 @@ intent is created, and no routing or outbox effects are activated.
 
 ## Bounds, cleanup and outcome
 
-All passes share one cooperative deadline. Archive, authority metadata, object,
-reference and edge limits remain the existing recovery profile's independent
-bounds. Payload memory stays bounded by the streaming reader's one-object buffer;
-Git payloads are not copied into scratch storage. Metadata backend/runtime limits
-can refuse earlier than the archive-byte ceiling.
+All passes share one cooperative deadline. The archive ceiling defaults to
+1 GiB and `--max-archive-bytes` permits at most 1 TiB. Blob payloads default to
+32 MiB each; `--max-blob-bytes` explicitly selects a value from 1 byte through
+1 TiB. A larger archive ceiling does not enlarge the blob ceiling. Commit, tree
+and tag bodies retain their separate 32 MiB limit, as do the existing authority
+metadata, inventory, reference and edge bounds.
+
+Blob payloads are hashed and audited in bounded chunks without a blob-sized
+buffer. Metadata object parsing retains a bounded reusable buffer. Git payloads
+are not copied into scratch storage, including blobs larger than 32 MiB.
+Metadata backend/runtime limits can refuse earlier than the archive-byte
+ceiling. Use the same explicit blob profile for later restore; preflight does
+not change restore defaults.
 
 Success requires explicit store/node closure and removal of the scratch tree.
 The JSON receipt is then emitted and flushed. Exit 0 means complete preflight and

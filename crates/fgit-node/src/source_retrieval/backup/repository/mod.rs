@@ -2,7 +2,9 @@
 //! the same head. Payload bytes stream through a private, unpublished file.
 mod approval;
 mod archive;
+mod blob_io;
 mod input;
+mod payload;
 mod profile;
 mod restore;
 
@@ -28,6 +30,7 @@ pub const USAGE: &str =
     "usage: fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
+         [--max-blob-bytes <1..1099511627776>]
 
 Authority metadata plus every authority-selected Git object, including admitted
 history unreachable from current refs. Source head, complete local graph, native
@@ -40,11 +43,12 @@ or a full service backup. External artifacts, private keys, runner workspaces,
 search indexes and routing are excluded. Stable trusted parent paths required.
 Default archive budget: 1 GiB; default operation deadline: 300 seconds.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
-Independent bounds: 100000 objects, 32 MiB per object, 100000 refs and
+Independent bounds: 100000 objects, 32 MiB per metadata object, 100000 refs and
 1000000 inspected edges. Authority metadata retains its separate 64 MiB bound.
 Codec/runtime limits may refuse earlier. The deadline covers all passes, is
 cooperative, and cannot interrupt a blocking filesystem call.
-Export streams payloads through one object buffer and verifies the staged file.
+Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
+Export streams blobs in bounded chunks and independently verifies the staged file.
 Export never overwrites an existing file. Save its SHA-256 independently.";
 
 #[derive(Debug)]
@@ -57,7 +61,7 @@ struct Options {
     profile: Profile,
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(6..=12).contains(&args.len())
+    if !(6..=14).contains(&args.len())
         || args[0] != "export"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -83,7 +87,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     _ => return Err("object format must be sha1 or sha256".into()),
                 });
             }
-            "--max-archive-bytes" | "--timeout-secs" => {
+            "--max-archive-bytes" | "--max-blob-bytes" | "--timeout-secs" => {
                 let value = args
                     .get(cursor)
                     .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -175,6 +179,10 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
     let result = with_node(
         NodeConfig::new(options.root.clone(), options.tenant, options.repository)
             .with_object_format(options.format)
+            .with_selected_pack_blob_limit(
+                usize::try_from(options.profile.transfer.max_blob_bytes)
+                    .map_err(|_| "backup blob limit is not representable on this host")?,
+            )
             .with_runtime_budgets(options.profile.node_budgets()?),
         |node| {
             let request = node.request_context();
@@ -206,26 +214,51 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
             )?;
             for &oid in objects {
                 io_live()?;
-                let object = node
-                    .read_git_object(oid)
-                    .map_err(|error| format!("backup object {oid}: {error}"))?;
-                io_live()?;
-                let kind = match object.envelope().object_kind() {
-                    FabricKind::Commit => GitObjectKind::Commit,
-                    FabricKind::Tree => GitObjectKind::Tree,
-                    FabricKind::Blob => GitObjectKind::Blob,
-                    FabricKind::Tag => GitObjectKind::Tag,
-                    FabricKind::Internal => {
-                        return Err("non-Git object in selected source closure".into());
+                // Header reads select the bounded path only; they establish no
+                // payload authenticity. Both paths verify the actual body.
+                let header = node.git_object_header(oid).map_err(|e| e.to_string())?;
+                if header.kind == FabricKind::Blob {
+                    let mut body = blob_io::BlobReader::open(
+                        node,
+                        oid,
+                        options.profile.transfer.max_blob_bytes,
+                        deadline,
+                        &request,
+                    )?;
+                    let length = body.length();
+                    let commitment = body.commitment();
+                    output.object_stream(
+                        oid,
+                        GitObjectKind::Blob,
+                        length,
+                        &commitment,
+                        &mut body,
+                        &mut io_live,
+                    )?;
+                } else {
+                    if header.payload_length > MAX_OBJECT_BYTES as u64 {
+                        return Err("repository backup metadata object-byte limit".into());
                     }
-                };
-                output.object(
-                    oid,
-                    kind,
-                    object.payload(),
-                    &object.envelope().payload_commitment(),
-                    &mut io_live,
-                )?;
+                    let object = node
+                        .read_git_object(oid)
+                        .map_err(|error| format!("backup object {oid}: {error}"))?;
+                    io_live()?;
+                    let kind = match object.envelope().object_kind() {
+                        FabricKind::Commit => GitObjectKind::Commit,
+                        FabricKind::Tree => GitObjectKind::Tree,
+                        FabricKind::Tag => GitObjectKind::Tag,
+                        FabricKind::Blob | FabricKind::Internal => {
+                            return Err("selected backup object changed its Git kind".into());
+                        }
+                    };
+                    output.object(
+                        oid,
+                        kind,
+                        object.payload(),
+                        &object.envelope().payload_commitment(),
+                        &mut io_live,
+                    )?;
+                }
             }
             let written = output.finish(&mut io_live)?;
             file.seek(SeekFrom::Start(0))
@@ -248,11 +281,16 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
                 &mut checkpoint,
             )
             .map_err(|error| error.to_string())?;
-            while let Some(record) = decoded.record(&mut io_live)? {
-                graph
-                    .observe(record.oid, record.kind, record.payload, &mut checkpoint)
-                    .map_err(|error| error.to_string())?;
-            }
+            while decoded.visit_record(&mut io_live, |header, body| {
+                payload::observe(
+                    &mut graph,
+                    header,
+                    body,
+                    options.profile.transfer.max_blob_bytes,
+                    &mut checkpoint,
+                )?;
+                Ok(())
+            })? {}
             let (header, verified) = decoded.finish(written.digest, &mut io_live)?;
             if verified != written {
                 return Err("repository backup staged length changed".into());

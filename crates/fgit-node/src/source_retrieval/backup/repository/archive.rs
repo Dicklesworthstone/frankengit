@@ -7,8 +7,8 @@ use fgit_crypto::GitObjectKind;
 #[cfg(test)]
 use fgit_crypto::{git_object_id, git_payload_commitment};
 #[cfg(test)]
-use fgit_types::CANONICAL_CODEC_VERSION;
-use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
+use fgit_types::{CANONICAL_CODEC_VERSION, GitOid};
+use fgit_types::{GitHashAlgorithm, RepositoryId, RepositoryIncarnationId, TenantId};
 
 #[cfg(test)]
 pub(super) const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
@@ -23,6 +23,7 @@ pub(super) struct Identity {
     pub incarnation: RepositoryIncarnationId,
     pub format: GitHashAlgorithm,
 }
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct Record<'a> {
     pub oid: GitOid,

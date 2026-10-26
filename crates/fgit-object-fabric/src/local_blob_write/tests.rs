@@ -172,7 +172,7 @@ impl Read for NeverRead {
 fn namespace_kind_payload_storage_and_quota_limits_refuse_before_reading() {
     let fixture = Fixture::new();
     let original = envelope(GitHashAlgorithm::Sha1, b"blob");
-    for case in 0..5 {
+    for case in 0..7 {
         let mut claimed = original.clone();
         let mut maximum = 4;
         match case {
@@ -181,6 +181,8 @@ fn namespace_kind_payload_storage_and_quota_limits_refuse_before_reading() {
             2 => maximum = 3,
             3 => maximum = 0,
             4 => claimed.declared_length = 128 * 1024 * 1024,
+            5 => claimed.codec_namespace = vec![7; 1024],
+            6 => claimed.codec_namespace = vec![7; 257],
             _ => unreachable!(),
         }
         if case == 4 {

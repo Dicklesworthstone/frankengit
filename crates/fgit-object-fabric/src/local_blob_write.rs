@@ -48,6 +48,11 @@ impl LocalFilesystemFabric {
                     maximum: maximum_payload_bytes,
                 });
             }
+            // Inspect the encoded length before allocating: the envelope may
+            // have been constructed under a much larger foreign profile.
+            if envelope.encoded_len()? > self.envelope_limits.max_envelope_bytes {
+                return Err(StoreRefusal::Fabric(crate::FabricError::EnvelopeTooLarge));
+            }
             let encoded = envelope.encode()?;
             // Envelopes can be constructed under another caller's limits.
             // Reapply this backend's envelope profile before any payload I/O.

@@ -1,7 +1,7 @@
 //! Bounded streaming I/O for the existing FGSRC001 transport. The wire bytes do
-//! not change. A record is borrowed from one reusable object buffer; no archive
-//! payload or object inventory is accumulated. Blob visitors consume bounded
-//! authenticated record streams. Only finish authenticates the complete archive.
+//! not change. Record visitors consume bounded authenticated streams without
+//! retaining their bodies. The buffered interface remains only as a test oracle.
+//! Only finish authenticates the complete archive.
 #[path = "stream/object.rs"]
 mod object;
 pub use object::RecordHeader;
@@ -17,7 +17,9 @@ use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId
 #[cfg(test)]
 use fgit_types::CANONICAL_CODEC_VERSION;
 
-use super::{Identity, MAGIC, MAX_OBJECT_BYTES, MAX_OBJECTS, Record, kind, kind_byte};
+#[cfg(test)]
+use super::Record;
+use super::{Identity, MAGIC, MAX_OBJECT_BYTES, MAX_OBJECTS, kind, kind_byte};
 
 const CHUNK_BYTES: usize = 64 * 1024;
 // Authority portability has its own codec and row bounds. A larger source
@@ -379,6 +381,7 @@ pub struct StreamDecoder<R> {
     header: StreamHeader,
     remaining: usize,
     previous: Option<GitOid>,
+    #[cfg(test)]
     payload: Vec<u8>,
     failed: bool,
 }
@@ -439,6 +442,7 @@ impl<R: Read> StreamDecoder<R> {
             },
             remaining: objects,
             previous: None,
+            #[cfg(test)]
             payload: Vec::new(),
             failed: false,
         })
@@ -449,6 +453,7 @@ impl<R: Read> StreamDecoder<R> {
     /// At most one 32 MiB payload is retained; the borrow prevents a caller from
     /// keeping it alive while asking this decoder for another record. Larger
     /// blobs require visit_record and never widen this buffered interface.
+    #[cfg(test)]
     pub fn record(
         &mut self,
         live: &mut impl FnMut() -> Result<(), String>,

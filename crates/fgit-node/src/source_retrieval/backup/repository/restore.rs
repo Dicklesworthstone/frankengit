@@ -6,7 +6,7 @@ mod resume;
 pub(super) mod verify;
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::{NodeConfig, OneNode};
@@ -20,15 +20,16 @@ use super::super::{
     emit, generation, hex, parent, quote, regular, require_absent, sync_directory, with_store,
 };
 use super::approval::{ApprovalFlags, ApprovalOptions, VerifiedApproval};
-use super::archive::{Record, stream::StreamHeader};
+use super::archive::stream::{RecordHeader, StreamHeader};
 use super::input::PinnedArchive;
 use super::profile::{Deadline, Profile, ProfileFlags};
-use super::{limits, with_node};
+use super::{blob_io::BlobReader, limits, payload, with_node};
 
 pub(super) const USAGE: &str =
     "usage: fg backup restore <backup-file> <storage-root> --trusted-local
          --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer>
          [--resume] [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
+         [--max-blob-bytes <1..1099511627776>]
          [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
           --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
           --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
@@ -51,6 +52,8 @@ Checksum and streamed identity checks precede directory creation. All later
 passes rehash the same open input against that pin; payload memory does not grow
 with archive size. Default archive budget: 1 GiB; authority metadata: 64 MiB.
 The 300 second default deadline is shared across ALL passes of one invocation.
+Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
+Commit, tree and tag bodies keep their independent 32 MiB metadata limit.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 An explicit resume gets a new bounded attempt, not an unbounded automatic retry.
 
@@ -99,7 +102,7 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
     Ok(result)
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=27).contains(&args.len())
+    if !(8..=29).contains(&args.len())
         || args[0] != "restore"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -142,7 +145,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or("destination instance must fit a positive SQL integer")?;
                 instance = Some(StoreInstanceId::from_raw(number));
             }
-            "--max-archive-bytes" | "--timeout-secs" => profile.set(flag, value)?,
+            "--max-archive-bytes" | "--max-blob-bytes" | "--timeout-secs" => {
+                profile.set(flag, value)?
+            }
             _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
             _ => return Err(format!("unknown or duplicate restore option: {flag}")),
         }
@@ -181,26 +186,56 @@ fn config(root: &Path, archive: &StreamHeader, profile: Profile) -> Result<NodeC
         NodeConfig::new(root.to_path_buf(), id.tenant, id.repository)
             .with_object_format(id.format)
             .with_expected_repository_incarnation(id.incarnation)
+            .with_selected_pack_blob_limit(
+                usize::try_from(profile.transfer.max_blob_bytes)
+                    .map_err(|_| "backup blob limit is not representable on this host")?,
+            )
             .with_runtime_budgets(profile.node_budgets()?),
     )
 }
-fn verify_stored(node: &OneNode, record: &Record<'_>) -> Result<(), String> {
-    let stored = node
-        .read_git_object(record.oid)
-        .map_err(|e| e.to_string())?;
-    let kind = match record.kind {
-        GitObjectKind::Commit => FabricKind::Commit,
-        GitObjectKind::Tree => FabricKind::Tree,
-        GitObjectKind::Blob => FabricKind::Blob,
-        GitObjectKind::Tag => FabricKind::Tag,
-    };
-    if stored.envelope().object_kind() != kind || stored.payload() != record.payload {
-        return Err(format!(
-            "restored object did not read back byte-identically: {}",
-            record.oid
-        ));
+fn verify_stored(
+    node: &OneNode,
+    record: RecordHeader,
+    metadata: Option<&[u8]>,
+    maximum_blob: u64,
+    deadline: Deadline,
+    request: &crate::NodeRequestContext,
+) -> Result<(), String> {
+    if record.kind == GitObjectKind::Blob {
+        let mut body = BlobReader::open(node, record.oid, maximum_blob, deadline, request)?;
+        if body.length() != record.length || body.commitment() != record.commitment {
+            return Err(format!("restored blob envelope changed: {}", record.oid));
+        }
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            match body.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    } else {
+        let stored = node
+            .read_git_object(record.oid)
+            .map_err(|e| e.to_string())?;
+        let kind = match record.kind {
+            GitObjectKind::Commit => FabricKind::Commit,
+            GitObjectKind::Tree => FabricKind::Tree,
+            GitObjectKind::Blob => FabricKind::Blob,
+            GitObjectKind::Tag => FabricKind::Tag,
+        };
+        if stored.envelope().object_kind() != kind
+            || stored.envelope().payload_commitment() != record.commitment
+            || metadata.is_none_or(|body| stored.payload() != body)
+        {
+            return Err(format!(
+                "restored object did not read back byte-identically: {}",
+                record.oid
+            ));
+        }
     }
-    Ok(())
+    deadline.in_request(request)
 }
 /// All three operations use the same authority selection and graph verifier.
 /// Preflight neither places payloads nor requires an existing restored fabric.
@@ -242,13 +277,24 @@ fn graph_from_archive(
     .map_err(|e| e.to_string())?;
     // Graph/selection validation and a complete checksum pass precede ALL object
     // placement. The graph checks exact sorted IDs, not only inventory counts.
-    archive.scan(deadline, |record| {
+    archive.scan_stream(deadline, |record, body| {
         deadline.in_request(&request)?;
-        graph
-            .observe(record.oid, record.kind, record.payload, &mut checkpoint)
-            .map_err(|e| e.to_string())?;
+        let metadata = payload::observe(
+            &mut graph,
+            record,
+            body,
+            profile.transfer.max_blob_bytes,
+            &mut checkpoint,
+        )?;
         if mode == ArchiveGraphMode::ReadBack {
-            verify_stored(node, &record)?;
+            verify_stored(
+                node,
+                record,
+                metadata.as_deref(),
+                profile.transfer.max_blob_bytes,
+                deadline,
+                &request,
+            )?;
         }
         deadline.in_request(&request)
     })?;
@@ -256,24 +302,51 @@ fn graph_from_archive(
         .finish(&selected.snapshot().refs, &mut checkpoint)
         .map_err(|e| e.to_string())?;
     if mode == ArchiveGraphMode::Install {
-        archive.scan(deadline, |record| {
+        archive.scan_stream(deadline, |record, body| {
             deadline.in_request(&request)?;
             // Even a changed file cannot cause an out-of-selection placement
             // before this pass's final checksum notices the mutation.
             if !objects.contains(&record.oid) {
                 return Err("archive inventory changed before placement".into());
             }
-            let mut body = Vec::new();
-            body.try_reserve_exact(record.payload.len())
-                .map_err(|_| "restore object allocation refused")?;
-            body.extend_from_slice(record.payload);
-            let stored = node
-                .put_git_object(record.kind, body)
-                .map_err(|e| e.to_string())?;
-            if stored.identity() != record.oid {
-                return Err("restored object changed identity".into());
-            }
-            verify_stored(node, &record)?;
+            let metadata = if record.kind == GitObjectKind::Blob {
+                let stored = node
+                    .put_git_blob_stream(
+                        record.oid,
+                        record.length,
+                        record.commitment,
+                        profile.transfer.max_blob_bytes,
+                        body,
+                        &mut checkpoint,
+                    )
+                    .map_err(|e| e.to_string())?;
+                if stored.identity() != record.oid {
+                    return Err("restored blob changed identity".into());
+                }
+                None
+            } else {
+                let bytes = payload::metadata(record, body)?;
+                let mut placed = Vec::new();
+                placed
+                    .try_reserve_exact(bytes.len())
+                    .map_err(|_| "restore metadata allocation refused")?;
+                placed.extend_from_slice(&bytes);
+                let stored = node
+                    .put_git_object(record.kind, placed)
+                    .map_err(|e| e.to_string())?;
+                if stored.identity() != record.oid {
+                    return Err("restored object changed identity".into());
+                }
+                Some(bytes)
+            };
+            verify_stored(
+                node,
+                record,
+                metadata.as_deref(),
+                profile.transfer.max_blob_bytes,
+                deadline,
+                &request,
+            )?;
             deadline.in_request(&request)
         })?;
     }
@@ -677,3 +750,7 @@ mod resume_engine_tests;
 #[cfg(test)]
 #[path = "restore_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "large_blob_tests.rs"]
+mod large_blob_tests;
