@@ -6,6 +6,12 @@ use crate::{
     Deadline, EntryKind, ObjectId, PackError, PackLimits, checkpoint, object_type_from_base_entry,
 };
 
+mod stream;
+pub use stream::{
+    DeltaStreamIo, STREAM_DELTA_CHUNK_BYTES, StreamDeltaError,
+    apply_delta_streamed_to_charged_base_with_budget, delta_declared_sizes,
+};
+
 /// A base reference carried by a delta entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaBase {
@@ -1200,8 +1206,10 @@ fn read_delta_size(
     let mut shift = 0_u32;
     loop {
         let byte = read_byte(input, cursor, context, deadline)?;
-        let component = usize::from(byte & 0x7f)
+        let payload = usize::from(byte & 0x7f);
+        let component = payload
             .checked_shl(shift)
+            .filter(|component| (*component >> shift) == payload)
             .ok_or(PackError::InvalidVarint { context })?;
         value = value
             .checked_add(component)
