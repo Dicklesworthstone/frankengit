@@ -1,4 +1,4 @@
-//! Bounded operator-owned output selectors. Parsing performs no filesystem I/O.
+//! Bounded operator-owned output and log capture. Parsing performs no filesystem I/O.
 use super::{unhex, validate_path};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -48,6 +48,7 @@ pub(super) fn input_selection(value: &str, encoded: bool) -> Result<InputSelecti
 pub(super) struct Options {
     root: PathBuf,
     selections: Vec<Selection>,
+    capture_logs: bool,
     maximum_bytes: usize,
     total_bytes: usize,
     inputs: Vec<InputSelection>,
@@ -98,18 +99,21 @@ pub(super) fn options_with_inputs(
     mut inputs: Vec<InputSelection>,
 ) -> Result<Option<Options>, String> {
     let root = flags.get("--artifact-root");
+    let capture_logs = flags.contains_key("--artifact-logs");
     let has_limit = flags.contains_key("--max-artifact-mib")
         || flags.contains_key("--max-artifact-total-mib")
         || flags.contains_key("--max-artifact-input-total-mib");
-    if root.is_none() && selections.is_empty() && inputs.is_empty() && !has_limit {
+    if root.is_none() && selections.is_empty() && inputs.is_empty() && !has_limit && !capture_logs {
         return Ok(None);
     }
-    let root = PathBuf::from(*root.ok_or("--artifact-root is required for output capture")?);
+    let root = PathBuf::from(*root.ok_or("--artifact-root is required for output or log capture")?);
     if !root.is_absolute() || root.as_os_str().len() > 4096 {
         return Err("artifact root must be an absolute bounded private directory".into());
     }
-    if selections.is_empty() || selections.len() > 64 {
-        return Err("artifact capture requires 1..64 explicit selections".into());
+    if (selections.is_empty() && !capture_logs) || selections.len() > 64 {
+        return Err(
+            "artifact capture requires --artifact-logs or 1..64 explicit selections".into(),
+        );
     }
     if selections
         .iter()
@@ -187,6 +191,7 @@ pub(super) fn options_with_inputs(
     Ok(Some(Options {
         root,
         selections,
+        capture_logs,
         maximum_bytes: mib("--max-artifact-mib", 16, 64)?,
         total_bytes: mib("--max-artifact-total-mib", 64, 512)?,
         inputs,
@@ -213,12 +218,21 @@ impl Options {
                     .map_err(str::to_owned)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let config = fgit_node::TrustedWorkflowArtifactConfig::new(
-            self.root.clone(),
-            selections,
-            self.maximum_bytes,
-            self.total_bytes,
-        )
+        let config = if self.capture_logs {
+            fgit_node::TrustedWorkflowArtifactConfig::new_with_logs(
+                self.root.clone(),
+                selections,
+                self.maximum_bytes,
+                self.total_bytes,
+            )
+        } else {
+            fgit_node::TrustedWorkflowArtifactConfig::new(
+                self.root.clone(),
+                selections,
+                self.maximum_bytes,
+                self.total_bytes,
+            )
+        }
         .map_err(str::to_owned)?;
         if self.inputs.is_empty() {
             return Ok(config);
@@ -270,6 +284,7 @@ mod tests {
         let selected = selection("ci/a.yml:build:out/result", false).unwrap();
         let base = BTreeMap::from([("--artifact-root", "/explicit-not-opened-root")]);
         let config = options(&base, vec![selected.clone()]).unwrap().unwrap();
+        assert!(!config.capture_logs);
         assert_eq!(config.maximum_bytes, 16 * 1024 * 1024);
         assert_eq!(config.total_bytes, 64 * 1024 * 1024);
         assert!(options(&base, vec![]).is_err());
@@ -368,5 +383,41 @@ mod tests {
                 .input_total_bytes,
             1024 * 1024
         );
+    }
+
+    #[test]
+    fn log_only_capture_requires_opt_in_root_and_preserves_payload_and_input_bounds() {
+        let flags = BTreeMap::from([
+            ("--artifact-root", "/explicit-not-opened-root"),
+            ("--artifact-logs", ""),
+        ]);
+        let config = options(&flags, Vec::new()).unwrap().unwrap();
+        assert!(config.capture_logs);
+        assert!(config.selections.is_empty());
+        assert_eq!(config.maximum_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.total_bytes, 64 * 1024 * 1024);
+        assert!(options(&BTreeMap::from([("--artifact-logs", "")]), Vec::new()).is_err());
+        let mut relative = flags.clone();
+        relative.insert("--artifact-root", "relative");
+        assert!(options(&relative, Vec::new()).is_err());
+        for (flag, value) in [
+            ("--max-artifact-mib", "0"),
+            ("--max-artifact-mib", "65"),
+            ("--max-artifact-total-mib", "513"),
+            ("--max-artifact-input-total-mib", "1"),
+        ] {
+            let mut invalid = flags.clone();
+            invalid.insert(flag, value);
+            assert!(options(&invalid, Vec::new()).is_err(), "{flag} {value}");
+        }
+        let input = input_selection("ci/a.yml:test:build:out:bin/tool", false).unwrap();
+        assert!(options_with_inputs(&flags, Vec::new(), vec![input.clone()]).is_err());
+        let output = selection("ci/a.yml:build:out", false).unwrap();
+        let config = options_with_inputs(&flags, vec![output], vec![input])
+            .unwrap()
+            .unwrap();
+        assert!(config.capture_logs);
+        assert_eq!(config.selections.len(), 1);
+        assert_eq!(config.inputs.len(), 1);
     }
 }

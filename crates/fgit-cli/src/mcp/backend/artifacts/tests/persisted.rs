@@ -370,3 +370,197 @@ fn startup_checks_exact_incarnation_existing_private_root_and_independent_grant(
     }
     source_only.close().unwrap();
 }
+
+fn workflow_object(
+    root: &std::path::Path,
+    format: GitHashAlgorithm,
+    kind: fgit_crypto::GitObjectKind,
+    name: &str,
+    body: &[u8],
+) -> fgit_types::GitOid {
+    let oid = fgit_crypto::git_object_id(format, kind, body);
+    let raw = [format!("{name} {}\0", body.len()).as_bytes(), body].concat();
+    let length = u16::try_from(raw.len()).unwrap();
+    let mut encoded = vec![0x78, 0x01, 0x01];
+    encoded.extend(length.to_le_bytes());
+    encoded.extend((!length).to_le_bytes());
+    encoded.extend(&raw);
+    let (a, b) = raw.iter().fold((1_u32, 0_u32), |(a, b), byte| {
+        let next = (a + u32::from(*byte)) % 65_521;
+        (next, (b + next) % 65_521)
+    });
+    encoded.extend(((b << 16) | a).to_be_bytes());
+    let text = oid.to_string();
+    fs::create_dir_all(root.join("objects").join(&text[..2])).unwrap();
+    fs::write(
+        root.join("objects").join(&text[..2]).join(&text[2..]),
+        encoded,
+    )
+    .unwrap();
+    oid
+}
+
+#[test]
+fn actual_failed_workflow_binary_logs_are_readable_by_exact_ids_after_mcp_reopen() {
+    use fgit_crypto::GitObjectKind;
+    use fgit_node::TrustedWorkflowArtifactConfig;
+    use fgit_types::{DecisionOutcome, PrincipalId, RefName};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::new(format);
+        let source = fixture.root.join("source");
+        fs::create_dir_all(source.join("refs/heads")).unwrap();
+        fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(source.join("config"), match format {
+            GitHashAlgorithm::Sha1 => "[core]\nrepositoryformatversion = 0\nbare = true\n",
+            GitHashAlgorithm::Sha256 => "[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n",
+        }).unwrap();
+        let workflow = b"name: MCP binary logs\non: push\njobs:\n  failure:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf 'mcp\\000\\377'; printf 'error\\000\\376' >&2; exit 9\n";
+        let blob = workflow_object(&source, format, GitObjectKind::Blob, "blob", workflow);
+        let mut tree = b"100644 workflow.yml\0".to_vec();
+        tree.extend(blob.as_bytes());
+        let tree = workflow_object(&source, format, GitObjectKind::Tree, "tree", &tree);
+        let commit = format!(
+            "tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nworkflow log fixture\n"
+        );
+        let tip = workflow_object(
+            &source,
+            format,
+            GitObjectKind::Commit,
+            "commit",
+            commit.as_bytes(),
+        );
+        fs::write(source.join("refs/heads/main"), format!("{tip}\n")).unwrap();
+        let parent = fixture.root.join("runs");
+        fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+        let backend = NodeTools::open(fixture.options.clone()).unwrap();
+        let imported = backend
+            .node
+            .runtime()
+            .block_on(backend.node.import_loose_git_directory_durable_in(
+                &backend.node.command_request_context(None),
+                &source,
+                PrincipalId::from_bytes([0xa3; 16]),
+                b"mcp-native-workflow-log-fixture",
+            ))
+            .unwrap();
+        assert!(
+            imported.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ))
+        );
+        let before = head(&backend);
+        let contract = TrustedWorkflowArtifactConfig::new_with_logs(
+            fixture.options.artifact_root.clone().unwrap(),
+            vec![],
+            1024,
+            2048,
+        )
+        .unwrap();
+        let run = backend
+            .node
+            .runtime()
+            .block_on(backend.node.run_trusted_workflow_with_artifacts_in(
+                &backend.node.command_request_context(None),
+                &RefName::try_new(b"refs/heads/main").unwrap(),
+                b"workflow.yml",
+                [0xa4; 16],
+                &parent,
+                &[b"workflow.yml".to_vec()],
+                (None, Some(tip)),
+                Default::default(),
+                Some(&contract),
+            ))
+            .unwrap();
+        assert!(!run.succeeded());
+        assert!(run.workspaces_closed);
+        assert_eq!(run.execution.jobs[0].outcome.token(), "failed");
+        assert_eq!(run.artifact_logs.len(), 1);
+        let captured = &run.artifact_logs[0];
+        assert_eq!(captured.logs.len(), 2);
+        let expected = [b"mcp\0\xff".as_slice(), b"error\0\xfe".as_slice()];
+        for (log, bytes) in captured.logs.iter().zip(expected) {
+            assert_eq!(log.payload_bytes, bytes.len());
+            assert_eq!(log.payload_sha256, digest(bytes));
+            assert!(log.output_complete);
+        }
+        assert_eq!(head(&backend), before);
+        backend.close().unwrap();
+        // Reopening proves the protocol adapter reads the settled immutable
+        // containers, not an in-memory process report or fixture publication.
+        let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
+        let mut server = Server::new(&backend).unwrap();
+        server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"workflow-log-test","version":"1"}}}"#).unwrap();
+        server.receive(
+            &mut backend,
+            br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        );
+        for (index, (log, bytes)) in captured.logs.iter().zip(expected).enumerate() {
+            let arguments = args([("artifact_id", text(hex(log.artifact_id.bytes().as_bytes())))]);
+            let inspected = invoke(
+                &mut server,
+                &mut backend,
+                (index * 2 + 2) as u64,
+                INSPECT,
+                arguments.clone(),
+            );
+            let metadata = result(&inspected);
+            assert_eq!(metadata["kind"].text(), Some("build_log"));
+            assert_eq!(
+                metadata["payload_sha256"].text(),
+                Some(hex(log.payload_sha256.bytes().as_bytes()).as_str())
+            );
+            assert_eq!(metadata["payload_verified"], Value::Bool(true));
+            assert_eq!(metadata["provenance_authenticated"], Value::Bool(false));
+            assert_eq!(
+                metadata["canonical_repository_published"],
+                Value::Bool(false)
+            );
+            assert_eq!(metadata["build_capsule_sha256"], Value::Null);
+            assert_eq!(metadata["check_receipt_sha256"], Value::Null);
+            let downloaded = invoke(
+                &mut server,
+                &mut backend,
+                (index * 2 + 3) as u64,
+                READ,
+                arguments,
+            );
+            let content = result(&downloaded);
+            assert_eq!(content["content_hex"].text(), Some(hex(bytes).as_str()));
+            assert_eq!(
+                content["byte_count"].text(),
+                Some(bytes.len().to_string().as_str())
+            );
+            assert_eq!(content["next_offset"], Value::Null);
+            assert_eq!(content["metadata"], Value::Object(metadata.clone()));
+            assert_eq!(content["transaction_created"], Value::Bool(false));
+        }
+        let manifest_args = args([(
+            "artifact_id",
+            text(hex(captured.manifest_id.bytes().as_bytes())),
+        )]);
+        let manifest = backend.call(READ, &manifest_args).unwrap();
+        let manifest = manifest.object().unwrap();
+        assert_eq!(
+            manifest["metadata"].object().unwrap()["kind"].text(),
+            Some("provenance")
+        );
+        let receipt = fs::read_to_string(run.run_directory.join("job-000-logs.json")).unwrap();
+        let prefix = format!(
+            "{{\"type\":\"trusted_workflow_log_receipt\",\"manifest_id_sha256\":\"{}\",\"manifest\":",
+            hex(captured.manifest_id.bytes().as_bytes())
+        );
+        let original_manifest = receipt
+            .strip_prefix(&prefix)
+            .unwrap()
+            .strip_suffix('}')
+            .unwrap();
+        assert_eq!(
+            manifest["content_hex"].text(),
+            Some(hex(original_manifest.as_bytes()).as_str())
+        );
+        assert_eq!(head(&backend), before);
+        backend.close().unwrap();
+    }
+}

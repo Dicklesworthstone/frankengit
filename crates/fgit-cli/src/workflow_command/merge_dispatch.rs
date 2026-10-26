@@ -11,7 +11,8 @@ const USAGE: &str = "usage: fg workflow dispatch-merge-candidate <storage-root> 
   [--expected-head <snapshot-token>] [--expected-incarnation <id>]
   [--ref-hex] [--source-ref-hex <hex> instead of --source-ref]
   [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
-  [--artifact-root <private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-root <absolute-private-directory>]
+  [--artifact-logs] [--artifact <workflow:job:output> ...]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
   [artifact hex selectors and byte ceilings from fg workflow run --help]
 
@@ -28,7 +29,10 @@ execution. There is no hostile isolation, temporary ref, automatic check grant,
 merge publication or automatic retry. Source-head watchers are unchanged.
 All definitions and artifact selectors are checked before the first child.
 Workflows share the native 600-second deadline, 16 MiB captured-output allowance,
-aggregate jobs/steps/materialization limits and artifact budgets. Ordinary job
+aggregate jobs/steps/materialization limits and artifact budgets. --artifact-logs
+with --artifact-root captures bounded raw step stdout/stderr from every executed
+child, including failed-step diagnostics; file selectors are optional. Files and
+logs share one cumulative artifact allowance. Ordinary job
 failure preserves independent results; timeout, cancellation or unproved
 containment stops later work. A zero-match report does not produce checks.
 
@@ -72,7 +76,10 @@ fn parse(args: &[String]) -> Result<(Options, NativeMerge, MergeCommitStyle, Str
     while at < args.len() {
         let flag = &args[at];
         at += 1;
-        if matches!(flag.as_str(), "--trusted-local" | "--ref-hex") {
+        if matches!(
+            flag.as_str(),
+            "--trusted-local" | "--ref-hex" | "--artifact-logs"
+        ) {
             common.push(flag.clone());
             continue;
         }
@@ -207,5 +214,26 @@ mod tests {
         let mut a = args(40);
         a.extend(["--force".into(), "true".into()]);
         assert!(parse(&a).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn merge_dispatch_log_only_capture_survives_both_argument_adapters() {
+        let mut input = args(40);
+        let event_at = input.iter().position(|s| s == "--event").unwrap();
+        input.insert(event_at, "--artifact-logs".into());
+        input.extend([
+            "--artifact-root".into(),
+            "/not-opened-merge-dispatch-logs".into(),
+            "--max-artifact-total-mib".into(),
+            "5".into(),
+        ]);
+        let (parsed, merge, _, event) = parse(&input).unwrap();
+        assert_eq!(event, "pull_request");
+        assert_eq!(merge.source_ref.as_bytes(), b"refs/heads/topic");
+        let config = parsed.artifacts.unwrap().node_config().unwrap();
+        assert!(config.capture_logs());
+        assert!(config.selections().is_empty());
+        assert_eq!(config.total_bytes(), 5 * 1024 * 1024);
     }
 }

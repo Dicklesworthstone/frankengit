@@ -9,7 +9,10 @@ const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <reposi
   [--pull-request <positive-native-pr-number>]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
+  [--artifact-root <absolute-private-directory>] [--artifact-logs]
   Artifact capture/input flags have the same meaning as workflow dispatch.
+  --artifact-logs retains bounded raw step stdout/stderr, including failed-step
+  diagnostics, for each executed event; --artifact-root is required, files optional.
 
 Default: one poll, 1000 ms between repeated polls. The global --timeout-secs
 bounds the whole command, including idle waits; no poll renews that budget.
@@ -113,7 +116,10 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
             }
         } else {
             ordinary.push(flag.clone());
-            if !matches!(flag.as_str(), "--trusted-local" | "--ref-hex") {
+            if !matches!(
+                flag.as_str(),
+                "--trusted-local" | "--ref-hex" | "--artifact-logs"
+            ) {
                 ordinary.push(args.get(i).ok_or("missing workflow option value")?.clone());
                 i += 1;
             }

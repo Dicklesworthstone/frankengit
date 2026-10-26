@@ -3,6 +3,8 @@
 use super::*;
 #[path = "artifact_inputs.rs"]
 mod input_delivery;
+#[path = "logs.rs"]
+mod logs;
 use fgit_node::{
     TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig as Config,
     TrustedWorkflowArtifactSelection as Selection, TrustedWorkflowRun,
@@ -74,12 +76,16 @@ fn real_outputs_survive_workspace_cleanup_and_provenance_binds_exact_producing_r
             &workflow("printf 'payload\\000bytes\\377' > out.bin; chmod +x out.bin"),
         );
         let contract = config(&f, b"out.bin", 1024, 2048);
+        assert!(!contract.capture_logs());
         let before = generation(f.node());
         let run = execute(&f, &contract, 0x51);
         assert!(run.succeeded());
         assert!(run.workspaces_closed);
         assert_eq!(run.source_commit, f.tip);
         assert_eq!(run.artifacts.len(), 1);
+        assert!(run.artifact_logs.is_empty());
+        assert!(!run.to_json().contains("\"artifact_logs\""));
+        assert!(!run.run_directory.join("job-000-logs.json").exists());
         let produced = &run.artifacts[0];
         assert_eq!(produced.job_id, "a");
         assert_eq!(produced.outputs.len(), 1);

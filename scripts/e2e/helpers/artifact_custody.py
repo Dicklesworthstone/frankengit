@@ -386,12 +386,96 @@ def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payl
                   'verified_downloads_restored_after_corruption': True, 'http_reopen_preserves_exact_metadata_and_bytes': True})
 
 
+
+def retrieve_workflow_logs(fmt, label, node, inc, report, directory, expected):
+    observed = {(job['id'], step['index']): step
+                for job in report['execution']['jobs'] for step in job['steps']}
+    jobs = {job['id']: job for job in report['execution']['jobs']}
+    assert len(report['artifact_logs']) == sum(bool(job['steps']) for job in jobs.values())
+    assert not report['execution']['authoritative_check']
+    seen, payloads, metadata_before = set(), {}, {}
+    for captured in report['artifact_logs']:
+        job_id = bytes.fromhex(captured['job_id_hex']).decode()
+        job = jobs[job_id]
+        assert captured['observed_job_outcome'] == job['outcome']
+        assert len(captured['logs']) == len(job['steps']) * 2
+        for log in captured['logs']:
+            coordinate = job_id, log['step_index'], log['stream']
+            assert coordinate not in seen and coordinate in expected
+            seen.add(coordinate)
+            step, payload = observed[coordinate[:2]], expected[coordinate]
+            assert bytes.fromhex(step[log['stream'] + '_hex']) == payload
+            assert log['observed_step_outcome'] == step['outcome']
+            assert step['script'] == 'alg:2:' + log['script_sha256'] and log['exit_code'] == step['exit_code']
+            assert log['output_complete'] == step['output_complete'] is True
+            assert log['payload_bytes'] == len(payload)
+            assert log['payload_sha256'] == hashlib.sha256(payload).hexdigest()
+            assert log['step_name_hex'] == (None if step['name'] is None else step['name'].encode().hex())
+            artifact_id = log['artifact_id_sha256']
+            assert payloads.setdefault(artifact_id, (payload, 'build_log')) == (payload, 'build_log')
+        index = next(index for index, candidate in enumerate(report['execution']['jobs']) if candidate['id'] == job_id)
+        receipt = (directory / f'job-{index:03d}-logs.json').read_bytes()
+        manifest_id = captured['manifest_id_sha256']
+        prefix = ('{"type":"trusted_workflow_log_receipt","manifest_id_sha256":"' + manifest_id + '","manifest":').encode()
+        assert receipt.startswith(prefix) and receipt.endswith(b'}')
+        payload = receipt[len(prefix):-1]
+        manifest = json.loads(payload)
+        assert manifest['type'] == 'trusted_workflow_log_provenance'
+        assert manifest['logs'] == captured['logs'] and manifest['observed_job_outcome'] == job['outcome']
+        assert manifest['attempt_sha256'] == hashlib.sha256((directory / 'attempt.json').read_bytes()).hexdigest()
+        assert manifest['producer']['source_commit'] == report['source_commit']
+        assert not manifest['job_success_asserted'] and not manifest['cache_reuse_authorized']
+        assert manifest['build_input_capsule_id'] is None and manifest['check_receipt_id'] is None
+        payloads[manifest_id] = payload, 'provenance'
+    assert seen == set(expected)
+    assert json.loads((directory / 'report.json').read_bytes()) == report
+    assert not any(path.name.endswith('.pending') for path in directory.iterdir())
+    for index, job in enumerate(report['execution']['jobs']):
+        if not job['steps']:
+            assert not (directory / f'job-{index:03d}-logs.json').exists()
+    tokens = {'artifact': secrets.token_hex(32), 'git': secrets.token_hex(32)}
+    grants = root / (fmt + '-' + label + '-log-grants')
+    artifact_grants(grants, inc, tokens)
+    with artifact_server(node, inc, grants, fmt + '-' + label + '-logs') as url:
+        for artifact_id, (payload, kind) in payloads.items():
+            route = '/api/v1/artifacts/' + artifact_id
+            _, metadata = artifact_http(url, route, tokens['artifact'])
+            metadata_before[artifact_id] = verify_artifact_metadata(metadata, artifact_id, payload, inc, kind)
+            assert metadata_before[artifact_id]['build_capsule_sha256'] is None
+            assert metadata_before[artifact_id]['check_receipt_sha256'] is None
+            fields, downloaded = artifact_http(url, route + '/content', tokens['artifact'])
+            assert downloaded == payload and fields['content-type'] == 'application/octet-stream'
+            (root / (fmt + '-' + label + '-log-' + artifact_id + '.payload')).write_bytes(downloaded)
+        # A valid requested prefix cannot conceal corrupted retained log bytes.
+        corrupt_id, (binary, _) = next((key, value) for key, value in payloads.items() if value[1] == 'build_log' and value[0])
+        container = store / ('scope-' + scope_id('trusted-workflow-local-owner', inc)) / corrupt_id
+        original = container.read_bytes()
+        try:
+            container.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+            for suffix in ['', '/content']:
+                _, body = artifact_http(url, '/api/v1/artifacts/' + corrupt_id + suffix, tokens['artifact'], 503)
+                assert binary not in body and json.loads(body)['code'] == 'artifact_storage_unavailable'
+        finally:
+            container.write_bytes(original)
+    with artifact_server(node, inc, grants, fmt + '-' + label + '-logs-reopened') as url:
+        for artifact_id, (payload, _) in payloads.items():
+            route = '/api/v1/artifacts/' + artifact_id
+            assert json.loads(artifact_http(url, route, tokens['artifact'])[1]) == metadata_before[artifact_id]
+            assert artifact_http(url, route + '/content', tokens['artifact'])[1] == payload
+    cases.append({'format': fmt, 'run_outcome': label, 'actual_workflow_streams_downloaded': len(seen),
+                  'log_artifact_ids': sorted(key for key, (_, kind) in payloads.items() if kind == 'build_log'),
+                  'binary_empty_and_diagnostic_streams_match': True, 'provenance_matches_normalized_job': True,
+                  'trailing_corruption_refused_and_restored': True, 'http_reopen_preserves_log_bytes': True,
+                  'readable_logs_do_not_assert_check_success': True})
+
+
 for fmt in ['sha1', 'sha256']:
     src, node, parent = root / (fmt + '-source'), root / (fmt + '-node'), root / (fmt + '-runs')
     parent.mkdir(mode=0o700)
     expected_workflow_output = b'WORKFLOW-ARTIFACT\0\xff\n'
     workflow = b"name: archive evidence\non: workflow_dispatch\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: mkdir -p dist; printf 'WORKFLOW-ARTIFACT\\000\\377\\n' > dist/result; printf VERIFIED-NATIVE-EVIDENCE\n"
-    tree = native_tree(src, fmt, {'.github/workflows/archive.yml': workflow})
+    failed_workflow = b"name: failed binary logs\non: workflow_dispatch\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - name: failure\n        run: printf 'FAILED-STDOUT\\000\\377'; printf 'FAILED-STDERR\\000\\376' >&2; exit 7\n      - if: failure()\n        name: diagnostic\n        run: printf 'DIAG\\n'\n      - if: always()\n        run: true\n  blocked:\n    runs-on: fgit-trusted-local\n    needs: build\n    steps:\n      - run: printf forbidden\n"
+    tree = native_tree(src, fmt, {'.github/workflows/archive.yml': workflow, '.github/workflows/failure.yml': failed_workflow})
     tip = native_object(src, fmt, 'commit', f'tree {tree}\nauthor Fixture <f@example.invalid> 1 +0000\ncommitter Fixture <f@example.invalid> 1 +0000\n\nartifact source\n'.encode())
     (src / 'refs/heads').mkdir(parents=True); (src / 'refs/heads/main').write_text(tip + '\n'); (src / 'HEAD').write_text('ref: refs/heads/main\n')
     ns = [node, tenant, repository]
@@ -400,7 +484,7 @@ for fmt in ['sha1', 'sha256']:
     assert imported['state'] == 'committed'; inc = imported['repository_incarnation_id']
     before = run(fmt + '-refs-before', ['refs', *ns, '--trusted-local', '--object-format', fmt])
     nonce = '5' * 32
-    report = json.loads(run(fmt + '-workflow', ['workflow', 'run', *ns, 'refs/heads/main', '--trusted-local', '--workflow', '.github/workflows/archive.yml', '--run-parent', parent, '--run-id', nonce, '--input', '.github', '--object-format', fmt, '--artifact-root', store, '--artifact', '.github/workflows/archive.yml:build:dist/result']))['run']
+    report = json.loads(run(fmt + '-workflow', ['workflow', 'run', *ns, 'refs/heads/main', '--trusted-local', '--workflow', '.github/workflows/archive.yml', '--run-parent', parent, '--run-id', nonce, '--input', '.github', '--object-format', fmt, '--artifact-root', store, '--artifact-logs', '--artifact', '.github/workflows/archive.yml:build:dist/result']))['run']
     assert report['succeeded'] and report['workspaces_closed']
     directory = parent / ('workflow-' + nonce); marker = hashlib.sha256((directory / 'attempt.json').read_bytes()).hexdigest()
     history = json.loads(run(fmt + '-recover', ['workflow', 'recover', directory, tenant, repository, '--journal-id', marker]))
@@ -413,6 +497,21 @@ for fmt in ['sha1', 'sha256']:
     archive = json.loads(run(fmt + '-archive-native-evidence', archive_args)); validate(archive, archive_id, payload, inc=inc)
     assert archive['source_rcr_sha256'] == rcr and archive['check_receipt_sha256'] is None
     retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_workflow_output)
+    retrieve_workflow_logs(fmt, 'succeeded', node, inc, report, directory,
+                           {('build', 0, 'stdout'): b'VERIFIED-NATIVE-EVIDENCE', ('build', 0, 'stderr'): b''})
+    failed_nonce = '6' * 32
+    failed = json.loads(run(fmt + '-failed-workflow', ['workflow', 'run', *ns, 'refs/heads/main', '--trusted-local', '--workflow', '.github/workflows/failure.yml', '--run-parent', parent, '--run-id', failed_nonce, '--input', '.github', '--object-format', fmt, '--artifact-root', store, '--artifact-logs'], 1))['run']
+    assert not failed['succeeded'] and failed['workspaces_closed']
+    assert [job['outcome'] for job in failed['execution']['jobs']] == ['failed', 'skipped']
+    failed_directory = parent / ('workflow-' + failed_nonce)
+    failed_marker = hashlib.sha256((failed_directory / 'attempt.json').read_bytes()).hexdigest()
+    failed_history = json.loads(run(fmt + '-failed-recover', ['workflow', 'recover', failed_directory, tenant, repository, '--journal-id', failed_marker]))
+    failed_facts = [fact for entry in failed_history['entries'] for fact in entry['facts'] if fact['status'] == 'completed']
+    assert failed_facts and all(fact['conclusion'] != 'success' for fact in failed_facts)
+    retrieve_workflow_logs(fmt, 'failed', node, inc, failed, failed_directory,
+                           {('build', 0, 'stdout'): b'FAILED-STDOUT\0\xff', ('build', 0, 'stderr'): b'FAILED-STDERR\0\xfe',
+                            ('build', 1, 'stdout'): b'DIAG\n', ('build', 1, 'stderr'): b'',
+                            ('build', 2, 'stdout'): b'', ('build', 2, 'stderr'): b''})
     assert run(fmt + '-refs-after', ['refs', *ns, '--trusted-local', '--object-format', fmt]) == before
     for path in [src, node, parent, evidence]: path.rename(path.with_name(path.name + '-offline'))
     validate(json.loads(run(fmt + '-offline-artifact-inspect', ['artifact', 'inspect', *scope(inc=inc), '--id', archive_id])), archive_id, payload, inc=inc)

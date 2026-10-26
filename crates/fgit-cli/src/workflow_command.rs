@@ -25,7 +25,8 @@ const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <reposito
   [--expected-commit <native-oid>] [--expected-incarnation <id>]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow]
   [--input-hex <hex> instead of each --input]
-  [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-root <absolute-private-directory>]
+  [--artifact-logs] [--artifact <workflow:job:output> ...]
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
@@ -61,13 +62,19 @@ jobs. No automatic retries, source publication, secret injection, remote listene
 trigger service, or authoritative green check. Native defaults: 60 seconds per
 step, 600 seconds per run, 256 KiB per captured stream, 16 MiB total captured output.
 
-Optional output capture requires an existing nonsymlink 0700 artifact root and
-1..64 exact workflow/job/file selections. Matrix jobs use their expanded IDs.
+Optional capture requires an existing nonsymlink 0700 artifact root and either
+--artifact-logs or 1..64 exact workflow/job/file selections, or both. Matrix jobs
+use their expanded IDs. --artifact-logs retains every executed step's bounded raw
+stdout/stderr, including failed-step diagnostics, as immutable BuildLog artifacts.
+It does not require any file selector. Empty streams are valid; output_complete
+records whether the runner captured a complete stream. Logs are not redacted.
 Regular selected files are verified and retained before workspace cleanup; missing,
-unsafe, oversized or corrupt payloads prevent success. Defaults: 16 MiB per file,
-64 MiB cumulative raw payloads, including all children of a dispatch. Provenance
-manifests bind exact producing attempts and sources. Use fg artifact inspect/export
-with --trust-domain trusted-workflow-local-owner to retrieve immutable bytes.
+unsafe, oversized or corrupt payloads prevent success. Defaults: 16 MiB per payload,
+64 MiB cumulative file/log payloads, including all children of a dispatch. Provenance
+manifests bind exact producing attempts and sources. Log custody appears separately
+in artifact_logs and job-NNN-logs.json; it never changes a failed job into success.
+Use fg artifact inspect/export with --trust-domain trusted-workflow-local-owner to
+retrieve immutable bytes.
 This script profile does not create a BuildInputCapsule or authorize cache reuse.
 Capture and explicit inputs also support run-candidate and run-merge-candidate;
 provenance retains the exact unpublished candidate and canonical base identity.
@@ -186,7 +193,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     while cursor < args.len() {
         let flag = args[cursor].as_str();
         cursor += 1;
-        if matches!(flag, "--trusted-local" | "--ref-hex") {
+        if matches!(flag, "--trusted-local" | "--ref-hex" | "--artifact-logs") {
             if flags.insert(flag, "").is_some() {
                 return Err(format!("duplicate {flag}"));
             }
@@ -789,6 +796,7 @@ mod tests {
         ]);
         let options = parse(&input).unwrap();
         let contract = options.artifacts.unwrap().node_config().unwrap();
+        assert!(!contract.capture_logs());
         assert_eq!(
             contract.root(),
             std::path::Path::new("/not-opened-artifact-root")
@@ -806,5 +814,63 @@ mod tests {
             .unwrap();
         missing_root.drain(at..at + 2);
         assert!(parse(&missing_root).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn run_and_candidate_route_log_only_capture_without_consuming_adjacent_flags() {
+        for candidate in [false, true] {
+            let mut input = args();
+            if candidate {
+                input[0] = "run-candidate".into();
+                input.extend([
+                    "--expected-commit".into(),
+                    "aa".repeat(20),
+                    "--candidate-commit".into(),
+                    "bb".repeat(20),
+                    "--bundle".into(),
+                    "not-opened.bundle".into(),
+                ]);
+            }
+            input.insert(5, "--artifact-logs".into());
+            input.extend([
+                "--artifact-root".into(),
+                "/not-opened-log-artifacts".into(),
+                "--max-artifact-total-mib".into(),
+                "3".into(),
+            ]);
+            let config = parse(&input)
+                .unwrap()
+                .artifacts
+                .unwrap()
+                .node_config()
+                .unwrap();
+            assert!(config.capture_logs());
+            assert!(config.selections().is_empty());
+            assert_eq!(config.total_bytes(), 3 * 1024 * 1024);
+            let mut combined = input.clone();
+            combined.extend(["--artifact".into(), "ci/run.yml:build:result".into()]);
+            let config = parse(&combined)
+                .unwrap()
+                .artifacts
+                .unwrap()
+                .node_config()
+                .unwrap();
+            assert!(config.capture_logs());
+            assert_eq!(config.selections().len(), 1);
+            let mut duplicate = input.clone();
+            duplicate.push("--artifact-logs".into());
+            assert!(parse(&duplicate).is_err());
+            let mut missing_root = input.clone();
+            let at = missing_root
+                .iter()
+                .position(|s| s == "--artifact-root")
+                .unwrap();
+            missing_root.drain(at..at + 2);
+            assert!(parse(&missing_root).is_err());
+            let mut valued_boolean = input.clone();
+            valued_boolean.insert(6, "true".into());
+            assert!(parse(&valued_boolean).is_err());
+        }
     }
 }

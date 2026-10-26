@@ -16,7 +16,8 @@ const USAGE: &str =
   [--expected-incarnation <id>] [--ref-hex]
   [--source-ref-hex <hex> instead of --source-ref]
   [--workflow-hex <hex> instead of --workflow] [--input-hex <hex> instead of --input]
-  [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-root <absolute-private-directory>]
+  [--artifact-logs] [--artifact <workflow:job:output> ...]
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
@@ -34,6 +35,9 @@ All inputs and workflow scripts come from the verified merged tree. No objects
 are staged, no temporary ref is created, no PR approval or canonical check is
 published. Optional artifact capture binds the exact merged input and both
 branch selections and the actual parent shape; durable output custody does not authorize a check or cache reuse.
+--artifact-logs with --artifact-root retains bounded raw step stdout/stderr, including
+failed-step diagnostics, and needs no file selector. File/log payloads share the
+capture budget; logs retain exact merged-candidate provenance. See run --help.
 Explicit artifact inputs deliver verified current-run outputs from successful
 direct dependencies into .fgit-artifacts/ before the consumer's first script.
 Delivery shares its own cumulative byte limit. See fg workflow run --help.
@@ -80,7 +84,7 @@ pub(super) fn parse(args: &[String]) -> Result<(Options, NativeMerge, MergeCommi
     while cursor < args.len() {
         let flag = args[cursor].as_str();
         cursor += 1;
-        if matches!(flag, "--trusted-local" | "--ref-hex") {
+        if matches!(flag, "--trusted-local" | "--ref-hex" | "--artifact-logs") {
             common.push(flag.to_owned());
             continue;
         }
@@ -317,5 +321,27 @@ mod tests {
         let mut ordinary = input;
         ordinary[0] = "run-candidate".into();
         assert!(super::super::parse(&ordinary).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn merge_log_only_capture_preserves_exact_merge_selection() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let mut input = args(format);
+            let source_at = input.iter().position(|s| s == "--source-ref").unwrap();
+            input.insert(source_at, "--artifact-logs".into());
+            input.extend([
+                "--artifact-root".into(),
+                "/not-opened-merge-logs".into(),
+                "--method".into(),
+                "squash".into(),
+            ]);
+            let (parsed, merge, style) = parse(&input).unwrap();
+            assert_eq!(merge.source_ref.as_bytes(), b"refs/heads/topic");
+            assert_eq!(style, MergeCommitStyle::Squash);
+            let config = parsed.artifacts.unwrap().node_config().unwrap();
+            assert!(config.capture_logs());
+            assert!(config.selections().is_empty());
+        }
     }
 }
