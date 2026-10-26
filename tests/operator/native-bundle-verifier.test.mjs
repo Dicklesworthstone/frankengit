@@ -5,11 +5,12 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import fsPromises, { appendFile, chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeNativeBundleExpectation, verifyNativeGitBundle, verifyNativeGitBundleFile } from '../../scripts/lib/native-bundle-verifier.mjs';
+import { normalizeNativeBundleExpectation, normalizeNativeBundleOptions, verifyNativeGitBundle, verifyNativeGitBundleFile } from '../../scripts/lib/native-bundle-verifier.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cli = join(root, 'scripts/verify_git_bundle_native.mjs');
@@ -48,9 +49,17 @@ const report = { type:'git_bundle_verification',schema_version:1,profile:'native
     object_format:args.includes('--expect-format')?format:null,
     ref_set:pins.length?(args.includes('--exact-refs')?'exact':'contains'):null,references:pins} };
 const mode = ${JSON.stringify(mode)};
+const scratch = args.includes('--scratch-dir') ? get('--scratch-dir') : null;
+if (args.includes('--file-backed') || mode === 'memory-file-claim') {
+  Object.assign(report, { storage_profile: 'file-backed-native-full-bundle-v1', scratch_bytes: 0,
+    scratch_removed: true, pack_sha256: crypto.createHash('sha256').update('').digest('hex') });
+}
+if (mode === 'file-residue' || mode === 'hang-residue') {
+  fs.writeFileSync(require('node:path').join(scratch, '.fg-bundle-fake.scratch'), 'retained native scratch');
+}
 if (mode === 'refuse') { console.error('typed native refusal'); process.exit(2); }
 if (mode === 'signal') process.kill(process.pid, 'SIGTERM');
-else if (mode === 'hang') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); }
+else if (mode === 'hang' || mode === 'hang-residue') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); }
 else if (mode === 'large') process.stdout.write('x'.repeat(8192));
 else if (mode === 'stderr') process.stderr.write('x'.repeat(70000));
 else if (mode === 'utf8') process.stdout.write(Buffer.from([255]));
@@ -69,6 +78,13 @@ else {
   if (mode === 'count') report.object_count = 100001;
   if (mode === 'ref-count') report.reference_count++;
   if (mode === 'zero-ref-count') report.reference_count = 0;
+  if (mode === 'file-missing') delete report.pack_sha256;
+  if (mode === 'file-profile') report.storage_profile = 'unknown-file-profile';
+  if (mode === 'file-negative') report.scratch_bytes = -1;
+  if (mode === 'file-over-budget') report.scratch_bytes = 2 * Number(get('--max-expanded-mib')) * 1024 * 1024 + 1;
+  if (mode === 'file-unsafe-count') report.scratch_bytes = Number.MAX_SAFE_INTEGER + 1;
+  if (mode === 'file-unremoved') report.scratch_removed = false;
+  if (mode === 'file-digest') report.pack_sha256 = 'A'.repeat(64);
   if (mode === 'substitute') { fs.unlinkSync(input); fs.writeFileSync(input + '.foreign', 'foreign'); fs.renameSync(input + '.foreign', input); }
   process.stdout.write(JSON.stringify(report) + '\\n');
 }
@@ -237,6 +253,175 @@ test('CLI refuses malformed and duplicate options without creating a process', a
   }
   await absent(mock.log);
   const help = await runCli(['--help']); assert.equal(help.code, 0); assert.match(help.stdout, /native Rust/);
+});
+
+test('file-backed limits are explicit and never enlarge byte-array verification', async () => {
+  const normal = normalizeNativeBundleOptions({ fg: '/fg' });
+  assert.equal(normal.fileBacked, false); assert.equal(normal.maxInputMiB, 128);
+  const defaults = normalizeNativeBundleOptions({ fg: '/fg', fileBacked: true });
+  assert.equal(defaults.maxInputMiB, 128); assert.equal(defaults.maxExpandedMiB, 128);
+  for (const size of [129, 16384]) {
+    const wide = normalizeNativeBundleOptions({ fg: '/fg', fileBacked: true, maxInputMiB: size, maxExpandedMiB: size });
+    assert.equal(wide.maxInputMiB, size); assert.equal(wide.maxExpandedMiB, size);
+    assert.equal(wide.maxObjects, normal.maxObjects); assert.equal(wide.maxRefs, normal.maxRefs);
+    await assert.rejects(verifyNativeGitBundle(opaque, wide), { code: 'native_file_backed_requires_file' });
+  }
+  for (const patch of [{ fileBacked: 'true' }, { fileBacked: null }, { maxInputMiB: 129 },
+    { maxExpandedMiB: 129 }, { fileBacked: true, maxInputMiB: 16385 },
+    { fileBacked: true, maxExpandedMiB: 16385 }, { fileBacked: true, maxObjects: 100001 },
+    { fileBacked: true, maxRefs: 4097 }, { fileBacked: true, scratchDirectory: '/caller-owned' }]) {
+    assert.throws(() => normalizeNativeBundleOptions({ fg: '/fg', ...patch }));
+  }
+});
+
+async function withSourceHandle(path, decorate, operation) {
+  const original = fsPromises.open;
+  fsPromises.open = async (...args) => {
+    const handle = await original(...args);
+    if (args[0] === path) decorate(handle);
+    return handle;
+  };
+  syncBuiltinESMExports();
+  try { return await operation(); }
+  finally { fsPromises.open = original; syncBuiltinESMExports(); }
+}
+
+test('file-backed snapshot hashes and copies bounded chunks with exact native pins', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  const bytes = Buffer.alloc(256 * 1024 + 17, 42), digest = sha(bytes);
+  await writeFile(path, bytes);
+  for (const format of ['sha1', 'sha256']) {
+    const reads = [], allocations = [], allocate = Buffer.alloc;
+    t.mock.method(Buffer, 'alloc', (size, ...args) => {
+      allocations.push(size); assert.ok(size <= 65536, 'no complete input allocation in the file profile');
+      return allocate(size, ...args);
+    });
+    let result;
+    try {
+      result = await withSourceHandle(path, handle => {
+        const read = handle.read.bind(handle);
+        handle.read = async (...args) => { reads.push(args[2]); return await read(...args); };
+      }, () => verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true,
+        maxInputMiB: 16384, maxExpandedMiB: 16384,
+        expected: { sha256: digest, object_format: format, exact_refs: true,
+          refs: [{ ref_hex: ref, object_id: '2'.repeat(format === 'sha1' ? 40 : 64) }] } }));
+    } finally { t.mock.restoreAll(); }
+    assert.ok(reads.length > 4); assert.equal(Math.max(...reads), 65536);
+    assert.equal(Math.max(...allocations), 65536);
+    assert.equal(result.artifact_sha256, digest); assert.equal(result.bundle_bytes, bytes.length);
+    assert.equal(result.storage_profile, 'file-backed-native-full-bundle-v1');
+    assert.equal(result.scratch_removed, true); assert.equal(result.caller_identity_pins_supplied, true);
+    const log = JSON.parse(await readFile(mock.log));
+    assert.ok(log.args.includes('--file-backed')); assert.ok(!log.args.includes(path));
+    assert.equal(log.args[log.args.indexOf('--scratch-dir') + 1], dirname(log.input));
+    assert.equal(log.args[log.args.indexOf('--max-input-mib') + 1], '16384');
+    assert.equal(log.args[log.args.indexOf('--max-expanded-mib') + 1], '16384');
+    assert.equal(log.hash, digest); assert.equal(log.fileMode, 0o600); assert.equal(log.directoryMode, 0o700);
+    await absent(dirname(log.input));
+  }
+  assert.deepEqual(await readFile(path), bytes);
+});
+
+for (const mode of ['truncate', 'grow', 'replace', 'cancel']) {
+  test('file-backed snapshot refuses source ' + mode + ' during the owned copy', async t => {
+    const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+    const bytes = Buffer.alloc(128 * 1024 + 17, 42), controller = new AbortController();
+    await writeFile(path, bytes);
+    let changed = false;
+    await withSourceHandle(path, handle => {
+      const read = handle.read.bind(handle);
+      handle.read = async (...args) => {
+        const result = await read(...args);
+        if (!changed && args[3] === 0) {
+          changed = true;
+          if (mode === 'truncate') await writeFile(path, 'short');
+          if (mode === 'grow') await appendFile(path, 'extra');
+          if (mode === 'replace') { await rename(path, path + '.old'); await writeFile(path, bytes); }
+          if (mode === 'cancel') controller.abort();
+        }
+        return result;
+      };
+    }, () => assert.rejects(verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true, signal: controller.signal }),
+      { code: { truncate: 'native_input_truncated', grow: 'native_input_grew',
+        replace: 'native_input_changed', cancel: 'native_verification_cancelled' }[mode] }));
+    assert.equal(changed, true); await absent(mock.log);
+  });
+}
+
+test('file-backed cancellation during final source close cannot return success', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  const controller = new AbortController(); await writeFile(path, opaque);
+  await withSourceHandle(path, handle => {
+    const close = handle.close.bind(handle);
+    handle.close = async () => { await close(); controller.abort(); };
+  }, () => assert.rejects(verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true, signal: controller.signal }),
+    { code: 'native_verification_cancelled' }));
+  const log = JSON.parse(await readFile(mock.log)); await absent(dirname(log.input));
+});
+
+test('file-backed digest mismatch refuses before starting native verification', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  await writeFile(path, opaque);
+  await assert.rejects(verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true,
+    expected: { sha256: '0'.repeat(64) } }), { code: 'native_expected_sha256_mismatch' });
+  await absent(mock.log);
+});
+
+test('file-backed reports require complete truthful storage fields within the selected budget', async t => {
+  const directory = await sandbox(t), path = join(directory, 'input.bundle'); await writeFile(path, opaque);
+  for (const mode of ['file-missing', 'file-profile', 'file-negative', 'file-over-budget',
+    'file-unsafe-count', 'file-unremoved', 'file-digest']) {
+    const mock = await fakeFg(directory, mode);
+    await assert.rejects(verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true }),
+      { code: 'native_invalid_file_report' });
+    const log = JSON.parse(await readFile(mock.log)); await absent(dirname(log.input));
+  }
+  const mock = await fakeFg(directory, 'memory-file-claim');
+  await assert.rejects(verifyNativeGitBundleFile(path, { fg: mock.fg }), { code: 'native_invalid_report' });
+});
+
+for (const mode of ['file-residue', 'hang-residue']) {
+  test('file-backed ' + mode + ' retains native scratch and reports its location after child close', async t => {
+    const directory = await sandbox(t), mock = await fakeFg(directory, mode), path = join(directory, 'input.bundle');
+    const controller = new AbortController(); await writeFile(path, opaque);
+    const operation = verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true, signal: controller.signal });
+    let failure;
+    const rejected = assert.rejects(operation, error => { failure = error; return error.code === 'native_snapshot_cleanup_refused'; });
+    const log = await waitFor(mock.log);
+    t.after(() => rm(dirname(log.input), { recursive: true, force: true }));
+    if (mode === 'hang-residue') {
+      await waitForScratch(join(dirname(log.input), '.fg-bundle-fake.scratch'));
+      controller.abort();
+    }
+    await rejected;
+    assert.throws(() => process.kill(log.pid, 0), { code: 'ESRCH' });
+    assert.equal(failure.details.directory, dirname(log.input));
+    if (mode === 'hang-residue') assert.equal(failure.details.verification_error, 'native_verification_cancelled');
+    await absent(log.input);
+    assert.equal(await readFile(join(dirname(log.input), '.fg-bundle-fake.scratch'), 'utf8'), 'retained native scratch');
+  });
+}
+async function waitForScratch(path) {
+  for (let at = 0; at < 300; at++) {
+    try { await lstat(path); return; } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+  }
+  throw new Error('test native scratch was not created');
+}
+
+test('file-backed CLI uses explicit limits and canonicalizes its owned temporary root', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory), path = join(directory, 'input.bundle');
+  await writeFile(path, opaque);
+  const actual = join(directory, 'scratch'), alias = join(directory, 'alias');
+  await mkdir(actual, { mode: 0o700 }); await symlink(actual, alias);
+  const result = await runCli([path, '--fg', mock.fg, '--file-backed', '--max-input-mib', '16384',
+    '--max-expanded-mib', '16384'], { env: { ...process.env, TMPDIR: alias } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).storage_profile, 'file-backed-native-full-bundle-v1');
+  const log = JSON.parse(await readFile(mock.log));
+  assert.ok(log.input.startsWith(actual + '/')); assert.ok(!log.input.startsWith(alias + '/'));
+  await absent(dirname(log.input));
+  const invalid = await runCli([path, '--fg', mock.fg, '--file-backed', '--file-backed']);
+  assert.notEqual(invalid.code, 0); assert.equal(JSON.parse(invalid.stderr).error, 'duplicate_option');
 });
 
 function gitFixture(format) {

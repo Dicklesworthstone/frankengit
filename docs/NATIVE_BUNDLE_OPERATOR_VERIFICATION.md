@@ -18,29 +18,64 @@ closure semantics. Failure never invokes the JavaScript decoder or another Git
 engine. The executable's authenticity is an operator responsibility; an output
 profile string is not a build signature or proof against a malicious executable.
 
-The source must be one nonempty, quiescent regular non-symlink file. One bounded
-read produces owned bytes; an exclusive private snapshot supplies those exact
-bytes to the child. The child always receives their SHA-256 as an input pin.
+The source must be one nonempty, quiescent regular non-symlink file. An exclusive
+private snapshot supplies the checked bytes to the child. The default profile
+first reads the source into owned memory; the explicit file-backed profile below
+copies and hashes it incrementally. The child always receives the snapshot's
+SHA-256 as an input pin.
 Independently supplied pins must additionally match. The parent validates the
 native report's profile, object format, snapshot hash and length, verification
 flags, reference pins, echoed expectations and explicit non-claims. It rejects
 malformed, duplicate-key, extra-document, lossy-number and oversized reports.
 
 Defaults are 128 MiB input, 128 MiB expanded native payload, 100,000 objects,
-4,096 references, a two-MiB report and one 300-second deadline. The public byte
-adapter can lower the report budget or select up to eight MiB. Input is held in
-memory; the native engine is not a streaming large-repository verifier. The
-parent uses bounded read/write chunks, but parent and child memory both count
-when provisioning the host. CLI limits can be reduced, never raised beyond the
-native profile's documented ceilings.
+4,096 references, a two-MiB report and one 300-second deadline. The public adapter
+can lower the report budget or select up to eight MiB. The default profile holds
+input in memory and retains its 128 MiB input and expansion ceilings. Parent and
+child memory both count when provisioning the host.
+
+## File-backed verification
+
+Select file-backed processing explicitly to verify larger portable bundles:
+
+```sh
+node scripts/verify_git_bundle_native.mjs ./large.bundle \
+  --fg "$PWD/target/release/fg" --file-backed \
+  --max-input-mib 4096 --max-expanded-mib 8192 --timeout-secs 1800 \
+  --expect-sha256 "$KNOWN_BUNDLE_SHA256"
+```
+
+This permits input and expanded-payload limits up to 16,384 MiB each. Selecting
+the mode alone leaves both defaults at 128 MiB; a larger allowance must be
+requested separately. Object, reference, report, metadata and per-object bounds
+are not widened. The public `verifyNativeGitBundleFile` adapter accepts the same
+explicit `fileBacked: true` option. The byte-array API refuses that profile.
+
+The parent reads at most 64 KiB at a time into one reusable data buffer, hashes
+each chunk and writes it into its exclusive private snapshot. It checks source
+length, EOF, descriptor and pathname identity, link count, permissions, owner,
+and nanosecond modification/change times before invoking the child. The original
+source path never reaches `fg`. The child uses the existing native file-backed
+verifier and creates its own scratch file in the same owned private temporary
+directory. Temporary paths passed to the native verifier are canonical paths.
+
+The report must include `storage_profile: file-backed-native-full-bundle-v1`,
+`scratch_bytes`, `scratch_removed: true`, and `pack_sha256` in addition to the
+existing content checks. These fields are required only for the selected
+file-backed profile. Temporary disk capacity must cover the complete snapshot
+plus native scratch of up to twice the selected expanded ceiling, while the
+original source remains in place. The native engine still retains bounded
+individual objects and metadata in memory. These limits are allowances, not
+reservations or promises of available space.
 
 Cancellation/deadline covers source reads, snapshot staging and child execution.
 The adapter requests termination and escalates to a kill after 500 milliseconds,
 then waits for process/pipe closure before cleanup. This is ownership of the
 trusted `fg` process, not isolation or containment of arbitrary hostile programs.
-Filesystem calls cannot be forcibly interrupted. Only the identified temporary
-file and empty private directory are removed. Observed substitutions refuse
-cleanup; there is no recursive deletion. A same-user adversarial namespace is
+Filesystem calls cannot be forcibly interrupted. Only the identified snapshot
+and empty owned directories are removed. Native scratch leftovers, unexpected
+children or observed substitutions refuse cleanup; there is no recursive
+deletion. A same-user adversarial namespace is
 outside this trusted-local profile. Process death may leave a private temporary
 snapshot; it is not automatically recovered or garbage-collected.
 

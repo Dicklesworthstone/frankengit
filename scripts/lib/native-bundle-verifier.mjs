@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdtemp, open, rmdir, unlink } from 'node:fs/promises';
+import { lstat, mkdtemp, open, realpath, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -14,6 +14,8 @@ export const NATIVE_BUNDLE_LIMITS = Object.freeze({
 });
 const MIB = 1024 * 1024;
 const MAX_STDERR = 65536;
+const COPY_BYTES = 65536;
+const FILE_REPORT_KEYS = new Set(['storage_profile', 'scratch_bytes', 'scratch_removed', 'pack_sha256']);
 const TRUE_FIELDS = ['pack_checksum_verified', 'objects_verified', 'object_graph_verified'];
 const FALSE_FIELDS = ['gitlink_targets_verified', 'signatures_verified', 'origin_authenticated',
   'current_branch_verified', 'strict_fsck_equivalent', 'repository_opened',
@@ -96,11 +98,13 @@ export function normalizeNativeRecoveryHead(value) {
  * No file, executable, signal listener or other resource is opened here.
  */
 export function normalizeNativeBundleOptions(options) {
-  if (!onlyKeys(options, ['fg', 'expected', 'signal', 'recoveryHead', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
+  if (!onlyKeys(options, ['fg', 'expected', 'signal', 'recoveryHead', 'fileBacked', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
     || options.fg.length > 4096 || /[\0\r\n]/.test(options.fg)) throw fail('native_absolute_fg_path_required');
-  const result = { ...NATIVE_BUNDLE_LIMITS, ...options };
-  integer(result.maxInputMiB, 1, 128, 'native_input_limit');
-  integer(result.maxExpandedMiB, 1, 128, 'native_expanded_limit');
+  const result = { ...NATIVE_BUNDLE_LIMITS, fileBacked: false, ...options };
+  if (typeof result.fileBacked !== 'boolean') throw fail('native_invalid_file_profile');
+  const maximumMiB = result.fileBacked ? 16384 : 128;
+  integer(result.maxInputMiB, 1, maximumMiB, 'native_input_limit');
+  integer(result.maxExpandedMiB, 1, maximumMiB, 'native_expanded_limit');
   integer(result.maxObjects, 1, 100000, 'native_object_limit');
   integer(result.maxRefs, 1, 4096, 'native_ref_limit');
   integer(result.timeoutMs, 1, 3600000, 'native_timeout_limit');
@@ -152,11 +156,12 @@ async function readInput(path, options, live) {
   } finally { await file.close(); }
 }
 
-function argumentsFor(path, digest, options, live) {
+function argumentsFor(path, digest, options, live, scratchDirectory) {
   const args = ['bundle', 'verify', '--max-input-mib', String(options.maxInputMiB),
     '--max-expanded-mib', String(options.maxExpandedMiB), '--max-objects', String(options.maxObjects),
     '--max-refs', String(options.maxRefs), '--timeout-secs', String(Math.max(1, Math.ceil(live.remaining() / 1000))),
     '--expect-sha256', digest];
+  if (options.fileBacked) args.push('--file-backed', '--scratch-dir', scratchDirectory);
   if (options.expected.object_format !== undefined) args.push('--expect-format', options.expected.object_format);
   for (const pin of options.expected.refs) args.push('--expect-ref-hex', `${pin.ref_hex}=${pin.object_id}`);
   if (options.expected.exact_refs) args.push('--exact-refs');
@@ -168,9 +173,9 @@ function argumentsFor(path, digest, options, live) {
 
 // Cancellation owns the actual process through close, not merely its Promise.
 // fg is an explicitly trusted local executable, not a hostile-process sandbox.
-async function runNative(path, digest, options, live) {
+async function runNative(path, digest, options, live, scratchDirectory) {
   live.check();
-  const args = argumentsFor(path, digest, options, live);
+  const args = argumentsFor(path, digest, options, live, scratchDirectory);
   return await new Promise((resolve, reject) => {
     let child;
     try { child = spawn(options.fg, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
@@ -235,7 +240,9 @@ function validateReport(raw, digest, size, options) {
   } catch { throw fail('native_invalid_report'); }
   // Native profile v1 emits compact JSON. Round-trip equality also refuses
   // duplicate object keys, trailing documents and lossy numeric spellings.
-  if (!record(result) || JSON.stringify(result) !== text || Object.keys(result).some(key => !REPORT_KEYS.has(key) && !(key === 'recovery' && options.recoveryHead !== undefined))
+  if (!record(result) || JSON.stringify(result) !== text || Object.keys(result).some(key => !REPORT_KEYS.has(key)
+      && !(key === 'recovery' && options.recoveryHead !== undefined)
+      && !(options.fileBacked && FILE_REPORT_KEYS.has(key)))
     || result.type !== 'git_bundle_verification' || result.schema_version !== 1
     || result.profile !== 'native-full-bundle-graph-v1'
     || !['sha1', 'sha256'].includes(result.object_format)
@@ -248,6 +255,11 @@ function validateReport(raw, digest, size, options) {
     || result.payload_bytes > options.maxExpandedMiB * MIB || result.delta_objects > result.object_count
     || !hex(result.pack_checksum, result.object_format === 'sha1' ? 20 : 32)
     || (result.advertised_head !== null && !oid(result.advertised_head, result.object_format))) throw fail('native_invalid_report');
+  if (options.fileBacked && (result.storage_profile !== 'file-backed-native-full-bundle-v1'
+    || result.scratch_removed !== true || !Number.isSafeInteger(result.scratch_bytes) || result.scratch_bytes < 0
+    || result.scratch_bytes > 2 * options.maxExpandedMiB * MIB || !hex(result.pack_sha256, 32))) {
+    throw fail('native_invalid_file_report');
+  }
   const actual = validateReferences(result.references, result.object_format, options.maxRefs);
   if (actual.size !== result.reference_count) throw fail('native_invalid_report');
   const expected = options.expected, echo = result.expectations;
@@ -273,51 +285,134 @@ function validateReport(raw, digest, size, options) {
     input_snapshot_sha256: digest };
 }
 
+async function writeSnapshot(file, bytes, position, live) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    live.check();
+    const { bytesWritten } = await file.write(bytes, offset, Math.min(COPY_BYTES, bytes.length - offset), position + offset);
+    live.check();
+    if (bytesWritten === 0) throw fail('native_snapshot_write_failed');
+    offset += bytesWritten;
+  }
+}
+
+async function cleanupSnapshot(directory, directoryIdentity, path, fileIdentity, file) {
+  try {
+    const currentDirectory = await lstat(directory, { bigint: true });
+    if (directoryIdentity === undefined || !currentDirectory.isDirectory()
+      || currentDirectory.dev !== directoryIdentity.dev || currentDirectory.ino !== directoryIdentity.ino) {
+      throw fail('native_snapshot_cleanup_refused');
+    }
+    if (fileIdentity !== undefined) {
+      const current = await lstat(path, { bigint: true });
+      if (!current.isFile() || current.dev !== fileIdentity.dev || current.ino !== fileIdentity.ino
+        || current.nlink !== 1n) throw fail('native_snapshot_cleanup_refused');
+      await unlink(path);
+    }
+    // A descriptor pins our inode through child close and the ownership check.
+    // Close it before rmdir for platforms that disallow removing open children.
+    if (file !== undefined) { const owned = file; file = undefined; await owned.close(); }
+    // Native scratch left by a killed child belongs to that native operation.
+    // Unknown/replaced entries are retained, never recursively deleted.
+    await rmdir(directory);
+  } catch (error) {
+    throw fail('native_snapshot_cleanup_refused', {
+      directory, cleanup_error: String(error.code ?? error.message).slice(0, 256),
+    });
+  } finally {
+    if (file !== undefined) await file.close();
+  }
+}
+
+async function verifySnapshot(options, live, stage) {
+  live.check();
+  let directory = await mkdtemp(join(tmpdir(), 'fg-native-verify-'));
+  let directoryIdentity, fileIdentity, file, report, failure;
+  let path = join(directory, 'input.bundle');
+  try {
+    directoryIdentity = await lstat(directory, { bigint: true }); live.check();
+    if (!directoryIdentity.isDirectory() || (process.platform !== 'win32' && (directoryIdentity.mode & 0o077n))) {
+      throw fail('native_private_directory_required');
+    }
+    // Native file-backed paths reject symlink components. TMPDIR itself can be
+    // an alias, so pass the canonical name of this exact owned directory.
+    const canonical = await realpath(directory), current = await lstat(canonical, { bigint: true });
+    if (!current.isDirectory() || current.dev !== directoryIdentity.dev || current.ino !== directoryIdentity.ino) {
+      throw fail('native_snapshot_changed');
+    }
+    directory = canonical; path = join(directory, 'input.bundle'); live.check();
+    file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    fileIdentity = await file.stat({ bigint: true });
+    const { digest, size } = await stage(file);
+    live.check();
+    if (options.expected.sha256 !== undefined && options.expected.sha256 !== digest) throw fail('native_expected_sha256_mismatch');
+    await file.sync(); live.check();
+    const staged = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
+    if (staged.size !== BigInt(size) || !named.isFile() || !sameFile(staged, named)) throw fail('native_snapshot_changed');
+    const result = await runNative(path, digest, options, live, directory);
+    live.check();
+    const after = await file.stat({ bigint: true }), currentFile = await lstat(path, { bigint: true });
+    if (!currentFile.isFile() || !sameFile(staged, after) || !sameFile(after, currentFile)) throw fail('native_snapshot_changed');
+    report = validateReport(result, digest, size, options);
+    live.check();
+  } catch (error) { failure = error; }
+  try { await cleanupSnapshot(directory, directoryIdentity, path, fileIdentity, file); }
+  catch (error) {
+    error.details ??= { directory };
+    if (failure !== undefined) {
+      error.details.verification_error = String(failure.code ?? failure.message).slice(0, 256);
+      if (typeof failure.details?.diagnostic === 'string') error.details.native_diagnostic = failure.details.diagnostic.slice(0, 4096);
+    }
+    throw error;
+  }
+  if (failure !== undefined) throw failure;
+  return report;
+}
+
 async function verifyOwned(bytes, options, live) {
   live.check();
   if (bytes.length < 1 || bytes.length > options.maxInputMiB * MIB) throw fail('native_input_size_or_type');
   const digest = createHash('sha256').update(bytes).digest('hex'); live.check();
   if (options.expected.sha256 !== undefined && options.expected.sha256 !== digest) throw fail('native_expected_sha256_mismatch');
-  const directory = await mkdtemp(join(tmpdir(), 'fg-native-verify-'));
-  let directoryIdentity, fileIdentity, file;
-  const path = join(directory, 'input.bundle');
+  return await verifySnapshot(options, live, async file => {
+    await writeSnapshot(file, bytes, 0, live);
+    return { digest, size: bytes.length };
+  });
+}
+
+async function verifyFileBacked(path, options, live) {
+  live.check();
+  if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined) throw fail('native_file_profile_unsupported');
+  if (typeof path !== 'string' || path.length === 0 || path.length > 4096 || path.includes('\0')) throw fail('native_invalid_input_path');
+  const named = await lstat(path, { bigint: true }); live.check();
+  if (!named.isFile() || named.size < 1n || named.size > BigInt(options.maxInputMiB * MIB)) throw fail('native_input_size_or_type');
+  const source = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0));
   try {
-    directoryIdentity = await lstat(directory, { bigint: true }); live.check();
-    if (!directoryIdentity.isDirectory() || (process.platform !== 'win32' && (directoryIdentity.mode & 0o077n))) throw fail('native_private_directory_required');
-    file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-    fileIdentity = await file.stat({ bigint: true });
-    let offset = 0;
-    while (offset < bytes.length) {
-      live.check();
-      const { bytesWritten } = await file.write(bytes, offset, Math.min(65536, bytes.length - offset), offset);
-      live.check(); if (bytesWritten === 0) throw fail('native_snapshot_write_failed'); offset += bytesWritten;
-    }
-    // Keep the owned inode pinned until cleanup, including while fg reads it.
-    await file.sync(); live.check();
-    const result = await runNative(path, digest, options, live);
-    live.check();
-    const report = validateReport(result, digest, bytes.length, options);
-    live.check(); return report;
-  } finally {
-    // The open descriptor prevents inode recycling during identity checks.
-    // The private directory is a trusted-local namespace, not a same-UID sandbox.
-    try {
-      const currentDirectory = await lstat(directory, { bigint: true });
-      if (directoryIdentity === undefined || !currentDirectory.isDirectory()
-        || currentDirectory.dev !== directoryIdentity.dev || currentDirectory.ino !== directoryIdentity.ino) throw fail('native_snapshot_cleanup_refused');
-      if (fileIdentity !== undefined) {
-        const current = await lstat(path, { bigint: true });
-        if (!current.isFile() || current.dev !== fileIdentity.dev || current.ino !== fileIdentity.ino
-          || current.nlink !== 1n) throw fail('native_snapshot_cleanup_refused');
-        await unlink(path);
-      }
-      // Windows needs the descriptor closed before removing its parent.
-      if (file !== undefined) { const owned = file; file = undefined; await owned.close(); }
-      await rmdir(directory);
-    } finally {
-      if (file !== undefined) await file.close();
-    }
-  }
+    const before = await source.stat({ bigint: true }); live.check();
+    if (!before.isFile() || !sameFile(named, before)) throw fail('native_input_changed');
+    const size = Number(before.size);
+    return await verifySnapshot(options, live, async destination => {
+      const buffer = Buffer.alloc(COPY_BYTES), digest = createHash('sha256');
+      let position = 0;
+      try {
+        while (position < size) {
+          live.check();
+          const { bytesRead } = await source.read(buffer, 0, Math.min(buffer.length, size - position), position);
+          live.check();
+          if (!bytesRead) throw fail('native_input_truncated');
+          const chunk = buffer.subarray(0, bytesRead);
+          digest.update(chunk);
+          await writeSnapshot(destination, chunk, position, live);
+          position += bytesRead;
+        }
+        if ((await source.read(buffer, 0, 1, size)).bytesRead) throw fail('native_input_grew');
+        const after = await source.stat({ bigint: true }), current = await lstat(path, { bigint: true });
+        live.check();
+        if (!current.isFile() || !sameFile(before, after) || !sameFile(after, current)) throw fail('native_input_changed');
+        return { digest: digest.digest('hex'), size };
+      } finally { buffer.fill(0); }
+    });
+  } finally { await source.close(); }
 }
 
 /** Verify exactly these bytes through an explicitly selected local fg binary.
@@ -326,17 +421,23 @@ async function verifyOwned(bytes, options, live) {
  */
 export async function verifyNativeGitBundle(bytes, options) {
   const config = normalizeNativeBundleOptions(options), live = lifetime(config); live.check();
+  if (config.fileBacked) throw fail('native_file_backed_requires_file');
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > config.maxInputMiB * MIB) throw fail('native_input_size_or_type');
   if (bytes.buffer instanceof SharedArrayBuffer) throw fail('native_shared_input_refused');
   const owned = Buffer.from(bytes); live.check();
-  return await verifyOwned(owned, config, live);
+  const report = await verifyOwned(owned, config, live);
+  live.check(); return report;
 }
 
 /** One quiescent local file read, one owned snapshot, one child, one deadline.
+ * Explicit fileBacked mode copies and hashes bounded chunks without retaining
+ * complete input bytes. It owns the native scratch directory until child close.
  * No fallback, source-path reopening by fg, Git executable, or node mutation.
  */
 export async function verifyNativeGitBundleFile(path, options) {
   const config = normalizeNativeBundleOptions(options), live = lifetime(config); live.check();
-  const bytes = await readInput(path, config, live);
-  return await verifyOwned(bytes, config, live);
+  const report = config.fileBacked
+    ? await verifyFileBacked(path, config, live)
+    : await verifyOwned(await readInput(path, config, live), config, live);
+  live.check(); return report;
 }

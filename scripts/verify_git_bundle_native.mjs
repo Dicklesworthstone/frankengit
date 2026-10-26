@@ -7,8 +7,9 @@ const USAGE = `Usage: node scripts/verify_git_bundle_native.mjs PATH.bundle --fg
 Run the existing native Rust fg bundle verify over an exclusive private snapshot.
 No Git executable, network client, repository opening, restore, or fallback.
 The executable is operator-trusted; this command does not authenticate its build.
-  --max-input-mib N       Input bytes, 1..128 (default 128)
-  --max-expanded-mib N    Native resolution/graph bytes, 1..128 (default 128)
+  --file-backed          Stream a private snapshot and use native disk resolution
+  --max-input-mib N       Input bytes, 1..128; file-backed 1..16384 (default 128)
+  --max-expanded-mib N    Resolution/graph bytes, same ceilings (default 128)
   --max-objects N         Included objects, 1..100000
   --max-refs N            References, 1..4096
   --timeout-secs N        One read/staging/process deadline, 1..3600 (default 300)
@@ -23,7 +24,12 @@ The executable is operator-trusted; this command does not authenticate its build
 A matching input snapshot hash is not an independent trust anchor. A format alone
 is not an identity pin. Native success does not authenticate an origin or signer,
 prove freshness, verify submodule targets, restore a capsule, or approve a change.
-The bounded native reader retains input in memory; this is not a streaming engine.
+The default profile retains input in memory. Explicit --file-backed keeps the
+input and resolved object payloads on disk with bounded transfer buffers; native
+per-object, object-count, metadata, graph and work limits still apply. Temporary
+storage needs the input snapshot plus up to twice the expanded ceiling. The
+wrapper creates and owns a private temporary directory; no scratch path is
+accepted. Interrupted native scratch is retained and its directory is reported.
 Cancellation terminates and reaps fg, escalating after 500 ms if necessary. It
 cannot interrupt a blocking OS filesystem operation. Only our temporary inode is
 removed; cleanup failure is a command failure, never recursive deletion.
@@ -42,6 +48,7 @@ function argumentsFor(args) {
       const repeated = arg === '--expect-ref' || arg === '--expect-ref-hex';
       if (!repeated && seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg);
       if (arg === '--exact-refs') { expected.exact_refs = true; continue; }
+      if (arg === '--file-backed') { options.fileBacked = true; continue; }
       if (!numbers.has(arg) && !repeated && !['--fg', '--expect-sha256', '--expect-format'].includes(arg)) throw new Error('unknown_option');
       const value = args[++at];
       if (!value || value.startsWith('--')) throw new Error('missing_option_value');
