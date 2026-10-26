@@ -324,6 +324,14 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        // Exclusive &mut self prevents live operation futures (which borrow
+        // &self) from repopulating this directly owned cache during shutdown.
+        // An abandoned SQL command cannot execute its dropped future's later
+        // cache insertion. Clear before awaiting close so a dropped/cancelled
+        // close cannot leave cached answers after the worker has stopped.
+        // Delegate directly: the engine must still replay a terminal close
+        // result even when a subsequent caller's context is already cancelled.
+        self.bodies.clear();
         self.connection
             .close(cx)
             .await
@@ -606,6 +614,17 @@ impl FsqliteAuthorityStore {
     {
         self.admit_body(body)?;
         let mut lease = self.operation(cx).await?;
+        // Only committed, write-once bytes enter this cache. Comparing them
+        // settles both retry and conflict without another BEGIN/count/INSERT/
+        // read/COMMIT cycle. The operation lease above still checks caller
+        // cancellation and repairs an abandoned predecessor transaction.
+        if let Some(identical) = self.bodies.matches(key.as_bytes(), body) {
+            return Ok(if identical {
+                PutOutcome::IdenticalRetry
+            } else {
+                PutOutcome::Conflict
+            });
+        }
         self.begin(cx, &mut lease).await?;
         match self.put_body(cx, key, body).await {
             Ok(outcome) => {
@@ -1672,5 +1691,63 @@ mod tests {
             })),
             "zero is reserved, not a fabricated negative integer"
         );
+    }
+
+    #[test]
+    fn cached_retry_recovers_an_abandoned_transaction_before_answering() {
+        use super::FsqliteAuthorityStore;
+        use fgit_authority::{AuthorityLimits, ImmutableKey, ImmutableRead, PutOutcome};
+
+        let runtime = RuntimeProfile::deterministic().build().unwrap();
+        let cx = request_cx(&runtime, Duration::from_secs(30));
+        let mut store = runtime
+            .block_on(FsqliteAuthorityStore::open(
+                &cx,
+                ":memory:",
+                INSTANCE,
+                AuthorityLimits::default(),
+            ))
+            .unwrap();
+        let committed = ImmutableKey::new(b"cached/committed".to_vec()).unwrap();
+        let abandoned = ImmutableKey::new(b"cached/abandoned".to_vec()).unwrap();
+        runtime.block_on(async {
+            assert_eq!(
+                store
+                    .put_if_absent(&cx, &committed, b"durable")
+                    .await
+                    .unwrap(),
+                PutOutcome::Created
+            );
+            let mut lease = store.operation(&cx).await.unwrap();
+            store.begin(&cx, &mut lease).await.unwrap();
+            assert_eq!(
+                store
+                    .put_body(&cx, &abandoned, b"uncommitted")
+                    .await
+                    .unwrap(),
+                PutOutcome::Created
+            );
+            assert!(store.connection.in_transaction());
+            drop(lease);
+
+            assert_eq!(
+                store
+                    .put_if_absent(&cx, &committed, b"durable")
+                    .await
+                    .unwrap(),
+                PutOutcome::IdenticalRetry
+            );
+            assert_eq!(store.body_cache_stats().put_hits, 1);
+            assert!(!store.connection.in_transaction());
+            assert_eq!(
+                store.read_immutable(&cx, &abandoned).await.unwrap(),
+                ImmutableRead::Absent
+            );
+            assert_eq!(
+                store.read_immutable(&cx, &committed).await.unwrap(),
+                ImmutableRead::Present(b"durable".to_vec())
+            );
+        });
+        runtime.block_on(store.close(&cx)).unwrap();
     }
 }

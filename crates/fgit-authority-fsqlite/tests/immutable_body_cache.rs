@@ -9,11 +9,14 @@
 
 use std::path::PathBuf;
 
-use fgit_authority::{AuthorityLimits, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId};
-use fgit_authority_fsqlite::{BodyCacheStats, FsqliteAuthorityStore};
+use fgit_authority::{
+    AuthorityLimits, AuthorityRefusal, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
+};
+use fgit_authority_fsqlite::{BodyCacheStats, EngineError, FsqliteAuthorityStore, TransientClass};
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
-use fgit_runtime::meter::BudgetClass;
+use fgit_runtime::meter::{BudgetClass, ClassLimits};
 use fsqlite_types::cx::Cx as FsqliteCx;
+use std::time::Duration;
 
 /// A database path that removes itself, sidecars included.
 struct Scratch {
@@ -198,4 +201,148 @@ fn a_refused_conflicting_write_never_enters_the_cache() {
     assert_eq!(harness.read(&second, &k), present(b"the stored bytes"));
     harness.close(second);
     harness.close(first);
+}
+
+#[test]
+fn thousands_of_identical_puts_avoid_sql_and_preserve_conflicts_at_capacity() {
+    let harness = Harness::new();
+    let scratch = Scratch::new("cached-put-capacity");
+    let limits = AuthorityLimits {
+        body_bytes: 8,
+        immutable_slots: 1,
+        ..AuthorityLimits::default()
+    };
+    let store = harness
+        .node
+        .block_on(FsqliteAuthorityStore::open(
+            &harness.cx,
+            scratch.as_str(),
+            StoreInstanceId::from_raw(1),
+            limits,
+        ))
+        .unwrap();
+    let k = key(b"cached/full");
+    assert_eq!(harness.put(&store, &k, b"original"), PutOutcome::Created);
+    assert_eq!(store.body_cache_stats().put_hits, 0);
+    // Session prebinding and seal admission repeat the same immutable keys.
+    // More than one seal's command count must not cause a second SQL write
+    // for any of these already-committed bytes.
+    for _ in 0..4097 {
+        assert_eq!(
+            harness.put(&store, &k, b"original"),
+            PutOutcome::IdenticalRetry
+        );
+    }
+    assert_eq!(store.body_cache_stats().put_hits, 4097);
+    assert_eq!(harness.put(&store, &k, b"conflict"), PutOutcome::Conflict);
+    assert_eq!(store.body_cache_stats().put_hits, 4098);
+    assert_eq!(harness.read(&store, &k), present(b"original"));
+
+    let new_key = key(b"cached/over-capacity");
+    assert_eq!(
+        harness
+            .node
+            .block_on(store.put_if_absent(&harness.cx, &new_key, b"new")),
+        Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+            occupancy: 1,
+            limit: 1
+        }))
+    );
+    // A cached conflict cannot bypass the caller's original per-body bound.
+    assert_eq!(
+        harness
+            .node
+            .block_on(store.put_if_absent(&harness.cx, &k, b"too large")),
+        Err(EngineError::Contract(AuthorityRefusal::BodyTooLarge {
+            len: 9,
+            limit: 8
+        }))
+    );
+    assert_eq!(store.body_cache_stats().put_hits, 4098);
+    assert_eq!(harness.read(&store, &new_key), ImmutableRead::Absent);
+    harness.close(store);
+}
+
+#[test]
+fn cached_puts_preserve_local_cancellation_and_native_budget_refusal() {
+    let harness = Harness::new();
+    let scratch = Scratch::new("cached-put-cancellation");
+    let store = harness.open(&scratch, 1);
+    let k = key(b"cached/cancellation");
+    assert_eq!(harness.put(&store, &k, b"stored"), PutOutcome::Created);
+    let cancelled = FsqliteCx::new();
+    cancelled.set_native_cx(harness.node.request_cx(BudgetClass::Request));
+    cancelled.cancel();
+    let exhausted = FsqliteCx::new();
+    exhausted.set_native_cx(harness.node.request_cx_with_budget(
+        ClassLimits::finite(Duration::from_secs(30), 0, 1_000_000).at(harness.node.now()),
+    ));
+    for cx in [&cancelled, &exhausted] {
+        for body in [b"stored".as_slice(), b"different".as_slice()] {
+            assert_eq!(
+                harness.node.block_on(store.put_if_absent(cx, &k, body)),
+                Err(EngineError::Engine(TransientClass::Cancelled))
+            );
+        }
+    }
+    assert_eq!(
+        store.body_cache_stats().put_hits,
+        0,
+        "neither context reached the cache"
+    );
+    assert_eq!(
+        harness.put(&store, &k, b"stored"),
+        PutOutcome::IdenticalRetry
+    );
+    assert_eq!(store.body_cache_stats().put_hits, 1);
+    assert_eq!(harness.read(&store, &k), present(b"stored"));
+    harness.close(store);
+}
+
+#[test]
+fn closing_the_worker_invalidates_cached_read_and_put_answers() {
+    let harness = Harness::new();
+    let scratch = Scratch::new("cached-put-closed");
+    let mut store = harness.open(&scratch, 1);
+    let k = key(b"cached/closed");
+    assert_eq!(harness.put(&store, &k, b"durable"), PutOutcome::Created);
+    assert_eq!(
+        harness.put(&store, &k, b"durable"),
+        PutOutcome::IdenticalRetry
+    );
+    assert_eq!(harness.read(&store, &k), present(b"durable"));
+    assert_eq!(store.body_cache_stats().entries, 1);
+    harness.node.block_on(store.close(&harness.cx)).unwrap();
+    // The real connection owns its terminal close memo. Cache invalidation
+    // must not add a cancellation gate in front of that idempotent result.
+    let cancelled = FsqliteCx::new();
+    cancelled.set_native_cx(harness.node.request_cx(BudgetClass::Request));
+    cancelled.cancel();
+    harness.node.block_on(store.close(&cancelled)).unwrap();
+    assert_eq!(store.body_cache_stats().entries, 0);
+    assert_eq!(store.body_cache_stats().retained, 0);
+    let hits = store.body_cache_stats().put_hits;
+    for body in [b"durable".as_slice(), b"different".as_slice()] {
+        assert!(
+            harness
+                .node
+                .block_on(store.put_if_absent(&harness.cx, &k, body))
+                .is_err()
+        );
+    }
+    assert!(
+        harness
+            .node
+            .block_on(store.read_immutable(&harness.cx, &k))
+            .is_err()
+    );
+    assert_eq!(store.body_cache_stats().put_hits, hits);
+    drop(store);
+    let reopened = harness.open(&scratch, 1);
+    assert_eq!(harness.read(&reopened, &k), present(b"durable"));
+    assert_eq!(
+        harness.put(&reopened, &k, b"durable"),
+        PutOutcome::IdenticalRetry
+    );
+    harness.close(reopened);
 }

@@ -7,7 +7,7 @@ use fgit_types::{
     PolicyEpoch, RefusalRecordId, RegistryEpoch,
 };
 
-fn fixture() -> (MemoryAuthorityStore, HeadKey, RecoveryScope, SealAttempt) {
+pub(super) fn fixture() -> (MemoryAuthorityStore, HeadKey, RecoveryScope, SealAttempt) {
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(73));
     let head_key = HeadKey::new(b"recovery-test/head".to_vec()).unwrap();
     let scope = RecoveryScope {

@@ -20,6 +20,9 @@ use crate::{
     resolve_outcome_async, seal_key,
 };
 
+mod batch;
+pub use batch::{MAX_RECOVERY_KEYS, recover_requests_async};
+
 const MAX_BINDING_BYTES: usize = 256;
 const MAX_SEAL_BYTES: usize = 8192;
 const LIMITS: DecodeLimits = DecodeLimits {
@@ -139,7 +142,7 @@ impl std::fmt::Display for RecoveryFailure {
                 observed,
             } => write!(
                 out,
-                "transaction recovery {field} is {observed} bytes, exceeds {limit}"
+                "transaction recovery {field} is {observed}, exceeds {limit}"
             ),
             Self::Interrupted(code) => write!(out, "transaction recovery interrupted: {code:?}"),
         }

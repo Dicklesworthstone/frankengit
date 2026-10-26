@@ -19,6 +19,9 @@
 //! store, in this process and any other.
 //!
 //! - An absent read is never cached, because a later write may fill the key.
+//! - An immutable put may compare its proposed bytes with a cached committed
+//!   body and settle an identical retry or conflict without another SQL write.
+//!   The caller still acquires the operation gate and observes cancellation.
 //! - Heads, tokens and every other mutable row bypass this cache.
 //! - The cache returns exactly the bytes the engine returned or accepted.
 //!   Callers still decode them and check every digest, so the cache adds no
@@ -56,6 +59,7 @@ struct State {
     clock: u64,
     hits: u64,
     misses: u64,
+    put_hits: u64,
 }
 
 /// Counters of one store's immutable-body cache, for tests and diagnostics.
@@ -65,6 +69,8 @@ pub struct BodyCacheStats {
     pub hits: u64,
     /// Reads that went to the engine (including absent keys).
     pub misses: u64,
+    /// Immutable puts settled by comparison with cached committed bytes.
+    pub put_hits: u64,
     /// Bodies currently retained.
     pub entries: usize,
     /// Bytes currently retained.
@@ -105,6 +111,39 @@ impl BodyCache {
         Some(body)
     }
 
+    /// Compare against committed cached bytes without copying the body.
+    ///
+    /// `None` requires the ordinary store path. An absent or evicted key never
+    /// proves that its durable slot is absent. Reads retain their own counters;
+    /// only a settled comparison increments `put_hits`.
+    pub(crate) fn matches(&self, key: &[u8], offered: &[u8]) -> Option<bool> {
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        let state = &mut *state;
+        state.clock = state.clock.wrapping_add(1);
+        let now = state.clock;
+        let (body, stamp) = state.bodies.get_mut(key)?;
+        let matches = body.as_ref() == offered;
+        let previous = std::mem::replace(stamp, now);
+        if let Some(owner) = state.recency.remove(&previous) {
+            state.recency.insert(now, owner);
+        }
+        state.put_hits = state.put_hits.saturating_add(1);
+        Some(matches)
+    }
+
+    /// Discard retained bodies before the connection leaves its live state.
+    /// The store's exclusive close borrow excludes any live operation future
+    /// that could insert committed bytes between eviction and shutdown.
+    pub(crate) fn clear(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.bodies.clear();
+            state.recency.clear();
+            state.retained = 0;
+        }
+    }
+
     /// Record `body` as the bytes of `key`. The caller has either read them
     /// from the engine or had the engine accept them for this key.
     pub(crate) fn insert(&self, key: &[u8], body: &[u8]) {
@@ -139,6 +178,7 @@ impl BodyCache {
             |state| BodyCacheStats {
                 hits: state.hits,
                 misses: state.misses,
+                put_hits: state.put_hits,
                 entries: state.bodies.len(),
                 retained: state.retained,
             },
@@ -213,5 +253,26 @@ mod tests {
             stats.entries > 0 && stats.retained > 900,
             "the budget is used, not wasted: {stats:?}"
         );
+    }
+
+    #[test]
+    fn put_comparisons_preserve_bytes_and_refresh_bounded_retention() {
+        let cache = BodyCache::with_bounds(8, 4);
+        assert_eq!(cache.matches(b"unknown", b"1234"), None);
+        cache.insert(b"a", b"1234");
+        cache.insert(b"b", b"5678");
+        assert_eq!(cache.matches(b"a", b"1234"), Some(true));
+        assert_eq!(cache.matches(b"a", b"different"), Some(false));
+        cache.insert(b"c", b"9012");
+        assert_eq!(cache.matches(b"b", b"5678"), None);
+        assert_eq!(cache.get(b"a").as_deref(), Some(&b"1234"[..]));
+        let before = cache.stats();
+        assert_eq!(before.put_hits, 2);
+        assert_eq!(before.retained, 8);
+        cache.clear();
+        assert_eq!(cache.matches(b"a", b"1234"), None);
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().retained, 0);
+        assert_eq!(cache.stats().put_hits, before.put_hits);
     }
 }
