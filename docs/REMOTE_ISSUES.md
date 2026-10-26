@@ -8,13 +8,30 @@ changes. The server must enable issues and outcomes and provision the caller
 with the independent issue-write and outcome-read grants.
 
 `scripts/operator/remote_issue.mjs` supports native `open`, `edit`, `comment`,
-`close`, `reopen`, `assign` and `unassign`. Issue numbers and expected versions
+`append-comment`, `close`, `reopen`, `assign` and `unassign`. Issue numbers and expected versions
 are canonical decimal **strings**, including values beyond JavaScript's safe
 integer range. Text and list limits follow the native form contract; unknown
 fields, duplicate labels/assignees and invalid versions refuse before I/O.
 Label replacement with an empty list emits the explicit native `clear_labels`
 field. Omitting labels in an edit leaves them unchanged. No issue number or
 expected version is guessed, and no read/modify/write retry updates a request.
+
+Use `append-comment` explicitly when a comment should survive intervening issue
+changes. Its input must contain `expected_version: null` and `fields: { "body":
+"exact comment text" }`. This local null encodes the absence of a predecessor:
+the HTTP form contains **only** `body`, never an `expected_version` field, and
+the publication receipt must return `expected_version: null`. Supplying a version,
+omitting the input property or adding other fields refuses before I/O.
+`comment` retains its exact positive version requirement and original saved
+request/key encoding. The client never converts a strict comment to an append,
+refreshes its version or falls back when a server lacks the append route.
+
+The native append profile binds the authenticated actor, issue and exact body
+while planning its position against the current canonical history. See
+[the native contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2021-native-issue-append-comment-intents).
+This permits comments on open or closed issues; it grants no other edit or
+authority. Different request identities with identical text remain different
+comments. Keep the saved intent for recovery, including after a lost reply.
 
 ## Request and recovery contract
 
@@ -106,8 +123,11 @@ source control, or an environment-variable example. `request.json` contains:
 
 Those IDs are placeholders. Obtain the actual scope independently and use an
 explicit issue number. For an existing issue, obtain its exact current version
-from the native issue API/browser. A concurrent version change causes a native
-refusal, never a silently refreshed mutation. `edit` can replace selected title,
+from the native issue API/browser for exact-version operations. A concurrent
+version change causes a native refusal, never a silently refreshed mutation.
+For contention-tolerant commenting instead, select `"action": "append-comment"`,
+`"expected_version": null` and a body-only `fields` object.
+`edit` can replace selected title,
 body or labels; `comment` takes a body; `assign`/`unassign` take an `assignees`
 array of principal IDs; `close`/`reopen` take an empty `fields` object.
 

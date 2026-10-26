@@ -138,6 +138,7 @@ export async function lookupOutcome(address, token, selected, options = {}) {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, maxHeaderSize: 16 * 1024, rejectUnauthorized: true, ...(ca ? { ca } : {}),
         headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': key, Accept: 'application/json',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           'Accept-Encoding': 'identity', 'Content-Length': '0', 'Cache-Control': 'no-store', Connection: 'close' },
       });
       request.once('close', () => { closed = true; if (!finishing) finish(new OutcomeError('outcome_response_incomplete')); else deliver(); });

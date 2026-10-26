@@ -9,7 +9,7 @@ import { lookupOutcome, outcomeEndpoint, outcomeScope, validateOutcomeReply, Out
 export const ISSUE_LIMITS = Object.freeze({ form: 256 * 1024, reply: 16 * 1024, intent: 512 * 1024,
   body: 64 * 1024, title: 256, labels: 32, assignees: 16 });
 const MAX_U64 = 18446744073709551615n;
-const ACTIONS = ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign'];
+const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign'];
 const INTENT = 'frankengit-remote-issue-intent-v1';
 const ID = /^[0-9a-f]{32}$/, HASH = /^[0-9a-f]{64}$/;
 export class IssueError extends Error {
@@ -96,10 +96,15 @@ export function parseIssueJson(bytes, { wire = false, maximum = ISSUE_LIMITS.int
   } catch (error) { if (error instanceof IssueError) throw error; fail('invalid_issue_json'); }
 }
 export function issueCommand(number, version, action, input) {
-  issueU64(number, 1n); issueU64(version, 0n, MAX_U64 - 1n);
-  if (!ACTIONS.includes(action) || (action === 'open') !== (version === '0')) fail('invalid_issue_action_or_version');
+  issueU64(number, 1n);
+  const append = action === 'append-comment';
+  // Explicit local null means the native form carries NO predecessor field.
+  // Never reinterpret a strict saved request by discarding its version.
+  if (append) { if (version !== null) fail('append_issue_version_forbidden'); }
+  else issueU64(version, 0n, MAX_U64 - 1n);
+  if (!ACTIONS.includes(action) || (!append && (action === 'open') !== (version === '0'))) fail('invalid_issue_action_or_version');
   const names = ['open', 'edit'].includes(action) ? ['title', 'body', 'labels']
-    : action === 'comment' ? ['body'] : ['assign', 'unassign'].includes(action) ? ['assignees'] : [];
+    : ['comment', 'append-comment'].includes(action) ? ['body'] : ['assign', 'unassign'].includes(action) ? ['assignees'] : [];
   fields(input, names, action === 'open' ? ['title', 'body'] : action === 'edit' ? [] : names);
   const normalized = {};
   if (Object.hasOwn(input, 'title')) normalized.title = text(input.title, ISSUE_LIMITS.title, true);
@@ -107,9 +112,9 @@ export function issueCommand(number, version, action, input) {
   if (Object.hasOwn(input, 'labels')) normalized.labels = list(input.labels, ISSUE_LIMITS.labels, label => text(label, 64, true));
   if (action === 'open') normalized.labels ??= [];
   if (Object.hasOwn(input, 'assignees')) normalized.assignees = list(input.assignees, ISSUE_LIMITS.assignees, identity);
-  if ((action === 'edit' && !Object.keys(normalized).length) || (action === 'comment' && !normalized.body.trim()) ||
+  if ((action === 'edit' && !Object.keys(normalized).length) || (['comment', 'append-comment'].includes(action) && !normalized.body.trim()) ||
       (['assign', 'unassign'].includes(action) && !normalized.assignees.length)) fail('empty_issue_change');
-  const form = new URLSearchParams({ expected_version: version });
+  const form = new URLSearchParams(append ? {} : { expected_version: version });
   for (const name of ['title', 'body']) if (Object.hasOwn(normalized, name)) form.append(name, normalized[name]);
   if (normalized.labels) {
     for (const label of normalized.labels) form.append('label', label);
@@ -188,6 +193,7 @@ function postIssue(intent, token, options) {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, maxHeaderSize: 16 * 1024, rejectUnauthorized: true, ...(options.ca ? { ca: options.ca } : {}),
         headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': intent.key, Accept: 'application/json',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(Buffer.byteLength(intent.body)),
           'Accept-Encoding': 'identity', Connection: 'close', 'Cache-Control': 'no-store' },
       });
