@@ -58,6 +58,8 @@ mod capsule_history;
 mod closure_selection;
 pub mod source_retrieval;
 mod treefs_workspace;
+#[cfg(target_os = "linux")]
+pub mod workflow_artifacts;
 pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
@@ -178,7 +180,8 @@ mod verified_reads;
 pub mod webhook;
 
 pub use ssh::{
-    FileDeployKeyAuthorizer, FileDeployKeyRefusal, NodeSshRefusal, SshServerLimits, SshServerReceipt,
+    FileDeployKeyAuthorizer, FileDeployKeyRefusal, NodeSshRefusal, SshServerLimits,
+    SshServerReceipt,
 };
 pub use webhook::{DeadLetterQueue, WebhookDeliveryDestination};
 
@@ -6961,6 +6964,8 @@ pub struct NodeConfig {
     /// transfer profile. Disabled unless an operator selects a private root;
     /// per-request LFS credentials remain independently required.
     http_lfs_root: Option<PathBuf>,
+    /// Opt-in workflow artifact custody reads; transport grants remain separate.
+    workflow_artifact_root: Option<PathBuf>,
     /// Which cell this process is, for answers it serves.
     ///
     /// `frankengit-1egm`. Unset by default and typed as such: a deployment that
@@ -7020,6 +7025,7 @@ impl NodeConfig {
             http_trusted_origin: None,
             http_protection_admin: false,
             http_lfs_root: None,
+            workflow_artifact_root: None,
         }
     }
 
@@ -7214,6 +7220,22 @@ impl NodeConfig {
     #[must_use]
     pub fn http_lfs_root(&self) -> Option<&Path> {
         self.http_lfs_root.as_deref()
+    }
+
+    /// Selects the existing private trusted-workflow artifact custody root.
+    /// This grants no access by itself. HTTP requires a distinct artifact-read
+    /// credential and MCP requires an explicit artifact launch grant. The grant
+    /// covers the entire repository/incarnation namespace, including artifacts
+    /// derived from hidden refs. Stored provenance never authorizes a check.
+    #[must_use]
+    pub fn with_workflow_artifact_root(mut self, root: PathBuf) -> Self {
+        self.workflow_artifact_root = Some(root);
+        self
+    }
+
+    #[must_use]
+    pub fn workflow_artifact_root(&self) -> Option<&Path> {
+        self.workflow_artifact_root.as_deref()
     }
 
     /// The selected git-daemon receive-processing budget (300 s unless an

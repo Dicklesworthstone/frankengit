@@ -60,6 +60,7 @@ pub(super) struct Grant {
     protection_write: bool,
     lfs_read: bool,
     lfs_write: bool,
+    artifact_read: bool,
 }
 impl Grant {
     pub const fn permits(self, service: Service) -> bool {
@@ -108,6 +109,11 @@ impl Grant {
     /// It never permits inspecting another principal's transaction namespace.
     pub const fn permits_outcomes(self) -> bool {
         self.outcomes_read
+    }
+    /// Reads the complete explicitly selected workflow artifact custody namespace.
+    /// This separate grant does not inherit Git visibility or grant a check.
+    pub const fn permits_artifact_read(self) -> bool {
+        self.artifact_read
     }
     /// Artifact custody is independent from Git ref publication and metadata.
     pub const fn permits_lfs(self, mutation: bool) -> bool {
@@ -180,6 +186,7 @@ impl CredentialSource {
                     protection_write: false,
                     lfs_read: false,
                     lfs_write: false,
+                    artifact_read: false,
                 })
             }
             Self::File { path, binding } => {
@@ -382,6 +389,7 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
         protection_write: false,
         lfs_read: false,
         lfs_write: false,
+        artifact_read: false,
     };
     let mut previous = 0;
     for scope in scopes.split(',') {
@@ -402,6 +410,7 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
             "protection-write" => (12, &mut grant.protection_write),
             "lfs-read" => (13, &mut grant.lfs_read),
             "lfs-write" => (14, &mut grant.lfs_write),
+            "artifact-read" => (15, &mut grant.artifact_read),
             _ => return Err(CredentialFailure::InvalidFile),
         };
         if rank <= previous {
@@ -528,6 +537,54 @@ mod tests {
             });
         }
         encoded
+    }
+
+    #[test]
+    fn artifact_reads_require_their_own_scope_without_widening_existing_grants() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let old_scopes = "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write";
+        assert!(
+            !grant(principal, old_scopes)
+                .unwrap()
+                .permits_artifact_read()
+        );
+        let selected = grant(principal, "artifact-read").unwrap();
+        assert!(selected.permits_artifact_read());
+        assert_eq!(selected.principal, principal);
+        assert!(!selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack));
+        assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
+        assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
+        assert!(!selected.permits_reviews(false) && !selected.permits_reviews(true));
+        assert!(!selected.permits_protection(false) && !selected.permits_protection(true));
+        assert!(!selected.permits_outcomes() && !selected.permits_reviewed_merge());
+        assert!(!selected.permits_lfs(false) && !selected.permits_lfs(true));
+        assert!(
+            grant(principal, &format!("{old_scopes},artifact-read"))
+                .unwrap()
+                .permits_artifact_read()
+        );
+        for invalid in [
+            "artifact-read,artifact-read",
+            "artifact-read,read",
+            "artifact-write",
+            "artifacts-read",
+        ] {
+            assert!(matches!(
+                grant(principal, invalid),
+                Err(CredentialFailure::InvalidFile)
+            ));
+        }
+        let token = "a".repeat(64);
+        let source = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        };
+        assert!(
+            !source
+                .authenticate(Some(&format!("Bearer {token}")))
+                .unwrap()
+                .permits_artifact_read()
+        );
     }
 
     #[test]

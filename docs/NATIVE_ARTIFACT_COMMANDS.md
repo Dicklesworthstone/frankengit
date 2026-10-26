@@ -5,6 +5,13 @@
 payload format or database and no subprocess doing hashing or storage. This is
 explicit trusted-local byte custody, not a repository mutation or a remote API.
 
+For remote inspection/download of the fixed trusted-workflow namespace, Linux
+`fg serve-http --artifact-root` provides the separately scoped `artifact-read`
+API described in [Authenticated workflow artifact downloads](HTTP_WORKFLOW_ARTIFACTS.md).
+That opt-in grant exposes the entire configured workflow custody namespace,
+including hidden-ref outputs. These local commands retain their explicit scope
+and do not acquire HTTP credentials or remote mutation behavior.
+
 All commands select an existing private root plus tenant, repository,
 repository incarnation, and trust domain. Inspect/export require the original
 artifact ID, not a filename. Put requires the expected raw payload SHA-256 and

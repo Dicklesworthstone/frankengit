@@ -9,6 +9,8 @@
 //! headers never authenticate. Git RPCs stream to native machines; metadata
 //! forms have a separate small envelope. Outcome queries never mutate state.
 
+#[cfg(target_os = "linux")]
+mod artifacts;
 mod browser;
 mod credentials;
 mod events;
@@ -462,6 +464,18 @@ impl OneNode {
         }
         credentials.validate().map_err(credential_error)?;
         self.validate_smart_http_lfs_storage()?;
+        #[cfg(target_os = "linux")]
+        if self.service_config.workflow_artifact_root().is_some() {
+            self.validate_workflow_artifact_storage().map_err(|error| {
+                io_error("open workflow artifact custody", io::Error::other(error))
+            })?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if self.service_config.workflow_artifact_root().is_some() {
+            return Err(invalid_configuration(
+                "workflow artifact custody requires Linux",
+            ));
+        }
         #[cfg(target_os = "linux")]
         let lfs = self.smart_http_lfs_service()?;
         let maximum_git_body =
@@ -1092,6 +1106,17 @@ fn serve_connection(
                 &mut writer,
                 &admission_deadline,
                 local,
+            );
+        }
+        #[cfg(target_os = "linux")]
+        if artifacts::is_route(envelope.target) {
+            return artifacts::serve(
+                profile,
+                &envelope,
+                &bytes[..envelope.consumed],
+                &bytes[envelope.consumed..],
+                &mut writer,
+                &admission_deadline,
             );
         }
         if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {

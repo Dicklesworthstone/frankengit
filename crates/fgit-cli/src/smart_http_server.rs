@@ -24,7 +24,7 @@ use crate::service_stop as stop_file;
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
-  [--allow-protection] [--lfs-root <private-directory>]
+  [--allow-protection] [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
@@ -73,7 +73,7 @@ for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -92,6 +92,17 @@ and at most 64 MiB total declared payload bytes per batch. Payloads are retained
 permanently: pointer-aware collection, partial-upload resume and LFS locking are
 outside this profile. Git pointer files are never rewritten by the service.
 See docs/GIT_LFS_BASIC_TRANSFER.md for provisioning and custody/backup limits.
+
+On Linux, --artifact-root enables read-only workflow artifact metadata/downloads
+from an existing absolute private (0700) custody root. Requires --credentials-file
+and the independent artifact-read grant. It exposes the ENTIRE selected repository
+incarnation's trusted-workflow-local-owner namespace, including outputs produced
+from hidden refs. Git, issue, PR, LFS and check grants do not imply this access.
+GET /api/v1/artifacts/<artifact-sha256> inspects complete verified custody;
+GET /api/v1/artifacts/<artifact-sha256>/content downloads verified bytes (64 MiB max).
+Use exact artifact IDs from workflow result or saved job artifact receipts. No
+upload, directory listing, caller-selected path/trust scope, producer authority,
+canonical check or cache reuse is granted. See docs/HTTP_WORKFLOW_ARTIFACTS.md.
 
 Git requests authenticate with a Bearer token or Basic token-as-password; the
 native APIs accept only an explicit Bearer token. Any request other than GET or
@@ -275,6 +286,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--principal"
                     | "--credentials-file"
                     | "--lfs-root"
+                    | "--artifact-root"
                     | "--expected-incarnation"
                     | "--stop-file"
                     | "--max-sessions"
@@ -391,6 +403,18 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         #[cfg(not(target_os = "linux"))]
         return Err("the Git LFS artifact-fabric backend requires Linux".into());
     }
+    if let Some(root) = flags.get("--artifact-root") {
+        if !matches!(&credentials, CredentialInput::Reloadable(_)) {
+            return Err(
+                "workflow artifacts require explicit artifact-read in --credentials-file".into(),
+            );
+        }
+        if root.len() > 4096 || !Path::new(root).is_absolute() {
+            return Err("artifact root must be an absolute bounded private directory".into());
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err("workflow artifact custody requires Linux".into());
+    }
     if (allow_issues || allow_outcomes || allow_pulls || allow_source || allow_protection)
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
@@ -499,6 +523,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if let Some(root) = flags.get("--lfs-root") {
         config = config.with_http_lfs_root(PathBuf::from(*root));
     }
+    if let Some(root) = flags.get("--artifact-root") {
+        config = config.with_workflow_artifact_root(PathBuf::from(*root));
+    }
     if let Some(origin) = flags.get("--trusted-origin") {
         config = config.with_http_trusted_origin(
             HttpTrustedOrigin::try_new(origin).map_err(|refusal| refusal.to_string())?,
@@ -595,6 +622,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         _ => None,
     };
     let lfs_enabled = options.config.http_lfs_root().is_some();
+    let artifacts_enabled = options.config.workflow_artifact_root().is_some();
     let mut node = OneNode::open_existing(options.config).map_err(|e| e.to_string())?;
     if matches!(&options.credentials, CredentialInput::HeaderOnly) {
         let authentication = node
@@ -623,6 +651,11 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         }
         node.validate_smart_http_lfs_storage()
             .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        if artifacts_enabled {
+            node.validate_workflow_artifact_storage()
+                .map_err(|error| error.to_string())?;
+        }
         let head = node
             .runtime()
             .block_on(node.authenticate_authority_head())
@@ -642,9 +675,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"lfs_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            options.allow_source, options.allow_protection, lfs_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
+            options.allow_source, options.allow_protection, lfs_enabled, artifacts_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
         };
         if let Some(maintenance) = options.index_maintenance {
@@ -810,6 +843,7 @@ mod tests {
         assert!(options.index_maintenance.is_none());
         assert!(!options.config.http_protection_admin_enabled());
         assert!(options.config.http_lfs_root().is_none());
+        assert!(options.config.workflow_artifact_root().is_none());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
@@ -846,6 +880,57 @@ mod tests {
             ["--print-credentials-header", "--lfs-root", "lfs-custody"]
                 .into_iter()
                 .map(str::to_owned),
+        );
+        assert!(parse(&header).is_err());
+    }
+
+    #[test]
+    fn artifacts_require_an_explicit_private_root_and_scoped_credentials() {
+        let mut static_args = arguments();
+        static_args.extend(["--artifact-root".into(), "/private/artifacts".into()]);
+        assert!(parse(&static_args).is_err());
+        let mut scoped = arguments()[..5].to_vec();
+        scoped.extend(
+            [
+                "--credentials-file",
+                "grants",
+                "--artifact-root",
+                "/private/artifacts",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let options = parse(&scoped).unwrap();
+            assert_eq!(
+                options.config.workflow_artifact_root(),
+                Some(Path::new("/private/artifacts"))
+            );
+            assert!(
+                !options.allow_receive
+                    && !options.allow_source
+                    && !options.allow_pulls
+                    && !options.allow_issues
+            );
+            assert!(options.config.http_lfs_root().is_none());
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert!(parse(&scoped).is_err());
+        let mut relative = scoped.clone();
+        *relative.last_mut().unwrap() = "relative-artifacts".into();
+        assert!(parse(&relative).is_err());
+        scoped.extend(["--artifact-root".into(), "/another".into()]);
+        assert!(parse(&scoped).is_err());
+        let mut header = arguments()[..5].to_vec();
+        header.extend(
+            [
+                "--print-credentials-header",
+                "--artifact-root",
+                "/private/artifacts",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         );
         assert!(parse(&header).is_err());
     }

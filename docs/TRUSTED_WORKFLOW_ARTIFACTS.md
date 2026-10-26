@@ -227,6 +227,14 @@ workspace even when collection refuses.
 
 ## Inspect or export after cleanup
 
+For authenticated remote inspection and downloads on Linux, the operator can
+start `fg serve-http` with this existing `--artifact-root` and grant a separate
+`artifact-read` credential. Use the result or saved receipt's exact output or
+manifest ID. This explicitly grants the complete repository incarnation's fixed
+workflow namespace, including hidden-ref outputs; ordinary Git/source grants
+never imply it. See [Authenticated workflow artifact downloads](HTTP_WORKFLOW_ARTIFACTS.md)
+for provisioning, metadata and binary routes, bounds and authority limits.
+
 Use the producing run's exact tenant, repository and incarnation, together with
 the fixed trust domain `trusted-workflow-local-owner`. Both payload and manifest
 IDs use the same store and scope:
