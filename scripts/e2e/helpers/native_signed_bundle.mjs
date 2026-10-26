@@ -73,11 +73,17 @@ async function check(key, action) {
   try { await action(); summary.checks[key] = 'pass'; }
   catch (error) { summary.checks[key] = 'fail'; throw error; }
 }
-function refused(result, expected) {
+function refused(result, expected, nativeReason) {
   assert.equal(result.code, 1, result.stderr.toString());
   assert.equal(result.stdout.length, 0);
   const error = JSON.parse(result.stderr);
   assert.equal(error.verified, false); assert.equal(error.error, expected);
+  if (nativeReason !== undefined) {
+    assert.equal(error.details.exit_code, 2); assert.equal(error.details.signal, null);
+    const diagnostic = JSON.parse(error.details.diagnostic);
+    assert.equal(diagnostic.type, 'bundle_error'); assert.equal(diagnostic.schema_version, 1);
+    assert.match(diagnostic.error, nativeReason);
+  }
 }
 function nativeFacts(report, format, bytes, tip) {
   assert.equal(report.object_format, format); assert.equal(report.object_count, 3);
@@ -144,16 +150,19 @@ try {
     await check(`${format}.wrong_ref`, async () => {
       const wrong = [...options], at = wrong.indexOf('--expect-ref') + 1;
       wrong[at] = `${ref}=${format}:${tip[0] === '0' ? '1' : '0'}${tip.slice(1)}`;
-      refused(await command('wrong-ref', artifact, approval, ['--native-max-input-mib', '18'], wrong), 'native_verification_refused');
+      refused(await command('wrong-ref', artifact, approval, ['--native-max-input-mib', '18'], wrong),
+        'native_verification_refused', /^expected_reference_mismatch:/);
     });
     await check(`${format}.expanded`, async () => {
-      refused(await command('expanded', artifact, approval, ['--native-max-input-mib', '18', '--native-max-expanded-mib', '1']), 'native_verification_refused');
+      refused(await command('expanded', artifact, approval, ['--native-max-input-mib', '18', '--native-max-expanded-mib', '1']),
+        'native_verification_refused', /^bundle_pack: ObjectSizeLimit \{ actual: 17825792, limit: 1048576 \}$/);
     });
     const badBytes = Buffer.from(bytes); badBytes[badBytes.length - 1] ^= 1;
     const invalid = join(directory, 'invalid.bundle'); await writeFile(invalid, badBytes, { flag: 'wx', mode: 0o600 });
     await check(`${format}.signed_invalid`, async () => {
       const signedInvalid = await sign(invalid, 'invalid.dsse.json');
-      refused(await command('signed-invalid', invalid, signedInvalid, ['--native-max-input-mib', '18']), 'native_verification_refused');
+      refused(await command('signed-invalid', invalid, signedInvalid, ['--native-max-input-mib', '18']),
+        'native_verification_refused', /^bundle_pack: TrailerChecksumMismatch$/);
     });
     await check(`${format}.tampered`, async () => {
       refused(await command('tampered', invalid, approval, ['--native-max-input-mib', '18']), 'native_expected_sha256_mismatch');
