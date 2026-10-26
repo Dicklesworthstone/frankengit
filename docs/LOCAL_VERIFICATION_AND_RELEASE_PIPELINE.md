@@ -1,8 +1,8 @@
 # Local Verification and Release Pipeline
 
 **Status:** normative operations profile  
-**Version:** 1.0  
-**Last revised:** 2026-08-19
+**Version:** 1.1
+**Last revised:** 2026-10-26
 
 FrankenGit does not depend on GitHub-hosted Actions for correctness, release availability, or evidence. Repository workflows are portable lane descriptions consumed locally by Doodlestein Self-Releaser (`dsr`) and `act` where appropriate. The canonical commands, schemas, and evidence generation live inside the repository.
 
@@ -22,6 +22,8 @@ No verification or release behavior may exist only in GitHub expression syntax, 
 The initial lanes are:
 
 ```bash
+# Choose a durable target directory unique to this verification pane.
+export CARGO_TARGET_DIR=/data/frankengit-targets/verify-my-pane
 ./scripts/verify.sh docs
 ./scripts/verify.sh constitution
 ./scripts/verify.sh fast
@@ -29,9 +31,20 @@ The initial lanes are:
 ./scripts/verify.sh release
 ```
 
+Build-backed lanes require `CARGO_TARGET_DIR`. Compilation follows the caller's
+Cargo/RCH routing under AGENTS.md §16.2; the verifier does not force local
+compilation. Repository-inspecting tools are built for the caller's native
+host and executed on the caller against explicit checkout paths. This keeps
+documentation, tracker and generated-schema checks on the real input tree,
+including files excluded from a worker's source projection. The configured
+`CARGO_BUILD_TARGET` still selects constitutional dependency/linkage inspection
+and workspace compilation; it does not select the host that runs these tools.
+Python 3.11+ is required by the bootstrap preflight; Python also parses Cargo's
+target metadata without losing spaces, quotes or backslashes in paths.
+
 - `docs`: Markdown links, fences, required status/contract phrases, registry schemas/rows, and workflow portability.
 - `constitution`: required files, first-party unsafe/FFI/foreign-Git source scan, manifest and Cargo.lock closed-world dependency checks, toolchain pin, and forbidden artifacts. Layering, license-compatibility, and claim-registry checks join this lane as the corresponding machinery lands; they are not implemented yet.
-- `fast`: the `docs` and `constitution` lanes plus `cargo fmt --check`, `cargo check`, full workspace tests, and `cargo clippy -D warnings`.
+- `fast`: the `docs` and `constitution` lanes plus verifier command-contract tests, `cargo fmt --check`, `cargo check`, generated-schema checks, full workspace tests, and `cargo clippy -D warnings`.
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
 

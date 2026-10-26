@@ -673,12 +673,18 @@ artifact no longer matches its exact digest.
 The initial local commands are:
 
 ```bash
+# Choose a durable target directory unique to this verification pane.
+export CARGO_TARGET_DIR=/data/frankengit-targets/verify-my-pane
 ./scripts/verify.sh docs
 ./scripts/verify.sh constitution
 ./scripts/verify.sh fast
 ./scripts/verify.sh full
 ./scripts/verify.sh release
 ```
+
+Build-backed lanes require that private target directory and respect Cargo/RCH
+routing. Returned native checker tools run against the caller's checkout; see
+the [local verification profile](docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md).
 
 The documentation/constitution/fast bootstrap lanes exist today. `full` and `release` deliberately return a typed exit-3 refusal until real conformance, fault, native-target, and artifact gates land; a dormant gate never reports success.
 
