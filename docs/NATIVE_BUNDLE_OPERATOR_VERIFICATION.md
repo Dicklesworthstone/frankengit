@@ -116,23 +116,47 @@ node scripts/verify_git_bundle.mjs ./backup.bundle \
 ```
 
 The four attestation arguments are still an all-or-nothing group. The existing
-Ed25519/DSSE verifier authenticates the external key, repository, full-width
-sequence floor, lifetime and exact artifact bytes before a native process is
-launched. The native adapter receives only those owned bytes; it never reopens
-the original source path after authentication. Signature files and trust-key
-paths are not passed to the child. Native content checks and independent identity
-pins are still required even when the signature is valid. After the child and
-its temporary files have been finalized, approval lifetime is checked again
-before output. An expired approval cannot ride through on a successful native
-content-verification report.
+Ed25519/DSSE verifier authenticates the captured small envelope, external key,
+repository, full-width sequence floor, lifetime and signed length against the
+selected input allowance before opening the artifact. A contradictory independent
+artifact-hash pin refuses at this boundary too. The native adapter then binds its
+single private snapshot to the mandatory signed SHA-256. Its validated byte count
+must equal the signed length. Signature files and trust-key paths are not passed
+to the child. Every native content check and independent format/reference pin
+still applies when the signature is valid.
 
-Both signed and unsigned invocations of this existing command retain a 16 MiB
-input ceiling. The separate `verify_git_bundle_native.mjs` command supports the
-128 MiB native input profile but does not itself consume detached approvals.
+After the child and its temporary files have been finalized, the command
+reauthenticates the original captured envelope, key and policy, including approval
+lifetime, before output. It does not reread adjacent control files or accept a
+replacement approval. An expired approval cannot ride through on a successful
+native content-verification report.
+
+Signed and unsigned invocations default to a 16 MiB input allowance and 128 MiB
+expanded-payload allowance. `--native-max-input-mib` and
+`--native-max-expanded-mib` select explicit limits up to 128 MiB in memory, or
+up to 16,384 MiB with `--native-file-backed`. The mode alone does not raise the
+defaults. For a large signed portable bundle:
+
+```sh
+node scripts/verify_git_bundle.mjs ./large.bundle \
+  --native-fg "$PWD/target/release/fg" --native-file-backed \
+  --native-max-input-mib 4096 --native-max-expanded-mib 8192 \
+  --native-timeout-secs 1800 \
+  --attestation ./large.dsse.json --trust-key ./trusted-ed25519.pem \
+  --repository Dicklesworthstone/frankengit --minimum-sequence 42
+```
+
+The signature cannot enlarge the operator's allowance. Native-only options
+require `--native-fg`; invalid combinations refuse before file access or legacy
+decoder loading. Object, reference, report, metadata and per-object limits stay
+in force. The separate `verify_git_bundle_native.mjs` command defaults to 128 MiB
+input and does not consume detached approvals itself.
+
 `--native-timeout-secs` selects one 1..3600-second native operation deadline,
 including authentication, snapshot staging and child processing. Authentication
 time is subtracted from the child's allowance; it does not earn a fresh budget.
-This remains cooperative for operating-system filesystem calls.
+Final approval checks share the same deadline. This remains cooperative for
+operating-system filesystem calls.
 
 The returned `source_attestation` is independent of the native report: its
 signature covers portable source bytes, not Git commit signatures, forge state,
@@ -143,7 +167,9 @@ not turn an unsigned artifact hash into signer authentication.
 Native selection does not load the JavaScript Git decoder, even to parse native
 pins, and a missing/refusing native executable never triggers legacy fallback.
 Without `--native-fg`, the command keeps its existing legacy backend, input
-profile and report shape. No browser route or decoder is modified.
+profile and report shape. Source recovery keeps its existing owned-byte profile;
+this verification option does not select a different recovery/resume format.
+No browser route or decoder is modified.
 
 Additional integration tests:
 
@@ -154,6 +180,11 @@ node --test tests/operator/native-bundle-verifier.test.mjs \
 
 The signed tests use real Ed25519 keys and the unchanged production attestation
 module, while a deliberately fake `fg` exercises process/report composition.
+They include a real 17 MiB input, its streamed signature, default-limit refusal,
+and explicit file-backed acceptance with exact digest/length binding. The
+artifact is deliberately opaque: this case tests bounded orchestration, not Git
+content validity. Other cases cover trust-before-input ordering, signed length
+disagreement, profile limits, expiry, cancellation and owned cleanup.
 An import sentinel proves native selection never loads the legacy decoder;
 a separate sentinel verifies default dispatch, not legacy Git semantics.
 Neither constitutes a native Rust execution or full compatibility gate.

@@ -64,8 +64,10 @@ provide bytes and is **not permission to reopen a pathname for recovery**.
 `verifySourceAttestation` accepts an explicit `maximumBytes` when validating a
 large signed length. Without it, its previous 16 MiB limit is unchanged.
 `signSourceBackup`, `authenticateSourceBackup`, `readAuthenticatedSourceBackup`,
-and the owned-byte Git verification/recovery commands keep their prior limits.
-Large streaming signature success cannot bypass those limits.
+and the owned-byte Git verification/recovery APIs keep their prior limits.
+The native operator verification command has the explicit file-backed profile
+below. Large streaming signature success cannot enlarge any consumer's selected
+resource allowance.
 
 This increment does not claim Git pack/object/closure validation, a complete
 FrankenGit backup, streaming native `fg restore`, signature revocation, current
@@ -86,6 +88,36 @@ opaque artifact, not a claim about Git validity or disk-throughput performance.
 Other tests cover exact small-envelope equivalence, byte allowances, same-size
 substitution, path and metadata mutation, cancellation, deadlines, signer and
 policy capture, expiry during reads, and actual sign/check CLI execution.
+
+## Verify large signed bundle contents
+
+Use the native file-backed verifier to combine the detached approval with Git
+pack, object and graph checks in one operation:
+
+```sh
+node scripts/verify_git_bundle.mjs /backups/repository.bundle \
+  --native-fg "$PWD/target/release/fg" --native-file-backed \
+  --native-max-input-mib 10240 --native-max-expanded-mib 16384 \
+  --native-timeout-secs 1800 \
+  --attestation /backups/repository.dsse.json \
+  --trust-key /trusted/backup-public.pem \
+  --repository team/repository --minimum-sequence 42
+```
+
+The command authenticates the small captured approval and key before opening the
+bundle, streams the input into one private snapshot bound to the signed hash,
+checks the signed length and native content report, and rechecks the original
+approval's lifetime before success. It never gives the original source or trust
+file paths to the native child. Signing and native verification retain their
+separate claims in the resulting report.
+
+The generic command still defaults to 16 MiB input. File-backed native limits
+are explicit and stop at 16,384 MiB input and expanded payload each; object,
+reference, metadata, per-object and work limits also apply. Temporary disk needs
+the input snapshot plus native scratch of up to twice the expanded allowance.
+This verifies portable Git source; it does not change source-recovery formats or
+restore forge/authority state. See the full
+[native operator verification profile](NATIVE_BUNDLE_OPERATOR_VERIFICATION.md).
 
 
 ## Materialize an authenticated large bundle

@@ -5,9 +5,11 @@ import { open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { ATTESTATION_LIMITS, readAuthenticatedSourceBackup } from './lib/source-attestation.mjs';
+import { ATTESTATION_LIMITS, readAttestationFile, readAuthenticatedSourceBackup, verifySourceAttestation } from './lib/source-attestation.mjs';
 import { SourceAttestationOptions, ATTESTATION_HELP } from './lib/source-attestation-options.mjs';
-import { NATIVE_BUNDLE_LIMITS, normalizeNativeBundleOptions, verifyNativeGitBundle, verifyNativeGitBundleFile } from './lib/native-bundle-verifier.mjs';
+import { NATIVE_BUNDLE_LIMITS, normalizeNativeBundleOptions, verifyNativeGitBundleFile } from './lib/native-bundle-verifier.mjs';
+
+const MIB = 1024 * 1024;
 
 async function readBounded(path, signal, limits) {
   signal.throwIfAborted();
@@ -31,6 +33,9 @@ const USAGE = `Usage: node scripts/verify_git_bundle.mjs PATH.bundle [OPTIONS]
 Verify a complete local Git bundle without Git, network, or repository writes.
   --native-fg PATH          Use this absolute-path native Rust fg executable
   --native-timeout-secs N    Whole native operation, 1..3600 (default 300)
+  --native-file-backed       Stream a private snapshot to native file-backed verification
+  --native-max-input-mib N   Input ceiling (default 16; file-backed maximum 16384)
+  --native-max-expanded-mib N Expanded payload ceiling (default 128; same maximum)
 Optional expectations must come from a separately trusted source:
   --expect-sha256 HEX         Exact SHA-256 of the entire bundle
   --expect-format sha1|sha256 Required when supplying native reference pins
@@ -48,26 +53,34 @@ approval is separate from Git author/signature, forge-state and gitlink checks.
 
 --native-fg selects the existing Rust verifier, not another Git implementation.
 It does not load the JavaScript Git decoder and never falls back on failure.
-The executable is operator-trusted; its build is not authenticated here. Both
-signed and unsigned native inputs retain this command's 16 MiB input ceiling.
-Native processing uses bounded private temporary storage and reaps its child on
-cancellation. The input hash sent to fg binds a snapshot, not independent trust.
+The executable is operator-trusted; its build is not authenticated here. Signed
+and unsigned native inputs default to a 16 MiB input ceiling. Explicit native
+limits may select up to 128 MiB in memory, or up to 16384 MiB with the explicit
+file-backed profile. File-backed mode owns its private snapshot and scratch; it
+does not raise object, reference, report or individual-object memory limits.
+Native processing reaps its child on cancellation. The input hash sent to fg
+binds a snapshot. Independent pins constrain content identity; a detached
+approval authenticates the separately trusted signer.
 Without --native-fg, the existing JavaScript profile and report remain selected.
 `;
 async function argumentsFor(args) {
   if (args.length > 8224 || args.reduce((sum, arg) => sum + Buffer.byteLength(arg), 0) > 2 * 1024 * 1024
     || args.some(arg => arg.length > 8300 || arg.includes('\0'))) throw new Error('argument_limit');
-  let nativeFg = null, nativeTimeoutMs = NATIVE_BUNDLE_LIMITS.timeoutMs;
+  let nativeFg = null, nativeTimeoutMs = NATIVE_BUNDLE_LIMITS.timeoutMs, nativeFileBacked = false;
+  let nativeMaxInputMiB = ATTESTATION_LIMITS.bundleBytes / MIB, nativeMaxExpandedMiB = NATIVE_BUNDLE_LIMITS.maxExpandedMiB;
   let path = null, literal = false; const expected = {}, seen = new Set(), signed = new SourceAttestationOptions();
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (!literal && arg === '--') { literal = true; continue; }
     if (!literal && arg.startsWith('-')) {
       const next = signed.take(args, index); if (next !== index) { index = next; continue; }
-      if (arg === '--exact-refs') {
-        if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg); expected.exact_refs = true; continue;
+      if (arg === '--exact-refs' || arg === '--native-file-backed') {
+        if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg);
+        if (arg === '--exact-refs') expected.exact_refs = true; else nativeFileBacked = true;
+        continue;
       }
-      if (!['--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex', '--native-fg', '--native-timeout-secs'].includes(arg)) throw new Error('unknown_option');
+      if (!['--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex', '--native-fg', '--native-timeout-secs',
+        '--native-max-input-mib', '--native-max-expanded-mib'].includes(arg)) throw new Error('unknown_option');
       const value = args[++index];
       if (!value || value.startsWith('--')) throw new Error('missing_option_value');
       if (arg === '--expect-ref' || arg === '--expect-ref-hex') {
@@ -85,6 +98,11 @@ async function argumentsFor(args) {
         else if (arg === '--native-timeout-secs') {
           if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 3600) throw new Error('native_timeout_limit');
           nativeTimeoutMs = Number(value) * 1000;
+        } else if (arg === '--native-max-input-mib' || arg === '--native-max-expanded-mib') {
+          if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+            throw new Error(arg === '--native-max-input-mib' ? 'native_input_limit' : 'native_expanded_limit');
+          }
+          if (arg === '--native-max-input-mib') nativeMaxInputMiB = Number(value); else nativeMaxExpandedMiB = Number(value);
         } else expected[arg === '--expect-sha256' ? 'sha256' : 'object_format'] = value;
       }
     } else {
@@ -94,11 +112,14 @@ async function argumentsFor(args) {
   if (path === null) throw new Error('bundle_path_required');
   const attestation = signed.finish(), expectation = Object.keys(expected).length ? expected : null;
   if (nativeFg === null && seen.has('--native-timeout-secs')) throw new Error('native_fg_required_for_timeout');
+  if (nativeFg === null && ['--native-file-backed', '--native-max-input-mib', '--native-max-expanded-mib'].some(flag => seen.has(flag))) {
+    throw new Error('native_fg_required_for_file_limits');
+  }
   // Native selection never loads the legacy Git decoder, even for parsing pins.
   // Both backends validate all options before any input/authentication file I/O.
   if (nativeFg !== null) {
-    const native = normalizeNativeBundleOptions({ fg: nativeFg, expected: expectation,
-      maxInputMiB: ATTESTATION_LIMITS.bundleBytes / (1024 * 1024), timeoutMs: nativeTimeoutMs });
+    const native = normalizeNativeBundleOptions({ fg: nativeFg, expected: expectation, fileBacked: nativeFileBacked,
+      maxInputMiB: nativeMaxInputMiB, maxExpandedMiB: nativeMaxExpandedMiB, timeoutMs: nativeTimeoutMs });
     return { path, attestation, native, legacy: null, expected: expectation };
   }
   const legacy = await import('../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs');
@@ -115,6 +136,30 @@ function nativeCheckpoint() {
   if (nativeDeadline !== null && performance.now() >= nativeDeadline) throw new Error('native_verification_deadline');
   controller.signal.throwIfAborted();
 }
+// Authenticate only the small controls before the artifact is opened. The
+// native file adapter then hashes exactly one owned snapshot against this pin;
+// there is no second full-file copy or approval of a later pathname reopening.
+async function readNativeApproval(attestation, native) {
+  nativeCheckpoint();
+  const policy = { ...attestation.policy }, options = { signal: controller.signal, maximumBytes: native.maxInputMiB * MIB };
+  const encoded = await readAttestationFile(attestation.envelope, ATTESTATION_LIMITS.envelopeBytes, { signal: controller.signal });
+  nativeCheckpoint();
+  const key = await readAttestationFile(attestation.key, ATTESTATION_LIMITS.keyBytes, { signal: controller.signal });
+  nativeCheckpoint();
+  // Recheck the captured original envelope, key and policy, never the mutable
+  // adjacent paths or the returned display record. This also rechecks expiry.
+  const checkCurrent = async () => {
+    nativeCheckpoint();
+    const authentication = await verifySourceAttestation(encoded, key, policy, options);
+    nativeCheckpoint(); return authentication;
+  };
+  const authentication = await checkCurrent();
+  const artifact = { ...authentication.statement.artifact };
+  if (native.expected.sha256 !== undefined && native.expected.sha256 !== artifact.sha256) {
+    throw new Error('native_expected_sha256_mismatch');
+  }
+  return { authentication, artifact, checkCurrent };
+}
 try {
   let output;
   if (args.length === 1 && args[0] === '--help') output = USAGE;
@@ -124,27 +169,29 @@ try {
       nativeDeadline = performance.now() + native.timeoutMs;
       nativeTimer = setTimeout(() => controller.abort(), native.timeoutMs);
     }
-    const signed = attestation === null ? null : await readAuthenticatedSourceBackup(path,
-      attestation.envelope, attestation.key, attestation.policy, { signal: controller.signal });
-    // Use exactly the authenticated bytes. Never reopen the path after checking
-    // the signature or let an approval bypass object/closure and explicit pins.
+    const signed = attestation === null ? null : native === null
+      ? await readAuthenticatedSourceBackup(path, attestation.envelope, attestation.key, attestation.policy, { signal: controller.signal })
+      : await readNativeApproval(attestation, native);
+    // An authenticated artifact still undergoes the complete native content
+    // checks and every independent format/ref pin. The legacy byte API is intact.
     let result;
     if (native !== null) {
       nativeCheckpoint();
       const options = { ...native, signal: controller.signal,
+        expected: signed === null ? native.expected : { ...native.expected, sha256: signed.artifact.sha256 },
         timeoutMs: Math.max(1, Math.ceil(nativeDeadline - performance.now())) };
-      result = signed === null ? await verifyNativeGitBundleFile(path, options)
-        : await verifyNativeGitBundle(signed.bytes, options);
+      result = await verifyNativeGitBundleFile(path, options);
       nativeCheckpoint();
+      if (signed !== null && result.bundle_bytes !== signed.artifact.bytes) throw new Error('attestation_artifact_mismatch');
     } else {
       const bytes = signed === null ? await readBounded(path, controller.signal, legacy.BUNDLE_VERIFY_LIMITS) : signed.bytes;
       const options = { cryptoImpl: webcrypto, signal: controller.signal };
       result = expected === null ? await legacy.verifyGitBundle(bytes, options) : await legacy.verifyGitBundleAgainst(bytes, expected, options);
     }
-    signed?.checkCurrent();
+    await signed?.checkCurrent();
     if (signed !== null) result.source_attestation = signed.authentication;
     output = `${JSON.stringify(result, null, 2)}\n`;
-    if (native !== null) { nativeCheckpoint(); signed?.checkCurrent(); }
+    if (native !== null) { nativeCheckpoint(); await signed?.checkCurrent(); nativeCheckpoint(); }
   }
   await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
 } catch (error) {
