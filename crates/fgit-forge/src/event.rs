@@ -14,6 +14,7 @@ use crate::aggregate::{
     IssueNumber, OrganisationNumber, PullRequestNumber, QueueNumber, TeamNumber,
 };
 
+pub mod admission;
 pub mod issue;
 pub mod protection;
 pub mod pull_request;

@@ -11,11 +11,40 @@ use crate::{
 use fgit_admission::merge::native::{issues, objects::MergeObjectLimits};
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
-use fgit_forge::{IssueNumber, event::issue::IssueCommand};
+use fgit_forge::{
+    IssueNumber,
+    event::issue::{IssueCommand, IssueCommentIntent},
+};
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, TxId};
 
+#[derive(Clone, Copy)]
+enum IssueSubmission<'a> {
+    Exact(&'a IssueCommand),
+    AppendComment(&'a IssueCommentIntent),
+}
+
 impl OneNode {
+    /// Publish a version-independent comment through the canonical issue owner.
+    /// The issue, body, actor and idempotency key remain fixed across retries;
+    /// each new publication attempt validates the current issue state and stamps
+    /// its next version. A known outcome is recovered before intake or quota.
+    pub async fn admit_issue_comment_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        intent: &IssueCommentIntent,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_issue_submission_in(
+            request,
+            session,
+            IssueSubmission::AppendComment(intent),
+            limits,
+        )
+        .await
+    }
+
     /// Publish a versioned issue command plus its existing outbox obligation.
     /// The session's principal is authenticated by the trusted local boundary;
     /// issue text does not supply identity, authorization or executable code.
@@ -24,6 +53,17 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         command: &IssueCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_issue_submission_in(request, session, IssueSubmission::Exact(command), limits)
+            .await
+    }
+
+    async fn admit_issue_submission_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        submission: IssueSubmission<'_>,
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session
@@ -38,7 +78,11 @@ impl OneNode {
             object_format: self.object_format,
         };
         let error = |source| NodeReceiveTransportRefusal::Admission(Box::new(source));
-        let (_, attempt) = issues::proposal(&context, command).map_err(error)?;
+        let (_, attempt) = match submission {
+            IssueSubmission::Exact(command) => issues::proposal(&context, command),
+            IssueSubmission::AppendComment(intent) => issues::append_proposal(&context, intent),
+        }
+        .map_err(error)?;
         let tx = attempt
             .derive()
             .map_err(|_| {
@@ -75,15 +119,30 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = issues::admit_issue_async(
-            &self.authority,
-            request.authority(),
-            &context,
-            command,
-            limits,
-            &projection,
-        )
-        .await
+        let terminal = match submission {
+            IssueSubmission::Exact(command) => {
+                issues::admit_issue_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                )
+                .await
+            }
+            IssueSubmission::AppendComment(intent) => {
+                issues::admit_issue_comment_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    intent,
+                    limits,
+                    &projection,
+                )
+                .await
+            }
+        }
         .map_err(error)?;
         Ok((tx, terminal))
     }

@@ -18,6 +18,9 @@ use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, Iss
 use fgit_types::{AsciiSlug, RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod append;
+pub use append::{admit_issue_comment_async, append_proposal};
+
 const MAX_PAGE: u16 = 100;
 // Scan work and retained query state are different budgets. Unrelated streams
 // must not consume the selected issue/page's replay-memory allowance. These are

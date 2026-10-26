@@ -246,6 +246,7 @@ pub fn prepare_event(
             {
                 return Err(RefusalCode::EvidenceInvalid);
             }
+            verify_issue_seal(context, event, attempt)?;
             (
                 ForgeEventKind::IssueChanged { issue: entity },
                 Vec::new(),
@@ -536,3 +537,60 @@ pub fn prepare_event(
         materialization: CommitMaterialization { record, roots },
     })
 }
+
+/// An event position may differ from the original commitment only for the
+/// explicit append-comment profile. Rebuild both supported requests exactly;
+/// a Comment payload alone cannot authorize changing a strict predecessor.
+fn verify_issue_seal(
+    context: &AdmissionContext,
+    event: &ForgeEvent,
+    attempt: &SealAttempt,
+) -> Result<(), RefusalCode> {
+    use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueCommentIntent};
+    use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion};
+
+    let (AggregateId::Issue(number), ForgeEventPayload::IssueChangedNative(change)) =
+        (event.aggregate, &event.payload)
+    else {
+        return Err(RefusalCode::EvidenceInvalid);
+    };
+    let expected_version = if event.version == AggregateVersion::FIRST {
+        ExpectedVersion::NewStream
+    } else {
+        ExpectedVersion::Exactly(
+            AggregateVersion::try_new(event.version.get() - 1)
+                .ok_or(RefusalCode::EvidenceInvalid)?,
+        )
+    };
+    let command = IssueCommand {
+        number,
+        expected_version,
+        action: change.action.clone(),
+    };
+    let (expected, strict) = super::native::issues::proposal(context, &command)
+        .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if expected != *event {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    if strict == *attempt {
+        return Ok(());
+    }
+    let IssueAction::Comment { body } = &change.action else {
+        return Err(RefusalCode::EvidenceInvalid);
+    };
+    let (_, append) = super::native::issues::append_proposal(
+        context,
+        &IssueCommentIntent {
+            number,
+            body: body.clone(),
+        },
+    )
+    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if append != *attempt {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod issue_seal_tests;

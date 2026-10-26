@@ -14,6 +14,7 @@ use fgit_authority::{
 use fgit_chronicle::{PublicationBasis, PublicationPlan};
 use fgit_codec::CryptoBodyIdentity;
 use fgit_forge::ForgeEvent;
+use fgit_forge::event::admission::{ForgeCommandProfile, ForgeReplanPolicy, classify_event};
 use fgit_types::RefusalCode;
 use std::future::Future;
 
@@ -23,6 +24,20 @@ where
     P: NativeMergeProjection<S> + ?Sized,
 {
     fn precheck(&self, snapshot: &AdmissionSnapshot) -> Result<(), ProjectionFailure>;
+    fn command_profile(&self) -> ForgeCommandProfile {
+        ForgeCommandProfile::ExactVersion
+    }
+    /// Plan only from the authenticated basis already resolved by this owner.
+    /// Exact commands retain their submitted event; an explicit append profile
+    /// may derive a new position while preserving its independently checked seal.
+    fn plan_event(
+        &self,
+        _context: &AdmissionContext,
+        submitted: &ForgeEvent,
+        _resolved: &NativeMergeBasis,
+    ) -> Result<ForgeEvent, ProjectionFailure> {
+        Ok(submitted.clone())
+    }
     fn validate<'a>(
         &'a self,
         store: &'a S,
@@ -98,6 +113,12 @@ where
             projection
                 .merge_checkpoint(cx)
                 .map_err(ProjectionFailure::Unavailable)?;
+            let rule = classify_event(&event, validation.command_profile());
+            let planned = validation.plan_event(context, &event, &resolved)?;
+            if planned != event && rule.replan != ForgeReplanPolicy::RevalidateAppend {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+            }
+            let event = planned;
             let closure = validation
                 .validate(
                     store,

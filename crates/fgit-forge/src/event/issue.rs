@@ -1,10 +1,14 @@
 //! Versioned issue commands and canonical events. Text is data, never authority.
-//! Events retain explicit changes, so a retry never depends on a latest-state
-//! lookup. Admission evaluates the exact expected predecessor before publication.
+//! Exact-version commands retain explicit changes and their expected predecessor.
+//! Additive comment intents use a distinct seal profile; admission assigns their
+//! event position from each authenticated publication basis.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::aggregate::{AggregateId, AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode};
+
+mod append;
+pub use append::IssueCommentIntent;
 
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -77,13 +81,7 @@ impl IssueAction {
                 }
                 Ok(())
             }
-            Self::Comment { body } => {
-                validate_body(body)?;
-                if body.trim().is_empty() {
-                    return Err(invalid_native("issue.empty_comment"));
-                }
-                Ok(())
-            }
+            Self::Comment { body } => validate_comment_body(body),
             Self::Close | Self::Reopen => Ok(()),
             Self::Assign { assignees } | Self::Unassign { assignees } => {
                 if assignees.is_empty() {
@@ -209,6 +207,13 @@ fn validate_title(title: &str) -> Result<(), CodecRefusal> {
 fn validate_body(body: &str) -> Result<(), CodecRefusal> {
     if body.len() > MAX_BODY_BYTES || body.contains('\0') {
         return Err(invalid_native("issue.body"));
+    }
+    Ok(())
+}
+fn validate_comment_body(body: &str) -> Result<(), CodecRefusal> {
+    validate_body(body)?;
+    if body.trim().is_empty() {
+        return Err(invalid_native("issue.empty_comment"));
     }
     Ok(())
 }

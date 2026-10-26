@@ -1992,7 +1992,9 @@ The logical append protocol and physical segment compaction are separate.
 
 ### 24.7 Atomic admission and transactional outbox
 
-Repository-local commands seal their canonical event bytes and expected aggregate versions before commit. A `RepositoryCommitRecord` atomically admits those events with any associated ref delta. Physical stream segments and projections may lag, but the canonical event cannot be lost or detached from the transaction that admitted it.
+Exact-version repository-local commands seal their canonical event bytes and expected aggregate versions before commit. The explicit native issue append-comment profile instead seals the issue, authenticated actor and exact comment body under a distinct request scope, without a caller-selected predecessor. Admission derives its publication version from authenticated current issue history on each attempt; a lost head CAS revalidates the same sealed request and TxId. Existing exact-version comment commands and saved receipts retain their original meaning. The CALM classification permits this bounded replanning only for the explicit additive profile; all canonical publication still requires the exact authority-head CAS.
+
+A `RepositoryCommitRecord` atomically admits the actual canonical event bytes with any associated ref delta and outbox obligation. Physical stream segments and projections may lag, but the canonical event cannot be lost or detached from the transaction that admitted it. The append profile changes neither event encoding nor the historical request identity of any existing command; its complete seal and retry contract is defined in the normative protocol contracts, section 20.2.1.
 
 The transactional outbox is separate. Canonical commits atomically record intents for **derived or external** work: search, graph, notifications, webhooks, CI scheduling, caches, and federation delivery. Consumers are at least once and idempotent; their acknowledgements are not repository truth.
 
