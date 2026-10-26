@@ -30,7 +30,7 @@ usage: fg branch transaction <storage-root> <tenant-id> <repository-id>
   --trusted-local --principal <id> (--idempotency-key <key> | --key-stdin)
   [--object-format sha1|sha256]
   --create <full-ref> <target> | --update <full-ref> <expected-tip> <target>
-  | --delete <full-ref> <expected-tip> [repeat for 1..64 distinct branches]
+  | --delete <full-ref> <expected-tip> [repeat for 1..4096 distinct branches]
   Use --create-hex, --update-hex or --delete-hex for exact reference bytes.
 
 A transaction publishes ALL changes together or none; no per-command partial

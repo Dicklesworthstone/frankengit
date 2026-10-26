@@ -161,11 +161,12 @@ only for the identical complete command. See docs/HTTP_PROTECTION_API.md.
 Outcome lookup uses a bodyless POST and the ORIGINAL Idempotency-Key:
   POST /api/v1/outcomes                 (metadata transaction or atomic push)
   POST /api/v1/outcomes/receive         (whole recorded non-atomic session)
-  POST /api/v1/outcomes/receive/INDEX   (non-atomic push; zero-based index 0..63)
+  POST /api/v1/outcomes/receive/INDEX   (non-atomic push; zero-based command index)
 No original command body, transaction ID or pack is needed. The authenticated
 principal can inspect only its own key scope. These queries never re-seal,
 resubmit or cancel work. Missing/undecided observations do not prove rollback;
 a single receive-command result does not prove completion of the whole session.
+INDEX is canonical decimal within the native receive command limit.
 
 Forwarded identity headers never authenticate. This is an operator credential
 profile, not organization/team IAM, per-ref/per-item ACLs, account lifecycle or
@@ -174,7 +175,7 @@ Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB receive
 envelopes and a 4096 MiB upload pack envelope (packs stream; memory is the delta window);
 metadata forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
 Outcome replies have a separate per-principal quota; single-transaction replies
-are capped at 16 KiB and whole-session replies at 1 MiB. Source reads have another
+are capped at 16 KiB and whole-session replies at 16 MiB. Source reads have another
 independent quota, 1 MiB maximum file slices, and an 8 MiB JSON response ceiling.
 ";
 

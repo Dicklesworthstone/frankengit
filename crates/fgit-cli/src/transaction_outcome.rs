@@ -1,14 +1,14 @@
 //! Read-only lost-response recovery. It never rebuilds or resubmits a mutation.
 use super::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_authority::key_recovery::RequestRecovery;
-use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, OutcomeLookup};
+use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, MAX_REF_COMMANDS, OutcomeLookup};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{DecisionOutcome, Digest, GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg outcome <storage-root> <tenant-id> <repository-id> --trusted-local\n  --principal <original-principal-id>\n  (--idempotency-key <exact-text> | --idempotency-key-hex <hex> | --key-stdin)\n  [--receive-command-index <0..63>] [--object-format sha1|sha256]\n\nNo bundle, workspace, command body or transaction ID is needed. The exact key\nis interpreted in the original tenant/repository/principal scope, not as a\ncredential. Stdin is bounded and byte-exact: no newline is removed.\nExit 0: committed; 3: canonical refusal; 4: nonterminal observation; 2: error.\nAn absent key, unobserved seal, or undecided request is NOT proof of rollback.\nFor non-atomic receive, pass the ORIGINAL session key and its zero-based wire\ncommand index. The selector uses the admission lowerer's existing key rule;\nkey_digest in the receipt identifies the selected child key. One observation\ndoes not establish session length or completion. Without an index, the key is\nused directly, as required for atomic pushes and other sealed transactions.\nRepository creation is separate. This command never retries or cancels work.";
+const USAGE: &str = "usage: fg outcome <storage-root> <tenant-id> <repository-id> --trusted-local\n  --principal <original-principal-id>\n  (--idempotency-key <exact-text> | --idempotency-key-hex <hex> | --key-stdin)\n  [--receive-command-index <INDEX>] [--object-format sha1|sha256]\n\nNo bundle, workspace, command body or transaction ID is needed. The exact key\nis interpreted in the original tenant/repository/principal scope, not as a\ncredential. Stdin is bounded and byte-exact: no newline is removed.\nExit 0: committed; 3: canonical refusal; 4: nonterminal observation; 2: error.\nAn absent key, unobserved seal, or undecided request is NOT proof of rollback.\nFor non-atomic receive, pass the ORIGINAL session key and its zero-based wire\ncommand index in canonical decimal, within the native receive command limit.\nThe selector uses the admission lowerer's existing key rule;\nkey_digest in the receipt identifies the selected child key. One observation\ndoes not establish session length or completion. Without an index, the key is\nused directly, as required for atomic pushes and other sealed transactions.\nRepository creation is separate. This command never retries or cancels work.";
 
 struct Options {
     storage: PathBuf,
@@ -195,15 +195,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--idempotency-key-hex" => key = Some(KeyInput::Bytes(unhex_key(value)?)),
             "--receive-command-index" => {
                 if value.is_empty()
-                    || value.len() > 2
+                    || value.len() > (MAX_REF_COMMANDS - 1).ilog10() as usize + 1
                     || !value.bytes().all(|b| b.is_ascii_digit())
                     || (value.len() > 1 && value.starts_with('0'))
                 {
-                    return Err("receive command index must be canonical decimal 0..63".into());
+                    return Err(format!(
+                        "receive command index must be canonical decimal 0..{}",
+                        MAX_REF_COMMANDS - 1
+                    ));
                 }
                 let selected: usize = value.parse().map_err(|_| "invalid receive command index")?;
-                if selected >= 64 {
-                    return Err("receive command index must be 0..63".into());
+                if selected >= MAX_REF_COMMANDS {
+                    return Err(format!(
+                        "receive command index must be 0..{}",
+                        MAX_REF_COMMANDS - 1
+                    ));
                 }
                 receive_command_index = Some(selected);
             }
@@ -396,7 +402,7 @@ mod tests {
     }
     #[test]
     fn receive_selector_is_bounded_and_uses_the_original_binary_key_exactly() {
-        for index in [0, 1, 63] {
+        for index in [0, 1, 63, 64, 99, 100, 1023, MAX_REF_COMMANDS - 1] {
             let mut input = args();
             input.extend(["--receive-command-index".into(), index.to_string()]);
             assert_eq!(parse(&input).unwrap().receive_command_index, Some(index));
@@ -407,7 +413,19 @@ mod tests {
                 OneNode::receive_command_recovery_key(&key, index).unwrap()
             );
         }
-        for value in ["", "64", "-1", "+1", "00", "01", "999999999999999999999"] {
+        let past_limit = MAX_REF_COMMANDS.to_string();
+        let overflow = usize::MAX.to_string();
+        for value in [
+            "",
+            past_limit.as_str(),
+            overflow.as_str(),
+            "-1",
+            "+1",
+            "00",
+            "01",
+            "0100",
+            "999999999999999999999",
+        ] {
             let mut input = args();
             input.extend(["--receive-command-index".into(), value.into()]);
             assert!(parse(&input).is_err(), "{value}");

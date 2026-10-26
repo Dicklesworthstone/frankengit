@@ -34,7 +34,7 @@ pub(super) fn tools() -> Vec<Tool> {
         (UPDATE, "Move a branch from an exact expected tip to an already-visible commit through non-forced native admission. No implicit latest tip or protection bypass."),
         (DELETE, "Delete a branch at its exact expected tip. The native default-branch and current protection checks remain mandatory. Does not rewrite PR metadata."),
         (RENAME, "Atomically delete an exact-tip branch and create an absent destination at that SAME tip. No partial rename, overwrite, default-branch rename or PR retargeting."),
-        (TRANSACTION, "Atomically create, advance or delete 1..64 distinct branches. All commands share one exact durable key and canonical decision; stale or protected members cannot publish a partial prefix."),
+        (TRANSACTION, "Atomically create, advance or delete 1..4096 distinct branches. All commands share one exact durable key and canonical decision; stale or protected members cannot publish a partial prefix."),
         (PUBLISH, "Publish a reviewed native Git bundle. The default requires an exact base and single parent; initial:true explicitly creates zero-parent history at an absent branch and forbids expected_base. At most 24 KiB in three hex chunks. Native quarantine verifies objects before ordinary admission; no merge approval."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }

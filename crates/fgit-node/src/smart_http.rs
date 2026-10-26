@@ -5,6 +5,7 @@
 //! then composes wire requests with the exact authority-selected admission and
 //! disclosure machinery already used by the raw Git compatibility service.
 
+mod command_limit;
 mod ingress;
 mod receive_session;
 mod server;
@@ -930,7 +931,14 @@ impl OneNode {
         let receive_limits = self.git_daemon_receive_limits.clone();
         let context = self.smart_http_receive_context(receive_limits.wire.clone())?;
         let mut rpc = ReceiveRpc::new(request, request.requested_version, context, http_limits)?;
-        let decoded_body_bytes = body.consume(cancellation, |bytes, live| rpc.push(bytes, live))?;
+        let decoded_body_bytes =
+            match body.consume(cancellation, |bytes, live| rpc.push(bytes, live)) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    command_limit::report_http(request, &error, &receive_limits.wire, writer)?;
+                    return Err(error);
+                }
+            };
 
         // Ingress is complete. These independent, finite server-work clocks
         // cannot be exhausted by time the peer spent uploading its body.
@@ -998,7 +1006,7 @@ impl OneNode {
         if !live() {
             return Err(RpcError::Cancelled.into());
         }
-        let outcome = drive_request_while(
+        let outcome = match drive_request_while(
             self,
             &node_request,
             self.admit_continuing_http_receive_in(
@@ -1008,7 +1016,13 @@ impl OneNode {
                 admission_limits,
             ),
             &mut live,
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                command_limit::report_http(request, &error, &receive_limits.wire, writer)?;
+                return Err(error);
+            }
+        };
 
         // From here on, cancellation and I/O failure cannot mean non-commit.
         // Preserve the canonical result on every response-encoding/write path.

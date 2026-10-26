@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use fgit_admission::AdmissionResult;
-use fgit_authority::{IdempotencyKey, TerminalOutcome};
+use fgit_authority::{IdempotencyKey, MAX_REF_COMMANDS, TerminalOutcome};
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest, sha256_digest};
 use fgit_node::{
     GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionTimeout, LoopbackReceiveSession,
@@ -479,16 +479,23 @@ fn recovery_scopes_reload_and_mutation_bodies_or_identity_overrides_are_not_acce
             + &row('a', OWNER, "read,receive,issues-read,issues-write")
             + &row('b', OWNER, "outcomes-read")),
     );
-    let server = Server::start(node, &path, 8, [true, true, true]);
+    let boundary_indices = [64, 100, MAX_REF_COMMANDS - 1];
+    let server = Server::start(node, &path, 8 + boundary_indices.len(), [true, true, true]);
     assert_eq!(lookup(&server, 'a', "unknown", None).0, 403);
     assert_eq!(lookup(&server, 'c', "unknown", None).0, 401);
+    for index in boundary_indices {
+        let response = lookup(&server, 'b', "unknown", Some(index));
+        observation(&response, "key_not_observed");
+        assert!(response.1.contains(&format!("\"command_index\":{index},")));
+    }
+    let past_limit = format!("/api/v1/outcomes/receive/{MAX_REF_COMMANDS}");
     for (suffix, extra) in [
         (
             "/api/v1/outcomes",
             "Content-Length: 1000000\r\nExpect: 100-continue\r\n",
         ),
         ("/api/v1/outcomes?principal=other", "Content-Length: 0\r\n"),
-        ("/api/v1/outcomes/receive/64", "Content-Length: 0\r\n"),
+        (past_limit.as_str(), "Content-Length: 0\r\n"),
     ] {
         let refused = exchange(
             &server,

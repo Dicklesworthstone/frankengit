@@ -87,7 +87,7 @@ POST {REPO_URL}/api/v1/outcomes/receive/0
 POST {REPO_URL}/api/v1/outcomes/receive/1
 ```
 
-The index is canonical decimal in 0..63. It is not sorted ref-name order, an
+The index is canonical decimal in 0..4095. It is not sorted ref-name order, an
 issue number, or a transaction sequence. The selector calls the admission
 lowerer's existing child-key derivation; it does not invent a new identity.
 Even a single-ref push without the `atomic` capability uses index 0. Atomic

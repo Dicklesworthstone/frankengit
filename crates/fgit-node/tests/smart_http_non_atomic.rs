@@ -17,6 +17,9 @@ use fgit_types::{
 use fgit_wire::smart_http::{HttpLimits, parse_head};
 use fgit_wire::{Packet, PktLineDecoder, WireLimits, encode_packets};
 
+#[path = "smart_http_non_atomic/command_limits.rs"]
+mod command_limits;
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const BLOB: &[u8] = b"continuation\n";
 
@@ -65,6 +68,19 @@ fn state(node: &OneNode) -> (HeadGeneration, BTreeMap<RefName, GitOid>) {
         .unwrap();
     (state.basis().generation(), state.snapshot().refs.clone())
 }
+fn decision_counts(node: &OneNode) -> (u64, u64) {
+    let selected = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
+    let head = selected.basis().body();
+    (
+        head.latest_decision_sequence
+            .map_or(0, |sequence| sequence.get()),
+        head.latest_repository_sequence
+            .map_or(0, |sequence| sequence.get()),
+    )
+}
 fn blob_pack(format: GitHashAlgorithm) -> (GitOid, GitOid, Vec<u8>) {
     assert!(BLOB.len() < 16);
     let oid = git_object_id(format, GitObjectKind::Blob, BLOB);
@@ -95,6 +111,28 @@ fn perform(
     pack: &[u8],
     atomic: bool,
     streaming: bool,
+    writer: &mut impl Write,
+) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
+    perform_with_limits(
+        node,
+        key,
+        commands,
+        pack,
+        atomic,
+        streaming,
+        AdmissionLimits::default(),
+        writer,
+    )
+}
+
+fn perform_with_limits(
+    node: &OneNode,
+    key: &[u8],
+    commands: &[(GitOid, GitOid, &str)],
+    pack: &[u8],
+    atomic: bool,
+    streaming: bool,
+    admission_limits: AdmissionLimits,
     writer: &mut impl Write,
 ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
     let mut packets = Vec::new();
@@ -142,7 +180,7 @@ fn perform(
             &session,
             &mut Cursor::new(body),
             HttpLimits::default(),
-            AdmissionLimits::default(),
+            admission_limits,
             &mut || true,
             writer,
         )
@@ -152,7 +190,7 @@ fn perform(
             &session,
             &body,
             HttpLimits::default(),
-            AdmissionLimits::default(),
+            admission_limits,
             &mut || true,
             writer,
         )
@@ -210,6 +248,7 @@ fn refused_first_ref_allows_later_creates_and_deletes_with_reopenable_retries() 
                 (zero, oid, "refs/tags/also-good"),
             ];
             let before = state(&node).0;
+            let before_counts = decision_counts(&node);
             let mut output = Vec::new();
             let first = perform(
                 &node,
@@ -227,8 +266,11 @@ fn refused_first_ref_allows_later_creates_and_deletes_with_reopenable_retries() 
             stale(&first, 0);
             committed(&first, 1);
             committed(&first, 2);
-            // Independent per-command outcomes now share one bounded batch.
             assert_eq!(state(&node).0.get(), before.get() + 1);
+            assert_eq!(
+                decision_counts(&node),
+                (before_counts.0 + 3, before_counts.1 + 2)
+            );
             assert_eq!(state(&node).1.len(), 2);
             assert_eq!(
                 reports(&output),
@@ -343,6 +385,7 @@ fn consecutive_refusals_keep_their_real_reason_instead_of_authority_receipt_stal
             (oid, oid, "refs/tags/three"),
         ];
         let before = state(&node).0;
+        let before_counts = decision_counts(&node);
         let result = perform(
             &node,
             b"three-refusals",
@@ -356,8 +399,11 @@ fn consecutive_refusals_keep_their_real_reason_instead_of_authority_receipt_stal
         for index in 0..3 {
             stale(&result, index);
         }
-        // A refusal-only batch still contains three distinct terminal decisions.
         assert_eq!(state(&node).0.get(), before.get() + 1);
+        assert_eq!(
+            decision_counts(&node),
+            (before_counts.0 + 3, before_counts.1)
+        );
         assert!(state(&node).1.is_empty());
         node.shutdown().unwrap();
     }
@@ -445,12 +491,15 @@ fn the_complete_command_limit_is_checked_before_any_command_is_admitted() {
     let scratch = Scratch::new();
     let node = start(config(&scratch, GitHashAlgorithm::Sha1), false);
     let (oid, zero, pack) = blob_pack(GitHashAlgorithm::Sha1);
-    let names: Vec<_> = (0..65).map(|n| format!("refs/tags/ref-{n:02}")).collect();
+    let names: Vec<_> = (0..=fgit_authority::MAX_REF_COMMANDS)
+        .map(|n| format!("refs/tags/ref-{n:05}"))
+        .collect();
     let commands: Vec<_> = names
         .iter()
         .map(|name| (zero, oid, name.as_str()))
         .collect();
     let before = state(&node);
+    let mut output = Vec::new();
     let error = perform(
         &node,
         b"too-many-refs",
@@ -458,7 +507,7 @@ fn the_complete_command_limit_is_checked_before_any_command_is_admitted() {
         &pack,
         false,
         true,
-        &mut Vec::new(),
+        &mut output,
     )
     .unwrap_err();
     let NodeSmartHttpRefusal::ReceiveInterrupted(error) = error else {
@@ -468,8 +517,9 @@ fn the_complete_command_limit_is_checked_before_any_command_is_admitted() {
     assert!(error.completed_commands().is_empty());
     assert!(matches!(
         error.admission_error(),
-        fgit_admission::AdmissionError::CommandLimitExceeded { limit: 64 }
+        fgit_admission::AdmissionError::CommandLimitExceeded { limit } if *limit == fgit_authority::MAX_REF_COMMANDS
     ));
+    command_limits::assert_limit_report(&output, fgit_authority::MAX_REF_COMMANDS);
     assert_eq!(state(&node), before);
     node.shutdown().unwrap();
 }

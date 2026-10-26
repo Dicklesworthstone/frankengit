@@ -347,6 +347,9 @@ fn continuation_preserves_authority(
         && observed.policy_epoch == previous.policy_epoch
         && observed.format_registry_epoch == previous.format_registry_epoch
         && observed.last_checkpoint_id == previous.last_checkpoint_id
+        && observed.retention_root == previous.retention_root
+        && observed.forge_position_root == previous.forge_position_root
+        && observed.outbox_root == previous.outbox_root
 }
 
 fn advance_validation<S: AuthorityStore + ?Sized>(
@@ -804,6 +807,15 @@ where
                     }
                 }
             };
+            // A successfully checked equivalent basis is itself a permitted
+            // witness. Retain it before our own chunk changes visible refs or
+            // closure; the next chunk must not need to cross the earlier
+            // foreign edge again. A snapshot refusal never grants this step.
+            if snapshot.is_ok()
+                && let Some(validation) = &mut validation
+            {
+                validation.head = basis.id();
+            }
             let mut attempt = BatchAttempt::new(basis.clone(), snapshot)?;
             for index in start..end {
                 if known[index].is_some() {

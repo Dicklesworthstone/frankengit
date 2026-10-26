@@ -32,7 +32,7 @@ implicit tip refresh, per-command key, caller identity, object upload, or partia
 publication option. Duplicate targets and unknown or inapplicable fields refuse.
 
 The complete request remains subject to the existing 64 KiB JSON frame, decoder
-string/nesting bounds, 64-command ceiling and native resource limits. Longer
+string/nesting bounds, 4,096-command native ceiling and native resource limits. Longer
 reference names can exhaust the frame before the command ceiling. Limits never
 truncate a request into a smaller transaction. Discovery publishes a closed
 schema for each action, with no nested idempotency keys.

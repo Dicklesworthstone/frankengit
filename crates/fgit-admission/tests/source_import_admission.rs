@@ -527,6 +527,98 @@ fn a_source_import_creates_a_ref_with_no_pack_at_all() {
     committed_terminal(&store, &context, result.session.tx_ids[0]);
 }
 
+#[test]
+fn many_ref_imports_commit_the_complete_ref_set_and_refuse_the_first_excess() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let tip = GitOid::from_hex(format, &"1".repeat(format.digest_len() * 2)).unwrap();
+        let zero = GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
+        for count in [65, 1024, fgit_authority::MAX_REF_COMMANDS] {
+            let context = AdmissionContext {
+                object_format: format,
+                ..context(b"many-ref-import")
+            };
+            let (store, projection) = setup(&context, &[]);
+            let updates: Vec<_> = (0..count)
+                .map(|index| SourceRefUpdate {
+                    old: zero,
+                    new: tip,
+                    ref_name: format!("refs/tags/import-{index:05}").into_bytes(),
+                })
+                .collect();
+            let receipt = SourceImportReceipt {
+                object_format: format,
+                object_count: 1,
+                delete_only: false,
+                origin: SourceImportOrigin::LocalGitDirectory,
+            };
+            let validated =
+                validate_source_import(&updates, &receipt, closure_over(&[tip])).unwrap();
+            let result = admit_validated_source_import(
+                &store,
+                &context,
+                &validated,
+                AdmissionLimits::default(),
+                &projection,
+            )
+            .unwrap();
+            assert_eq!(result.commands.len(), count);
+            assert!(
+                result
+                    .commands
+                    .iter()
+                    .all(|command| command == &result.commands[0])
+            );
+            committed_terminal(&store, &context, result.commands[0].tx_id);
+            let expected = CanonicalRefState::new(
+                updates
+                    .iter()
+                    .map(|update| (RefName::try_new(&update.ref_name).unwrap(), tip))
+                    .collect(),
+            );
+            let after = head_body(&store, &context.head_key);
+            assert_eq!(after.ref_root, canonical_ref_state_root(&expected).unwrap());
+            assert_eq!(
+                admit_validated_source_import(
+                    &store,
+                    &context,
+                    &validated,
+                    AdmissionLimits::default(),
+                    &projection
+                )
+                .unwrap(),
+                result
+            );
+            assert_eq!(head_body(&store, &context.head_key), after);
+        }
+
+        let context = AdmissionContext {
+            object_format: format,
+            ..context(b"too-many-ref-import")
+        };
+        let (store, projection) = setup(&context, &[]);
+        let updates: Vec<_> = (0..=fgit_authority::MAX_REF_COMMANDS)
+            .map(|index| SourceRefUpdate {
+                old: zero,
+                new: tip,
+                ref_name: format!("refs/tags/import-{index:05}").into_bytes(),
+            })
+            .collect();
+        let receipt = SourceImportReceipt {
+            object_format: format,
+            object_count: 1,
+            delete_only: false,
+            origin: SourceImportOrigin::LocalGitDirectory,
+        };
+        let validated = validate_source_import(&updates, &receipt, closure_over(&[tip])).unwrap();
+        let before = head_body(&store, &context.head_key);
+        assert!(matches!(
+            admit_validated_source_import(&store, &context, &validated, AdmissionLimits::default(), &projection),
+            Err(AdmissionError::CommandLimitExceeded { limit }) if limit == fgit_authority::MAX_REF_COMMANDS
+        ));
+        assert_eq!(head_body(&store, &context.head_key), before);
+    }
+}
+
 /// The provenance is a distinct type, and it says where the objects came from.
 ///
 /// The strong form of this is enforced by the compiler and cannot be asserted
@@ -729,20 +821,20 @@ fn a_zero_command_limit_is_refused() {
 }
 
 #[test]
-fn a_command_limit_above_the_intent_slice_is_refused() {
-    let context = context(b"dw7i-over-64");
+fn a_command_limit_above_the_authority_request_bound_is_refused() {
+    let context = context(b"over-authority-command-bound");
     let (_, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
     let refusal = admit_validated_source_import(
         &headless(),
         &context,
         &import_deleting_main(),
-        limits(65, 16),
+        limits(fgit_authority::MAX_REF_COMMANDS + 1, 16),
         &projection,
     )
-    .expect_err("a command limit past the 64-intent slice must be refused");
+    .expect_err("a command limit past the authority request bound must be refused");
     assert!(
         matches!(refusal, AdmissionError::InvalidLimit),
-        "a command limit past the intent slice must refuse as an invalid limit, got {refusal:?}"
+        "a command limit past the authority request bound must refuse as an invalid limit, got {refusal:?}"
     );
 }
 
@@ -765,28 +857,20 @@ fn a_zero_replan_budget_is_refused() {
     );
 }
 
-/// **The permitted twin at the exact boundary.** A 64-command limit is
-/// admissible — it is the largest session the intent slice can express.
-///
-/// Stated honestly: this boundary is **already** exercised incidentally, because
-/// `AdmissionLimits::default()` *is* `max_commands: 64`, so essentially every
-/// other test in the crate would fail if the guard were tightened to `>= 64`.
-/// What this test adds is **diagnosis, not detection** — a failure here names
-/// the boundary, where the incidental failures name unrelated properties. The
-/// same distinction applies as on `frankengit-33ib`, where the byte-budget
-/// boundary turned out to be protected by a shared fixture sitting on it.
+/// The authority's exact request bound remains admitted; the first excess
+/// limit above is refused before any authority contact.
 #[test]
-fn a_command_limit_at_exactly_the_intent_slice_is_admitted() {
-    let context = context(b"dw7i-exactly-64");
+fn a_command_limit_at_exactly_the_authority_request_bound_is_admitted() {
+    let context = context(b"exact-authority-command-bound");
     let (store, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
     admit_validated_source_import(
         &store,
         &context,
         &import_deleting_main(),
-        limits(64, 16),
+        limits(fgit_authority::MAX_REF_COMMANDS, 16),
         &projection,
     )
-    .expect("a limit of exactly the intent-slice width must be expressible");
+    .expect("the exact authority request bound must be expressible");
 }
 
 /// The other end of both ranges, so the boundary case above is not passing

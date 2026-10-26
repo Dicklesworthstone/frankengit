@@ -147,8 +147,25 @@ mod tests {
     #[test]
     fn count_and_payload_limits_refuse_without_truncation() {
         let f = GitHashAlgorithm::Sha256;
-        assert_eq!(parse(form(f, 64).as_bytes(), f).unwrap().len(), 64);
-        assert!(parse(form(f, 65).as_bytes(), f).is_err());
+        for count in [64, 65, 1024] {
+            assert_eq!(parse(form(f, count).as_bytes(), f).unwrap().len(), count);
+        }
+        // The independent form-byte bound can reject before the native count
+        // ceiling; never truncate a large transaction into a permitted prefix.
+        assert!(
+            parse(
+                form(f, OneNode::MAX_BRANCH_TRANSACTION_COMMANDS).as_bytes(),
+                f
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                form(f, OneNode::MAX_BRANCH_TRANSACTION_COMMANDS + 1).as_bytes(),
+                f
+            )
+            .is_err()
+        );
         assert!(parse(b"object_format=sha256", f).is_err());
         assert!(parse(&vec![b'x'; 262145], f).is_err());
         assert!(reference(&"aa".repeat(4097)).is_err());

@@ -115,6 +115,41 @@ and SSH transport and hash format. These additions are not included in the
 historical executed counts above; their execution is reported separately at
 the tested source revision.
 
+## Many-reference admission and publication
+
+Native imports, atomic pushes and the whole-session binding of non-atomic
+pushes admit up to 4,096 commands, subject to their independent byte and object
+budgets (frankengit-p9b5). HTTP/CLI indexed recovery accepts every admitted
+wire index, and whole-session response assembly allows up to 16 MiB while
+respecting a tighter server ceiling. Long names or option payloads can still
+reach a byte limit before the count limit. Non-atomic option replication is
+bounded to 16 MiB before lowering or sealing.
+
+The continuing durable receive path combines up to 64 independent command
+decisions into one bounded publication (frankengit-x0v8). Individual seals,
+transaction identities, commit/refusal records and wire-order status remain
+independent. Each successful command advances the batch's scratch refs for
+later commands; a refusal does not discard successful siblings. Atomic
+requests retain one all-or-nothing decision. This is combining within one
+session, not a cross-session scheduler or an end-to-end throughput claim.
+
+The repository-owned stock-Git campaign is
+`scripts/e2e/helpers/many_ref_admission.py`. It creates a mixed branch,
+lightweight-tag and annotated-tag corpus in both hash formats, verifies the
+complete ref map after imports and atomic/mirror pushes, and repeats each
+operation. For example:
+
+```sh
+python3 scripts/e2e/helpers/many_ref_admission.py \
+  --fg /absolute/path/to/fg --counts 64,256,1024,4096 \
+  --summary /tmp/many-ref-admission.json
+```
+
+Its default is 1,000 refs over the existing git://, HTTP and SSH helpers.
+Recorded elapsed times describe the supplied binary and host; they do not
+establish a release performance envelope. This authored campaign and the new
+native/model regressions are not included in historical executed totals.
+
 ## Tier A: the declared differential tier
 
 Tier A is the narrow compatibility tier the plan's Phase 2 exit and 1.0

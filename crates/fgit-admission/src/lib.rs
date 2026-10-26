@@ -71,14 +71,19 @@ pub mod microbatch;
 pub mod policy_bridge;
 mod projection_failure;
 
+// Non-atomic lowering preserves the ordered options in each independently
+// sealed child. Keep its aggregate allocation within the former 64-command
+// envelope even when many short ref commands are admitted (p9b5).
+const MAX_SESSION_OPTION_COPY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Bounds enforced before creating per-command work or retrying a stale plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdmissionLimits {
     /// Largest receive command list this layer lowers into transaction intents.
     ///
-    /// The current `fgit-txn` request vocabulary has a 64-intent final slice,
-    /// so accepting more here would only defer a resource refusal until after
-    /// allocation and sealing.
+    /// The authority request bound also applies to the whole-session retry
+    /// binding of a non-atomic push. Per-command publication is microbatched,
+    /// but does not bypass that single canonical request envelope.
     pub max_commands: usize,
     /// Largest number of re-plans after losing a head compare-and-exchange.
     pub max_cas_replans: usize,
@@ -87,7 +92,7 @@ pub struct AdmissionLimits {
 impl Default for AdmissionLimits {
     fn default() -> Self {
         Self {
-            max_commands: 64,
+            max_commands: fgit_authority::MAX_REF_COMMANDS,
             max_cas_replans: 16,
         }
     }
@@ -95,7 +100,10 @@ impl Default for AdmissionLimits {
 
 impl AdmissionLimits {
     const fn validate(self) -> Result<(), AdmissionError> {
-        if self.max_commands == 0 || self.max_commands > 64 || self.max_cas_replans == 0 {
+        if self.max_commands == 0
+            || self.max_commands > fgit_authority::MAX_REF_COMMANDS
+            || self.max_cas_replans == 0
+        {
             return Err(AdmissionError::InvalidLimit);
         }
         Ok(())
@@ -2225,6 +2233,9 @@ pub enum AdmissionError {
     ObjectFormatMismatch,
     /// The receive request exceeds the bounded transaction lowerer.
     CommandLimitExceeded { limit: usize },
+    /// Repeating ordered push options into independent requests exceeds the
+    /// bounded lowering allocation, before any transaction is sealed.
+    PushOptionWorkExceeded { limit: usize, observed: usize },
     /// A bounded ref chunk exceeded the canonical decision-batch byte budget.
     MicrobatchBytesExceeded { limit: usize, observed: usize },
     /// Conversion from validated wire ref bytes unexpectedly failed.
@@ -2307,6 +2318,10 @@ impl Display for AdmissionError {
                     "receive command count exceeds admission limit {limit}"
                 )
             }
+            Self::PushOptionWorkExceeded { limit, observed } => write!(
+                formatter,
+                "push option lowering needs {observed} bytes; the limit is {limit}; reduce the command count or push options"
+            ),
             Self::MicrobatchBytesExceeded { limit, observed } => write!(
                 formatter,
                 "receive microbatch needs {observed} canonical bytes; limit is {limit}",
@@ -3080,6 +3095,19 @@ fn validate_admission_input(
     }
     if input.updates.is_empty() {
         return Err(AdmissionError::CommandLimitExceeded { limit: 0 });
+    }
+    let copies = if input.atomic { 1 } else { input.updates.len() };
+    let option_bytes = input
+        .push_options
+        .iter()
+        .try_fold(0_usize, |total, option| total.checked_add(option.len()))
+        .and_then(|bytes| bytes.checked_mul(copies))
+        .unwrap_or(usize::MAX);
+    if option_bytes > MAX_SESSION_OPTION_COPY_BYTES {
+        return Err(AdmissionError::PushOptionWorkExceeded {
+            limit: MAX_SESSION_OPTION_COPY_BYTES,
+            observed: option_bytes,
+        });
     }
     // The provenance declared a shape; the commands must actually have it. This
     // catches a caller whose receipt and command list disagree, on either path.
@@ -4398,6 +4426,8 @@ mod tests {
     #![forbid(unsafe_code)]
 
     mod absent_delete;
+    mod option_work;
+    mod receive_batch;
 
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet};

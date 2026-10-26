@@ -142,7 +142,7 @@ mod tests {
     fn bounds_duplicates_and_per_command_authority_are_closed() {
         let format = GitHashAlgorithm::Sha1;
         let tip = "a".repeat(40);
-        let maximum = (0..64)
+        let maximum = (0..MAX_COMMANDS)
             .map(|i| create(&format!("refs/heads/{i}"), &tip))
             .collect::<Vec<_>>();
         assert_eq!(
@@ -150,7 +150,7 @@ mod tests {
                 .unwrap()
                 .commands
                 .len(),
-            64
+            MAX_COMMANDS
         );
         let mut excess = maximum;
         excess.push(create("refs/heads/overflow", &tip));

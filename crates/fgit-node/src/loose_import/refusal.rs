@@ -321,7 +321,11 @@ impl Display for LooseGitImportRefusal {
                 )
             }
             Self::RefLimitExceeded { limit } => {
-                write!(formatter, "source ref count exceeds {limit}")
+                write!(
+                    formatter,
+                    "source has at least {} refs; this import admits at most {limit}; import a smaller ref set or push refs in bounded sessions",
+                    limit.saturating_add(1)
+                )
             }
             Self::ObjectLimitExceeded { limit } => {
                 write!(formatter, "reachable object count exceeds {limit}")

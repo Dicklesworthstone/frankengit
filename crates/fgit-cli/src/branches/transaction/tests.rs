@@ -92,10 +92,13 @@ fn non_utf8_reference_bytes_are_preserved_and_duplicate_encodings_refuse() {
 fn transaction_has_a_hard_command_bound_with_a_permitted_boundary_twin() {
     let tip = "1".repeat(40);
     let mut input = args(&[]);
-    for i in 0..64 {
+    for i in 0..OneNode::MAX_BRANCH_TRANSACTION_COMMANDS {
         input.extend(["--create".into(), format!("refs/heads/b-{i}"), tip.clone()]);
     }
-    assert_eq!(commands(parse(&input).unwrap()).len(), 64);
+    assert_eq!(
+        commands(parse(&input).unwrap()).len(),
+        OneNode::MAX_BRANCH_TRANSACTION_COMMANDS
+    );
     input.extend(["--create".into(), "refs/heads/overflow".into(), tip]);
     assert!(parse(&input).is_err());
     assert!(parse(&args(&[])).is_err());

@@ -168,7 +168,7 @@ fn transaction_limits_force_duplicates_formats_and_default_branch_remain_guarded
     }
     let foreign = GitOid::from_hex(GitHashAlgorithm::Sha256, &"11".repeat(32)).unwrap();
     assert!(transact(&node, &[create("refs/heads/foreign", foreign)], "foreign").is_err());
-    let maximum: Vec<_> = (0..64)
+    let maximum: Vec<_> = (0..OneNode::MAX_BRANCH_TRANSACTION_COMMANDS)
         .map(|i| create(&format!("refs/heads/batch-{i:02}"), base))
         .collect();
     let mut excessive = maximum.clone();
@@ -176,8 +176,14 @@ fn transaction_limits_force_duplicates_formats_and_default_branch_remain_guarded
     assert!(transact(&node, &excessive, "too-many").is_err());
     assert_eq!(snapshot(&node).basis(), before.basis());
     let accepted = accepted(transact(&node, &maximum, "maximum"));
-    assert_eq!(accepted.commands.len(), 64);
-    assert_eq!(snapshot(&node).snapshot().refs.len(), 65);
+    assert_eq!(
+        accepted.commands.len(),
+        OneNode::MAX_BRANCH_TRANSACTION_COMMANDS
+    );
+    assert_eq!(
+        snapshot(&node).snapshot().refs.len(),
+        OneNode::MAX_BRANCH_TRANSACTION_COMMANDS + 1
+    );
     node.shutdown().unwrap();
 }
 

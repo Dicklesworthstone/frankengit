@@ -23,7 +23,8 @@ another member published. A canonical refusal may advance the decision stream,
 but not the selected reference state. No force or unspecified-old option exists.
 
 The node API is `OneNode::admit_branch_transaction_durable_in`; its public
-`MAX_BRANCH_TRANSACTION_COMMANDS` is 64. The existing single-branch and
+`MAX_BRANCH_TRANSACTION_COMMANDS` is 4,096, matching the canonical authority
+request bound. The existing single-branch and
 exact-rename API retains its original validation and request identities.
 The ordinary `branch create`, `update`, `delete` and `rename` commands keep their
 existing semantics. This command does not upload objects, rewrite pull-request
@@ -39,11 +40,11 @@ reference, not a short branch name. `--object-format sha256` selects SHA-256;
 the default is SHA-1. OIDs are nonzero lowercase hex in that exact hash domain.
 Duplicate target references refuse, even when one spelling uses hex encoding.
 
-The parser admits at most 272 arguments, 8,192 bytes per argument, 128 KiB of
+The parser admits at most 16,400 arguments, 8,192 bytes per argument, 1 MiB of
 argument text and 4,096 bytes per reference; the node also enforces command,
 object, wire, ancestry and inherited request limits. These are refusal bounds,
 not performance or whole-operation memory guarantees. Long branch names may
-hit the wire envelope before the 64-command ceiling.
+hit the wire envelope before the 4,096-command ceiling.
 
 Keys are explicitly supplied with `--idempotency-key` or byte-exact
 `--key-stdin`, never both. They are bounded to 256 bytes, and trailing newline
@@ -68,7 +69,7 @@ The explicit trusted-local principal is an operator assertion, not remote IAM.
 Native tests exercise both Git domains, mixed three-command publication,
 reordered and restarted retries, stale-tip refusal, default-branch/non-commit/
 non-fast-forward guards, mandatory review protection, pre-cancellation, quota
-and the 64-command permitted/65-command refusal boundary. The real-process
+and the 4,096-command permitted/4,097-command refusal boundary. The real-process
 campaign in `scripts/e2e/branch_transaction_smoke.py` uses independently encoded
 native objects and an empty executable PATH for each `fg` process. It checks
 atomic state, one decision, exact private-key recovery, raw reference bytes and

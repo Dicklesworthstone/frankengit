@@ -18,7 +18,7 @@ use fgit_wire::receive::{ReceiveError, ReceiveEvent, ReceivePack, advertise_rece
 use fgit_wire::{Packet, WireLimits, encode_packets};
 
 use super::super::verdict::command_verdict_report;
-use super::super::{NodeSmartHttpRefusal, drive_request_while};
+use super::super::{NodeSmartHttpRefusal, command_limit, drive_request_while};
 use crate::{
     AdmissionReceivePackAdvertisement, DeadlineTcpStream, GitDaemonService,
     GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, GitDaemonTransportRefusal,
@@ -119,6 +119,7 @@ fn fatal(
     writer: &mut impl Write,
     admission_started: bool,
     processing_expired: bool,
+    command_bound: Option<usize>,
     limits: &WireLimits,
 ) -> io::Result<()> {
     // Name the processing deadline when it is the cause, so an operator knows
@@ -139,6 +140,10 @@ fn fatal(
             expired; no ref decision was attempted (fg serve --processing-timeout-secs)\n"
             .as_slice(),
     };
+    let bounded = command_bound
+        .filter(|_| !admission_started)
+        .map(command_limit::message);
+    let message = bounded.as_deref().unwrap_or(message);
     let bytes = encode_packets(&[Packet::Data(message.to_vec())], limits)
         .map_err(|e| io::Error::other(e.to_string()))?;
     writer.write_all(&bytes)?;
@@ -516,7 +521,17 @@ impl OneNode {
             ));
             // Keep the exact admission error/prefix even if this best-effort
             // diagnostic is also lost. Never replace it with a transport verdict.
-            if let Err(error) = fatal(writer, admission_started, processing_expired.get(), limits) {
+            let command_bound = result
+                .as_ref()
+                .err()
+                .and_then(command_limit::before_admission);
+            if let Err(error) = fatal(
+                writer,
+                admission_started,
+                processing_expired.get(),
+                command_bound,
+                limits,
+            ) {
                 eprintln!("guarded receive fatal response delivery failed: {error}");
             }
         }
@@ -644,7 +659,7 @@ mod tests {
     #[test]
     fn fatal_interruption_never_fabricates_per_ref_rejection() {
         let mut bytes = Vec::new();
-        fatal(&mut bytes, true, false, &WireLimits::default()).unwrap();
+        fatal(&mut bytes, true, false, None, &WireLimits::default()).unwrap();
         assert!(
             bytes
                 .windows(b"ERR receive outcome unknown".len())
@@ -652,14 +667,14 @@ mod tests {
         );
         assert!(!bytes.windows(3).any(|w| w == b"ng "));
         let mut before = Vec::new();
-        fatal(&mut before, false, false, &WireLimits::default()).unwrap();
+        fatal(&mut before, false, false, None, &WireLimits::default()).unwrap();
         assert_ne!(bytes, before);
         // A processing-deadline cause is named, with the same outcome class:
         // still UNKNOWN after admission started, still no decision before it.
         let mut unknown = Vec::new();
-        fatal(&mut unknown, true, true, &WireLimits::default()).unwrap();
+        fatal(&mut unknown, true, true, None, &WireLimits::default()).unwrap();
         let mut early = Vec::new();
-        fatal(&mut early, false, true, &WireLimits::default()).unwrap();
+        fatal(&mut early, false, true, None, &WireLimits::default()).unwrap();
         for (payload, class) in [
             (&unknown, b"ERR receive outcome unknown".as_slice()),
             (&early, b"ERR receive failed before admission".as_slice()),
@@ -673,6 +688,25 @@ mod tests {
             assert!(payload[4..].starts_with(b"ERR "));
             assert!(!payload[4..].starts_with(b"ng "));
         }
+    }
+    #[test]
+    fn command_limit_diagnostic_never_reclassifies_started_admission() {
+        let mut early = Vec::new();
+        fatal(&mut early, false, false, Some(2), &WireLimits::default()).unwrap();
+        assert!(
+            early[4..].starts_with(
+                b"ERR receive command count exceeded: observed at least 3; maximum 2;"
+            )
+        );
+        assert!(
+            String::from_utf8_lossy(&early)
+                .contains("split the push into batches of at most 2 commands")
+        );
+
+        let mut started = Vec::new();
+        fatal(&mut started, true, false, Some(2), &WireLimits::default()).unwrap();
+        assert!(started[4..].starts_with(b"ERR receive outcome unknown"));
+        assert!(!String::from_utf8_lossy(&started).contains("no ref decision"));
     }
     #[test]
     fn raw_retry_selector_preserves_legacy_bytes_and_excludes_pack_representation() {

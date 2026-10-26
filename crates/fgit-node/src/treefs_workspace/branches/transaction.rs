@@ -5,9 +5,10 @@ use super::*;
 
 impl OneNode {
     /// Hard limit for a single local branch transaction before cloning commands.
-    pub const MAX_BRANCH_TRANSACTION_COMMANDS: usize = 64;
+    pub const MAX_BRANCH_TRANSACTION_COMMANDS: usize = fgit_authority::MAX_REF_COMMANDS;
 
-    /// Publish 1..=64 distinct branch changes in one sealed, atomic transaction.
+    /// Publish up to [`Self::MAX_BRANCH_TRANSACTION_COMMANDS`] distinct branch
+    /// changes in one sealed, atomic transaction.
     /// Every command requires an exact old tip or absence, and new tips remain
     /// visible, verified commits. Force, duplicate targets, mixed hash domains,
     /// hidden refs and default-branch deletion are not admitted. All ordinary
@@ -27,7 +28,9 @@ impl OneNode {
             .authenticated_session()
             .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
         if commands.is_empty() || commands.len() > Self::MAX_BRANCH_TRANSACTION_COMMANDS {
-            return Err(invalid("branch transaction requires 1..=64 commands"));
+            return Err(invalid(
+                "branch transaction command count is outside the authority request bound",
+            ));
         }
         let semantic = branch_commands_request(self.object_format, commands)?;
         self.admit_branch_commands_durable_in(request, session, commands, semantic, limits)

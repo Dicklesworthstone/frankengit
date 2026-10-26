@@ -205,7 +205,8 @@ where
 /// Receive, source import, workspace publication, branch changes and rebase all
 /// use that materializer; a client cannot opt out by choosing another CLI verb.
 /// Identity/no-op effects do not change a protected branch and remain permitted.
-/// `refs` must be materialized from this same authenticated publication basis.
+/// `refs` must be materialized from this authenticated publication basis, plus
+/// only the successful prior decisions in the same bounded decision batch.
 pub async fn enforce_direct_at<S, C>(
     store: &S,
     cx: &S::Context,

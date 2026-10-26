@@ -26,6 +26,8 @@ use std::time::Duration;
 
 #[path = "guarded_git_daemon/absent_delete.rs"]
 mod absent_delete;
+#[path = "guarded_git_daemon/command_limits.rs"]
+mod command_limits;
 #[path = "guarded_git_daemon/continuous.rs"]
 mod continuous;
 #[path = "guarded_git_daemon/microbatch.rs"]
@@ -91,6 +93,19 @@ fn state(node: &OneNode) -> (u64, BTreeMap<RefName, GitOid>) {
     (
         selected.basis().generation().get(),
         selected.snapshot().refs.clone(),
+    )
+}
+fn decision_counts(node: &OneNode) -> (u64, u64) {
+    let selected = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
+    let head = selected.basis().body();
+    (
+        head.latest_decision_sequence
+            .map_or(0, |sequence| sequence.get()),
+        head.latest_repository_sequence
+            .map_or(0, |sequence| sequence.get()),
     )
 }
 fn pack(format: GitHashAlgorithm) -> (GitOid, GitOid, Vec<u8>) {
@@ -267,6 +282,7 @@ fn real_tcp_mixed_pushes_continue_after_refusal_and_recover_across_restart() {
         let node = start(config.clone(), false);
         let path = route(&node);
         let before = state(&node).0;
+        let before_counts = decision_counts(&node);
         let (oid, zero, pack) = pack(format);
         let commands = prefix(
             format,
@@ -290,6 +306,10 @@ fn real_tcp_mixed_pushes_continue_after_refusal_and_recover_across_restart() {
             ]
         );
         assert_eq!(state(&node).0, before + 1);
+        assert_eq!(
+            decision_counts(&node),
+            (before_counts.0 + 3, before_counts.1 + 2)
+        );
         recovered(&node, &path, &commands, &first);
         let published = state(&node);
         node.shutdown().unwrap();

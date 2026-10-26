@@ -25,7 +25,7 @@ const MAX_BYTES: usize = 1024 * 1024;
 const LIMITS: DecodeLimits = DecodeLimits {
     frame_bytes: MAX_BYTES as u64,
     byte_string_bytes: MAX_BYTES as u64,
-    elements: 256,
+    elements: fgit_authority::MAX_REF_COMMANDS as u64,
     depth: 16,
 };
 
@@ -198,7 +198,20 @@ impl Descriptor {
     fn encode(&self) -> Result<Vec<u8>, AdmissionError> {
         self.validate()?;
         let request = encode_body(&self.request).map_err(codec)?;
-        if request.len() > MAX_BYTES - 1024 {
+        // Include the complete wire-order permutation and both length prefixes
+        // before allocating the descriptor. The count limit is independent of
+        // this byte envelope: unusually long names/options can reach it first.
+        let permutation_bytes = self
+            .wire_order
+            .len()
+            .checked_mul(size_of::<u16>())
+            .and_then(|bytes| bytes.checked_add(32))
+            .ok_or_else(invalid)?;
+        if request
+            .len()
+            .checked_add(permutation_bytes)
+            .is_none_or(|bytes| bytes > MAX_BYTES)
+        {
             return Err(invalid());
         }
         let mut out = Encoder::new();
@@ -503,6 +516,53 @@ mod tests {
             b"refs/tags/a"
         );
         assert_eq!(decoded.encode().unwrap(), bytes);
+    }
+
+    #[test]
+    fn many_command_descriptors_roundtrip_both_formats_and_keep_the_byte_bound() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let oid = GitOid::from_hex(format, &"1".repeat(format.digest_len() * 2)).unwrap();
+            let build = |count: usize, name_padding: usize| {
+                let commands = (0..count)
+                    .map(|index| RefCommand {
+                        name: RefName::try_new(
+                            format!("refs/tags/{index:05}-{}", "x".repeat(name_padding)).as_bytes(),
+                        )
+                        .unwrap(),
+                        expected_old: ExpectedOld::Absent,
+                        proposed_new: ProposedNew::Update(oid),
+                        force: false,
+                    })
+                    .collect();
+                Descriptor {
+                    request: SemanticRequest::build(
+                        fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                        format,
+                        false,
+                        commands,
+                        vec![PushOption::new(b"ordered-option".to_vec()).unwrap()],
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                    wire_order: (0..count).rev().collect(),
+                }
+            };
+            for count in [257, 1024, fgit_authority::MAX_REF_COMMANDS] {
+                let descriptor = build(count, 0);
+                let bytes = descriptor.encode().unwrap();
+                let recovered = Descriptor::decode(&bytes).unwrap();
+                assert_eq!(recovered.request, descriptor.request);
+                assert_eq!(recovered.wire_order, descriptor.wire_order);
+                assert_eq!(recovered.encode().unwrap(), bytes);
+            }
+            let oversized = build(fgit_authority::MAX_REF_COMMANDS, 1000);
+            assert!(
+                oversized.encode().is_err(),
+                "the command count cannot waive the independent descriptor byte ceiling"
+            );
+            let small_twin = build(256, 1000);
+            assert!(Descriptor::decode(&small_twin.encode().unwrap()).is_ok());
+        }
     }
 
     #[test]

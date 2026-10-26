@@ -298,3 +298,125 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
         3
     );
 }
+
+#[test]
+fn ssh_receive_command_limit_reports_counts_and_accepts_the_boundary_twin() {
+    use fgit_types::{DecisionOutcome, GitHashAlgorithm};
+    use fgit_wire::receive::{ReceiveError, ReceiveLimits};
+    use fgit_wire::{Packet, PktLineDecoder, encode_packets};
+
+    #[derive(Default)]
+    struct Reply(Vec<u8>);
+    impl Write for Reply {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl ReceiveResponseWriter for Reply {
+        fn restart_deadline(&mut self, _: GitDaemonSessionDeadline) {}
+    }
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let config = NodeConfig::new(
+            scratch.0.clone(),
+            TenantId::from_bytes([0x71; 16]),
+            RepositoryId::from_bytes([0x72; 16]),
+        )
+        .with_object_format(format)
+        .with_worker_threads(2)
+        .with_git_daemon_receive_limits(ReceiveLimits {
+            max_commands: 2,
+            ..ReceiveLimits::default()
+        });
+        let (mut node, _) = OneNode::init(config).unwrap();
+        let generation = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap()
+            .receipt()
+            .generation();
+        node.bring_into_service(generation).unwrap();
+        let writers = crate::WriterGate::new(1);
+        let quota = PushQuota::default();
+        for count in [3, 2] {
+            let zero = "0".repeat(format.digest_len() * 2);
+            let mut packets: Vec<_> = (0..count)
+                .map(|index| {
+                    let capabilities = if index == 0 {
+                        format!("\0report-status object-format={}", format.as_str())
+                    } else {
+                        String::new()
+                    };
+                    Packet::Data(
+                        format!("{zero} {zero} refs/tags/absent-{index}{capabilities}")
+                            .into_bytes(),
+                    )
+                })
+                .collect();
+            packets.push(Packet::Flush);
+            let wire = encode_packets(&packets, &WireLimits::default()).unwrap();
+            let mut input = io::Cursor::new(wire);
+            let mut output = Reply::default();
+            let ingress = GitDaemonSessionDeadline::new(
+                GitDaemonSessionTimeout::try_new(Duration::from_secs(30)).unwrap(),
+                GitDaemonSessionWorkScaling::FLAT,
+            );
+            let result = node.serve_ssh_receive_pack(
+                &mut input,
+                &mut output,
+                Some(PrincipalId::from_bytes([0x73; 16])),
+                b"",
+                &writers,
+                &quota,
+                &ingress,
+            );
+            let mut decoder = PktLineDecoder::new(WireLimits::default()).unwrap();
+            let response = decoder.push(&output.0).unwrap();
+            decoder.finish().unwrap();
+            if count == 3 {
+                assert!(
+                    matches!(result, Err(crate::NodeSmartHttpRefusal::Receive(error)) if matches!(*error, ReceiveError::TooManyCommands { limit: 2 }))
+                );
+                let Some(Packet::Data(message)) = response.last() else {
+                    panic!("SSH must deliver a Git ERR packet");
+                };
+                let message = std::str::from_utf8(message).unwrap();
+                assert!(message.starts_with(
+                    "ERR receive command count exceeded: observed at least 3; maximum 2;"
+                ));
+                assert!(message.contains("split the push into batches of at most 2 commands"));
+                assert!(message.ends_with("no ref decision was attempted\n"));
+                assert_eq!(input.position() as usize, input.get_ref().len() - 4);
+                assert_eq!(
+                    node.runtime()
+                        .block_on(node.authenticate_authority_head())
+                        .unwrap()
+                        .receipt()
+                        .generation(),
+                    generation
+                );
+            } else {
+                let result = result.unwrap().unwrap();
+                assert_eq!(result.commands.len(), 2);
+                assert!(result.commands.iter().all(|command| matches!(
+                    command.terminal.outcome,
+                    DecisionOutcome::Committed { .. }
+                )));
+                for index in 0..2 {
+                    let expected = format!("ok refs/tags/absent-{index}\n").into_bytes();
+                    assert!(
+                        response.iter().any(
+                            |packet| matches!(packet, Packet::Data(bytes) if *bytes == expected)
+                        )
+                    );
+                }
+            }
+        }
+        node.shutdown().unwrap();
+    }
+}

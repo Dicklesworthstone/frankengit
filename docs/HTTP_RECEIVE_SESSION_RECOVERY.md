@@ -86,8 +86,10 @@ unavailable required evidence returns an error, not a completed or empty
 session. Descriptor conflicts stop new admission before any child is published.
 Descriptor staging itself advances neither decision nor repository sequence.
 
-The descriptor is bounded to 1 MiB and 64 commands. Responses are capped at
-1 MiB and the configured server response ceiling. The full response is built
+The descriptor is bounded to 1 MiB and 4,096 commands. Both bounds apply;
+long reference names and push options can hit the byte ceiling first. Responses
+are capped at 16 MiB and the configured server response ceiling, whichever is
+smaller. Indexed recovery accepts wire indices 0 through 4,095. The full response is built
 and bounded before the first success byte; an over-limit response is refused,
 not truncated into an apparently complete session.
 

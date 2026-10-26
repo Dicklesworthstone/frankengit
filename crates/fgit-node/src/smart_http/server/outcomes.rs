@@ -10,7 +10,7 @@ use std::io::{self, Write};
 
 use fgit_admission::policy_bridge::receive_session::non_atomic_command_key;
 use fgit_authority::key_recovery::RequestRecovery;
-use fgit_authority::{IdempotencyKey, OutcomeLookup};
+use fgit_authority::{IdempotencyKey, MAX_REF_COMMANDS, OutcomeLookup};
 use fgit_types::{DecisionOutcome, PrincipalId};
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
 
@@ -61,7 +61,7 @@ impl<'a> Request<'a> {
                 .strip_prefix("/receive/")
                 .ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
             if number.is_empty()
-                || number.len() > 2
+                || number.len() > (MAX_REF_COMMANDS - 1).ilog10() as usize + 1
                 || !number.bytes().all(|byte| byte.is_ascii_digit())
                 || (number.len() > 1 && number.starts_with('0'))
             {
@@ -70,7 +70,7 @@ impl<'a> Request<'a> {
             let index: usize = number
                 .parse()
                 .map_err(|_| ApiError::bad("invalid_command_index"))?;
-            if index >= fgit_admission::AdmissionLimits::default().max_commands {
+            if index >= MAX_REF_COMMANDS {
                 return Err(ApiError::bad("invalid_command_index"));
             }
             Selector::Command(index)
@@ -398,12 +398,16 @@ mod tests {
 
     #[test]
     fn selectors_are_bodyless_queries_with_explicit_original_wire_indices() {
-        for (suffix, selector) in [
-            ("", Selector::Transaction),
-            ("/receive", Selector::Session),
-            ("/receive/0", Selector::Command(0)),
-            ("/receive/63", Selector::Command(63)),
-        ] {
+        let mut cases = vec![
+            (String::new(), Selector::Transaction),
+            ("/receive".to_owned(), Selector::Session),
+        ];
+        cases.extend(
+            [0, 1, 63, 64, 99, 100, 1023, MAX_REF_COMMANDS - 1]
+                .into_iter()
+                .map(|index| (format!("/receive/{index}"), Selector::Command(index))),
+        );
+        for (suffix, selector) in cases {
             let bytes = format!(
                 "POST /repo.git/api/v1/outcomes{suffix} HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n"
             );
@@ -418,11 +422,16 @@ mod tests {
 
     #[test]
     fn recovery_never_accepts_mutation_bodies_query_keys_or_ambiguous_indices() {
+        let past_limit = format!("/receive/{MAX_REF_COMMANDS}");
+        let overflow = format!("/receive/{}", usize::MAX);
         for (suffix, headers) in [
             ("?key=secret", ""),
-            ("/receive/64", ""),
+            (past_limit.as_str(), ""),
+            (overflow.as_str(), ""),
             ("/receive/00", ""),
+            ("/receive/0100", ""),
             ("/receive/-1", ""),
+            ("/receive/+1", ""),
             ("/receive/1/extra", ""),
             ("/receive/%30", ""),
             ("/receive/", ""),

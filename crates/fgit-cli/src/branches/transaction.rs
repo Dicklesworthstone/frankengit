@@ -10,7 +10,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 5
         || args.len() > 4 * OneNode::MAX_BRANCH_TRANSACTION_COMMANDS + 16
         || args.iter().any(|value| value.len() > 8192)
-        || args.iter().map(String::len).sum::<usize>() > 128 * 1024
+        || args.iter().map(String::len).sum::<usize>() > 1024 * 1024
         || args[0] != "transaction"
         || args[1].is_empty()
         || args[1].len() > 4096
@@ -29,7 +29,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         };
         if arity != 0 {
             if operations.len() == OneNode::MAX_BRANCH_TRANSACTION_COMMANDS {
-                return Err("branch transaction supports at most 64 commands".into());
+                return Err(format!(
+                    "branch transaction supports at most {} commands",
+                    OneNode::MAX_BRANCH_TRANSACTION_COMMANDS
+                ));
             }
             let end = index
                 .checked_add(arity)

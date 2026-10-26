@@ -155,7 +155,7 @@ fn exchange(server: &Server, token: char, key: &str, suffix: &str, headers: &str
     // must not wait for bytes that recovery has no reason to accept.
     let mut bytes = Vec::new();
     (&mut stream)
-        .take(1024 * 1024 + 32768)
+        .take(16 * 1024 * 1024 + 32768)
         .read_to_end(&mut bytes)
         .unwrap();
     let response = String::from_utf8(bytes).unwrap();

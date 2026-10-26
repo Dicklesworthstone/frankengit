@@ -74,6 +74,19 @@ fn state(node: &OneNode) -> (u64, BTreeMap<RefName, GitOid>) {
         selected.snapshot().refs.clone(),
     )
 }
+fn decision_counts(node: &OneNode) -> (u64, u64) {
+    let selected = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
+    let head = selected.basis().body();
+    (
+        head.latest_decision_sequence
+            .map_or(0, |sequence| sequence.get()),
+        head.latest_repository_sequence
+            .map_or(0, |sequence| sequence.get()),
+    )
+}
 fn session(key: &[u8]) -> LoopbackReceiveSession {
     LoopbackReceiveSession::authenticated(PRINCIPAL, IdempotencyKey::new(key.to_vec()).unwrap())
 }
@@ -274,10 +287,14 @@ fn raw_mixed_create_delete_sessions_retry_over_http_and_recover_after_reopen() {
         ];
         let bytes = body(format, &commands, &pack, false);
         let before = state(&node).0;
+        let before_counts = decision_counts(&node);
         let first = raw(&node, format, b"cross-create", &bytes).unwrap();
         mixed(&first);
-        // The three independent terminal decisions share one physical batch.
         assert_eq!(state(&node).0, before + 1);
+        assert_eq!(
+            decision_counts(&node),
+            (before_counts.0 + 3, before_counts.1 + 2)
+        );
         assert_eq!(state(&node).1.len(), 2);
         let published = state(&node);
         assert_eq!(http(&node, b"cross-create", &bytes, true), first);
@@ -318,15 +335,21 @@ fn absent_ref_deletes_preserve_unborn_head_and_recover_after_reopen() {
         let commands = [(zero, zero, names[0]), (zero, zero, names[1])];
         let bytes = body(format, &commands, &[], false);
         let before = state(&node);
+        let before_counts = decision_counts(&node);
         let first = raw(&node, format, b"absent-only", &bytes).unwrap();
         assert_eq!(
             first.command_statuses(),
             vec![fgit_wire::receive::ReceiveCommandStatus::Ok; 2]
         );
         assert_eq!(state(&node).1, before.1);
-        // Both no-ops retain independent recoverable decisions in one physical
-        // publication, leaving the selected refs and object closure unchanged.
+        // Existing committed-noop semantics preserve a recoverable decision
+        // while leaving the selected refs and object closure unchanged.
         assert_eq!(state(&node).0, before.0 + 1);
+        assert_ne!(first.commands[0].tx_id, first.commands[1].tx_id);
+        assert_eq!(
+            decision_counts(&node),
+            (before_counts.0 + 2, before_counts.1 + 2)
+        );
         let published = state(&node);
         let (retry, reply) = http_reply(&node, b"absent-only", &bytes);
         assert_eq!(retry.unwrap(), first);
@@ -368,8 +391,8 @@ fn absent_ref_deletes_do_not_discard_copushed_updates() {
                 vec![fgit_wire::receive::ReceiveCommandStatus::Ok; 2]
             );
             assert_eq!(result.session.tx_ids.len(), if atomic { 1 } else { 2 });
-            // Atomicity controls identity and outcome semantics; both modes
-            // can publish this bounded command list with one head transition.
+            // Both forms publish once; only the atomic form shares a
+            // transaction identity and terminal decision between commands.
             assert_eq!(state(&node).0, before + 1);
             assert_eq!(
                 state(&node).1,
