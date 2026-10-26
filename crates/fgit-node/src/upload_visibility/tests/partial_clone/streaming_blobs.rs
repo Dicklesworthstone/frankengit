@@ -222,7 +222,7 @@ fn a_blob_above_32_mib_uses_verified_file_chunks_and_never_enters_buffered_loadi
     assert_eq!(source.buffered_object_limit(), 32 * 1024 * 1024);
     assert_eq!(source.parse_limits().max_object_bytes, 32 * 1024 * 1024);
     assert!(matches!(
-        source.load(&id),
+        fgit_pack::CanonicalObjectSource::load(&source, &id),
         Err(PackWriteError::Pack(PackError::ObjectSizeLimit {
             actual: LENGTH,
             limit: 33_554_432,
