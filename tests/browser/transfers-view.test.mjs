@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { TransferClient } from '../../crates/fgit-node/src/smart_http/server/browser/transfers.mjs';
 import { mountTransfers, selectedBytes, referenceLabel } from '../../crates/fgit-node/src/smart_http/server/browser/transfers-view.mjs';
-import { BUNDLE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs';
+import { BUNDLE_LIMIT, MAPPING_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs';
 import { fixture, bundleBytes as checksumOnlyBundle, crypto, href, token, hex, head, deferred, decodeUpload, json } from './transfers-fixtures.mjs';
 import { completeBundle } from './transfer-closure-fixtures.mjs';
 import { bundle as encodeBundle } from './bundle-verify-fixtures.mjs';
@@ -98,15 +98,24 @@ test('duplicate destinations refuse and removing the conflicting mapping permits
   await h.get('stage-fetch').fire('click'); assert.equal(h.client.pending, null); assert.match(h.get('transfer-status').textContent, /Duplicate/);
   await find(second, 'button', 'Remove').fire('click'); await h.get('stage-fetch').fire('click'); assert.equal(h.client.pending.count, 1);
 });
-test('large advertised sets can use mapped subsets but cannot import more than 64 refs', async () => {
-  const input = completeBundle('sha1', { refCount: 65 }).bytes;
-  const h = await harness('sha1', input); await h.select(); await h.load();
-  assert.equal(h.get('stage-import').disabled, true); await h.map(); await h.get('stage-fetch').fire('click'); assert.equal(h.client.pending.count, 1);
+test('verified imports above the former 64-ref ceiling are enabled without sending early', async () => {
+  for (const algorithm of ['sha1', 'sha256']) {
+    const input = completeBundle(algorithm, { refCount: 65 }).bytes;
+    const h = await harness(algorithm, input); await h.select(); await h.load();
+    assert.equal(h.get('stage-import').disabled, false); await h.get('stage-import').fire('click');
+    assert.equal(h.client.pending.count, 65); assert.equal(h.client.pending.sent, false);
+    assert.equal(h.f.calls.length, 1); assert(h.client.pending.updates.every(row => row.expected_old === null));
+    h.f.config.importCount = 65; h.get('confirm-transfer').checked = true;
+    await h.get('send-transfer').fire('click'); assert.equal(h.client.pending, null);
+    assert.equal(decodeUpload(h.f.calls.at(-1)).fields.has('mapping'), false);
+  }
 });
 test('mapping count is bounded before creating another editor', async () => {
   const h = await harness(); await h.select(); await h.load();
-  for (let i = 0; i < 65; i++) await find(h.get('bundle-refs'), 'button', 'Map this reference').fire('click');
-  assert.equal(h.get('mapping-rows').children.length, 64); assert.match(h.get('transfer-status').textContent, /At most 64/);
+  const add = find(h.get('bundle-refs'), 'button', 'Map this reference');
+  for (let i = 0; i <= MAPPING_LIMIT; i++) await add.fire('click');
+  assert.equal(h.get('mapping-rows').children.length, MAPPING_LIMIT);
+  assert.match(h.get('transfer-status').textContent, /At most 4096/);
 });
 test('source refs, malicious-looking text and direction controls remain inert labels', async () => {
   const raw = 'refs/heads/<script>\u202e', graph = completeBundle();

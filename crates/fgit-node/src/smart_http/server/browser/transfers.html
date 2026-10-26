@@ -34,19 +34,19 @@
         <p>Supply values recorded through a separately trusted channel, not copied from this bundle or an unsigned adjacent manifest. Leave these blank for internal consistency checking only. Pins do not grant permissions or choose destination refs.</p>
         <label>Trusted whole-bundle SHA-256<input id="bundle-sha256" maxlength="64" autocomplete="off" spellcheck="false"></label>
         <label>Pin name encoding<select id="bundle-pin-encoding"><option value="text">UTF-8 full reference names</option><option value="hex">Raw lowercase hexadecimal reference names</option></select></label>
-        <label>Trusted native reference pins (one NAME=OID per line, at most 64)<textarea id="bundle-pins" rows="4" maxlength="65536" spellcheck="false" placeholder="refs/heads/main=FULL_NATIVE_COMMIT_ID"></textarea></label>
+        <label>Trusted native reference pins (one NAME=OID per line, up to 4096 within 64 KiB)<textarea id="bundle-pins" rows="4" maxlength="65536" spellcheck="false" placeholder="refs/heads/main=FULL_NATIVE_COMMIT_ID"></textarea></label>
         <label><input id="bundle-exact-refs" type="checkbox">Require exactly this direct-ref set, without additional refs</label>
         <p>Object IDs use the selected repository format. Annotated tag pins name the tag object, not its peeled commit. Ref pins survive repacking; a whole-bundle hash requires byte-identical transport data. Without exact-set mode, other advertised refs are allowed but still fully verified.</p>
       </details>
       <button id="load-bundle" type="button">Verify complete selected bundle</button>
-      <p class="hint">Self-contained v2/v3 bundles only. Before a new transfer can be prepared, this browser checks every packed object and the complete reachable history. Native admission still enforces objects, permissions, policy and ref leases. Verification is bounded to 16 MiB input, 128 MiB expansion, 32,768 objects, delta depth 64 and 30 seconds. Incomplete, mismatching or over-budget data refuses without a checksum-only fallback. Prerequisite/filter bundles are unsupported.</p>
+      <p class="hint">Self-contained v2/v3 bundles only. Before a new transfer can be prepared, this browser checks every packed object and the complete reachable history. Native admission still enforces objects, permissions, policy and ref leases. Verification is bounded to 16 MiB input, 4096 advertised records (including HEAD) within a 256 KiB header, 128 MiB expansion, 32,768 objects, delta depth 64 and 30 seconds. Incomplete, mismatching or over-budget data refuses without a checksum-only fallback. Prerequisite/filter bundles are unsupported.</p>
       <div id="bundle-info"></div><div id="bundle-refs"></div>
       <h3>Explicit fetch destinations</h3>
-      <p>Use “Map this reference” for each source to import. Supply a complete destination ref and either <code>absent</code> or its exact old native OID. No destination or old tip is inferred; at most 64 mappings. One source may be mapped to several distinct destinations.</p>
+      <p>Use “Map this reference” for each source to import. Supply a complete destination ref and either <code>absent</code> or its exact old native OID. No destination or old tip is inferred; at most 4096 mappings within a 256 KiB encoded command. Long names or exact old IDs can reach the byte limit first. One source may be mapped to several distinct destinations.</p>
       <div id="mapping-rows"></div>
       <button id="stage-fetch" type="button">Prepare mapped fetch — do not send</button>
       <h3>Or import all advertised direct refs</h3>
-      <p>All destinations must be absent. No existing ref is overwritten and advertised HEAD is not installed. This operation supports at most 64 direct refs; use mapped fetch for a subset of larger bundles.</p>
+      <p>All destinations must be absent. No existing ref is overwritten and advertised HEAD is not installed. This operation supports up to 4096 direct refs within the bundle header limits. Use mapped fetch to select a subset; the complete bundle is verified in either case.</p>
       <button id="stage-import" type="button">Prepare absent-ref import — do not send</button>
     </section>
     <section aria-labelledby="pending-heading">

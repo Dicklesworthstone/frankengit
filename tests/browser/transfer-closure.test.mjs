@@ -81,15 +81,18 @@ test('checksum and full-check paths own Buffer inputs before yielding', async ()
     const result = await inspect(input, controlled); assert.deepEqual(result.bytes, f.bytes);
   }
 });
-test('legacy and full checks share the original deterministic object verifier', async () => {
+test('legacy and full checks share the verifier with only its reference ceiling raised', async () => {
   for (const name of Object.keys(offline)) assert.equal(offline[name], served[name]);
   const source = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs', import.meta.url), 'utf8');
   let moved = source.slice(source.indexOf('// Independent, read-only verification'), source.indexOf('\n// Prepare standard Git interchange files'))
-    .replace('return { budget, byId, objects, pack, summary: {', 'return { budget, byId, objects, summary: {');
+    .replace('return { budget, byId, objects, pack, summary: {', 'return { budget, byId, objects, summary: {')
+    // Normalize only the reviewed count-profile change; the original parser,
+    // closure checks and every byte/work ceiling remain covered by this pin.
+    .replace('maxRefs: REF_LIMIT', 'maxRefs: 1024');
   for (const name of Object.keys(offline)) moved = moved.replace(new RegExp(`^(const|class|async function|function) ${name}\\b`, 'm'), 'export $&');
   const raw = Buffer.from(moved);
   assert.equal(createHash('sha1').update(`blob ${raw.length}\0`).update(raw).digest('hex'),
-    '74561a4e58e2aa970094e4cbb5dc6feefdf27101', 'the original verifier body moved unchanged');
+    '74561a4e58e2aa970094e4cbb5dc6feefdf27101', 'the verifier body is unchanged apart from the reference-count ceiling');
 });
 test('unsupported verification choices fail locally without creating a request', async () => {
   const { client, calls } = await connectedTransfer(); const count = calls.length;

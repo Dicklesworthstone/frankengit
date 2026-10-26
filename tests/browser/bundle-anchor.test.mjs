@@ -93,7 +93,7 @@ for (const [label, expected] of [
 });
 test('expectation reference counts and aggregate byte budgets are enforced before work', () => {
   const f = fixture(), row = f.expected.refs[0];
-  assert.throws(() => normalizeBundleExpectation({ object_format: 'sha1', refs: Array(1025).fill(row) }), error => error.code === 'expectation_reference_limit');
+  assert.throws(() => normalizeBundleExpectation({ object_format: 'sha1', refs: Array(4097).fill(row) }), error => error.code === 'expectation_reference_limit');
   const refs = Array.from({ length: 65 }, (_, n) => ({ ref_hex: bytes(`refs/tags/${String(n).padStart(3, '0')}${'a'.repeat(4078)}`).toString('hex'), object_id: f.tip }));
   assert.throws(() => normalizeBundleExpectation({ object_format: 'sha1', refs }), error => error.code === 'expectation_header_limit');
 });

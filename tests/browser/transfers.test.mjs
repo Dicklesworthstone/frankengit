@@ -96,7 +96,7 @@ test('fetch requires explicit distinct destinations, advertised sources and abse
   for (const rows of [[], [mapping(), mapping()], [{ ...mapping(), source_hex: hex('HEAD') }],
     [{ ...mapping(), source_hex: hex('refs/heads/missing') }], [{ ...mapping(), expected_old: undefined }],
     [{ ...mapping(), expected_old: '0'.repeat(40) }], [{ ...mapping(), force: true }],
-    Array.from({ length: 65 }, (_, i) => ({ ...mapping(), destination_hex: hex(`refs/heads/d${i}`) }))]) assert.throws(() => transferCommand('fetch', summary, rows));
+    Array.from({ length: 4097 }, (_, i) => ({ ...mapping(), destination_hex: hex(`refs/heads/d${i}`) }))]) assert.throws(() => transferCommand('fetch', summary, rows));
   assert.throws(() => transferCommand('import', summary, [mapping()]));
   assert.throws(() => transferCommand('force', summary));
   for (const r of ['', hex('HEAD'), hex('refs/heads/..'), hex('refs/heads/a.lock'), hex('refs/heads/a\0b')]) assert.throws(() => bundleRef(r));

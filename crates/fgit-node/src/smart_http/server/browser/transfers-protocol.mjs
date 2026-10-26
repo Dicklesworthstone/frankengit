@@ -3,7 +3,9 @@ import { fail, keys, record, integer, hex, unhex, utf8, format, oid, binding, pi
   opaque, principal, form, rootFor, snapshot as snapshotToken } from './pulls-core.mjs';
 import { digest, BUNDLE_LIMIT } from './pulls-candidate.mjs';
 export { BUNDLE_LIMIT };
-export const HEADER_LIMIT = 256 * 1024, REF_LIMIT = 1024, MAPPING_LIMIT = 64;
+// Count ceilings match native bundle/admission profiles; byte budgets apply independently.
+// The advertised-record ceiling includes an optional HEAD record.
+export const HEADER_LIMIT = 256 * 1024, REF_LIMIT = 4096, MAPPING_LIMIT = REF_LIMIT;
 export const EXPORT_HEADERS = Object.freeze(['x-fgit-bundle-profile', 'x-fgit-object-format', 'x-fgit-tenant',
   'x-fgit-repository', 'x-fgit-repository-incarnation', 'x-fgit-source-head', 'x-fgit-snapshot',
   'x-fgit-artifact-sha256', 'x-fgit-read-only']);
@@ -41,7 +43,7 @@ export async function inspectBundle(input, crypto, checkpoint = () => {}) {
       algorithm = value.slice('@object-format='.length); capability = true; continue;
     }
     if (row[0] === 45) fail('This full-bundle HTTP profile does not accept prerequisites.');
-    if (++records > REF_LIMIT) fail('Bundle exceeds 1024 advertised references.');
+    if (++records > REF_LIMIT) fail(`Bundle exceeds ${REF_LIMIT} advertised reference records.`);
     const width = algorithm === 'sha1' ? 40 : 64;
     if (row.length <= width + 1 || row[width] !== 32) fail('Invalid bundle reference record.');
     const id = oid(ascii(row.subarray(0, width)).toLowerCase(), algorithm), name = row.subarray(width + 1);
@@ -72,10 +74,10 @@ export function transferCommand(operation, summary, input = []) {
   if (!/^[0-9a-f]{64}$/.test(fields.artifact_sha256)) fail('Invalid artifact commitment.');
   let updates;
   if (operation === 'import') {
-    if (input.length || summary.refs.length > MAPPING_LIMIT) fail('Import requires no mappings and at most 64 direct refs; use an explicit fetch subset.');
+    if (input.length || summary.refs.length > MAPPING_LIMIT) fail(`Import requires no mappings and at most ${MAPPING_LIMIT} direct refs.`);
     updates = summary.refs.map(r => ({ source_hex: r.ref_hex, destination_hex: r.ref_hex, expected_old: null, new_commit: r.object_id }));
   } else {
-    if (!input.length || input.length > MAPPING_LIMIT) fail('Select 1 through 64 explicit fetch mappings.');
+    if (!input.length || input.length > MAPPING_LIMIT) fail(`Select 1 through ${MAPPING_LIMIT} explicit fetch mappings.`);
     const destinations = new Set(), sources = new Map(summary.refs.map(r => [r.ref_hex, r.object_id]));
     updates = input.map(row => {
       keys(row, ['source_hex', 'destination_hex', 'expected_old']);
@@ -212,7 +214,7 @@ export const { BUNDLE_VERIFY_LIMITS, BundleVerificationError, verifyGitBundleObj
 // No platform inflater is used: exact stream boundaries and pre-allocation
 // resource accounting are part of this hostile-input verification boundary.
 const BUNDLE_VERIFY_LIMITS = Object.freeze({
-  maxInputBytes: 16 * 1024 * 1024, maxHeaderBytes: 256 * 1024, maxRefs: 1024,
+  maxInputBytes: 16 * 1024 * 1024, maxHeaderBytes: 256 * 1024, maxRefs: REF_LIMIT,
   maxObjects: 32768, maxObjectBytes: 16 * 1024 * 1024,
   maxExpandedBytes: 128 * 1024 * 1024, maxDeltaDepth: 64,
   maxWork: 256 * 1024 * 1024, timeoutMs: 30000,

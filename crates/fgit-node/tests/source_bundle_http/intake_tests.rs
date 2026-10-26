@@ -516,3 +516,75 @@ fn matching_transport_digest_cannot_admit_a_corrupt_pack_and_a_valid_retry_still
         node.shutdown().unwrap();
     }
 }
+
+#[test]
+fn mapped_fetch_above_sixty_four_refs_is_atomic_and_replays_after_restart() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let origin = Scratch::new();
+        let (bundle, _, main) = source_bundle(&origin, format);
+        let root = Scratch::new();
+        let config = root.config(format);
+        let node = empty(&root, format);
+        let before = generation(&node);
+        let path = root.0.join("credentials");
+        credentials(&node, &path);
+        let mut command = form(&bundle, format);
+        for i in 0..65 {
+            command += &format!(
+                "&mapping={}:{}:absent",
+                hex(b"refs/heads/main"),
+                hex(format!("refs/remotes/batch/r{i:04}").as_bytes())
+            );
+        }
+        let server = WriteServer::start(node, &path, 2, true);
+        let first = send(
+            &server,
+            "fetch",
+            "large-mapped-transfer",
+            &command,
+            &bundle,
+            false,
+        );
+        status(&first, 200);
+        assert_eq!(text(&first.body, "outcome"), "committed");
+        assert_eq!(number(&first.body, "command_count"), 65);
+        assert!(first.body.contains("\"atomic\":true,\"terminal\":true"));
+        assert_eq!(
+            send(
+                &server,
+                "fetch",
+                "large-mapped-transfer",
+                &command,
+                &bundle,
+                true,
+            ),
+            first
+        );
+        server.finish();
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before + 1);
+        let actual = refs(&node);
+        assert_eq!(actual.len(), 65);
+        for i in 0..65 {
+            let name = RefName::try_new(format!("refs/remotes/batch/r{i:04}").as_bytes()).unwrap();
+            assert_eq!(actual[&name], main);
+        }
+        let server = WriteServer::start(node, &path, 1, true);
+        assert_eq!(
+            send(
+                &server,
+                "fetch",
+                "large-mapped-transfer",
+                &command,
+                &bundle,
+                false,
+            ),
+            first
+        );
+        server.finish();
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before + 1);
+        assert_eq!(refs(&node), actual);
+        node.shutdown().unwrap();
+    }
+}

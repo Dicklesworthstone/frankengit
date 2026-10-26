@@ -29,7 +29,7 @@ export function intakeExpectations(algorithm, sha256, pins, encoding, exact) {
   text(sha256, 64, 'trusted bundle SHA-256'); text(pins, 64 * 1024, 'trusted reference pins');
   if (!['text', 'hex'].includes(encoding) || typeof exact !== 'boolean') throw new Error('Choose explicit pin encoding and ref-set semantics.');
   const lines = pins.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (lines.length > MAPPING_LIMIT) throw new Error('At most 64 trusted reference pins are supported.');
+  if (lines.length > MAPPING_LIMIT) throw new Error(`At most ${MAPPING_LIMIT} trusted reference pins are supported.`);
   if (!sha256 && !lines.length && !exact) return null;
   const expected = { object_format: algorithm, ...(sha256 ? { sha256 } : {}) };
   if (lines.length) expected.refs = lines.map(line => {
@@ -99,7 +99,7 @@ export function mountTransfers(doc, options = {}) {
   function addMapping(source) {
     if (busy || client.pending || !summary || !client.connected) return;
     try {
-      if (mappings.length === MAPPING_LIMIT) throw new Error('At most 64 mappings are supported.');
+      if (mappings.length === MAPPING_LIMIT) throw new Error(`At most ${MAPPING_LIMIT} mappings are supported.`);
       if (!summary.refs.some(r => r.ref_hex === source)) throw new Error('Source is no longer in this bundle.');
       const row = node('fieldset'), title = node('legend', `Map ${referenceLabel(source)}`); row.append(title);
       const destination = node('input'); destination.maxLength = 8192; destination.autocomplete = 'off'; destination.spellcheck = false;

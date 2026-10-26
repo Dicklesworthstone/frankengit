@@ -23,7 +23,8 @@ use fgit_wire::smart_http::{BodyFraming, HttpLimits};
 use std::collections::BTreeSet;
 use std::io::Read;
 
-const MAX_MAPPINGS: usize = 64;
+// Match the sealed native transaction ceiling; form/MIME bytes remain independently bounded.
+const MAX_MAPPINGS: usize = fgit_authority::MAX_REF_COMMANDS;
 
 fn ref_hex(text: &str) -> Result<RefName, ApiError> {
     if text.is_empty()
@@ -473,46 +474,100 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn fetch_mapping_count_paths_and_namespaces_are_bounded() {
-        let mut form = form(b"bundle", GitHashAlgorithm::Sha1);
-        for i in 0..MAX_MAPPINGS {
-            form += &format!(
+    fn short_mapping_form(format: GitHashAlgorithm, count: usize, exact_old: bool) -> String {
+        let mut value = form(b"bundle", format);
+        let old = "a".repeat(format.digest_len() * 2);
+        for i in 0..count {
+            let lease = if exact_old || i == 0 {
+                old.as_str()
+            } else {
+                "absent"
+            };
+            // Match the browser's percent-encoded form, using short names so
+            // the count boundary is independent of the unchanged byte budget.
+            value += &format!(
                 "&mapping={}",
-                item("refs/heads/main", &format!("refs/heads/d{i}"), "absent")
+                item("refs/a", &format!("refs/d{i:04}"), lease).replace(':', "%3A")
             );
         }
-        assert_eq!(
-            command(
-                form.as_bytes(),
-                GitHashAlgorithm::Sha1,
+        value
+    }
+
+    #[test]
+    fn fetch_mapping_count_paths_and_namespaces_are_bounded() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for count in [65, 1024, MAX_MAPPINGS] {
+                let value = short_mapping_form(format, count, false);
+                assert!(value.len() < super::super::super::super::issues::MAX_FORM_BYTES);
+                let mappings = command(
+                    value.as_bytes(),
+                    format,
+                    Operation::Fetch,
+                    b"bundle",
+                    &mut || true,
+                )
+                .unwrap();
+                assert_eq!(mappings.len(), count);
+                assert_eq!(mappings[0].source.as_bytes(), b"refs/a");
+                assert_eq!(mappings[0].destination.as_bytes(), b"refs/d0000");
+                assert_eq!(
+                    mappings[0].expected_old.unwrap().to_string(),
+                    "a".repeat(format.digest_len() * 2)
+                );
+                assert!(
+                    mappings[1..]
+                        .iter()
+                        .all(|mapping| mapping.expected_old.is_none())
+                );
+            }
+            let value = short_mapping_form(format, MAX_MAPPINGS + 1, false);
+            assert!(value.len() < super::super::super::super::issues::MAX_FORM_BYTES);
+            let refusal = command(
+                value.as_bytes(),
+                format,
                 Operation::Fetch,
                 b"bundle",
-                &mut || true
+                &mut || true,
             )
-            .unwrap()
-            .len(),
-            MAX_MAPPINGS
-        );
-        form += &format!(
-            "&mapping={}",
-            item("refs/heads/main", "refs/heads/extra", "absent")
-        );
-        assert!(
-            command(
-                form.as_bytes(),
-                GitHashAlgorithm::Sha1,
-                Operation::Fetch,
-                b"bundle",
-                &mut || true
-            )
-            .is_err()
-        );
+            .unwrap_err();
+            assert_eq!(refusal.status, Status::TooLarge);
+            assert!(!refusal.outcome_unknown);
+        }
         for name in ["HEAD", "../main", "refs/heads/../secret", "refs/heads/a\0b"] {
             assert!(ref_hex(&hex(name.as_bytes())).is_err());
         }
         assert!(ref_hex(&"ab".repeat(4097)).is_err());
     }
+
+    #[test]
+    fn mapping_byte_budget_and_cancellation_still_refuse_before_publication() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let value = short_mapping_form(format, MAX_MAPPINGS, true);
+            assert!(value.len() > super::super::super::super::issues::MAX_FORM_BYTES);
+            let refusal = command(
+                value.as_bytes(),
+                format,
+                Operation::Fetch,
+                b"bundle",
+                &mut || true,
+            )
+            .unwrap_err();
+            assert_eq!(refusal.status, Status::TooLarge);
+            assert!(!refusal.outcome_unknown);
+            let value = short_mapping_form(format, 65, false);
+            let refusal = command(
+                value.as_bytes(),
+                format,
+                Operation::Fetch,
+                b"bundle",
+                &mut || false,
+            )
+            .unwrap_err();
+            assert_eq!(refusal.status, Status::Timeout);
+            assert!(!refusal.outcome_unknown);
+        }
+    }
+
     #[test]
     fn infrastructure_failure_after_intake_retains_uncertainty() {
         assert!(
