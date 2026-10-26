@@ -116,6 +116,7 @@ pub use outcome_checkpoint::{
 };
 pub use publish::{
     CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,
+    publish_with_cumulative, publish_with_cumulative_async,
 };
 pub use recovery::{AuditedRestore, CapsuleVerification, HaltReason, RecoveryPlan, plan_recovery};
 pub use refusal::ChronicleRefusal;

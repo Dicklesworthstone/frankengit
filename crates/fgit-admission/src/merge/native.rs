@@ -687,9 +687,15 @@ where
             receipt.token(),
         )?;
         projection.merge_checkpoint(cx).map_err(unavailable)?;
-        if let Some(terminal) =
-            crate::outcome_after_publish_async(store, cx, context, receipt.token(), &publication)
-                .await?
+        if let Some(terminal) = crate::outcome_after_publish_async(
+            store,
+            cx,
+            context,
+            receipt.token(),
+            &publication,
+            &cumulative,
+        )
+        .await?
         {
             return Ok(terminal);
         }

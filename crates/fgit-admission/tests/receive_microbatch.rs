@@ -9,6 +9,8 @@
 mod chunks;
 #[path = "receive_microbatch/continuation.rs"]
 mod continuation;
+#[path = "receive_microbatch/history_reads.rs"]
+mod history_reads;
 #[path = "receive_microbatch/index_race.rs"]
 mod index_race;
 
@@ -209,6 +211,9 @@ struct Rival {
 struct Authority {
     inner: MemoryAuthorityStore,
     immutable_writes: AtomicUsize,
+    watched_reads: Mutex<BTreeMap<ImmutableKey, usize>>,
+    post_publication_authentications: AtomicUsize,
+    post_publication_auth_failure: Mutex<Option<(usize, AuthorityFailure)>>,
     publications: AtomicUsize,
     committed_publications: AtomicUsize,
     drop_response: AtomicBool,
@@ -267,6 +272,9 @@ impl AsyncAuthorityStore for Authority {
         _cx: &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        if let Some(count) = self.watched_reads.lock().unwrap().get_mut(key) {
+            *count += 1;
+        }
         let rival = {
             let mut scheduled = self.index_rival.lock().unwrap();
             if scheduled.as_ref().is_some_and(|(target, _)| target == key) {
@@ -323,6 +331,23 @@ impl AsyncAuthorityStore for Authority {
         _cx: &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        if self.committed_publications.load(Ordering::SeqCst) != 0 {
+            let ordinal = self
+                .post_publication_authentications
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            let failure = {
+                let mut scheduled = self.post_publication_auth_failure.lock().unwrap();
+                if scheduled.as_ref().is_some_and(|(at, _)| *at == ordinal) {
+                    scheduled.take().map(|(_, failure)| failure)
+                } else {
+                    None
+                }
+            };
+            if let Some(failure) = failure {
+                return std::future::ready(Err(failure));
+            }
+        }
         std::future::ready(self.inner.authenticate_head_receipt(receipt))
     }
     fn publish_head_with_outcomes(
@@ -455,6 +480,9 @@ fn setup(
         Authority {
             inner,
             immutable_writes: AtomicUsize::new(0),
+            watched_reads: Mutex::new(BTreeMap::new()),
+            post_publication_authentications: AtomicUsize::new(0),
+            post_publication_auth_failure: Mutex::new(None),
             publications: AtomicUsize::new(0),
             committed_publications: AtomicUsize::new(0),
             drop_response: AtomicBool::new(false),

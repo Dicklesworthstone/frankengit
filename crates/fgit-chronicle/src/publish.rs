@@ -6,9 +6,10 @@
 //! usable, or has the repository already decided the transactions it carries?
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthorityStore, AuthorityVersionToken, HeadKey, HeadReadReceipt,
-    OutcomeFailure, OutcomeLookup, PublicationOutcome, PublishedBatch, TerminalOutcome,
-    publish_decisions, publish_decisions_async, resolve_outcome, resolve_outcome_async,
+    AsyncAuthorityStore, AuthorityStore, AuthorityVersionToken, CumulativeOutcomes, HeadKey,
+    HeadReadReceipt, OutcomeFailure, OutcomeLookup, PublicationOutcome, PublishedBatch,
+    TerminalOutcome, publish_decisions, publish_decisions_async, publish_decisions_with_cumulative,
+    publish_decisions_with_cumulative_async, resolve_outcome, resolve_outcome_async,
 };
 use fgit_types::{RepositoryDecisionBatchId, TenantId, TxId};
 
@@ -150,6 +151,46 @@ where
     }
 }
 
+/// Publish using cumulative outcomes already collected for the exact basis.
+///
+/// Authority validates the set's store token against the current head before
+/// using it to establish duplicate absence. This avoids a second historical
+/// scan without turning cached data or an accelerator into publication
+/// authority. Lost candidates retain the ordinary authoritative resolution.
+pub fn publish_with_cumulative<S>(
+    store: &S,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    publication: &VerifiedPublication,
+    tenant_id: TenantId,
+    cumulative: &CumulativeOutcomes,
+) -> Result<PublicationVerdict, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let outcome = publish_decisions_with_cumulative(
+        store,
+        head_key,
+        expected,
+        publication.batch(),
+        publication.head(),
+        tenant_id,
+        cumulative,
+    )?;
+    match outcome {
+        PublicationOutcome::Published(published) => Ok(published_verdict(*published)),
+        PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(classify_loss(
+            store,
+            head_key,
+            publication,
+            tenant_id,
+        )?)),
+        PublicationOutcome::AlreadyDecided { decided } => {
+            Ok(PublicationVerdict::AlreadyDecided { decided })
+        }
+    }
+}
+
 /// Ask the authority whether any transaction in the candidate is decided.
 ///
 /// This resolves through `resolve_outcome`, which replays the authenticated
@@ -245,6 +286,42 @@ where
         publication.batch(),
         publication.head(),
         tenant_id,
+    )
+    .await?;
+    match outcome {
+        PublicationOutcome::Published(published) => Ok(published_verdict(*published)),
+        PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(
+            classify_loss_async(store, cx, head_key, publication, tenant_id).await?,
+        )),
+        PublicationOutcome::AlreadyDecided { decided } => {
+            Ok(PublicationVerdict::AlreadyDecided { decided })
+        }
+    }
+}
+
+/// Async counterpart of [`publish_with_cumulative`], using the same authority
+/// checks and lost-candidate semantics with the caller's live context.
+pub async fn publish_with_cumulative_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    publication: &VerifiedPublication,
+    tenant_id: TenantId,
+    cumulative: &CumulativeOutcomes,
+) -> Result<PublicationVerdict, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let outcome = publish_decisions_with_cumulative_async(
+        store,
+        cx,
+        head_key,
+        expected,
+        publication.batch(),
+        publication.head(),
+        tenant_id,
+        cumulative,
     )
     .await?;
     match outcome {

@@ -32,7 +32,8 @@ use fgit_authority::{
 use fgit_chronicle::{
     PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
-    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async, publish,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async,
+    publish_with_cumulative,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, RefusalRecordBody,
@@ -3505,7 +3506,7 @@ where
         cumulative_outcomes,
         expected,
     )?;
-    outcome_after_publish(store, context, expected, &publication)
+    outcome_after_publish(store, context, expected, &publication, cumulative_outcomes)
 }
 
 fn validate_commit_materialization(
@@ -3612,7 +3613,7 @@ where
     store.put_if_absent(&key, &bytes)?;
 
     let publication = seal_refusal_publication(basis, &refusal, cumulative_outcomes, expected)?;
-    outcome_after_publish(store, context, expected, &publication)
+    outcome_after_publish(store, context, expected, &publication, cumulative_outcomes)
 }
 
 fn refusal_record_id(record: &RefusalRecordBody) -> Result<RefusalRecordId, AdmissionError> {
@@ -3643,17 +3644,19 @@ fn outcome_after_publish<S>(
     context: &AdmissionContext,
     expected: fgit_authority::AuthorityVersionToken,
     publication: &fgit_chronicle::VerifiedPublication,
+    cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AuthorityStore + ?Sized,
 {
     let tx_id = publication_tx_id(publication)?;
-    match publish(
+    match publish_with_cumulative(
         store,
         &context.head_key,
         expected,
         publication,
         context.tenant_id,
+        cumulative_outcomes,
     )? {
         PublicationVerdict::Published(_) | PublicationVerdict::Lost(_) => {
             match fgit_authority::resolve_outcome(
@@ -4393,7 +4396,15 @@ where
         cumulative_outcomes,
         expected,
     )?;
-    outcome_after_publish_async(store, cx, context, expected, &publication).await
+    outcome_after_publish_async(
+        store,
+        cx,
+        context,
+        expected,
+        &publication,
+        cumulative_outcomes,
+    )
+    .await
 }
 
 /// Stage a refusal record and publish its terminal decision, asynchronously.
@@ -4429,7 +4440,15 @@ where
     store.put_if_absent(cx, &key, &bytes).await?;
 
     let publication = seal_refusal_publication(basis, &refusal, cumulative_outcomes, expected)?;
-    outcome_after_publish_async(store, cx, context, expected, &publication).await
+    outcome_after_publish_async(
+        store,
+        cx,
+        context,
+        expected,
+        &publication,
+        cumulative_outcomes,
+    )
+    .await
 }
 
 /// Interpret the result of a publication attempt, asynchronously.
@@ -4451,18 +4470,20 @@ async fn outcome_after_publish_async<S>(
     context: &AdmissionContext,
     expected: fgit_authority::AuthorityVersionToken,
     publication: &fgit_chronicle::VerifiedPublication,
+    cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
     let tx_id = publication_tx_id(publication)?;
-    match fgit_chronicle::publish_async(
+    match fgit_chronicle::publish_with_cumulative_async(
         store,
         cx,
         &context.head_key,
         expected,
         publication,
         context.tenant_id,
+        cumulative_outcomes,
     )
     .await?
     {

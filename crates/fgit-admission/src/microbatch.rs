@@ -17,7 +17,8 @@ use fgit_authority::{
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
     VerifiedPublication, collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
-    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async, publish, verify_pair,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async,
+    publish_with_cumulative, verify_pair,
 };
 use fgit_codec::{CryptoBodyIdentity, RefusalRecordBody, RepositoryDecisionBatchBody, encode_body};
 use fgit_txn::combiner::BatchBounds;
@@ -560,6 +561,10 @@ where
     let chunk_size = bounds()?.max_decisions() as usize;
     let mut known = vec![None; plan.lowered.len()];
     let mut validation = input.validation_basis;
+    // One invocation may publish many chunks. Retain its authenticated history
+    // only while the exact store token matches, or after authority verifies our
+    // own winning successor. A foreign head always requires a fresh collection.
+    let mut cumulative_cache: Option<CumulativeOutcomes> = None;
     let seals = plan
         .lowered
         .iter()
@@ -572,12 +577,18 @@ where
         let end = (start + chunk_size).min(plan.lowered.len());
         for _ in 0..limits.max_cas_replans {
             let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
-            let cumulative = collect_cumulative_outcomes_from_authenticated_capsule_checkpoint(
-                store,
-                &CryptoBodyIdentity,
-                &context.head_key,
-                &authenticated,
-            )?;
+            let cumulative = match cumulative_cache
+                .take()
+                .filter(|outcomes| outcomes.observed() == receipt.token())
+            {
+                Some(outcomes) => outcomes,
+                None => collect_cumulative_outcomes_from_authenticated_capsule_checkpoint(
+                    store,
+                    &CryptoBodyIdentity,
+                    &context.head_key,
+                    &authenticated,
+                )?,
+            };
             if cumulative.observed() != receipt.token() {
                 continue;
             }
@@ -606,6 +617,7 @@ where
                 }
             }
             if known[start..end].iter().all(Option::is_some) {
+                cumulative_cache = Some(cumulative);
                 break;
             }
             advance_validation(
@@ -666,17 +678,24 @@ where
                 attempt.refuse(&refusal)?;
             }
             let publication = attempt.seal(&cumulative, receipt.token())?;
-            let resolved = match publication_resolution(publish(
+            let (resolved, published) = match publication_resolution(publish_with_cumulative(
                 store,
                 &context.head_key,
                 receipt.token(),
                 &publication,
                 context.tenant_id,
+                &cumulative,
             )?) {
-                PublicationResolution::Published(receipt) => {
-                    published_decisions(&publication, &store.authenticate_head_receipt(&receipt)?)?
+                PublicationResolution::Published(published) => {
+                    let resolved = published_decisions(
+                        &publication,
+                        &store.authenticate_head_receipt(&published)?,
+                    )?;
+                    (resolved, Some(published))
                 }
-                PublicationResolution::Recovered(decided) => decided,
+                // The cached prefix cannot be rebound to a competing writer's
+                // head from terminal hints, even when every child is decided.
+                PublicationResolution::Recovered(decided) => (decided, None),
             };
             for (tx_id, terminal) in resolved {
                 let index = terminal_index(plan, start, end, tx_id)?;
@@ -685,6 +704,20 @@ where
                     terminal,
                 )?;
                 remember(&mut known, completed, index, terminal);
+            }
+            // Carrying a prefix is optional work for the next chunk. Preserve
+            // every authenticated terminal first, including if reauthentication
+            // is cancelled or detects an integrity failure. No final chunk
+            // needs an extension, so completion cannot fail on unused caching.
+            if end < plan.lowered.len()
+                && let Some(published) = published
+            {
+                cumulative_cache = Some(cumulative.extend_after_publication(
+                    store,
+                    &receipt,
+                    &published,
+                    publication.batch(),
+                )?);
             }
             if known[start..end].iter().all(Option::is_some) {
                 break;
@@ -718,6 +751,7 @@ where
     let chunk_size = bounds()?.max_decisions() as usize;
     let mut known = vec![None; plan.lowered.len()];
     let mut validation = input.validation_basis;
+    let mut cumulative_cache: Option<CumulativeOutcomes> = None;
     let mut seals = Vec::with_capacity(plan.lowered.len());
     for lowered in &plan.lowered {
         seals.push(
@@ -732,15 +766,22 @@ where
         for _ in 0..limits.max_cas_replans {
             let (basis, receipt, authenticated) =
                 read_basis_async(store, cx, &context.head_key).await?;
-            let cumulative =
-                collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async(
-                    store,
-                    cx,
-                    &CryptoBodyIdentity,
-                    &context.head_key,
-                    &authenticated,
-                )
-                .await?;
+            let cumulative = match cumulative_cache
+                .take()
+                .filter(|outcomes| outcomes.observed() == receipt.token())
+            {
+                Some(outcomes) => outcomes,
+                None => {
+                    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async(
+                        store,
+                        cx,
+                        &CryptoBodyIdentity,
+                        &context.head_key,
+                        &authenticated,
+                    )
+                    .await?
+                }
+            };
             if cumulative.observed() != receipt.token() {
                 continue;
             }
@@ -772,6 +813,7 @@ where
                 }
             }
             if known[start..end].iter().all(Option::is_some) {
+                cumulative_cache = Some(cumulative);
                 break;
             }
             advance_validation_async(
@@ -869,22 +911,26 @@ where
                 attempt.refuse(&refusal)?;
             }
             let publication = attempt.seal(&cumulative, receipt.token())?;
-            let resolved = match publication_resolution(
-                fgit_chronicle::publish_async(
+            let (resolved, published) = match publication_resolution(
+                fgit_chronicle::publish_with_cumulative_async(
                     store,
                     cx,
                     &context.head_key,
                     receipt.token(),
                     &publication,
                     context.tenant_id,
+                    &cumulative,
                 )
                 .await?,
             ) {
-                PublicationResolution::Published(receipt) => published_decisions(
-                    &publication,
-                    &store.authenticate_head_receipt(cx, &receipt).await?,
-                )?,
-                PublicationResolution::Recovered(decided) => decided,
+                PublicationResolution::Published(published) => {
+                    let resolved = published_decisions(
+                        &publication,
+                        &store.authenticate_head_receipt(cx, &published).await?,
+                    )?;
+                    (resolved, Some(published))
+                }
+                PublicationResolution::Recovered(decided) => (decided, None),
             };
             for (tx_id, terminal) in resolved {
                 let index = terminal_index(plan, start, end, tx_id)?;
@@ -900,6 +946,21 @@ where
                     terminal,
                 )?;
                 remember(&mut known, completed, index, terminal);
+            }
+            if end < plan.lowered.len()
+                && let Some(published) = published
+            {
+                cumulative_cache = Some(
+                    cumulative
+                        .extend_after_publication_async(
+                            store,
+                            cx,
+                            &receipt,
+                            &published,
+                            publication.batch(),
+                        )
+                        .await?,
+                );
             }
             if known[start..end].iter().all(Option::is_some) {
                 break;
