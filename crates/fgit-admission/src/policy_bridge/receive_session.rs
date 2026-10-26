@@ -19,18 +19,18 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
-    AsyncAuthorityStore, IdempotencyKey, SealAttempt, SemanticRequest, TerminalOutcome,
-    bind_idempotency_key_async, read_authority_head_body_async, read_decision_batch_body_async,
+    AsyncAuthorityStore, IdempotencyKey, TerminalOutcome, bind_idempotency_key_async,
+    read_authority_head_body_async, read_decision_batch_body_async,
 };
 use fgit_chronicle::{PublicationBasis, verify_pair};
 use fgit_codec::{CryptoBodyIdentity, RepositoryDecisionBatchBody};
-use fgit_types::{DecisionOutcome, RepositoryAuthorityHeadId, TxId};
+use fgit_types::{DecisionOutcome, RefusalCode, RepositoryAuthorityHeadId, TxId};
 
 use crate::{
     AdmissionContext, AdmissionError, AdmissionInput, AdmissionLimits, AdmissionResult,
     AsyncAdmissionProjection, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
     SessionPlan, SessionTerminals, admit_one_async, assemble_result, basis_bound_receive_input,
-    lower_ref_update, plan_session, read_basis_async, seal_attempt,
+    plan_session_checked, read_basis_async, seal_attempt,
 };
 
 /// Select one non-atomic receive command for read-only lost-response recovery.
@@ -49,7 +49,7 @@ pub fn non_atomic_command_key(
     original: &IdempotencyKey,
     index: usize,
 ) -> Result<IdempotencyKey, AdmissionError> {
-    let limit = crate::MAX_ADMISSION_COMMANDS;
+    let limit = crate::MAX_RECEIVE_SESSION_COMMANDS;
     if index >= limit {
         return Err(AdmissionError::CommandLimitExceeded { limit });
     }
@@ -125,11 +125,42 @@ where
     S: AsyncAuthorityStore + ?Sized,
     P: AsyncAdmissionProjection<S> + ?Sized,
 {
+    admit_with_checkpoint(
+        store,
+        cx,
+        context,
+        validated,
+        limits,
+        projection,
+        &|| Ok(()),
+    )
+    .await
+}
+
+/// Admit with bounded cancellation/budget probes during CPU preflight and key
+/// binding. The callback never converts an authenticated final outcome into an
+/// interruption; after publication, the existing decision core owns completion.
+pub async fn admit_with_checkpoint<S, P, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &BasisBoundValidatedReceive,
+    limits: AdmissionLimits,
+    projection: &P,
+    checkpoint: &C,
+) -> Result<AdmissionResult, InterruptedSession>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: AsyncAdmissionProjection<S> + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
     let input = basis_bound_receive_input(validated);
-    let plan = plan_session(context, &input, limits).map_err(|source| InterruptedSession {
-        source: Box::new(source),
-        session: None,
-        completed: Vec::new(),
+    let plan = plan_session_checked(context, &input, limits, checkpoint).map_err(|source| {
+        InterruptedSession {
+            source: Box::new(source),
+            session: None,
+            completed: Vec::new(),
+        }
     })?;
     let mapping = SessionMapping {
         atomic: plan.atomic,
@@ -139,7 +170,7 @@ where
     // alone permit appending commands to an already used session key. Bind all
     // child keys up front too, so a changed wire-order mapping cannot publish a
     // new prefix before encountering a conflicting existing child binding.
-    bind_session_keys(store, cx, context, &input, &plan)
+    bind_session_keys(store, cx, context, &input, &plan, checkpoint)
         .await
         .map_err(|source| InterruptedSession {
             source: Box::new(source),
@@ -245,62 +276,42 @@ async fn bind_session_keys<S>(
     context: &AdmissionContext,
     input: &AdmissionInput<'_>,
     plan: &SessionPlan,
+    checkpoint: &(impl Fn() -> Result<(), RefusalCode> + Sync),
 ) -> Result<(), AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let whole = if plan.atomic {
+    // Validate the entire carrier, canonical whole-session binding and exact
+    // child correspondence before reserving any original or derived key.
+    let prepared = if plan.atomic {
         None
     } else {
-        let commands = input
-            .updates
-            .iter()
-            .map(|update| lower_ref_update(update.old, update.new, update.ref_name))
-            .collect::<Result<Vec<_>, _>>()?;
-        let options = input
-            .push_options
-            .iter()
-            .cloned()
-            .map(fgit_authority::PushOption::new)
-            .collect::<Result<Vec<_>, _>>()?;
-        let whole = SealAttempt {
-            tenant_id: context.tenant_id,
-            repository_id: context.repository_id,
-            authenticated_principal_id: context.principal_id,
-            idempotency_key: context.idempotency_key.clone(),
-            request: SemanticRequest::build(
-                fgit_authority::RECEIVE_ADMISSION_SCHEMA,
-                context.object_format,
-                false,
-                commands,
-                options,
-                Vec::new(),
-            )?,
-        };
-        Some(whole)
+        Some(recovery::prepare_session(context, input, plan, checkpoint)?)
     };
-    // Determine the exact descriptor bytes before reserving any key. A
-    // deterministic size refusal must not strand the original retry key or
-    // any child binding for a request that can never be admitted unchanged.
-    let descriptor = whole
-        .as_ref()
-        .map(|whole| recovery::prepare(context, whole, plan))
-        .transpose()?;
-    if let Some(whole) = &whole {
-        let (identity, _) = whole.derive()?;
-        // This reserves only the original key, not another transaction. The
-        // canonical request and all original child identities are unchanged.
-        bind_idempotency_key_async(store, cx, whole, identity).await?;
+    if let Some(prepared) = &prepared {
+        // A narrower backend profile must refuse deterministically before the
+        // original key is reserved for a carrier it can never retain.
+        if prepared.bytes.len() > store.limits().body_bytes {
+            return Err(AdmissionError::SessionDescriptorBytesExceeded {
+                limit: store.limits().body_bytes,
+                observed: prepared.bytes.len(),
+            });
+        }
+        checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+        let (identity, _) = prepared.whole.derive()?;
+        // The original key binds an unsealed session identity, never a second
+        // logical transaction or publication authority.
+        bind_idempotency_key_async(store, cx, &prepared.whole, identity).await?;
     }
     for (lowered, identity) in plan.lowered.iter().zip(&plan.tx_ids) {
+        checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
         bind_idempotency_key_async(store, cx, &seal_attempt(context, lowered), *identity).await?;
     }
-    if let Some(bytes) = descriptor {
-        // This recovery carrier is checked against all of those bindings on
-        // read. It neither creates another seal nor authorizes publication.
-        // Persist before the first child so interruption cannot leave committed
-        // commands whose original session shape was never recorded.
-        recovery::stage(store, cx, context, &bytes).await?;
+    if let Some(prepared) = prepared {
+        checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+        // All original/child bindings precede this immutable recovery carrier,
+        // and the complete carrier precedes the first child seal or decision.
+        recovery::stage(store, cx, context, &prepared.bytes).await?;
     }
     Ok(())
 }
@@ -389,7 +400,7 @@ mod recovery_selector_tests {
         for bytes in [Vec::new(), b"opaque\0key\n\xff".to_vec(), vec![b'k'; 256]] {
             let original = IdempotencyKey::new(bytes).unwrap();
             let mut previous = None;
-            for index in 0..crate::MAX_ADMISSION_COMMANDS {
+            for index in 0..crate::MAX_RECEIVE_SESSION_COMMANDS {
                 let selected = non_atomic_command_key(&original, index).unwrap();
                 assert_eq!(selected, crate::non_atomic_key(&original, index).unwrap());
                 assert_ne!(selected, original);
@@ -403,14 +414,14 @@ mod recovery_selector_tests {
     fn an_out_of_range_command_is_not_coerced_into_a_different_key() {
         let key = IdempotencyKey::new(b"original".to_vec()).unwrap();
         for index in [
-            crate::MAX_ADMISSION_COMMANDS,
-            crate::MAX_ADMISSION_COMMANDS + 1,
+            crate::MAX_RECEIVE_SESSION_COMMANDS,
+            crate::MAX_RECEIVE_SESSION_COMMANDS + 1,
             usize::MAX,
         ] {
             assert!(matches!(
                 non_atomic_command_key(&key, index),
                 Err(AdmissionError::CommandLimitExceeded { limit })
-                    if limit == crate::MAX_ADMISSION_COMMANDS
+                    if limit == crate::MAX_RECEIVE_SESSION_COMMANDS
             ));
         }
     }

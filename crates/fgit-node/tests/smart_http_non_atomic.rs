@@ -19,6 +19,8 @@ use fgit_wire::{Packet, PktLineDecoder, WireLimits, encode_packets};
 
 #[path = "smart_http_non_atomic/command_limits.rs"]
 mod command_limits;
+#[path = "smart_http_non_atomic/large_session.rs"]
+mod large_session;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const BLOB: &[u8] = b"continuation\n";
@@ -152,7 +154,15 @@ fn perform_with_limits(
     body.extend_from_slice(pack);
     let framing = if streaming {
         let mut wire = Vec::new();
-        for chunk in body.chunks(5) {
+        // Small cases stress five-byte HTTP framing. A many-command fixture
+        // must not exhaust the independent 65,536-chunk envelope before it
+        // reaches the command boundary that the test actually exercises.
+        let chunk_bytes = if body.len() > 5 * HttpLimits::default().max_chunks as usize {
+            16 * 1024
+        } else {
+            5
+        };
+        for chunk in body.chunks(chunk_bytes) {
             wire.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
             wire.extend_from_slice(chunk);
             wire.extend_from_slice(b"\r\n");
@@ -223,7 +233,10 @@ fn reports(response: &[u8]) -> Vec<Vec<u8>> {
     let offset = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
     let mut decoder = PktLineDecoder::new(WireLimits::default()).unwrap();
-    let packets = decoder.push(&response[offset..]).unwrap();
+    let mut packets = Vec::new();
+    for chunk in response[offset..].chunks(16 * 1024) {
+        packets.extend(decoder.push(chunk).unwrap());
+    }
     decoder.finish().unwrap();
     packets
         .into_iter()
@@ -488,50 +501,53 @@ fn a_lost_mixed_report_retains_all_outcomes_and_retry_does_not_publish_again() {
 
 #[test]
 fn the_complete_command_limit_is_checked_before_any_command_is_admitted() {
-    let scratch = Scratch::new();
-    let node = start(config(&scratch, GitHashAlgorithm::Sha1), false);
-    let (oid, zero, pack) = blob_pack(GitHashAlgorithm::Sha1);
-    let names: Vec<_> = (0..=fgit_admission::MAX_ADMISSION_COMMANDS)
-        .map(|n| format!("refs/tags/ref-{n:05}"))
-        .collect();
-    let commands: Vec<_> = names
-        .iter()
-        .map(|name| (zero, oid, name.as_str()))
-        .collect();
-    let before = state(&node);
-    let mut output = Vec::new();
-    let error = perform(
-        &node,
-        b"too-many-refs",
-        &commands,
-        &pack,
-        false,
-        true,
-        &mut output,
-    )
-    .unwrap_err();
-    let NodeSmartHttpRefusal::Rpc(error) = error else {
-        panic!("the shared receive ceiling must refuse before session admission");
-    };
-    assert!(matches!(
-        *error,
-        fgit_wire::smart_http::rpc::RpcError::Receive(
-            fgit_wire::receive::ReceiveError::TooManyCommands { limit }
-        ) if limit == fgit_admission::MAX_ADMISSION_COMMANDS
-    ));
-    assert!(matches!(
-        node.runtime()
-            .block_on(node.recover_receive_session_in(
-                &node.request_context(),
-                &LoopbackReceiveSession::authenticated(
-                    PrincipalId::from_bytes([0xd3; 16]),
-                    IdempotencyKey::new(b"too-many-refs".to_vec()).unwrap(),
-                ),
-            ))
-            .unwrap(),
-        fgit_admission::policy_bridge::receive_session::recovery::SessionRecovery::NotObserved
-    ));
-    command_limits::assert_limit_report(&output, fgit_admission::MAX_ADMISSION_COMMANDS);
-    assert_eq!(state(&node), before);
-    node.shutdown().unwrap();
+    for atomic in [false, true] {
+        let scratch = Scratch::new();
+        let node = start(config(&scratch, GitHashAlgorithm::Sha1), false);
+        let (oid, zero, pack) = blob_pack(GitHashAlgorithm::Sha1);
+        let limit = AdmissionLimits::default().command_limit(atomic);
+        let names: Vec<_> = (0..=limit)
+            .map(|n| format!("refs/tags/ref-{n:05}"))
+            .collect();
+        let commands: Vec<_> = names
+            .iter()
+            .map(|name| (zero, oid, name.as_str()))
+            .collect();
+        let before = state(&node);
+        let mut output = Vec::new();
+        let error = perform(
+            &node,
+            b"too-many-refs",
+            &commands,
+            &pack,
+            atomic,
+            true,
+            &mut output,
+        )
+        .unwrap_err();
+        let NodeSmartHttpRefusal::Rpc(error) = error else {
+            panic!("both receive ceilings must refuse before session admission");
+        };
+        assert!(matches!(
+            *error,
+            fgit_wire::smart_http::rpc::RpcError::Receive(
+                fgit_wire::receive::ReceiveError::TooManyCommands { limit: observed }
+            ) if observed == limit
+        ));
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.recover_receive_session_in(
+                    &node.request_context(),
+                    &LoopbackReceiveSession::authenticated(
+                        PrincipalId::from_bytes([0xd3; 16]),
+                        IdempotencyKey::new(b"too-many-refs".to_vec()).unwrap(),
+                    ),
+                ))
+                .unwrap(),
+            fgit_admission::policy_bridge::receive_session::recovery::SessionRecovery::NotObserved
+        ));
+        command_limits::assert_limit_report(&output, limit);
+        assert_eq!(state(&node), before);
+        node.shutdown().unwrap();
+    }
 }

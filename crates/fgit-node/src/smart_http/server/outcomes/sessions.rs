@@ -13,7 +13,7 @@ use crate::{
 // A session can carry thousands of commands, each with its own scoped
 // observation and terminal identity. Keep a finite response budget that can
 // carry that admitted count; the caller may still select a tighter envelope.
-const MAX_SESSION_REPLY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SESSION_REPLY_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) fn execute(
     node: &OneNode,
@@ -298,6 +298,103 @@ mod tests {
         let error = append(&mut refused, &row, exact - 1).unwrap_err();
         assert_eq!(error.status, Status::TooLarge);
         assert!(refused.is_empty());
+        node.shutdown().unwrap();
+    }
+
+    #[test]
+    fn large_session_reply_fits_the_v2_carrier_and_retains_the_callers_byte_limit() {
+        const COUNT: usize = fgit_admission::MAX_RECEIVE_SESSION_COMMANDS;
+        let root = Scratch(std::env::temp_dir().join(format!(
+            "fg-large-session-response-limit-{}",
+            std::process::id(),
+        )));
+        let (node, _) = OneNode::init(
+            NodeConfig::new(
+                root.0.clone(),
+                TenantId::from_bytes([0xb1; 16]),
+                RepositoryId::from_bytes([0xb2; 16]),
+            )
+            .with_worker_threads(1),
+        )
+        .unwrap();
+        let principal = PrincipalId::from_bytes([0xb3; 16]);
+        let commands = (0..COUNT)
+            .map(|index| {
+                let prefix = format!("refs/tags/{index:05}-");
+                let name = format!("{prefix}{}", "\"".repeat(128 - prefix.len()));
+                RefCommand {
+                    name: RefName::try_new(name.as_bytes()).unwrap(),
+                    expected_old: ExpectedOld::Absent,
+                    proposed_new: ProposedNew::Delete,
+                    force: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let chunks = commands
+            .chunks(MAX_ADMISSION_COMMANDS)
+            .map(|commands| {
+                encode_body(
+                    &SemanticRequest::build(
+                        RECEIVE_ADMISSION_SCHEMA,
+                        GitHashAlgorithm::Sha1,
+                        false,
+                        commands.to_vec(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut descriptor = Encoder::new();
+        descriptor.write_scalar(2_u32);
+        descriptor
+            .write_sequence("receive-session.chunks", &chunks, |out, bytes| {
+                out.write_bytes("receive-session.chunk", bytes)
+            })
+            .unwrap();
+        let indices = (0..COUNT)
+            .map(|index| u16::try_from(index).unwrap())
+            .collect::<Vec<_>>();
+        descriptor
+            .write_sequence("receive-session.wire-order", &indices, |out, index| {
+                out.write_scalar(*index);
+                Ok(())
+            })
+            .unwrap();
+        assert!(descriptor.into_bytes().len() <= 4 * 1024 * 1024);
+
+        // Exercise the real serializer only. These observations deliberately
+        // claim neither a seal nor a canonical decision for this fixture.
+        let mut complete = String::new();
+        let mut narrowed = String::new();
+        let tighter = 1024 * 1024;
+        let mut refused = false;
+        append(&mut complete, "{\"commands\":[", MAX_SESSION_REPLY_BYTES).unwrap();
+        for (index, command) in commands.iter().enumerate() {
+            let row = render_command(
+                &node,
+                principal,
+                index,
+                &command.name,
+                &RequestRecovery::SealNotObserved,
+            );
+            append(&mut complete, &row, MAX_SESSION_REPLY_BYTES).unwrap();
+            if !refused {
+                let before = narrowed.len();
+                if let Err(error) = append(&mut narrowed, &row, tighter) {
+                    assert_eq!(error.status, Status::TooLarge);
+                    assert_eq!(narrowed.len(), before);
+                    refused = true;
+                }
+            }
+        }
+        complete.push_str("]}");
+        assert_eq!(complete.matches("\"command_index\":").count(), COUNT * 2);
+        assert!(complete.contains("\"command_index\":16383"));
+        assert!(complete.len() <= MAX_SESSION_REPLY_BYTES);
+        assert!(refused);
         node.shutdown().unwrap();
     }
 

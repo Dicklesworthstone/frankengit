@@ -88,7 +88,7 @@ impl OneNode {
             .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
         let limits = AdmissionLimits::default();
         let staged = self
-            .stage_import_profile_in(request, source, limits.max_commands, maximum_bytes)
+            .stage_import_profile_in(request, source, limits.command_limit(true), maximum_bytes)
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
         let object_count = u32::try_from(staged.object_count()).map_err(|_| {
             NodeSourceImportRefusal::ObjectCountOutOfRange {

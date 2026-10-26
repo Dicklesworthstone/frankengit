@@ -4430,19 +4430,23 @@ impl std::fmt::Debug for PushQuota {
     }
 }
 
-/// The operator's receive envelope, narrowed to what one sealed request can
-/// carry while preserving any stricter operator limits.
+/// The operator's receive envelope, narrowed to the shared session and
+/// per-transaction limits while preserving any stricter operator limits.
 ///
 /// The wire parser and the seal bound push options independently
 /// (`ReceiveLimits` allows 4,096-byte options, `fgit_authority::PushOption`
 /// 1,024). Without this narrowing an option between the two would be parsed
 /// and its pack read, only for sealing to refuse it after quarantine. Every
 /// receive transport reads the node's one envelope, so the narrowing happens
-/// once, here. A non-atomic session also binds its whole command list before
-/// publishing any child, so its command count must fit the same sealed format.
+/// once, here. Non-atomic sessions bind their complete semantics through the
+/// versioned receive-session carrier. Atomic requests still fit one seal and
+/// are refused at their narrower count before their PACK body is retained.
 fn sealable_receive_limits(mut limits: ReceiveLimits) -> ReceiveLimits {
     limits.max_commands = limits
         .max_commands
+        .min(fgit_admission::MAX_RECEIVE_SESSION_COMMANDS);
+    limits.max_atomic_commands = limits
+        .max_atomic_commands
         .min(fgit_admission::MAX_ADMISSION_COMMANDS);
     limits.max_push_options = limits
         .max_push_options
@@ -6747,6 +6751,7 @@ pub struct NodeConfig {
     resolution_input: Option<RepositoryResolutionInput>,
     git_daemon_repository_path: GitDaemonRepositoryPath,
     store_instance: StoreInstanceId,
+    authority_limits: AuthorityLimits,
     worker_threads: usize,
     runtime_budgets: BudgetPolicy,
     /// An explicit creation/open expectation. An unspecified value defers to
@@ -6843,6 +6848,13 @@ impl NodeConfig {
             resolution_input: None,
             git_daemon_repository_path: default_git_daemon_repository_path(repository_id),
             store_instance: StoreInstanceId::from_raw(1),
+            // One fresh 16,384-command receive can stage up to eleven immutable
+            // bodies per command plus two per microbatch. Keep a finite profile
+            // that fits that envelope; existing state and races consume it too.
+            authority_limits: AuthorityLimits {
+                immutable_slots: 1 << 18,
+                ..AuthorityLimits::default()
+            },
             serving_cell: ServingCell::Unidentified,
             worker_threads: 1,
             runtime_budgets: BudgetPolicy::finite_defaults(),
@@ -6870,6 +6882,26 @@ impl NodeConfig {
     pub const fn with_store_instance(mut self, store_instance: StoreInstanceId) -> Self {
         self.store_instance = store_instance;
         self
+    }
+
+    /// Selects the finite authority storage profile for this node and its
+    /// reopened service children. Count, key and body limits remain enforced by
+    /// the embedded store; enlarging a command envelope never bypasses them.
+    ///
+    /// The default admits 262,144 immutable bodies, enough for the staged-body
+    /// bound of one fresh, uncontended 16,384-command receive. Existing history
+    /// and speculative publications consume the same capacity. Operators may
+    /// select a different finite profile for their retained history and load.
+    #[must_use]
+    pub const fn with_authority_limits(mut self, authority_limits: AuthorityLimits) -> Self {
+        self.authority_limits = authority_limits;
+        self
+    }
+
+    /// The authority storage profile inherited by this node's service children.
+    #[must_use]
+    pub const fn authority_limits(&self) -> AuthorityLimits {
+        self.authority_limits
     }
 
     /// Selects a finite production runtime worker count.
@@ -7638,7 +7670,7 @@ impl OneNode {
                 &opening_cx,
                 authority_path,
                 config.store_instance,
-                AuthorityLimits::default(),
+                config.authority_limits,
             ))
             .map_err(authority_engine_refusal)?;
         let service_config = config.clone();
@@ -8631,7 +8663,7 @@ impl OneNode {
             .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
         let limits = AdmissionLimits::default();
         let staged = self
-            .stage_loose_git_import_with_ref_limit_in(request, source, limits.max_commands)
+            .stage_loose_git_import_with_ref_limit_in(request, source, limits.command_limit(true))
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
         let object_count = u32::try_from(staged.object_count()).map_err(|_| {
             NodeSourceImportRefusal::ObjectCountOutOfRange {

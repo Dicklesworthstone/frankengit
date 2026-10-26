@@ -420,6 +420,42 @@ Identity at evaluation takes precedence over last-writer provenance. When two so
 
 Git receive-pack atomic capability maps all commands to one transaction. Without atomic capability, the mapping from a session to independently terminal ref transactions is explicit and replayable.
 
+### 13.1 Bounded non-atomic receive-session recovery
+
+The continuing receive coordinator admits at most 16,384 independent commands;
+atomic receive and source-import transactions retain the 4,096-command semantic
+request limit. Lower operator limits and independent byte/work/storage budgets
+remain binding. A session is not a transaction: only each child seal and its
+canonical outcome can establish a ref decision.
+
+Sessions with at most 4,096 commands retain their v1 canonical request, whole-key
+binding identity, 1 MiB descriptor encoding and descriptor key. Larger sessions
+use descriptor version 2 under the same immutable key namespace, with a 4 MiB
+bound. The v2 encoding is a canonical u32 version, a sequence of two to four
+byte-framed canonical receive requests, and a sequence of u16 indices mapping
+original wire order to globally ref-sorted order. Every nonfinal chunk contains
+exactly 4,096 commands; all chunks share object format and ordered push options,
+contain no scoped entries, and collectively contain unique ref names. The
+permutation covers every command exactly once. Unknown versions or noncanonical
+encodings MUST refuse.
+
+The original key is bound through the existing TxId derivation to an unsealed
+`receive-session-binding/v2.0` SemanticRequest. Its `receive-session` scoped
+entries bind the u32 command count, each canonical request digest under
+`chunk-NNNN`, and consecutive canonical u16 permutation bytes under
+`wire-order-NNNN` (at most 4,096 bytes per scoped value). No separate hash or
+publication rule is introduced. Each child retains the established receive
+schema, original-index retry key and complete one-command semantics.
+
+All carrier validation, child correspondence and byte/work checks MUST precede
+any key reservation. The original binding and every child binding MUST precede
+the immutable descriptor; the complete descriptor MUST precede the first child
+seal or decision. Recovery verifies the original binding and every child
+binding/seal against reconstructed semantics before reporting completeness.
+Cancellation can leave retryable reservations or a published prefix, but never
+proves non-commit. A descriptor, including its versioned whole binding, is an
+untrusted recovery carrier and MUST NOT become a second state authority.
+
 ## 14. Cancellation and ambiguity
 
 1. **Before seal:** cancellation may leave no canonical trace.

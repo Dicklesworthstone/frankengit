@@ -1,6 +1,7 @@
 //! Read-only recovery of an entire non-atomic receive from its original key.
 //!
-//! A descriptor retains the canonical request and its wire-order permutation.
+//! A v1 descriptor retains one canonical request and its wire-order permutation.
+//! Larger sessions use v2 canonical chunks while retaining every child identity.
 //! It is an untrusted recovery carrier, not a decision, seal, or new authority:
 //! the existing whole-request binding must reproduce its identity, every child
 //! binding must match the original admission lowering, and each reported outcome
@@ -8,7 +9,7 @@
 //! credential, pack, validation basis, or locally inferred outcome is stored.
 
 use fgit_authority::key_recovery::{
-    RecoveryFailure, RecoveryScope, RequestRecovery, recover_request_async,
+    RecoveryFailure, RecoveryScope, RequestRecovery, recover_request_async, recover_requests_async,
 };
 use fgit_authority::{
     AsyncAuthorityStore, ExpectedOld, ImmutableKey, ImmutableRead, ProposedNew, PutOutcome,
@@ -17,7 +18,12 @@ use fgit_authority::{
 use fgit_codec::{DecodeLimits, Decoder, Encoder, decode_body, encode_body};
 use fgit_types::{RefName, RefusalCode, TxId};
 
-use crate::{AdmissionContext, AdmissionError, MAX_ADMISSION_COMMANDS, SessionPlan, seal_attempt};
+use crate::{
+    AdmissionContext, AdmissionError, AdmissionInput, MAX_ADMISSION_COMMANDS, SessionPlan,
+    lower_ref_update, seal_attempt,
+};
+
+mod large;
 
 const PREFIX: &[u8] = b"fg/receive-session/v1/";
 const VERSION: u32 = 1;
@@ -126,6 +132,120 @@ impl From<AdmissionError> for SessionRecoveryFailure {
 struct Descriptor {
     request: SemanticRequest,
     wire_order: Vec<usize>,
+}
+
+/// Prepared before every key write. The binding is deliberately never sealed.
+pub(super) struct PreparedSession {
+    pub(super) whole: SealAttempt,
+    pub(super) bytes: Vec<u8>,
+}
+
+pub(super) fn prepare_session(
+    context: &AdmissionContext,
+    input: &AdmissionInput<'_>,
+    plan: &SessionPlan,
+    checkpoint: &(impl Fn() -> Result<(), RefusalCode> + Sync),
+) -> Result<PreparedSession, AdmissionError> {
+    if plan.atomic {
+        return Err(invalid());
+    }
+    if plan.command_count > MAX_ADMISSION_COMMANDS {
+        let descriptor = large::Descriptor::from_plan(context, plan, checkpoint)?;
+        let bytes = descriptor.encode(checkpoint)?;
+        let whole = descriptor.whole_attempt(context, checkpoint)?;
+        return Ok(PreparedSession { whole, bytes });
+    }
+    // Preserve the exact v1 request, identity, descriptor key and stored bytes.
+    let commands = input
+        .updates
+        .iter()
+        .map(|update| {
+            checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+            lower_ref_update(update.old, update.new, update.ref_name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let options = input
+        .push_options
+        .iter()
+        .cloned()
+        .map(fgit_authority::PushOption::new)
+        .collect::<Result<Vec<_>, _>>()?;
+    let whole = SealAttempt {
+        tenant_id: context.tenant_id,
+        repository_id: context.repository_id,
+        authenticated_principal_id: context.principal_id,
+        idempotency_key: context.idempotency_key.clone(),
+        request: SemanticRequest::build(
+            fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+            context.object_format,
+            false,
+            commands,
+            options,
+            Vec::new(),
+        )?,
+    };
+    let bytes = prepare(context, &whole, plan)?;
+    Ok(PreparedSession { whole, bytes })
+}
+
+enum SessionDescriptor {
+    Legacy(Descriptor),
+    Large(large::Descriptor),
+}
+
+impl SessionDescriptor {
+    fn decode(
+        bytes: &[u8],
+        checkpoint: &(impl Fn() -> Result<(), RefusalCode> + Sync),
+    ) -> Result<Self, AdmissionError> {
+        if bytes.len() > large::MAX_BYTES {
+            return Err(invalid());
+        }
+        let mut input = Decoder::new(bytes, large::LIMITS);
+        match input
+            .read_scalar::<u32>("receive-session.version")
+            .map_err(codec)?
+        {
+            VERSION => Descriptor::decode(bytes).map(Self::Legacy),
+            large::VERSION => large::Descriptor::decode(bytes, checkpoint).map(Self::Large),
+            _ => Err(invalid()),
+        }
+    }
+    fn len(&self) -> usize {
+        match self {
+            Self::Legacy(descriptor) => descriptor.wire_order.len(),
+            Self::Large(descriptor) => descriptor.len(),
+        }
+    }
+    fn whole_attempt(
+        &self,
+        context: &AdmissionContext,
+        checkpoint: &(impl Fn() -> Result<(), RefusalCode> + Sync),
+    ) -> Result<SealAttempt, AdmissionError> {
+        match self {
+            Self::Legacy(descriptor) => descriptor.whole_attempt(context),
+            Self::Large(descriptor) => descriptor.whole_attempt(context, checkpoint),
+        }
+    }
+    fn child_attempt(
+        &self,
+        context: &AdmissionContext,
+        index: usize,
+    ) -> Result<SealAttempt, AdmissionError> {
+        match self {
+            Self::Legacy(descriptor) => descriptor.child_attempt(context, index),
+            Self::Large(descriptor) => descriptor.child_attempt(context, index),
+        }
+    }
+}
+
+fn recovery_preflight_failure(error: AdmissionError) -> SessionRecoveryFailure {
+    match error {
+        AdmissionError::AsyncProjectionUnavailable(code) => {
+            RecoveryFailure::Interrupted(code).into()
+        }
+        error => error.into(),
+    }
 }
 
 const fn invalid() -> AdmissionError {
@@ -440,26 +560,45 @@ where
     let ImmutableRead::Present(bytes) = stored else {
         return Ok(SessionRecovery::NotObserved);
     };
-    let descriptor = Descriptor::decode(&bytes)?;
-    let whole = descriptor.whole_attempt(context)?;
+    let descriptor =
+        SessionDescriptor::decode(&bytes, checkpoint).map_err(recovery_preflight_failure)?;
+    let whole = descriptor
+        .whole_attempt(context, checkpoint)
+        .map_err(recovery_preflight_failure)?;
     let identity = require_binding(store, cx, &whole).await?;
-    let mut commands = Vec::with_capacity(descriptor.wire_order.len());
-    for index in 0..descriptor.wire_order.len() {
+    // Validate the entire descriptor's child bindings and expected seals before
+    // a shared authority replay supplies any result. The immutable bindings are
+    // checked again by the authority-owned key recovery boundary.
+    let mut expected = Vec::with_capacity(descriptor.len());
+    let mut keys = Vec::with_capacity(descriptor.len());
+    for index in 0..descriptor.len() {
         checkpoint().map_err(RecoveryFailure::Interrupted)?;
         let child = descriptor.child_attempt(context, index)?;
         let child_id = require_binding(store, cx, &child).await?;
-        let recovery = recover_request_async(
-            store,
-            cx,
-            &context.head_key,
-            scope,
-            &child.idempotency_key,
-            checkpoint,
-        )
-        .await?;
+        let (_, seal) = child.derive().map_err(AdmissionError::from)?;
+        expected.push((child_id, seal, child.request.ref_commands()[0].name.clone()));
+        keys.push(child.idempotency_key);
+    }
+    let recoveries =
+        recover_requests_async(store, cx, &context.head_key, scope, &keys, checkpoint).await?;
+    if recoveries.len() != expected.len() {
+        return Err(SessionRecoveryFailure::Integrity("recovered child count"));
+    }
+    let all_terminal = recoveries
+        .iter()
+        .all(|recovery| recovery.terminal().is_some());
+    let mut commands = Vec::with_capacity(descriptor.len());
+    for (index, ((child_id, seal, reference), recovery)) in
+        expected.into_iter().zip(recoveries).enumerate()
+    {
+        // Authority has already resolved every requested terminal decision.
+        // This bounded comparison performs no I/O; a late cancellation must
+        // not erase an all-terminal answer while assembling its command list.
+        if !all_terminal {
+            checkpoint().map_err(RecoveryFailure::Interrupted)?;
+        }
         match &recovery {
             RequestRecovery::Recovered(known) => {
-                let (_, seal) = child.derive().map_err(AdmissionError::from)?;
                 if known.tx_id() != child_id || known.seal() != &seal {
                     return Err(SessionRecoveryFailure::Integrity("descriptor/child seal"));
                 }
@@ -473,7 +612,7 @@ where
         }
         commands.push(RecoveredCommand {
             index,
-            reference: child.request.ref_commands()[0].name.clone(),
+            reference,
             recovery,
         });
     }

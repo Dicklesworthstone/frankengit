@@ -117,21 +117,29 @@ the tested source revision.
 
 ## Many-reference admission and publication
 
-Native imports, atomic pushes and the whole-session binding of non-atomic
-pushes admit up to 4,096 commands, subject to their independent byte and object
-budgets (frankengit-p9b5). HTTP/CLI indexed recovery accepts every admitted
-wire index, and whole-session response assembly allows up to 16 MiB while
-respecting a tighter server ceiling. Long names or option payloads can still
-reach a byte limit before the count limit. Non-atomic option replication is
-bounded to 16 MiB before lowering or sealing.
+Native imports and atomic pushes admit up to 4,096 commands. Non-atomic pushes
+admit up to 16,384 independently sealed commands through a versioned session
+carrier, subject to independent byte, object, storage and work budgets
+(frankengit-p9b5). The parser retains a distinct atomic command bound, so a
+larger non-atomic envelope does not widen a single transaction. HTTP/CLI indexed
+recovery accepts indices through 16,383; whole-session response assembly allows
+up to 64 MiB while respecting a tighter server ceiling. Non-atomic option
+replication is bounded to 16 MiB before lowering or sealing, with retained
+header work charged even for empty options.
 
 Complete-input native and loopback adapters feed bounded fragments into the
 wire parser, so the closing flush does not make an otherwise valid 4,096-command
 request exceed the per-call packet budget. Tighter configured packet limits
 remain effective, and cancellation is checked between fragments. Non-atomic
-recovery descriptors must fit their independent 1 MiB envelope before any
-retry key is reserved; an oversized descriptor leaves an otherwise unused key
-available for a corrected request.
+recovery descriptors must fit the unchanged 1 MiB v1 envelope through 4,096
+commands or the 4 MiB v2 envelope above that count before any retry key is
+reserved. A smaller backend body limit also applies. An oversized descriptor
+leaves an otherwise unused key available for a corrected request. V2 binds
+canonical chunk digests and the complete original wire permutation; it preserves
+every child key and transaction identity. Authored tests cover 16,384 commands
+through the real reference-authority planner/seal/CAS path and a 4,097-command
+HTTP restart/recovery path. These are separate from the historical stock-Git
+campaign results below; native execution must be reported at its tested revision.
 
 The continuing durable receive path combines up to 64 independent command
 decisions into one bounded publication (frankengit-x0v8). Individual seals,

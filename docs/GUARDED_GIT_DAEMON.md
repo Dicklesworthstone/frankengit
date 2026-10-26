@@ -137,9 +137,10 @@ takes about 5 s, and a 24,000-object push 17.5 s at the defaults (release-perf
 `fg`, development host).
 
 The guarded service supports **1..1,000,000 sessions**, **1..16 concurrent
-connections**, and at most **4,096 commands per receive**, matching the canonical
-whole-session request bound before retaining a longer command list. Session/concurrency defaults remain
-one. Command-prefix retention is bounded to 4 MiB; PACK reads use 16 KiB scratch
+connections**, with at most **16,384 non-atomic commands** or **4,096 atomic
+commands** per receive. The parser enforces both ceilings before retaining a
+PACK body, including stricter operator-selected limits. Session/concurrency
+defaults remain one. Command-prefix retention is bounded to 4 MiB; PACK reads use 16 KiB scratch
 chunks. The native scanner and quarantine retain their own bounded storage;
 this is not disk-spooled admission or a zero-copy claim.
 
@@ -147,13 +148,23 @@ The durable non-atomic receive coordinator publishes up to 64 independent
 command decisions per authority-head CAS, with a 1 MiB canonical batch-byte
 bound. Commands retain their individual seals, transaction IDs and outcomes,
 and successful earlier commands affect later commands in original wire order.
-An atomic receive still makes one all-or-nothing decision. Recovery descriptors
-retain their separate 1 MiB bound, and replicated non-atomic push-option bytes
-are capped at 16 MiB; long names or large option lists can therefore reach a
-byte limit before the command-count ceiling. A known pre-admission count
+An atomic receive still makes one all-or-nothing decision. Sessions through
+4,096 commands retain their v1 identity and 1 MiB recovery carrier; larger
+sessions bind two to four canonical chunks and the full wire-order permutation
+in a 4 MiB v2 carrier. This unsealed binding is not another transaction or state
+authority. Replicated non-atomic push-option work is capped at 16 MiB, including
+retained headers for empty options; long names or large option lists can reach
+a byte/work limit before the command-count ceiling. A known pre-admission count
 refusal reports the observed minimum, actual configured maximum and a remedy
 in a Git `ERR` packet. An interruption after admission starts retains unknown
 outcomes for any commands without authenticated terminal evidence.
+
+The node's default authority profile permits 262,144 immutable bodies, with
+all key/body/count checks still enforced. This fits the staged-body bound for
+one fresh uncontended 16,384-command receive. Existing history and speculative
+CAS work share that capacity. `NodeConfig::with_authority_limits` selects a
+different finite profile; command capacity does not promise enough remaining
+storage, deadline or work budget for every request.
 
 ## Receive sequencing
 

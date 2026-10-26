@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use fgit_admission::AdmissionResult;
-use fgit_admission::MAX_ADMISSION_COMMANDS;
+use fgit_admission::MAX_RECEIVE_SESSION_COMMANDS;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest, sha256_digest};
 use fgit_node::{
@@ -480,7 +480,7 @@ fn recovery_scopes_reload_and_mutation_bodies_or_identity_overrides_are_not_acce
             + &row('a', OWNER, "read,receive,issues-read,issues-write")
             + &row('b', OWNER, "outcomes-read")),
     );
-    let boundary_indices = [64, 100, MAX_ADMISSION_COMMANDS - 1];
+    let boundary_indices = [64, 100, MAX_RECEIVE_SESSION_COMMANDS - 1];
     let server = Server::start(node, &path, 8 + boundary_indices.len(), [true, true, true]);
     assert_eq!(lookup(&server, 'a', "unknown", None).0, 403);
     assert_eq!(lookup(&server, 'c', "unknown", None).0, 401);
@@ -489,7 +489,7 @@ fn recovery_scopes_reload_and_mutation_bodies_or_identity_overrides_are_not_acce
         observation(&response, "key_not_observed");
         assert!(response.1.contains(&format!("\"command_index\":{index},")));
     }
-    let past_limit = format!("/api/v1/outcomes/receive/{MAX_ADMISSION_COMMANDS}");
+    let past_limit = format!("/api/v1/outcomes/receive/{MAX_RECEIVE_SESSION_COMMANDS}");
     for (suffix, extra) in [
         (
             "/api/v1/outcomes",

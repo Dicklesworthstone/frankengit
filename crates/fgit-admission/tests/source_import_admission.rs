@@ -821,20 +821,20 @@ fn a_zero_command_limit_is_refused() {
 }
 
 #[test]
-fn a_command_limit_above_the_authority_request_bound_is_refused() {
+fn a_command_limit_above_the_receive_session_bound_is_refused() {
     let context = context(b"over-authority-command-bound");
     let (_, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
     let refusal = admit_validated_source_import(
         &headless(),
         &context,
         &import_deleting_main(),
-        limits(MAX_ADMISSION_COMMANDS + 1, 16),
+        limits(fgit_admission::MAX_RECEIVE_SESSION_COMMANDS + 1, 16),
         &projection,
     )
-    .expect_err("a command limit past the authority request bound must be refused");
+    .expect_err("a command limit past the receive session bound must be refused");
     assert!(
         matches!(refusal, AdmissionError::InvalidLimit),
-        "a command limit past the authority request bound must refuse as an invalid limit, got {refusal:?}"
+        "a command limit past the receive session bound must refuse as an invalid limit, got {refusal:?}"
     );
 }
 

@@ -220,12 +220,13 @@ exact-predecessor authority-head CAS. Every command retains its own seal,
 transaction identity, terminal result and recovery selector. Earlier accepted
 ref changes are visible to later commands; a refused command does not poison
 its siblings. Atomic receives and native imports remain one transaction.
-The shared admission ceiling is 4,096 ref commands, with lower caller limits
-and independent request, descriptor, repeated push-option and response byte
-budgets still enforced.
-This is per-session batching. Cross-session combiner scheduling and the
-16,384-command session carrier required by the remaining `frankengit-x0v8`
-and `frankengit-p9b5` acceptance work are not implemented by this slice.
+Non-atomic sessions admit up to 16,384 commands through a versioned recovery
+carrier; atomic requests and imports retain their 4,096-command ceiling.
+Original and child keys bind the complete command list before any publication,
+including its original wire order. Lower caller limits and independent request,
+descriptor, option-replication, response, storage and runtime budgets remain
+in force. This is per-session batching; cross-session combiner scheduling and
+independent full-bead acceptance remain incomplete.
 
 **What still blocks the product:**
 
@@ -234,10 +235,11 @@ and `frankengit-p9b5` acceptance work are not implemented by this slice.
   closure (lh8z), so 100,000-commit and 100,000-file repositories prepare and
   publish. Merge-base discovery retires already-read ancestors as soon as a
   common base dominates them, so equal or missing dates do not force a recent
-  unique-base query through the whole history. Skewed dates or multiple best
-  bases can still exhaust the 4,096-commit bound and refuse, never select a wrong
-  base. Served packs refuse any single object over the 32 MiB per-object
-  ceiling.
+  unique-base query through the whole history. Bounded FIFO service also keeps
+  skewed timestamps from starving the other side. Wide ancestry regions or
+  multiple best bases can still exhaust the 4,096-commit bound and refuse,
+  never select a wrong base. Served packs refuse any single object over the
+  32 MiB per-object ceiling.
 - Forge-position and outbox state have 16,384-entry bounds; the node writer
   gate is one. Required-check history scans are independently bounded.
   These do not establish sustained or extreme-scale operation.

@@ -194,7 +194,7 @@ fn records(socket: &mut TcpStream) -> Vec<Vec<u8>> {
             return rows;
         }
         assert!(
-            rows.len() <= fgit_admission::MAX_ADMISSION_COMMANDS + 2,
+            rows.len() <= fgit_admission::MAX_RECEIVE_SESSION_COMMANDS + 2,
             "bounded fixture response"
         );
     }

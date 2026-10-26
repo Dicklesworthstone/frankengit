@@ -8,7 +8,7 @@ mod sessions;
 
 use std::io::{self, Write};
 
-use fgit_admission::MAX_ADMISSION_COMMANDS;
+use fgit_admission::MAX_RECEIVE_SESSION_COMMANDS;
 use fgit_admission::policy_bridge::receive_session::non_atomic_command_key;
 use fgit_authority::key_recovery::RequestRecovery;
 use fgit_authority::{IdempotencyKey, OutcomeLookup};
@@ -62,7 +62,7 @@ impl<'a> Request<'a> {
                 .strip_prefix("/receive/")
                 .ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
             if number.is_empty()
-                || number.len() > (MAX_ADMISSION_COMMANDS - 1).ilog10() as usize + 1
+                || number.len() > (MAX_RECEIVE_SESSION_COMMANDS - 1).ilog10() as usize + 1
                 || !number.bytes().all(|byte| byte.is_ascii_digit())
                 || (number.len() > 1 && number.starts_with('0'))
             {
@@ -71,7 +71,7 @@ impl<'a> Request<'a> {
             let index: usize = number
                 .parse()
                 .map_err(|_| ApiError::bad("invalid_command_index"))?;
-            if index >= MAX_ADMISSION_COMMANDS {
+            if index >= MAX_RECEIVE_SESSION_COMMANDS {
                 return Err(ApiError::bad("invalid_command_index"));
             }
             Selector::Command(index)
@@ -404,9 +404,18 @@ mod tests {
             ("/receive".to_owned(), Selector::Session),
         ];
         cases.extend(
-            [0, 1, 63, 64, 99, 100, 1023, MAX_ADMISSION_COMMANDS - 1]
-                .into_iter()
-                .map(|index| (format!("/receive/{index}"), Selector::Command(index))),
+            [
+                0,
+                1,
+                63,
+                64,
+                99,
+                100,
+                1023,
+                MAX_RECEIVE_SESSION_COMMANDS - 1,
+            ]
+            .into_iter()
+            .map(|index| (format!("/receive/{index}"), Selector::Command(index))),
         );
         for (suffix, selector) in cases {
             let bytes = format!(
@@ -423,7 +432,7 @@ mod tests {
 
     #[test]
     fn recovery_never_accepts_mutation_bodies_query_keys_or_ambiguous_indices() {
-        let past_limit = format!("/receive/{MAX_ADMISSION_COMMANDS}");
+        let past_limit = format!("/receive/{MAX_RECEIVE_SESSION_COMMANDS}");
         let overflow = format!("/receive/{}", usize::MAX);
         for (suffix, headers) in [
             ("?key=secret", ""),

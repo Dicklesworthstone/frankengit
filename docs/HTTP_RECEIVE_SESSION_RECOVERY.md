@@ -57,20 +57,31 @@ sealed transaction or terminal decision**. `session_identity_is_transaction`
 is false. Only the individual child transactions have canonical outcomes.
 
 This is explicitly **not a single-snapshot read**: `single_snapshot` is false.
-Children are observed sequentially and nonterminal observations may immediately
-change. Completion is nevertheless meaningful because the command list is fixed
-and verified, and each authenticated terminal decision is immutable. A cancelled
-or failed lookup does not publish a decision or convert missing evidence into
-an absent or refused result. Repeat the same lookup after a lost query response.
+Child bindings and seals are observed sequentially, so nonterminal observations
+may immediately change. The authority recovery path reads accelerator hints
+before selecting one fresh authenticated head, then walks that immutable history
+once for all sealed children. Each answer still passes the existing hint/stream
+consistency check. This avoids replaying the full history separately for every
+command without turning the accelerator into authority. Completion is meaningful
+because the command list is fixed and verified, and each authenticated terminal
+decision is immutable. A cancelled or failed lookup does not publish a decision
+or convert missing evidence into an absent or refused result. Repeat the same
+lookup after a lost query response.
 
 ## Why a descriptor cannot invent completion
 
 The continuing admission coordinator already binds the entire semantic request
 and every child retry key before publishing any child. It now also stores a
 bounded immutable descriptor at that point, before the first child is sealed.
-This contains the existing canonical `SemanticRequest` and an exact permutation
-from canonical ref-name order to original wire order. It contains no pack,
-validation basis, secret, raw client key, or outcome.
+Sessions through 4,096 commands retain the existing v1 canonical
+`SemanticRequest` and exact wire-order permutation. Sessions from 4,097 through
+16,384 commands use a v2 carrier containing two to four canonical request
+chunks, each with at most 4,096 globally ref-sorted commands, and one exact
+permutation from canonical to original wire order. Each child keeps its existing
+key, receive schema and transaction identity. The unsealed v2 whole-session
+binding commits to the chunk digests, total count and complete permutation using
+the existing semantic-request identity derivation. Neither carrier contains a
+pack, validation basis, secret, raw client key or outcome.
 
 The descriptor is an untrusted recovery carrier, not a new state authority.
 Recovery checks its version, size, canonical byte encoding, semantic validity,
@@ -86,12 +97,17 @@ unavailable required evidence returns an error, not a completed or empty
 session. Descriptor conflicts stop new admission before any child is published.
 Descriptor staging itself advances neither decision nor repository sequence.
 
-The descriptor is bounded to 1 MiB and 4,096 commands. Both bounds apply;
-long reference names and push options can hit the byte ceiling first. Responses
-are capped at 16 MiB and the configured server response ceiling, whichever is
-smaller. Indexed recovery accepts wire indices 0 through 4,095. The full response is built
-and bounded before the first success byte; an over-limit response is refused,
-not truncated into an apparently complete session.
+V1 descriptors remain bounded to 1 MiB and 4,096 commands; v2 descriptors are
+bounded to 4 MiB and 16,384 commands. Long reference names and push options can
+hit the byte ceiling first. Both carrier size and any narrower backend body
+limit are checked before reserving a previously unused retry key. The existing
+16 MiB option-replication work budget now charges the retained option header as
+well as nonempty payload work, so empty options cannot evade the bound.
+Responses are capped at 64 MiB and the configured server response ceiling,
+whichever is smaller. Indexed recovery accepts wire indices 0 through 16,383.
+The full response is built and bounded before the first success byte; an
+over-limit response is refused, not truncated into an apparently complete
+session. All original and child bindings must verify for either version.
 
 ## Compatibility and non-claims
 
@@ -101,8 +117,8 @@ for legacy sessions. A missing indexed outcome alone still cannot establish
 command count or completion.
 
 Whole-session descriptors are written by the continuing receive coordinator
-used by Smart HTTP. Older sessions and the unchanged generic/raw git-daemon
-paths may have no descriptor. An identical retry through the new coordinator
+used by Smart HTTP and the guarded native/SSH receive paths. Older sessions and
+legacy compatibility entry points may have no descriptor. An identical retry through the new coordinator
 can populate one after its existing whole/child bindings pass, but a read-only
 lookup never reconstructs missing metadata by writing it. Do not interpret
 `session_not_observed` as permission to replace a mutation's original key.

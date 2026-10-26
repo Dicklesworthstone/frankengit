@@ -226,7 +226,10 @@ impl OneNode {
             .authenticated_session()
             .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
         let mut live = || workspace_request_live(request);
-        let mut receive_limits = ReceiveLimits::default();
+        let mut receive_limits = ReceiveLimits {
+            max_atomic_commands: limits.command_limit(true),
+            ..ReceiveLimits::default()
+        };
         let mut bundle_limits = FullBundleLimits::default();
         bundle_limits.max_references = bundle_limits
             .max_references
@@ -237,7 +240,7 @@ impl OneNode {
         if expectations.is_some() {
             bundle_limits.max_references = bundle_limits
                 .max_references
-                .min(limits.max_commands.saturating_add(1));
+                .min(limits.command_limit(true).saturating_add(1));
         }
         let bundle = if expectations.is_some() {
             FullBundleInput::parse_incremental(input, bundle_limits, &mut live)
@@ -251,7 +254,7 @@ impl OneNode {
         let mut expected = std::collections::BTreeMap::new();
         if let Some(expectations) = expectations {
             if expectations.len() != bundle.references().len()
-                || expectations.len() > limits.max_commands
+                || expectations.len() > limits.command_limit(true)
             {
                 return Err(bundle_error(FullBundleError::Invalid(
                     "one expectation per reference is required",
@@ -419,6 +422,7 @@ impl OneNode {
             GitHashAlgorithm::Sha1 => GitObjectFormat::Sha1,
             GitHashAlgorithm::Sha256 => GitObjectFormat::Sha256,
         };
+        let wire_limits = receive_limits.wire.clone();
         let context = ReceiveContext::new(
             format,
             capabilities,
@@ -427,10 +431,15 @@ impl OneNode {
         )
         .map_err(receive_error)?;
         let mut receive = ReceivePack::new(context).map_err(receive_error)?;
-        receive.push_bytes(&prefix).map_err(receive_error)?;
-        receive
-            .push_bytes(bundle.pack_bytes())
+        crate::bounded_receive_intake::push(&mut receive, &prefix, &wire_limits, &mut live)
             .map_err(receive_error)?;
+        crate::bounded_receive_intake::push(
+            &mut receive,
+            bundle.pack_bytes(),
+            &wire_limits,
+            &mut live,
+        )
+        .map_err(receive_error)?;
         let mut handoff = FullHandoff {
             validator: FullValidator {
                 inner: validator,

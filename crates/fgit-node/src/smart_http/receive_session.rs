@@ -32,7 +32,7 @@ impl OneNode {
     /// Derive the key needed to recover one non-atomic receive command.
     ///
     /// The index is zero-based ORIGINAL wire order and must be below
-    /// [`fgit_admission::MAX_ADMISSION_COMMANDS`].
+    /// [`fgit_admission::MAX_RECEIVE_SESSION_COMMANDS`].
     /// This is a pure selector over the admission lowerer's existing identity
     /// rule, not a credential, new transaction, or storage operation. A local
     /// client can then call `recover_transaction_in` with this key under the
@@ -80,13 +80,24 @@ impl OneNode {
         let projection = self
             .durable_admission_projection(&context)
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
-        receive_session::admit(
+        let checkpoint = || match checkpoint_pack_context(request.authority()) {
+            PackContextCheckpoint::Live => Ok(()),
+            PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                Err(if budget_exhaustion.is_some() {
+                    RefusalCode::ResourceBudgetExceeded
+                } else {
+                    RefusalCode::CancellationInProgress
+                })
+            }
+        };
+        receive_session::admit_with_checkpoint(
             &self.authority,
             request.authority(),
             &context,
             validated,
             limits,
             &projection,
+            &checkpoint,
         )
         .await
         .map_err(|error| NodeSmartHttpRefusal::ReceiveInterrupted(Box::new(error)))

@@ -81,6 +81,12 @@ struct AsyncMemory {
     publications: AtomicUsize,
     lose_response: AtomicBool,
     race: Mutex<Option<Race>>,
+    put_calls: AtomicUsize,
+    interrupt_put_at: AtomicUsize,
+    lose_put_response_at: AtomicUsize,
+    immutable_created: AtomicUsize,
+    immutable_reads: AtomicUsize,
+    head_reads: AtomicUsize,
 }
 
 impl AsyncAuthorityStore for AsyncMemory {
@@ -97,13 +103,30 @@ impl AsyncAuthorityStore for AsyncMemory {
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
-        std::future::ready(self.inner.put_if_absent(key, body))
+        let ordinal = self.put_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if ordinal == self.interrupt_put_at.load(Ordering::SeqCst) {
+            return std::future::ready(Err(AuthorityFailure::Ambiguous(
+                AmbiguityReason::NoResponse,
+            )));
+        }
+        let result = self.inner.put_if_absent(key, body);
+        if matches!(result, Ok(PutOutcome::Created)) {
+            self.immutable_created.fetch_add(1, Ordering::SeqCst);
+        }
+        std::future::ready(
+            if ordinal == self.lose_put_response_at.load(Ordering::SeqCst) && result.is_ok() {
+                Err(AuthorityFailure::Ambiguous(AmbiguityReason::NoResponse))
+            } else {
+                result
+            },
+        )
     }
     fn read_immutable(
         &self,
         _: &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        self.immutable_reads.fetch_add(1, Ordering::SeqCst);
         std::future::ready(self.inner.read_immutable(key))
     }
     fn initialize_head(
@@ -120,6 +143,7 @@ impl AsyncAuthorityStore for AsyncMemory {
         _: &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        self.head_reads.fetch_add(1, Ordering::SeqCst);
         std::future::ready(self.inner.read_head(key))
     }
     fn compare_exchange_head(
@@ -156,6 +180,10 @@ impl AsyncAuthorityStore for AsyncMemory {
         let result = self
             .inner
             .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness);
+        if matches!(result, Ok(CasOutcome::Committed(_))) {
+            self.immutable_created
+                .fetch_add(outcomes.len(), Ordering::SeqCst);
+        }
         if let (Some(race), Ok(CasOutcome::Committed(_))) = (after, &result) {
             race.publish(&self.inner);
         }
@@ -368,6 +396,12 @@ fn setup(initial: &[(&[u8], u8)]) -> (AsyncMemory, SharedCanonical, Projection) 
             publications: AtomicUsize::new(0),
             lose_response: AtomicBool::new(false),
             race: Mutex::new(None),
+            put_calls: AtomicUsize::new(0),
+            interrupt_put_at: AtomicUsize::new(0),
+            lose_put_response_at: AtomicUsize::new(0),
+            immutable_created: AtomicUsize::new(0),
+            immutable_reads: AtomicUsize::new(0),
+            head_reads: AtomicUsize::new(0),
         },
         staging,
         projection,
@@ -861,3 +895,6 @@ fn an_equivalent_foreign_cas_replan_continues_own_chunks_in_the_same_attempt() {
         );
     }
 }
+
+#[path = "receive_batch/large_session.rs"]
+mod large_session;

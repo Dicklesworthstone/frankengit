@@ -16,6 +16,7 @@
 //! has consumed them.
 
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt::{self, Display, Formatter},
 };
@@ -43,6 +44,10 @@ pub struct ReceiveLimits {
     pub pack: PackLimits,
     /// Maximum ref commands retained from one request.
     pub max_commands: usize,
+    /// Maximum commands when the client negotiates `atomic`, additionally
+    /// bounded by `max_commands`. Independent sessions may admit more commands
+    /// than a single atomic transaction can seal.
+    pub max_atomic_commands: usize,
     /// Maximum client push options retained from one request.
     pub max_push_options: usize,
     /// Maximum bytes in one client push option.
@@ -65,6 +70,7 @@ impl Default for ReceiveLimits {
             max_quarantine_bytes: pack.max_input_bytes,
             pack,
             max_commands: 16_384,
+            max_atomic_commands: 16_384,
             max_push_options: 256,
             max_push_option_bytes: 4_096,
             max_certificate_lines: 16_384,
@@ -78,6 +84,7 @@ impl ReceiveLimits {
     fn validate(&self) -> Result<(), ReceiveError> {
         PktLineDecoder::new(self.wire.clone()).map_err(ReceiveError::Wire)?;
         if self.max_commands == 0
+            || self.max_atomic_commands == 0
             || self.max_push_options == 0
             || self.max_push_option_bytes == 0
             || self.max_certificate_lines == 0
@@ -408,6 +415,9 @@ pub struct ReceivePack {
     decoder: PktLineDecoder,
     phase: ReceivePhase,
     commands: Vec<ReceiveCommand>,
+    // Membership only: commands retain original wire order for retry identity
+    // and report-status. Avoid a quadratic scan for large push sessions.
+    command_refs: BTreeSet<Vec<u8>>,
     client_capabilities: Vec<Capability>,
     push_options: Vec<Vec<u8>>,
     certificate: Option<PushCertificate>,
@@ -425,6 +435,7 @@ impl ReceivePack {
             decoder,
             phase: ReceivePhase::Commands,
             commands: Vec::new(),
+            command_refs: BTreeSet::new(),
             client_capabilities: Vec::new(),
             push_options: Vec::new(),
             certificate: None,
@@ -679,16 +690,18 @@ impl ReceivePack {
     }
 
     fn push_command(&mut self, command: ReceiveCommand) -> Result<(), ReceiveError> {
-        if self.commands.len() == self.context.limits.max_commands {
-            return Err(ReceiveError::TooManyCommands {
-                limit: self.context.limits.max_commands,
-            });
+        let limit = if self.has_client_capability(b"atomic") {
+            self.context
+                .limits
+                .max_commands
+                .min(self.context.limits.max_atomic_commands)
+        } else {
+            self.context.limits.max_commands
+        };
+        if self.commands.len() == limit {
+            return Err(ReceiveError::TooManyCommands { limit });
         }
-        if self
-            .commands
-            .iter()
-            .any(|existing| existing.ref_name == command.ref_name)
-        {
+        if self.command_refs.contains(command.ref_name.as_slice()) {
             return Err(ReceiveError::DuplicateRefCommand {
                 ref_name: command.ref_name,
             });
@@ -696,6 +709,7 @@ impl ReceivePack {
         self.commands
             .try_reserve(1)
             .map_err(|_| ReceiveError::AllocationFailure)?;
+        self.command_refs.insert(command.ref_name.clone());
         self.commands.push(command);
         Ok(())
     }

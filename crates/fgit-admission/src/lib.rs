@@ -71,27 +71,46 @@ pub mod microbatch;
 pub mod policy_bridge;
 mod projection_failure;
 
-/// Largest ref command list admitted by the current request and recovery format.
+/// Largest ref command list admitted as one sealed transaction.
 ///
-/// Atomic receives and imports seal this list as one transaction. A non-atomic
-/// session seals one transaction per command, but its whole-session retry
-/// binding still uses the same bounded authority request vocabulary. Physical
-/// publication chunks are independently bounded by [`microbatch::MAX_BATCH_DECISIONS`].
+/// Atomic receives, imports and native ref transactions share the authority's
+/// canonical request bound. Physical publication chunks are independently
+/// bounded by [`microbatch::MAX_BATCH_DECISIONS`].
 pub const MAX_ADMISSION_COMMANDS: usize = fgit_authority::MAX_REF_COMMANDS;
+
+/// Largest non-atomic receive session, matching the native wire profile.
+///
+/// Each command remains one independently sealed transaction. Larger sessions
+/// use a versioned recovery carrier and original-key binding; they never widen
+/// [`MAX_ADMISSION_COMMANDS`] or change a child's transaction identity.
+pub const MAX_RECEIVE_SESSION_COMMANDS: usize = 16_384;
 
 // Non-atomic lowering preserves the ordered options in each independently
 // sealed child. Keep its aggregate allocation within the former 64-command
 // envelope even when many short ref commands are admitted (p9b5).
 const MAX_SESSION_OPTION_COPY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Account for both payload and empty-option allocation work. An empty option
+/// still occupies one Vec header in every independently sealed child. Charging
+/// the larger of payload/header preserves existing large-option boundaries and
+/// bounds actual header-plus-payload retention to twice this work allowance.
+fn session_option_work<'a>(mut options: impl Iterator<Item = &'a [u8]>, copies: usize) -> usize {
+    options
+        .try_fold(0_usize, |total, option| {
+            total.checked_add(option.len().max(size_of::<fgit_authority::PushOption>()))
+        })
+        .and_then(|bytes| bytes.checked_mul(copies))
+        .unwrap_or(usize::MAX)
+}
+
 /// Bounds enforced before creating per-command work or retrying a stale plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdmissionLimits {
     /// Largest receive command list this layer lowers into transaction intents.
     ///
-    /// At most [`MAX_ADMISSION_COMMANDS`], matching the authority's semantic
-    /// request and whole-session retry binding. Non-atomic publication uses
-    /// bounded chunks without changing this finite intake limit.
+    /// At most [`MAX_RECEIVE_SESSION_COMMANDS`] for non-atomic sessions. Atomic
+    /// receives and imports also obey [`MAX_ADMISSION_COMMANDS`]. A smaller
+    /// caller limit narrows either shape through [`Self::command_limit`].
     pub max_commands: usize,
     /// Largest number of re-plans after losing a head compare-and-exchange.
     pub max_cas_replans: usize,
@@ -100,16 +119,27 @@ pub struct AdmissionLimits {
 impl Default for AdmissionLimits {
     fn default() -> Self {
         Self {
-            max_commands: MAX_ADMISSION_COMMANDS,
+            max_commands: MAX_RECEIVE_SESSION_COMMANDS,
             max_cas_replans: 16,
         }
     }
 }
 
 impl AdmissionLimits {
+    /// Effective command ceiling, retaining a stricter caller-selected bound.
+    /// Imports use the atomic shape even when their input came from local files.
+    #[must_use]
+    pub const fn command_limit(self, atomic: bool) -> usize {
+        if atomic && self.max_commands > MAX_ADMISSION_COMMANDS {
+            MAX_ADMISSION_COMMANDS
+        } else {
+            self.max_commands
+        }
+    }
+
     const fn validate(self) -> Result<(), AdmissionError> {
         if self.max_commands == 0
-            || self.max_commands > MAX_ADMISSION_COMMANDS
+            || self.max_commands > MAX_RECEIVE_SESSION_COMMANDS
             || self.max_cas_replans == 0
         {
             return Err(AdmissionError::InvalidLimit);
@@ -3033,12 +3063,25 @@ fn plan_session(
     input: &AdmissionInput<'_>,
     limits: AdmissionLimits,
 ) -> Result<SessionPlan, AdmissionError> {
+    plan_session_checked(context, input, limits, &|| Ok(()))
+}
+
+fn plan_session_checked(
+    context: &AdmissionContext,
+    input: &AdmissionInput<'_>,
+    limits: AdmissionLimits,
+    checkpoint: &(impl Fn() -> Result<(), RefusalCode> + Sync),
+) -> Result<SessionPlan, AdmissionError> {
+    checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
     limits.validate()?;
     validate_admission_input(context, input, limits)?;
-    let lowered = lower_input(context, input)?;
+    let lowered = lower_input_checked(context, input, checkpoint)?;
     let tx_ids = lowered
         .iter()
-        .map(|request| derive_tx_id(context, request))
+        .map(|request| {
+            checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+            derive_tx_id(context, request)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SessionPlan {
         atomic: input.atomic,
@@ -3102,21 +3145,17 @@ fn validate_admission_input(
     if input.object_format != context.object_format {
         return Err(AdmissionError::ObjectFormatMismatch);
     }
-    if input.updates.len() > limits.max_commands {
+    let command_limit = limits.command_limit(input.atomic);
+    if input.updates.len() > command_limit {
         return Err(AdmissionError::CommandLimitExceeded {
-            limit: limits.max_commands,
+            limit: command_limit,
         });
     }
     if input.updates.is_empty() {
         return Err(AdmissionError::CommandLimitExceeded { limit: 0 });
     }
     let copies = if input.atomic { 1 } else { input.updates.len() };
-    let option_bytes = input
-        .push_options
-        .iter()
-        .try_fold(0_usize, |total, option| total.checked_add(option.len()))
-        .and_then(|bytes| bytes.checked_mul(copies))
-        .unwrap_or(usize::MAX);
+    let option_bytes = session_option_work(input.push_options.iter().map(Vec::as_slice), copies);
     if option_bytes > MAX_SESSION_OPTION_COPY_BYTES {
         return Err(AdmissionError::PushOptionWorkExceeded {
             limit: MAX_SESSION_OPTION_COPY_BYTES,
@@ -3142,9 +3181,18 @@ fn validate_admission_input(
 /// separate schema per provenance would give the same refs two transaction
 /// identities and split one canonical history in half, which is precisely what
 /// §5.2's single stable identity derivation forbids.
+#[cfg(test)]
 fn lower_input(
     context: &AdmissionContext,
     input: &AdmissionInput<'_>,
+) -> Result<Vec<LoweredRequest>, AdmissionError> {
+    lower_input_checked(context, input, &|| Ok(()))
+}
+
+fn lower_input_checked(
+    context: &AdmissionContext,
+    input: &AdmissionInput<'_>,
+    checkpoint: &(impl Fn() -> Result<(), RefusalCode> + Sync),
 ) -> Result<Vec<LoweredRequest>, AdmissionError> {
     let push_options = input
         .push_options
@@ -3156,7 +3204,10 @@ fn lower_input(
         let commands = input
             .updates
             .iter()
-            .map(|update| lower_ref_update(update.old, update.new, update.ref_name))
+            .map(|update| {
+                checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
+                lower_ref_update(update.old, update.new, update.ref_name)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(vec![LoweredRequest {
             semantic: fgit_authority::SemanticRequest::build(
@@ -3176,6 +3227,7 @@ fn lower_input(
         .iter()
         .enumerate()
         .map(|(index, update)| {
+            checkpoint().map_err(AdmissionError::AsyncProjectionUnavailable)?;
             Ok(LoweredRequest {
                 semantic: fgit_authority::SemanticRequest::build(
                     RECEIVE_ADMISSION_SCHEMA,

@@ -1,6 +1,6 @@
 //! Read-only lost-response recovery. It never rebuilds or resubmits a mutation.
 use super::publication_support::{describe, quote, write_terminal_receipt};
-use fgit_admission::MAX_ADMISSION_COMMANDS;
+use fgit_admission::MAX_RECEIVE_SESSION_COMMANDS;
 use fgit_authority::key_recovery::RequestRecovery;
 use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, OutcomeLookup};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
@@ -196,20 +196,20 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--idempotency-key-hex" => key = Some(KeyInput::Bytes(unhex_key(value)?)),
             "--receive-command-index" => {
                 if value.is_empty()
-                    || value.len() > (MAX_ADMISSION_COMMANDS - 1).ilog10() as usize + 1
+                    || value.len() > (MAX_RECEIVE_SESSION_COMMANDS - 1).ilog10() as usize + 1
                     || !value.bytes().all(|b| b.is_ascii_digit())
                     || (value.len() > 1 && value.starts_with('0'))
                 {
                     return Err(format!(
                         "receive command index must be canonical decimal 0..{}",
-                        MAX_ADMISSION_COMMANDS - 1
+                        MAX_RECEIVE_SESSION_COMMANDS - 1
                     ));
                 }
                 let selected: usize = value.parse().map_err(|_| "invalid receive command index")?;
-                if selected >= MAX_ADMISSION_COMMANDS {
+                if selected >= MAX_RECEIVE_SESSION_COMMANDS {
                     return Err(format!(
                         "receive command index must be 0..{}",
-                        MAX_ADMISSION_COMMANDS - 1
+                        MAX_RECEIVE_SESSION_COMMANDS - 1
                     ));
                 }
                 receive_command_index = Some(selected);
@@ -403,7 +403,16 @@ mod tests {
     }
     #[test]
     fn receive_selector_is_bounded_and_uses_the_original_binary_key_exactly() {
-        for index in [0, 1, 63, 64, 99, 100, 1023, MAX_ADMISSION_COMMANDS - 1] {
+        for index in [
+            0,
+            1,
+            63,
+            64,
+            99,
+            100,
+            1023,
+            MAX_RECEIVE_SESSION_COMMANDS - 1,
+        ] {
             let mut input = args();
             input.extend(["--receive-command-index".into(), index.to_string()]);
             assert_eq!(parse(&input).unwrap().receive_command_index, Some(index));
@@ -414,7 +423,7 @@ mod tests {
                 OneNode::receive_command_recovery_key(&key, index).unwrap()
             );
         }
-        let past_limit = MAX_ADMISSION_COMMANDS.to_string();
+        let past_limit = MAX_RECEIVE_SESSION_COMMANDS.to_string();
         let overflow = usize::MAX.to_string();
         for value in [
             "",

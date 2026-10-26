@@ -21,7 +21,7 @@ impl OneNode {
     ) -> Result<(RepositoryAuthorityHeadId, IncrementalBundle), NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if references.is_empty()
-            || references.len() > AdmissionLimits::default().max_commands
+            || references.len() > AdmissionLimits::default().command_limit(true)
             || prerequisites.is_empty()
             || prerequisites.len() > MAX_BUNDLE_PREREQUISITES
         {
