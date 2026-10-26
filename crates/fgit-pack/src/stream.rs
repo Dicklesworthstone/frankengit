@@ -9,16 +9,18 @@ use std::fmt;
 use std::io::{self, BufRead};
 
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
-use fgit_deflate::{CancellationProbe, Inflater, StreamProgress};
+use fgit_deflate::{BoundedStreamProgress, CancellationProbe, Inflater};
 
 use crate::{
-    Deadline, EntryKind, ObjectFormat, ObjectId, PackError, PackHeader, PackLimits,
-    QuarantinedEntry, checkpoint, decode_entry_header, object_id_from_bytes, parse_delta_base,
-    parse_pack_header,
+    Deadline, EntryKind, ObjectFormat, ObjectId, PackEntryHeader, PackError, PackHeader,
+    PackLimits, ParsedDeltaBase, QuarantinedEntry, checkpoint, decode_entry_header,
+    object_id_from_bytes, parse_delta_base, parse_pack_header,
 };
 
 const INPUT_CHUNK: usize = 32 * 1024;
 const PENDING_INPUT: usize = 64 * 1024;
+/// Maximum payload slice supplied by the chunked reader.
+pub const STREAM_PACK_CHUNK_BYTES: usize = 16 * 1024;
 
 /// One fully inflated, still tentative entry with its exact encoded range.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +30,33 @@ pub struct StreamPackEntry {
     pub end_offset: u64,
     /// IEEE CRC-32 over the complete encoded entry, including delta headers.
     pub crc32: u32,
+}
+
+/// Entry metadata before any inflated bytes are offered to a chunked sink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamPackEntryStart {
+    pub offset: u64,
+    pub header: PackEntryHeader,
+    pub delta_base: Option<ParsedDeltaBase>,
+}
+
+/// Encoded range evidence after the entry's zlib trailer and length verify.
+/// It is still tentative until the complete pack receipt is returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamPackEntryEnd {
+    pub end_offset: u64,
+    pub crc32: u32,
+}
+
+/// Ordered, tentative entry events. Every successful entry has one `Begin`,
+/// zero or more `Data` pieces, then one `End`. An error can interrupt any entry
+/// and can occur after every `End` when the pack trailer or exact EOF fails.
+#[derive(Debug)]
+pub enum StreamPackEvent<'a> {
+    Begin(StreamPackEntryStart),
+    /// At most [`STREAM_PACK_CHUNK_BYTES`] bytes, borrowed only for this call.
+    Data(&'a [u8]),
+    End(StreamPackEntryEnd),
 }
 
 /// Whole-pack framing and native trailer verification, issued only at exact EOF.
@@ -128,6 +157,69 @@ where
     R: BufRead + ?Sized,
     F: FnMut(StreamPackEntry) -> Result<(), E>,
 {
+    let mut pending: Option<(StreamPackEntryStart, Vec<u8>)> = None;
+    let result = read_streamed_pack_chunks(
+        reader,
+        format,
+        limits,
+        limits.max_object_bytes,
+        deadline,
+        |event| -> Result<(), StreamPackError<E>> {
+            match event {
+                StreamPackEvent::Begin(start) => pending = Some((start, Vec::new())),
+                StreamPackEvent::Data(bytes) => {
+                    let (start, body) = pending.as_mut().ok_or(PackError::InvalidIndexOrdering)?;
+                    append_output(body, bytes, start.header.declared_size)?;
+                }
+                StreamPackEvent::End(end) => {
+                    let (start, inflated) =
+                        pending.take().ok_or(PackError::InvalidIndexOrdering)?;
+                    sink(StreamPackEntry {
+                        entry: QuarantinedEntry {
+                            offset: start.offset,
+                            header: start.header,
+                            delta_base: start.delta_base,
+                            inflated,
+                        },
+                        end_offset: end.end_offset,
+                        crc32: end.crc32,
+                    })
+                    .map_err(StreamPackError::Sink)?;
+                }
+            }
+            Ok(())
+        },
+    );
+    result.map_err(|error| match error {
+        StreamPackError::Io(error) => StreamPackError::Io(error),
+        StreamPackError::Pack(error) => StreamPackError::Pack(error),
+        StreamPackError::Sink(error) => error,
+    })
+}
+
+/// Read one pack while draining each inflated entry into bounded sink pieces.
+/// No complete entry or pack is retained by this decoder. Only non-delta blob
+/// entries use `max_blob_bytes`; metadata and delta programs retain
+/// `limits.max_object_bytes`. The aggregate, input, expansion, codec work and
+/// entry-count limits remain independent. A large blob used as a delta base
+/// still requires a separately bounded, verified resolver owned by the caller.
+///
+/// All sink effects are tentative. Neither an entry's `End` nor any native ID
+/// computed by a sink authenticates the pack trailer or exact EOF; only the
+/// returned receipt does. On every failure the caller must discard/quarantine
+/// every previously observed piece. Blocking reads remain caller-owned.
+pub fn read_streamed_pack_chunks<R, F, E>(
+    reader: &mut R,
+    format: ObjectFormat,
+    limits: &PackLimits,
+    max_blob_bytes: usize,
+    deadline: &mut impl Deadline,
+    mut sink: F,
+) -> Result<StreamPackReceipt, StreamPackError<E>>
+where
+    R: BufRead + ?Sized,
+    F: FnMut(StreamPackEvent<'_>) -> Result<(), E>,
+{
     checkpoint(deadline)?;
     let mut input = Input::new(reader, format, limits);
     let mut fixed = [0_u8; 12];
@@ -135,6 +227,10 @@ where
     let header = parse_pack_header(&fixed, limits)?;
     let mut total_inflated = 0_usize;
     let mut framing = framing_hasher();
+    // Header parsing never allocates payload. A kind-specific check below
+    // applies the original metadata/program bound before any sink effect.
+    let mut header_limits = limits.clone();
+    header_limits.max_object_bytes = limits.max_object_bytes.max(max_blob_bytes);
     for _ in 0..header.object_count {
         checkpoint(deadline)?;
         let offset = input.position();
@@ -155,12 +251,24 @@ where
                 deadline,
             )?;
             size += 1;
-            match decode_entry_header(&encoded[..size], limits, deadline) {
+            match decode_entry_header(&encoded[..size], &header_limits, deadline) {
                 Ok((parsed, _)) => break parsed,
                 Err(PackError::Truncated { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
         };
+        let entry_limit = if entry_header.kind == EntryKind::Blob {
+            max_blob_bytes
+        } else {
+            limits.max_object_bytes
+        };
+        if entry_header.declared_size > entry_limit {
+            return Err(PackError::ObjectSizeLimit {
+                actual: entry_header.declared_size,
+                limit: entry_limit,
+            }
+            .into());
+        }
         let delta_base = match entry_header.kind {
             EntryKind::RefDelta => {
                 let mut bytes = [0_u8; 32];
@@ -210,21 +318,27 @@ where
             }
             .into());
         }
-        let inflated = inflate_entry(&mut input, entry_header.declared_size, limits, deadline)?;
+        sink(StreamPackEvent::Begin(StreamPackEntryStart {
+            offset,
+            header: entry_header,
+            delta_base,
+        }))
+        .map_err(StreamPackError::Sink)?;
+        inflate_entry_chunks(
+            &mut input,
+            entry_header.declared_size,
+            limits,
+            deadline,
+            &mut sink,
+        )?;
         let end_offset = input.position();
         let crc32 = !input.crc.take().ok_or(PackError::InvalidIndexOrdering)?;
         framing_row(&mut framing, offset, end_offset, crc32);
         checkpoint(deadline)?;
-        sink(StreamPackEntry {
-            entry: QuarantinedEntry {
-                offset,
-                header: entry_header,
-                delta_base,
-                inflated,
-            },
+        sink(StreamPackEvent::End(StreamPackEntryEnd {
             end_offset,
             crc32,
-        })
+        }))
         .map_err(StreamPackError::Sink)?;
     }
     checkpoint(deadline)?;
@@ -250,18 +364,21 @@ where
     })
 }
 
-fn inflate_entry<R: BufRead + ?Sized, E>(
+fn inflate_entry_chunks<R, F, E>(
     input: &mut Input<'_, R>,
     declared: usize,
     limits: &PackLimits,
     deadline: &mut impl Deadline,
-) -> Result<Vec<u8>, StreamPackError<E>> {
+    sink: &mut F,
+) -> Result<(), StreamPackError<E>>
+where
+    R: BufRead + ?Sized,
+    F: FnMut(StreamPackEvent<'_>) -> Result<(), E>,
+{
     let mut inflate_limits = crate::reader::inflate_limits(limits, declared);
-    // The caller may admit GiB input, but only a decode fragment plus an RFC
-    // header can remain pending. Never retain a pack-sized inflater input buffer.
     inflate_limits.max_pending_input_bytes = limits.max_input_bytes.min(PENDING_INPUT);
     let mut inflater = Inflater::new_framed(inflate_limits).map_err(PackError::Inflate)?;
-    let mut output = Vec::new();
+    let mut output_bytes = 0_usize;
     let mut fed = 0_usize;
     loop {
         checkpoint(deadline)?;
@@ -278,10 +395,43 @@ fn inflate_entry<R: BufRead + ?Sized, E>(
             .into());
         }
         let supplied = buffer.len().min(INPUT_CHUNK).min(remaining);
-        let progress = inflater
-            .push_with_control(&buffer[..supplied], &mut Probe(deadline))
+        let mut progress = inflater
+            .push_with_bounded_output(
+                &buffer[..supplied],
+                STREAM_PACK_CHUNK_BYTES,
+                &mut Probe(deadline),
+            )
             .map_err(PackError::Inflate)?;
-        let consumed = if progress == StreamProgress::Finished {
+        loop {
+            let fresh = inflater.take_output();
+            output_bytes =
+                output_bytes
+                    .checked_add(fresh.len())
+                    .ok_or(PackError::IntegerOverflow {
+                        context: "streamed inflated entry bytes",
+                    })?;
+            if output_bytes > declared {
+                return Err(PackError::InflatedEntrySizeMismatch {
+                    declared,
+                    actual: output_bytes,
+                }
+                .into());
+            }
+            // The inflater may finish one match across the requested drain
+            // boundary. Sink slices themselves obey the exact chunk bound.
+            for chunk in fresh.chunks(STREAM_PACK_CHUNK_BYTES) {
+                checkpoint(deadline)?;
+                sink(StreamPackEvent::Data(chunk)).map_err(StreamPackError::Sink)?;
+                checkpoint(deadline)?;
+            }
+            if progress != BoundedStreamProgress::OutputReady {
+                break;
+            }
+            progress = inflater
+                .push_with_bounded_output(&[], STREAM_PACK_CHUNK_BYTES, &mut Probe(deadline))
+                .map_err(PackError::Inflate)?;
+        }
+        let consumed = if progress == BoundedStreamProgress::Finished {
             inflater
                 .consumed_input_bytes()
                 .checked_sub(fed)
@@ -298,28 +448,21 @@ fn inflate_entry<R: BufRead + ?Sized, E>(
             .ok_or(PackError::IntegerOverflow {
                 context: "streamed zlib member bytes",
             })?;
-        append_output(&mut output, inflater.take_output(), declared)?;
-        if progress == StreamProgress::Finished {
+        if progress == BoundedStreamProgress::Finished {
             checkpoint(deadline)?;
-            inflater.finish().map_err(PackError::Inflate)?;
-            append_output(&mut output, inflater.take_output(), declared)?;
-            if output.len() != declared {
+            if output_bytes != declared {
                 return Err(PackError::InflatedEntrySizeMismatch {
                     declared,
-                    actual: output.len(),
+                    actual: output_bytes,
                 }
                 .into());
             }
-            return Ok(output);
+            return Ok(());
         }
     }
 }
 
-fn append_output(
-    output: &mut Vec<u8>,
-    mut fresh: Vec<u8>,
-    declared: usize,
-) -> Result<(), PackError> {
+fn append_output(output: &mut Vec<u8>, fresh: &[u8], declared: usize) -> Result<(), PackError> {
     let total = output
         .len()
         .checked_add(fresh.len())
@@ -332,20 +475,13 @@ fn append_output(
             actual: total,
         });
     }
-    if output.is_empty() {
-        *output = fresh;
-    } else {
-        if total > output.capacity() {
-            // Byte-sized readers must not force one reallocating copy per
-            // emitted byte. Grow geometrically within this entry's already
-            // checked declaration; never reserve a pack-sized output buffer.
-            let target = total.max(output.capacity().saturating_mul(2).min(declared));
-            output
-                .try_reserve_exact(target.saturating_sub(output.len()))
-                .map_err(|_| PackError::AllocationFailed { requested: target })?;
-        }
-        output.append(&mut fresh);
+    if total > output.capacity() {
+        let target = total.max(output.capacity().saturating_mul(2).min(declared));
+        output
+            .try_reserve_exact(target.saturating_sub(output.len()))
+            .map_err(|_| PackError::AllocationFailed { requested: target })?;
     }
+    output.extend_from_slice(fresh);
     Ok(())
 }
 
