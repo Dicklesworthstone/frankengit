@@ -66,6 +66,36 @@ impl DeliveryState {
     }
 }
 
+/// Stage the canonical empty forge and outbox maps for a new repository.
+///
+/// Returns their content-derived roots only after both immutable bodies have
+/// been accepted by the authority store. This performs no head publication or
+/// migration: an existing repository continues to select its original roots.
+/// A cancelled or refused attempt can leave reusable immutable frames, but
+/// returns no pair for a caller to install in a genesis head.
+pub async fn stage_empty_in<S, C>(
+    store: &S,
+    cx: &S::Context,
+    repository: RepositoryId,
+    cancelled: &C,
+) -> Result<(Digest, Digest), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    checkpoint(cancelled)?;
+    let forge = CanonicalForgePositionState::try_new(repository, Vec::new())
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+    let outbox = CanonicalOutboxState::try_new(repository, Vec::new())
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+    let forge_root =
+        storage::stage_body(store, cx, repository, storage::POSITION_NAMESPACE, &forge).await?;
+    checkpoint(cancelled)?;
+    let outbox_root = storage::stage_body(store, cx, repository, OUTBOX_NAMESPACE, &outbox).await?;
+    checkpoint(cancelled)?;
+    Ok((forge_root, outbox_root))
+}
+
 /// Resolve authority-selected state and all retained event/effect dependencies.
 /// Legacy forge frontiers use the existing authenticated-history bootstrap;
 /// missing outbox bodies are empty only for an unchanged exact legacy root.

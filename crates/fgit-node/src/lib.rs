@@ -7466,7 +7466,30 @@ impl OneNode {
                 }),
             };
         }
-        let genesis = match genesis_head(repository_id, ref_root, configuration_root) {
+        let (forge_position_root, outbox_root) =
+            match node
+                .runtime
+                .block_on(fgit_admission::merge::native::delivery::stage_empty_in(
+                    &node.authority,
+                    &initialization_cx,
+                    repository_id,
+                    &|| initialization_cx.checkpoint().is_err(),
+                )) {
+                Ok(roots) => roots,
+                Err(staging) => {
+                    let initialization = NodeRefusal::from(
+                        AdmissionMaterializationRefusal::Delivery(Box::new(staging)),
+                    );
+                    return match node.shutdown() {
+                        Ok(()) => Err(initialization),
+                        Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                            initialization: Box::new(initialization),
+                            cleanup: Box::new(cleanup),
+                        }),
+                    };
+                }
+            };
+        let legacy_genesis = match genesis_head(repository_id, ref_root, configuration_root) {
             Ok(genesis) => genesis,
             Err(initialization) => {
                 return match node.shutdown() {
@@ -7478,6 +7501,13 @@ impl OneNode {
                 };
             }
         };
+        // Ref-only decisions carry these roots forward unchanged. Staging
+        // canonical empty bodies here keeps future reads out of the bounded
+        // legacy-history bootstrap even if the repository never has a forge
+        // event or outbox entry.
+        let mut genesis = legacy_genesis.clone();
+        genesis.forge_position_root = forge_position_root;
+        genesis.outbox_root = outbox_root;
         let initialization = match initialize_embedded_repository(
             &node.runtime,
             &node.authority,
@@ -7487,7 +7517,20 @@ impl OneNode {
         ) {
             Ok(HeadInit::Created(_)) => Ok(NodeInitialization::Created),
             Ok(HeadInit::IdenticalRetry(_)) => Ok(NodeInitialization::IdenticalRetry),
-            Ok(HeadInit::Conflict) => Err(NodeRefusal::HeadInitializationConflict),
+            Ok(HeadInit::Conflict) => node.runtime.block_on(async {
+                // A retry against the exact older genesis remains idempotent.
+                // Authenticate and compare every field; never replace its
+                // roots or accept a repository that has already advanced.
+                let authenticated = node.authenticate_authority_head().await?;
+                let current = authenticated
+                    .body()
+                    .map_err(fgit_authority::OutcomeFailure::from)?;
+                if current == legacy_genesis {
+                    Ok(NodeInitialization::IdenticalRetry)
+                } else {
+                    Err(NodeRefusal::HeadInitializationConflict)
+                }
+            }),
             Err(error) => Err(error),
         };
         match initialization {
@@ -10326,6 +10369,7 @@ fn admission_cache_resources() -> ResourceVector {
 #[cfg(test)]
 mod tests {
     mod admission_projection;
+    mod canonical_genesis;
     mod capsule_history;
     mod closure_selection;
     mod fabric_read_budget;
