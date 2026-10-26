@@ -134,11 +134,13 @@ fn absent_delete_lowers_to_an_explicit_identity_noop_and_stays_in_the_seal() {
 fn absent_delete_has_the_same_conditional_identity_for_source_import() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let context = context_for(format, b"source-absent-delete");
-        let validated = receive(
+        let mut validated = receive(
             format,
             vec![command(format, b"refs/heads/absent", 0, 0)],
             true,
         );
+        // Push options are sealed into the request, and an import has none.
+        validated.request.push_options.clear();
         let import = validate_source_import(
             &[SourceRefUpdate {
                 old: native_oid(format, 0),
