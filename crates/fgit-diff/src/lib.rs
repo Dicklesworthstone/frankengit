@@ -1473,9 +1473,10 @@ pub trait CommitGraph {
     -> Result<ParentSet<Self::CommitId>, Self::Error>;
 
     /// Parents plus an untrusted visit-order hint, such as a committer date.
-    /// [`frontier_merge_bases_all`] visits higher hints first. A hint can make
-    /// that traversal cheaper or costlier; it never changes the bases returned.
-    /// The default supplies none, which leaves the traversal breadth-first.
+    /// [`frontier_merge_bases_all`] favors higher hints, interleaving bounded
+    /// FIFO service so a misleading hint cannot starve an outstanding commit.
+    /// A hint can make the traversal cheaper or costlier; it never changes the
+    /// bases returned. The default leaves the traversal breadth-first.
     fn parents_with_order_hint(
         &self,
         commit: &Self::CommitId,

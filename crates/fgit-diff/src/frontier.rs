@@ -14,6 +14,11 @@
 //! marks only grow and the final marks do not depend on the visit order. The
 //! order comes from [`CommitGraph::parents_with_order_hint`]; a hint (usually a
 //! committer date) is untrusted and can only make the walk cheaper or costlier.
+//! The date-priority queue shares tickets with a FIFO. At least one in every
+//! 64 selections takes the oldest outstanding ticket, so arbitrary hints cannot
+//! indefinitely postpone one side while the other walks the whole history.
+//! Consuming a ticket through either index retires it in both. This changes
+//! only scheduling: the paint and stopping proofs do not depend on the hints.
 //! A new DOMINATED mark also propagates immediately through already-read parent
 //! edges. Otherwise equal dates can leave this proof behind a one-sided queue
 //! that keeps reading older commits, even after the recent best base is known.
@@ -39,7 +44,7 @@
 //! must verify, already exclude a cycle there.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
 use super::{
     AncestryQueryWork, CommitGraph, MergeBaseError, MergeBaseLimits, MergeBaseQueryResult,
@@ -52,6 +57,10 @@ const COMMON: u8 = LEFT | RIGHT;
 const DOMINATED: u8 = 4;
 const PAINT: u8 = COMMON | DOMINATED;
 const CANDIDATE: u8 = 8;
+
+// Keep the date-guided fast path while guaranteeing progress in discovery
+// order. This is a scheduling quantum, not an increase to any resource limit.
+const PRIORITY_QUANTUM: usize = 63;
 
 /// Return every best common ancestor in canonical identity order, reading only
 /// the commits that an exact answer requires.
@@ -89,8 +98,14 @@ struct Frontier<'g, G: CommitGraph> {
     queued: Vec<usize>,
     expanded: Vec<bool>,
     // Highest hint first, then first pushed: equal hints visit breadth-first.
-    heap: BinaryHeap<(i64, Reverse<u64>, usize)>,
-    pushes: u64,
+    heap: BinaryHeap<(i64, Reverse<usize>, usize)>,
+    fifo: VecDeque<(usize, usize)>,
+    // Both indexes refer to the same tickets; a pop from one makes the other
+    // reference stale. Each enqueue adds at least one previously absent paint
+    // bit, so there are at most three tickets per admitted commit. Retaining
+    // their retired bits cannot grow with scheduling time or history not read.
+    pending: Vec<bool>,
+    priority_remaining: usize,
     // Queue entries whose commit is undominated; the main loop runs while > 0.
     live: usize,
     // Undominated candidates.
@@ -111,7 +126,9 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
             queued: Vec::new(),
             expanded: Vec::new(),
             heap: BinaryHeap::new(),
-            pushes: 0,
+            fifo: VecDeque::new(),
+            pending: Vec::new(),
+            priority_remaining: PRIORITY_QUANTUM,
             live: 0,
             open: 0,
             work: AncestryQueryWork::default(),
@@ -139,7 +156,9 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
         let mut candidates = Vec::new();
         while self.live > 0 {
             checkpoint().map_err(MergeBaseError::Source)?;
-            let ordinal = self.pop().ok_or(MergeBaseError::GraphClosureViolation)?;
+            let ordinal = self
+                .pop(checkpoint)?
+                .ok_or(MergeBaseError::GraphClosureViolation)?;
             let mut paint = self.marks[ordinal] & PAINT;
             if paint == COMMON {
                 if self.marks[ordinal] & CANDIDATE == 0 {
@@ -154,7 +173,7 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
         // Every queued entry is dominated now and carries DOMINATED onward.
         while self.open > 1 {
             checkpoint().map_err(MergeBaseError::Source)?;
-            let Some(ordinal) = self.pop() else {
+            let Some(ordinal) = self.pop(checkpoint)? else {
                 break;
             };
             self.expand(ordinal, self.marks[ordinal] & PAINT, checkpoint)?;
@@ -267,9 +286,11 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
         if self.marks[ordinal] & DOMINATED == 0 {
             self.live += 1;
         }
+        let ticket = self.pending.len();
+        self.pending.push(true);
         self.heap
-            .push((self.hints[ordinal], Reverse(self.pushes), ordinal));
-        self.pushes += 1;
+            .push((self.hints[ordinal], Reverse(ticket), ordinal));
+        self.fifo.push_back((ticket, ordinal));
         newly_dominated
     }
 
@@ -304,13 +325,45 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
         Ok(())
     }
 
-    fn pop(&mut self) -> Option<usize> {
-        let (_, _, ordinal) = self.heap.pop()?;
-        self.queued[ordinal] -= 1;
-        if self.marks[ordinal] & DOMINATED == 0 {
-            self.live -= 1;
+    /// Service the oldest outstanding ticket after a finite number of date
+    /// selections. Stale references consume neither a turn nor another paint
+    /// expansion. Each reference is removed once, with a cancellation probe,
+    /// so the two indexes add only linear queue work and bounded storage.
+    fn pop<F>(
+        &mut self,
+        checkpoint: &mut F,
+    ) -> Result<Option<usize>, MergeBaseError<G::CommitId, G::Error>>
+    where
+        F: FnMut() -> Result<(), G::Error>,
+    {
+        let oldest = self.priority_remaining == 0;
+        loop {
+            checkpoint().map_err(MergeBaseError::Source)?;
+            let next = if oldest {
+                self.fifo.pop_front()
+            } else {
+                self.heap
+                    .pop()
+                    .map(|(_, Reverse(ticket), ordinal)| (ticket, ordinal))
+            };
+            let Some((ticket, ordinal)) = next else {
+                return Ok(None);
+            };
+            if !self.pending[ticket] {
+                continue;
+            }
+            self.pending[ticket] = false;
+            self.priority_remaining = if oldest {
+                PRIORITY_QUANTUM
+            } else {
+                self.priority_remaining - 1
+            };
+            self.queued[ordinal] -= 1;
+            if self.marks[ordinal] & DOMINATED == 0 {
+                self.live -= 1;
+            }
+            return Ok(Some(ordinal));
         }
-        Some(ordinal)
     }
 
     /// Kahn's algorithm over the expanded commits and the edges between them.
@@ -354,5 +407,68 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
         } else {
             Err(MergeBaseError::Cycle)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TicketGraph;
+
+    impl CommitGraph for TicketGraph {
+        type CommitId = usize;
+        type Error = ();
+
+        fn parents_of(&self, _: &usize) -> Result<ParentSet<usize>, ()> {
+            Ok(ParentSet::Complete(Vec::new()))
+        }
+
+        fn parents_with_order_hint(&self, id: &usize) -> Result<(ParentSet<usize>, i64), ()> {
+            Ok((
+                self.parents_of(id)?,
+                if *id == 0 { i64::MIN } else { i64::MAX },
+            ))
+        }
+    }
+
+    #[test]
+    fn fifo_progress_survives_requeues_and_each_ticket_retires_once() {
+        let graph = TicketGraph;
+        let mut frontier = Frontier::new(
+            &graph,
+            MergeBaseLimits {
+                max_commits: 256,
+                max_edges: 0,
+            },
+        );
+        for id in 0..256 {
+            let ordinal = frontier.discover(&id, &mut || Ok(())).unwrap();
+            frontier.mark(ordinal, LEFT);
+        }
+        let mut probes = 0;
+        let mut checkpoint = || {
+            probes += 1;
+            Ok(())
+        };
+        // Every priority choice has a higher hint than commit zero. Requeues
+        // add more such choices and leave stale references in the other index.
+        for _ in 0..PRIORITY_QUANTUM {
+            let ordinal = frontier.pop(&mut checkpoint).unwrap().unwrap();
+            assert_ne!(ordinal, 0);
+            frontier.mark(ordinal, RIGHT);
+            frontier.mark(ordinal, PAINT);
+        }
+        assert_eq!(frontier.pop(&mut checkpoint).unwrap(), Some(0));
+        let mut popped = PRIORITY_QUANTUM + 1;
+        while frontier.pop(&mut checkpoint).unwrap().is_some() {
+            popped += 1;
+        }
+        assert_eq!(popped, frontier.pending.len());
+        assert!(frontier.pending.iter().all(|pending| !pending));
+        assert!(frontier.queued.iter().all(|queued| *queued == 0));
+        assert_eq!(frontier.live, 0);
+        assert!(frontier.pending.len() <= 3 * frontier.work.visited_commits);
+        assert!(probes <= 2 * frontier.pending.len() + 1);
     }
 }

@@ -173,9 +173,13 @@ with a recent base fits. Committer dates only order that walk. Once a common
 ancestor is established, its domination mark propagates immediately through
 already-read parent edges without loading new objects. This retires obsolete
 one-sided work even with equal or missing dates; it does not require a persisted
-ancestry index or increase the commit/edge ceilings. Skewed dates can still
-prioritize one side far below the eventual base before it becomes common and
-exhaust the ceiling. Exhaustion returns the typed limit, never a different base.
+ancestry index or increase the commit/edge ceilings. Date-priority traversal
+also services the oldest pending entry at least once every 64 selections, so
+skewed or reversed timestamps cannot indefinitely starve the other side of a
+recent-base query. The independent fixtures include 100,000-commit histories
+with reversed and extreme hints, both tip orders, and exact read-budget twins.
+Wide ancestry regions can still exhaust the ceiling; exhaustion returns the
+typed limit, never a different base.
 Two incomparable best bases are proved incomparable by reading their shared
 history, so a
 criss-cross pair over a long history refuses at the ceiling; multiple bases
