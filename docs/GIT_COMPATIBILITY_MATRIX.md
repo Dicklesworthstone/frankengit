@@ -152,6 +152,24 @@ native/model regressions are not included in historical executed totals.
 
 ## Tier A: the declared differential tier
 
+### Rejected upload wants
+
+Upload-pack applies the same visible-object reachability boundary to wants in
+protocol v0, v1 and v2, including when no refs are visible. A stored object from
+deleted or hidden history and a never-stored object receive the same
+`ERR upload-pack: not our ref <oid>` packet, before any pack output. The
+diagnostic echoes only the requested object ID. Smart HTTP carries this Git
+protocol error in a `200` upload-pack RPC response; malformed framing retains
+its separate transport refusal (frankengit-aitq).
+
+The stock transport campaign includes deleted-commit, deleted-blob and
+unknown-object refusal cases, each paired with a successful visible-commit
+fetch. `--focus unreachable-wants` runs those cases across both native hash
+formats and all three transports. These authored cases do not change the
+historical executed counts below.
+
+### Differential scope
+
 Tier A is the narrow compatibility tier the plan's Phase 2 exit and 1.0
 definition of done (item 2) require to pass differentially. Its rows are
 declared in [`registries/compatibility_tiers.tsv`](../registries/compatibility_tiers.tsv).
@@ -206,6 +224,17 @@ visible-graph proof:
 
 Every other capability `fg` advertises must also be advertised by pinned Git,
 and the Tier A capability subset must match exactly.
+
+Upload-pack's visible-object boundary has an additional deliberate divergence:
+
+- DIV-TA-005: `fg` refuses wants for objects outside the visible ref graph,
+  including blobs and protocol v2 requests. The pinned upstream 2.54.0 probes
+  recorded in frankengit-aitq serve an unreachable blob in v0 and both an
+  unreachable commit and blob in v2; `fg` deliberately does not disclose them.
+  Every such refusal carries `ERR upload-pack: not our ref <oid>`, matching
+  upstream's v0 unreachable-commit diagnostic. Stored-but-unreachable and
+  never-stored objects have identical diagnostics; reachable twins still
+  succeed. This boundary does not change when the visible advertisement is empty.
 
 Report-status must match byte for byte except for the following explicitly
 scoped divergences. DIV-TA-003 changes reason wording only; its accept/refuse

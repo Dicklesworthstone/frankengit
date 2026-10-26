@@ -20,6 +20,8 @@ host's, or the pinned oracle through --git-bin/--git-exec-path) exercises:
   refname conflict, and the non-atomic twin that publishes the other ref;
 - absent-ref deletion alone and beside a create, in atomic and non-atomic
   sessions (frankengit-l6mb);
+- unreachable commit/blob and never-existing OID fetches, with exact Git ERR
+  diagnostics and a successful visible-object twin (frankengit-aitq);
 - `git push -o` (push options, frankengit-321s), and the refusal of an option
   past the 1,024-byte sealable bound beside its twin at the bound.
 
@@ -41,6 +43,8 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+
+from unreachable_wants import exercise as unreachable_wants
 
 TENANT, REPOSITORY, PRINCIPAL = "c1" * 16, "c2" * 16, "c3" * 16
 TIMEOUT = 300
@@ -292,13 +296,22 @@ def served(fg: str, transport: str, node: Path, root: Path):
         err.close()
 
 
-def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: dict, checks: Checks) -> None:
+def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: dict,
+             checks: Checks, focus: str = "all") -> None:
     prefix = f"{fmt}-{transport}"
     node = root / f"node-{prefix}"
     subprocess.run([fg, "init", node, TENANT, REPOSITORY, fmt], check=True, capture_output=True, timeout=TIMEOUT)
     subprocess.run([fg, "import", node, TENANT, REPOSITORY, PRINCIPAL, f"import-{prefix}", source["path"] / ".git"],
                    check=True, capture_output=True, timeout=TIMEOUT)
     with served(fg, transport, node, root) as (url, env):
+        if focus != "all":
+            work = root / f"work-{prefix}"
+            git.run("clone", "-q", url, work, env=env, check=True)
+            if focus in ("absent-deletes", "ref-errors"):
+                absent_ref_deletes(git, work, url, env, prefix, checks)
+            if focus in ("unreachable-wants", "ref-errors"):
+                unreachable_wants(git, work, url, env, root, fmt, prefix, checks)
+            return
         # Partial clone, lazy fetch, and the sparse refusal twins (protocol v2, then v0 for blob:none).
         for name, spec, mode in FILTERS:
             clone = root / f"clone-{prefix}-{name}"
@@ -404,6 +417,8 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
                    and flags.get("refs/heads/topic/conflict2", "").startswith("!"),
                    f"flags={flags} published_only_plain={after == expected} {text(partial)[-300:]}")
         absent_ref_deletes(git, work, url, env, prefix, checks)
+        unreachable_wants(git, work, url, env, root, fmt, prefix, checks)
+        after = ref_map(git, url, env)
         # Push options (frankengit-321s): `git push -o` works only when the server
         # advertises push-options. The options are sealed with the request; one
         # past the sealable 1,024-byte bound is refused and publishes nothing,
@@ -434,6 +449,8 @@ def main() -> None:
     parser.add_argument("--git-bin", help="directory holding the git to use (default: PATH)")
     parser.add_argument("--git-exec-path", help="GIT_EXEC_PATH for a relocated git install")
     parser.add_argument("--formats", default="sha1,sha256")
+    parser.add_argument("--focus", choices=("all", "absent-deletes", "unreachable-wants", "ref-errors"),
+                        default="all", help="run only the selected transport regression cases")
     options = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="fg-transport-capabilities-"))
     checks = Checks()
@@ -445,7 +462,7 @@ def main() -> None:
             source = build_source(git, root, fmt)
             for transport in TRANSPORTS:
                 try:
-                    exercise(options.fg, git, root, fmt, transport, source, checks)
+                    exercise(options.fg, git, root, fmt, transport, source, checks, options.focus)
                 except Exception as error:  # recorded, never swallowed: the id fails the suite
                     checks.add(f"{fmt}-{transport}-campaign", False, f"{type(error).__name__}: {error}")
                 else:

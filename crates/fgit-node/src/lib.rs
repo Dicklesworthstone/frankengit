@@ -5793,9 +5793,10 @@ pub fn parse_git_daemon_request(
 /// The first-clone lane advertises exactly the supplied capabilities. Its
 /// intended caller passes an empty capability set, yielding raw `PACK` bytes
 /// after the final negotiated ACK/NAK. An authenticated empty repository is
-/// complete without negotiation or a pack, so its advertisement returns an
-/// [`GitDaemonSessionOutcome::EmptyRepository`] immediately. When a later
-/// caller explicitly enables `side-band-64k`, this adapter preserves the wire
+/// complete without a pack when the client closes or sends a want-less flush.
+/// An explicit want still enters the verified negotiation machine, even when
+/// the advertised ref set is empty. When a later caller explicitly enables
+/// `side-band-64k`, this adapter preserves the wire
 /// crate's bounded pull/write ordering and emits a terminal flush after the
 /// payload.
 pub fn serve_git_daemon_upload_pack<R, W, BuildPack, Payload, PackError>(
@@ -5827,39 +5828,6 @@ where
             build_pack(request, pack_request).map_err(GitDaemonServeError::Pack)
         },
     )
-}
-
-/// Best-effort consumption of the client's want-less request after an
-/// empty-repository advertisement.
-///
-/// A real client answers the zero-identity `capabilities^{}` advertisement by
-/// sending its request and waiting; closing the read side with those bytes
-/// still queued makes the kernel answer with RST instead of a clean FIN, so a
-/// cloning client can observe a connection reset where upstream completes
-/// gracefully. The drain reads until the request flush, stream end, or any
-/// bounded refusal, and never changes the session outcome. A client that
-/// drips framing forever is the unbounded-session problem a transport
-/// deadline owns, not this drain's.
-fn drain_client_request(reader: &mut impl Read, limits: &WireLimits) {
-    let Ok(mut decoder) = PktLineDecoder::new(limits.clone()) else {
-        return;
-    };
-    let mut input = [0_u8; 16 * 1024];
-    loop {
-        let read = match reader.read(&mut input) {
-            Ok(0) | Err(_) => return,
-            Ok(read) => read,
-        };
-        match decoder.push(&input[..read]) {
-            Ok(packets) if packets.iter().any(|packet| matches!(packet, Packet::Flush)) => {
-                return;
-            }
-            Ok(_) => {}
-            // A bounded framing refusal ends the politeness drain the same
-            // way a stream end does: the outcome is already decided.
-            Err(_) => return,
-        }
-    }
 }
 
 /// Completes one upload-pack session after its git-daemon greeting was read.
@@ -5925,25 +5893,31 @@ where
     )
     .map_err(GitDaemonServeError::Transport)?;
 
-    if repository.advertised_refs().is_empty() {
-        drain_client_request(reader, &limits);
-        return Ok(GitDaemonSessionOutcome::EmptyRepository(
-            GitDaemonAdvertisementReceipt { request },
-        ));
-    }
-
     let mut machine = LegacyUploadPack::new(upload_pack_version, capabilities, limits.clone())
         .map(LegacyUploadPack::with_shallow_updates)
         .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
     let mut input = [0_u8; 16 * 1024];
+    let mut received_negotiation = false;
     loop {
+        check_session_deadline(session_deadline, "read upload-pack negotiation")
+            .map_err(GitDaemonServeError::Transport)?;
         let read = reader.read(&mut input).map_err(|source| {
             GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
                 operation: "read upload-pack negotiation",
                 source,
             })
         })?;
+        check_session_deadline(session_deadline, "read upload-pack negotiation")
+            .map_err(GitDaemonServeError::Transport)?;
         if read == 0 {
+            // Empty clones and advertisement-only clients may close without
+            // sending a request. Once any bytes arrive, ordinary framing and
+            // negotiation checks apply, including to an empty visible view.
+            if !received_negotiation && repository.advertised_refs().is_empty() {
+                return Ok(GitDaemonSessionOutcome::EmptyRepository(
+                    GitDaemonAdvertisementReceipt { request },
+                ));
+            }
             machine.finish().map_err(|error| {
                 GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
             })?;
@@ -5951,11 +5925,17 @@ where
                 GitDaemonTransportRefusal::IncompleteNegotiation,
             ));
         }
+        received_negotiation = true;
 
         let transition = machine
             .push_bytes(&input[..read], repository)
             .map_err(|error| {
-                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+                GitDaemonServeError::Transport(report_upload_wire_refusal(
+                    writer,
+                    error,
+                    &limits,
+                    session_deadline,
+                ))
             })?;
         if let Some(refusal) = refuse_unserved_filter(writer, &transition.events, &limits) {
             return Err(GitDaemonServeError::Transport(refusal));
@@ -6096,7 +6076,12 @@ where
         let transition = machine
             .push_bytes(&input[..read], repository)
             .map_err(|error| {
-                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+                GitDaemonServeError::Transport(report_upload_wire_refusal(
+                    writer,
+                    error,
+                    &limits,
+                    session_deadline,
+                ))
             })?;
         if let Some(refusal) = refuse_unserved_filter(writer, &transition.events, &limits) {
             return Err(GitDaemonServeError::Transport(refusal));
@@ -6520,6 +6505,40 @@ fn emit_pack_payload(
 /// when a pack request names a filter this node does not serve.
 fn unserved_filter_error(filter: &str) -> Vec<u8> {
     format!("ERR filter '{filter}' not supported\n").into_bytes()
+}
+
+/// The client-safe upload-pack refusal shared by git://, SSH and smart HTTP.
+///
+/// The only reflected value is the fixed-width object ID parsed from this
+/// client's want. Hidden, deleted and never-seen objects have the same answer;
+/// neither the stored object kind nor physical existence enters the message.
+/// Other wire failures keep their existing transport behavior rather than
+/// reflecting arbitrary parser input or internal diagnostics.
+fn upload_want_error(error: &WireError) -> Option<Vec<u8>> {
+    match error {
+        WireError::WantNotAdvertised { oid } | WireError::WantNotReachable { oid } => {
+            Some(format!("ERR upload-pack: not our ref {oid}\n").into_bytes())
+        }
+        _ => None,
+    }
+}
+
+/// Reports an upload negotiation refusal before any pack bytes can escape.
+/// The wire refusal remains the local outcome even if the peer has gone away.
+fn report_upload_wire_refusal(
+    writer: &mut impl Write,
+    error: WireError,
+    limits: &WireLimits,
+    session_deadline: Option<&GitDaemonSessionDeadline>,
+) -> GitDaemonTransportRefusal {
+    if let Some(line) = upload_want_error(&error) {
+        if let Err(expired) = check_session_deadline(session_deadline, "report upload-pack refusal")
+        {
+            return expired;
+        }
+        let _ = write_packet_group(writer, &[Packet::Data(line)], limits);
+    }
+    GitDaemonTransportRefusal::Wire(error)
 }
 
 /// The `ERR` line a stock client reports as "remote error" when the visible
@@ -14298,71 +14317,6 @@ mod tests {
         node.shutdown().expect("node closes cleanly");
     }
 }
-#[cfg(test)]
-mod drain_politeness_tests {
-    use super::*;
-
-    /// A reader that yields fixed chunks and records how many reads happened,
-    /// so a drain can be pinned to the exact read it must stop on.
-    struct ChunkedReader {
-        chunks: Vec<Vec<u8>>,
-        next: usize,
-        reads: usize,
-    }
-
-    impl ChunkedReader {
-        fn new(chunks: &[&[u8]]) -> Self {
-            Self {
-                chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
-                next: 0,
-                reads: 0,
-            }
-        }
-    }
-
-    impl std::io::Read for ChunkedReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.reads += 1;
-            let Some(chunk) = self.chunks.get(self.next) else {
-                return Ok(0);
-            };
-            self.next += 1;
-            let taken = chunk.len().min(buf.len());
-            buf[..taken].copy_from_slice(&chunk[..taken]);
-            Ok(taken)
-        }
-    }
-
-    #[test]
-    fn drain_consumes_a_want_less_request_through_its_flush() {
-        // The request flush completes in the SECOND chunk; a correct drain
-        // stops there and never asks for a third.
-        let mut client = ChunkedReader::new(&[b"000ePACK-request\n", b"0000"]);
-        drain_client_request(&mut client, &WireLimits::default());
-        assert_eq!(
-            client.reads, 2,
-            "the drain must stop reading once the request flush arrives"
-        );
-    }
-
-    #[test]
-    fn drain_returns_at_stream_end_without_a_flush() {
-        let mut client = ChunkedReader::new(&[b"0009half-framed"]);
-        drain_client_request(&mut client, &WireLimits::default());
-        assert_eq!(client.reads, 1, "a truncated request ends the drain at EOF");
-    }
-
-    #[test]
-    fn drain_stops_at_a_framing_refusal_without_hanging() {
-        let mut client = ChunkedReader::new(&[b"zzzznot-a-packet-length"]);
-        drain_client_request(&mut client, &WireLimits::default());
-        assert_eq!(
-            client.reads, 1,
-            "a framing refusal ends the drain without another read"
-        );
-    }
-}
-
 #[cfg(test)]
 mod push_quota_tests {
     use super::*;

@@ -369,6 +369,28 @@ fn write_response_part<W: Write>(
         .map_err(|source| NodeSmartHttpRefusal::Io { operation, source })
 }
 
+/// Git RPC failures are successful HTTP exchanges carrying a single ERR
+/// packet. Bound and frame the entire packet before emitting the HTTP head,
+/// withholding every negotiation prefix and pack byte.
+fn write_upload_rpc_error(
+    writer: &mut impl Write,
+    request: &RequestHead<'_>,
+    line: Vec<u8>,
+    wire_limits: &WireLimits,
+    maximum_response_bytes: u64,
+) -> Result<(), NodeSmartHttpRefusal> {
+    let body = fgit_wire::encode_packets(&[Packet::Data(line)], wire_limits)?;
+    let head = success_head(request, None);
+    let mut encoder = ResponseEncoder::new(request.http_version, None, maximum_response_bytes)?;
+    let framed = encoder.push(&body)?;
+    write_response_part(writer, head.as_bytes(), "write smart HTTP head")?;
+    write_response_part(writer, framed.prefix.as_bytes(), "write HTTP chunk prefix")?;
+    write_response_part(writer, framed.data, "write smart HTTP body")?;
+    write_response_part(writer, framed.suffix, "write HTTP chunk suffix")?;
+    let terminal = encoder.finish()?;
+    write_response_part(writer, terminal, "finish smart HTTP response")
+}
+
 // Cancellation must reach awaited authority work, not stop at the last parser
 // checkpoint. Cancel the owning context before each subsequent poll, but keep
 // driving the future to completion. Dropping it or replacing its actual result
@@ -573,8 +595,33 @@ impl OneNode {
             wire_limits.clone(),
             http_limits,
         )?;
-        body.consume(cancellation, |bytes, live| rpc.push(bytes, live))?;
-        let reply = rpc.finish(cancellation)?;
+        let reply = body
+            .consume(cancellation, |bytes, live| rpc.push(bytes, live))
+            .and_then(|_| rpc.finish(cancellation).map_err(NodeSmartHttpRefusal::from));
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(refusal) => {
+                if let NodeSmartHttpRefusal::Rpc(error) = &refusal
+                    && let RpcError::Wire(error) = &**error
+                    && let Some(line) = crate::upload_want_error(error)
+                {
+                    if !cancellation.checkpoint() {
+                        return Err(RpcError::Cancelled.into());
+                    }
+                    deadline
+                        .check("report smart HTTP upload-pack refusal")
+                        .map_err(NodeGitDaemonServeRefusal::from)?;
+                    write_upload_rpc_error(
+                        writer,
+                        request,
+                        line,
+                        &wire_limits,
+                        maximum_response_bytes,
+                    )?;
+                }
+                return Err(refusal);
+            }
+        };
         if let Some(filter) = reply
             .pack_request()
             .and_then(|pack_request| pack_request.filter.as_ref())
@@ -583,20 +630,13 @@ impl OneNode {
             // Upstream's stateless upload-pack answers a filter it does not
             // serve with one `ERR` packet in a 200 body, which a stock client
             // reports as a remote error. The negotiation prefix is withheld.
-            let body = fgit_wire::encode_packets(
-                &[Packet::Data(crate::unserved_filter_error(filter))],
+            write_upload_rpc_error(
+                writer,
+                request,
+                crate::unserved_filter_error(filter),
                 &wire_limits,
+                maximum_response_bytes,
             )?;
-            let head = success_head(request, None);
-            let mut encoder =
-                ResponseEncoder::new(request.http_version, None, maximum_response_bytes)?;
-            let framed = encoder.push(&body)?;
-            write_response_part(writer, head.as_bytes(), "write smart HTTP head")?;
-            write_response_part(writer, framed.prefix.as_bytes(), "write HTTP chunk prefix")?;
-            write_response_part(writer, framed.data, "write smart HTTP body")?;
-            write_response_part(writer, framed.suffix, "write HTTP chunk suffix")?;
-            let terminal = encoder.finish()?;
-            write_response_part(writer, terminal, "finish smart HTTP response")?;
             return Err(NodeGitDaemonServeRefusal::from(
                 GitDaemonTransportRefusal::UnservedFilter { filter },
             )
