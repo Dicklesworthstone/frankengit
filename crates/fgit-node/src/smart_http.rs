@@ -12,6 +12,9 @@ mod server;
 pub use server::source_retrieval_json;
 mod verdict;
 
+#[cfg(test)]
+mod writer_permit_tests;
+
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -989,7 +992,7 @@ impl OneNode {
         let processing = super::GitDaemonReceiveProcessingDeadline::new(
             self.git_daemon_receive_processing_timeout,
         );
-        let _writer = super::admit_writer(writers, &deadline)?;
+        let writer_permit = super::admit_writer(writers, &deadline)?;
         let mut live = || cancellation.checkpoint() && !deadline.expired() && !processing.expired();
         let node_request = super::NodeRequestContext {
             authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
@@ -1019,6 +1022,9 @@ impl OneNode {
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         let completion = match rpc.finish_with_handoff(&mut handoff, &mut live) {
             Err(RpcError::Receive(ReceiveError::AuthoritativeRefusal(code))) => {
+                // Admission is finished; a slow response must not hold the
+                // process's writer capacity while this verdict is delivered.
+                drop(writer_permit);
                 // A verdict on the fully received commands reaches the client
                 // per ref in a 200 receive-pack result, as git-receive-pack
                 // answers over HTTP. The refusal is still returned: nothing is
@@ -1059,10 +1065,14 @@ impl OneNode {
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
+                drop(writer_permit);
                 command_limit::report_http(request, &error, &receive_limits.wire, writer)?;
                 return Err(error);
             }
         };
+        // The canonical result is fixed. Release write admission before any
+        // response encoding or client I/O, including a failed delivery.
+        drop(writer_permit);
 
         // From here on, cancellation and I/O failure cannot mean non-commit.
         // Preserve the canonical result on every response-encoding/write path.

@@ -439,7 +439,7 @@ impl OneNode {
             let processing = crate::GitDaemonReceiveProcessingDeadline::new(
                 self.git_daemon_receive_processing_timeout,
             );
-            let _writer = crate::admit_writer(writers, processing.deadline())?;
+            let writer_permit = crate::admit_writer(writers, processing.deadline())?;
             let request = NodeRequestContext {
                 authority: self
                     .receive_admission_authority_context(input_bytes, processing.deadline()),
@@ -472,6 +472,9 @@ impl OneNode {
                 ProductionReceiveQuarantineHandoff::new(validator, selected.basis().clone());
             let completion = match machine.finish_with_handoff(&mut handoff, &mut live) {
                 Err(ReceiveError::AuthoritativeRefusal(code)) => {
+                    // The verdict needs no further authority writes. Raw TCP
+                    // and SSH must not reserve writer capacity during delivery.
+                    drop(writer_permit);
                     // A verdict on the received commands is reported to the
                     // client per ref; the refusal itself is still returned, so
                     // the session counts as refused and nothing is admitted.
@@ -490,6 +493,9 @@ impl OneNode {
             drop(machine);
             admission_started = true;
             let outcome = admit(&request, &session, &validated, &mut live)?;
+            // Publication and outcome resolution are complete. A stalled
+            // receiver may delay its own response, never another writer.
+            drop(writer_permit);
             // A late deadline or socket failure cannot erase canonical knowledge.
             final_attempted = true;
             writer.restart_deadline(GitDaemonSessionDeadline::new(
