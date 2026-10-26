@@ -71,11 +71,11 @@ pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
 };
 pub use writer::{
-    CanonicalObjectSource, CanonicalPackObject, DeltaWorkBudget, DeterministicPackEncoder,
-    MAX_THIN_BASES_PER_TARGET, MaterializedPack, MemoizedPackEncoder, PackArtifactSink,
-    PackCacheStats, PackComputationCache, PackEntryEncoder, PackOrderKey, PackPlan, PackPlanEntry,
-    PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, PlannedDelta,
-    PlannedDeltaBase, ThinBase,
+    CanonicalBlobReader, CanonicalBlobStream, CanonicalObjectSource, CanonicalPackObject,
+    DeltaWorkBudget, DeterministicPackEncoder, MAX_THIN_BASES_PER_TARGET, MaterializedPack,
+    MemoizedPackEncoder, PackArtifactSink, PackCacheStats, PackComputationCache, PackEntryEncoder,
+    PackOrderKey, PackPlan, PackPlanEntry, PackPlanner, PackWriteError, PackWriteProfile,
+    PackWriteReceipt, PackWriter, PlannedDelta, PlannedDeltaBase, ThinBase,
 };
 
 use std::error::Error;

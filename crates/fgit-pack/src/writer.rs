@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 mod cache;
 pub use cache::{MemoizedPackEncoder, PackCacheStats, PackComputationCache};
+mod blob_stream;
+pub use blob_stream::{CanonicalBlobReader, CanonicalBlobStream};
 
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
 use fgit_deflate::{
@@ -149,6 +151,14 @@ impl CanonicalPackObject {
 pub trait CanonicalObjectSource {
     /// Loads exactly the object named by `id`, including verified closure edges.
     fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError>;
+
+    /// Optionally opens one blob without retaining its body. The stream's
+    /// bytes remain tentative until the writer verifies its exact length and
+    /// native identity and promotes the complete pack. Existing sources need
+    /// only implement `load`; versioned streaming profiles use this seam.
+    fn open_blob(&self, _id: &ObjectId) -> Result<Option<CanonicalBlobStream<'_>>, PackWriteError> {
+        Ok(None)
+    }
 }
 
 /// The ordering metadata a caller declares for one object of a streamed pack
@@ -251,6 +261,11 @@ pub struct PackWriteProfile {
     /// says so accepts [`ThinBase`]s, so every other profile's packs stay
     /// self-contained (frankengit-pazc).
     pub thin: bool,
+    /// Blobs larger than this threshold are emitted whole and clear the
+    /// preceding delta window. A streaming source can then supply their bytes
+    /// without retaining the body. `None` preserves the original policy.
+    /// The caller's independent per-object limit still governs every blob.
+    pub stream_blob_threshold: Option<usize>,
 }
 
 impl PackWriteProfile {
@@ -269,6 +284,7 @@ impl PackWriteProfile {
         delta_search: DeltaSearch::PrefixSuffix,
         delta_work: None,
         thin: false,
+        stream_blob_threshold: None,
     };
 
     /// Deterministic fixed-Huffman pack emission with bounded match search.
@@ -287,6 +303,7 @@ impl PackWriteProfile {
         delta_search: DeltaSearch::PrefixSuffix,
         delta_work: None,
         thin: false,
+        stream_blob_threshold: None,
     };
 
     /// [`Self::COMPRESSED_V1`]'s compression with delta emission disabled.
@@ -307,6 +324,7 @@ impl PackWriteProfile {
         delta_search: DeltaSearch::PrefixSuffix,
         delta_work: None,
         thin: false,
+        stream_blob_threshold: None,
     };
 
     /// [`Self::COMPRESSED_V1`] with interior-match delta search.
@@ -332,6 +350,7 @@ impl PackWriteProfile {
         delta_search: DeltaSearch::IndexedBlocks,
         delta_work: None,
         thin: false,
+        stream_blob_threshold: None,
     };
 
     /// [`Self::COMPRESSED_V2`] with a per-target delta-search work budget.
@@ -360,6 +379,7 @@ impl PackWriteProfile {
             target_multiple: 4,
         }),
         thin: false,
+        stream_blob_threshold: None,
     };
 
     /// [`Self::COMPRESSED_V3`] that may also delta against client-held objects
@@ -419,6 +439,39 @@ impl PackWriteProfile {
         thin: true,
         ..Self::COMPRESSED_V5
     };
+
+    /// V5 for buffered objects, with blobs over 32 MiB emitted as full bases
+    /// through a bounded stream. Such a blob clears the delta window and is
+    /// never retained as a later base. Small-object bytes stay equal to V5;
+    /// callers must explicitly select a larger object and encoder envelope.
+    pub const COMPRESSED_V6: Self = Self {
+        id: "git-pack-compressed-v6",
+        stream_blob_threshold: Some(32 * 1024 * 1024),
+        ..Self::COMPRESSED_V5
+    };
+
+    /// V6 with independently proven, buffered client-held thin bases.
+    pub const COMPRESSED_V6_THIN: Self = Self {
+        id: "git-pack-compressed-v6-thin",
+        thin: true,
+        ..Self::COMPRESSED_V6
+    };
+
+    /// The original no-delta compression policy with bounded blob streaming.
+    /// This profile never emits OFS_DELTA, including for small objects.
+    pub const COMPRESSED_NO_DELTA_V2: Self = Self {
+        id: "git-pack-compressed-no-delta-v2",
+        stream_blob_threshold: Some(32 * 1024 * 1024),
+        ..Self::COMPRESSED_NO_DELTA_V1
+    };
+
+    const fn streams_blob(self, kind: ObjectType, length: usize) -> bool {
+        matches!(kind, ObjectType::Blob)
+            && match self.stream_blob_threshold {
+                Some(threshold) => length > threshold,
+                None => false,
+            }
+    }
 }
 
 /// Maximum client-held bases a plan considers for one target.
@@ -872,7 +925,42 @@ impl PackPlanner {
         let mut delta_count = 0_usize;
         for key in order {
             checkpoint(deadline)?;
-            let object = source.load(&key.id)?;
+            let stream = if self.profile.stream_blob_threshold.is_some()
+                && key.object_type == ObjectType::Blob
+            {
+                let opened = source.open_blob(&key.id);
+                checkpoint(deadline)?;
+                opened?
+            } else {
+                None
+            };
+            let object = if let Some(blob) = stream {
+                blob.validate_key(key)?;
+                let next_total = selected_object_total(
+                    blob.length(),
+                    total_object_bytes,
+                    &self.limits,
+                    &writer.limits,
+                )?;
+                if self.profile.streams_blob(ObjectType::Blob, blob.length()) {
+                    total_object_bytes = next_total;
+                    compression.push(blob_stream::emit_blob(
+                        &mut emitter,
+                        blob,
+                        &mut offsets,
+                        encoder,
+                        self.profile,
+                        deadline,
+                    )?);
+                    selector.advance_streamed_blob()?;
+                    continue;
+                }
+                blob.into_buffered(deadline)?
+            } else {
+                let loaded = source.load(&key.id);
+                checkpoint(deadline)?;
+                loaded?
+            };
             if object.id != key.id {
                 return Err(PackWriteError::SourceIdentityMismatch {
                     requested: key.id,
@@ -885,24 +973,26 @@ impl PackPlanner {
             {
                 return Err(PackWriteError::SourceOrderMismatch(key.id));
             }
-            self.limits.object_size(object.body.len())?;
-            writer.limits.object_size(object.body.len())?;
-            total_object_bytes = total_object_bytes.checked_add(object.body.len()).ok_or(
-                PackError::IntegerOverflow {
-                    context: "selected pack plan total object bytes",
-                },
+            total_object_bytes = selected_object_total(
+                object.body.len(),
+                total_object_bytes,
+                &self.limits,
+                &writer.limits,
             )?;
-            for limit in [
-                self.limits.max_total_expanded_bytes,
-                writer.limits.max_total_expanded_bytes,
-            ] {
-                if total_object_bytes > limit {
-                    return Err(PackError::TotalExpandedLimit {
-                        actual: total_object_bytes,
-                        limit,
-                    }
-                    .into());
-                }
+            if self
+                .profile
+                .streams_blob(object.object_type, object.body.len())
+            {
+                compression.push(blob_stream::emit_blob(
+                    &mut emitter,
+                    CanonicalBlobStream::from_buffered(object),
+                    &mut offsets,
+                    encoder,
+                    self.profile,
+                    deadline,
+                )?);
+                selector.advance_streamed_blob()?;
+                continue;
             }
             verify_native_object(
                 self.format,
@@ -986,14 +1076,20 @@ impl PackPlanner {
                 requested: bases.len(),
             })?;
         for id in bases {
-            let object = self.load_thin_base(source, id, &mut total_base_bytes, deadline)?;
-            external.objects.push(object);
+            if let Some(object) =
+                self.load_thin_base(source, id, &mut total_base_bytes, deadline)?
+            {
+                external.objects.push(object);
+            }
         }
         for offer in offers {
-            let position = external
+            let Ok(position) = external
                 .objects
                 .binary_search_by(|object| object.id.cmp(&offer.base))
-                .map_err(|_| PackWriteError::MissingCanonicalObject(offer.base))?;
+            else {
+                // A streamed large blob is deliberately not a delta base.
+                continue;
+            };
             external
                 .by_target
                 .entry(offer.target)
@@ -1057,14 +1153,35 @@ impl PackPlanner {
         id: ObjectId,
         total_base_bytes: &mut usize,
         deadline: &mut impl Deadline,
-    ) -> Result<CanonicalPackObject, PackWriteError> {
+    ) -> Result<Option<CanonicalPackObject>, PackWriteError> {
         checkpoint(deadline)?;
+        if self.profile.stream_blob_threshold.is_some() {
+            let opened = source.open_blob(&id);
+            checkpoint(deadline)?;
+            if let Some(blob) = opened? {
+                blob.validate_key(PackOrderKey {
+                    id,
+                    object_type: ObjectType::Blob,
+                    recency: blob.order_key().recency,
+                    path_hash: blob.order_key().path_hash,
+                })?;
+                if self.profile.streams_blob(ObjectType::Blob, blob.length()) {
+                    return Ok(None);
+                }
+            }
+        }
         let object = source.load(&id)?;
         if object.id != id {
             return Err(PackWriteError::SourceIdentityMismatch {
                 requested: id,
                 returned: object.id,
             });
+        }
+        if self
+            .profile
+            .streams_blob(object.object_type, object.body.len())
+        {
+            return Ok(None);
         }
         self.limits.object_size(object.body.len())?;
         *total_base_bytes =
@@ -1088,7 +1205,7 @@ impl PackPlanner {
             AcceptanceProfile::GitCompatibleImport,
             &object_parse_limits(self.format, &self.limits),
         )?;
-        Ok(object)
+        Ok(Some(object))
     }
 
     /// The client-held bases offered for `target` alone, loaded for its one
@@ -1116,7 +1233,9 @@ impl PackPlanner {
             } else {
                 &mut uncounted
             };
-            let object = self.load_thin_base(source, offer.base, total, deadline)?;
+            let Some(object) = self.load_thin_base(source, offer.base, total, deadline)? else {
+                continue;
+            };
             external
                 .objects
                 .try_reserve(1)
@@ -1200,6 +1319,18 @@ pub enum PackWriteError {
     TemporaryReadRefused,
     /// A completed dependency encoder omitted its required immutable receipt.
     MissingCompressionReceipt,
+    /// A custom encoder's receipt did not bind the actual streamed member.
+    CompressionReceiptMismatch,
+    /// This encoder has no bounded streaming input implementation.
+    StreamingEncoderUnsupported,
+    /// A source's observed EOF did not match its declared blob length.
+    SourceLengthMismatch {
+        id: ObjectId,
+        declared: usize,
+        observed: usize,
+    },
+    /// A source returned more bytes than the supplied destination could hold.
+    SourceReadOverflow { count: usize, capacity: usize },
     /// Thin bases were offered to a profile that emits only self-contained
     /// packs, or a self-contained profile's plan carries a client-held base.
     ThinBasesNotPermitted,
@@ -1298,6 +1429,19 @@ pub trait PackEntryEncoder {
     ) -> Result<DeflateReceipt, PackWriteError> {
         self.encode_entry(input, deadline, emit)
     }
+
+    /// Encodes a blob without retaining its entire body. The default fails
+    /// closed for custom encoders that only implement buffered input. The
+    /// writer verifies the source identity and exact length before promotion.
+    fn encode_blob_stream(
+        &mut self,
+        _input: &mut dyn CanonicalBlobReader,
+        _declared_length: usize,
+        _deadline: &mut dyn Deadline,
+        _emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
+    ) -> Result<DeflateReceipt, PackWriteError> {
+        Err(PackWriteError::StreamingEncoderUnsupported)
+    }
 }
 
 /// Adapter from the dependency-owned deterministic DEFLATE encoder to the
@@ -1321,6 +1465,32 @@ impl DeterministicPackEncoder {
     pub const fn for_profile(profile: PackWriteProfile) -> Self {
         Self::new(DeflateLimits::GIT_OBJECT, profile.compression)
     }
+
+    /// Bounded encoder for an explicitly widened pack-object envelope. Input
+    /// and output inherit the caller's byte limits. Per-member codec work is
+    /// at most eight units per permitted object byte, with the original Git
+    /// codec work allowance as a floor. Pending input and history stay fixed.
+    /// An unrepresentable work envelope is refused before source reads.
+    pub fn for_pack_limits(
+        profile: PackWriteProfile,
+        limits: &PackLimits,
+    ) -> Result<Self, PackWriteError> {
+        let work = u64::try_from(limits.max_object_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(8))
+            .ok_or(PackError::IntegerOverflow {
+                context: "streamed pack compression work",
+            })?;
+        Ok(Self::new(
+            DeflateLimits {
+                max_input_bytes: limits.max_object_bytes.max(1),
+                max_output_bytes: limits.max_input_bytes,
+                max_work_units: work.max(DeflateLimits::GIT_OBJECT.max_work_units),
+                ..DeflateLimits::GIT_OBJECT
+            },
+            profile.compression,
+        ))
+    }
 }
 
 impl PackEntryEncoder for DeterministicPackEncoder {
@@ -1333,9 +1503,77 @@ impl PackEntryEncoder for DeterministicPackEncoder {
         self.encode_with_work(input, deadline, emit)
             .map(|(receipt, _)| receipt)
     }
+
+    fn encode_blob_stream(
+        &mut self,
+        input: &mut dyn CanonicalBlobReader,
+        declared_length: usize,
+        deadline: &mut dyn Deadline,
+        emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
+    ) -> Result<DeflateReceipt, PackWriteError> {
+        self.encode_stream_with_work(input, declared_length, deadline, emit)
+            .map(|(receipt, _)| receipt)
+    }
 }
 
 impl DeterministicPackEncoder {
+    fn encode_stream_with_work(
+        &mut self,
+        input: &mut dyn CanonicalBlobReader,
+        declared_length: usize,
+        deadline: &mut dyn Deadline,
+        emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
+    ) -> Result<(DeflateReceipt, u64), PackWriteError> {
+        checkpoint(deadline)?;
+        if declared_length > self.limits.max_input_bytes {
+            return Err(DeflateRefusal::ResourceLimit {
+                resource: fgit_deflate::Resource::InputBytes,
+                limit: self.limits.max_input_bytes as u64,
+                observed: declared_length as u64,
+            }
+            .into());
+        }
+        let mut encoder = Deflater::new(self.limits, self.profile)?;
+        emit(&encoder.take_output())?;
+        let mut chunk = [0; ENCODER_INPUT_CHUNK_BYTES];
+        loop {
+            // Refill a complete fixed-size input chunk across short reads so
+            // source fragmentation never changes the deterministic zlib bytes.
+            let mut filled = 0;
+            while filled < chunk.len() {
+                checkpoint(deadline)?;
+                let read = input.read(&mut chunk[filled..]);
+                checkpoint(deadline)?;
+                let count = read?;
+                if count > chunk.len() - filled {
+                    return Err(PackWriteError::SourceReadOverflow {
+                        count,
+                        capacity: chunk.len() - filled,
+                    });
+                }
+                if count == 0 {
+                    break;
+                }
+                filled += count;
+            }
+            if filled != 0 {
+                let mut control = DeflateDeadline { deadline };
+                let _ = encoder.push_with_control(&chunk[..filled], &mut control)?;
+                emit(&encoder.take_output())?;
+            }
+            if filled < chunk.len() {
+                break;
+            }
+        }
+        let mut control = DeflateDeadline { deadline };
+        encoder.finish_with_control(&mut control)?;
+        emit(&encoder.take_output())?;
+        let receipt = encoder
+            .receipt()
+            .ok_or(PackWriteError::MissingCompressionReceipt)?;
+        Ok((receipt, encoder.work_units()))
+    }
+
     fn encode_with_work(
         &mut self,
         input: &[u8],
@@ -1529,6 +1767,34 @@ impl PackWriter {
 }
 
 /// Emits one planned entry at the current offset and records that offset.
+fn selected_object_total(
+    length: usize,
+    previous: usize,
+    planner: &PackLimits,
+    writer: &PackLimits,
+) -> Result<usize, PackWriteError> {
+    planner.object_size(length)?;
+    writer.object_size(length)?;
+    let total = previous
+        .checked_add(length)
+        .ok_or(PackError::IntegerOverflow {
+            context: "selected pack plan total object bytes",
+        })?;
+    for limit in [
+        planner.max_total_expanded_bytes,
+        writer.max_total_expanded_bytes,
+    ] {
+        if total > limit {
+            return Err(PackError::TotalExpandedLimit {
+                actual: total,
+                limit,
+            }
+            .into());
+        }
+    }
+    Ok(total)
+}
+
 /// [`PackWriter::write_into`] and [`PackPlanner::stream_selected_thin`] both
 /// emit through this, so equal decisions give equal bytes. Returns the
 /// member's receipt and whether the entry is a delta.
@@ -1903,9 +2169,42 @@ impl<'limits> DeltaSelector<'limits> {
     /// Appends a decided entry; an index whose base left the candidates goes
     /// with it. Indexes are a cache, so dropping one changes no decision.
     fn push(&mut self, entry: PackPlanEntry) -> Result<(), PackWriteError> {
+        let barrier = self
+            .profile
+            .streams_blob(entry.object.object_type, entry.object.body.len());
         self.window.push(entry)?;
+        if barrier {
+            self.window.start = self.window.len();
+            self.window.candidate_bytes = 0;
+            if self.window.evict {
+                self.window.entries.clear();
+                self.window.fanout.clear();
+                self.window.first = self.window.start;
+                self.window.resident_bytes = 0;
+            }
+        }
         let start = self.window.start;
         self.indexes.retain(|(base_index, _)| *base_index >= start);
+        Ok(())
+    }
+
+    /// A full streamed blob occupies one absolute pack offset, but retains no
+    /// body and is a delta-window barrier under the selected frozen profile.
+    fn advance_streamed_blob(&mut self) -> Result<(), PackWriteError> {
+        let next = self
+            .window
+            .len()
+            .checked_add(1)
+            .ok_or(PackError::IntegerOverflow {
+                context: "streamed blob pack index",
+            })?;
+        self.window.entries.clear();
+        self.window.fanout.clear();
+        self.window.first = next;
+        self.window.start = next;
+        self.window.candidate_bytes = 0;
+        self.window.resident_bytes = 0;
+        self.indexes.clear();
         Ok(())
     }
 
@@ -1916,6 +2215,13 @@ impl<'limits> DeltaSelector<'limits> {
         external: &ExternalBases,
         deadline: &mut D,
     ) -> Result<Option<PlannedDelta>, PackWriteError> {
+        if self
+            .profile
+            .streams_blob(object.object_type, object.body.len())
+        {
+            checkpoint(deadline)?;
+            return Ok(None);
+        }
         let profile = self.profile;
         let limits = self.limits;
         let max_delta_fanout = limits.max_delta_fanout;

@@ -490,6 +490,21 @@ impl MemoizedPackEncoder {
         Self::new(DeflateLimits::GIT_OBJECT, profile, cache)
     }
 
+    /// The same bounded retention policy with explicit pack byte/work limits
+    /// for blobs too large for the historical buffered encoder envelope.
+    pub fn for_pack_limits(
+        profile: PackWriteProfile,
+        limits: &PackLimits,
+        cache: Arc<PackComputationCache>,
+    ) -> Result<Self, PackWriteError> {
+        Ok(Self {
+            encoder: DeterministicPackEncoder::for_pack_limits(profile, limits)?,
+            profile,
+            cache,
+            work_units: 0,
+        })
+    }
+
     #[must_use]
     pub fn new(
         limits: DeflateLimits,
@@ -586,6 +601,23 @@ impl MemoizedPackEncoder {
 }
 
 impl PackEntryEncoder for MemoizedPackEncoder {
+    fn encode_blob_stream(
+        &mut self,
+        input: &mut dyn CanonicalBlobReader,
+        declared_length: usize,
+        deadline: &mut dyn Deadline,
+        emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
+    ) -> Result<DeflateReceipt, PackWriteError> {
+        // A large blob never becomes a retained capture or an unverified
+        // identity-only cache hit. Its source is read and checked every time.
+        let (receipt, work) =
+            self.encoder
+                .encode_stream_with_work(input, declared_length, deadline, emit)?;
+        self.work_units = self.work_units.saturating_add(work);
+        self.cache.charge_compression(work);
+        Ok(receipt)
+    }
+
     fn encode_entry(
         &mut self,
         input: &[u8],
