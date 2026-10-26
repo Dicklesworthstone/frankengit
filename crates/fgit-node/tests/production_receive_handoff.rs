@@ -262,49 +262,67 @@ fn raw_receive_refuses_anonymous_session_before_unpacking() {
 
 #[test]
 fn raw_receive_cancellation_prevents_quarantine_handoff_and_publication() {
-    let scratch = ScratchDirectory::new();
-    let node = serving_node(scratch.path().join("node"));
-    let materialization_request = node.request_context();
-    let materialized = node
-        .runtime()
-        .block_on(node.materialize_admission_in(&materialization_request))
-        .expect("empty genesis state materializes");
-    let blob = b"cancelled quarantine blob\n";
-    let object_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, blob);
-    let command = format!(
-        "{} {object_id} refs/tags/transport-main\0report-status",
-        zero_oid()
-    )
-    .into_bytes();
-    let input = packet_line(command, &one_blob_pack(blob));
-    let request = node.request_context();
-    let mut cancelled = || false;
+    // Cancellation is checked at two boundaries. The bounded intake checks
+    // before it retains each fragment of the input; the native machine checks
+    // again before the quarantine handoff. Neither boundary may publish.
+    for (live_checkpoints, expected) in [
+        (
+            0,
+            ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress),
+        ),
+        (1, ReceiveError::Cancelled),
+    ] {
+        let scratch = ScratchDirectory::new();
+        let node = serving_node(scratch.path().join("node"));
+        let materialization_request = node.request_context();
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&materialization_request))
+            .expect("empty genesis state materializes");
+        let blob = b"cancelled quarantine blob\n";
+        let object_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, blob);
+        let command = format!(
+            "{} {object_id} refs/tags/transport-main\0report-status",
+            zero_oid()
+        )
+        .into_bytes();
+        let input = packet_line(command, &one_blob_pack(blob));
+        let request = node.request_context();
+        let mut checkpoints = 0;
+        let mut live = || {
+            checkpoints += 1;
+            checkpoints <= live_checkpoints
+        };
 
-    let refusal = node
-        .runtime()
-        .block_on(node.receive_loopback_pack_durable_in(
-            &request,
-            &authenticated_session(),
-            &materialized,
-            receive_context(),
-            &input,
-            ParseLimits::default(),
-            AdmissionLimits::default(),
-            &mut cancelled,
-        ));
+        let refusal = node
+            .runtime()
+            .block_on(node.receive_loopback_pack_durable_in(
+                &request,
+                &authenticated_session(),
+                &materialized,
+                receive_context(),
+                &input,
+                ParseLimits::default(),
+                AdmissionLimits::default(),
+                &mut live,
+            ));
 
-    assert!(matches!(
-        refusal,
-        Err(NodeReceiveTransportRefusal::Admission(error))
-            if matches!(error.as_ref(), AdmissionError::Receive(ReceiveError::Cancelled))
-    ));
-    let after_request = node.request_context();
-    let after = node
-        .runtime()
-        .block_on(node.materialize_admission_in(&after_request))
-        .expect("cancelled receive leaves the empty head materializable");
-    assert!(after.snapshot().refs.is_empty());
-    node.shutdown().expect("node closes cleanly");
+        assert!(
+            matches!(
+                &refusal,
+                Err(NodeReceiveTransportRefusal::Admission(error))
+                    if matches!(error.as_ref(), AdmissionError::Receive(observed) if *observed == expected)
+            ),
+            "{live_checkpoints} live checkpoints: {refusal:?}"
+        );
+        let after_request = node.request_context();
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&after_request))
+            .expect("cancelled receive leaves the empty head materializable");
+        assert!(after.snapshot().refs.is_empty());
+        node.shutdown().expect("node closes cleanly");
+    }
 }
 
 #[test]
