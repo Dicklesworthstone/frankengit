@@ -903,10 +903,10 @@ impl OneNode {
     }
 
     /// [`Self::smart_http_receive_stream_in`] for a serving process that
-    /// bounds its concurrent writers: the upload is not gated, and once
-    /// ingress completes this receive waits, on its server-work clock, for
-    /// one of `writers`' admissions before it materializes, validates and
-    /// admits.
+    /// bounds its concurrent writers: upload and structural pack validation
+    /// are not gated. Once that bounded work completes, this receive waits on
+    /// its server-work clock for one of `writers`' admissions, then selects a
+    /// fresh authority basis for native validation, staging and publication.
     pub(crate) fn smart_http_receive_stream_gated_in<R, W, C>(
         &self,
         request: &RequestHead<'_>,
@@ -1044,8 +1044,13 @@ impl OneNode {
         let processing = super::GitDaemonReceiveProcessingDeadline::new(
             self.git_daemon_receive_processing_timeout,
         );
-        let writer_permit = super::admit_writer(writers, &deadline)?;
         let mut live = || cancellation.checkpoint() && !deadline.expired() && !processing.expired();
+        // Inflating and checking the complete untrusted pack needs no writer
+        // capacity. Keep its exclusive quarantine owner while waiting, then
+        // select authority after admission so another push cannot stale the
+        // validation basis merely by finishing while this request prepared.
+        let quarantine = rpc.into_quarantine(&mut live)?;
+        let writer_permit = super::admit_writer(writers, &deadline)?;
         let node_request = super::NodeRequestContext {
             authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
         };
@@ -1072,8 +1077,9 @@ impl OneNode {
             .map_err(ReceiveError::AuthoritativeRefusal)?;
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
-        let completion = match rpc.finish_with_handoff(&mut handoff, &mut live) {
-            Err(RpcError::Receive(ReceiveError::AuthoritativeRefusal(code))) => {
+        let received = quarantine.request().clone();
+        let completion = match quarantine.handoff(&mut handoff, &mut live) {
+            Err(ReceiveError::AuthoritativeRefusal(code)) => {
                 // Admission is finished; a slow response must not hold the
                 // process's writer capacity while this verdict is delivered.
                 drop(writer_permit);
@@ -1081,9 +1087,7 @@ impl OneNode {
                 // per ref in a 200 receive-pack result, as git-receive-pack
                 // answers over HTTP. The refusal is still returned: nothing is
                 // admitted and the request counts as refused (frankengit-87c7).
-                let report = rpc.refused_request().and_then(|refused| {
-                    verdict::command_verdict_report(refused, code, &receive_limits)
-                });
+                let report = verdict::command_verdict_report(&received, code, &receive_limits);
                 if let Some(report) = report {
                     let body = fgit_wire::encode_packets(&report?, &receive_limits.wire)?;
                     let length =
@@ -1098,8 +1102,9 @@ impl OneNode {
                 }
                 return Err(RpcError::Receive(ReceiveError::AuthoritativeRefusal(code)).into());
             }
-            completion => completion?,
+            completion => completion.map_err(RpcError::from)?,
         };
+        drop(received);
         let validated = handoff.into_validated_receive()?;
         if !live() {
             return Err(RpcError::Cancelled.into());

@@ -205,12 +205,30 @@ ends ingress without waiting for client EOF. Bytes beyond the trailer in the
 same read refuse. EOF before the trailer, corruption, invalid commands and
 resource exhaustion do not yield a successful handoff.
 
-After ingress, the node starts independent finite server-work clocks and selects
-a **fresh authenticated authority basis** for production quarantine. The earlier
-advertisement is not reused as the validation witness. An intervening unrelated
-publication therefore does not by itself invalidate otherwise current client
-expected-old conditions. Publication admission still rechecks the exact basis
-and current policy: a later race cannot turn the advertisement into authority.
+After ingress, the node starts independent finite server-work clocks and
+finishes bounded structural pack validation before acquiring writer capacity.
+DEFLATE decoding, entry framing and the native pack checksum therefore run
+outside the one-writer gate. A non-cloneable `ReceiveQuarantine` owns the checked
+entries while the request waits; raw pack bytes have been discarded. Corruption
+is refused before waiting for a writer, and cancellation before handoff drops
+that private quarantine without staging objects or creating a session seal.
+
+Only after acquiring the permit does the node select a **fresh authenticated
+authority basis** for native object identity, visible-source connectivity and
+policy validation. The earlier advertisement is not reused as the validation
+witness. An intervening publication during structural work or the capacity wait
+therefore does not by itself stale the validation basis. Publication admission
+still rechecks the exact basis and current policy. Immutable object staging and
+authority writes remain inside the existing writer envelope; this split is not
+cross-session combining or a claim of measured throughput improvement
+(`frankengit-root-doctrine-x2mv.4.9`). HTTP and the shared raw Git/SSH coordinator
+use the same native quarantine owner.
+
+Structural preparation uses the existing per-pack input, expanded-byte, object
+and work ceilings and the server's `--max-in-flight` bound. With multiple
+clients enabled, more than one waiting request can retain decoded entries;
+operators must budget that memory against the expanded-byte envelope, not only
+compressed input size. The default remains one in-flight client.
 
 `admit_receive_session_durable_in` owns all command decisions. Non-atomic pushes
 bind their complete semantics and each wire-order child key before publication,
