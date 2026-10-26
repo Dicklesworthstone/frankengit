@@ -71,7 +71,8 @@ pub use treefs_workspace::{
     TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
-    TrustedWorkflowJobArtifacts, TrustedWorkflowRun,
+    TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
+    TrustedWorkflowRun, TrustedWorkflowStepLog,
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,

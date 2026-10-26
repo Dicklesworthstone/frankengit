@@ -650,6 +650,16 @@ where
     ) -> Result<(), WorkerFailure> {
         self.inner.capture_job_outputs(job, live)
     }
+    fn has_job_logs(&self) -> bool {
+        self.inner.has_job_logs()
+    }
+    fn capture_job_logs(
+        &mut self,
+        report: &JobReport,
+        live: &dyn Fn() -> bool,
+    ) -> Result<(), WorkerFailure> {
+        self.inner.capture_job_logs(report, live)
+    }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
         let result = self.inner.finish_job(retain);
         self.scope_open = false;

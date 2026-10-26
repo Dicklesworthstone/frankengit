@@ -110,6 +110,8 @@ pub struct TrustedWorkflowRun {
     /// Explicit operator output contract, included in the immutable attempt identity.
     pub artifact_contract: Option<TrustedWorkflowArtifactConfig>,
     pub artifacts: Vec<artifacts::TrustedWorkflowJobArtifacts>,
+    /// Immutable custody for exact captured step streams, separate from outputs.
+    pub artifact_logs: Vec<artifacts::TrustedWorkflowJobLogs>,
     /// Verified copies supplied to started consumers in their private namespace.
     pub artifact_inputs: Vec<artifacts::TrustedWorkflowJobArtifactInputs>,
     pub execution: WorkflowReport,
@@ -206,6 +208,20 @@ impl TrustedWorkflowRun {
                         .join(",")
                 )
             });
+        if self
+            .artifact_contract
+            .as_ref()
+            .is_some_and(|config| config.capture_logs())
+        {
+            artifacts.push_str(&format!(
+                ",\"artifact_logs\":[{}]",
+                self.artifact_logs
+                    .iter()
+                    .map(artifacts::TrustedWorkflowJobLogs::to_json)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
         if self
             .artifact_contract
             .as_ref()
@@ -617,6 +633,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         request_interrupted: false,
         artifact_contract: artifact_session.map(|session| session.config.clone()),
         artifacts: Vec::new(),
+        artifact_logs: Vec::new(),
         artifact_inputs: Vec::new(),
         execution: WorkflowReport {
             source: plan.source_commitment(),
@@ -692,6 +709,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     report.execution = coordinated.execute(&report.run_directory, &mut worker, &live)?;
     if let Some(collector) = &mut worker.artifacts {
         report.artifacts = std::mem::take(&mut collector.jobs);
+        report.artifact_logs = std::mem::take(&mut collector.logs);
         report.artifact_inputs = std::mem::take(&mut collector.inputs);
     }
     report.workspaces_closed = !worker.retained && worker.current.is_none();
@@ -897,6 +915,37 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
             &mut self.capture_paths,
             live,
         )
+    }
+    fn has_job_logs(&self) -> bool {
+        self.artifacts
+            .as_ref()
+            .is_some_and(|collector| collector.logs_enabled())
+    }
+    fn capture_job_logs(
+        &mut self,
+        report: &fgit_runner::workflow::JobReport,
+        live: &dyn Fn() -> bool,
+    ) -> Result<(), WorkerFailure> {
+        let Some(collector) = &mut self.artifacts else {
+            return Err(WorkerFailure::new("log custody contract missing", false));
+        };
+        // The job workspace has closed (or is explicitly retained). The collector
+        // reads only owned StepObservation bytes and settles its new stage files.
+        let captured = collector.capture_logs(
+            self.job_index,
+            report,
+            &self.parent,
+            &self.directory,
+            &mut self.capture_paths,
+            live,
+        );
+        if captured
+            .as_ref()
+            .is_err_and(|failure| failure.retain_workspace)
+        {
+            self.retained = true;
+        }
+        captured
     }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
         let Some((workspace, ledger)) = self.current.take() else {

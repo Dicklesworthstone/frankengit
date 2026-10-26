@@ -13,10 +13,12 @@ use fgit_types::{Digest, DigestBytes};
 use std::cell::Cell;
 use std::time::Duration;
 mod inputs;
+mod logs;
 pub use inputs::{
     DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowJobArtifactInputs,
 };
+pub use logs::{TrustedWorkflowJobLogs, TrustedWorkflowLogStream, TrustedWorkflowStepLog};
 
 /// Filesystem namespace selected with fg artifact inspect/export --trust-domain.
 pub const TRUSTED_WORKFLOW_ARTIFACT_TRUST: &str = "trusted-workflow-local-owner";
@@ -80,20 +82,43 @@ pub struct TrustedWorkflowArtifactConfig {
     selections: Vec<TrustedWorkflowArtifactSelection>,
     maximum_bytes: usize,
     total_bytes: usize,
+    capture_logs: bool,
     inputs: Vec<TrustedWorkflowArtifactInput>,
     input_total_bytes: usize,
 }
 impl TrustedWorkflowArtifactConfig {
     pub fn new(
         root: PathBuf,
+        selections: Vec<TrustedWorkflowArtifactSelection>,
+        maximum_bytes: usize,
+        total_bytes: usize,
+    ) -> Result<Self, &'static str> {
+        Self::build(root, selections, maximum_bytes, total_bytes, false)
+    }
+
+    /// Retain bounded stdout/stderr observations as well as selected outputs.
+    /// Empty output selections explicitly request logs only. Log bytes are raw,
+    /// possibly incomplete process output and never authorize a successful check.
+    pub fn new_with_logs(
+        root: PathBuf,
+        selections: Vec<TrustedWorkflowArtifactSelection>,
+        maximum_bytes: usize,
+        total_bytes: usize,
+    ) -> Result<Self, &'static str> {
+        Self::build(root, selections, maximum_bytes, total_bytes, true)
+    }
+
+    fn build(
+        root: PathBuf,
         mut selections: Vec<TrustedWorkflowArtifactSelection>,
         maximum_bytes: usize,
         total_bytes: usize,
+        capture_logs: bool,
     ) -> Result<Self, &'static str> {
         if !root.is_absolute() || root.as_os_str().as_bytes().len() > 4096 {
             return Err("artifact root must be an absolute bounded private directory");
         }
-        if selections.is_empty()
+        if (selections.is_empty() && !capture_logs)
             || selections.len() > MAX_SELECTIONS
             || maximum_bytes == 0
             || maximum_bytes > MAX_ARTIFACT_BYTES
@@ -118,6 +143,7 @@ impl TrustedWorkflowArtifactConfig {
             selections,
             maximum_bytes,
             total_bytes,
+            capture_logs,
             inputs: Vec::new(),
             input_total_bytes: DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES,
         })
@@ -133,6 +159,9 @@ impl TrustedWorkflowArtifactConfig {
     }
     pub const fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+    pub const fn capture_logs(&self) -> bool {
+        self.capture_logs
     }
 
     pub(super) fn to_json(&self) -> String {
@@ -151,6 +180,12 @@ impl TrustedWorkflowArtifactConfig {
         if !self.inputs.is_empty() {
             json.pop();
             json.push_str(&format!(",\"input_delivery\":{}}}", self.inputs_json()));
+        }
+        if self.capture_logs {
+            json.pop();
+            json.push_str(
+                ",\"log_capture\":{\"schema_version\":1,\"streams\":[\"stdout\",\"stderr\"]}}",
+            );
         }
         json
     }
@@ -318,6 +353,7 @@ pub(super) struct Collector<'a> {
     workflow: Vec<u8>,
     source_rcr: Option<Digest>,
     pub(super) jobs: Vec<TrustedWorkflowJobArtifacts>,
+    pub(super) logs: Vec<TrustedWorkflowJobLogs>,
     pub(super) inputs: Vec<TrustedWorkflowJobArtifactInputs>,
     completed: std::collections::BTreeMap<String, fgit_runner::workflow::JobOutcome>,
 }
@@ -339,6 +375,7 @@ impl<'a> Collector<'a> {
             workflow: report.workflow_path.clone(),
             source_rcr,
             jobs: Vec::new(),
+            logs: Vec::new(),
             inputs: Vec::new(),
             completed: std::collections::BTreeMap::new(),
         }
