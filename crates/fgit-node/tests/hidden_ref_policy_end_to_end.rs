@@ -76,8 +76,9 @@ use std::time::Duration;
 use fgit_admission::AdmissionLimits;
 use fgit_authority::{
     AuthorityLimits, HeadGeneration, HeadKey, HeadRead, IdempotencyKey, StoreInstanceId,
-    authority_head_identity, read_repository_incarnation_configuration_async,
-    stage_hidden_ref_policy_async, stage_latest_repository_incarnation_configuration_async,
+    TerminalOutcome, authority_head_identity, collect_cumulative_outcomes_async,
+    read_repository_incarnation_configuration_async, stage_hidden_ref_policy_async,
+    stage_latest_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_codec::{
@@ -421,6 +422,27 @@ fn publish_policy(root: &Path, repository_id: RepositoryId, rules: &[&[u8]]) {
                 ),
             },
         }];
+        // The batch's outcome root is the repository's cumulative outcome index
+        // after it, folded exactly as the chronicle folds a real batch. Carrying
+        // the predecessor's root forward while adding a decision is the
+        // frankengit-d6nl defect, which publication refuses (frankengit-zooz).
+        let stamped: Vec<_> = decisions
+            .iter()
+            .map(|decision| {
+                (
+                    decision.tx_id,
+                    TerminalOutcome {
+                        decision_sequence: decision.decision_sequence,
+                        outcome: decision.outcome,
+                    },
+                )
+            })
+            .collect();
+        let outcome_index_root = runtime
+            .block_on(collect_cumulative_outcomes_async(&store, &cx, &head_key))
+            .expect("the predecessor's cumulative outcome index collects")
+            .fold_against(receipt.token(), &stamped)
+            .expect("the policy batch's cumulative outcome root folds");
         let dummy_evidence_root = fgit_types::Digest::new(
             DigestAlgorithmId::try_new(2).expect("valid slot"),
             DigestBytes::try_new(&[0; 32]).expect("32 bytes"),
@@ -434,7 +456,7 @@ fn publish_policy(root: &Path, repository_id: RepositoryId, rules: &[&[u8]]) {
             committed_rcrs: vec![],
             resulting_ref_root: advanced.ref_root,
             resulting_forge_position_root: advanced.forge_position_root,
-            resulting_outcome_index_root: advanced.outcome_index_root,
+            resulting_outcome_index_root: outcome_index_root,
             resulting_retention_root: advanced.retention_root,
             resulting_outbox_root: advanced.outbox_root,
             resulting_policy_epoch: advanced.policy_epoch,
@@ -473,7 +495,7 @@ fn publish_policy(root: &Path, repository_id: RepositoryId, rules: &[&[u8]]) {
             latest_repository_sequence: advanced.latest_repository_sequence,
             ref_root: advanced.ref_root,
             forge_position_root: advanced.forge_position_root,
-            outcome_index_root: advanced.outcome_index_root,
+            outcome_index_root,
             retention_root: advanced.retention_root,
             outbox_root: advanced.outbox_root,
             configuration_root,
@@ -1147,4 +1169,70 @@ fn names(refs: &[Vec<u8>]) -> Vec<String> {
     refs.iter()
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect()
+}
+
+/// A node whose first publication is a production forge write, not a receive,
+/// still admits pushes, before and after a reopen: each later batch folds its
+/// decisions into the cumulative outcome index the forge publication left
+/// (frankengit-zooz). That a root carried forward is refused is pinned in
+/// fgit-authority's outcome_index cumulative_publication tests.
+#[test]
+fn pushes_after_a_first_forge_publication_commit_before_and_after_reopen() {
+    use fgit_forge::{
+        ExpectedVersion, IssueNumber,
+        event::issue::{IssueAction, IssueCommand},
+    };
+
+    let scratch = ScratchDirectory::new();
+    let node_config = config(scratch.0.clone());
+    let (mut created, _) =
+        OneNode::init(node_config.clone()).expect("the genesis configuration persists");
+    created
+        .bring_into_service(HeadGeneration::FIRST)
+        .expect("the initialized node enters service");
+
+    let command = IssueCommand {
+        number: IssueNumber::try_new(1).expect("issue number one"),
+        expected_version: ExpectedVersion::NewStream,
+        action: IssueAction::Open {
+            title: "first publication".into(),
+            body: "A forge write before any receive.".into(),
+            labels: vec![],
+        },
+    };
+    let session = LoopbackReceiveSession::authenticated(
+        PrincipalId::from_bytes([0x74; 16]),
+        IdempotencyKey::new(b"zooz-first-forge-publication".to_vec())
+            .expect("bounded retry key constructs"),
+    );
+    let (_, issue) = created
+        .runtime()
+        .block_on(created.admit_issue_durable_in(
+            &created.request_context(),
+            &session,
+            &command,
+            AdmissionLimits::default(),
+        ))
+        .expect("the issue reaches durable admission");
+    assert!(matches!(issue.outcome, DecisionOutcome::Committed { .. }));
+
+    // The first receive after the forge publication.
+    push_two_refs(&created);
+    created.shutdown().expect("the node quiesces");
+
+    let mut node = OneNode::open_existing(node_config).expect("the published head opens");
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("the reopened node enters service");
+    let outcomes = push(
+        &node,
+        &[(ADMITTED_REF, ADMITTED_BLOB)],
+        b"zooz-push-after-reopen",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        matches!(outcomes[0], DecisionOutcome::Committed { .. }),
+        "a push after the reopen commits, got {:?}",
+        outcomes[0]
+    );
+    node.shutdown().expect("the reopened node quiesces");
 }

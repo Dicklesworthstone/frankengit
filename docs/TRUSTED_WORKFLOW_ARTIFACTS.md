@@ -1,11 +1,12 @@
-# Retained outputs from trusted workflows
+# Retained outputs and logs from trusted workflows
 
-`fg workflow run`, `dispatch`, `run-candidate` and `run-merge-candidate` can
-retain explicitly selected output files through the existing immutable
-`LocalArtifactStore`.
-The runner copies and verifies these files after the job's processes have
-settled and before its private TreeFS workspace is closed. A completed report
-includes exact artifact IDs that can be inspected or exported after the
+`fg workflow run`, `dispatch`, `run-candidate`, `run-merge-candidate`,
+`dispatch-merge-candidate` and `watch` can retain explicitly selected output files
+and opt-in step logs through the existing immutable `LocalArtifactStore`.
+The runner copies and verifies selected files after the job's processes have
+settled and before its private TreeFS workspace is closed. Logs preserve the
+runner's already bounded stdout/stderr bytes during job finalization. A completed
+report includes exact artifact IDs that can be inspected or exported after the
 workspaces and producing node are gone.
 
 This is the trusted local script execution profile. Review every script and
@@ -42,7 +43,7 @@ marker.
 
 Select up to 64 distinct files. Each path is at most 4096 bytes; workflow and
 output path bytes across all selectors are at most 64 KiB. Defaults are 16 MiB
-per file and 64 MiB of raw output payloads per invocation. Configure these with
+per payload and 64 MiB of combined raw file/log payloads per invocation. Configure these with
 `--max-artifact-mib 1..64` and `--max-artifact-total-mib 1..512`. Zero-length
 regular files are valid. Provenance is bounded separately to 1 MiB per producing
 job, with at most 64 selected jobs. These limits bound this collection operation;
@@ -60,7 +61,76 @@ Capture is opt-in: calls without a contract keep their original attempt identity
 and result fields. Candidate modes use the same file validation, custody and
 job-settlement code, not an alternate artifact store or publication path.
 
-### Retain an unpublished candidate's build output
+## Retain stdout and stderr, including failed steps
+
+Use the valueless `--artifact-logs` flag with the private artifact root to retain
+logs without selecting any output files:
+
+```sh
+fg workflow run "$NODE" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --workflow ci/build.yml --input ci --input src \
+  --run-parent "$RUN_PARENT" --run-id "$RUN_ID" \
+  --artifact-root "$ARTIFACT_ROOT" --artifact-logs
+```
+
+This captures stdout and stderr separately for every recorded step in each
+selected workflow job. It includes observations from failed, cancelled,
+timed-out and output-limited steps. A job with no executed steps produces no log
+receipt. An executed step's empty stream is retained as an empty payload.
+`--artifact` and `--artifact-hex` remain optional and can be combined with logs;
+`--artifact-input` still requires an explicitly selected producer output file.
+The same flag works with dispatch, both candidate execution commands, merge
+candidate dispatch, and push/PR watch executions.
+
+The retained bytes are exactly the bounded binary bytes already captured by the
+runner. They are not decoded, redacted, reconstructed from shell commands or read
+from files in the workspace. Default execution limits remain 256 KiB per stream
+and 16 MiB across captured output; artifact retention does not increase them.
+`output_complete` preserves the runner's completeness observation for that step's
+combined capture; the same value accompanies both streams. A false value means
+the retained payload must not be treated as the full process stream.
+
+Files and logs share `--max-artifact-mib` and `--max-artifact-total-mib`; retaining
+logs consumes the same cumulative allowance as selected output files. A dispatch
+shares that allowance across its children. Separate artifact-input delivery
+budgets are unchanged. `--artifact-logs` is part of the immutable attempt and
+batch capture contract, so it cannot be silently enabled on a previously reserved
+run. Omitting it preserves the existing file-only contract and report fields.
+
+Reports use a separate `artifact_logs` array. Each entry names the exact expanded
+job with `job_id_hex`, its immutable `manifest_id_sha256`, the
+`observed_job_outcome`, and a `logs` array containing each retained step stream:
+
+| Field | Meaning |
+|---|---|
+| `step_index`, `step_name_hex`, `script_sha256` | The recorded step's position, optional exact name (`null` when unnamed) and script commitment. |
+| `stream` | `stdout` or `stderr`; each is a separate immutable payload. |
+| `observed_step_outcome`, `exit_code` | The runner's observed step result and optional process exit code. |
+| `output_complete` | Whether the runner reported complete captured output for the step. |
+| `artifact_id_sha256` | Exact log identity used for inspect, export, HTTP or MCP reads. |
+| `payload_sha256`, `payload_bytes` | Digest and length of the retained raw bytes. |
+
+Each producing job also receives a synced, create-only `job-NNN-logs.json` receipt
+that links its immutable log provenance manifest. The receipt preserves custody
+independently of a later workflow report write. The manifest binds the exact
+attempt, workflow, job, executed source and per-step observations, including
+unpublished candidate provenance when relevant. Logs use `BuildLog` payloads;
+log manifests use `Provenance` and the same `trusted-workflow-local-owner` scope.
+
+`observed_job_outcome` records the job outcome before log custody settlement; the
+final report and journal still own the result if a later custody or cleanup
+operation fails. Log custody can preserve these owned observations even when
+unproved containment requires retaining the original workspace; it never reopens
+live process captures or workspace paths. All jobs in one workflow share a separate, cumulative 30-second allowance for
+log finalization after job close. Execution cancellation does not skip this drain
+of already captured bytes, and it never permits another step to run. A custody
+failure prevents an otherwise successful job from reporting success; existing
+failed or stopped results remain non-successful. The log ID, manifest and receipt
+do not grant check publication or cache reuse. Logs may contain
+secrets printed by trusted scripts; artifact-read access exposes these raw bytes
+under the same repository-incarnation grant as other workflow artifacts.
+
+## Retain an unpublished candidate's build output
 
 ```sh
 fg workflow run-candidate "$NODE" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
@@ -192,8 +262,9 @@ their existing capture-only marker, report and manifest bytes.
 
 ## What is retained
 
-A successful capture adds an `artifact_contract` to the immutable attempt and
-an `artifacts` array to the run report. Each array member contains a
+Capture adds an `artifact_contract` to the immutable attempt. Successfully
+retained selected files appear in the run report's `artifacts` array, separately
+from `artifact_logs`. Each file-producing job's array member contains a
 `job_id_hex`, a `manifest_id_sha256` and output entries with:
 
 | Field | Meaning |
@@ -307,7 +378,7 @@ not satisfy it.
 
 For authenticated remote inspection and downloads on Linux, the operator can
 start `fg serve-http` with this existing `--artifact-root` and grant a separate
-`artifact-read` credential. Use the result or saved receipt's exact output or
+`artifact-read` credential. Use the result or saved receipt's exact output, log or
 manifest ID. This explicitly grants the complete repository incarnation's fixed
 workflow namespace, including hidden-ref outputs; ordinary Git/source grants
 never imply it. See [Authenticated workflow artifact downloads](HTTP_WORKFLOW_ARTIFACTS.md)
@@ -335,8 +406,8 @@ can review the report's executable flag before applying their own permissions.
 See `NATIVE_ARTIFACT_COMMANDS.md` and `LOCAL_ARTIFACT_STORAGE.md` for the storage
 identity, verification and no-overwrite rules.
 
-Artifacts use the existing `CiArtifact` payload kind; manifests use
-`Provenance`. Their retention identity is `HotEphemeral` with 86400-second TTL
+Selected files use the existing `CiArtifact` payload kind; step stdout/stderr use
+`BuildLog`; file and log manifests use `Provenance`. Their retention identity is `HotEphemeral` with 86400-second TTL
 metadata. This feature does not automatically delete files or register retention
 authority. Repeated exact payload custody verifies an existing immutable object;
 it never skips the producing scripts or treats an object name as authorization.

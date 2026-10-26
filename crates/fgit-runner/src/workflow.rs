@@ -27,6 +27,9 @@ pub const PROFILE: &str = "trusted-local-foreground-v1";
 pub const MAX_JOBS: usize = 128;
 pub const MAX_STEPS: usize = 512;
 pub const MAX_REPORT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+/// Cumulative time reserved for persisting already captured logs after job close.
+/// This drain allowance never restarts execution or grants another job a scope.
+pub const LOG_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Finite limits; output bounds describe retained bytes, not an OS disk quota.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,6 +195,7 @@ impl WorkflowPlan {
         };
         let mut completed = BTreeMap::new();
         let mut remaining = limits.total_output_bytes;
+        let mut log_finalization_left = LOG_FINALIZATION_TIMEOUT;
         let mut containment_lost = false;
         let mut cancelled = false;
         for (index, job) in self.graph.jobs.iter().enumerate() {
@@ -439,6 +443,61 @@ impl WorkflowPlan {
                         {
                             result.outcome = job_stopped();
                         }
+                        // Persist owned, normalized observations after workspace
+                        // close and before the durable terminal notification. A
+                        // cancelled/expired execution still owns this finite drain
+                        // obligation; it may not launch or inspect live processes.
+                        // All jobs share one allowance, so retries/jobs cannot
+                        // replenish finalization time. Disabled adapters preserve
+                        // their historical liveness checkpoint order exactly.
+                        if executor.has_job_logs() && !result.steps.is_empty() {
+                            let began = elapsed();
+                            let allowance = log_finalization_left;
+                            let finalize_live = || elapsed().saturating_sub(began) < allowance;
+                            let captured = if allowance.is_zero() {
+                                Err(WorkerFailure::new(
+                                    "workflow log finalization deadline exhausted",
+                                    false,
+                                ))
+                            } else {
+                                executor.capture_job_logs(&result, &finalize_live)
+                            };
+                            let spent = elapsed().saturating_sub(began);
+                            log_finalization_left = allowance.saturating_sub(spent);
+                            let captured = captured.and_then(|()| {
+                                if spent >= allowance {
+                                    Err(WorkerFailure::new(
+                                        "workflow log finalization deadline exhausted",
+                                        false,
+                                    ))
+                                } else {
+                                    Ok(())
+                                }
+                            });
+                            if let Err(failure) = captured {
+                                containment_lost |= failure.retain_workspace;
+                                let retain =
+                                    failure.retain_workspace || result.requires_containment();
+                                if result.outcome == JobOutcome::Succeeded {
+                                    result.outcome = JobOutcome::Refused;
+                                }
+                                let detail = result.failure.take().map_or_else(
+                                    || format!("logs: {}", failure.detail),
+                                    |original| {
+                                        format!("{}; logs: {}", original.detail, failure.detail)
+                                    },
+                                );
+                                result.failure = Some(WorkerFailure::new(detail, retain));
+                            }
+                            // Log custody is never proof of successful execution.
+                            // A stop observed while draining cannot become green.
+                            if (result.outcome == JobOutcome::Succeeded
+                                || (job_timeout.is_some() && result.outcome == JobOutcome::Failed))
+                                && !job_live()
+                            {
+                                result.outcome = job_stopped();
+                            }
+                        }
                     }
                 }
             }
@@ -556,6 +615,31 @@ pub trait WorkflowExecutor {
     }
 
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure>;
+
+    /// Whether this adapter has an explicit custody obligation for captured logs.
+    /// Disabled adapters acquire no new work or cancellation checkpoints.
+    fn has_job_logs(&self) -> bool {
+        false
+    }
+
+    /// Persist only the report's bounded, normalized, already captured bytes.
+    /// Called after unconditional job close, including for failed, cancelled,
+    /// timed-out or output-limited observations, before observe_job can persist a
+    /// terminal result. `live` is the remaining cumulative log-finalization
+    /// allowance, not permission to resume execution. The adapter must settle
+    /// any newly acquired file/upload obligations even if persistence fails.
+    /// Failure prevents a successful job result and preserves existing stop or
+    /// containment outcomes. Stored provenance cannot authorize a green check.
+    fn capture_job_logs(
+        &mut self,
+        _report: &JobReport,
+        _live: &dyn Fn() -> bool,
+    ) -> Result<(), WorkerFailure> {
+        Err(WorkerFailure::new(
+            "executor does not implement log custody",
+            false,
+        ))
+    }
 
     /// Receives one normalized terminal observation after cleanup, or after a
     /// job is skipped/refused before starting. Called in graph order before
@@ -743,6 +827,9 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod settlement_tests;
+
+#[cfg(test)]
+mod log_settlement_tests;
 
 #[cfg(test)]
 mod deadline_tests;

@@ -333,3 +333,25 @@ fn pull_request_reporting_preserves_the_original_explicit_publisher_contract() {
     input.drain(index..index + 2);
     assert!(options(&input).is_err());
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn watch_log_only_capture_preserves_poll_options_and_derived_execution_identity() {
+    let mut input = args();
+    input.extend([
+        "--artifact-logs".into(),
+        "--polls".into(),
+        "3".into(),
+        "--artifact-root".into(),
+        "/not-opened-watch-logs".into(),
+    ]);
+    let parsed = options(&input).unwrap();
+    assert_eq!(parsed.polls, 3);
+    assert!(parsed.execution.head.is_none());
+    assert!(parsed.execution.commit.is_none());
+    let config = parsed.execution.artifacts.unwrap().node_config().unwrap();
+    assert!(config.capture_logs());
+    assert!(config.selections().is_empty());
+    input.push("--artifact-logs".into());
+    assert!(options(&input).is_err());
+}

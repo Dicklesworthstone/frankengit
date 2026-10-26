@@ -53,6 +53,7 @@ fn report() -> TrustedWorkflowRun {
         artifact_contract: None,
         artifacts: Vec::new(),
         artifact_inputs: Vec::new(),
+        artifact_logs: Vec::new(),
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),
@@ -452,4 +453,429 @@ fn combined_source_and_input_headroom_cannot_be_replenished_by_child_preflight()
 
     drop((first, second));
     fs::remove_dir(&directory).unwrap();
+}
+
+#[test]
+fn log_retention_is_explicit_log_only_is_valid_and_disabled_contract_bytes_are_unchanged() {
+    let root = "/operator/store";
+    let old = config(root, vec![selection("build", b"out")]);
+    assert!(!old.capture_logs());
+    let expected = format!(
+        "{{\"schema_version\":1,\"root_hex\":\"{}\",\"trust_domain\":\"trusted-workflow-local-owner\",\"maximum_file_bytes\":16777216,\"total_payload_bytes\":67108864,\"retention_ttl_seconds\":86400,\"selections\":[{{\"workflow_path_hex\":\"{}\",\"job_id_hex\":\"6275696c64\",\"output_path_hex\":\"6f7574\"}}]}}",
+        hex(root.as_bytes()),
+        hex(b"workflow.yml"),
+    );
+    assert_eq!(old.to_json(), expected);
+    let enabled = TrustedWorkflowArtifactConfig::new_with_logs(
+        root.into(),
+        old.selections.clone(),
+        old.maximum_bytes(),
+        old.total_bytes(),
+    )
+    .unwrap();
+    assert!(enabled.capture_logs());
+    assert_eq!(
+        enabled.to_json(),
+        format!(
+            "{},\"log_capture\":{{\"schema_version\":1,\"streams\":[\"stdout\",\"stderr\"]}}}}",
+            &expected[..expected.len() - 1],
+        ),
+    );
+    let mut run = report();
+    run.artifact_contract = Some(old);
+    let previous_marker = run.attempt_marker();
+    run.artifact_contract = Some(enabled);
+    assert_ne!(previous_marker, run.attempt_marker());
+    let logs_only =
+        TrustedWorkflowArtifactConfig::new_with_logs(root.into(), vec![], 16, 32).unwrap();
+    assert!(logs_only.capture_logs());
+    assert!(logs_only.selections().is_empty());
+    for (root, maximum, total) in [
+        ("relative", 16, 32),
+        ("/operator/store", 0, 32),
+        ("/operator/store", MAX_ARTIFACT_BYTES + 1, 32),
+        ("/operator/store", 16, 0),
+        ("/operator/store", 16, MAX_ARTIFACT_TOTAL_BYTES + 1),
+    ] {
+        assert!(
+            TrustedWorkflowArtifactConfig::new_with_logs(root.into(), vec![], maximum, total)
+                .is_err()
+        );
+    }
+}
+
+struct LogFixture {
+    directory: PathBuf,
+    root: File,
+    config: TrustedWorkflowArtifactConfig,
+    run: TrustedWorkflowRun,
+}
+impl LogFixture {
+    fn new(maximum: usize, total: usize) -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "fgit-workflow-log-custody-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let store = directory.join("artifacts");
+        fs::DirBuilder::new().mode(0o700).create(&store).unwrap();
+        let config =
+            TrustedWorkflowArtifactConfig::new_with_logs(store, vec![], maximum, total).unwrap();
+        let mut run = report();
+        run.run_directory = directory.clone();
+        run.artifact_contract = Some(config.clone());
+        Self {
+            root: File::open(&directory).unwrap(),
+            directory,
+            config,
+            run,
+        }
+    }
+    fn session(&self) -> Session<'_> {
+        let scope = ArtifactScope::new(
+            self.run.tenant,
+            self.run.repository,
+            self.run.incarnation,
+            TRUSTED_WORKFLOW_ARTIFACT_TRUST,
+        )
+        .unwrap();
+        Session {
+            config: &self.config,
+            store: LocalArtifactStore::open(self.config.root(), scope).unwrap(),
+            remaining: Cell::new(self.config.total_bytes()),
+            input_remaining: Cell::new(DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES),
+            input_materialization_remaining: Cell::new(MAX_REPLICATED_BYTES),
+            input_entry_remaining: Cell::new(MAX_REPLICATED_ENTRIES),
+        }
+    }
+}
+impl Drop for LogFixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.directory).unwrap();
+    }
+}
+fn log_job() -> fgit_runner::workflow::JobReport {
+    use fgit_runner::workflow::{JobOutcome, JobReport, StepOutcome, StepReport};
+    JobReport {
+        id: "build".into(),
+        outcome: JobOutcome::Failed,
+        steps: vec![StepReport {
+            index: 2,
+            name: Some("binary diagnostic".into()),
+            script: fgit_runner::Commitment::of_bytes(b"printf output; exit 7"),
+            observation: StepObservation {
+                outcome: StepOutcome::Failed,
+                exit_code: Some(7),
+                stdout: b"out\0\xff".to_vec(),
+                stderr: b"err\xfe".to_vec(),
+                elapsed_millis: 1,
+                output_complete: true,
+                retain_workspace: false,
+            },
+        }],
+        failure: None,
+    }
+}
+
+#[test]
+fn failed_binary_log_custody_binds_observations_and_exports_after_capture_cleanup() {
+    let fixture = LogFixture::new(64, 128);
+    let session = fixture.session();
+    let mut collector = Collector::new(&session, &fixture.run);
+    let job = log_job();
+    let mut stages = Vec::new();
+    collector
+        .capture_logs(
+            4,
+            &job,
+            &fixture.root,
+            &fixture.directory,
+            &mut stages,
+            &|| true,
+        )
+        .unwrap();
+    assert!(stages.is_empty());
+    assert_eq!(session.remaining.get(), 128 - 9);
+    assert_eq!(collector.logs.len(), 1);
+    let saved = &collector.logs[0];
+    assert_eq!(saved.job_id, job.id);
+    assert_eq!(
+        saved.observed_outcome,
+        fgit_runner::workflow::JobOutcome::Failed
+    );
+    assert_eq!(saved.logs.len(), 2);
+    let live = || true;
+    let operation = ArtifactOperation::new(1024 * 1024, Duration::from_secs(30), &live).unwrap();
+    for (index, (log, bytes, stream)) in [
+        (
+            &saved.logs[0],
+            b"out\0\xff".as_slice(),
+            TrustedWorkflowLogStream::Stdout,
+        ),
+        (
+            &saved.logs[1],
+            b"err\xfe".as_slice(),
+            TrustedWorkflowLogStream::Stderr,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(log.stream, stream);
+        assert_eq!(log.step_index, 2);
+        assert_eq!(log.step_name.as_deref(), Some("binary diagnostic"));
+        assert_eq!(log.script, job.steps[0].script);
+        assert_eq!(
+            log.observed_outcome,
+            fgit_runner::workflow::StepOutcome::Failed
+        );
+        assert_eq!(log.exit_code, Some(7));
+        assert!(log.output_complete);
+        assert_eq!(log.payload_bytes, bytes.len());
+        assert_eq!(log.payload_sha256, digest(bytes));
+        let output = fixture.directory.join(format!("export-{index}"));
+        let identity = session
+            .store
+            .export(&log.artifact_id, &output, &operation)
+            .unwrap();
+        assert_eq!(identity.payload_kind(), ArtifactPayloadKind::BuildLog);
+        assert!(identity.build_capsule_id().is_none());
+        assert!(identity.check_receipt_id().is_none());
+        assert_eq!(fs::read(output).unwrap(), bytes);
+    }
+    let receipt = fs::read_to_string(fixture.directory.join("job-004-logs.json")).unwrap();
+    for field in [
+        "\"type\":\"trusted_workflow_log_receipt\"".to_owned(),
+        "\"type\":\"trusted_workflow_log_provenance\"".to_owned(),
+        "\"observed_job_outcome\":\"failed\"".to_owned(),
+        "\"observed_step_outcome\":\"failed\"".to_owned(),
+        "\"exit_code\":7".to_owned(),
+        "\"job_success_asserted\":false".to_owned(),
+        "\"cache_reuse_authorized\":false".to_owned(),
+        format!("\"attempt_sha256\":\"{}\"", hex(&collector.attempt_sha256)),
+        format!(
+            "\"manifest_id_sha256\":\"{}\"",
+            digest_hex(saved.manifest_id)
+        ),
+    ] {
+        assert!(receipt.contains(&field), "{field}");
+    }
+    let original = receipt;
+    let remaining = session.remaining.get();
+    assert!(
+        collector
+            .capture_logs(
+                4,
+                &job,
+                &fixture.root,
+                &fixture.directory,
+                &mut stages,
+                &|| true
+            )
+            .is_err()
+    );
+    assert_eq!(session.remaining.get(), remaining);
+    assert_eq!(
+        fs::read_to_string(fixture.directory.join("job-004-logs.json")).unwrap(),
+        original
+    );
+    assert!(stages.is_empty());
+}
+
+#[test]
+fn incomplete_cancelled_timed_out_and_output_limited_logs_preserve_their_non_green_observation() {
+    use fgit_runner::workflow::{JobOutcome, StepOutcome};
+    for (job_outcome, step_outcome) in [
+        (JobOutcome::Cancelled, StepOutcome::Cancelled),
+        (JobOutcome::TimedOut, StepOutcome::TimedOut),
+        (JobOutcome::OutputLimit, StepOutcome::OutputLimit),
+    ] {
+        let fixture = LogFixture::new(64, 128);
+        let session = fixture.session();
+        let mut collector = Collector::new(&session, &fixture.run);
+        let mut job = log_job();
+        job.outcome = job_outcome;
+        let observation = &mut job.steps[0].observation;
+        observation.outcome = step_outcome;
+        observation.exit_code = None;
+        observation.output_complete = false;
+        observation.stderr.clear();
+        collector
+            .capture_logs(
+                0,
+                &job,
+                &fixture.root,
+                &fixture.directory,
+                &mut Vec::new(),
+                &|| true,
+            )
+            .unwrap();
+        assert_eq!(collector.logs[0].observed_outcome, job_outcome);
+        for log in &collector.logs[0].logs {
+            assert_eq!(log.observed_outcome, step_outcome);
+            assert_eq!(log.exit_code, None);
+            assert!(!log.output_complete);
+        }
+        assert_eq!(collector.logs[0].logs[1].payload_bytes, 0);
+        let receipt = fs::read_to_string(fixture.directory.join("job-000-logs.json")).unwrap();
+        assert!(receipt.contains("\"output_complete\":false"));
+        assert!(receipt.contains("\"exit_code\":null"));
+        assert!(!receipt.contains("\"succeeded\""));
+    }
+}
+
+#[test]
+fn log_limits_reserve_the_entire_job_before_any_publication_and_share_output_allowance() {
+    for (maximum, total, previously_spent) in [(4, 128, 0), (64, 8, 0), (64, 128, 120)] {
+        let fixture = LogFixture::new(maximum, total);
+        let session = fixture.session();
+        session.charge(previously_spent).unwrap();
+        let remaining = session.remaining.get();
+        let mut collector = Collector::new(&session, &fixture.run);
+        let mut stages = Vec::new();
+        let error = collector
+            .capture_logs(
+                0,
+                &log_job(),
+                &fixture.root,
+                &fixture.directory,
+                &mut stages,
+                &|| true,
+            )
+            .unwrap_err();
+        assert!(!error.retain_workspace);
+        assert_eq!(session.remaining.get(), remaining);
+        assert!(collector.logs.is_empty());
+        assert!(stages.is_empty());
+        assert!(!fixture.directory.join("job-000-logs.json").exists());
+        assert_eq!(fs::read_dir(fixture.config.root()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn log_finalization_stop_cleans_only_its_new_stages_and_never_publishes_a_receipt() {
+    let fixture = LogFixture::new(256 * 1024, 512 * 1024);
+    let session = fixture.session();
+    let mut collector = Collector::new(&session, &fixture.run);
+    let mut job = log_job();
+    job.steps[0].observation.stdout = vec![0xa5; 128 * 1024];
+    job.steps[0].observation.stderr.clear();
+    let previous = fixture.directory.join("original-capture");
+    fs::write(&previous, b"owned by caller").unwrap();
+    let mut stages = vec![previous.clone()];
+    let staged = fixture
+        .directory
+        .join("job-000-step-002-stdout.log.pending");
+    let live = || fs::metadata(&staged).map_or(true, |metadata| metadata.len() < 64 * 1024);
+    let error = collector
+        .capture_logs(
+            0,
+            &job,
+            &fixture.root,
+            &fixture.directory,
+            &mut stages,
+            &live,
+        )
+        .unwrap_err();
+    assert!(!error.retain_workspace);
+    assert!(
+        error
+            .detail
+            .contains("request stopped during artifact staging")
+    );
+    assert_eq!(stages, [previous.clone()]);
+    assert_eq!(fs::read(&previous).unwrap(), b"owned by caller");
+    assert!(!staged.exists());
+    assert!(!fixture.directory.join("job-000-logs.json").exists());
+    assert!(collector.logs.is_empty());
+}
+
+#[test]
+fn log_stage_cleanup_failure_keeps_responsibility_and_the_original_refusal() {
+    let fixture = LogFixture::new(64, 128);
+    let session = fixture.session();
+    let mut collector = Collector::new(&session, &fixture.run);
+    let mut stages = Vec::new();
+    let staged = fixture
+        .directory
+        .join("job-000-step-002-stdout.log.pending");
+    let live = || {
+        if staged.is_file() {
+            fs::remove_file(&staged).unwrap();
+            fs::create_dir(&staged).unwrap();
+            false
+        } else {
+            true
+        }
+    };
+    let error = collector
+        .capture_logs(
+            0,
+            &log_job(),
+            &fixture.root,
+            &fixture.directory,
+            &mut stages,
+            &live,
+        )
+        .unwrap_err();
+    assert!(error.retain_workspace);
+    assert!(
+        error
+            .detail
+            .contains("request stopped during artifact staging")
+    );
+    assert!(error.detail.contains("log stage cleanup"));
+    assert_eq!(stages, [staged.clone()]);
+    assert!(!fixture.directory.join("job-000-logs.json").exists());
+    assert!(collector.logs.is_empty());
+    fs::remove_dir(&staged).unwrap();
+    stages.clear();
+}
+
+#[test]
+fn occupied_log_receipt_is_never_overwritten_and_zero_step_jobs_create_no_custody() {
+    let fixture = LogFixture::new(64, 128);
+    let session = fixture.session();
+    let mut collector = Collector::new(&session, &fixture.run);
+    let mut job = log_job();
+    job.steps.clear();
+    job.outcome = fgit_runner::workflow::JobOutcome::Skipped;
+    let mut stages = Vec::new();
+    collector
+        .capture_logs(
+            0,
+            &job,
+            &fixture.root,
+            &fixture.directory,
+            &mut stages,
+            &|| false,
+        )
+        .unwrap();
+    assert!(collector.logs.is_empty());
+    assert_eq!(session.remaining.get(), 128);
+    let receipt = fixture.directory.join("job-000-logs.json");
+    fs::write(&receipt, b"prior immutable custody").unwrap();
+    let error = collector
+        .capture_logs(
+            0,
+            &log_job(),
+            &fixture.root,
+            &fixture.directory,
+            &mut stages,
+            &|| true,
+        )
+        .unwrap_err();
+    assert!(!error.retain_workspace);
+    assert!(error.detail.contains("log receipt durability"));
+    assert_eq!(fs::read(receipt).unwrap(), b"prior immutable custody");
+    assert!(collector.logs.is_empty());
+    assert!(stages.is_empty());
+    assert!(!fixture.directory.join(".job-000-logs.pending").exists());
 }

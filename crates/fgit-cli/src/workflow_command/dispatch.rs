@@ -10,7 +10,8 @@ const USAGE: &str = "usage: fg workflow dispatch <storage-root> <tenant-id> <rep
   --expected-head <snapshot-token> --expected-commit <native-oid>
   [--expected-incarnation <id>] [--object-format sha1|sha256]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
-  [--artifact-root <absolute-private-directory> --artifact <workflow:job:output> ...]
+  [--artifact-root <absolute-private-directory>]
+  [--artifact-logs] [--artifact <workflow:job:output> ...]
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
@@ -26,9 +27,12 @@ No unattended trigger, automatic retry, secret injection or green check is creat
 
 At most 32 definitions, 1 MiB workflow text, 128 selected jobs and 512 selected
 steps. Workflows share the native 600-second run and 16 MiB captured-output budgets.
-Selected artifact files share one cumulative byte allowance across every child:
-16 MiB per file and 64 MiB total by default. Explicit selectors name full workflow
-paths and expanded job IDs. All selectors are validated before any child starts.
+Selected artifact files and --artifact-logs share one cumulative byte allowance
+across every child: 16 MiB per payload and 64 MiB total by default. Log-only capture
+requires --artifact-root but no file selector; bounded raw stdout/stderr from each
+executed step is retained, including failed-step diagnostics. Explicit file selectors
+name full workflow paths and expanded job IDs. All selectors are validated before
+any child starts.
 Verified payloads and immutable producing-job provenance are saved before cleanup;
 a capture failure prevents success. See fg workflow run --help for retrieval.
 Artifact-input selectors require a direct needs dependency in that same workflow.
@@ -77,7 +81,10 @@ fn options(args: &[String]) -> Result<(Options, String), String> {
         } else {
             ordinary.push(flag.clone());
             cursor += 1;
-            if !matches!(flag.as_str(), "--trusted-local" | "--ref-hex") {
+            if !matches!(
+                flag.as_str(),
+                "--trusted-local" | "--ref-hex" | "--artifact-logs"
+            ) {
                 if let Some(value) = args.get(cursor) {
                     ordinary.push(value.clone());
                     cursor += 1;
@@ -354,5 +361,27 @@ mod tests {
         let mut duplicate = input.clone();
         duplicate.extend(["--artifact-root".into(), "/another-root".into()]);
         assert!(options(&duplicate).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn dispatch_log_only_flag_preserves_event_and_shared_budget() {
+        let mut input = args();
+        let event_at = input.iter().position(|s| s == "--event").unwrap();
+        input.insert(event_at, "--artifact-logs".into());
+        input.extend([
+            "--artifact-root".into(),
+            "/not-opened-dispatch-logs".into(),
+            "--max-artifact-total-mib".into(),
+            "6".into(),
+        ]);
+        let (parsed, event) = options(&input).unwrap();
+        assert_eq!(event, "push");
+        let config = parsed.artifacts.unwrap().node_config().unwrap();
+        assert!(config.capture_logs());
+        assert!(config.selections().is_empty());
+        assert_eq!(config.total_bytes(), 6 * 1024 * 1024);
+        input.push("--artifact-logs".into());
+        assert!(options(&input).is_err());
     }
 }

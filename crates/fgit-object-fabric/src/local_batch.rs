@@ -123,13 +123,17 @@ impl LocalFilesystemFabric {
             return Ok(());
         }
         batch_checkpoint(live)?;
-        self.create_directory(&self.staging_dir())?;
+        // A directory that already exists is not synced again here: staged
+        // names are scratch, and link_pending syncs every object directory
+        // after linking. A directory created here is made durable through
+        // the store root, as by create_directory.
+        self.create_directory_for_batch(&self.staging_dir())?;
         for object in objects {
             batch_checkpoint(live)?;
             let path = self.object_path(object.identity());
             let parent = path.parent().ok_or(StoreRefusal::MalformedStoredObject)?;
             if pending.directories.insert(parent.to_path_buf()) {
-                self.create_directory(parent)?;
+                self.create_directory_for_batch(parent)?;
             }
             let amount = batch_resources((object.payload().len() as u64).max(1), 1);
             let grant = budget.split_off(&amount).map_err(StoreRefusal::Resource)?;

@@ -71,7 +71,8 @@ pub use treefs_workspace::{
     TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
-    TrustedWorkflowJobArtifacts, TrustedWorkflowRun,
+    TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
+    TrustedWorkflowRun, TrustedWorkflowStepLog,
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
@@ -8129,6 +8130,13 @@ impl OneNode {
     #[must_use]
     pub const fn git_daemon_repository_path(&self) -> &GitDaemonRepositoryPath {
         &self.git_daemon_repository_path
+    }
+
+    /// The key this node's authority head is stored under, for a caller that
+    /// builds an [`AdmissionContext`] for this node.
+    #[must_use]
+    pub const fn authority_head_key(&self) -> &HeadKey {
+        &self.head_key
     }
 
     /// Mints the bounded authority context for one node request.

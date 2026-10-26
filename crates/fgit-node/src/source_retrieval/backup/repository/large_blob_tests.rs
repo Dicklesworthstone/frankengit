@@ -127,7 +127,7 @@ fn source(root: &Path, format: GitHashAlgorithm) -> GitOid {
     };
     let validated = validate_source_import(&updates, &receipt, closure).unwrap();
     let context = AdmissionContext {
-        head_key: node.head_key.clone(),
+        head_key: node.authority_head_key().clone(),
         tenant_id: node.tenant_id(),
         repository_id: node.repository_id(),
         principal_id: PrincipalId::from_bytes([7; 16]),

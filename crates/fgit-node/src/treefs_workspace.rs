@@ -44,7 +44,8 @@ pub use trusted_workflow::artifacts::{
     TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowJobArtifactInputs,
-    TrustedWorkflowJobArtifacts,
+    TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
+    TrustedWorkflowStepLog,
 };
 #[cfg(target_os = "linux")]
 pub use trusted_workflow::{TrustedWorkflowFailure, TrustedWorkflowRun};
