@@ -32,7 +32,8 @@ function publication(intent, state = 'committed') {
     delivery_acknowledged: null };
 }
 export const wire = value => JSON.stringify(value, (key, value) =>
-  ['number', 'expected_version', 'decision_sequence'].includes(key) && typeof value === 'string' ? JSON.rawJSON(value) : value);
+  ['number', 'expected_version', 'decision_sequence'].includes(key) && typeof value === 'string' &&
+    /^(0|[1-9][0-9]*)$/.test(value) ? JSON.rawJSON(value) : value);
 export function input(endpoint = 'https://forge.example/repo.git', changes = {}) {
   return { endpoint, scope, number: '7', expected_version: '2', action: 'comment', fields: { body: 'exact message\r\n💡' }, ...changes };
 }
@@ -69,6 +70,7 @@ for (const [action, version, data, pairs] of [
   ['open', '0', { title: 'title', body: '', labels: ['z', 'a'] }, [['expected_version', '0'], ['title', 'title'], ['body', ''], ['label', 'a'], ['label', 'z']]],
   ['edit', '1', { labels: [] }, [['expected_version', '1'], ['clear_labels', 'true']]],
   ['comment', '2', { body: '  literal\r\n💡  ' }, [['expected_version', '2'], ['body', '  literal\r\n💡  ']]],
+  ['append-comment', null, { body: '  literal%26+&=\r\n💡  ' }, [['body', '  literal%26+&=\r\n💡  ']]],
   ['close', '3', {}, [['expected_version', '3']]], ['reopen', '4', {}, [['expected_version', '4']]],
   ['assign', '5', { assignees: [scope.principal_id] }, [['expected_version', '5'], ['assignee', scope.principal_id]]],
   ['unassign', '6', { assignees: [scope.principal_id] }, [['expected_version', '6'], ['assignee', scope.principal_id]]],
@@ -83,6 +85,7 @@ for (const [action, version, data, pairs] of [
     assert.equal(call.method, 'POST'); assert.equal(call.headers.authorization, `Bearer ${token}`);
     assert.equal(call.headers['idempotency-key'], p.intent.key); assert.equal(call.headers.cookie, undefined);
     assert.equal(call.headers.connection, 'close'); assert(!call.path.includes(token));
+    assert.equal(call.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
   }
   assert.equal(p.calls[0].body, ''); assert.equal(p.calls[2].body, '');
 });
@@ -98,6 +101,12 @@ const invalidCommands = [
   ['comment', '18446744073709551615', { body: 'x' }], ['close', '01', {}], ['close', 1, {}],
   ['comment', '1', { body: 'x', principal: scope.principal_id }],
   ['comment', '1', { body: 'x'.repeat(ISSUE_LIMITS.body + 1) }],
+  ...['0', '2', 'null', undefined, 2].map(version => ['append-comment', version, { body: 'x' }]),
+  ['comment', null, { body: 'x' }], ['append-comment', null, { body: ' \r\n ' }],
+  ['append-comment', null, { body: 'x', expected_version: '2' }],
+  ['append-comment', null, { body: 'x', principal: scope.principal_id }],
+  ['append-comment', null, { body: 'x'.repeat(ISSUE_LIMITS.body + 1) }],
+  ['append-comment', null, { body: '\ud800' }], ['append-comment', null, { body: 'a\0b' }],
 ];
 for (const [index, command] of invalidCommands.entries()) test(`refuse invalid native issue command ${index}`, () => {
   assert.throws(() => issueCommand('7', command[1], command[0], command[2]));
@@ -244,4 +253,75 @@ test('certificate-verified HTTPS supports private CA; untrusted and wrong-name p
   assert.equal(p.calls.length, 0); assert.equal((await p.send({ ca: tls.cert })).outcome.state, 'committed');
   const other = await credentials('wrong', 'DNS:wrong.example'), wrong = await peer(t, { tls: other });
   await assert.rejects(wrong.send({ ca: other.cert }), error => !error.dispatched); assert.equal(wrong.calls.length, 0);
+});
+
+// Frozen from the unchanged 954b62f6 operator and independently hashed in
+// Python before append support. Protects the original saved strict identity.
+test('legacy saved strict intent retains its original key and version precondition', () => {
+  const saved = {
+    schema: 'frankengit-remote-issue-intent-v1', endpoint: 'https://forge.example/repo.git', scope,
+    number: '7', expected_version: '2', action: 'comment', fields: { body: 'exact message\r\n💡' },
+    body: 'expected_version=2&body=exact+message%0D%0A%F0%9F%92%A1', nonce: '55'.repeat(16),
+    credential_fingerprint: '271a413bd339c5709fdceaec41f14f11e9fbfb5042d72d331c65f32b284cd09a',
+    key: 'fgi1-55555555555555555555555555555555-c8b32862c53c636eb004c7c12cf9b97381c0f650219640bbaa5dc0b5db191f75',
+  };
+  assert.deepEqual(validateIssueIntent(saved), saved);
+  assert.equal(issueCommand(saved.number, saved.expected_version, saved.action, saved.fields).body, saved.body);
+});
+test('append body uses the full byte bound and preserves text with one form decoding', () => {
+  const body = 'é'.repeat(ISSUE_LIMITS.body / 2);
+  const command = issueCommand('18446744073709551615', null, 'append-comment', { body });
+  assert.equal(command.expected_version, null); assert.equal(command.fields.body, body);
+  assert.deepEqual([...new URLSearchParams(command.body)], [['body', body]]);
+  assert.throws(() => issueCommand('1', null, 'append-comment', { body: body + 'x' }));
+});
+test('append requires explicit null and cannot reinterpret a saved strict request or vice versa', () => {
+  const { expected_version, ...omitted } = input(undefined, { action: 'append-comment' });
+  assert.throws(() => prepareIssue(omitted, token));
+  const strict = prepareIssue(input(), token);
+  const append = prepareIssue(input(undefined, { action: 'append-comment', expected_version: null }), token);
+  assert.equal(validateIssueIntent(parseIssueJson(Buffer.from(issueCanonical(append)))).expected_version, null);
+  for (const [original, action, version] of [[strict, 'append-comment', null], [append, 'comment', '2']]) {
+    const changed = { ...original, ...issueCommand(original.number, version, action, original.fields) };
+    assert.throws(() => validateIssueIntent(changed), /issue_intent_changed/);
+  }
+  const changed = clone(append); changed.fields.body += 'changed';
+  assert.throws(() => validateIssueIntent(changed));
+});
+for (const changed of [{ action: 'comment' }, { expected_version: '2' }, { expected_version: 'null' }]) {
+  test(`append publication refuses profile/predecessor substitution ${JSON.stringify(changed)}`, async t => {
+    const p = await peer(t, { input: { action: 'append-comment', expected_version: null }, mutate: reply => ({ ...reply, ...changed }) });
+    await assert.rejects(p.send(), error => error.phase === 'publication' && error.dispatched && error.outcomeUnknown);
+    assert.equal(p.calls.length, 2);
+  });
+}
+test('append lost reply recovers and suppresses repost with original key and rotated credential', async t => {
+  const p = await peer(t, { input: { action: 'append-comment', expected_version: null }, drop: true });
+  const before = issueCanonical(p.intent);
+  await assert.rejects(p.send(), error => error.dispatched && error.outcomeUnknown);
+  const result = await p.recover(rotated); assert.equal(result.outcome.state, 'committed');
+  assert.equal(result.expected_version, null); assert.equal(result.key, p.intent.key);
+  assert.equal((await p.send()).dispatched_this_call, false);
+  assert.equal(p.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  assert.equal(p.calls[1].path, '/repo.git/api/v1/issues/7/append-comment');
+  assert.equal(p.calls[2].headers.authorization, `Bearer ${rotated}`); assert.equal(p.calls[2].body, '');
+  assert.equal(issueCanonical(p.intent), before);
+});
+test('unsupported append route retains uncertainty and never falls back to strict comment', async t => {
+  const p = await peer(t, { input: { action: 'append-comment', expected_version: null }, handle: ({ response, phase }) => {
+    if (phase !== 'publication') return false; response.writeHead(404); response.end('unsupported'); return true;
+  } });
+  await assert.rejects(p.send(), error => error.status === 404 && error.dispatched && error.outcomeUnknown);
+  assert.equal(p.calls.length, 2); assert.equal(p.calls[1].path, '/repo.git/api/v1/issues/7/append-comment');
+  assert.deepEqual([...new URLSearchParams(p.calls[1].body)], [['body', p.intent.fields.body]]);
+});
+test('append cancellation drains publication and retains its exact request', async t => {
+  const controller = new AbortController();
+  const p = await peer(t, { input: { action: 'append-comment', expected_version: null }, handle: ({ response, phase }) => {
+    if (phase !== 'publication') return false;
+    response.writeHead(200, { 'Content-Type': 'application/json' }); response.write('{'); controller.abort(); return true;
+  } });
+  const before = issueCanonical(p.intent);
+  await assert.rejects(p.send({ signal: controller.signal }), error => error.dispatched && error.code === 'issue_cancelled');
+  assert.equal(issueCanonical(validateIssueIntent(p.intent)), before); assert.equal(p.calls.length, 2);
 });

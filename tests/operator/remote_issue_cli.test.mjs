@@ -68,7 +68,7 @@ async function fixture(t, options = {}) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
   const input = { endpoint: `http://127.0.0.1:${server.address().port}/repo.git`, scope, number: '7', expected_version: '2',
-    action: 'comment', fields: { body: ' exact\r\n💡 <script>inert</script> \u202e ' } };
+    action: 'comment', fields: { body: ' exact\r\n💡 <script>inert</script> \u202e ' }, ...options.input };
   const inputFile = join(directory, 'input.json'); await writeFile(inputFile, issueCanonical(input), { mode: 0o600 });
   const prepare = () => invoke(['prepare', '--input', inputFile, '--token-file', tokenFile, '--request-dir', slot]);
   const sendArgs = key => ['send', '--request-dir', slot, '--token-file', tokenFile, '--confirm-key', key];
@@ -221,4 +221,49 @@ test('record-publication race preserves both the competing file and the already 
   assert.equal(result.value.dispatched_this_call, true); assert.equal(result.value.outcome_unknown, false);
   assert.equal(await readFile(record, 'utf8'), 'competing record');
   assert.equal((await invoke(f.recoverArgs)).code, 0);
+});
+
+const appendInput = { action: 'append-comment', expected_version: null };
+test('CLI append persists null, sends only body and reuses its retained terminal record', async t => {
+  const f = await fixture(t, { input: appendInput }), prepared = await f.prepare(); assert.equal(prepared.code, 0);
+  const before = await readFile(join(f.slot, 'intent.json')), intent = await loadIssueIntent(f.slot);
+  assert.equal(intent.expected_version, null); assert.equal(intent.action, 'append-comment');
+  assert.deepEqual([...new URLSearchParams(intent.body)], [['body', f.input.fields.body]]);
+  const inspected = await invoke(['inspect', '--request-dir', f.slot]); assert.equal(inspected.code, 0);
+  assert.deepEqual(inspected.value.intent, intent); assert.equal(f.calls.length, 0);
+  const record = join(f.directory, 'append.json'), sent = await invoke([...f.sendArgs(intent.key), '--record', record]);
+  assert.equal(sent.code, 0); assert.equal(sent.value.publication.expected_version, null);
+  assert.equal(sent.value.action, 'append-comment'); assert.equal(sent.value.key, prepared.value.key);
+  assert.equal(f.calls[1].path, '/repo.git/api/v1/issues/7/append-comment'); assert.equal(f.calls[1].body, intent.body);
+  const again = await invoke([...f.sendArgs(intent.key), '--known', record]); assert.equal(again.code, 0);
+  assert.equal(again.value.dispatched_this_call, false);
+  assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});
+test('CLI append lost reply retains original bytes and key through rotated read-only recovery', async t => {
+  const f = await fixture(t, { input: appendInput, handle: ({ recovering, response }) => {
+    if (recovering) return false; response.destroy(); return true;
+  } });
+  const p = await f.prepare(); assert.equal(p.code, 0);
+  const before = await readFile(join(f.slot, 'intent.json'));
+  const failed = await invoke(f.sendArgs(p.value.key)); assert.equal(failed.code, 3); assert.equal(failed.value.outcome_unknown, true);
+  const recovered = await invoke(f.recoverArgs); assert.equal(recovered.code, 0);
+  assert.equal(recovered.value.key, p.value.key); assert.equal(recovered.value.expected_version, null);
+  assert.equal(f.calls.at(-1).headers.authorization, `Bearer ${rotated}`); assert.equal(f.calls.at(-1).body, '');
+  assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});
+for (const version of ['2', '0', 'null']) test(`CLI append refuses supplied predecessor ${version} before creating a slot or network`, async t => {
+  const f = await fixture(t, { input: { action: 'append-comment', expected_version: version } });
+  assert.equal((await f.prepare()).code, 2); assert.equal(f.calls.length, 0);
+  await assert.rejects(stat(f.slot), { code: 'ENOENT' });
+});
+test('CLI unsupported append never silently retries using strict comment', async t => {
+  const f = await fixture(t, { input: appendInput, handle: ({ recovering, response }) => {
+    if (recovering) return false; response.writeHead(404); response.end('unsupported'); return true;
+  } });
+  const p = await f.prepare(); assert.equal(p.code, 0);
+  const sent = await invoke(f.sendArgs(p.value.key)); assert.equal(sent.code, 3); assert.equal(sent.value.outcome_unknown, true);
+  assert.equal(f.calls.length, 2); assert.equal(f.calls[1].path, '/repo.git/api/v1/issues/7/append-comment');
+  assert.equal((await loadIssueIntent(f.slot)).key, p.value.key);
 });
