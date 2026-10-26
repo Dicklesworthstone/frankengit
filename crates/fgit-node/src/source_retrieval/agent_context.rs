@@ -4,12 +4,15 @@
 //! model. It accepts only an authenticated IntentRun, proves that the hydrated
 //! source context is from that run's exact repository/head/RCR/forge position,
 //! and keeps repository bytes in ContextSource's visibly-untrusted field.
-use super::context::InitialContext;
+use super::{InitialReport, context::InitialContext};
 use fgit_agent::{
-    ContextControl, ContextPacket, ContextSource, IntentRun, OperationClass, ProtocolRefusal,
-    RetrievalChannel,
+    AuthorityReadReceipt, ContextControl, ContextPacket, ContextSource, IntentRun, OperationClass,
+    ProtocolRefusal, RetrievalChannel,
 };
 use fgit_crypto::sha256_digest;
+
+mod read;
+pub use read::{AgentContextRead, AgentContextReadError, AgentSourceContext};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentContextRefusal {
@@ -61,6 +64,29 @@ pub fn context_packet_for_run(
     context: &InitialContext,
     control: ContextControl,
 ) -> Result<ContextPacket, AgentContextRefusal> {
+    let receipt = run_receipt(run, &control)?;
+    match_run_source(receipt, context.retrieval())?;
+
+    let mut sources = Vec::new();
+    for file in context.files() {
+        for excerpt in file.excerpts() {
+            let body = excerpt.untrusted_bytes().to_vec();
+            let commitment = source_commitment(file.path(), file.blob(), excerpt.offset(), &body);
+            sources.push(
+                ContextSource::new(commitment, RetrievalChannel::Exact, body)
+                    .map_err(AgentContextRefusal::Protocol)?,
+            );
+        }
+    }
+    ContextPacket::build(receipt.clone(), control, sources).map_err(AgentContextRefusal::Protocol)
+}
+
+// Shared preflight: the native reader checks these BEFORE source acquisition,
+// while the existing pure binding entrypoint retains its original contract.
+fn run_receipt<'a>(
+    run: &'a IntentRun,
+    control: &ContextControl,
+) -> Result<&'a AuthorityReadReceipt, AgentContextRefusal> {
     let receipt = run
         .authority_read_receipt()
         .ok_or(AgentContextRefusal::RunAuthorityReceiptRequired)?;
@@ -74,7 +100,14 @@ pub fn context_packet_for_run(
         return Err(AgentContextRefusal::ControlScopeOutsideRun);
     }
 
-    let source = context.retrieval().source();
+    Ok(receipt)
+}
+
+fn match_run_source(
+    receipt: &AuthorityReadReceipt,
+    initial: &InitialReport,
+) -> Result<(), AgentContextRefusal> {
+    let source = initial.source();
     if source.namespace.repository != receipt.repository_id() {
         return Err(AgentContextRefusal::RepositoryMismatch);
     }
@@ -91,18 +124,7 @@ pub fn context_packet_for_run(
         return Err(AgentContextRefusal::ForgePositionMismatch);
     }
 
-    let mut sources = Vec::new();
-    for file in context.files() {
-        for excerpt in file.excerpts() {
-            let body = excerpt.untrusted_bytes().to_vec();
-            let commitment = source_commitment(file.path(), file.blob(), excerpt.offset(), &body);
-            sources.push(
-                ContextSource::new(commitment, RetrievalChannel::Exact, body)
-                    .map_err(AgentContextRefusal::Protocol)?,
-            );
-        }
-    }
-    ContextPacket::build(receipt.clone(), control, sources).map_err(AgentContextRefusal::Protocol)
+    Ok(())
 }
 
 #[cfg(test)]
