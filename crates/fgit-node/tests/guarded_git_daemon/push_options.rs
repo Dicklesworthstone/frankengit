@@ -53,19 +53,25 @@ fn advertises_push_options(first_ref: &[u8]) -> bool {
 
 /// The first advertised record, the node, the server's result and the
 /// client's response records of one raw session.
-type Served = (
+pub type Served = (
     Vec<u8>,
     OneNode,
     Result<Option<AdmissionResult>, NodeSmartHttpRefusal>,
     Vec<Vec<u8>>,
 );
 
-/// A refused option list, the parse refusal that names it, and its permitted
-/// twin, under one label.
-type BoundCase = (&'static str, Vec<Vec<u8>>, &'static str, Vec<Vec<u8>>);
+/// A refused option list, the parse refusal that names it, the cause the
+/// client reads, and its permitted twin, under one label.
+type BoundCase = (
+    &'static str,
+    Vec<Vec<u8>>,
+    &'static str,
+    &'static str,
+    Vec<Vec<u8>>,
+);
 
 /// Serves one raw receive session carrying `body`.
-fn serve(node: OneNode, body: &[u8]) -> Served {
+pub fn serve(node: OneNode, body: &[u8]) -> Served {
     let (address, route, worker) = launch(node);
     let mut socket = connect(address, &route);
     let advertised = records(&mut socket);
@@ -197,18 +203,21 @@ fn options_past_the_sealable_bounds_are_refused_while_parsing_and_their_twins_pu
             "long",
             long(MAX_PUSH_OPTION_BYTES + 1),
             "InvalidPushOption",
+            "a push option is empty, longer than this server accepts, or contains NUL, CR or LF",
             long(MAX_PUSH_OPTION_BYTES),
         ),
         (
             "many",
             many(MAX_PUSH_OPTIONS + 1),
             "TooManyPushOptions",
+            "push carries more than 256 push options",
             many(MAX_PUSH_OPTIONS),
         ),
         (
             "newline",
             vec![b"key=two\nlines".to_vec()],
             "MalformedRequestLine",
+            "malformed pkt-line request",
             vec![b"key=two lines".to_vec()],
         ),
     ];
@@ -216,7 +225,7 @@ fn options_past_the_sealable_bounds_are_refused_while_parsing_and_their_twins_pu
         let root = Scratch::new();
         let mut node = start(root.config(format, true), false);
         let (oid, zero, pack) = pack(format);
-        for (label, refused, refusal, permitted) in &cases {
+        for (label, refused, refusal, cause, permitted) in &cases {
             let name = format!("refs/tags/{label}");
             let before = state(&node);
             let body = [
@@ -233,9 +242,13 @@ fn options_past_the_sealable_bounds_are_refused_while_parsing_and_their_twins_pu
                 format!("{error:?}").contains(refusal),
                 "{label}: expected {refusal}, refused for another reason: {error:?}"
             );
-            assert!(
-                rows.last().is_some_and(|row| row.starts_with(b"ERR ")),
-                "{label}: {rows:?}"
+            // The client reads the typed cause, not the generic line
+            // (frankengit-yrff).
+            assert_eq!(
+                rows.last()
+                    .map(|row| String::from_utf8_lossy(row).into_owned()),
+                Some(format!("ERR {cause}; no ref decision was attempted\n")),
+                "{label}"
             );
             assert_eq!(
                 state(&node),

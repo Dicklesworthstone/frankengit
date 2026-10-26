@@ -120,8 +120,21 @@ fn fatal(
     admission_started: bool,
     processing_expired: bool,
     command_bound: Option<usize>,
+    cause: Option<&str>,
     limits: &WireLimits,
 ) -> io::Result<()> {
+    // Before admission starts nothing was decided, so a client-safe cause
+    // (crate::receive_refusal) is named; a client or CI job can act on a quota,
+    // a bound or a malformed request only if it reads which (frankengit-yrff).
+    // The command-count refusal keeps its own operator text (command_limit,
+    // frankengit-p9b5). After admission starts the outcome is unknown whatever
+    // the cause, and the processing deadline keeps its own text.
+    let named = match (admission_started, processing_expired, cause) {
+        (false, false, Some(cause)) if command_bound.is_none() => {
+            Some(format!("ERR {cause}; no ref decision was attempted\n").into_bytes())
+        }
+        _ => None,
+    };
     // Name the processing deadline when it is the cause, so an operator knows
     // which budget a large push needs (frankengit-3gdw contract (b)).
     let message = match (admission_started, processing_expired) {
@@ -143,7 +156,7 @@ fn fatal(
     let bounded = command_bound
         .filter(|_| !admission_started)
         .map(command_limit::message);
-    let message = bounded.as_deref().unwrap_or(message);
+    let message = bounded.as_deref().or(named.as_deref()).unwrap_or(message);
     let bytes = encode_packets(&[Packet::Data(message.to_vec())], limits)
         .map_err(|e| io::Error::other(e.to_string()))?;
     writer.write_all(&bytes)?;
@@ -531,11 +544,16 @@ impl OneNode {
                 .as_ref()
                 .err()
                 .and_then(command_limit::before_admission);
+            let cause = result
+                .as_ref()
+                .err()
+                .and_then(crate::receive_refusal::client_cause);
             if let Err(error) = fatal(
                 writer,
                 admission_started,
                 processing_expired.get(),
                 command_bound,
+                cause.as_deref(),
                 limits,
             ) {
                 eprintln!("guarded receive fatal response delivery failed: {error}");
@@ -625,6 +643,7 @@ mod tests {
             false,
             false,
             command_limit::before_admission(&refusal),
+            None,
             &WireLimits::default(),
         )
         .unwrap();
@@ -643,6 +662,7 @@ mod tests {
             true,
             false,
             Some(limit),
+            None,
             &WireLimits::default(),
         )
         .unwrap();
@@ -743,7 +763,7 @@ mod tests {
     #[test]
     fn fatal_interruption_never_fabricates_per_ref_rejection() {
         let mut bytes = Vec::new();
-        fatal(&mut bytes, true, false, None, &WireLimits::default()).unwrap();
+        fatal(&mut bytes, true, false, None, None, &WireLimits::default()).unwrap();
         assert!(
             bytes
                 .windows(b"ERR receive outcome unknown".len())
@@ -751,14 +771,22 @@ mod tests {
         );
         assert!(!bytes.windows(3).any(|w| w == b"ng "));
         let mut before = Vec::new();
-        fatal(&mut before, false, false, None, &WireLimits::default()).unwrap();
+        fatal(
+            &mut before,
+            false,
+            false,
+            None,
+            None,
+            &WireLimits::default(),
+        )
+        .unwrap();
         assert_ne!(bytes, before);
         // A processing-deadline cause is named, with the same outcome class:
         // still UNKNOWN after admission started, still no decision before it.
         let mut unknown = Vec::new();
-        fatal(&mut unknown, true, true, None, &WireLimits::default()).unwrap();
+        fatal(&mut unknown, true, true, None, None, &WireLimits::default()).unwrap();
         let mut early = Vec::new();
-        fatal(&mut early, false, true, None, &WireLimits::default()).unwrap();
+        fatal(&mut early, false, true, None, None, &WireLimits::default()).unwrap();
         for (payload, class) in [
             (&unknown, b"ERR receive outcome unknown".as_slice()),
             (&early, b"ERR receive failed before admission".as_slice()),
@@ -776,7 +804,15 @@ mod tests {
     #[test]
     fn command_limit_diagnostic_never_reclassifies_started_admission() {
         let mut early = Vec::new();
-        fatal(&mut early, false, false, Some(2), &WireLimits::default()).unwrap();
+        fatal(
+            &mut early,
+            false,
+            false,
+            Some(2),
+            None,
+            &WireLimits::default(),
+        )
+        .unwrap();
         assert!(
             early[4..].starts_with(
                 b"ERR receive command count exceeded: observed at least 3; maximum 2;"
@@ -788,9 +824,55 @@ mod tests {
         );
 
         let mut started = Vec::new();
-        fatal(&mut started, true, false, Some(2), &WireLimits::default()).unwrap();
+        fatal(
+            &mut started,
+            true,
+            false,
+            Some(2),
+            None,
+            &WireLimits::default(),
+        )
+        .unwrap();
         assert!(started[4..].starts_with(b"ERR receive outcome unknown"));
         assert!(!String::from_utf8_lossy(&started).contains("no ref decision"));
+    }
+    #[test]
+    fn a_client_safe_cause_is_named_only_before_admission_starts() {
+        let cause = "push carries more than 256 push options";
+        let write = |started: bool, expired: bool, bound: Option<usize>, cause: Option<&str>| {
+            let mut bytes = Vec::new();
+            fatal(
+                &mut bytes,
+                started,
+                expired,
+                bound,
+                cause,
+                &WireLimits::default(),
+            )
+            .unwrap();
+            bytes
+        };
+        let expected = format!("ERR {cause}; no ref decision was attempted\n").into_bytes();
+        assert_eq!(
+            &write(false, false, None, Some(cause))[4..],
+            expected.as_slice()
+        );
+        // Once admission started the outcome is unknown: the same cause must
+        // not turn into a claim that nothing was decided.
+        assert_eq!(
+            write(true, false, None, Some(cause)),
+            write(true, false, None, None)
+        );
+        // The processing deadline keeps its own named text.
+        assert_eq!(
+            write(false, true, None, Some(cause)),
+            write(false, true, None, None)
+        );
+        // The command-count refusal keeps its operator text (command_limit).
+        assert_eq!(
+            write(false, false, Some(2), Some(cause)),
+            write(false, false, Some(2), None)
+        );
     }
     #[test]
     fn raw_retry_selector_preserves_legacy_bytes_and_excludes_pack_representation() {

@@ -36,6 +36,8 @@ mod limits;
 mod microbatch;
 #[path = "guarded_git_daemon/push_options.rs"]
 mod push_options;
+#[path = "guarded_git_daemon/typed_refusals.rs"]
+mod typed_refusals;
 
 const PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0xb3; 16]);
 static NEXT: AtomicU64 = AtomicU64::new(0);

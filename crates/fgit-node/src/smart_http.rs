@@ -950,6 +950,58 @@ impl OneNode {
         W: Write,
         C: ReceiveCancellation,
     {
+        let result = self.smart_http_receive_body_checked_in(
+            request,
+            session,
+            body,
+            http_limits,
+            admission_limits,
+            writers,
+            cancellation,
+            writer,
+        );
+        // A well-formed request refused by a bound or policy is answered as
+        // git-http-backend answers a fatal error: one ERR packet in a 200
+        // receive-pack body, which a stock client prints as "fatal: remote
+        // error: ...". A 4xx/5xx body is discarded by the client. Only causes
+        // raised before any response byte qualify (crate::receive_refusal); the
+        // refusal is still returned, and the server's started-response guard
+        // keeps it from writing a second response (frankengit-yrff). The
+        // command-count refusal was already answered where it was raised
+        // (command_limit::report_http, frankengit-p9b5).
+        if let Err(error) = &result
+            && command_limit::before_admission(error).is_none()
+            && let Some(cause) = crate::receive_refusal::request_cause(error)
+        {
+            let message = format!("ERR {cause}; no ref decision was attempted\n").into_bytes();
+            let body = fgit_wire::encode_packets(&[Packet::Data(message)], &WireLimits::default())?;
+            let length = u64::try_from(body.len()).map_err(|_| WireError::AllocationFailure)?;
+            let head = success_head(request, Some(length));
+            write_response_part(writer, head.as_bytes(), "write smart HTTP refusal head")?;
+            write_response_part(writer, &body, "write smart HTTP receive refusal")?;
+            writer.flush().map_err(|source| NodeSmartHttpRefusal::Io {
+                operation: "flush smart HTTP receive refusal",
+                source,
+            })?;
+        }
+        result
+    }
+
+    fn smart_http_receive_body_checked_in<W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        session: &LoopbackReceiveSession,
+        body: ingress::BodyInput<'_>,
+        http_limits: HttpLimits,
+        admission_limits: AdmissionLimits,
+        writers: Option<&crate::WriterGate>,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal>
+    where
+        W: Write,
+        C: ReceiveCancellation,
+    {
         if !self.smart_http_route_matches(request) {
             return Err(NodeSmartHttpRefusal::RepositoryRouteMismatch);
         }

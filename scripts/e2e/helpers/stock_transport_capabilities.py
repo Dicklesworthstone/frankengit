@@ -23,7 +23,9 @@ host's, or the pinned oracle through --git-bin/--git-exec-path) exercises:
 - unreachable commit/blob and never-existing OID fetches, with exact Git ERR
   diagnostics and a successful visible-object twin (frankengit-aitq);
 - `git push -o` (push options, frankengit-321s), and the refusal of an option
-  past the 1,024-byte sealable bound beside its twin at the bound.
+  past the 1,024-byte sealable bound beside its twin at the bound;
+- the typed pre-admission refusal of the over-bound option (frankengit-yrff):
+  stock git must print its cause as "fatal: remote error: ...".
 
 Every check lands in one JSON summary as {"checks": {id: {"ok", "detail"}}};
 scripts/e2e/suites/transport/stock_transport_capabilities.sh asserts each id.
@@ -64,6 +66,10 @@ FILTERS = (
 # uploadpackfilter.sparse:oid.allow=false), so that trailing line is the
 # client's, not the server's.
 SPARSE_REFUSAL = "fatal: remote error: filter 'sparse:oid' not supported"
+# The typed pre-admission cause a stock client prints for an over-bound push
+# option (frankengit-yrff).
+OPTION_REFUSAL = ("fatal: remote error: a push option is empty, longer than this server accepts, "
+                  "or contains NUL, CR or LF; no ref decision was attempted")
 
 
 class Checks:
@@ -436,10 +442,13 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
         at_bound = git.run("-C", work, "push", "-o", "o" * 1024, "origin", "HEAD:refs/heads/push-option-bound",
                            env=env)
         after = ref_map(git, url, env)
-        checks.add(f"{prefix}-push-option-bound", too_long.returncode != 0 and unchanged and at_bound.returncode == 0
-                   and after == dict(before, **{"refs/heads/push-option-bound": head}),
-                   f"refused_rc={too_long.returncode} unchanged={unchanged} {text(too_long)[-200:]} "
-                   f"twin: {text(at_bound)[-200:]}")
+        # The client reads the typed cause, not the generic pre-admission line
+        # (frankengit-yrff), on every transport.
+        named = OPTION_REFUSAL in text(too_long)
+        checks.add(f"{prefix}-push-option-bound", too_long.returncode != 0 and unchanged and named
+                   and at_bound.returncode == 0 and after == dict(before, **{"refs/heads/push-option-bound": head}),
+                   f"refused_rc={too_long.returncode} unchanged={unchanged} named={named} "
+                   f"{text(too_long)[-200:]} twin: {text(at_bound)[-200:]}")
 
 
 def main() -> None:
