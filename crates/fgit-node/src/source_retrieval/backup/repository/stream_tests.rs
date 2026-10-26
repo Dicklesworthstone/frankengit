@@ -142,6 +142,7 @@ fn exact_byte_budget_is_inclusive_and_payload_allocation_is_preflighted() {
     let bytes = sample(GitHashAlgorithm::Sha256);
     let limits = TransferLimits {
         max_archive_bytes: bytes.len() as u64,
+        ..Default::default()
     };
     assert!(scan(bytes.as_slice(), hash(&bytes), limits).is_ok());
     assert!(
@@ -149,7 +150,8 @@ fn exact_byte_budget_is_inclusive_and_payload_allocation_is_preflighted() {
             bytes.as_slice(),
             hash(&bytes),
             TransferLimits {
-                max_archive_bytes: limits.max_archive_bytes - 1
+                max_archive_bytes: limits.max_archive_bytes - 1,
+                ..Default::default()
             }
         )
         .is_err()
@@ -373,3 +375,6 @@ fn repeated_interruption_cannot_bypass_cooperative_termination() {
     assert_eq!(result.err().unwrap(), "deadline");
     assert_eq!(checks, 9);
 }
+
+#[path = "stream/large_tests.rs"]
+mod large;

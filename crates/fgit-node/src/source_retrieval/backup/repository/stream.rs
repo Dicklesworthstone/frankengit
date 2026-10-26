@@ -1,16 +1,21 @@
 //! Bounded streaming I/O for the existing FGSRC001 transport. The wire bytes do
 //! not change. A record is borrowed from one reusable object buffer; no archive
-//! payload or object inventory is accumulated. Only finish authenticates a pass.
+//! payload or object inventory is accumulated. Blob visitors consume bounded
+//! authenticated record streams. Only finish authenticates the complete archive.
+#[path = "stream/object.rs"]
+mod object;
+pub use object::RecordHeader;
+use object::{ObjectVerifier, RecordReader};
 use std::io::{self, Read, Write};
 
 use fgit_authority_fsqlite::{ExportBundle, import_bundle};
-use fgit_crypto::{
-    DigestHasher, GitObjectKind, Sha256Hasher, git_object_id, git_payload_commitment,
-};
-use fgit_types::{
-    CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId,
-    TenantId,
-};
+use fgit_crypto::{DigestHasher, GitObjectKind, Sha256Hasher};
+#[cfg(test)]
+use fgit_crypto::{git_object_id, git_payload_commitment};
+use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
+
+#[cfg(test)]
+use fgit_types::CANONICAL_CODEC_VERSION;
 
 use super::{Identity, MAGIC, MAX_OBJECT_BYTES, MAX_OBJECTS, Record, kind, kind_byte};
 
@@ -22,11 +27,14 @@ const MAX_AUTHORITY_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
     pub max_archive_bytes: u64,
+    /// Streaming-only allowance. Commit, tree and tag bodies retain 32 MiB.
+    pub max_blob_bytes: u64,
 }
 impl Default for TransferLimits {
     fn default() -> Self {
         Self {
             max_archive_bytes: 1 << 30,
+            max_blob_bytes: MAX_OBJECT_BYTES as u64,
         }
     }
 }
@@ -35,7 +43,16 @@ impl TransferLimits {
         if self.max_archive_bytes == 0 || self.max_archive_bytes > (1_u64 << 40) {
             return Err("archive byte budget must be in 1..=1099511627776".into());
         }
+        if self.max_blob_bytes == 0 || self.max_blob_bytes > (1_u64 << 40) {
+            return Err("blob byte budget must be in 1..=1099511627776".into());
+        }
         Ok(())
+    }
+    const fn object_limit(self, kind: GitObjectKind) -> u64 {
+        match kind {
+            GitObjectKind::Blob => self.max_blob_bytes,
+            _ => MAX_OBJECT_BYTES as u64,
+        }
     }
 }
 
@@ -107,8 +124,7 @@ impl<W: Write> StreamEncoder<W> {
         encoder.push(&(objects as u64).to_be_bytes(), live)?;
         Ok(encoder)
     }
-    /// The source fabric verifies the supplied commitment; the read-back pass
-    /// independently checks it before the enclosing file can be published.
+    /// Encode one buffered record through the same identity-checked stream path.
     pub fn object(
         &mut self,
         oid: GitOid,
@@ -117,19 +133,44 @@ impl<W: Write> StreamEncoder<W> {
         commitment: &[u8; 32],
         live: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
-        if self.failed {
-            return Err("repository backup encoder previously failed".into());
-        }
-        let result = self.object_inner(oid, kind, payload, commitment, live);
-        self.failed = result.is_err();
-        result
+        let mut input = payload;
+        self.object_stream(
+            oid,
+            kind,
+            payload.len() as u64,
+            commitment,
+            &mut input,
+            live,
+        )
     }
-    fn object_inner(
+    /// Consume one exact-length source through a 64 KiB buffer. Both native
+    /// identity and the original independent commitment must match before this
+    /// record completes. The source's EOF operation is required, so a late
+    /// fabric verification error cannot be hidden behind the declared length.
+    /// All output remains private until the caller verifies the complete file.
+    pub fn object_stream(
         &mut self,
         oid: GitOid,
         kind: GitObjectKind,
-        payload: &[u8],
+        length: u64,
         commitment: &[u8; 32],
+        input: &mut (impl Read + ?Sized),
+        live: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.failed {
+            return Err("repository backup encoder previously failed".into());
+        }
+        let result = self.object_stream_inner(oid, kind, length, commitment, input, live);
+        self.failed = result.is_err();
+        result
+    }
+    fn object_stream_inner(
+        &mut self,
+        oid: GitOid,
+        kind: GitObjectKind,
+        length: u64,
+        commitment: &[u8; 32],
+        input: &mut (impl Read + ?Sized),
         live: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
         live()?;
@@ -140,16 +181,40 @@ impl<W: Write> StreamEncoder<W> {
         {
             return Err("repository backup object order/domain mismatch".into());
         }
-        if payload.len() > MAX_OBJECT_BYTES {
+        if length > self.limits.object_limit(kind) {
             return Err("repository backup object-byte limit".into());
         }
-        let record_bytes = (self.format.digest_len() + 1 + 8 + 32) as u64 + payload.len() as u64;
+        let record_bytes = (self.format.digest_len() + 1 + 8 + 32) as u64 + length;
         check_room(self.bytes, record_bytes, self.limits)?;
+        let header = RecordHeader {
+            oid,
+            kind,
+            length,
+            commitment: *commitment,
+        };
+        let mut verifier = ObjectVerifier::new(header)?;
         self.push(oid.as_bytes(), live)?;
         self.push(&[kind_byte(kind)], live)?;
-        self.push(&(payload.len() as u64).to_be_bytes(), live)?;
+        self.push(&length.to_be_bytes(), live)?;
         self.push(commitment, live)?;
-        self.push(payload, live)?;
+        let mut remaining = length;
+        let mut buffer = [0; CHUNK_BYTES];
+        while remaining != 0 {
+            let offered = usize::try_from(remaining.min(CHUNK_BYTES as u64))
+                .map_err(|_| "repository backup object length cannot fit a chunk")?;
+            let count = read_source(input, &mut buffer[..offered], live)?;
+            if count == 0 {
+                return Err("truncated repository backup object source".into());
+            }
+            verifier.update(&buffer[..count])?;
+            self.push(&buffer[..count], live)?;
+            remaining -= count as u64;
+        }
+        if read_source(input, &mut buffer[..1], live)? != 0 {
+            return Err("trailing repository backup object source bytes".into());
+        }
+        verifier.finish()?;
+        live()?;
         self.remaining -= 1;
         self.previous = Some(oid);
         Ok(())
@@ -196,6 +261,24 @@ impl<W: Write> StreamEncoder<W> {
             digest: self.hash.finish(),
             bytes: self.bytes,
         })
+    }
+}
+
+fn read_source(
+    input: &mut (impl Read + ?Sized),
+    output: &mut [u8],
+    live: &mut impl FnMut() -> Result<(), String>,
+) -> Result<usize, String> {
+    loop {
+        live()?;
+        let result = input.read(output);
+        live()?;
+        match result {
+            Ok(count) if count <= output.len() => return Ok(count),
+            Ok(_) => return Err("repository backup source returned an invalid byte count".into()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("repository backup source read failed: {error}")),
+        }
     }
 }
 
@@ -364,37 +447,69 @@ impl<R: Read> StreamDecoder<R> {
         &self.header
     }
     /// At most one 32 MiB payload is retained; the borrow prevents a caller from
-    /// keeping it alive while asking this decoder for another record.
+    /// keeping it alive while asking this decoder for another record. Larger
+    /// blobs require visit_record and never widen this buffered interface.
     pub fn record(
         &mut self,
         live: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<Option<Record<'_>>, String> {
+        let mut payload = std::mem::take(&mut self.payload);
+        let mut header = None;
+        let result = self.visit_record(live, |next, input| {
+            let length = usize::try_from(next.length)
+                .ok()
+                .filter(|length| *length <= MAX_OBJECT_BYTES)
+                .ok_or("repository backup buffered object-byte limit")?;
+            payload.clear();
+            payload
+                .try_reserve_exact(length)
+                .map_err(|_| "repository backup object allocation refused")?;
+            payload.resize(length, 0);
+            input
+                .read_exact(&mut payload)
+                .map_err(|error| format!("repository backup object read failed: {error}"))?;
+            header = Some(next);
+            Ok(())
+        });
+        self.payload = payload;
+        result?;
+        Ok(header.map(|header| Record {
+            oid: header.oid,
+            kind: header.kind,
+            payload: &self.payload,
+        }))
+    }
+    /// Visit one tentative record through bounded reads without retaining its
+    /// payload. Returns false at the end of the declared inventory. The reader
+    /// ends at the exact record boundary, verifies native identity and the
+    /// original strong commitment, and never consumes the next record.
+    ///
+    /// The visitor must consume all declared bytes; returning early, hiding a
+    /// reader error, or failing after consumption poisons the entire decoder.
+    /// A successful visitor is still not an authenticated archive: finish must
+    /// verify the whole-file checksum and exact EOF before any publication.
+    pub fn visit_record(
+        &mut self,
+        live: &mut impl FnMut() -> Result<(), String>,
+        visitor: impl FnOnce(RecordHeader, &mut dyn Read) -> Result<(), String>,
+    ) -> Result<bool, String> {
         if self.failed {
             return Err("repository backup decoder previously failed".into());
         }
-        let result = self.record_inner(live);
-        // Metadata is returned separately so an error can poison the decoder
-        // without competing with a borrow of the retained payload buffer.
-        match result {
-            Ok(Some((oid, kind))) => Ok(Some(Record {
-                oid,
-                kind,
-                payload: &self.payload,
-            })),
-            Ok(None) => Ok(None),
-            Err(error) => {
-                self.failed = true;
-                Err(error)
-            }
+        let result = self.visit_record_inner(live, visitor);
+        if result.is_err() {
+            self.failed = true;
         }
+        result
     }
-    fn record_inner(
+    fn visit_record_inner(
         &mut self,
         live: &mut impl FnMut() -> Result<(), String>,
-    ) -> Result<Option<(GitOid, GitObjectKind)>, String> {
+        visitor: impl FnOnce(RecordHeader, &mut dyn Read) -> Result<(), String>,
+    ) -> Result<bool, String> {
         live()?;
         if self.remaining == 0 {
-            return Ok(None);
+            return Ok(false);
         }
         let format = self.header.identity.format;
         let mut raw = [0; 32];
@@ -409,30 +524,27 @@ impl<R: Read> StreamDecoder<R> {
             return Err("repository backup object order/domain mismatch".into());
         }
         let kind = kind(self.input.array::<1>(live)?[0])?;
-        let length = self.input.length(MAX_OBJECT_BYTES, live)?;
-        let commitment = self.input.array::<32>(live)?;
-        check_room(self.input.bytes, length as u64, self.input.limits)?;
-        self.payload.clear();
-        self.payload
-            .try_reserve_exact(length)
-            .map_err(|_| "repository backup object allocation refused")?;
-        self.payload.resize(length, 0);
-        self.input.read_exact(&mut self.payload, live)?;
-        if git_object_id(format, kind, &self.payload) != oid {
-            return Err(format!(
-                "repository backup native object identity mismatch: {oid}"
-            ));
+        let length = u64::from_be_bytes(self.input.array(live)?);
+        if length > self.input.limits.object_limit(kind) {
+            return Err("repository backup declared length/count exceeds its limit".into());
         }
-        let computed = git_payload_commitment(kind, &self.payload, CANONICAL_CODEC_VERSION);
-        if computed.digest().as_bytes() != commitment.as_slice() {
-            return Err(format!(
-                "repository backup payload commitment mismatch: {oid}"
-            ));
+        let commitment = self.input.array::<32>(live)?;
+        check_room(self.input.bytes, length, self.input.limits)?;
+        let header = RecordHeader {
+            oid,
+            kind,
+            length,
+            commitment,
+        };
+        {
+            let mut reader = RecordReader::new(&mut self.input, header, live)?;
+            visitor(header, &mut reader)?;
+            reader.finish()?;
         }
         live()?;
         self.remaining -= 1;
         self.previous = Some(oid);
-        Ok(Some((oid, kind)))
+        Ok(true)
     }
     pub fn finish(
         self,

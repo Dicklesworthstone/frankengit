@@ -67,6 +67,7 @@ impl Deadline {
 #[derive(Default)]
 pub(super) struct ProfileFlags {
     bytes: Option<u64>,
+    blob_bytes: Option<u64>,
     seconds: Option<u64>,
 }
 impl ProfileFlags {
@@ -81,9 +82,18 @@ impl ProfileFlags {
             "--max-archive-bytes" => {
                 TransferLimits {
                     max_archive_bytes: value,
+                    ..TransferLimits::default()
                 }
                 .validate()?;
                 &mut self.bytes
+            }
+            "--max-blob-bytes" => {
+                TransferLimits {
+                    max_blob_bytes: value,
+                    ..TransferLimits::default()
+                }
+                .validate()?;
+                &mut self.blob_bytes
             }
             "--timeout-secs" if value <= 86_400 => &mut self.seconds,
             "--timeout-secs" => return Err("timeout must be in 1..=86400 seconds".into()),
@@ -99,6 +109,7 @@ impl ProfileFlags {
         Profile {
             transfer: TransferLimits {
                 max_archive_bytes: self.bytes.unwrap_or(defaults.transfer.max_archive_bytes),
+                max_blob_bytes: self.blob_bytes.unwrap_or(defaults.transfer.max_blob_bytes),
             },
             timeout: Duration::from_secs(self.seconds.unwrap_or(defaults.timeout.as_secs())),
         }
@@ -130,23 +141,30 @@ mod tests {
             narrowed.transfer.max_archive_bytes,
             profile.transfer.max_archive_bytes
         );
+        assert_eq!(
+            narrowed.transfer.max_blob_bytes,
+            profile.transfer.max_blob_bytes
+        );
         assert!(profile.with_timeout_cap(Some(Duration::ZERO)).is_err());
     }
     #[test]
     fn defaults_and_explicit_limits_remain_independent() {
         let defaults = ProfileFlags::default().finish();
         assert_eq!(defaults.transfer.max_archive_bytes, 1 << 30);
+        assert_eq!(defaults.transfer.max_blob_bytes, 32 * 1024 * 1024);
         assert_eq!(defaults.timeout, Duration::from_secs(300));
         let mut flags = ProfileFlags::default();
         flags.set("--max-archive-bytes", "1099511627776").unwrap();
+        flags.set("--max-blob-bytes", "536870912").unwrap();
         flags.set("--timeout-secs", "86400").unwrap();
         let profile = flags.finish();
         assert_eq!(profile.transfer.max_archive_bytes, 1 << 40);
+        assert_eq!(profile.transfer.max_blob_bytes, 512 * 1024 * 1024);
         assert_eq!(profile.timeout, Duration::from_hours(24));
     }
     #[test]
     fn malformed_duplicate_and_excessive_budgets_refuse() {
-        for flag in ["--max-archive-bytes", "--timeout-secs"] {
+        for flag in ["--max-archive-bytes", "--max-blob-bytes", "--timeout-secs"] {
             for text in [
                 "",
                 "0",
@@ -170,10 +188,33 @@ mod tests {
         );
         assert!(
             ProfileFlags::default()
+                .set("--max-blob-bytes", "1099511627777")
+                .is_err()
+        );
+        assert!(
+            ProfileFlags::default()
                 .set("--timeout-secs", "86401")
                 .is_err()
         );
     }
+    #[test]
+    fn selecting_a_blob_limit_preserves_archive_and_deadline_bounds() {
+        for maximum in [1_u64, 32 * 1024 * 1024, 1 << 40] {
+            let mut flags = ProfileFlags::default();
+            flags.set("--max-blob-bytes", &maximum.to_string()).unwrap();
+            let profile = flags.finish();
+            assert_eq!(profile.transfer.max_blob_bytes, maximum);
+            assert_eq!(profile.transfer.max_archive_bytes, 1 << 30);
+            assert_eq!(profile.timeout, Duration::from_secs(300));
+        }
+        let mut archive_only = ProfileFlags::default();
+        archive_only.set("--max-archive-bytes", "1").unwrap();
+        assert_eq!(
+            archive_only.finish().transfer.max_blob_bytes,
+            32 * 1024 * 1024
+        );
+    }
+
     #[test]
     fn the_same_deadline_is_shared_by_later_passes() {
         let deadline = Deadline {

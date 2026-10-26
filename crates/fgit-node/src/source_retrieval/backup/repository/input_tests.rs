@@ -12,7 +12,7 @@ use fgit_types::{
 };
 use std::io::Cursor;
 
-fn sample(format: GitHashAlgorithm, payload: &[u8]) -> Vec<u8> {
+pub(super) fn sample(format: GitHashAlgorithm, payload: &[u8]) -> Vec<u8> {
     let token = mint_token(StoreInstanceId::from_raw(41), IssuanceSequence::FIRST)
         .to_opaque_bytes()
         .to_vec();
@@ -126,7 +126,8 @@ fn metadata_changes_truncation_and_byte_budgets_never_yield_a_complete_pass() {
             Cursor::new(bytes.clone()),
             pin,
             TransferLimits {
-                max_archive_bytes: bytes.len() as u64 - 1
+                max_archive_bytes: bytes.len() as u64 - 1,
+                ..TransferLimits::default()
             },
             deadline
         )
@@ -137,6 +138,7 @@ fn metadata_changes_truncation_and_byte_budgets_never_yield_a_complete_pass() {
         pin,
         TransferLimits {
             max_archive_bytes: bytes.len() as u64,
+            ..TransferLimits::default()
         },
         deadline,
     )
