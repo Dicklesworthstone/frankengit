@@ -4,9 +4,11 @@
 //! Both decisions advance the authority head. Clearing the validation witness
 //! after a commit, or keeping the original head after a refusal, is not enough:
 //! the former admits unrelated successors and the latter rejects valid later
-//! commands. This driver advances only across its own verified one-decision
-//! publication. Every actual decision still uses the shared admission planner,
-//! lowerer, seal, CAS loop, and authoritative outcome resolver.
+//! commands. This driver advances only across verified publications whose
+//! complete decision lists belong to this session. Opt-in projections combine
+//! independent commands through the shared bounded microbatch driver; other
+//! projections retain one decision per publication. Every decision still uses
+//! the shared admission planner, lowerer, seal, and authority-head CAS.
 //!
 //! The conservative profile deliberately does not walk arbitrary descendants.
 //! An intervening publication requires a newly validated request on retry.
@@ -75,7 +77,7 @@ impl InterruptedSession {
         self.session.as_ref()
     }
 
-    /// Only outcomes already returned by the authoritative resolver, in order.
+    /// Only authenticated canonical terminal outcomes, in original wire order.
     #[must_use]
     pub fn completed_commands(&self) -> &[CommandOutcome] {
         &self.completed
@@ -145,6 +147,35 @@ where
             completed: Vec::new(),
         })?;
     let mut outcomes = Vec::with_capacity(plan.lowered.len());
+    if !plan.atomic && projection.supports_ref_microbatching() {
+        if let Err(source) = crate::microbatch::admit_non_atomic_async(
+            store,
+            cx,
+            context,
+            &input,
+            &plan,
+            limits,
+            projection,
+            &mut outcomes,
+        )
+        .await
+        {
+            let completed = outcomes
+                .into_iter()
+                .zip(plan.tx_ids.iter().copied())
+                .map(|(terminal, tx_id)| CommandOutcome { tx_id, terminal })
+                .collect();
+            return Err(InterruptedSession {
+                source: Box::new(source),
+                session: Some(mapping),
+                completed,
+            });
+        }
+        return Ok(assemble_result(
+            plan,
+            SessionTerminals::PerCommand(outcomes),
+        ));
+    }
     let mut permitted = validated.validation_basis();
 
     for (index, lowered) in plan.lowered.iter().enumerate() {

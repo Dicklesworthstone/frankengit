@@ -13,8 +13,11 @@
 //! An atomic receive session seals one request containing every command.  A
 //! non-atomic session derives one bounded child idempotency key per wire-order
 //! command and returns that ordered mapping, so retries reconstruct the same
-//! per-ref transactions.  In both cases a report is formed only after
-//! [`fgit_authority::resolve_outcome`] has authenticated a terminal decision.
+//! per-ref transactions. Projections may combine their physical publication
+//! through [`microbatch`] while preserving each command's sealed identity and
+//! outcome. A report requires an authenticated canonical terminal decision,
+//! resolved from the authority history or the exact batch selected by an
+//! authenticated successful CAS receipt and reconciled with the outcome index.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -64,6 +67,7 @@ pub mod evidence;
 /// Admitting a sealed merge; see the module for what it does and does not
 /// re-check.
 pub mod merge;
+pub mod microbatch;
 pub mod policy_bridge;
 mod projection_failure;
 
@@ -1195,6 +1199,28 @@ pub trait AdmissionSnapshotProjection {
 /// blocking entrypoint, where a typed staging refusal would otherwise become a
 /// permanent canonical terminal decision for a retryable request.
 pub trait AdmissionProjection: AdmissionSnapshotProjection {
+    /// Opts into bounded, wire-ordered ref publication from derived batch state.
+    /// The default retains the single-transaction materialization contract.
+    fn supports_ref_microbatching(&self) -> bool {
+        false
+    }
+
+    /// Stages a committing fold against the original authenticated basis and
+    /// accepted earlier ref effects. Only the admission driver can construct
+    /// this state. Implementors opting in must use its current refs rather than
+    /// rereading the original ref root for every command.
+    fn materialize_batch_commit(
+        &self,
+        _state: &microbatch::BatchRefState,
+        _request: &TransactionRequest,
+        _fold: &TransactionFoldReport,
+        _closure: &ValidatedClosure,
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        Err(ProjectionFailure::Unavailable(
+            RefusalCode::DurabilityProfileUnavailable,
+        ))
+    }
+
     /// Materializes a committed fold into an RCR and its successor roots.
     ///
     /// A refusal is an evaluated terminal decision for this exact basis. An
@@ -1237,6 +1263,28 @@ pub trait AsyncAdmissionProjection<Authority>: Sync
 where
     Authority: AsyncAuthorityStore + ?Sized,
 {
+    /// Opts into the same bounded ref microbatch semantics as the blocking seam.
+    fn supports_ref_microbatching(&self) -> bool {
+        false
+    }
+
+    /// Stages one fold from the driver's private, authority-derived batch state.
+    /// The original head remains the only publication basis; the ref overlay
+    /// contains accepted earlier decisions in this same unpublished chunk.
+    fn materialize_batch_commit_async<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _cx: &'a Authority::Context,
+        _state: &'a microbatch::BatchRefState,
+        _request: &'a TransactionRequest,
+        _fold: &'a TransactionFoldReport,
+        _closure: &'a ValidatedClosure,
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
+        std::future::ready(Err(ProjectionFailure::Unavailable(
+            RefusalCode::DurabilityProfileUnavailable,
+        )))
+    }
+
     /// Opens a read-only snapshot at the exact authenticated basis for this
     /// attempt. The driver invokes this again after every CAS replan.
     fn snapshot_async<'a>(
@@ -1995,6 +2043,27 @@ where
     Store: CanonicalAdmissionStore,
     Evidence: AdmissionEvidence,
 {
+    fn supports_ref_microbatching(&self) -> bool {
+        true
+    }
+
+    fn materialize_batch_commit(
+        &self,
+        state: &microbatch::BatchRefState,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+        closure: &ValidatedClosure,
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        microbatch::materialize_canonical(
+            self,
+            state.basis(),
+            state.refs().clone(),
+            request,
+            fold,
+            closure,
+        )
+    }
+
     fn materialize_commit(
         &self,
         basis: &PublicationBasis,
@@ -2005,31 +2074,7 @@ where
         let current = self
             .resolve_ref_state(basis.body().ref_root)
             .map_err(ProjectionFailure::Unavailable)?;
-        let evidence = self
-            .evidence
-            .commit_evidence(basis, request, fold)
-            .map_err(ProjectionFailure::Refuse)?;
-        let prepared = prepare_canonical_commit(
-            basis,
-            request,
-            fold,
-            closure,
-            current,
-            RootLayoutVersion::LegacyWholeBody,
-            evidence,
-        )
-        .map_err(ProjectionFailure::Refuse)?;
-        let ref_root = canonical_ref_state_root(prepared.next_ref_state())
-            .map_err(ProjectionFailure::Refuse)?;
-        self.store
-            .stage_ref_state(ref_root, prepared.next_ref_state().clone())
-            .map_err(ProjectionFailure::Unavailable)?;
-        let object_closure_root = permitted_object_closure_root(prepared.object_closure())
-            .map_err(ProjectionFailure::Refuse)?;
-        self.store
-            .stage_permitted_object_closure(object_closure_root, prepared.object_closure().clone())
-            .map_err(ProjectionFailure::Unavailable)?;
-        Ok(prepared.into_materialization())
+        microbatch::materialize_canonical(self, basis, current, request, fold, closure)
     }
 
     fn materialize_refusal(
@@ -2049,6 +2094,24 @@ where
     Store: CanonicalAdmissionStore + Sync,
     Evidence: AdmissionEvidence + Sync,
 {
+    fn supports_ref_microbatching(&self) -> bool {
+        true
+    }
+
+    fn materialize_batch_commit_async<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _cx: &'a Authority::Context,
+        state: &'a microbatch::BatchRefState,
+        request: &'a TransactionRequest,
+        fold: &'a TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
+        std::future::ready(AdmissionProjection::materialize_batch_commit(
+            self, state, request, fold, closure,
+        ))
+    }
+
     fn snapshot_async<'a>(
         &'a self,
         _authority: &'a Authority,
@@ -2162,6 +2225,8 @@ pub enum AdmissionError {
     ObjectFormatMismatch,
     /// The receive request exceeds the bounded transaction lowerer.
     CommandLimitExceeded { limit: usize },
+    /// A bounded ref chunk exceeded the canonical decision-batch byte budget.
+    MicrobatchBytesExceeded { limit: usize, observed: usize },
     /// Conversion from validated wire ref bytes unexpectedly failed.
     RefName(fgit_types::TypeRefusal),
     /// Request canonicalization refused the lowered semantic request.
@@ -2242,6 +2307,10 @@ impl Display for AdmissionError {
                     "receive command count exceeds admission limit {limit}"
                 )
             }
+            Self::MicrobatchBytesExceeded { limit, observed } => write!(
+                formatter,
+                "receive microbatch needs {observed} canonical bytes; limit is {limit}",
+            ),
             Self::RefName(refusal) => write!(formatter, "receive ref name refused: {refusal}"),
             Self::Request(refusal) => write!(formatter, "semantic request refused: {refusal}"),
             Self::Seal(failure) => {
@@ -2423,6 +2492,18 @@ where
             projection,
             limits,
         )?)
+    } else if projection.supports_ref_microbatching() {
+        let mut outcomes = Vec::with_capacity(plan.lowered.len());
+        microbatch::admit_non_atomic(
+            store,
+            context,
+            input,
+            &plan,
+            limits,
+            projection,
+            &mut outcomes,
+        )?;
+        SessionTerminals::PerCommand(outcomes)
     } else {
         let mut outcomes = Vec::with_capacity(plan.lowered.len());
         let mut current_validation_basis = input.validation_basis;
@@ -3972,6 +4053,20 @@ where
             )
             .await?,
         )
+    } else if projection.supports_ref_microbatching() {
+        let mut outcomes = Vec::with_capacity(plan.lowered.len());
+        microbatch::admit_non_atomic_async(
+            store,
+            cx,
+            context,
+            input,
+            &plan,
+            limits,
+            projection,
+            &mut outcomes,
+        )
+        .await?;
+        SessionTerminals::PerCommand(outcomes)
     } else {
         let mut outcomes = Vec::with_capacity(plan.lowered.len());
         let mut current_validation_basis = input.validation_basis;
