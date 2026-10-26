@@ -179,16 +179,9 @@ fn every_refusal_route_leaves_an_empty_quarantine() {
             vec![Packet::Data(b"not-a-command".to_vec())],
             |error| matches!(error, ReceiveError::MalformedCommand { .. }),
         ),
-        (
-            "both object ids zero",
-            vec![command(
-                ZERO,
-                ZERO,
-                "refs/heads/main",
-                Some("report-status"),
-            )],
-            |error| matches!(error, ReceiveError::BothObjectIdsZero),
-        ),
+        ("empty command list", vec![Packet::Flush], |error| {
+            matches!(error, ReceiveError::MissingCommands)
+        }),
         (
             "duplicate ref command",
             vec![

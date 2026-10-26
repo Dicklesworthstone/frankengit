@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[path = "guarded_git_daemon/absent_delete.rs"]
+mod absent_delete;
 #[path = "guarded_git_daemon/continuous.rs"]
 mod continuous;
 #[path = "guarded_git_daemon/push_options.rs"]

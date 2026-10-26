@@ -82,6 +82,32 @@ correctness judged by omission and lazy-fetch content rather than by pack
 bytes, and no claim about `object:type` or other filters stock git does not
 send by default.
 
+## Conditional deletion of an absent ref
+
+An all-zero old and new object ID is a delete command with an explicit
+absent-ref precondition (frankengit-l6mb). When that ref is absent, it succeeds
+as an identity no-op: it requires no pack, retains the original command in the
+sealed request and terminal result, and leaves the ref root unchanged. In a
+mixed push it does not prevent another valid command from publishing. Atomic
+pushes still share one decision; non-atomic pushes retain independent command
+outcomes and recovery identities.
+
+The same command targeting a present ref receives `stale info` and cannot
+delete it. This preserves the old-ID assertion and is the explicit DIV-TA-004
+safety divergence below. Hidden-ref authorization runs before either the
+no-op or expected-old comparison, so both hidden-present and hidden-absent
+targets receive the existing generic hidden-ref refusal.
+
+Authored regression coverage includes both native object formats, packless
+quarantine handoff, capability/name/count bounds, cancellation, mixed
+atomic/non-atomic outcomes, exact sealed identity, and recovery after a node
+restart. The stock-client helper above includes
+`absent-delete-{atomic,non-atomic}` and
+`absent-delete-create-{atomic,non-atomic}` for each configured HTTP, git://,
+and SSH transport and hash format. These additions are not included in the
+historical executed counts above; their execution is reported separately at
+the tested source revision.
+
 ## Tier A: the declared differential tier
 
 Tier A is the narrow compatibility tier the plan's Phase 2 exit and 1.0
@@ -139,12 +165,19 @@ visible-graph proof:
 Every other capability `fg` advertises must also be advertised by pinned Git,
 and the Tier A capability subset must match exactly.
 
-Report-status must match byte for byte, except where a declared pair differs
-only in its reason wording. The accept/refuse decision and the ref must still
-match:
+Report-status must match byte for byte except for the following explicitly
+scoped divergences. DIV-TA-003 changes reason wording only; its accept/refuse
+decision and target ref must still match:
 - DIV-TA-003: deleting HEAD's branch. Upstream says `deletion of the current
   branch prohibited`; `fg` refuses it through its ref-protection policy and says
   `protected ref denied`.
+- DIV-TA-004: a raw all-zero old/new command targeting a present ref. Upstream
+  permits a zero-old delete as an unconditional corruption-recovery operation.
+  `fg` retains `ExpectedOld::Absent` and refuses with `stale info`, preserving
+  the present ref. An absent target succeeds in both implementations, and a
+  delete carrying the correct nonzero old ID remains supported. This single
+  precondition case deliberately differs in acceptance; it does not relax
+  outcome parity for ordinary deletes, other commands, or hidden-ref policy.
 
 The push node runs at `fg serve`'s default session and processing budgets, so
 the many-objects push is checked against fg as shipped. Before batched receive

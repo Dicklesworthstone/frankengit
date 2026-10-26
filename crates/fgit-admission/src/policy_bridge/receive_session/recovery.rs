@@ -188,10 +188,6 @@ impl Descriptor {
                 || matches!(command.expected_old, ExpectedOld::Unspecified)
                 || matches!(command.expected_old, ExpectedOld::Exactly(oid) if oid.is_zero())
                 || matches!(command.proposed_new, ProposedNew::Update(oid) if oid.is_zero())
-                || matches!(
-                    (command.expected_old, command.proposed_new),
-                    (ExpectedOld::Absent, ProposedNew::Delete)
-                )
             {
                 return Err(invalid());
             }
@@ -507,6 +503,56 @@ mod tests {
             b"refs/tags/a"
         );
         assert_eq!(decoded.encode().unwrap(), bytes);
+    }
+
+    #[test]
+    fn absent_delete_roundtrips_without_becoming_an_unconditional_delete() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let command = RefCommand {
+                name: RefName::try_new(b"refs/heads/absent").unwrap(),
+                expected_old: ExpectedOld::Absent,
+                proposed_new: ProposedNew::Delete,
+                force: false,
+            };
+            let build = |command| {
+                SemanticRequest::build(
+                    fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                    format,
+                    false,
+                    vec![command],
+                    vec![PushOption::new(b"ordered-option".to_vec()).unwrap()],
+                    Vec::new(),
+                )
+                .unwrap()
+            };
+            let descriptor = Descriptor {
+                request: build(command.clone()),
+                wire_order: vec![0],
+            };
+            let encoded = descriptor
+                .encode()
+                .expect("a zero-pair delete is recoverable");
+            let decoded = Descriptor::decode(&encoded).unwrap();
+            assert_eq!(decoded.request, descriptor.request);
+            assert_eq!(
+                decoded.request.ref_commands(),
+                std::slice::from_ref(&command)
+            );
+            assert_eq!(decoded.wire_order, [0]);
+            assert_eq!(decoded.encode().unwrap(), encoded);
+
+            // The absent assertion must survive: permitting an unspecified
+            // old value would let recovery describe a deletion the wire never
+            // authorized, including a ref created after the advertisement.
+            let unconditional = Descriptor {
+                request: build(RefCommand {
+                    expected_old: ExpectedOld::Unspecified,
+                    ..command
+                }),
+                wire_order: vec![0],
+            };
+            assert!(unconditional.encode().is_err());
+        }
     }
 
     #[test]

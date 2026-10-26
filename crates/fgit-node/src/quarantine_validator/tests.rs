@@ -145,7 +145,6 @@ fn every_receive_refusal_arm_maps_losslessly_to_the_async_transport_surface() {
         ReceiveError::DuplicateRefCommand {
             ref_name: b"refs/heads/main".to_vec(),
         },
-        ReceiveError::BothObjectIdsZero,
         ReceiveError::MalformedCommand {
             line: b"bad command".to_vec(),
         },
@@ -791,6 +790,57 @@ fn live_delete_only_receive_returns_the_canonical_empty_closure() {
         ProductionQuarantineValidator::empty_closure().expect("empty closure has a canonical root")
     );
     node.shutdown().expect("node shuts down after test");
+}
+
+#[test]
+fn absent_ref_delete_reaches_the_production_validator_without_pack_bytes() {
+    let scratch = ScratchDirectory::new();
+    let node = test_node(scratch.path().to_path_buf());
+    let zero = AnyGitOid::from_hex(GitObjectFormat::Sha1, &"0".repeat(40)).unwrap();
+    let request = ReceiveRequest {
+        commands: vec![ReceiveCommand {
+            old: zero,
+            new: zero,
+            ref_name: b"refs/heads/absent".to_vec(),
+        }],
+        capabilities: Vec::new(),
+        push_options: Vec::new(),
+        certificate: None,
+    };
+    let receipt = QuarantineReceipt {
+        object_format: GitObjectFormat::Sha1,
+        object_count: 0,
+        pack_bytes: 0,
+        delete_only: true,
+    };
+    let authority_request = node.request_context();
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&authority_request))
+        .unwrap();
+    let validator = node
+        .production_quarantine_validator(
+            &materialized,
+            PackLimits::default(),
+            ParseLimits::default(),
+        )
+        .unwrap();
+    let validated = validate_receive(&request, None, &receipt, &validator, &mut || true)
+        .expect("an absent-ref delete has an empty validated closure and needs no pack");
+    assert_eq!(validated.request(), &request);
+    assert_eq!(validated.receipt(), &receipt);
+    assert_eq!(
+        validator
+            .validate(&request, None, &receipt, &mut || true)
+            .unwrap(),
+        ProductionQuarantineValidator::empty_closure().unwrap()
+    );
+    assert_eq!(
+        validate_receive(&request, None, &receipt, &validator, &mut || false),
+        Err(RefusalCode::CancellationInProgress)
+    );
+    node.shutdown()
+        .expect("node shuts down after packless validation");
 }
 
 #[test]

@@ -516,7 +516,7 @@ struct RefUpdateView<'a> {
 impl RefUpdateView<'_> {
     /// The receive-pack zero-sentinel rule: an all-zero new ID deletes.
     fn deletes(&self) -> bool {
-        self.new.is_zero() && !self.old.is_zero()
+        self.new.is_zero()
     }
 }
 
@@ -2162,9 +2162,6 @@ pub enum AdmissionError {
     ObjectFormatMismatch,
     /// The receive request exceeds the bounded transaction lowerer.
     CommandLimitExceeded { limit: usize },
-    /// The parser handed over an invalid zero/zero command; production receive
-    /// parsing refuses this before handoff, but this public boundary is total.
-    InvalidZeroPair,
     /// Conversion from validated wire ref bytes unexpectedly failed.
     RefName(fgit_types::TypeRefusal),
     /// Request canonicalization refused the lowered semantic request.
@@ -2244,9 +2241,6 @@ impl Display for AdmissionError {
                     formatter,
                     "receive command count exceeds admission limit {limit}"
                 )
-            }
-            Self::InvalidZeroPair => {
-                formatter.write_str("receive command has zero old and new ids")
             }
             Self::RefName(refusal) => write!(formatter, "receive ref name refused: {refusal}"),
             Self::Request(refusal) => write!(formatter, "semantic request refused: {refusal}"),
@@ -3093,13 +3087,14 @@ fn lower_ref_update(
     } else {
         fgit_authority::ExpectedOld::Exactly(old)
     };
-    // The classification is the receive-pack zero-sentinel rule, applied to any
-    // source: two zero IDs name nothing and are refused, a zero new deletes,
-    // and anything else proposes that object.
-    let proposed_new = match (old.is_zero(), new.is_zero()) {
-        (true, true) => return Err(AdmissionError::InvalidZeroPair),
-        (_, true) => fgit_authority::ProposedNew::Delete,
-        (_, false) => fgit_authority::ProposedNew::Update(new),
+    // A zero new ID deletes even when old is zero. Keep the absent assertion
+    // above: the ordinary fold records an identity no-op for an absent ref,
+    // and an expected-old mismatch for a present one. Dropping the command
+    // would lose a client-visible field from the sealed request (l6mb).
+    let proposed_new = if new.is_zero() {
+        fgit_authority::ProposedNew::Delete
+    } else {
+        fgit_authority::ProposedNew::Update(new)
     };
     Ok(fgit_authority::RefCommand {
         name,
@@ -4306,6 +4301,8 @@ where
 #[cfg(test)]
 mod tests {
     #![forbid(unsafe_code)]
+
+    mod absent_delete;
 
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet};
@@ -5647,11 +5644,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_pair_is_refused_and_nearby_create_proceeds() {
+    fn zero_pair_lowers_to_a_conditional_delete_and_nearby_create_proceeds() {
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();
-        let malformed = completion(
+        let mut absent_delete = completion(
             vec![ReceiveCommand {
                 old: oid(0),
                 new: oid(0),
@@ -5659,18 +5656,22 @@ mod tests {
             }],
             true,
         );
-        assert!(matches!(
-            admit_validated_receive(
-                &store,
-                &context,
-                &malformed,
-                AdmissionLimits::default(),
-                &projection,
-            ),
-            Err(AdmissionError::InvalidZeroPair)
-        ));
+        absent_delete.receipt.delete_only = true;
+        let deleted = admit_validated_receive(
+            &store,
+            &context,
+            &absent_delete,
+            AdmissionLimits::default(),
+            &projection,
+        )
+        .expect("a zero pair is an absent-ref deletion, not malformed framing");
+        assert_eq!(deleted.command_statuses(), vec![ReceiveCommandStatus::Ok]);
 
         let permitted = completion(vec![create(b"refs/heads/main", 27)], true);
+        let context = AdmissionContext {
+            idempotency_key: IdempotencyKey::new(b"nearby-create".to_vec()).unwrap(),
+            ..context
+        };
         assert!(
             admit_validated_receive(
                 &store,

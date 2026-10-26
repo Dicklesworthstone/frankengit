@@ -18,6 +18,8 @@ host's, or the pinned oracle through --git-bin/--git-exec-path) exercises:
   design, including a pushed gitlink update;
 - `git push --atomic` success, all-or-nothing failure when one update is a
   refname conflict, and the non-atomic twin that publishes the other ref;
+- absent-ref deletion alone and beside a create, in atomic and non-atomic
+  sessions (frankengit-l6mb);
 - `git push -o` (push options, frankengit-321s), and the refusal of an option
   past the 1,024-byte sealable bound beside its twin at the bound.
 
@@ -365,6 +367,26 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
                    and flags.get("refs/heads/plain-a", "").startswith("*")
                    and flags.get("refs/heads/topic/conflict2", "").startswith("!"),
                    f"flags={flags} published_only_plain={after == expected} {text(partial)[-300:]}")
+        # Full refnames make stock git send zero/zero for an absent delete.
+        # That assertion is a no-op and must not discard its co-pushed create.
+        for atomic in (False, True):
+            mode = "atomic" if atomic else "non-atomic"
+            options = ["--atomic"] if atomic else []
+            absent = f"refs/heads/absent-{mode}"
+            created = f"refs/heads/absent-delete-create-{mode}"
+            before = ref_map(git, url, env)
+            deleted = git.run("-C", work, "push", "--porcelain", *options,
+                              "origin", f":{absent}", env=env)
+            after = ref_map(git, url, env)
+            checks.add(f"{prefix}-absent-delete-{mode}", deleted.returncode == 0 and after == before,
+                       f"unchanged={after == before} {text(deleted)}")
+            mixed = git.run("-C", work, "push", "--porcelain", *options,
+                            "origin", f":{absent}", f"HEAD:{created}", env=env)
+            after = ref_map(git, url, env)
+            expected = dict(before, **{created: head})
+            checks.add(f"{prefix}-absent-delete-create-{mode}",
+                       mixed.returncode == 0 and after == expected,
+                       f"only_create_published={after == expected} {text(mixed)}")
         # Push options (frankengit-321s): `git push -o` works only when the server
         # advertises push-options. The options are sealed with the request; one
         # past the sealable 1,024-byte bound is refused and publishes nothing,

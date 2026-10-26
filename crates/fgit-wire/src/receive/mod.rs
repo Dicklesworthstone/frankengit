@@ -193,7 +193,7 @@ impl ReceiveContext {
 /// proof that an authority head has changed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiveCommand {
-    /// Expected old native object ID, or all-zero for a create request.
+    /// Expected old native object ID, or all-zero to assert that the ref is absent.
     pub old: AnyGitOid,
     /// Requested new native object ID, or all-zero for a delete request.
     pub new: AnyGitOid,
@@ -207,9 +207,8 @@ impl ReceiveCommand {
     pub fn kind(&self) -> ReceiveCommandKind {
         match (self.old.is_zero(), self.new.is_zero()) {
             (true, false) => ReceiveCommandKind::Create,
-            (false, true) => ReceiveCommandKind::Delete,
+            (_, true) => ReceiveCommandKind::Delete,
             (false, false) => ReceiveCommandKind::Update,
-            (true, true) => ReceiveCommandKind::InvalidZeroPair,
         }
     }
 
@@ -226,12 +225,11 @@ impl ReceiveCommand {
 pub enum ReceiveCommandKind {
     /// All-zero old ID followed by a non-zero new ID.
     Create,
-    /// Non-zero old ID followed by an all-zero new ID.
+    /// An all-zero new ID. A zero old ID asserts absence and is a no-op only
+    /// when the authority-selected ref is absent; it is never an unconditional delete.
     Delete,
     /// Two non-zero IDs; admission decides fast-forward/force policy.
     Update,
-    /// Two zero IDs, which receive-pack refuses.
-    InvalidZeroPair,
 }
 
 /// Versioned signed-push evidence retained only for the admission handoff.
@@ -681,9 +679,6 @@ impl ReceivePack {
     }
 
     fn push_command(&mut self, command: ReceiveCommand) -> Result<(), ReceiveError> {
-        if command.kind() == ReceiveCommandKind::InvalidZeroPair {
-            return Err(ReceiveError::BothObjectIdsZero);
-        }
         if self.commands.len() == self.context.limits.max_commands {
             return Err(ReceiveError::TooManyCommands {
                 limit: self.context.limits.max_commands,
@@ -1611,8 +1606,6 @@ pub enum ReceiveError {
     TooManyCommands { limit: usize },
     /// Two commands targeted one ref, which is ambiguous under atomic semantics.
     DuplicateRefCommand { ref_name: Vec<u8> },
-    /// One command used all-zero old and all-zero new IDs.
-    BothObjectIdsZero,
     /// A command did not have exactly old/new/ref fields.
     MalformedCommand { line: Vec<u8> },
     /// A delete command was supplied although the server did not advertise
@@ -1698,9 +1691,6 @@ impl Display for ReceiveError {
             }
             Self::DuplicateRefCommand { ref_name } => {
                 write!(formatter, "duplicate receive command ref {ref_name:?}")
-            }
-            Self::BothObjectIdsZero => {
-                formatter.write_str("receive command cannot use two zero object IDs")
             }
             Self::MalformedCommand { line } => {
                 write!(formatter, "malformed receive command {line:?}")
