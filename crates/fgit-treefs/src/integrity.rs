@@ -15,6 +15,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+mod stream;
+pub use stream::BlobGraphError;
+
 use fgit_crypto::git_object_id;
 pub use fgit_git_object::ObjectType as ObjectKind;
 use fgit_git_object::{
