@@ -7659,28 +7659,22 @@ impl OneNode {
                     };
                 }
             };
-        let ref_root =
-            match node
-                .runtime
-                .block_on(node.admission_materializer.stage_ref_state_for_layout_in(
-                    &node.authority,
-                    &initialization_cx,
-                    repository_id,
-                    root_layout,
-                    genesis_refs,
-                )) {
-                Ok(root) => root,
-                Err(staging) => {
-                    let initialization = NodeRefusal::from(staging);
-                    return match node.shutdown() {
-                        Ok(()) => Err(initialization),
-                        Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
-                            initialization: Box::new(initialization),
-                            cleanup: Box::new(cleanup),
-                        }),
-                    };
-                }
-            };
+        // The ref-state frame itself is staged only after an existing head has
+        // been compared, below.
+        let ref_root = match fgit_admission::ref_state_root(root_layout, &genesis_refs) {
+            Ok(root) => root,
+            Err(code) => {
+                let initialization =
+                    NodeRefusal::from(AdmissionMaterializationRefusal::CanonicalRoot(code));
+                return match node.shutdown() {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+        };
         if let Err(staging) = node.runtime.block_on(
             node.admission_materializer
                 .stage_permitted_object_closure_in(
@@ -7741,6 +7735,40 @@ impl OneNode {
         let mut genesis = legacy_genesis.clone();
         genesis.forge_position_root = forge_position_root;
         genesis.outbox_root = outbox_root;
+        // Compare an existing repository before staging its ref-state frame.
+        // Under a Merkle ref layout the root commits only to the ref entries,
+        // so another initial branch over the same empty refs names the stored
+        // frame's key with different bytes. Staging first would report that
+        // immutable conflict instead of the initialization conflict.
+        let staged = match node
+            .runtime
+            .block_on(node.existing_head_differs_from_genesis(
+                &genesis,
+                &legacy_genesis,
+                &genesis_refs,
+            )) {
+            Ok(false) => node
+                .runtime
+                .block_on(node.admission_materializer.stage_ref_state_for_layout_in(
+                    &node.authority,
+                    &initialization_cx,
+                    repository_id,
+                    root_layout,
+                    genesis_refs,
+                ))
+                .map_err(NodeRefusal::from),
+            Ok(true) => Err(NodeRefusal::HeadInitializationConflict),
+            Err(comparison) => Err(comparison),
+        };
+        if let Err(initialization) = staged {
+            return match node.shutdown() {
+                Ok(()) => Err(initialization),
+                Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                    initialization: Box::new(initialization),
+                    cleanup: Box::new(cleanup),
+                }),
+            };
+        }
         let initialization = match initialize_embedded_repository(
             &node.runtime,
             &node.authority,
@@ -8300,6 +8328,34 @@ impl OneNode {
     pub async fn authenticate_authority_head(&self) -> Result<AuthenticatedHead, NodeRefusal> {
         let request = self.request_context();
         self.authenticate_authority_head_in(&request).await
+    }
+
+    /// Whether an existing authority head differs from the genesis an
+    /// initialization requests, in either its canonical or legacy form.
+    ///
+    /// An absent head differs from nothing. An equal head body is not enough
+    /// under a Merkle ref layout, whose ref root commits only to the ref
+    /// entries and not to the symbolic `HEAD` target, so the stored ref state
+    /// is then compared as well.
+    async fn existing_head_differs_from_genesis(
+        &self,
+        genesis: &RepositoryAuthorityHeadBody,
+        legacy_genesis: &RepositoryAuthorityHeadBody,
+        refs: &CanonicalRefState,
+    ) -> Result<bool, NodeRefusal> {
+        if matches!(self.read_authority_head().await?, HeadRead::Absent) {
+            return Ok(false);
+        }
+        let authenticated = self.authenticate_authority_head().await?;
+        let current = authenticated
+            .body()
+            .map_err(fgit_authority::OutcomeFailure::from)?;
+        if current != *genesis && current != *legacy_genesis {
+            return Ok(true);
+        }
+        let selected = Box::pin(self.materialize_admission()).await?;
+        let snapshot = selected.snapshot();
+        Ok(snapshot.refs != *refs.refs() || snapshot.head_target.as_ref() != refs.head_target())
     }
 
     /// Materializes the canonical ref state selected by the current durable

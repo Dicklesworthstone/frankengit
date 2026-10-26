@@ -517,3 +517,95 @@ fn exact_legacy_genesis_retries_without_migration_or_custom_head_changes() {
     assert_eq!(selected(&node).basis(), before.basis());
     node.shutdown().unwrap();
 }
+
+#[test]
+fn reinitializing_with_another_initial_branch_is_an_initialization_conflict_in_every_layout() {
+    let trunk = RefName::try_new(b"refs/heads/trunk").unwrap();
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for layout in [
+            RootLayoutVersion::LegacyWholeBody,
+            RootLayoutVersion::RefStateMerkleV1,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        ] {
+            for legacy in [false, true] {
+                let case = format!("{format:?} {layout:?} legacy genesis {legacy}");
+                let scratch = ScratchDirectory::new();
+                let unnamed = test_config(scratch.path().to_path_buf())
+                    .with_object_format(format)
+                    .with_root_layout(layout);
+                let config = unnamed.clone().with_initial_branch(trunk.clone());
+                let node = if legacy {
+                    initialize_legacy(config.clone())
+                } else {
+                    let (node, initialized) = OneNode::init(config.clone()).unwrap();
+                    assert_eq!(initialized, NodeInitialization::Created, "{case}");
+                    node
+                };
+                let before = selected(&node);
+                node.shutdown().unwrap();
+
+                let (node, initialized) = OneNode::init(config.clone()).unwrap();
+                assert_eq!(initialized, NodeInitialization::IdenticalRetry, "{case}");
+                assert_eq!(selected(&node).basis(), before.basis(), "{case}");
+                node.shutdown().unwrap();
+
+                for other in [
+                    unnamed.clone(),
+                    config
+                        .clone()
+                        .with_initial_branch(RefName::try_new(b"refs/heads/different").unwrap()),
+                ] {
+                    assert!(
+                        matches!(
+                            OneNode::init(other),
+                            Err(NodeRefusal::HeadInitializationConflict)
+                        ),
+                        "{case}"
+                    );
+                }
+
+                let node = OneNode::open_existing(config.clone()).unwrap();
+                let after = selected(&node);
+                assert_eq!(after.basis(), before.basis(), "{case}");
+                assert_eq!(after.snapshot().head_target, Some(trunk.clone()), "{case}");
+                node.shutdown().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn reinitializing_an_advanced_repository_is_an_initialization_conflict() {
+    for layout in [
+        RootLayoutVersion::LegacyWholeBody,
+        RootLayoutVersion::RefStateMerkleV1,
+    ] {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf()).with_root_layout(layout);
+        let (mut node, _) = OneNode::init(config.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let oid = publish_tag(&node);
+        let advanced = selected(&node);
+        node.shutdown().unwrap();
+
+        assert!(
+            matches!(
+                OneNode::init(config.clone()),
+                Err(NodeRefusal::HeadInitializationConflict)
+            ),
+            "{layout:?}"
+        );
+        let node = OneNode::open_existing(config).unwrap();
+        let reopened = selected(&node);
+        assert_eq!(reopened.basis(), advanced.basis(), "{layout:?}");
+        assert_eq!(
+            reopened
+                .snapshot()
+                .refs
+                .get(&RefName::try_new(b"refs/tags/canonical-genesis").unwrap()),
+            Some(&oid),
+            "{layout:?}"
+        );
+        node.shutdown().unwrap();
+    }
+}
