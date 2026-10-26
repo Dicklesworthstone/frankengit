@@ -8132,6 +8132,13 @@ impl OneNode {
         &self.git_daemon_repository_path
     }
 
+    /// The key this node's authority head is stored under, for a caller that
+    /// builds an [`AdmissionContext`] for this node.
+    #[must_use]
+    pub const fn authority_head_key(&self) -> &HeadKey {
+        &self.head_key
+    }
+
     /// Mints the bounded authority context for one node request.
     ///
     /// Each call creates a new `FrankenSQLite` context attached to a fresh

@@ -42,6 +42,8 @@ pub use provenance::{
     ProvenanceVerificationReceipt,
 };
 pub use retention::{ArtifactRetentionRegistry, ArtifactRetentionRoot};
+// Callers that stream placed objects name the fabric's refusal from the root.
+pub use fabric::StoreRefusal;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"FGEN";
 const SEGMENT_MAGIC: &[u8; 4] = b"FGMS";

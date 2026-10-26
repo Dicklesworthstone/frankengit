@@ -273,7 +273,7 @@ fn cancellation_and_invalid_hydration_limits_are_not_deferred_until_after_retrie
     assert!(matches!(error, AgentContextReadError::Retrieval(RetrievalError::Invalid("context limits"))));
     assert_eq!(clock_calls.load(Ordering::Relaxed), 0);
     let request = node.outbox_delivery_context();
-    request.authority().cancel();
+    request.cancel();
     let error = node.runtime().block_on(node.retrieve_agent_context_local_in(
         &request,
         AgentContextRead {
@@ -357,7 +357,7 @@ fn cancellation_during_the_final_clock_probe_cannot_release_a_packet() {
     let calls = AtomicUsize::new(0);
     let clock = || {
         if calls.fetch_add(1, Ordering::Relaxed) == 3 {
-            request.authority().cancel();
+            request.cancel();
         }
         LogicalTime::new(41)
     };
