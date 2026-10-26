@@ -4300,6 +4300,25 @@ impl std::fmt::Debug for PushQuota {
     }
 }
 
+/// The operator's receive envelope, with its push-option bounds narrowed to
+/// what one sealed request can carry.
+///
+/// The wire parser and the seal bound push options independently
+/// (`ReceiveLimits` allows 4,096-byte options, `fgit_authority::PushOption`
+/// 1,024). Without this narrowing an option between the two would be parsed
+/// and its pack read, only for sealing to refuse it after quarantine. Every
+/// receive transport reads the node's one envelope, so the narrowing happens
+/// once, here.
+fn sealable_receive_limits(mut limits: ReceiveLimits) -> ReceiveLimits {
+    limits.max_push_options = limits
+        .max_push_options
+        .min(fgit_authority::MAX_PUSH_OPTIONS);
+    limits.max_push_option_bytes = limits
+        .max_push_option_bytes
+        .min(fgit_authority::MAX_PUSH_OPTION_BYTES);
+    limits
+}
+
 impl Default for PushQuota {
     /// Deliberately conservative operator default: 120 pushes per principal
     /// per minute. Tuning belongs to configuration, which arrives through
@@ -7417,7 +7436,9 @@ impl OneNode {
             git_daemon_session_timeout: config.git_daemon_session_timeout,
             git_daemon_receive_processing_timeout: config.git_daemon_receive_processing_timeout,
             git_daemon_session_work_scaling: config.git_daemon_session_work_scaling,
-            git_daemon_receive_limits: config.git_daemon_receive_limits.clone(),
+            git_daemon_receive_limits: sealable_receive_limits(
+                config.git_daemon_receive_limits.clone(),
+            ),
             git_daemon_receive_principal: config.git_daemon_receive_principal,
             serving_cell: config.serving_cell,
             service_config,
@@ -8972,7 +8993,7 @@ impl OneNode {
             GitHashAlgorithm::Sha256 => "sha256",
         };
         let capability_text =
-            format!("report-status delete-refs ofs-delta object-format={format_name}");
+            format!("report-status delete-refs ofs-delta push-options object-format={format_name}");
         let server_capabilities = Capabilities::parse_v1(capability_text.as_bytes(), limits)
             .map_err(GitDaemonTransportRefusal::Wire)
             .map_err(NodeGitDaemonServeRefusal::from)?;

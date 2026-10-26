@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # e2e: stock git exercises partial clone (every served filter, lazy fetch, the
-# sparse refusal twins), refs/notes/*, superproject gitlinks and atomic push
-# through fg serve-http, fg serve (git://) and fg serve-ssh, in SHA-1 and
-# SHA-256 repositories.
-# Bead: frankengit-root-doctrine-x2mv.4.33
+# sparse refusal twins), refs/notes/*, superproject gitlinks, atomic push and
+# push options through fg serve-http, fg serve (git://) and fg serve-ssh, in
+# SHA-1 and SHA-256 repositories.
+# Beads: frankengit-root-doctrine-x2mv.4.33; push options frankengit-321s
 #
 # scripts/e2e/helpers/stock_transport_capabilities.py imports one source into
 # a fresh node per transport and records one check per capability; this suite

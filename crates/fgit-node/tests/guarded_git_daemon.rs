@@ -26,6 +26,8 @@ use std::time::Duration;
 
 #[path = "guarded_git_daemon/continuous.rs"]
 mod continuous;
+#[path = "guarded_git_daemon/push_options.rs"]
+mod push_options;
 
 const PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0xb3; 16]);
 static NEXT: AtomicU64 = AtomicU64::new(0);

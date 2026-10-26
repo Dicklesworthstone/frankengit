@@ -1047,8 +1047,12 @@ impl OneNode {
         // transaction and publishes its complete fold under one head CAS.
         // Advertise that existing guarantee on HTTP; do not emulate atomicity
         // with a loop over independently published ref updates in the gateway.
-        let capability_text =
-            format!("report-status delete-refs ofs-delta atomic object-format={format_name}");
+        // Push options are sealed into each request's canonical digest
+        // (normative contracts section 3), within the bounds the node narrowed
+        // its receive envelope to (`sealable_receive_limits`).
+        let capability_text = format!(
+            "report-status delete-refs ofs-delta atomic push-options object-format={format_name}"
+        );
         let capabilities = Capabilities::parse_v1(capability_text.as_bytes(), &wire)?;
         Ok(ReceiveContext::new(
             wire_format,

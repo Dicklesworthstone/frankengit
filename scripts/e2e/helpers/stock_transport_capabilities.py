@@ -17,7 +17,9 @@ host's, or the pinned oracle through --git-bin/--git-exec-path) exercises:
 - clone and fetch of a superproject whose gitlink targets are absent by
   design, including a pushed gitlink update;
 - `git push --atomic` success, all-or-nothing failure when one update is a
-  refname conflict, and the non-atomic twin that publishes the other ref.
+  refname conflict, and the non-atomic twin that publishes the other ref;
+- `git push -o` (push options, frankengit-321s), and the refusal of an option
+  past the 1,024-byte sealable bound beside its twin at the bound.
 
 Every check lands in one JSON summary as {"checks": {id: {"ok", "detail"}}};
 scripts/e2e/suites/transport/stock_transport_capabilities.sh asserts each id.
@@ -363,6 +365,27 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
                    and flags.get("refs/heads/plain-a", "").startswith("*")
                    and flags.get("refs/heads/topic/conflict2", "").startswith("!"),
                    f"flags={flags} published_only_plain={after == expected} {text(partial)[-300:]}")
+        # Push options (frankengit-321s): `git push -o` works only when the server
+        # advertises push-options. The options are sealed with the request; one
+        # past the sealable 1,024-byte bound is refused and publishes nothing,
+        # beside its twin at the bound.
+        before = after
+        sent = git.run("-C", work, "push", "--porcelain", "-o", "ci.skip", "-o", "key=value", "origin",
+                       "HEAD:refs/heads/push-options", env=env)
+        after = ref_map(git, url, env)
+        checks.add(f"{prefix}-push-options", sent.returncode == 0
+                   and after == dict(before, **{"refs/heads/push-options": head}), text(sent))
+        before = after
+        too_long = git.run("-C", work, "push", "-o", "o" * 1025, "origin", "HEAD:refs/heads/push-option-long",
+                           env=env)
+        unchanged = ref_map(git, url, env) == before
+        at_bound = git.run("-C", work, "push", "-o", "o" * 1024, "origin", "HEAD:refs/heads/push-option-bound",
+                           env=env)
+        after = ref_map(git, url, env)
+        checks.add(f"{prefix}-push-option-bound", too_long.returncode != 0 and unchanged and at_bound.returncode == 0
+                   and after == dict(before, **{"refs/heads/push-option-bound": head}),
+                   f"refused_rc={too_long.returncode} unchanged={unchanged} {text(too_long)[-200:]} "
+                   f"twin: {text(at_bound)[-200:]}")
 
 
 def main() -> None:

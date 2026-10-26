@@ -197,6 +197,21 @@ fn update_request() -> Vec<u8> {
     body
 }
 
+/// The push body a Git client sends for one ref creation with `git push -o`:
+/// the push-options section follows the command section's flush.
+fn push_request_with_options(options: &[&[u8]]) -> Vec<u8> {
+    let oid = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, PUSHED_BLOB);
+    let command = format!("{ZERO_OID} {oid} {PUSHED_REF}\0report-status push-options");
+    let mut body = pkt_line(command.as_bytes());
+    body.extend_from_slice(b"0000");
+    for option in options {
+        body.extend_from_slice(&pkt_line(option));
+    }
+    body.extend_from_slice(b"0000");
+    body.extend_from_slice(&blob_pack(&[PUSHED_BLOB]));
+    body
+}
+
 /// The exact push body a Git client would send for one ref creation.
 fn push_request() -> Vec<u8> {
     let oid = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, PUSHED_BLOB);
@@ -213,6 +228,7 @@ fn run_push_session(scratch: ScratchDirectory, initialize: bool, extra_bytes: &[
 
 struct ServedPush {
     scratch: ScratchDirectory,
+    advertisement: Vec<u8>,
     report: Vec<u8>,
     server: Result<(), String>,
 }
@@ -301,6 +317,7 @@ where
     let server = server_thread.join().expect("server thread joins");
     ServedPush {
         scratch,
+        advertisement,
         report,
         server,
     }
@@ -351,6 +368,48 @@ fn a_configured_node_serves_a_real_push_end_to_end() {
         refs,
         vec![PUSHED_REF.as_bytes().to_vec()],
         "the push is canonical only through the reopened authenticated head"
+    );
+}
+
+#[test]
+fn the_bounded_daemon_advertises_push_options_and_publishes_a_push_that_sends_them() {
+    // `fg serve` without --continuous serves this lane (frankengit-321s). A
+    // client may send push-options only when the server advertised it, so the
+    // push itself also fails if the advertisement loses the capability.
+    let outcome = run_session(
+        ScratchDirectory::new(),
+        true,
+        push_request_with_options(&[b"ci.skip", b"key=value"]),
+        &[],
+    );
+    let first_ref = outcome
+        .advertisement
+        .split(|byte| *byte == b'\n')
+        .next()
+        .expect("the advertisement has a first record");
+    let capabilities = first_ref
+        .split(|byte| *byte == 0)
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        capabilities
+            .split(|byte| *byte == b' ')
+            .any(|capability| capability == b"push-options"),
+        "the bounded receive lane advertises push-options, got {first_ref:?}"
+    );
+    outcome
+        .server
+        .as_ref()
+        .expect("the server completes the receive session");
+    let report = String::from_utf8_lossy(&outcome.report);
+    assert!(
+        report.contains(&format!("ok {PUSHED_REF}")),
+        "report-status confirms the ref decision, got {report:?}"
+    );
+    assert_eq!(
+        materialized_refs(&outcome.scratch),
+        vec![PUSHED_REF.as_bytes().to_vec()],
+        "the push with options is canonical through the reopened authenticated head"
     );
 }
 
