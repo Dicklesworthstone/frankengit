@@ -15,7 +15,7 @@ use fgit_authority::{
     AsyncAuthorityStore, ExpectedOld, ImmutableKey, ImmutableRead, ProposedNew, PutOutcome,
     SealAttempt, SemanticRequest, idempotency_binding_key,
 };
-use fgit_codec::{DecodeLimits, Decoder, Encoder, decode_body, encode_body};
+use fgit_codec::{DecodeLimits, Decoder, Encoder, TransactionSealBody, decode_body, encode_body};
 use fgit_types::{RefName, RefusalCode, TxId};
 
 use crate::{
@@ -44,9 +44,10 @@ pub enum SessionRecovery {
 }
 
 /// A complete, binding-verified command list with independently observed results.
-/// These are not a single atomic snapshot. Terminal decisions are immutable, so
-/// all-terminal completion is nevertheless sound once every listed child is
-/// authenticated as terminal. Nonterminal observations may immediately change.
+/// Key and seal observations are not a single atomic snapshot. All observed
+/// sealed children share one authenticated history walk selected after the
+/// accelerator observations. Terminal decisions remain immutable; nonterminal
+/// key or seal observations may immediately change.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveredSession {
     identity: TxId,
@@ -498,8 +499,8 @@ async fn require_binding<S: AsyncAuthorityStore + ?Sized>(
     store: &S,
     cx: &S::Context,
     attempt: &SealAttempt,
-) -> Result<TxId, SessionRecoveryFailure> {
-    let identity = attempt.derive().map_err(AdmissionError::from)?.0;
+) -> Result<(TxId, TransactionSealBody), SessionRecoveryFailure> {
+    let (identity, seal) = attempt.derive().map_err(AdmissionError::from)?;
     let key = idempotency_binding_key(
         attempt.tenant_id,
         attempt.repository_id,
@@ -518,7 +519,7 @@ async fn require_binding<S: AsyncAuthorityStore + ?Sized>(
     if !matches!(found, ImmutableRead::Present(ref bytes) if *bytes == expected.into_bytes()) {
         return Err(SessionRecoveryFailure::Integrity("descriptor/key binding"));
     }
-    Ok(identity)
+    Ok((identity, seal))
 }
 
 /// Recover the complete non-atomic command list without reexecuting any command.
@@ -565,7 +566,7 @@ where
     let whole = descriptor
         .whole_attempt(context, checkpoint)
         .map_err(recovery_preflight_failure)?;
-    let identity = require_binding(store, cx, &whole).await?;
+    let (identity, _) = require_binding(store, cx, &whole).await?;
     // Validate the entire descriptor's child bindings and expected seals before
     // a shared authority replay supplies any result. The immutable bindings are
     // checked again by the authority-owned key recovery boundary.
@@ -574,8 +575,9 @@ where
     for index in 0..descriptor.len() {
         checkpoint().map_err(RecoveryFailure::Interrupted)?;
         let child = descriptor.child_attempt(context, index)?;
-        let child_id = require_binding(store, cx, &child).await?;
-        let (_, seal) = child.derive().map_err(AdmissionError::from)?;
+        // Reuse the seal derived while verifying the binding. Re-deriving it
+        // would hash and encode every child's request and push options twice.
+        let (child_id, seal) = require_binding(store, cx, &child).await?;
         expected.push((child_id, seal, child.request.ref_commands()[0].name.clone()));
         keys.push(child.idempotency_key);
     }

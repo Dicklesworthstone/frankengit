@@ -310,16 +310,47 @@ fn missing_hints_do_not_hide_terminal_outcomes_and_negative_observations_stay_di
 
 #[test]
 fn a_hint_published_after_initial_authentication_is_resolved_from_the_fresh_head() {
-    let (store, attempts) = setup(2);
-    seal(&store, &attempts);
-    // The first head is genesis. Publication occurs immediately before the
-    // first accelerator read, so retaining that first head would falsely report
-    // a conflicting hint. Both hints precede the actual shared replay snapshot.
-    *store.publish_on_hint.lock().unwrap() = Some(attempts.clone());
-    let results = recover(&store, &keys(&attempts)).unwrap();
-    assert!(results.iter().all(|result| result.terminal().is_some()));
-    assert_eq!(store.heads.load(Ordering::SeqCst), 2);
-    assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+    for singular in [false, true] {
+        let (store, attempts) = setup(2);
+        seal(&store, &attempts);
+        // The first head is genesis. Publication occurs immediately before the
+        // first accelerator read, so retaining that first head would falsely
+        // report a conflicting hint. Singular and plural production recovery
+        // must both select their replay head after observing those hints.
+        *store.publish_on_hint.lock().unwrap() = Some(attempts.clone());
+        let query = keys(if singular { &attempts[..1] } else { &attempts });
+        let results = if singular {
+            vec![
+                ready(recover_request_async(
+                    &store,
+                    &(),
+                    &store.head,
+                    store.scope,
+                    &query[0],
+                    &|| Ok(()),
+                ))
+                .unwrap(),
+            ]
+        } else {
+            recover(&store, &query).unwrap()
+        };
+        assert_eq!(results.len(), query.len());
+        for (result, attempt) in results.iter().zip(&attempts) {
+            let RequestRecovery::Recovered(known) = result else {
+                panic!("the published seal must remain recoverable");
+            };
+            let (tx_id, seal) = attempt.derive().unwrap();
+            assert_eq!(known.tx_id(), tx_id);
+            assert_eq!(known.seal(), &seal);
+            assert!(result.terminal().is_some());
+            assert_eq!(
+                known.outcome(),
+                crate::replay_outcome(&store.inner, &store.head, tx_id).unwrap()
+            );
+        }
+        assert_eq!(store.heads.load(Ordering::SeqCst), 2);
+        assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]

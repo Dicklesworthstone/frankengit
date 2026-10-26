@@ -100,11 +100,21 @@ fn zero_old_preserves_present_refs_and_only_atomic_mode_refuses_the_other_comman
                     ..
                 }
             ));
-            assert_eq!(rows[1], b"ng refs/tags/present stale info\n");
+            // Atomic wire reports deliberately normalize every rejected
+            // command to the same group-abort text (receive_protocol.rs).
+            // The terminal reason above remains the exact stale-old refusal.
+            assert_eq!(
+                rows[1],
+                if atomic {
+                    b"ng refs/tags/present atomic push failed\n".as_slice()
+                } else {
+                    b"ng refs/tags/present stale info\n".as_slice()
+                }
+            );
             assert_eq!(
                 rows[2],
                 if atomic {
-                    b"ng refs/tags/created stale info\n".as_slice()
+                    b"ng refs/tags/created atomic push failed\n".as_slice()
                 } else {
                     b"ok refs/tags/created\n".as_slice()
                 }

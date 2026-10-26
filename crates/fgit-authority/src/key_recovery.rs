@@ -17,7 +17,7 @@ use crate::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadKey, HeadRead,
     HeadReadReceipt, IdempotencyKey, ImmutableRead, OutcomeFailure, OutcomeLookup, SealFailure,
     TxIdPreimage, canonical_body_id, derive_tx_id, idempotency_binding_key, resolve_outcome,
-    resolve_outcome_async, seal_key,
+    seal_key,
 };
 
 mod batch;
@@ -247,46 +247,18 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> Result<(), RefusalCode> + Sync,
 {
-    check(checkpoint)?;
-    let receipt = head_receipt(store.read_head(cx, head_key).await?)?;
-    check(checkpoint)?;
-    let authenticated = store.authenticate_head_receipt(cx, &receipt).await?;
-    check_head(
-        &receipt,
-        &authenticated,
-        store.instance_id(),
-        head_key,
-        scope,
-    )?;
-    check(checkpoint)?;
-    let slot = idempotency_binding_key(
-        scope.tenant_id,
-        scope.repository_id,
-        scope.principal_id,
-        key,
-    )?;
-    let binding = store.read_immutable(cx, &slot).await?;
-    check(checkpoint)?;
-    let Some(tx_id) = binding_identity(binding)? else {
-        return Ok(RequestRecovery::KeyNotObserved);
-    };
-    let slot = seal_key(scope.tenant_id, scope.repository_id, tx_id)?;
-    let stored = store.read_immutable(cx, &slot).await?;
-    check(checkpoint)?;
-    let Some((seal, seal_id)) = checked_seal(stored, scope, key, tx_id)? else {
-        return Ok(RequestRecovery::SealNotObserved);
-    };
-    check(checkpoint)?;
-    let outcome = resolve_outcome_async(
+    let mut recovered = recover_requests_async(
         store,
         cx,
         head_key,
-        scope.tenant_id,
-        scope.repository_id,
-        tx_id,
+        scope,
+        std::slice::from_ref(key),
+        checkpoint,
     )
     .await?;
-    finish(seal, seal_id, outcome, checkpoint)
+    recovered
+        .pop()
+        .ok_or_else(|| integrity("single recovery result"))
 }
 
 fn check<C: Fn() -> Result<(), RefusalCode>>(checkpoint: &C) -> Result<(), RecoveryFailure> {

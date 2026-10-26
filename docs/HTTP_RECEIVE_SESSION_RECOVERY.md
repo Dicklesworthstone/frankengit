@@ -68,6 +68,12 @@ decision is immutable. A cancelled or failed lookup does not publish a decision
 or convert missing evidence into an absent or refused result. Repeat the same
 lookup after a lost query response.
 
+Asynchronous single-key recovery uses the same authority resolver. Its fresh
+head is selected after accelerator observations as well, so a legitimate
+concurrent publication cannot produce a false hint/history disagreement. The
+shared walk stops when every requested terminal is found. It still obeys the
+existing replay bound for unresolved or sufficiently old transactions.
+
 ## Why a descriptor cannot invent completion
 
 The continuing admission coordinator already binds the entire semantic request
