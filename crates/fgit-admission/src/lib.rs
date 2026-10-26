@@ -5485,16 +5485,17 @@ mod tests {
 
     #[test]
     fn cas_loser_resolves_and_retries_the_same_sealed_request() {
-        // Transcript since f09d bound carried-forward roots to the
-        // authenticated basis: [1] seal-body put_if_absent, [2] head read,
-        // [3] outcome-index read, [4] basis head read, [5] receipt
-        // authentication, [6] projection head read, [7..8] staged batch and
-        // ref frames, [9] post-staging basis re-read -- so the publication
-        // CAS is operation 10, with the post-stamp outcome fold reading the
+        // Transcript, by operation kind, since 812f9667 published with the
+        // carried cumulative outcomes: [1] put_if_absent, [2] immutable read,
+        // [3..4] head reads, [5] receipt authentication, [6] projection head
+        // read, [7..8] staged batch and ref frames, [9] post-staging basis
+        // re-read, [10] authentication of that receipt before the carried
+        // outcome set may stand in for a history scan -- so the publication
+        // CAS is operation 11, with the post-stamp outcome fold reading the
         // exact carried stream afterwards.  Keeping that transcript explicit
         // makes a changed authority call graph fail this planted-race test
         // instead of silently skipping it.
-        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(10);
+        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(11);
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();
