@@ -277,23 +277,30 @@ where
                 Vec::new(),
             )?,
         };
-        let (identity, _) = whole.derive()?;
-        // This reserves the caller's original key; it does NOT seal or publish
-        // another transaction. Only the unchanged child TxIds in SessionMapping
-        // acquire terminal decisions. Pack bytes and validation basis remain
-        // excluded by the existing canonical SemanticRequest/SealAttempt rules.
-        bind_idempotency_key_async(store, cx, &whole, identity).await?;
         Some(whole)
     };
+    // Determine the exact descriptor bytes before reserving any key. A
+    // deterministic size refusal must not strand the original retry key or
+    // any child binding for a request that can never be admitted unchanged.
+    let descriptor = whole
+        .as_ref()
+        .map(|whole| recovery::prepare(context, whole, plan))
+        .transpose()?;
+    if let Some(whole) = &whole {
+        let (identity, _) = whole.derive()?;
+        // This reserves only the original key, not another transaction. The
+        // canonical request and all original child identities are unchanged.
+        bind_idempotency_key_async(store, cx, whole, identity).await?;
+    }
     for (lowered, identity) in plan.lowered.iter().zip(&plan.tx_ids) {
         bind_idempotency_key_async(store, cx, &seal_attempt(context, lowered), *identity).await?;
     }
-    if let Some(whole) = whole {
+    if let Some(bytes) = descriptor {
         // This recovery carrier is checked against all of those bindings on
         // read. It neither creates another seal nor authorizes publication.
         // Persist before the first child so interruption cannot leave committed
         // commands whose original session shape was never recorded.
-        recovery::stage(store, cx, context, &whole, plan).await?;
+        recovery::stage(store, cx, context, &bytes).await?;
     }
     Ok(())
 }

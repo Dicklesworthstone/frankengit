@@ -5,7 +5,7 @@
 //! public error family; interrupted outcomes do not depend on transport framing.
 //! Older node compatibility methods remain distinct from the guarded service.
 
-mod bounded_intake;
+use crate::bounded_receive_intake as bounded_intake;
 mod daemon;
 
 use std::future::{Future, poll_fn};
@@ -164,8 +164,9 @@ impl OneNode {
                 parse_limits,
             )
             .map_err(ReceiveError::AuthoritativeRefusal)?;
+        let wire_limits = receive_context.limits.wire.clone();
         let mut receive = ReceivePack::new(receive_context)?;
-        bounded_intake::push(&mut receive, input, &mut live)?;
+        bounded_intake::push(&mut receive, input, &wire_limits, &mut live)?;
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         receive.finish_with_handoff(&mut handoff, &mut live)?;

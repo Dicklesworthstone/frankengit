@@ -52,6 +52,8 @@ use fgit_admission::{
     validate_source_import,
 };
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
+#[path = "smart_http/receive_session/bounded_intake.rs"]
+mod bounded_receive_intake;
 mod capsule_history;
 mod closure_selection;
 pub mod source_retrieval;
@@ -8468,11 +8470,13 @@ impl OneNode {
             .map_err(|code| {
                 NodeReceiveTransportRefusal::from(ReceiveError::AuthoritativeRefusal(code))
             })?;
+        let wire_limits = receive_context.limits.wire.clone();
         let mut receive =
             ReceivePack::new(receive_context).map_err(NodeReceiveTransportRefusal::from)?;
-        receive
-            .push_bytes(input)
-            .map_err(NodeReceiveTransportRefusal::from)?;
+        bounded_receive_intake::push(&mut receive, input, &wire_limits, &mut || {
+            cancellation.checkpoint()
+        })
+        .map_err(NodeReceiveTransportRefusal::from)?;
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         receive

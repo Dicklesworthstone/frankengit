@@ -125,6 +125,14 @@ respecting a tighter server ceiling. Long names or option payloads can still
 reach a byte limit before the count limit. Non-atomic option replication is
 bounded to 16 MiB before lowering or sealing.
 
+Complete-input native and loopback adapters feed bounded fragments into the
+wire parser, so the closing flush does not make an otherwise valid 4,096-command
+request exceed the per-call packet budget. Tighter configured packet limits
+remain effective, and cancellation is checked between fragments. Non-atomic
+recovery descriptors must fit their independent 1 MiB envelope before any
+retry key is reserved; an oversized descriptor leaves an otherwise unused key
+available for a corrected request.
+
 The continuing durable receive path combines up to 64 independent command
 decisions into one bounded publication (frankengit-x0v8). Individual seals,
 transaction identities, commit/refusal records and wire-order status remain

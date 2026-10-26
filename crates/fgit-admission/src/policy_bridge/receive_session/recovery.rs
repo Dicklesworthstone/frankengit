@@ -198,21 +198,23 @@ impl Descriptor {
     fn encode(&self) -> Result<Vec<u8>, AdmissionError> {
         self.validate()?;
         let request = encode_body(&self.request).map_err(codec)?;
-        // Include the complete wire-order permutation and both length prefixes
-        // before allocating the descriptor. The count limit is independent of
-        // this byte envelope: unusually long names/options can reach it first.
+        // Count the version, request length, permutation length, and every
+        // u16 index exactly. Ref names and options are already in `request`.
         let permutation_bytes = self
             .wire_order
             .len()
             .checked_mul(size_of::<u16>())
-            .and_then(|bytes| bytes.checked_add(32))
+            .and_then(|bytes| bytes.checked_add(3 * size_of::<u32>()))
             .ok_or_else(invalid)?;
-        if request
+        let observed = request
             .len()
             .checked_add(permutation_bytes)
-            .is_none_or(|bytes| bytes > MAX_BYTES)
-        {
-            return Err(invalid());
+            .ok_or_else(invalid)?;
+        if observed > MAX_BYTES {
+            return Err(AdmissionError::SessionDescriptorBytesExceeded {
+                limit: MAX_BYTES,
+                observed,
+            });
         }
         let mut out = Encoder::new();
         out.write_scalar(VERSION);
@@ -229,7 +231,7 @@ impl Descriptor {
         })
         .map_err(codec)?;
         let bytes = out.into_bytes();
-        if bytes.len() > MAX_BYTES {
+        if bytes.len() != observed {
             return Err(invalid());
         }
         Ok(bytes)
@@ -313,16 +315,12 @@ impl Descriptor {
     }
 }
 
-/// Stage only after every existing whole/child key binding has been checked,
-/// and before the first child can be sealed or published. Failed staging leaves
-/// the same command identities retryable; the descriptor never grants admission.
-pub(super) async fn stage<S: AsyncAuthorityStore + ?Sized>(
-    store: &S,
-    cx: &S::Context,
+/// Validate and encode before any key binding, seal or publication is written.
+pub(super) fn prepare(
     context: &AdmissionContext,
     whole: &SealAttempt,
     plan: &SessionPlan,
-) -> Result<(), AdmissionError> {
+) -> Result<Vec<u8>, AdmissionError> {
     if plan.atomic {
         return Err(invalid());
     }
@@ -333,12 +331,16 @@ pub(super) async fn stage<S: AsyncAuthorityStore + ?Sized>(
             let [command] = lowered.semantic.ref_commands() else {
                 return Err(invalid());
             };
-            whole
-                .request
-                .ref_commands()
-                .iter()
-                .position(|candidate| candidate == command)
-                .ok_or_else(invalid)
+            // SemanticRequest orders unique commands by name. Preserve full
+            // command equality while avoiding a quadratic scan for large pushes.
+            let commands = whole.request.ref_commands();
+            let index = commands
+                .binary_search_by(|candidate| candidate.name.cmp(&command.name))
+                .map_err(|_| invalid())?;
+            if commands[index] != *command {
+                return Err(invalid());
+            }
+            Ok(index)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let descriptor = Descriptor {
@@ -352,9 +354,19 @@ pub(super) async fn stage<S: AsyncAuthorityStore + ?Sized>(
             return Err(invalid());
         }
     }
-    let bytes = descriptor.encode()?;
+    descriptor.encode()
+}
+
+/// Stage after every whole/child key binding has been checked and before the
+/// first child can be sealed or published. These bytes never grant admission.
+pub(super) async fn stage<S: AsyncAuthorityStore + ?Sized>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    bytes: &[u8],
+) -> Result<(), AdmissionError> {
     match store
-        .put_if_absent(cx, &descriptor_key(context)?, &bytes)
+        .put_if_absent(cx, &descriptor_key(context)?, bytes)
         .await?
     {
         PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(()),
@@ -556,8 +568,15 @@ mod tests {
                 assert_eq!(recovered.encode().unwrap(), bytes);
             }
             let oversized = build(fgit_authority::MAX_REF_COMMANDS, 1000);
+            let expected_bytes = encode_body(&oversized.request).unwrap().len()
+                + 3 * size_of::<u32>()
+                + oversized.wire_order.len() * size_of::<u16>();
             assert!(
-                oversized.encode().is_err(),
+                matches!(
+                    oversized.encode(),
+                    Err(AdmissionError::SessionDescriptorBytesExceeded { limit: MAX_BYTES, observed })
+                        if observed == expected_bytes
+                ),
                 "the command count cannot waive the independent descriptor byte ceiling"
             );
             let small_twin = build(256, 1000);

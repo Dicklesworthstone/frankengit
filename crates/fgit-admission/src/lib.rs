@@ -2236,6 +2236,8 @@ pub enum AdmissionError {
     /// Repeating ordered push options into independent requests exceeds the
     /// bounded lowering allocation, before any transaction is sealed.
     PushOptionWorkExceeded { limit: usize, observed: usize },
+    /// The complete recovery descriptor exceeds its independent byte ceiling.
+    SessionDescriptorBytesExceeded { limit: usize, observed: usize },
     /// A bounded ref chunk exceeded the canonical decision-batch byte budget.
     MicrobatchBytesExceeded { limit: usize, observed: usize },
     /// Conversion from validated wire ref bytes unexpectedly failed.
@@ -2321,6 +2323,10 @@ impl Display for AdmissionError {
             Self::PushOptionWorkExceeded { limit, observed } => write!(
                 formatter,
                 "push option lowering needs {observed} bytes; the limit is {limit}; reduce the command count or push options"
+            ),
+            Self::SessionDescriptorBytesExceeded { limit, observed } => write!(
+                formatter,
+                "receive session recovery descriptor needs {observed} bytes; the limit is {limit}; shorten ref names or push options, or split the push"
             ),
             Self::MicrobatchBytesExceeded { limit, observed } => write!(
                 formatter,

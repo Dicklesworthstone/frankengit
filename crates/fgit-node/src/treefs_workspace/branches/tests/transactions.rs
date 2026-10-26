@@ -168,13 +168,23 @@ fn transaction_limits_force_duplicates_formats_and_default_branch_remain_guarded
     }
     let foreign = GitOid::from_hex(GitHashAlgorithm::Sha256, &"11".repeat(32)).unwrap();
     assert!(transact(&node, &[create("refs/heads/foreign", foreign)], "foreign").is_err());
-    let maximum: Vec<_> = (0..OneNode::MAX_BRANCH_TRANSACTION_COMMANDS)
+    let mut maximum: Vec<_> = (0..OneNode::MAX_BRANCH_TRANSACTION_COMMANDS)
         .map(|i| create(&format!("refs/heads/batch-{i:02}"), base))
         .collect();
     let mut excessive = maximum.clone();
     excessive.push(create("refs/heads/overflow", base));
     assert!(transact(&node, &excessive, "too-many").is_err());
     assert_eq!(snapshot(&node).basis(), before.basis());
+    let below = maximum.len() - 1;
+    let permitted = accepted(transact(&node, &maximum[..below], "below-maximum"));
+    assert_eq!(permitted.commands.len(), below);
+    assert!(permitted.session.atomic);
+    // The next atomic request still has 4,096 command packets plus its flush.
+    // Existing refs become identity updates, with one final new ref, so both
+    // sides of the old decoder cliff are real permitted transactions.
+    for command in &mut maximum[..below] {
+        command.expected_old = ExpectedOld::Exactly(base);
+    }
     let accepted = accepted(transact(&node, &maximum, "maximum"));
     assert_eq!(
         accepted.commands.len(),

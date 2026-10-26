@@ -404,7 +404,8 @@ impl OneNode {
         )
         .map_err(receive_error)?;
         let mut receive = ReceivePack::new(context).map_err(receive_error)?;
-        receive.push_bytes(&prefix).map_err(receive_error)?;
+        crate::bounded_receive_intake::push(&mut receive, &prefix, &receive_limits.wire, &mut live)
+            .map_err(receive_error)?;
         if attempt
             .request
             .ref_commands()
@@ -422,7 +423,13 @@ impl OneNode {
             let (pack, _) = PackWriter::new(receive_limits.pack)
                 .write(&plan, &mut live)
                 .map_err(|error| NodeWorkspaceRefusal::MergePack(Box::new(error)))?;
-            receive.push_bytes(&pack).map_err(receive_error)?;
+            crate::bounded_receive_intake::push(
+                &mut receive,
+                &pack,
+                &receive_limits.wire,
+                &mut live,
+            )
+            .map_err(receive_error)?;
         }
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());

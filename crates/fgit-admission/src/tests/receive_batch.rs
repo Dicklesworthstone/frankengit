@@ -520,6 +520,60 @@ fn commands_len(receive: &BasisBoundValidatedReceive) -> usize {
 }
 
 #[test]
+fn oversized_descriptor_refuses_before_binding_keys_and_a_smaller_retry_can_publish() {
+    let (store, staging, projection) = setup(&[]);
+    let commands = (0..1024)
+        .map(|index| {
+            let name = format!("refs/heads/{index:04}-{}", "n".repeat(1008));
+            assert_eq!(name.len(), fgit_types::MAX_REF_NAME_LEN);
+            command(&name, 0, 1)
+        })
+        .collect();
+    let receive = validated(&store, commands, false);
+    let before = read_basis(&store.inner, &context().head_key).unwrap().0;
+    let error = run(&store, &projection, &receive).unwrap_err();
+    assert!(matches!(
+        error.admission_error(),
+        AdmissionError::SessionDescriptorBytesExceeded { limit, observed }
+            if *limit == 1024 * 1024 && observed > limit
+    ));
+    assert!(error.completed_commands().is_empty());
+    assert_eq!(store.publications.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        read_basis(&store.inner, &context().head_key).unwrap().0,
+        before
+    );
+    assert!(current_refs(&store, &staging).is_empty());
+    let context = context();
+    let keys = [
+        context.idempotency_key.clone(),
+        crate::non_atomic_key(&context.idempotency_key, 0).unwrap(),
+        crate::non_atomic_key(&context.idempotency_key, 1023).unwrap(),
+    ];
+    for key in keys {
+        let binding = fgit_authority::idempotency_binding_key(
+            context.tenant_id,
+            context.repository_id,
+            context.principal_id,
+            &key,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.inner.read_immutable(&binding).unwrap(),
+            ImmutableRead::Absent
+        ));
+    }
+    // No key was reserved: the original client key can now carry a request
+    // that fits, with its normal descriptor and unchanged admission identities.
+    let allowed = validated(&store, vec![command("refs/heads/permitted", 0, 1)], false);
+    let result = run(&store, &projection, &allowed).unwrap();
+    assert_eq!(result.command_statuses(), vec![ReceiveCommandStatus::Ok]);
+    assert_eq!(current_refs(&store, &staging).len(), 1);
+    assert_eq!(run(&store, &projection, &allowed).unwrap(), result);
+    assert_eq!(store.publications.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn multiple_chunks_continue_over_their_own_authenticated_batches() {
     let (store, staging, projection) = setup(&[]);
     let receive = validated(
