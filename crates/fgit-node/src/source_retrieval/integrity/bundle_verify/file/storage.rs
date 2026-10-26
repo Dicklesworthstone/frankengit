@@ -109,6 +109,67 @@ pub(super) struct Span {
     length: usize,
     sha256: [u8; 32],
 }
+impl Span {
+    pub(super) const fn length(self) -> usize {
+        self.length
+    }
+}
+
+/// One bounded append, still private and uncommitted until its exact length
+/// has arrived. A failed append cannot mint a reusable span.
+pub(super) struct Append {
+    offset: u64,
+    length: usize,
+    written: usize,
+    hash: Sha256Hasher,
+}
+
+/// Exact range custody. The digest is rechecked on the actual descriptor's
+/// bytes; EOF is returned only after the complete retained span verifies.
+pub(super) struct SpanReader<'a, W> {
+    file: &'a mut W,
+    remaining: usize,
+    expected: [u8; 32],
+    hash: Sha256Hasher,
+    verified: bool,
+}
+impl<W: Read> SpanReader<'_, W> {
+    pub(super) fn read(
+        &mut self,
+        output: &mut [u8],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<usize, BundleVerifyError> {
+        checkpoint(live)?;
+        if self.remaining == 0 {
+            if !self.verified && self.hash.clone().finish() != self.expected {
+                return Err(BundleVerifyError::ScratchChanged);
+            }
+            self.verified = true;
+            return Ok(0);
+        }
+        let offered = output.len().min(CHUNK_BYTES).min(self.remaining);
+        if offered == 0 {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        loop {
+            checkpoint(live)?;
+            let result = self.file.read(&mut output[..offered]);
+            checkpoint(live)?;
+            match result {
+                Ok(0) => return Err(BundleVerifyError::ScratchChanged),
+                Ok(count) if count <= offered => {
+                    self.hash.update(&output[..count]);
+                    self.remaining -= count;
+                    return Ok(count);
+                }
+                Ok(_) => return Err(BundleVerifyError::ScratchChanged),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(io_error("read scratch", error)),
+            }
+        }
+    }
+}
+
 pub(super) struct Scratch<'a, W> {
     file: &'a mut W,
     end: u64,
@@ -140,15 +201,14 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         self.end
     }
 
-    pub(super) fn append(
+    pub(super) fn begin_append(
         &mut self,
-        body: &[u8],
+        length: usize,
         live: &mut impl FnMut() -> bool,
-    ) -> Result<Span, BundleVerifyError> {
+    ) -> Result<Append, BundleVerifyError> {
         checkpoint(live)?;
-        let end = self
-            .end
-            .checked_add(body.len() as u64)
+        self.end
+            .checked_add(length as u64)
             .filter(|end| *end <= self.maximum)
             .ok_or(BundleVerifyError::Graph(super::super::GraphRefusal::Limit(
                 "scratch bytes",
@@ -159,8 +219,30 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
             "seek scratch output",
             live,
         )?;
-        let mut hash = Sha256Hasher::new();
-        let mut pending = body;
+        Ok(Append {
+            offset: self.end,
+            length,
+            written: 0,
+            hash: Sha256Hasher::new(),
+        })
+    }
+
+    pub(super) fn append_chunk(
+        &mut self,
+        append: &mut Append,
+        bytes: &[u8],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), BundleVerifyError> {
+        checkpoint(live)?;
+        if append.offset != self.end
+            || append
+                .written
+                .checked_add(bytes.len())
+                .is_none_or(|written| written > append.length)
+        {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        let mut pending = bytes;
         while !pending.is_empty() {
             checkpoint(live)?;
             let offered = pending.len().min(CHUNK_BYTES);
@@ -169,7 +251,8 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
             match result {
                 Ok(0) => return Err(io_error("write scratch", io::ErrorKind::WriteZero.into())),
                 Ok(count) if count <= offered => {
-                    hash.update(&pending[..count]);
+                    append.hash.update(&pending[..count]);
+                    append.written += count;
                     pending = &pending[count..];
                 }
                 Ok(_) => return Err(BundleVerifyError::ScratchChanged),
@@ -177,14 +260,71 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
                 Err(error) => return Err(io_error("write scratch", error)),
             }
         }
+        checkpoint(live)
+    }
+
+    pub(super) fn finish_append(
+        &mut self,
+        append: Append,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Span, BundleVerifyError> {
+        checkpoint(live)?;
+        if append.offset != self.end || append.written != append.length {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        self.end = self
+            .end
+            .checked_add(append.length as u64)
+            .filter(|end| *end <= self.maximum)
+            .ok_or(BundleVerifyError::ScratchChanged)?;
         let span = Span {
-            offset: self.end,
-            length: body.len(),
-            sha256: hash.finish(),
+            offset: append.offset,
+            length: append.length,
+            sha256: append.hash.finish(),
         };
-        self.end = end;
         checkpoint(live)?;
         Ok(span)
+    }
+
+    pub(super) fn append(
+        &mut self,
+        body: &[u8],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Span, BundleVerifyError> {
+        let mut append = self.begin_append(body.len(), live)?;
+        self.append_chunk(&mut append, body, live)?;
+        self.finish_append(append, live)
+    }
+
+    pub(super) fn reader(
+        &mut self,
+        span: Span,
+        maximum: usize,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<SpanReader<'_, W>, BundleVerifyError> {
+        checkpoint(live)?;
+        if span.length > maximum
+            || span
+                .offset
+                .checked_add(span.length as u64)
+                .is_none_or(|end| end > self.end)
+        {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        self.flush(live)?;
+        seek(
+            self.file,
+            SeekFrom::Start(span.offset),
+            "seek scratch input",
+            live,
+        )?;
+        Ok(SpanReader {
+            file: self.file,
+            remaining: span.length,
+            expected: span.sha256,
+            hash: Sha256Hasher::new(),
+            verified: false,
+        })
     }
 
     pub(super) fn read(

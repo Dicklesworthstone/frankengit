@@ -77,16 +77,20 @@ const result = await recoverGitBundleFile('./backup.bundle', './restored.git', {
   expectations: { sha256: independentlyKnownBundleHash },
 }, {
   nativeFg: '/absolute/path/to/trusted/fg',
-  nativeLimits: { maxInputMiB: 4096, maxExpandedMiB: 8192 },
+  nativeLimits: { maxInputMiB: 4096, maxExpandedMiB: 8192, maxBlobMiB: 512 },
   timeoutMs: 1800000,
   resume: false,
 });
 ```
 
-Input and expansion allowances can be selected up to 16,384 MiB each. Defaults
-remain 16 MiB input, 128 MiB expanded payload and 60 seconds; the file API permits
-up to one hour. Object, reference, metadata, per-object and native work limits
-remain independently bounded. The owned-byte API keeps its previous limits.
+Input, expansion and ordinary base-blob allowances can be selected independently
+from 1 through 16,384 MiB. Defaults remain 16 MiB input, 128 MiB expanded payload,
+32 MiB per streamed blob and 60 seconds; the file API permits up to one hour.
+The blob allowance does not raise total expansion, object/reference counts,
+metadata or native work limits. Metadata objects, delta programs, delta bases
+and reconstructed delta results retain the 32 MiB buffered-object bound. A pack
+that needs a larger blob as a delta base still refuses. The owned-byte API keeps
+its previous limits.
 
 The adapter copies a stable local file into an exclusive private snapshot in
 64 KiB chunks and verifies that snapshot with the existing Rust file-backed
@@ -160,15 +164,19 @@ For a larger source backup, select file-backed recovery and explicit allowances:
 node scripts/recover_git_bundle.mjs backup.bundle ./restored.git \
   --native-fg "$PWD/target/release/fg" --native-file-backed \
   --native-max-input-mib 4096 --native-max-expanded-mib 8192 \
-  --native-timeout-secs 1800 --head refs/heads/main \
+  --native-max-blob-mib 512 --native-timeout-secs 1800 --head refs/heads/main \
   --attestation backup.dsse.json --trust-key trusted-ed25519.pem \
   --repository owner/project --minimum-sequence 42
 ```
 
-The byte-limit flags require both `--native-fg` and `--native-file-backed`.
+All three byte-limit flags require both `--native-fg` and `--native-file-backed`.
 They can precede or follow the mode flag; all options are validated before
-opening command files. Defaults remain 16 MiB input and 128 MiB expanded data.
-Each selected ceiling can be at most 16,384 MiB. No approval can increase it.
+opening command files. Values must be canonical positive decimal integers.
+Defaults remain 16 MiB input, 128 MiB expanded data and 32 MiB per streamed blob.
+Each selected ceiling can be at most 16,384 MiB. `--native-max-blob-mib` permits
+larger ordinary base blobs while metadata and delta reconstruction retain their
+32 MiB memory bound; input and total expansion remain separate allowances. No
+approval can increase any selected ceiling.
 
 The four approval arguments remain an all-or-nothing group. The unchanged
 Ed25519/DSSE verifier checks the independently trusted key, source repository,

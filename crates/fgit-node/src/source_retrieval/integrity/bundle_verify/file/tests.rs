@@ -683,3 +683,5 @@ fn same_length_valid_pack_replacement_after_preflight_is_refused() {
         Err(BundleVerifyError::SourceChanged)
     ));
 }
+
+mod streamed_blobs;

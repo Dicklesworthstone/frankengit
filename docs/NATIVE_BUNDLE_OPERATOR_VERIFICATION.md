@@ -28,7 +28,7 @@ native report's profile, object format, snapshot hash and length, verification
 flags, reference pins, echoed expectations and explicit non-claims. It rejects
 malformed, duplicate-key, extra-document, lossy-number and oversized reports.
 
-Defaults are 128 MiB input, 128 MiB expanded native payload, 100,000 objects,
+Defaults are 128 MiB input, 128 MiB expanded native payload, 32 MiB per blob, 100,000 objects,
 4,096 references, a two-MiB report and one 300-second deadline. The public adapter
 can lower the report budget or select up to eight MiB. The default profile holds
 input in memory and retains its 128 MiB input and expansion ceilings. Parent and
@@ -41,15 +41,24 @@ Select file-backed processing explicitly to verify larger portable bundles:
 ```sh
 node scripts/verify_git_bundle_native.mjs ./large.bundle \
   --fg "$PWD/target/release/fg" --file-backed \
-  --max-input-mib 4096 --max-expanded-mib 8192 --timeout-secs 1800 \
+  --max-input-mib 4096 --max-expanded-mib 8192 --max-blob-mib 1024 \
+  --timeout-secs 1800 \
   --expect-sha256 "$KNOWN_BUNDLE_SHA256"
 ```
 
-This permits input and expanded-payload limits up to 16,384 MiB each. Selecting
-the mode alone leaves both defaults at 128 MiB; a larger allowance must be
-requested separately. Object, reference, report, metadata and per-object bounds
-are not widened. The public `verifyNativeGitBundleFile` adapter accepts the same
-explicit `fileBacked: true` option. The byte-array API refuses that profile.
+This permits input, expanded-payload and ordinary base-blob limits up to 16,384
+MiB each. Selecting the mode alone leaves the input/expanded defaults at 128 MiB
+and the blob default at 32 MiB; each larger allowance must be requested explicitly.
+The blob allowance is independent: increasing it never increases total expansion,
+buffered metadata, delta-program, delta-base, reconstructed-delta, object-count,
+reference or report budgets. A blob must fit both its own allowance and the
+remaining aggregate budget. Larger delta bases or results still refuse under
+their existing limits.
+
+The public `verifyNativeGitBundleFile` adapter accepts `fileBacked: true` and
+`maxBlobMiB`. The byte-array API retains its original limits and refuses the
+file-backed profile. Native `fg bundle verify` and `fg bundle recover` share the
+same `--max-blob-mib` setting, which requires `--file-backed --scratch-dir DIR`.
 
 The parent reads at most 64 KiB at a time into one reusable data buffer, hashes
 each chunk and writes it into its exclusive private snapshot. It checks source
@@ -64,9 +73,13 @@ The report must include `storage_profile: file-backed-native-full-bundle-v1`,
 existing content checks. These fields are required only for the selected
 file-backed profile. Temporary disk capacity must cover the complete snapshot
 plus native scratch of up to twice the selected expanded ceiling, while the
-original source remains in place. The native engine still retains bounded
-individual objects and metadata in memory. These limits are allowances, not
-reservations or promises of available space.
+original source remains in place. Native inflation now delivers ordinary blobs
+to private scratch in bounded chunks, computes their native identities while
+writing, and re-reads them with bounded buffers for scratch-integrity and graph
+verification. Exact length, EOF, pack trailer and native identity checks remain
+mandatory before a successful report or recovery layout. Metadata and delta
+reconstruction still use their separately bounded memory. These limits are
+allowances, not reservations or promises of available space.
 
 Cancellation/deadline covers source reads, snapshot staging and child execution.
 The adapter requests termination and escalates to a kill after 500 milliseconds,
@@ -140,7 +153,7 @@ defaults. For a large signed portable bundle:
 ```sh
 node scripts/verify_git_bundle.mjs ./large.bundle \
   --native-fg "$PWD/target/release/fg" --native-file-backed \
-  --native-max-input-mib 4096 --native-max-expanded-mib 8192 \
+  --native-max-input-mib 4096 --native-max-expanded-mib 8192 --native-max-blob-mib 1024 \
   --native-timeout-secs 1800 \
   --attestation ./large.dsse.json --trust-key ./trusted-ed25519.pem \
   --repository Dicklesworthstone/frankengit --minimum-sequence 42
@@ -148,8 +161,10 @@ node scripts/verify_git_bundle.mjs ./large.bundle \
 
 The signature cannot enlarge the operator's allowance. Native-only options
 require `--native-fg`; invalid combinations refuse before file access or legacy
-decoder loading. Object, reference, report, metadata and per-object limits stay
-in force. The separate `verify_git_bundle_native.mjs` command defaults to 128 MiB
+decoder loading. `--native-max-blob-mib` requires the file-backed mode and selects
+the same independently bounded streamed-base-blob allowance described above.
+It never widens metadata, delta reconstruction or total expansion. Object,
+reference and report limits stay in force. The separate `verify_git_bundle_native.mjs` command defaults to 128 MiB
 input and does not consume detached approvals itself.
 
 `--native-timeout-secs` selects one 1..3600-second native operation deadline,

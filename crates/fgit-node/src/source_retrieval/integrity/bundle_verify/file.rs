@@ -10,8 +10,9 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
 use fgit_pack::{
-    StreamPackError, StreamPackIndexEntry, build_streamed_pack_index_v2, read_streamed_pack,
+    StreamPackError, StreamPackIndexEntry, build_streamed_pack_index_v2, read_streamed_pack_chunks,
 };
+use fgit_treefs::integrity::{BlobGraphError, ObjectKind};
 use fgit_types::RefName;
 
 use super::recovery::{RecoveryMetadata, prepare_metadata};
@@ -122,8 +123,11 @@ impl FileGitBundleRecovery {
 /// Input and aggregate work limits remain separate from per-object memory.
 /// Scratch is bounded by the admitted inflated bytes plus resolved payload
 /// bytes. Native IDs, ranges, delta links and graph edges remain O(objects+edges)
-/// metadata. At most one inflated entry, or one delta base/program/result tuple,
-/// is retained as payload at a time; this is not an unbounded-inventory profile.
+/// metadata. Base blobs use bounded inflate and graph-reader chunks even when
+/// their independent streamed-blob allowance exceeds the buffered object cap.
+/// Metadata and a delta base/program/result tuple keep that buffered cap; a
+/// delta requiring a larger base refuses before allocation. Inventory remains
+/// explicitly bounded by objects and edges.
 /// Both source passes, all scratch I/O, delta work, graph checks and index output
 /// share sticky cooperative cancellation. Blocking `Read`/`Write` cannot be
 /// preempted by this synchronous core.
@@ -261,10 +265,11 @@ fn verify_reader_inner<R: Read + Seek, W: Read + Write + Seek>(
         // shared callback owner avoids minting a separate cancellation budget.
         let gate = RefCell::new(&mut *live);
         let mut pack_live = || (gate.borrow_mut())();
-        let result = read_streamed_pack(
+        let result = read_streamed_pack_chunks(
             &mut reader,
             first.format(),
             &pack_limits,
+            limits.max_streamed_blob_bytes,
             &mut pack_live,
             |entry| {
                 let mut sink_live = || (gate.borrow_mut())();
@@ -303,10 +308,36 @@ fn verify_reader_inner<R: Read + Seek, W: Read + Write + Seek>(
             .resolved
             .as_ref()
             .ok_or(BundleVerifyError::ResolutionIncomplete)?;
-        let body = scratch.read(resolved.span, limits.graph.max_object_bytes, live)?;
-        let result = graph.observe(id, resolved.kind, &body, live);
-        checkpoint(live)?;
-        result.map_err(BundleVerifyError::Graph)?;
+        if resolved.kind == ObjectKind::Blob {
+            if resolved.span.length() > limits.max_streamed_blob_bytes {
+                return Err(BundleVerifyError::Graph(super::GraphRefusal::Limit(
+                    "object bytes",
+                )));
+            }
+            let mut reader = scratch.reader(resolved.span, limits.max_streamed_blob_bytes, live)?;
+            // Both the graph hasher and storage span verifier share the same
+            // sticky cancellation owner. Neither callback outlives this read.
+            let gate = RefCell::new(&mut *live);
+            let mut graph_live = || (gate.borrow_mut())();
+            let mut read = |output: &mut [u8]| reader.read(output, &mut || (gate.borrow_mut())());
+            let result = graph.observe_blob_stream(
+                id,
+                resolved.span.length(),
+                limits.max_streamed_blob_bytes,
+                &mut read,
+                &mut graph_live,
+            );
+            checkpoint(&mut graph_live)?;
+            result.map_err(|error| match error {
+                BlobGraphError::Graph(error) => BundleVerifyError::Graph(error),
+                BlobGraphError::Reader(error) => error,
+            })?;
+        } else {
+            let body = scratch.read(resolved.span, limits.graph.max_object_bytes, live)?;
+            let result = graph.observe(id, resolved.kind, &body, live);
+            checkpoint(live)?;
+            result.map_err(BundleVerifyError::Graph)?;
+        }
         rows.push(StreamPackIndexEntry {
             oid: id,
             pack_offset: entry.offset,

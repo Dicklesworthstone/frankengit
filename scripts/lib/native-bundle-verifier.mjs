@@ -9,7 +9,7 @@ import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 export const NATIVE_BUNDLE_LIMITS = Object.freeze({
-  maxInputMiB: 128, maxExpandedMiB: 128, maxObjects: 100000, maxRefs: 4096,
+  maxInputMiB: 128, maxExpandedMiB: 128, maxBlobMiB: 32, maxObjects: 100000, maxRefs: 4096,
   timeoutMs: 300000, maxReportBytes: 2 * 1024 * 1024,
 });
 const MIB = 1024 * 1024;
@@ -105,6 +105,10 @@ export function normalizeNativeBundleOptions(options) {
   const maximumMiB = result.fileBacked ? 16384 : 128;
   integer(result.maxInputMiB, 1, maximumMiB, 'native_input_limit');
   integer(result.maxExpandedMiB, 1, maximumMiB, 'native_expanded_limit');
+  integer(result.maxBlobMiB, 1, result.fileBacked ? 16384 : 32, 'native_blob_limit');
+  if (!result.fileBacked && options.maxBlobMiB !== undefined && options.maxBlobMiB !== 32) {
+    throw fail('native_blob_limit_requires_file_profile');
+  }
   if (result.expectedBytes !== undefined) integer(result.expectedBytes, 1, result.maxInputMiB * MIB, 'native_invalid_expected_bytes');
   integer(result.maxObjects, 1, 100000, 'native_object_limit');
   integer(result.maxRefs, 1, 4096, 'native_ref_limit');
@@ -163,7 +167,8 @@ function argumentsFor(path, digest, options, live, scratchDirectory) {
     '--max-expanded-mib', String(options.maxExpandedMiB), '--max-objects', String(options.maxObjects),
     '--max-refs', String(options.maxRefs), '--timeout-secs', String(Math.max(1, Math.ceil(live.remaining() / 1000))),
     '--expect-sha256', digest];
-  if (options.fileBacked) args.push('--file-backed', '--scratch-dir', scratchDirectory);
+  if (options.fileBacked) args.push('--file-backed', '--scratch-dir', scratchDirectory,
+    '--max-blob-mib', String(options.maxBlobMiB));
   if (options.expected.object_format !== undefined) args.push('--expect-format', options.expected.object_format);
   for (const pin of options.expected.refs) args.push('--expect-ref-hex', `${pin.ref_hex}=${pin.object_id}`);
   if (options.expected.exact_refs) args.push('--exact-refs');

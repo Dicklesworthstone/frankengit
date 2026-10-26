@@ -520,7 +520,7 @@ async function recover(input, destination, request, options, fileBacked) {
       if (Object.hasOwn(options, 'verificationLimits')) failure('native_recovery_limits_not_supported');
       const limits = Object.hasOwn(options, 'nativeLimits') ? options.nativeLimits : {};
       if (!limits || typeof limits !== 'object' || Array.isArray(limits)
-          || Object.keys(limits).some(key => !['maxInputMiB', 'maxExpandedMiB', 'maxObjects', 'maxRefs'].includes(key))) {
+          || Object.keys(limits).some(key => !['maxInputMiB', 'maxExpandedMiB', 'maxBlobMiB', 'maxObjects', 'maxRefs'].includes(key))) {
         failure('native_invalid_recovery_limits');
       }
       if (resume) state = 'existing_unknown';

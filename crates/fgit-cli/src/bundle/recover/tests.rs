@@ -179,3 +179,26 @@ fn file_backed_recovery_forwards_explicit_profiles_with_order_independent_larger
         assert!(parse(&values).is_err(), "{values:?}");
     }
 }
+
+#[test]
+fn file_backed_recovery_carries_the_independent_streamed_blob_limit() {
+    let mut values = base();
+    values.extend(args(&[
+        "--max-blob-mib",
+        "256",
+        "--max-expanded-mib",
+        "512",
+        "--file-backed",
+        "--scratch-dir",
+        "private",
+    ]));
+    let parsed = parse(&values).unwrap();
+    let limits = &parsed.verification.limits;
+    assert_eq!(limits.max_streamed_blob_bytes, 256 * 1024 * 1024);
+    assert_eq!(limits.pack.max_total_expanded_bytes, 512 * 1024 * 1024);
+    assert_eq!(limits.pack.max_object_bytes, 32 * 1024 * 1024);
+    assert_eq!(limits.graph.max_object_bytes, 32 * 1024 * 1024);
+    let mut memory = base();
+    memory.extend(args(&["--max-blob-mib", "32"]));
+    assert!(parse(&memory).is_err());
+}

@@ -10,6 +10,7 @@ The executable is operator-trusted; this command does not authenticate its build
   --file-backed          Stream a private snapshot and use native disk resolution
   --max-input-mib N       Input bytes, 1..128; file-backed 1..16384 (default 128)
   --max-expanded-mib N    Resolution/graph bytes, same ceilings (default 128)
+  --max-blob-mib N        Streamed base blob bytes, 1..16384, file-backed only (default 32)
   --max-objects N         Included objects, 1..100000
   --max-refs N            References, 1..4096
   --timeout-secs N        One read/staging/process deadline, 1..3600 (default 300)
@@ -25,8 +26,10 @@ A matching input snapshot hash is not an independent trust anchor. A format alon
 is not an identity pin. Native success does not authenticate an origin or signer,
 prove freshness, verify submodule targets, restore a capsule, or approve a change.
 The default profile retains input in memory. Explicit --file-backed keeps the
-input and resolved object payloads on disk with bounded transfer buffers; native
-per-object, object-count, metadata, graph and work limits still apply. Temporary
+input and resolved object payloads on disk with bounded transfer buffers.
+--max-blob-mib independently permits larger ordinary base blobs; buffered metadata
+and delta reconstruction retain their limits. Total expansion, object-count,
+graph and work limits still apply. Temporary
 storage needs the input snapshot plus up to twice the expanded ceiling. The
 wrapper creates and owns a private temporary directory; no scratch path is
 accepted. Interrupted native scratch is retained and its directory is reported.
@@ -40,7 +43,7 @@ function argumentsFor(args) {
   const options = {}, expected = {}, seen = new Set();
   let path = null, literal = false;
   const numbers = new Map([['--max-input-mib', 'maxInputMiB'], ['--max-expanded-mib', 'maxExpandedMiB'],
-    ['--max-objects', 'maxObjects'], ['--max-refs', 'maxRefs'], ['--timeout-secs', 'timeoutMs']]);
+    ['--max-blob-mib', 'maxBlobMiB'], ['--max-objects', 'maxObjects'], ['--max-refs', 'maxRefs'], ['--timeout-secs', 'timeoutMs']]);
   for (let at = 0; at < args.length; at++) {
     const arg = args[at];
     if (!literal && arg === '--') { literal = true; continue; }
@@ -71,6 +74,7 @@ function argumentsFor(args) {
     }
   }
   if (path === null) throw new Error('bundle_path_required');
+  if (seen.has('--max-blob-mib') && !options.fileBacked) throw new Error('native_blob_limit_requires_file_profile');
   options.expected = normalizeNativeBundleExpectation(expected, options.maxRefs ?? 4096);
   return { path, options };
 }

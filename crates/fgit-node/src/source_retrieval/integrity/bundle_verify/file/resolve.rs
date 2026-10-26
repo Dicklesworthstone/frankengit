@@ -5,15 +5,15 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, Write};
 
-use fgit_crypto::git_object_id;
+use fgit_crypto::{GitObjectHasher, NativeObjectIdentity, Sha1, Sha256, git_object_id};
 use fgit_pack::{
-    PackError, ParsedDeltaBase, ResolutionBudget, StreamPackEntry,
-    apply_delta_to_charged_base_with_budget, object_type_from_base_entry,
+    PackError, ParsedDeltaBase, ResolutionBudget, StreamPackEntryEnd, StreamPackEntryStart,
+    StreamPackEvent, apply_delta_to_charged_base_with_budget, object_type_from_base_entry,
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
 use super::super::{BundleVerifyError, BundleVerifyLimits, GraphRefusal, ObjectKind, checkpoint};
-use super::storage::{Scratch, Span};
+use super::storage::{Append, Scratch, Span};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Base {
@@ -38,6 +38,40 @@ pub(super) struct Entry {
     pub(super) resolved: Option<Resolved>,
 }
 
+enum NativeEntryHash {
+    Sha1(GitObjectHasher<Sha1>),
+    Sha256(GitObjectHasher<Sha256>),
+}
+impl NativeEntryHash {
+    fn new(format: GitHashAlgorithm, kind: ObjectKind, length: usize) -> Self {
+        match format {
+            GitHashAlgorithm::Sha1 => Self::Sha1(GitObjectHasher::new(kind, length as u64)),
+            GitHashAlgorithm::Sha256 => Self::Sha256(GitObjectHasher::new(kind, length as u64)),
+        }
+    }
+    fn update(&mut self, bytes: &[u8]) -> Result<(), BundleVerifyError> {
+        match self {
+            Self::Sha1(hash) => hash.update(bytes),
+            Self::Sha256(hash) => hash.update(bytes),
+        }
+        .map_err(|_| BundleVerifyError::Pack(PackError::NativeObjectIdMismatch))
+    }
+    fn finish(self) -> Result<GitOid, BundleVerifyError> {
+        match self {
+            Self::Sha1(hash) => hash.finish().map(|id| id.erase()),
+            Self::Sha256(hash) => hash.finish().map(|id| id.erase()),
+        }
+        .map_err(|_| BundleVerifyError::Pack(PackError::NativeObjectIdMismatch))
+    }
+}
+
+struct Pending {
+    start: StreamPackEntryStart,
+    base: Option<Base>,
+    append: Append,
+    native: Option<(ObjectKind, NativeEntryHash)>,
+}
+
 pub(super) struct Inventory {
     pub(super) entries: Vec<Entry>,
     pub(super) by_id: BTreeMap<GitOid, usize>,
@@ -46,6 +80,7 @@ pub(super) struct Inventory {
     payload_bytes: u64,
     budget: ResolutionBudget,
     pub(super) delta_objects: usize,
+    pending: Option<Pending>,
 }
 impl Inventory {
     pub(super) fn new(_limits: &BundleVerifyLimits) -> Self {
@@ -57,44 +92,61 @@ impl Inventory {
             payload_bytes: 0,
             budget: ResolutionBudget::new(),
             delta_objects: 0,
+            pending: None,
         }
     }
 
     pub(super) fn accept<W: Read + Write + Seek>(
         &mut self,
-        entry: StreamPackEntry,
+        event: StreamPackEvent<'_>,
         format: GitHashAlgorithm,
         scratch: &mut Scratch<'_, W>,
         limits: &BundleVerifyLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(), BundleVerifyError> {
         checkpoint(live)?;
+        match event {
+            StreamPackEvent::Begin(start) => self.begin(start, format, scratch, limits, live),
+            StreamPackEvent::Data(bytes) => {
+                let pending = self
+                    .pending
+                    .as_mut()
+                    .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+                scratch.append_chunk(&mut pending.append, bytes, live)?;
+                if let Some((_, hash)) = &mut pending.native {
+                    hash.update(bytes)?;
+                }
+                checkpoint(live)
+            }
+            StreamPackEvent::End(end) => self.end(end, scratch, live),
+        }
+    }
+
+    fn begin<W: Read + Write + Seek>(
+        &mut self,
+        start: StreamPackEntryStart,
+        format: GitHashAlgorithm,
+        scratch: &mut Scratch<'_, W>,
+        limits: &BundleVerifyLimits,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), BundleVerifyError> {
+        if self.pending.is_some() {
+            return Err(BundleVerifyError::ResolutionIncomplete);
+        }
         if self.entries.len() >= limits.graph.max_objects {
             return Err(BundleVerifyError::Graph(GraphRefusal::Limit("objects")));
         }
         self.budget
             .charge_work(1, &limits.pack)
             .map_err(BundleVerifyError::Pack)?;
-        let original = &entry.entry;
-        // The streaming reader has already bounded every inflated member by
-        // the pack limit. A delta program is not a graph object: its result is
-        // independently checked against the tighter graph limit at resolution.
-        if original.delta_base.is_none() && original.inflated.len() > limits.graph.max_object_bytes
-        {
-            return Err(BundleVerifyError::Graph(GraphRefusal::Limit(
-                "object bytes",
-            )));
-        }
-        if self.by_offset.contains_key(&original.offset) {
+        if self.by_offset.contains_key(&start.offset) {
             return Err(BundleVerifyError::Pack(PackError::DuplicateObjectOffset(
-                original.offset,
+                start.offset,
             )));
         }
-        let base = match &original.delta_base {
+        let base = match &start.delta_base {
             Some(ParsedDeltaBase::Ofs { base_offset, .. }) => {
-                // Offsets identify exact earlier entry starts; a byte inside an
-                // earlier compressed member is never accepted as a base.
-                if *base_offset >= original.offset || !self.by_offset.contains_key(base_offset) {
+                if *base_offset >= start.offset || !self.by_offset.contains_key(base_offset) {
                     return Err(BundleVerifyError::Pack(PackError::MissingDeltaBase));
                 }
                 Some(Base::Offset(*base_offset))
@@ -119,41 +171,75 @@ impl Inventory {
         self.entries
             .try_reserve(1)
             .map_err(|_| BundleVerifyError::Allocation)?;
-        let resolved = if base.is_none() {
-            let kind = object_type_from_base_entry(original.header.kind)
-                .map_err(BundleVerifyError::Pack)?;
-            self.charge_payload(original.inflated.len(), limits)?;
-            self.budget
-                .charge_expanded(original.inflated.len(), &limits.pack)
-                .map_err(BundleVerifyError::Pack)?;
-            let id = git_object_id(format, kind, &original.inflated);
-            checkpoint(live)?;
-            if self.by_id.contains_key(&id) {
-                return Err(BundleVerifyError::DuplicateObject(id));
+        let native = if base.is_none() {
+            let kind =
+                object_type_from_base_entry(start.header.kind).map_err(BundleVerifyError::Pack)?;
+            let maximum = if kind == ObjectKind::Blob {
+                limits.max_streamed_blob_bytes
+            } else {
+                limits.graph.max_object_bytes
+            };
+            if start.header.declared_size > maximum {
+                return Err(BundleVerifyError::Graph(GraphRefusal::Limit(
+                    "object bytes",
+                )));
             }
-            Some((id, kind))
+            self.charge_payload(start.header.declared_size, limits)?;
+            self.budget
+                .charge_expanded(start.header.declared_size, &limits.pack)
+                .map_err(BundleVerifyError::Pack)?;
+            Some((
+                kind,
+                NativeEntryHash::new(format, kind, start.header.declared_size),
+            ))
         } else {
             self.delta_objects += 1;
             None
         };
-        let span = scratch.append(&original.inflated, live)?;
+        let append = scratch.begin_append(start.header.declared_size, live)?;
+        self.pending = Some(Pending {
+            start,
+            base,
+            append,
+            native,
+        });
+        checkpoint(live)
+    }
+
+    fn end<W: Read + Write + Seek>(
+        &mut self,
+        end: StreamPackEntryEnd,
+        scratch: &mut Scratch<'_, W>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), BundleVerifyError> {
+        let pending = self
+            .pending
+            .take()
+            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+        let span = scratch.finish_append(pending.append, live)?;
         let at = self.entries.len();
-        self.by_offset.insert(original.offset, at);
-        let resolved = resolved.map(|(id, kind)| {
+        let resolved = if let Some((kind, hash)) = pending.native {
+            let id = hash.finish()?;
+            if self.by_id.contains_key(&id) {
+                return Err(BundleVerifyError::DuplicateObject(id));
+            }
             self.by_id.insert(id, at);
-            Resolved {
+            Some(Resolved {
                 id,
                 kind,
                 span,
                 depth: 0,
-            }
-        });
+            })
+        } else {
+            None
+        };
+        self.by_offset.insert(pending.start.offset, at);
         self.entries.push(Entry {
-            offset: original.offset,
-            end_offset: entry.end_offset,
-            crc32: entry.crc32,
+            offset: pending.start.offset,
+            end_offset: end.end_offset,
+            crc32: end.crc32,
             original: span,
-            base,
+            base: pending.base,
             resolved,
         });
         checkpoint(live)
@@ -182,6 +268,9 @@ impl Inventory {
         live: &mut impl FnMut() -> bool,
     ) -> Result<usize, BundleVerifyError> {
         checkpoint(live)?;
+        if self.pending.is_some() {
+            return Err(BundleVerifyError::ResolutionIncomplete);
+        }
         if self.entries.is_empty() {
             return Ok(0);
         }
@@ -227,10 +316,19 @@ impl Inventory {
                         limit: limits.pack.max_delta_depth,
                     }));
                 }
-                let maximum = limits
+                let mut maximum = limits
                     .pack
                     .max_object_bytes
                     .min(limits.graph.max_object_bytes);
+                if base.kind == ObjectKind::Blob {
+                    maximum = maximum.min(limits.max_streamed_blob_bytes);
+                }
+                if base.span.length() > maximum {
+                    return Err(BundleVerifyError::Pack(PackError::ObjectSizeLimit {
+                        actual: base.span.length(),
+                        limit: maximum,
+                    }));
+                }
                 let base_body = scratch.read(base.span, maximum, live)?;
                 let actual = git_object_id(format, base.kind, &base_body);
                 checkpoint(live)?;

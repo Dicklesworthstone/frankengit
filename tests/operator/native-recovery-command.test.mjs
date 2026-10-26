@@ -84,6 +84,7 @@ for (const fileBacked of [false, true]) for (const format of ['sha1', 'sha256'])
   assert.equal(calls[0].includes('--file-backed'), fileBacked);
   if (fileBacked) {
     assert.equal(result.report.verification.storage_profile, 'file-backed-native-full-bundle-v1');
+    assert.equal(calls[0][calls[0].indexOf('--max-blob-mib') + 1], '32');
     await absent(calls[0].at(-1));
   }
 });
@@ -428,6 +429,7 @@ test('the original native deadline also bounds the awaited prepublication approv
 
 for (const flags of [
   ['--native-file-backed'], ['--native-max-input-mib', '1'], ['--native-max-expanded-mib', '1'],
+  ['--native-max-blob-mib', '32'],
 ]) test(`native file option requires native selection before legacy import: ${flags.join(' ')}`, async t => {
   const h = await harness(t), isolated = await sentinelCommand(h);
   const result = await invoke(h, [], { command: isolated, args: ['missing', h.destination, '--head', 'refs/heads/main', ...flags] });
@@ -438,6 +440,14 @@ for (const flags of [
 for (const [flags, code] of [
   [['--native-max-input-mib', '16'], 'native_file_backed_required_for_limits'],
   [['--native-max-expanded-mib', '128'], 'native_file_backed_required_for_limits'],
+  [['--native-max-blob-mib', '32'], 'native_blob_limit_requires_file_profile'],
+  [['--native-file-backed', '--native-max-blob-mib', '0'], 'native_blob_limit'],
+  [['--native-file-backed', '--native-max-blob-mib', '01'], 'native_blob_limit'],
+  [['--native-file-backed', '--native-max-blob-mib', '1.5'], 'native_blob_limit'],
+  [['--native-file-backed', '--native-max-blob-mib', '16385'], 'native_blob_limit'],
+  [['--native-file-backed', '--native-max-blob-mib', '9007199254740993'], 'native_blob_limit'],
+  [['--native-file-backed', '--native-max-blob-mib'], 'invalid_option_value'],
+  [['--native-file-backed', '--native-max-blob-mib', '1', '--native-max-blob-mib', '2'], 'duplicate_option'],
   [['--native-file-backed', '--native-file-backed'], 'duplicate_option'],
   [['--native-file-backed', '--native-max-input-mib', '0'], 'native_input_limit'],
   [['--native-file-backed', '--native-max-expanded-mib', '1.5'], 'native_expanded_limit'],
@@ -463,6 +473,25 @@ for (const flags of [
   assert.equal(args[args.indexOf('--max-expanded-mib') + 1], '128');
   const childTimeout = Number(args[args.indexOf('--timeout-secs') + 1]);
   assert.ok(childTimeout >= 1 && childTimeout <= (flags.includes('301') ? 301 : 3600));
+});
+
+for (const [format, blobMiB, flags] of [
+  ['sha1', '1', ['--native-max-blob-mib', '1', '--native-file-backed']],
+  ['sha256', '16384', ['--native-file-backed', '--native-max-blob-mib', '16384']],
+]) test(`signed ${format} recovery forwards explicit blob limit${blobMiB}MiB without widening aggregate limits`, async t => {
+  const h = await harness(t, format), a = await approval(h);
+  const result = await invoke(h, [...flags, ...a.args]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.report.state, 'complete');
+  assert.equal(result.report.source_attestation.signature_verified, true);
+  assert.equal(result.report.verification.object_format, format);
+  const calls = await h.calls(); assert.equal(calls.length, 1);
+  const args = calls[0]; assert.ok(args.includes('--file-backed'));
+  assert.equal(args[args.indexOf('--max-blob-mib') + 1], blobMiB);
+  assert.equal(args[args.indexOf('--max-input-mib') + 1], '16');
+  assert.equal(args[args.indexOf('--max-expanded-mib') + 1], '128');
+  assert.equal(await readFile(join(h.destination, 'HEAD'), 'utf8'), 'ref: refs/heads/main\n');
+  await absent(args.at(-1));
 });
 
 test('a signed17MiB payload is fully materialized only with an explicit file input allowance', async t => {

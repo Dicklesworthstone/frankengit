@@ -23,6 +23,7 @@ This is Git source recovery, not FrankenGit forge/authority/capsule restore.
   --native-file-backed       Stream native verification and pack materialization
   --native-max-input-mib N   File-backed input ceiling, 1..16384 (default 16)
   --native-max-expanded-mib N File-backed expanded ceiling, 1..16384 (default 128)
+  --native-max-blob-mib N    Streamed base-blob ceiling, 1..16384 (default 32)
   --resume                   Resume an exact interrupted recovery, never overwrite
   --head REF                 Explicit advertised refs/heads/... for HEAD
   --head-hex HEX             Byte-exact hexadecimal alternative to --head
@@ -38,7 +39,9 @@ Input defaults to 16 MiB; expanded object data to 128 MiB. Explicit native
 file-backed mode allows independently selected limits up to 16384 MiB and a
 1..3600-second deadline. Other native runs retain their 16/128 MiB limits and
 1..300-second deadline. Object/ref/report and individual-object limits remain
-bounded. The two byte-limit flags require --native-file-backed. No Git
+bounded. All three byte-limit flags require --native-file-backed. The blob
+allowance does not raise metadata, delta-reconstruction or total expanded
+limits. No Git
 executable, network, hooks or checkout is used. HEAD is installed last. On failure, any
 incomplete destination is retained and its publication state is reported.
 Resume requires the same host/PID namespace and refuses live or unknown owners;
@@ -62,7 +65,7 @@ async function parse(args) {
   if (args.length > 8240 || args.some(arg => arg.length > 8300 || arg.includes('\0'))
     || args.reduce((sum, arg) => sum + Buffer.byteLength(arg), 0) > 2 * 1024 * 1024) throw new Error('argument_limit');
   let nativeFg = null, nativeTimeoutMs = 60000, nativeFileBacked = false;
-  let nativeMaxInputMiB = 16, nativeMaxExpandedMiB = 128;
+  let nativeMaxInputMiB = 16, nativeMaxExpandedMiB = 128, nativeMaxBlobMiB = NATIVE_BUNDLE_LIMITS.maxBlobMiB;
   const paths = [], expected = {}, seen = new Set(), signed = new SourceAttestationOptions(); let head = null, literal = false, resume = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -76,7 +79,7 @@ async function parse(args) {
         continue;
       }
       if (!['--head', '--head-hex', '--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex', '--native-fg', '--native-timeout-secs',
-        '--native-max-input-mib', '--native-max-expanded-mib'].includes(arg)) throw new Error('unknown_option');
+        '--native-max-input-mib', '--native-max-expanded-mib', '--native-max-blob-mib'].includes(arg)) throw new Error('unknown_option');
       const value = args[++i]; if (!value || value.startsWith('--') || value.length > 8300) throw new Error('invalid_option_value');
       const encode = text => { if (/[\uD800-\uDFFF]/u.test(text)) throw new Error('invalid_unicode'); return Buffer.from(text).toString('hex'); };
       if (arg === '--head' || arg === '--head-hex') {
@@ -91,11 +94,15 @@ async function parse(args) {
         else if (arg === '--native-timeout-secs') {
           if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 3600) throw new Error('native_timeout_limit');
           nativeTimeoutMs = Number(value) * 1000;
-        } else if (arg === '--native-max-input-mib' || arg === '--native-max-expanded-mib') {
+        } else if (['--native-max-input-mib', '--native-max-expanded-mib', '--native-max-blob-mib'].includes(arg)) {
           if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
-            throw new Error(arg === '--native-max-input-mib' ? 'native_input_limit' : 'native_expanded_limit');
+            const codes = { '--native-max-input-mib': 'native_input_limit',
+              '--native-max-expanded-mib': 'native_expanded_limit', '--native-max-blob-mib': 'native_blob_limit' };
+            throw new Error(codes[arg]);
           }
-          if (arg === '--native-max-input-mib') nativeMaxInputMiB = Number(value); else nativeMaxExpandedMiB = Number(value);
+          if (arg === '--native-max-input-mib') nativeMaxInputMiB = Number(value);
+          else if (arg === '--native-max-expanded-mib') nativeMaxExpandedMiB = Number(value);
+          else nativeMaxBlobMiB = Number(value);
         } else expected[arg === '--expect-sha256' ? 'sha256' : 'object_format'] = value;
       }
     } else paths.push(arg);
@@ -104,11 +111,12 @@ async function parse(args) {
   if (head === null || !head.startsWith('726566732f68656164732f')) throw new Error('explicit_branch_head_required');
   const attestation = signed.finish(), request = { head_ref_hex: head, ...(Object.keys(expected).length ? { expectations: expected } : {}) };
   if (nativeFg === null && seen.has('--native-timeout-secs')) throw new Error('native_fg_required_for_timeout');
-  const hasNativeLimits = ['--native-max-input-mib', '--native-max-expanded-mib'].some(flag => seen.has(flag));
+  const hasNativeLimits = ['--native-max-input-mib', '--native-max-expanded-mib', '--native-max-blob-mib'].some(flag => seen.has(flag));
   if (nativeFg === null && (nativeFileBacked || hasNativeLimits)) throw new Error('native_fg_required_for_file_limits');
+  if (seen.has('--native-max-blob-mib') && !nativeFileBacked) throw new Error('native_blob_limit_requires_file_profile');
   if (hasNativeLimits && !nativeFileBacked) throw new Error('native_file_backed_required_for_limits');
   if (!nativeFileBacked && nativeTimeoutMs > 300000) throw new Error('native_timeout_limit');
-  const nativeLimits = { maxInputMiB: nativeMaxInputMiB, maxExpandedMiB: nativeMaxExpandedMiB };
+  const nativeLimits = { maxInputMiB: nativeMaxInputMiB, maxExpandedMiB: nativeMaxExpandedMiB, maxBlobMiB: nativeMaxBlobMiB };
   let legacyLimits = null;
   if (nativeFg !== null) {
     normalizeNativeRecoveryRequest(request);

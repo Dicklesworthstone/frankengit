@@ -290,7 +290,7 @@ test('file-backed signed and unsigned commands preserve both hash domains and ex
       const oid = '2'.repeat(format === 'sha1' ? 40 : 64);
       const result = await run(f, [approval.input, ...(authenticated ? approval.args : []),
         '--native-fg', mock.fg, '--native-file-backed', '--native-max-input-mib', '16384',
-        '--native-max-expanded-mib', '16384', '--expect-format', format,
+        '--native-max-expanded-mib', '16384', '--native-max-blob-mib', '512', '--expect-format', format,
         '--expect-ref', `refs/heads/main=${format}:${oid}`, '--exact-refs']).done;
       assert.equal(result.code, 0, result.stderr); const report = JSON.parse(result.stdout);
       assert.equal(report.storage_profile, 'file-backed-native-full-bundle-v1');
@@ -304,6 +304,7 @@ test('file-backed signed and unsigned commands preserve both hash domains and ex
       } else assert.equal(report.source_attestation, undefined);
       const log = JSON.parse(await readFile(mock.log)), get = flag => log.args[log.args.indexOf(flag) + 1];
       assert.ok(log.args.includes('--file-backed')); assert.notEqual(log.path, approval.input);
+      assert.equal(log.args[log.args.indexOf('--max-blob-mib') + 1], '512');
       assert.equal(get('--max-input-mib'), '16384'); assert.equal(get('--max-expanded-mib'), '16384');
       assert.equal(get('--expect-sha256'), sha(opaque));
       assert.ok(!log.args.includes(approval.envelope) && !log.args.includes(approval.key));
@@ -390,6 +391,11 @@ test('native storage options reject invalid, implicit and legacy combinations be
     [['--native-file-backed'], 'native_fg_required_for_file_limits'],
     [['--native-max-input-mib', '1'], 'native_fg_required_for_file_limits'],
     [['--native-max-expanded-mib', '1'], 'native_fg_required_for_file_limits'],
+    [['--native-max-blob-mib', '64'], 'native_fg_required_for_file_limits'],
+    [['--native-fg', mock.fg, '--native-max-blob-mib', '32'], 'native_blob_limit_requires_file_profile'],
+    [['--native-fg', mock.fg, '--native-file-backed', '--native-max-blob-mib', '0'], 'native_blob_limit'],
+    [['--native-fg', mock.fg, '--native-file-backed', '--native-max-blob-mib', '16385'], 'native_blob_limit'],
+    [['--native-fg', mock.fg, '--native-file-backed', '--native-max-blob-mib', '64', '--native-max-blob-mib', '128'], 'duplicate_option'],
     [['--native-fg', mock.fg, '--native-file-backed', '--native-file-backed'], 'duplicate_option'],
     [['--native-fg', mock.fg, '--native-max-input-mib', '129'], 'native_input_limit'],
     [['--native-fg', mock.fg, '--native-max-expanded-mib', '129'], 'native_expanded_limit'],

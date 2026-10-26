@@ -60,6 +60,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
     let mut scratch_directory = None;
     let mut input_mib = None;
     let mut expanded_mib = None;
+    let mut blob_mib = None;
     let mut literal = false;
     let mut at = 0;
     while at < args.len() {
@@ -127,6 +128,9 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
                 "--max-expanded-mib" => {
                     expanded_mib = Some(number(value, 16_384)?);
                 }
+                "--max-blob-mib" => {
+                    blob_mib = Some(number(value, 16_384)?);
+                }
                 "--max-objects" => {
                     let count = number(value, 100_000)?;
                     limits.pack.max_entries =
@@ -147,6 +151,9 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
     }
     if file_backed != scratch_directory.is_some() {
         return Err("--file-backed and --scratch-dir must be supplied together".into());
+    }
+    if blob_mib.is_some() && !file_backed {
+        return Err("--max-blob-mib requires --file-backed and a private --scratch-dir".into());
     }
     let maximum_mib = if file_backed { 16_384 } else { 128 };
     if input_mib.is_some_and(|value| value > maximum_mib)
@@ -174,6 +181,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
         limits.pack.max_object_bytes = limits.pack.max_object_bytes.min(bytes);
         limits.graph.max_object_bytes = limits.pack.max_object_bytes;
         limits.graph.max_payload_bytes = bytes as u64;
+    }
+    if let Some(mib) = blob_mib {
+        limits.max_streamed_blob_bytes = mib
+            .checked_mul(1024 * 1024)
+            .ok_or("blob limit exceeds address space")?;
     }
     // Complete validation uses final limits, independent of option order,
     // before opening the input or installing any runtime resources.
@@ -343,5 +355,107 @@ mod tests {
             assert!(parse(&input).is_err(), "{input:?}");
         }
         assert!(parse(&args(&["missing", "--max-input-mib", "128"])).is_ok());
+    }
+
+    #[test]
+    fn streamed_blob_allowance_is_explicit_and_does_not_widen_other_budgets() {
+        let defaults = BundleVerifyLimits::default();
+        let ordinary = parse(&args(&["missing"])).unwrap();
+        assert_eq!(ordinary.limits.max_streamed_blob_bytes, 32 * 1024 * 1024);
+        for value in ["1", "64", "16384"] {
+            for first in [true, false] {
+                let mut input = args(&["missing", "--max-blob-mib", value]);
+                let profile = args(&["--file-backed", "--scratch-dir", "private"]);
+                if first {
+                    input.splice(0..0, profile);
+                } else {
+                    input.extend(profile);
+                }
+                let options = parse(&input).unwrap();
+                assert_eq!(
+                    options.limits.max_streamed_blob_bytes,
+                    value.parse::<usize>().unwrap() * 1024 * 1024
+                );
+                assert_eq!(options.limits.pack, defaults.pack);
+                assert_eq!(
+                    options.limits.graph.max_object_bytes,
+                    defaults.graph.max_object_bytes
+                );
+                assert_eq!(
+                    options.limits.graph.max_payload_bytes,
+                    defaults.graph.max_payload_bytes
+                );
+                assert_eq!(options.limits.graph.max_objects, defaults.graph.max_objects);
+                assert_eq!(options.limits.graph.max_edges, defaults.graph.max_edges);
+                assert_eq!(
+                    options.limits.graph.max_references,
+                    defaults.graph.max_references
+                );
+                assert_eq!(
+                    options.limits.envelope.max_bundle_bytes,
+                    defaults.envelope.max_bundle_bytes
+                );
+                assert_eq!(
+                    options.limits.envelope.max_header_bytes,
+                    defaults.envelope.max_header_bytes
+                );
+                assert_eq!(
+                    options.limits.envelope.max_references,
+                    defaults.envelope.max_references
+                );
+            }
+        }
+        for value in ["0", "01", "-1", "1.5", "16385", "18446744073709551616"] {
+            assert!(
+                parse(&args(&[
+                    "missing",
+                    "--file-backed",
+                    "--scratch-dir",
+                    "private",
+                    "--max-blob-mib",
+                    value,
+                ]))
+                .is_err(),
+                "{value}"
+            );
+        }
+        assert!(parse(&args(&["missing", "--max-blob-mib", "32"])).is_err());
+        assert!(
+            parse(&args(&[
+                "missing",
+                "--file-backed",
+                "--scratch-dir",
+                "private",
+                "--max-blob-mib"
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse(&args(&[
+                "missing",
+                "--file-backed",
+                "--scratch-dir",
+                "private",
+                "--max-blob-mib",
+                "64",
+                "--max-blob-mib",
+                "128"
+            ]))
+            .is_err()
+        );
+        let options = parse(&args(&[
+            "missing",
+            "--file-backed",
+            "--scratch-dir",
+            "private",
+            "--max-blob-mib",
+            "64",
+            "--max-expanded-mib",
+            "1",
+        ]))
+        .unwrap();
+        assert_eq!(options.limits.max_streamed_blob_bytes, 64 * 1024 * 1024);
+        assert_eq!(options.limits.pack.max_total_expanded_bytes, 1024 * 1024);
+        assert_eq!(options.limits.graph.max_payload_bytes, 1024 * 1024);
     }
 }

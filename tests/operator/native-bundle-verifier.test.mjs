@@ -260,6 +260,7 @@ test('file-backed limits are explicit and never enlarge byte-array verification'
   assert.equal(normal.fileBacked, false); assert.equal(normal.maxInputMiB, 128);
   const defaults = normalizeNativeBundleOptions({ fg: '/fg', fileBacked: true });
   assert.equal(defaults.maxInputMiB, 128); assert.equal(defaults.maxExpandedMiB, 128);
+  assert.equal(defaults.maxBlobMiB, 32); assert.equal(normal.maxBlobMiB, 32);
   for (const size of [129, 16384]) {
     const wide = normalizeNativeBundleOptions({ fg: '/fg', fileBacked: true, maxInputMiB: size, maxExpandedMiB: size });
     assert.equal(wide.maxInputMiB, size); assert.equal(wide.maxExpandedMiB, size);
@@ -269,6 +270,9 @@ test('file-backed limits are explicit and never enlarge byte-array verification'
   for (const patch of [{ fileBacked: 'true' }, { fileBacked: null }, { maxInputMiB: 129 },
     { maxExpandedMiB: 129 }, { fileBacked: true, maxInputMiB: 16385 },
     { fileBacked: true, maxExpandedMiB: 16385 }, { fileBacked: true, maxObjects: 100001 },
+    { maxBlobMiB: 33 }, { fileBacked: true, maxBlobMiB: 0 },
+    { fileBacked: true, maxBlobMiB: 16385 }, { fileBacked: true, maxBlobMiB: 1.5 },
+    { fileBacked: true, maxBlobMiB: '64' },
     { fileBacked: true, maxRefs: 4097 }, { fileBacked: true, scratchDirectory: '/caller-owned' }]) {
     assert.throws(() => normalizeNativeBundleOptions({ fg: '/fg', ...patch }));
   }
@@ -302,7 +306,7 @@ test('file-backed snapshot hashes and copies bounded chunks with exact native pi
         const read = handle.read.bind(handle);
         handle.read = async (...args) => { reads.push(args[2]); return await read(...args); };
       }, () => verifyNativeGitBundleFile(path, { fg: mock.fg, fileBacked: true,
-        maxInputMiB: 16384, maxExpandedMiB: 16384,
+        maxInputMiB: 16384, maxExpandedMiB: 16384, maxBlobMiB: 512,
         expected: { sha256: digest, object_format: format, exact_refs: true,
           refs: [{ ref_hex: ref, object_id: '2'.repeat(format === 'sha1' ? 40 : 64) }] } }));
     } finally { t.mock.restoreAll(); }
@@ -316,6 +320,7 @@ test('file-backed snapshot hashes and copies bounded chunks with exact native pi
     assert.equal(log.args[log.args.indexOf('--scratch-dir') + 1], dirname(log.input));
     assert.equal(log.args[log.args.indexOf('--max-input-mib') + 1], '16384');
     assert.equal(log.args[log.args.indexOf('--max-expanded-mib') + 1], '16384');
+    assert.equal(log.args[log.args.indexOf('--max-blob-mib') + 1], '512');
     assert.equal(log.hash, digest); assert.equal(log.fileMode, 0o600); assert.equal(log.directoryMode, 0o700);
     await absent(dirname(log.input));
   }
@@ -414,14 +419,41 @@ test('file-backed CLI uses explicit limits and canonicalizes its owned temporary
   const actual = join(directory, 'scratch'), alias = join(directory, 'alias');
   await mkdir(actual, { mode: 0o700 }); await symlink(actual, alias);
   const result = await runCli([path, '--fg', mock.fg, '--file-backed', '--max-input-mib', '16384',
-    '--max-expanded-mib', '16384'], { env: { ...process.env, TMPDIR: alias } });
+    '--max-expanded-mib', '16384', '--max-blob-mib', '16384'], { env: { ...process.env, TMPDIR: alias } });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).storage_profile, 'file-backed-native-full-bundle-v1');
   const log = JSON.parse(await readFile(mock.log));
   assert.ok(log.input.startsWith(actual + '/')); assert.ok(!log.input.startsWith(alias + '/'));
+  assert.equal(log.args[log.args.indexOf('--max-blob-mib') + 1], '16384');
   await absent(dirname(log.input));
   const invalid = await runCli([path, '--fg', mock.fg, '--file-backed', '--file-backed']);
   assert.notEqual(invalid.code, 0); assert.equal(JSON.parse(invalid.stderr).error, 'duplicate_option');
+});
+
+test('streamed blob allowance stays independent and invalid CLI profiles never launch fg', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory);
+  for (const maxBlobMiB of [1, 64, 16384]) {
+    const limits = normalizeNativeBundleOptions({ fg: mock.fg, fileBacked: true,
+      maxBlobMiB, maxExpandedMiB: 1 });
+    assert.equal(limits.maxBlobMiB, maxBlobMiB);
+    assert.equal(limits.maxExpandedMiB, 1);
+    assert.equal(limits.maxObjects, 100000);
+    assert.equal(limits.maxRefs, 4096);
+  }
+  for (const extra of [
+    ['--max-blob-mib', '32'],
+    ['--file-backed', '--max-blob-mib', '0'],
+    ['--file-backed', '--max-blob-mib', '01'],
+    ['--file-backed', '--max-blob-mib', '16385'],
+    ['--file-backed', '--max-blob-mib', '18446744073709551616'],
+    ['--file-backed', '--max-blob-mib'],
+    ['--file-backed', '--max-blob-mib', '64', '--max-blob-mib', '128'],
+  ]) {
+    const result = await runCli(['missing.bundle', '--fg', mock.fg, ...extra]);
+    assert.notEqual(result.code, 0, JSON.stringify(extra));
+    assert.equal(result.stdout, '');
+  }
+  await absent(mock.log);
 });
 
 

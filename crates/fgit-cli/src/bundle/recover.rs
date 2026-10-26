@@ -27,6 +27,7 @@ pub(super) const USAGE: &str =
                          required exactly with --file-backed
   --max-input-mib N       1..128, or 1..16384 with --file-backed; default 128
   --max-expanded-mib N    1..128, or 1..16384 with --file-backed; default 128
+  --max-blob-mib N        Streamed base blobs, 1..16384; default 32; file-backed only
   --max-objects N         1..100000, default 100000
   --max-refs N            1..4096, default 4096
   --timeout-secs N        Whole read, verification and filesystem deadline, 1..3600
@@ -63,7 +64,9 @@ This restores ordinary bare Git SOURCE, not forge events, authority, credentials
 signatures, gitlink targets or a complete capsule. It does not attest freshness.
 The in-memory profile retains its 128 MiB ceilings. Explicit file-backed mode
 allows input and expanded limits up to 16 GiB without holding complete pack or
-expanded payloads in memory. Per-object, count, metadata and work limits remain.
+expanded payloads in memory. --max-blob-mib independently permits larger ordinary
+base blobs without enlarging buffered metadata or delta-reconstruction limits.
+Count, total expanded, graph and work limits remain independently enforced.
 Scratch may use twice the expanded limit; it is removed before destination writes.
 Read-only path separation precedes verification. Source paths and scratch parents
 must not contain symlinks. Every pack replay checks length, SHA-256 and the opened

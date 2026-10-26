@@ -36,6 +36,7 @@ Verify a complete local Git bundle without Git, network, or repository writes.
   --native-file-backed       Stream a private snapshot to native file-backed verification
   --native-max-input-mib N   Input ceiling (default 16; file-backed maximum 16384)
   --native-max-expanded-mib N Expanded payload ceiling (default 128; same maximum)
+  --native-max-blob-mib N    Streamed base-blob ceiling (default 32; file-backed only)
 Optional expectations must come from a separately trusted source:
   --expect-sha256 HEX         Exact SHA-256 of the entire bundle
   --expect-format sha1|sha256 Required when supplying native reference pins
@@ -58,6 +59,8 @@ and unsigned native inputs default to a 16 MiB input ceiling. Explicit native
 limits may select up to 128 MiB in memory, or up to 16384 MiB with the explicit
 file-backed profile. File-backed mode owns its private snapshot and scratch; it
 does not raise object, reference, report or individual-object memory limits.
+--native-max-blob-mib independently permits larger ordinary base blobs in that
+profile, while total expansion, metadata and delta-reconstruction limits remain.
 Native processing reaps its child on cancellation. The input hash sent to fg
 binds a snapshot. Independent pins constrain content identity; a detached
 approval authenticates the separately trusted signer.
@@ -68,6 +71,7 @@ async function argumentsFor(args) {
     || args.some(arg => arg.length > 8300 || arg.includes('\0'))) throw new Error('argument_limit');
   let nativeFg = null, nativeTimeoutMs = NATIVE_BUNDLE_LIMITS.timeoutMs, nativeFileBacked = false;
   let nativeMaxInputMiB = ATTESTATION_LIMITS.bundleBytes / MIB, nativeMaxExpandedMiB = NATIVE_BUNDLE_LIMITS.maxExpandedMiB;
+  let nativeMaxBlobMiB = NATIVE_BUNDLE_LIMITS.maxBlobMiB;
   let path = null, literal = false; const expected = {}, seen = new Set(), signed = new SourceAttestationOptions();
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -80,7 +84,7 @@ async function argumentsFor(args) {
         continue;
       }
       if (!['--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex', '--native-fg', '--native-timeout-secs',
-        '--native-max-input-mib', '--native-max-expanded-mib'].includes(arg)) throw new Error('unknown_option');
+        '--native-max-input-mib', '--native-max-expanded-mib', '--native-max-blob-mib'].includes(arg)) throw new Error('unknown_option');
       const value = args[++index];
       if (!value || value.startsWith('--')) throw new Error('missing_option_value');
       if (arg === '--expect-ref' || arg === '--expect-ref-hex') {
@@ -98,11 +102,15 @@ async function argumentsFor(args) {
         else if (arg === '--native-timeout-secs') {
           if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 3600) throw new Error('native_timeout_limit');
           nativeTimeoutMs = Number(value) * 1000;
-        } else if (arg === '--native-max-input-mib' || arg === '--native-max-expanded-mib') {
+        } else if (['--native-max-input-mib', '--native-max-expanded-mib', '--native-max-blob-mib'].includes(arg)) {
           if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
-            throw new Error(arg === '--native-max-input-mib' ? 'native_input_limit' : 'native_expanded_limit');
+            const codes = { '--native-max-input-mib': 'native_input_limit',
+              '--native-max-expanded-mib': 'native_expanded_limit', '--native-max-blob-mib': 'native_blob_limit' };
+            throw new Error(codes[arg]);
           }
-          if (arg === '--native-max-input-mib') nativeMaxInputMiB = Number(value); else nativeMaxExpandedMiB = Number(value);
+          if (arg === '--native-max-input-mib') nativeMaxInputMiB = Number(value);
+          else if (arg === '--native-max-expanded-mib') nativeMaxExpandedMiB = Number(value);
+          else nativeMaxBlobMiB = Number(value);
         } else expected[arg === '--expect-sha256' ? 'sha256' : 'object_format'] = value;
       }
     } else {
@@ -112,14 +120,16 @@ async function argumentsFor(args) {
   if (path === null) throw new Error('bundle_path_required');
   const attestation = signed.finish(), expectation = Object.keys(expected).length ? expected : null;
   if (nativeFg === null && seen.has('--native-timeout-secs')) throw new Error('native_fg_required_for_timeout');
-  if (nativeFg === null && ['--native-file-backed', '--native-max-input-mib', '--native-max-expanded-mib'].some(flag => seen.has(flag))) {
+  if (nativeFg === null && ['--native-file-backed', '--native-max-input-mib', '--native-max-expanded-mib', '--native-max-blob-mib'].some(flag => seen.has(flag))) {
     throw new Error('native_fg_required_for_file_limits');
   }
+  if (seen.has('--native-max-blob-mib') && !nativeFileBacked) throw new Error('native_blob_limit_requires_file_profile');
   // Native selection never loads the legacy Git decoder, even for parsing pins.
   // Both backends validate all options before any input/authentication file I/O.
   if (nativeFg !== null) {
     const native = normalizeNativeBundleOptions({ fg: nativeFg, expected: expectation, fileBacked: nativeFileBacked,
-      maxInputMiB: nativeMaxInputMiB, maxExpandedMiB: nativeMaxExpandedMiB, timeoutMs: nativeTimeoutMs });
+      maxInputMiB: nativeMaxInputMiB, maxExpandedMiB: nativeMaxExpandedMiB,
+      maxBlobMiB: nativeMaxBlobMiB, timeoutMs: nativeTimeoutMs });
     return { path, attestation, native, legacy: null, expected: expectation };
   }
   const legacy = await import('../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs');

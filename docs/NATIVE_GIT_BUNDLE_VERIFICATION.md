@@ -92,7 +92,7 @@ retain the complete compressed input and complete resolved payload set in memory
 mkdir -m 700 /var/tmp/frankengit-bundle-scratch
 fg bundle verify /backups/repository.bundle \
   --file-backed --scratch-dir /var/tmp/frankengit-bundle-scratch \
-  --max-input-mib 1024 --max-expanded-mib 2048 \
+  --max-input-mib 1024 --max-expanded-mib 2048 --max-blob-mib 512 \
   --expect-sha256 "$KNOWN_BUNDLE_SHA256" --timeout-secs 1800
 ```
 
@@ -104,7 +104,8 @@ limits above 128 MiB refuse during argument validation before opening a file.
 |---|---:|---:|
 | Whole input | 128 MiB | 16,384 MiB |
 | Total inflated entries and separately total resolved graph payload | 128 MiB each | 16,384 MiB each |
-| One object or delta program | 32 MiB | 32 MiB |
+| Ordinary base blob (`--max-blob-mib`) | 32 MiB | 16,384 MiB |
+| Metadata object, delta program/base/result | 32 MiB | 32 MiB |
 | Included objects | 100,000 | 100,000 |
 | Advertised records, including optional HEAD | 4,096 | 4,096 |
 | Header metadata | 1 MiB | 1 MiB |
@@ -113,15 +114,23 @@ limits above 128 MiB refuse during argument validation before opening a file.
 The larger byte ceilings are explicit resource allowances, not a promise that
 every bundle beneath them is accepted. Existing inflater work, expansion ratio,
 delta work, depth, fanout, index, metadata, and deadline limits still apply.
-Increasing `--max-expanded-mib` does not increase those limits. A single shared
-resolution budget charges deferred and successful delta work. No external base
-or alternate decoder is consulted when a limit refuses.
+Increasing `--max-expanded-mib` does not increase those limits. The independent
+`--max-blob-mib` option accepts canonical decimal integers from 1 through 16,384
+and requires both `--file-backed` and `--scratch-dir`. It permits larger ordinary
+base blobs without increasing metadata or delta-reconstruction memory. A blob
+used as a delta base still has to fit the 32 MiB reconstruction bound. Total
+expansion must separately cover the selected blob. A single shared resolution
+budget charges deferred and successful delta work. No external base or alternate
+decoder is consulted when a limit refuses.
 
 Scratch space is bounded by inflated bytes plus resolved payload bytes, so it
 can require up to twice the selected expanded ceiling. The implementation still
-retains object/index inventories and graph edges within their count limits, and
-one object or a bounded delta base/program/result tuple uses memory. These
-limits describe admitted payload and work, not total process RSS.
+retains object/index inventories and graph edges within their count limits.
+Ordinary base blobs use at most 16 KiB scratch-write chunks and 64 KiB graph-read
+chunks; scratch SHA-256, native identity, exact length and EOF are checked before
+a report is issued. Metadata objects and a bounded delta base/program/result
+tuple still use memory within the unchanged buffered-object cap. These limits
+describe admitted payload and work, not total process RSS.
 
 The input is opened once and its descriptor is used for all passes. Whole-input
 and native-format/reference pins are checked before inflation; a matching pin

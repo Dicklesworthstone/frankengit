@@ -67,9 +67,9 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
                 });
             }
             "--exact-refs" | "--file-backed" => common.push(flag.to_owned()),
-            "--max-input-mib" | "--max-expanded-mib" | "--max-objects" | "--max-refs"
-            | "--timeout-secs" | "--expect-sha256" | "--expect-format" | "--expect-ref"
-            | "--expect-ref-hex" | "--scratch-dir" => {
+            "--max-input-mib" | "--max-expanded-mib" | "--max-blob-mib" | "--max-objects"
+            | "--max-refs" | "--timeout-secs" | "--expect-sha256" | "--expect-format"
+            | "--expect-ref" | "--expect-ref-hex" | "--scratch-dir" => {
                 let value = args.get(at).ok_or("missing bundle recovery option value")?;
                 at += 1;
                 common.push(flag.to_owned());

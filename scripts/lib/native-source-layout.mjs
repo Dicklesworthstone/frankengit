@@ -18,7 +18,7 @@ export function normalizeNativeRecoveryRequest(request) {
 function capture(request, options, fileBacked) {
   const head = normalizeNativeRecoveryRequest(request);
   const allowed = ['fg', 'signal', 'timeoutMs', 'approvalBinding'];
-  if (fileBacked) allowed.push('maxInputMiB', 'maxExpandedMiB', 'maxObjects', 'maxRefs', 'artifact');
+  if (fileBacked) allowed.push('maxInputMiB', 'maxExpandedMiB', 'maxBlobMiB', 'maxObjects', 'maxRefs', 'artifact');
   if (!record(options) || Object.keys(options).some(key => !allowed.includes(key))) fail('native_invalid_recovery_options');
   const { approvalBinding, artifact, ...native } = options;
   if (approvalBinding !== undefined && (typeof approvalBinding !== 'string' || !/^[0-9a-f]{64}$/.test(approvalBinding))) fail('native_invalid_approval_binding');
