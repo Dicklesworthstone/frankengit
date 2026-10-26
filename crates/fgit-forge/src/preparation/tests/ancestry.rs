@@ -443,7 +443,59 @@ fn ten_thousand_commit_history_prepares_against_its_recent_base_within_the_profi
 }
 
 #[test]
-fn a_base_beyond_the_profile_and_an_undated_source_refuse_typed_never_a_wrong_base() {
+fn equal_or_missing_dates_prepare_and_review_a_recent_base_in_long_histories() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (source, dates, main, topic, base) = long_history(format, 10_000, 10);
+        for missing in [false, true] {
+            let observed = Dated {
+                source: &source,
+                dates: if missing {
+                    BTreeMap::new()
+                } else {
+                    dates.keys().map(|id| (*id, 1_700_000_000)).collect()
+                },
+                reads: Cell::new(0),
+            };
+            assert_eq!(
+                source_merge_bases(&observed, format, main, topic, limits()),
+                Ok(MergeBaseResult::Bases(vec![base]))
+            );
+            assert!(observed.reads.get() <= 24, "{format:?}, missing={missing}");
+            observed.reads.set(0);
+            let prepared = prepare_merge(
+                &observed,
+                format,
+                main,
+                topic,
+                &metadata(),
+                PreparationLimits::default(),
+            )
+            .unwrap();
+            assert!(matches!(
+                prepared,
+                MergePreparation::Clean(PreparedMerge { base: selected, .. }) if selected == base
+            ));
+            assert!(observed.reads.get() <= 27, "{format:?}, missing={missing}");
+            observed.reads.set(0);
+            let reviewed = compare_source(
+                &observed,
+                format,
+                main,
+                topic,
+                &ReviewOptions {
+                    mode: ComparisonMode::MergeBase,
+                    ..ReviewOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(reviewed.compared_before, base);
+            assert!(observed.reads.get() <= 27, "{format:?}, missing={missing}");
+        }
+    }
+}
+
+#[test]
+fn a_base_beyond_the_profile_refuses_typed_beside_a_permitted_twin() {
     let format = GitHashAlgorithm::Sha256;
     let refused = |result: Result<MergePreparation, PreparationError>| {
         matches!(
@@ -479,29 +531,4 @@ fn a_base_beyond_the_profile_and_an_undated_source_refuse_typed_never_a_wrong_ba
         prepare_merge(&dated, format, main, topic, &metadata(), PreparationLimits::default()),
         Ok(MergePreparation::Clean(PreparedMerge { base: selected, .. })) if selected == base
     ));
-    // Without dates the traversal is breadth-first. Here the topic's side runs
-    // below the base as fast as the stop follows it, so the walk reaches the
-    // profile and refuses: more work, never a different base.
-    let (source, _, main, topic, base) = long_history(format, 6_000, 10);
-    assert!(refused(prepare_merge(
-        &source,
-        format,
-        main,
-        topic,
-        &metadata(),
-        PreparationLimits::default()
-    )));
-    assert_eq!(
-        source_merge_bases(
-            &source,
-            format,
-            main,
-            topic,
-            MergeBaseLimits {
-                max_commits: 10_000,
-                max_edges: 10_000,
-            }
-        ),
-        Ok(MergeBaseResult::Bases(vec![base]))
-    );
 }

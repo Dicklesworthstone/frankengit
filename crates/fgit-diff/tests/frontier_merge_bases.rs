@@ -341,6 +341,50 @@ fn one_hundred_thousand_commit_history_reads_only_the_region_above_a_recent_base
 }
 
 #[test]
+fn equal_dates_do_not_make_a_recent_base_walk_the_whole_history() {
+    const COUNT: u64 = 100_000;
+    let mut graph = chain_with_topic(COUNT, 10);
+    graph.hints.clear();
+    let expected = MergeBaseResult::Bases(vec![COUNT - 11]);
+    for (left, right) in [(COUNT - 1, COUNT), (COUNT, COUNT - 1)] {
+        let (result, work) = frontier(&graph, left, right, profile());
+        assert_eq!(result.as_ref(), Ok(&expected));
+        // The shorter side can run slightly below the eventual base before
+        // the other paint arrives. Once common ancestry is known, its cached
+        // ancestors must be dominated immediately instead of chasing the old
+        // one-sided frontier all the way to genesis.
+        assert!(work.visited_commits <= 24, "{work:?}");
+        assert_eq!(work.examined_edges, work.visited_commits);
+        assert_eq!(frontier(&graph, left, right, profile()), (result, work));
+        // Optimization does not waive the read limit: the exact observed
+        // allowance succeeds and one fewer still refuses before another read.
+        let exact = MergeBaseLimits {
+            max_commits: work.visited_commits,
+            max_edges: work.examined_edges,
+        };
+        assert_eq!(
+            frontier(&graph, left, right, exact),
+            (Ok(expected.clone()), work)
+        );
+        assert_eq!(
+            frontier(
+                &graph,
+                left,
+                right,
+                MergeBaseLimits {
+                    max_commits: work.visited_commits - 1,
+                    ..exact
+                }
+            )
+            .0,
+            Err(MergeBaseError::CommitLimitExceeded {
+                limit: work.visited_commits - 1
+            })
+        );
+    }
+}
+
+#[test]
 fn a_base_beyond_the_profile_refuses_typed_beside_a_permitted_twin() {
     const COUNT: u64 = 20_000;
     // 4,000 commits above the base fit the profile.
@@ -455,7 +499,7 @@ fn commit_and_edge_limits_are_inclusive_and_report_the_work_spent() {
 }
 
 #[test]
-fn adversarial_and_missing_dates_cost_work_but_never_change_the_answer() {
+fn adversarial_dates_cost_work_but_flat_dates_stop_at_the_known_common_frontier() {
     const COUNT: u64 = 2_000;
     let honest = chain_with_topic(COUNT, 10);
     let (expected, cheap) = frontier(&honest, COUNT - 1, COUNT, generous());
@@ -466,28 +510,36 @@ fn adversarial_and_missing_dates_cost_work_but_never_change_the_answer() {
     }
     let mut flat = chain_with_topic(COUNT, 10);
     flat.hints.clear();
-    for graph in [&reversed, &flat] {
-        let (result, work) = frontier(graph, COUNT - 1, COUNT, generous());
-        assert_eq!(result, expected);
-        assert!(
-            work.visited_commits > 10 * cheap.visited_commits,
-            "{work:?} vs {cheap:?}"
-        );
-        // The same misleading order exhausts the profile instead of guessing.
+    for graph in [&honest, &reversed, &flat] {
         assert_eq!(
-            frontier(
-                graph,
-                COUNT - 1,
-                COUNT,
-                MergeBaseLimits {
-                    max_commits: 100,
-                    max_edges: 400
-                }
-            )
-            .0,
-            Err(MergeBaseError::CommitLimitExceeded { limit: 100 })
+            merge_bases_all(graph, COUNT - 1, COUNT, generous()),
+            expected
         );
+        assert_eq!(frontier(graph, COUNT - 1, COUNT, generous()).0, expected);
     }
+    let (_, work) = frontier(&reversed, COUNT - 1, COUNT, generous());
+    assert!(
+        work.visited_commits > 10 * cheap.visited_commits,
+        "{work:?} vs {cheap:?}"
+    );
+    // Misleading dates can still send one side far below the base before the
+    // other side reaches it. Exhaustion refuses rather than guessing a base.
+    assert_eq!(
+        frontier(
+            &reversed,
+            COUNT - 1,
+            COUNT,
+            MergeBaseLimits {
+                max_commits: 100,
+                max_edges: 400
+            }
+        )
+        .0,
+        Err(MergeBaseError::CommitLimitExceeded { limit: 100 })
+    );
+    let (result, flat_work) = frontier(&flat, COUNT - 1, COUNT, profile());
+    assert_eq!(result, expected);
+    assert!(flat_work.visited_commits <= 2 * cheap.visited_commits);
 }
 
 #[test]
@@ -615,6 +667,8 @@ fn defects_the_traversal_reads_refuse_and_the_same_defects_below_it_are_unread()
 #[test]
 fn every_checkpoint_propagates_its_stop_and_a_fresh_query_still_succeeds() {
     let graph = chain_with_topic(40, 6);
+    let mut flat = chain_with_topic(120, 20);
+    flat.hints.clear();
     // Pick a pair with two bases so the drain's checkpoints are covered too.
     let mut generator = Generator(0x0123_4567_89ab_cdef);
     let (dag, pair) = (0..100)
@@ -632,6 +686,7 @@ fn every_checkpoint_propagates_its_stop_and_a_fresh_query_still_succeeds() {
     let random = dag.graph(Order::Dated, &mut generator);
     for (graph, left, right) in [
         (&graph, 39, 40),
+        (&flat, 119, 120),
         (&random, dag.ids[pair.0], dag.ids[pair.1]),
     ] {
         let calls = Cell::new(0_usize);

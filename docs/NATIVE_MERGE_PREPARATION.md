@@ -169,10 +169,15 @@ The initial profile admits at most 4,096 ancestor commits, 16,384 graph edges,
 The commit and edge ceilings count what merge-base discovery reads, not the
 repository's total history. It reads the commits between both tips and their
 best bases, plus the frontier that proves those bases best, so a long history
-with a recent base fits. Committer dates only order that walk. A missing,
-equal or skewed date can cost reads up to the ceiling, which then refuses
-with the typed limit, never with a different base. Two incomparable best
-bases are proved incomparable by reading their shared history, so a
+with a recent base fits. Committer dates only order that walk. Once a common
+ancestor is established, its domination mark propagates immediately through
+already-read parent edges without loading new objects. This retires obsolete
+one-sided work even with equal or missing dates; it does not require a persisted
+ancestry index or increase the commit/edge ceilings. Skewed dates can still
+prioritize one side far below the eventual base before it becomes common and
+exhaust the ceiling. Exhaustion returns the typed limit, never a different base.
+Two incomparable best bases are proved incomparable by reading their shared
+history, so a
 criss-cross pair over a long history refuses at the ceiling; multiple bases
 refuse in any case.
 Admission revalidates only what the candidate adds above the

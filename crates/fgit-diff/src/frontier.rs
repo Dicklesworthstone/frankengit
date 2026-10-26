@@ -14,6 +14,11 @@
 //! marks only grow and the final marks do not depend on the visit order. The
 //! order comes from [`CommitGraph::parents_with_order_hint`]; a hint (usually a
 //! committer date) is untrusted and can only make the walk cheaper or costlier.
+//! A new DOMINATED mark also propagates immediately through already-read parent
+//! edges. Otherwise equal dates can leave this proof behind a one-sided queue
+//! that keeps reading older commits, even after the recent best base is known.
+//! This propagation reads no new objects and does not follow unknown parents;
+//! ordinary queued expansion still owns those reads and their resource limits.
 //!
 //! Why stopping early is exact. A best base `b` is never dominated: domination
 //! flows only from commits popped while common, which are true common
@@ -236,18 +241,22 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
             checkpoint().map_err(MergeBaseError::Source)?;
             let parent = self.parents[ordinal][index].clone();
             let parent = self.discover(&parent, checkpoint)?;
-            self.mark(parent, paint);
+            if self.mark(parent, paint) {
+                self.propagate_known_domination(parent, checkpoint)?;
+            }
         }
         Ok(())
     }
 
-    /// Add marks and queue the commit again if that changed anything.
-    fn mark(&mut self, ordinal: usize, paint: u8) {
+    /// Add marks and queue the commit again if that changed anything. Return
+    /// whether the commit became dominated for the first time.
+    fn mark(&mut self, ordinal: usize, paint: u8) -> bool {
         let before = self.marks[ordinal];
         if before & paint == paint {
-            return;
+            return false;
         }
-        if paint & DOMINATED != 0 && before & DOMINATED == 0 {
+        let newly_dominated = paint & DOMINATED != 0 && before & DOMINATED == 0;
+        if newly_dominated {
             self.live -= self.queued[ordinal];
             if before & CANDIDATE != 0 {
                 self.open -= 1;
@@ -261,6 +270,38 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
         self.heap
             .push((self.hints[ordinal], Reverse(self.pushes), ordinal));
         self.pushes += 1;
+        newly_dominated
+    }
+
+    /// Retire obsolete queued work using only ancestry already admitted by
+    /// `discover`. Every parent of a dominated commit is itself dominated;
+    /// neither its visit-order hint nor another graph read is needed to know
+    /// that. A commit enters this stack only when it first becomes dominated,
+    /// so the extra work is bounded by the admitted commits and parent edges.
+    /// Unknown parents remain on the normal expansion path, including the
+    /// complete drain needed to distinguish several surviving best bases.
+    fn propagate_known_domination<F>(
+        &mut self,
+        ordinal: usize,
+        checkpoint: &mut F,
+    ) -> Result<(), MergeBaseError<G::CommitId, G::Error>>
+    where
+        F: FnMut() -> Result<(), G::Error>,
+    {
+        let mut pending = vec![ordinal];
+        while let Some(ordinal) = pending.pop() {
+            checkpoint().map_err(MergeBaseError::Source)?;
+            for index in 0..self.parents[ordinal].len() {
+                checkpoint().map_err(MergeBaseError::Source)?;
+                let Some(parent) = self.ordinals.get(&self.parents[ordinal][index]).copied() else {
+                    continue;
+                };
+                if self.mark(parent, PAINT) {
+                    pending.push(parent);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn pop(&mut self) -> Option<usize> {
