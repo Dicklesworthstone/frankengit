@@ -65,6 +65,9 @@ use crate::vocabulary::{
     ImmutableRead, PutOutcome,
 };
 
+mod cumulative;
+pub use cumulative::{publish_decisions_with_cumulative, publish_decisions_with_cumulative_async};
+
 /// Namespace prefix of a per-identity outcome accelerator slot.
 pub const OUTCOME_KEY_PREFIX: &[u8] = b"fg/outcome/v1/";
 
@@ -222,6 +225,12 @@ pub enum OutcomeFailure {
         /// The head the caller intends to replace.
         expected: AuthorityVersionToken,
     },
+    /// A retained cumulative set or proposed extension does not match the
+    /// exact authenticated publication it claims to describe.
+    CumulativePublicationMismatch {
+        /// The identity, position, or commitment that did not agree.
+        field: &'static str,
+    },
     /// One sealed transaction acquired a second terminal decision.
     ///
     /// §5.2 is the invariant: *one sealed transaction has at most one terminal
@@ -343,6 +352,10 @@ impl core::fmt::Display for OutcomeFailure {
                 "the cumulative outcome index was collected against a different head \
                  than the one being replaced; failing closed rather than folding a \
                  leaf set from another history",
+            ),
+            Self::CumulativePublicationMismatch { field } => write!(
+                f,
+                "the cumulative outcome index disagrees with the authenticated publication: {field}",
             ),
             Self::DuplicateTerminalDecision { duplicate } => write!(
                 f,
@@ -2625,6 +2638,21 @@ pub fn publish_decisions<S>(
 where
     S: AuthorityStore + ?Sized,
 {
+    publish_decisions_impl(store, head_key, expected, batch, head, tenant_id, None)
+}
+
+fn publish_decisions_impl<S>(
+    store: &S,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    batch: &RepositoryDecisionBatchBody,
+    head: &RepositoryAuthorityHeadBody,
+    tenant_id: TenantId,
+    cumulative: Option<&CumulativeOutcomes>,
+) -> Result<PublicationOutcome, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
     let batch_id = decision_batch_identity(batch)?;
 
     let batch_key = body_key(IdentityDomain::RepositoryDecisionBatch, batch)?;
@@ -2647,7 +2675,18 @@ where
         .iter()
         .map(|decision| decision.tx_id)
         .collect();
-    let witness = match scan_for_existing_decisions(store, head_key, &tx_ids)? {
+    let scan = match cumulative {
+        Some(cumulative) => {
+            let Some(scan) =
+                cumulative::scan_current(store, head_key, expected, cumulative, &tx_ids)?
+            else {
+                return Ok(PublicationOutcome::PredecessorMismatch);
+            };
+            scan
+        }
+        None => scan_for_existing_decisions(store, head_key, &tx_ids)?,
+    };
+    let witness = match scan {
         DuplicateScan::Found { observed, decided } => {
             return match classify_duplicates(observed, expected, &decided, batch) {
                 DuplicateVerdict::Lost => Ok(PublicationOutcome::PredecessorMismatch),
@@ -2882,6 +2921,22 @@ pub async fn publish_decisions_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
+    publish_decisions_impl_async(store, cx, head_key, expected, batch, head, tenant_id, None).await
+}
+
+async fn publish_decisions_impl_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    batch: &RepositoryDecisionBatchBody,
+    head: &RepositoryAuthorityHeadBody,
+    tenant_id: TenantId,
+    cumulative: Option<&CumulativeOutcomes>,
+) -> Result<PublicationOutcome, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
     let batch_id = decision_batch_identity(batch)?;
 
     let batch_key = body_key(IdentityDomain::RepositoryDecisionBatch, batch)?;
@@ -2901,7 +2956,19 @@ where
         .iter()
         .map(|decision| decision.tx_id)
         .collect();
-    let witness = match scan_for_existing_decisions_async(store, cx, head_key, &tx_ids).await? {
+    let scan = match cumulative {
+        Some(cumulative) => {
+            let Some(scan) =
+                cumulative::scan_current_async(store, cx, head_key, expected, cumulative, &tx_ids)
+                    .await?
+            else {
+                return Ok(PublicationOutcome::PredecessorMismatch);
+            };
+            scan
+        }
+        None => scan_for_existing_decisions_async(store, cx, head_key, &tx_ids).await?,
+    };
+    let witness = match scan {
         DuplicateScan::Found { observed, decided } => {
             return match classify_duplicates(observed, expected, &decided, batch) {
                 DuplicateVerdict::Lost => Ok(PublicationOutcome::PredecessorMismatch),

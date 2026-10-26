@@ -4,6 +4,9 @@
 //! is only worth anything if both paths are exercised against the same corpus
 //! and if a disagreement is proven to fail closed rather than pick a side.
 
+#[path = "outcome_index/cumulative_publication.rs"]
+mod cumulative_publication;
+
 use fgit_authority::{
     AuthorityStore, CasOutcome, HeadKey, HeadRead, MemoryAuthorityStore, OutcomeFailure,
     OutcomeLookup, PublicationOutcome, StoreInstanceId, TerminalOutcome, body_key,
