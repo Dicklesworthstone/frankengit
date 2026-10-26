@@ -10,7 +10,7 @@ The executable is operator-trusted; this command does not authenticate its build
   --file-backed          Stream a private snapshot and use native disk resolution
   --max-input-mib N       Input bytes, 1..128; file-backed 1..16384 (default 128)
   --max-expanded-mib N    Resolution/graph bytes, same ceilings (default 128)
-  --max-blob-mib N        Streamed base blob bytes, 1..16384, file-backed only (default 32)
+  --max-blob-mib N        Streamed blob/base/result bytes, 1..16384, file-backed only (default 32)
   --max-objects N         Included objects, 1..100000
   --max-refs N            References, 1..4096
   --timeout-secs N        One read/staging/process deadline, 1..3600 (default 300)
@@ -27,8 +27,8 @@ is not an identity pin. Native success does not authenticate an origin or signer
 prove freshness, verify submodule targets, restore a capsule, or approve a change.
 The default profile retains input in memory. Explicit --file-backed keeps the
 input and resolved object payloads on disk with bounded transfer buffers.
---max-blob-mib independently permits larger ordinary base blobs; buffered metadata
-and delta reconstruction retain their limits. Total expansion, object-count,
+--max-blob-mib permits larger blobs and blob delta bases/results through bounded
+scratch chunks. Metadata and delta programs retain their caps. Total expansion, object-count,
 graph and work limits still apply. Temporary
 storage needs the input snapshot plus up to twice the expanded ceiling. The
 wrapper creates and owns a private temporary directory; no scratch path is

@@ -339,7 +339,7 @@ fn delta_varint(mut value: usize, bytes: &mut Vec<u8>) {
     }
 }
 #[test]
-fn streaming_blob_allowance_does_not_expand_delta_base_reconstruction_memory() {
+fn streaming_blob_allowance_supports_large_delta_bases_without_expanding_memory_limits() {
     let files = Files::new();
     for (case, length) in [4096, 96 * 1024].into_iter().enumerate() {
         let base = repeated_id(length);
@@ -359,31 +359,34 @@ fn streaming_blob_allowance_does_not_expand_delta_base_reconstruction_memory() {
         limits.max_streamed_blob_bytes = 128 * 1024;
         let mut scratch = BoundedScratch::new(files.file(&format!("delta-{case}")));
         let actual = verify_git_bundle_reader(
-            &mut Cursor::new(input),
+            &mut Cursor::new(&input),
             &mut scratch,
             &limits,
             None,
             &mut || true,
         );
-        if case == 0 {
-            let actual = actual.unwrap();
-            assert_eq!(actual.verified().graph().objects, 2);
-            assert_eq!(actual.verified().delta_objects(), 1);
-            assert_eq!(actual.verified().graph().payload_bytes, length as u64 + 1);
-        } else {
-            assert!(matches!(
-                actual,
-                Err(BundleVerifyError::Pack(
-                    fgit_pack::PackError::ObjectSizeLimit {
-                        actual: 98304,
-                        limit: 8192
-                    }
-                ))
-            ));
-            assert_eq!(
-                scratch.read_bytes, 0,
-                "oversized delta base refused before reading/allocating"
-            );
-        }
+        let actual = actual.unwrap();
+        assert_eq!(actual.verified().graph().objects, 2);
+        assert_eq!(actual.verified().delta_objects(), 1);
+        assert_eq!(actual.verified().graph().payload_bytes, length as u64 + 1);
+        assert_eq!(limits.pack.max_object_bytes, 8192);
+        assert_eq!(limits.graph.max_object_bytes, 8192);
+        assert_eq!(scratch.write_bytes, length + program.len() + 1);
+        // The explicit blob allowance is still checked before payload writes.
+        limits.max_streamed_blob_bytes = length - 1;
+        let mut scratch = BoundedScratch::new(files.file(&format!("too-large-{case}")));
+        assert!(
+            verify_git_bundle_reader(
+                &mut Cursor::new(&input),
+                &mut scratch,
+                &limits,
+                None,
+                &mut || true,
+            )
+            .is_err()
+        );
+        assert_eq!(scratch.write_bytes, 0);
     }
 }
+
+mod deltas;

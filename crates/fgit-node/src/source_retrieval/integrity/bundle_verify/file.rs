@@ -125,9 +125,12 @@ impl FileGitBundleRecovery {
 /// bytes. Native IDs, ranges, delta links and graph edges remain O(objects+edges)
 /// metadata. Base blobs use bounded inflate and graph-reader chunks even when
 /// their independent streamed-blob allowance exceeds the buffered object cap.
-/// Metadata and a delta base/program/result tuple keep that buffered cap; a
-/// delta requiring a larger base refuses before allocation. Inventory remains
-/// explicitly bounded by objects and edges.
+/// Blob delta bases/results above the buffered cap use the same private
+/// scratch descriptor, with a fully verified base block index and authenticated
+/// random reads. Metadata and delta programs retain their buffered caps. Small
+/// deltas retain the scalar path and its work accounting. Inventory remains
+/// bounded by objects and edges; a large base's temporary index uses 32 bytes
+/// per 16 KiB block plus one cached block.
 /// Both source passes, all scratch I/O, delta work, graph checks and index output
 /// share sticky cooperative cancellation. Blocking `Read`/`Write` cannot be
 /// preempted by this synchronous core.

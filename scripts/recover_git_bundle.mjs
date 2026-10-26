@@ -23,7 +23,7 @@ This is Git source recovery, not FrankenGit forge/authority/capsule restore.
   --native-file-backed       Stream native verification and pack materialization
   --native-max-input-mib N   File-backed input ceiling, 1..16384 (default 16)
   --native-max-expanded-mib N File-backed expanded ceiling, 1..16384 (default 128)
-  --native-max-blob-mib N    Streamed base-blob ceiling, 1..16384 (default 32)
+  --native-max-blob-mib N    Streamed blob/base/result ceiling, 1..16384 (default 32)
   --resume                   Resume an exact interrupted recovery, never overwrite
   --head REF                 Explicit advertised refs/heads/... for HEAD
   --head-hex HEX             Byte-exact hexadecimal alternative to --head
@@ -40,9 +40,9 @@ file-backed mode allows independently selected limits up to 16384 MiB and a
 1..3600-second deadline. Other native runs retain their 16/128 MiB limits and
 1..300-second deadline. Object/ref/report and individual-object limits remain
 bounded. All three byte-limit flags require --native-file-backed. The blob
-allowance does not raise metadata, delta-reconstruction or total expanded
-limits. No Git
-executable, network, hooks or checkout is used. HEAD is installed last. On failure, any
+allowance includes blob delta bases/results. Metadata, program, total expansion
+and work limits remain separate. No Git executable, network, hooks or checkout
+is used. HEAD is installed last. On failure, any
 incomplete destination is retained and its publication state is reported.
 Resume requires the same host/PID namespace and refuses live or unknown owners;
 it is not arbitrary repair, a force option or distributed lock takeover.

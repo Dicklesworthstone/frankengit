@@ -320,6 +320,7 @@ fn delta_program_size_is_separate_from_the_reconstructed_object_graph_limit() {
         let mut limits = BundleVerifyLimits::default();
         limits.graph.max_object_bytes = result.len();
         limits.pack.max_object_bytes = program.len();
+        limits.max_streamed_blob_bytes = result.len();
         let expected = verify_git_bundle(&input, &limits, &mut || true).unwrap();
         let actual = verify_git_bundle_reader(
             &mut Cursor::new(&input),
@@ -333,8 +334,14 @@ fn delta_program_size_is_separate_from_the_reconstructed_object_graph_limit() {
         for dimension in 0..3 {
             let mut below = limits.clone();
             match dimension {
-                0 => below.graph.max_object_bytes = result.len() - 1,
-                1 => below.graph.max_object_bytes = base.len() - 1,
+                0 => {
+                    below.graph.max_object_bytes = result.len() - 1;
+                    below.max_streamed_blob_bytes = result.len() - 1;
+                }
+                1 => {
+                    below.graph.max_object_bytes = base.len() - 1;
+                    below.max_streamed_blob_bytes = base.len() - 1;
+                }
                 _ => below.pack.max_object_bytes = program.len() - 1,
             }
             assert!(verify_git_bundle(&input, &below, &mut || true).is_err());
