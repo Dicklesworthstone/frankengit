@@ -22,31 +22,19 @@ readonly VERIFY_ARTIFACT_SCHEMA_VERSION=1
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
-# Every cargo invocation below runs on THIS machine.
-#
-# `cargo` on PATH is the rch shim, which routes `build|test|check|clippy|bench|
-# doc|nextest` through `rch exec` to a worker fleet and leaves everything else
-# local. Without this export the split falls out of which subcommands the shim
-# happens to intercept: `cargo run` (docs, constitution) and `cargo fmt` stayed
-# local while check, test and clippy -- the three lanes that decide whether the
-# tree is green -- left the machine. Nobody chose that split.
-#
-# It is also not merely a preference. The shim offloads with
-# `RCH_REQUIRE_REMOTE=1`, which does NOT fall back locally, so those lanes could
-# not complete at all without a reachable fleet. That contradicts AGENTS.md §16.2
-# ("Builds run locally (128 cores): always set RCH_CARGO_WRAPPER_BYPASS=1"), §1's
-# "local reproducibility over hosted-service dependence", and §14's review
-# question "Can the complete verification/release path run locally?".
-#
-# Set deliberately rather than defaulted, so re-enabling offload is a visible
-# diff to this line and not an environment variable someone exported once.
-export RCH_CARGO_WRAPPER_BYPASS=1
+# AGENTS.md §16.2: builds use the caller's Cargo/RCH routing and private target
+# directory. Never force a local compiler here. Tools that inspect this checkout
+# are built for the CALLER's host, returned by Cargo/RCH, then executed here:
+# `cargo run` could instead inspect a worker's filtered copy (notably no Beads).
+# Explicit input roots also avoid embedded worker CARGO_MANIFEST_DIR paths.
+VERIFY_NATIVE_HOST=''
+VERIFY_TARGET_DIRECTORY=''
 
 echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
   printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|full|release}\n' "$0" >&2
-  printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|native-rebase-check|native-rebase-test|pull-request-checks|continuous-serve|tier-a\n' "$0" >&2
+  printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|native-rebase-check|native-rebase-test|pull-request-checks|continuous-serve|tier-a\n' >&2
 }
 refuse_dormant() {
   printf '\033[1;33m==> %s\033[0m\n' "$1" >&2
@@ -54,23 +42,81 @@ refuse_dormant() {
   exit 3
 }
 
+prepare_native_tools() {
+  [[ -n "${VERIFY_NATIVE_HOST}" ]] && return 0
+  if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+    printf 'verify: set CARGO_TARGET_DIR to a pane-private durable target directory (AGENTS.md 16.2)\n' >&2
+    return 2
+  fi
+  local compiler_version metadata
+  compiler_version="$(rustc -vV)"
+  VERIFY_NATIVE_HOST="$(printf '%s\n' "$compiler_version" | sed -n 's/^host: //p')"
+  if ! [[ "${VERIFY_NATIVE_HOST}" =~ ^[a-zA-Z0-9_]+(-[a-zA-Z0-9_]+)+$ ]]; then
+    printf 'verify: cannot determine one native caller host from rustc -vV\n' >&2
+    return 2
+  fi
+  metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+  VERIFY_TARGET_DIRECTORY="$(printf '%s' "$metadata" | "${PYTHON_BIN:-python3}" -c '
+import json, os, sys
+try:
+    target = json.load(sys.stdin)["target_directory"]
+    if not isinstance(target, str) or not os.path.isabs(target) or any(c in target for c in "\0\r\n"):
+        raise ValueError("expected an absolute target_directory without control separators")
+except (ValueError, KeyError, TypeError) as error:
+    print(f"verify: invalid Cargo target metadata: {error}", file=sys.stderr)
+    sys.exit(2)
+print(target)
+')"
+}
+
+native_binary_path() {
+  local suffix=''
+  case "${VERIFY_NATIVE_HOST}" in *-windows-*) suffix='.exe' ;; esac
+  printf '%s/%s/debug/%s%s\n' "$VERIFY_TARGET_DIRECTORY" "$VERIFY_NATIVE_HOST" "$1" "$suffix"
+}
+
+build_native_tools() {
+  # RCH estimates and forwards Cargo's argv. An ambient CARGO_BUILD_JOBS may
+  # not reach the worker, so make the caller's requested compiler cap explicit
+  # for both actual compilation and its matching scheduler reservation.
+  if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
+    cargo build --locked --target "$VERIFY_NATIVE_HOST" --jobs "$CARGO_BUILD_JOBS" "$@"
+  else
+    cargo build --locked --target "$VERIFY_NATIVE_HOST" "$@"
+  fi
+}
+
+run_native_tool() {
+  local package="$1" binary="$2" executable
+  shift 2
+  prepare_native_tools
+  build_native_tools -p "$package" --bin "$binary"
+  executable="$(native_binary_path "$binary")"
+  if [[ ! -x "$executable" ]]; then
+    printf 'verify: no returned native executable at %s\n' "$executable" >&2
+    return 1
+  fi
+  "$executable" "$@"
+}
+
 run_docs() {
   echo_step "Checking pinned Rust bootstrap metadata before Cargo"
   "$ROOT/scripts/check_toolchain_bootstrap_links.sh"
   echo_step "Checking FrankenGit documentation and registries"
-  cargo run --locked -p fgit-registry-check -- docs
+  run_native_tool fgit-registry-check fgit-registry-check docs --root "$ROOT"
 }
 
 run_constitution() {
   echo_step "Checking dependency and memory-safety constitution"
-  cargo run --locked -p fgit-registry-check -- constitution
+  run_native_tool fgit-registry-check fgit-registry-check constitution --root "$ROOT"
   cargo metadata --locked --no-deps --format-version 1 >/dev/null
 }
 
 run_fast() {
   run_docs
   run_constitution
-  echo_step "Building locally (RCH_CARGO_WRAPPER_BYPASS=${RCH_CARGO_WRAPPER_BYPASS})"
+  echo_step "Checking verifier command contracts"
+  bash "$ROOT/scripts/tests/verify_test.sh"
   echo_step "Checking formatting"
   cargo fmt --all -- --check
   echo_step "Checking workspace"
@@ -79,7 +125,7 @@ run_fast() {
   # what keeps that safe. `check` never writes, so a verify run cannot
   # repair the drift it is supposed to report.
   echo_step "Checking the generated schema artifacts are current"
-  cargo run -q -p fgit-schema --bin fgit-schema-gen -- check
+  run_native_tool fgit-schema fgit-schema-gen check "$ROOT/crates/fgit-schema/generated" --workspace-root "$ROOT"
   echo_step "Running workspace tests"
   # --no-fail-fast is mandatory: without it, cargo stops after the first test
   # binary that fails and never runs the rest, so a single red test (e.g. an
@@ -103,16 +149,18 @@ run_fast() {
 run_e2e() {
   # fg-mcp is built with fg: the MCP suites drive both executables.
   echo_step "Building the fg and fg-mcp binaries once for the product suites"
-  cargo build --locked -p fgit-cli --bin fg --bin fg-mcp
-  local target_dir binary
-  target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
-    grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)
+  prepare_native_tools
+  build_native_tools -p fgit-cli --bin fg --bin fg-mcp
+  local executable binary fg_binary mcp_binary
   for binary in fg fg-mcp; do
-    [ -x "$target_dir/debug/$binary" ] || {
-      printf 'verify: e2e: no %s binary at %s/debug/%s\n' "$binary" "$target_dir" "$binary" >&2
+    executable="$(native_binary_path "$binary")"
+    [ -x "$executable" ] || {
+      printf 'verify: no returned native executable at %s\n' "$executable" >&2
       return 1
     }
   done
+  fg_binary="$(native_binary_path fg)"
+  mcp_binary="$(native_binary_path fg-mcp)"
   local -a suites=()
   local suite
   while IFS= read -r suite; do
@@ -124,8 +172,8 @@ run_e2e() {
     printf 'verify: e2e: no product suites discovered\n' >&2
     return 1
   }
-  echo_step "Running ${#suites[@]} product suites against $target_dir/debug/fg"
-  FG_BIN="$target_dir/debug/fg" FG_MCP_BIN="$target_dir/debug/fg-mcp" "$ROOT/scripts/e2e/run_all.sh" \
+  echo_step "Running ${#suites[@]} product suites against $fg_binary"
+  FG_BIN="$fg_binary" FG_MCP_BIN="$mcp_binary" "$ROOT/scripts/e2e/run_all.sh" \
     --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
 }
 
@@ -149,7 +197,7 @@ run_release() {
   # release behavior out of workflow YAML while the lane below remains a typed
   # exit-3 refusal until the complete native matrix exists.
   echo_step "Checking DSR release-attempt runner wiring"
-  cargo run --locked -p fgit-release --bin fgit-release-attempt -- --release-gate-probe
+  run_native_tool fgit-release fgit-release-attempt --release-gate-probe
 
   refuse_dormant "No releasable FrankenGit binary or complete native target matrix exists yet"
 }
