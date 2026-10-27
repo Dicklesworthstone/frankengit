@@ -130,7 +130,10 @@ impl Sources {
         })
     }
 }
-pub(super) fn read_private(path: &Path, maximum: usize) -> Result<Vec<u8>, TrustedWorkflowFailure> {
+pub(in super::super) fn read_private(
+    path: &Path,
+    maximum: usize,
+) -> Result<Vec<u8>, TrustedWorkflowFailure> {
     let meta = fs::symlink_metadata(path).map_err(io)?;
     if !meta.is_file()
         || meta.mode() & 0o777 != 0o600

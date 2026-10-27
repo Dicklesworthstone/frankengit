@@ -33,6 +33,11 @@ batch always refuses, even if a process died before its first child. Recover
 original child journals without rerunning scripts; retain custody across restore.
 Existing check-publication policy is not relaxed by these observations.
 
+For automatic PR candidate preparation, canonical CI-ref admission and optional
+check publication, use [exact PR merge-candidate watch](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md).
+That opt-in path executes the admitted candidate through the canonical dispatcher;
+the manual unpublished-candidate command described here retains its behavior.
+
 ## Native command
 
 ```

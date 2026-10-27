@@ -168,7 +168,11 @@ impl OneNode {
                         artifacts,
                         Some(&merge.target_ref),
                         source,
-                        Some((Some(merge.target_tip_before), ComparisonMode::MergeBase)),
+                        Some((
+                            Some(merge.target_tip_before),
+                            ComparisonMode::MergeBase,
+                            None,
+                        )),
                     );
                     *observed
                         .lock()

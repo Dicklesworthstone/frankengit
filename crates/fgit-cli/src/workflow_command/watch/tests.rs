@@ -18,6 +18,112 @@ fn args() -> Vec<String> {
     .map(str::to_owned)
     .collect()
 }
+
+fn merge_args() -> Vec<String> {
+    [
+        args(),
+        [
+            "--pull-request",
+            "7",
+            "--expected-incarnation",
+            &"44".repeat(16),
+            "--merge-candidate-ref",
+            "refs/heads/ci/pr-7",
+            "--merge-principal",
+            &"33".repeat(16),
+            "--merge-author",
+            "CI <ci@example.test>",
+            "--merge-committer",
+            "CI <ci@example.test>",
+            "--merge-timestamp",
+            "1700000000",
+            "--merge-message",
+            "Test the combined tree\n",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    ]
+    .concat()
+}
+
+#[test]
+fn merge_watch_is_explicit_and_does_not_implicitly_publish_checks() {
+    let options = options(&merge_args()).unwrap();
+    assert_eq!(options.pull_request, Some(7));
+    assert!(options.publisher.is_none());
+    let merge = options.merge_candidate.unwrap();
+    assert_eq!(merge.reference.as_bytes(), b"refs/heads/ci/pr-7");
+    assert_eq!(merge.metadata.message, b"Test the combined tree\n");
+    assert_eq!(
+        merge.style,
+        fgit_forge::preparation::MergeCommitStyle::TwoParent
+    );
+
+    let mut input = merge_args();
+    input.extend([
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "55".repeat(16),
+        "--merge-method".into(),
+        "squash".into(),
+        "--merge-profile".into(),
+        "exact-renames".into(),
+    ]);
+    let options = self::options(&input).unwrap();
+    assert_eq!(
+        options.publisher.unwrap(),
+        fgit_types::PrincipalId::from_bytes([0x55; 16])
+    );
+    assert_eq!(
+        options.merge_candidate.unwrap().style,
+        fgit_forge::preparation::MergeCommitStyle::Squash
+    );
+    assert!(self::options(&args()).unwrap().merge_candidate.is_none());
+}
+
+#[test]
+fn merge_watch_requires_complete_identity_pr_and_incarnation_without_io() {
+    for flag in [
+        "--pull-request",
+        "--expected-incarnation",
+        "--merge-candidate-ref",
+        "--merge-principal",
+        "--merge-author",
+        "--merge-committer",
+        "--merge-timestamp",
+        "--merge-message",
+    ] {
+        let mut input = merge_args();
+        let index = input.iter().position(|v| v == flag).unwrap();
+        input.drain(index..index + 2);
+        assert!(options(&input).is_err(), "{flag}");
+    }
+    let mut input = merge_args();
+    input.extend(["--merge-principal".into(), "66".repeat(16)]);
+    assert!(options(&input).is_err());
+    let mut input = merge_args();
+    let index = input
+        .iter()
+        .position(|v| v == "--merge-candidate-ref")
+        .unwrap();
+    input[index + 1] = input[4].clone();
+    assert!(options(&input).is_err());
+}
+
+#[test]
+fn merge_option_values_cannot_inject_another_option() {
+    let mut input = merge_args();
+    let index = input.iter().position(|v| v == "--merge-message").unwrap();
+    input[index + 1] = "--merge-method".into();
+    let options = options(&input).unwrap();
+    let merge = options.merge_candidate.unwrap();
+    assert_eq!(merge.metadata.message, b"--merge-method");
+    assert_eq!(
+        merge.style,
+        fgit_forge::preparation::MergeCommitStyle::TwoParent
+    );
+}
 #[test]
 fn defaults_and_finite_polling_options_parse_without_io() {
     let opts = options(&args()).unwrap();

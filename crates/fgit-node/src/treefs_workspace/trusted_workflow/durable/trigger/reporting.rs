@@ -3,7 +3,8 @@ use super::*;
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{DecisionOutcome, PrincipalId};
 mod sources;
-use sources::{Sources, read_private};
+use sources::Sources;
+pub(super) use sources::read_private;
 
 /// Counts refer to observed canonical decisions, including historical retries.
 /// Previously reported events are suppression records, never passing checks.
@@ -50,7 +51,7 @@ impl OneNode {
         observe: impl FnMut(&str) -> Result<(), String>,
     ) -> TrustedRefCheckPublication {
         self.publish_selected_workflow_checks_in(
-            request, reference, directory, parent, publisher, None, observe,
+            request, reference, directory, parent, publisher, None, None, observe,
         )
         .await
     }
@@ -74,6 +75,33 @@ impl OneNode {
             parent,
             publisher,
             Some(number),
+            None,
+            observe,
+        )
+        .await
+    }
+
+    /// Publish original admitted-candidate evidence under its fixed CI ref.
+    /// Current PR metadata never replaces the retained execution identity.
+    pub async fn publish_trusted_pull_request_merge_workflow_checks_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        number: u64,
+        directory: &[u8],
+        parent: &Path,
+        publisher: PrincipalId,
+        merge: &pull_request_merge::PullRequestMergeWatchConfig,
+        observe: impl FnMut(&str) -> Result<(), String>,
+    ) -> TrustedRefCheckPublication {
+        self.publish_selected_workflow_checks_in(
+            request,
+            reference,
+            directory,
+            parent,
+            publisher,
+            Some(number),
+            Some(merge),
             observe,
         )
         .await
@@ -87,6 +115,7 @@ impl OneNode {
         parent: &Path,
         publisher: PrincipalId,
         pull_number: Option<u64>,
+        merge_config: Option<&pull_request_merge::PullRequestMergeWatchConfig>,
         mut observe: impl FnMut(&str) -> Result<(), String>,
     ) -> TrustedRefCheckPublication {
         let mut result = TrustedRefCheckPublication::default();
@@ -102,12 +131,18 @@ impl OneNode {
                 return Ok(());
             }
             check_directory(parent)?;
-            let scope = match pull_number {
-                Some(number) => super::pull_request::scope(self, reference, directory, number),
-                None => scope(self, reference, directory),
+            let scope = match (pull_number, merge_config) {
+                (Some(number), Some(_)) => pull_request_merge::scope(self, reference, directory, number),
+                (Some(number), None) => super::pull_request::scope(self, reference, directory, number),
+                (None, _) => scope(self, reference, directory),
             };
             let root = parent.join(format!("watch-{}", hex(&scope)));
             let _owner = Owner::open(&root)?;
+            if let Some(config) = merge_config {
+                if config.reference() == reference { return Err(invalid("CI branch must differ from PR source")); }
+                config.bind(&root)?;
+            }
+            let reporting_reference = merge_config.map_or(reference, |config| config.reference());
             let reporter = commitment(&[b"frankengit/watch-reporter/v1", &scope, publisher.as_bytes()]);
             bind_reporter(&root, &reporter)?;
             for entry in event_entries(&root)? {
@@ -135,7 +170,7 @@ impl OneNode {
                         .join(format!("workflow-{}", hex(&source.run)));
                     let set = self.prepare_trusted_workflow_check_set(request, &child,
                         digest(source.journal)?, (source.bytes, digest(source.tail)?),
-                        publisher, reference.clone(), (jobs_left.max(1), bytes_left.max(1)))?;
+                        publisher, reporting_reference.clone(), (jobs_left.max(1), bytes_left.max(1)))?;
                     if !set.targets_commit(sources.commit) { return Err(invalid("watch checks name another executed commit")); }
                     jobs_left = jobs_left.checked_sub(set.len()).ok_or_else(||invalid("watch check job limit exceeded"))?;
                     bytes_left = bytes_left.checked_sub(set.evidence_bytes()).ok_or_else(||invalid("watch check evidence limit exceeded"))?;
@@ -185,13 +220,17 @@ pub(super) fn scope(node: &OneNode, reference: &RefName, directory: &[u8]) -> [u
 pub(super) fn event_entries(root: &Path) -> Result<Vec<fs::DirEntry>, TrustedWorkflowFailure> {
     let mut entries = fs::read_dir(root)
         .map_err(io)?
-        .take(MAX_EVENTS + 3)
+        .take(MAX_EVENTS + 4)
         .collect::<Result<Vec<_>, _>>()
         .map_err(io)?;
-    if entries.len() > MAX_EVENTS + 2 {
+    if entries.len() > MAX_EVENTS + 3 {
         return Err(invalid("ref watcher retained-event limit exceeded"));
     }
-    entries.retain(|entry| entry.file_name() != "owner.lock" && entry.file_name() != "publisher");
+    entries.retain(|entry| {
+        !["owner.lock", "publisher", "merge-config"]
+            .iter()
+            .any(|name| entry.file_name() == *name)
+    });
     if entries.len() > MAX_EVENTS {
         return Err(invalid("ref watcher retained-event limit exceeded"));
     }
@@ -209,13 +248,22 @@ pub(super) fn capture(
     Sources::capture(path, scope, event, commit, dispatch, request)
 }
 fn bind_reporter(root: &Path, expected: &[u8; 32]) -> Result<(), TrustedWorkflowFailure> {
-    let path = root.join("publisher");
+    bind_identity(root, "publisher", expected)
+}
+pub(super) fn bind_identity(
+    root: &Path,
+    name: &str,
+    expected: &[u8; 32],
+) -> Result<(), TrustedWorkflowFailure> {
+    let path = root.join(name);
     match fs::symlink_metadata(&path) {
         Ok(_) => {
             if read_private(&path, 32)? != *expected {
-                return Err(invalid(
-                    "watch publisher differs from original reporting identity",
-                ));
+                return Err(invalid(if name == "publisher" {
+                    "watch publisher differs from original reporting identity"
+                } else {
+                    "watch configuration differs from original bound identity"
+                }));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

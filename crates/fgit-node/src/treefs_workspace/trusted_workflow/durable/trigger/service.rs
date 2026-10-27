@@ -3,7 +3,10 @@
 //! the existing native watcher. No remote request can configure this service.
 
 use super::super::super::validate_inputs;
-use super::{Owner, check_directory, hex, lower_hash, pull_request, reporting, settled};
+pub use super::pull_request_merge::PullRequestMergeWatchConfig;
+use super::{
+    Owner, check_directory, hex, lower_hash, pull_request, pull_request_merge, reporting, settled,
+};
 use crate::treefs_workspace::TrustedWorkflowArtifactConfig;
 use crate::{GitDaemonSessionTimeout, NodeConfig, NodeRequestContext, OneNode};
 use fgit_runner::workflow::WorkflowLimits;
@@ -36,6 +39,7 @@ pub struct WorkflowWatchConfig {
     attempt_timeout: GitDaemonSessionTimeout,
     publisher: Option<PrincipalId>,
     pull_request: Option<u64>,
+    merge_candidate: Option<PullRequestMergeWatchConfig>,
     limits: WorkflowLimits,
     artifacts: Option<TrustedWorkflowArtifactConfig>,
 }
@@ -73,6 +77,7 @@ impl WorkflowWatchConfig {
             attempt_timeout: GitDaemonSessionTimeout::DEFAULT,
             publisher: None,
             pull_request: None,
+            merge_candidate: None,
             limits: WorkflowLimits::default(),
             artifacts: None,
         })
@@ -104,6 +109,19 @@ impl WorkflowWatchConfig {
             return Err(invalid("workflow service requires a positive PR number"));
         }
         self.pull_request = Some(number);
+        Ok(self)
+    }
+
+    /// Select exact merge-candidate execution after choosing the canonical PR.
+    /// The fixed CI ref must differ from the source; its target is checked when
+    /// the current PR is selected. This authorizes ordinary exact-old rewrites.
+    pub fn with_merge_candidate(mut self, config: PullRequestMergeWatchConfig) -> io::Result<Self> {
+        if self.pull_request.is_none() || config.reference() == &self.reference {
+            return Err(invalid(
+                "merge candidate requires a PR and a distinct CI branch",
+            ));
+        }
+        self.merge_candidate = Some(config);
         Ok(self)
     }
 
@@ -156,6 +174,10 @@ impl WorkflowWatchConfig {
     #[must_use]
     pub const fn pull_request(&self) -> Option<u64> {
         self.pull_request
+    }
+    #[must_use]
+    pub fn merge_candidate(&self) -> Option<&PullRequestMergeWatchConfig> {
+        self.merge_candidate.as_ref()
     }
 }
 
@@ -433,8 +455,22 @@ fn attempt(
     let poll = node
         .runtime()
         .block_on(async {
-            match config.pull_request {
-                Some(number) => {
+            match (config.pull_request, config.merge_candidate.as_ref()) {
+                (Some(number), Some(merge)) => {
+                    node.poll_trusted_pull_request_merge_workflows_in(
+                        request,
+                        &config.reference,
+                        number,
+                        &config.directory,
+                        &config.run_parent,
+                        &config.inputs,
+                        config.limits,
+                        config.artifacts.as_ref(),
+                        merge,
+                    )
+                    .await
+                }
+                (Some(number), None) => {
                     node.poll_trusted_pull_request_workflows_in(
                         request,
                         &config.reference,
@@ -447,7 +483,7 @@ fn attempt(
                     )
                     .await
                 }
-                None => {
+                (None, _) => {
                     node.poll_trusted_ref_workflows_in(
                         request,
                         &config.reference,
@@ -484,6 +520,7 @@ fn attempt(
             receipt.non_green = true;
         }
     }
+    receipt.non_green |= poll.non_green();
     receipt.requires_reconciliation |= poll.requires_reconciliation();
     if receipt.requires_reconciliation {
         // This is a returned native execution observation, not an operation
@@ -531,8 +568,21 @@ fn publish(
         return Ok(false);
     };
     let result = node.runtime().block_on(async {
-        match config.pull_request {
-            Some(number) => {
+        match (config.pull_request, config.merge_candidate.as_ref()) {
+            (Some(number), Some(merge)) => {
+                node.publish_trusted_pull_request_merge_workflow_checks_in(
+                    request,
+                    &config.reference,
+                    number,
+                    &config.directory,
+                    &config.run_parent,
+                    publisher,
+                    merge,
+                    |_| Ok(()),
+                )
+                .await
+            }
+            (Some(number), None) => {
                 node.publish_trusted_pull_request_workflow_checks_in(
                     request,
                     &config.reference,
@@ -544,7 +594,7 @@ fn publish(
                 )
                 .await
             }
-            None => {
+            (None, _) => {
                 node.publish_trusted_ref_workflow_checks_in(
                     request,
                     &config.reference,
@@ -604,14 +654,22 @@ impl Custody {
         check_directory(&config.run_parent).map_err(custody)?;
         let parent_metadata = fs::symlink_metadata(&config.run_parent)
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
-        let scope = match config.pull_request {
-            Some(number) => pull_request::scope(node, &config.reference, &config.directory, number),
-            None => reporting::scope(node, &config.reference, &config.directory),
+        let scope = match (config.pull_request, config.merge_candidate.as_ref()) {
+            (Some(number), Some(_)) => {
+                pull_request_merge::scope(node, &config.reference, &config.directory, number)
+            }
+            (Some(number), None) => {
+                pull_request::scope(node, &config.reference, &config.directory, number)
+            }
+            (None, _) => reporting::scope(node, &config.reference, &config.directory),
         };
         let root = config.run_parent.join(format!("service-{}", hex(&scope)));
         let owner = Owner::open(&root).map_err(custody)?;
         let events = config.run_parent.join(format!("watch-{}", hex(&scope)));
         let _event_owner = Owner::open(&events).map_err(custody)?;
+        if let Some(merge) = &config.merge_candidate {
+            merge.bind(&events).map_err(custody)?;
+        }
         let watch_metadata = fs::symlink_metadata(&events)
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
         let watch_owner = fs::File::open(events.join("owner.lock"))

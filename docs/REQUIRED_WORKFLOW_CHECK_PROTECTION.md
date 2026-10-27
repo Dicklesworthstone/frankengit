@@ -51,8 +51,11 @@ For a two-parent merge or squash, the candidate is the newly prepared merge
 commit. Passing checks on a different source-tip commit cannot authorize it.
 Publish the prepared candidate on a separate ordinary CI branch, execute the
 workflow there and publish the retained result before submitting the merge.
-Candidate creation, workflow execution and canonical publication remain explicit
-operations; this profile does not automatically create a CI ref or schedule CI.
+The protection policy itself does not schedule CI or create that branch.
+An operator can automate those steps with
+[exact PR merge-candidate watch](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md),
+using a fixed CI ref, explicit publication identity and deterministic metadata.
+The watcher uses these existing exact-candidate rules without relaxing them.
 
 Admission scans canonical history backwards and selects the latest matching
 publication for each requirement. It requires `Success`. A later matching

@@ -32,6 +32,7 @@ mod transaction_outcome;
 mod verify_read;
 mod webhook_commands;
 mod workflow_command;
+mod workflow_merge_watch;
 #[cfg(target_os = "linux")]
 mod workspace;
 #[cfg(target_os = "linux")]

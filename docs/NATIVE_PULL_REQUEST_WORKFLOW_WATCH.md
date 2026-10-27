@@ -3,10 +3,16 @@
 Branch-selected execution is documented in [native branch filters](NATIVE_WORKFLOW_BRANCH_FILTERS.md).
 
 
-The native watcher can select `on: pull_request` workflows from an actual open,
+The default native watcher can select `on: pull_request` workflows from an actual open,
 same-repository pull request. It reuses the existing trusted-host executor,
 artifact capture/delivery, cancellation owner and durable check publisher. It
 neither opens a GitHub PR nor invokes Git or another `fg` subprocess in production.
+
+For the actual combined merge or squash tree, opt into
+[exact PR merge-candidate CI](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md). That
+mode requires an explicit CI branch, publication principal, incarnation and
+deterministic commit metadata, and can publish candidate-bound canonical checks.
+The source-head behavior described here remains the default.
 
 ```bash
 fg --timeout-secs 300 workflow watch NODE TENANT REPOSITORY refs/heads/topic \
