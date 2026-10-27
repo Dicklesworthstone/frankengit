@@ -458,6 +458,12 @@ fn activated_ref_policy_governs_real_source_import_and_survives_reopen() {
             DecisionOutcome::Committed { .. }
         ));
         let source = scratch.0.join("source");
+        // The fixture already imported main and topic from this source, and an
+        // import publishes every source ref establish-if-absent. Move them out so
+        // the policy, not ExpectedOldRefMismatch, decides each import below.
+        for name in ["main", "topic"] {
+            fs::rename(source.join("refs/heads").join(name), scratch.0.join(name)).unwrap();
+        }
         let restricted_path = source.join("refs/heads/restricted");
         fs::write(&restricted_path, format!("{}\n", f.source)).unwrap();
         let refused = node

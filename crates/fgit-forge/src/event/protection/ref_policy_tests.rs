@@ -72,14 +72,15 @@ fn activated_snapshot_is_a_required_new_kind_and_preserves_each_old_profile() {
 #[test]
 fn activation_replacement_and_removal_require_current_admin_version_and_epoch() {
     let first = event(
-        installed("policy deny { default deny \"maintenance\" }"),
+        // Policy names are labels: the DSL keywords `deny` and `allow` are not.
+        installed("policy freeze { default deny \"maintenance\" }"),
         ExpectedVersion::NewStream,
         PolicyEpoch::FIRST,
         actor(1),
     );
     validate_transition(None, &first, PolicyEpoch::FIRST).unwrap();
     let next_epoch = PolicyEpoch::FIRST.next().unwrap();
-    for replacement in [installed("policy allow { default allow }"), policy()] {
+    for replacement in [installed("policy open { default allow }"), policy()] {
         let next = event(
             replacement.clone(),
             ExpectedVersion::Exactly(first.version),

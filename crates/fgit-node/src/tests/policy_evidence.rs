@@ -7,7 +7,7 @@ use fgit_admission::evidence::PolicyDecisionRecord;
 use fgit_reference::effect::FoldBasis;
 use fgit_reference::intent::{Intent, RefIntent, Statement};
 use fgit_reference::refs::ExpectedRefState;
-use fgit_types::{MismatchPolicy, RootLayoutVersion};
+use fgit_types::{HeadGeneration, MismatchPolicy, RootLayoutVersion};
 
 struct EmptyClosure;
 impl QuarantineValidator for EmptyClosure {
@@ -380,7 +380,9 @@ fn fold_effect_delete(name: &RefName) -> BTreeMap<RefName, fgit_reference::effec
 #[test]
 fn activated_policy_refuses_legacy_evidence_downgrade_and_accepts_exact_new_receipt() {
     let scratch = ScratchDirectory::new();
-    let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    let (mut node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    // Protection administration is a staging write; a bootstrapping cell refuses it.
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let request = node.request_context();
     let (context, mut model, _) = evidence_request(&node);
     let object = node
