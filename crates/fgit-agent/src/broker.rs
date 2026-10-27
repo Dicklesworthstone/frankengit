@@ -559,6 +559,19 @@ impl EffectJournal {
         if !terminal_matches {
             return Err(EffectJournalRefusal::TerminalOutcomeMismatch { effect_id });
         }
+        // A cleanup acknowledgement/probe consumes no new grant; its zero
+        // incremental cost must not erase the amount charged at commit.
+        let budget_consumed = if budget_consumed.is_zero()
+            && matches!(
+                event,
+                LifecycleEvent::Acknowledge
+                    | LifecycleEvent::Escalate
+                    | LifecycleEvent::FailTerminally
+            ) {
+            record.budget_consumed
+        } else {
+            budget_consumed
+        };
         record.obligation_state = state;
         record.budget_consumed = budget_consumed;
         record.output_commitments.clone_from(&output_commitments);

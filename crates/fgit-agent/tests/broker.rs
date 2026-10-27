@@ -598,6 +598,11 @@ fn crash_mid_external_effect_reconciles_to_the_downstream_outcome_and_replays_hi
     );
     assert_eq!(record.output_commitments, vec![[0x53; 32]]);
     assert_eq!(
+        record.budget_consumed,
+        egress(300),
+        "acknowledgement must retain the dispatch charge"
+    );
+    assert_eq!(
         record
             .reconciliation_evidence
             .as_ref()
@@ -654,6 +659,11 @@ fn weak_downstream_unknown_probe_is_an_explicit_escalated_record_not_maybe() {
 
     let record = broker.records().pop().expect("the effect remains recorded");
     assert_eq!(
+        record.budget_consumed,
+        egress(300),
+        "escalation must retain the dispatch charge"
+    );
+    assert_eq!(
         record.obligation_state,
         fgit_resource::ObligationState::Escalated
     );
@@ -665,4 +675,103 @@ fn weak_downstream_unknown_probe_is_an_explicit_escalated_record_not_maybe() {
         !broker.close().is_quiescent(),
         "an explicit unresolved record blocks quiescence rather than becoming maybe"
     );
+}
+
+#[test]
+fn terminal_failure_and_late_resolution_preserve_committed_resource_spend() {
+    struct PermanentRejection;
+    impl DownstreamChannel for PermanentRejection {
+        fn deliver(&mut self, _: &IdempotencyKey, _: u32) -> DeliveryVerdict {
+            DeliveryVerdict::PermanentRejection
+        }
+        fn probe(&mut self, _: &IdempotencyKey) -> ProbeVerdict {
+            panic!("permanent rejection needs no probe")
+        }
+    }
+    for resolution in 0..3 {
+        let mut broker = external_broker();
+        let dispatch = external_dispatch(0x71, DownstreamIdempotency::Weak);
+        let grant = broker
+            .request(&external_capability(), t(10), &external_request(71, 300))
+            .unwrap();
+        let deferred = broker
+            .reserve_outbox(grant, dispatch)
+            .unwrap()
+            .dispatch(1, &egress(250))
+            .unwrap();
+        let mut plan = ReconcilePlan::new(
+            dispatch.idempotency,
+            dispatch.idempotency_strength,
+            reconciliation_policy(),
+        );
+        let acknowledgement = |attempt| DownstreamAck {
+            receipt: opaque(0x72),
+            attempt,
+        };
+        if resolution == 0 {
+            let result = deferred
+                .reconcile(
+                    &mut plan,
+                    &mut PermanentRejection,
+                    principal(0x71),
+                    acknowledgement,
+                    Vec::new(),
+                )
+                .unwrap();
+            assert!(matches!(
+                result,
+                fgit_agent::ExternalEffectOutcome::TerminallyFailed(_)
+            ));
+        } else {
+            let mut channel = CrashAfterDispatch {
+                delivered: 0,
+                probed: 0,
+                probe: ProbeVerdict::Unknown,
+            };
+            let result = deferred
+                .reconcile(
+                    &mut plan,
+                    &mut channel,
+                    principal(0x71),
+                    acknowledgement,
+                    Vec::new(),
+                )
+                .unwrap();
+            let fgit_agent::ExternalEffectOutcome::Escalated(effect) = result else {
+                panic!("weak unknown result must retain responsibility");
+            };
+            if resolution == 1 {
+                effect
+                    .resolve_acknowledged(acknowledgement(1), Vec::new())
+                    .unwrap();
+            } else {
+                effect
+                    .resolve_failed(
+                        fgit_resource::TerminalFailureReason::OperatorDecision,
+                        Vec::new(),
+                    )
+                    .unwrap();
+            }
+        }
+        let records = broker.records();
+        assert_eq!(
+            records[0].budget_consumed,
+            egress(250),
+            "terminal resolution must retain actual, not reserved, spend"
+        );
+        assert_eq!(
+            EffectBroker::replay(&broker.journal()).unwrap().records(),
+            records
+        );
+        // The journal and real ledger agree: only 750 egress bytes remain.
+        assert!(matches!(
+            broker.request(&external_capability(), t(20), &external_request(72, 751)),
+            Err(BrokerRefusal::BudgetExhausted { .. })
+        ));
+        let permitted = broker
+            .request(&external_capability(), t(20), &external_request(73, 750))
+            .unwrap();
+        broker.abort(permitted).unwrap();
+        assert!(broker.close().is_quiescent());
+    }
 }
