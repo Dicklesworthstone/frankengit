@@ -274,7 +274,7 @@ fn receipt_attestation_refuses_substituted_omitted_or_reordered_candidates() {
     changed.entries[0].head_tip = oid(GitHashAlgorithm::Sha256, 0x75);
     let mut omitted = original.clone();
     omitted.entries.pop();
-    let mut reordered = original.clone();
+    let mut reordered = original;
     reordered.entries.reverse();
     for invalid in [changed, omitted, reordered] {
         assert!(invalid.receipt_digest().is_err());

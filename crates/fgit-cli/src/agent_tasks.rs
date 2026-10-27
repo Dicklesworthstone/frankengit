@@ -2,6 +2,8 @@
 //! Local operator sponsorship does not grant autonomous task or repository
 //! writes. Task text is returned explicitly as untrusted data.
 
+#[cfg(test)]
+mod beads_tests;
 mod options;
 pub mod process;
 

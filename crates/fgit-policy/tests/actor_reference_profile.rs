@@ -8,6 +8,7 @@ use fgit_policy::{
     render_trace,
 };
 use fgit_types::{GitOid, GitOidSha1, GitOidSha256, PrincipalId, RefName};
+use std::fmt::Write;
 
 fn input(principal: u8, sha256: bool, target: &[u8]) -> PolicyInputRoot {
     let oid = if sha256 {
@@ -146,7 +147,7 @@ fn actor_id_support_never_implies_authentication_membership_or_snapshot_facts() 
 fn actor_profile_retains_rule_and_evaluation_budgets() {
     let mut source = String::from("policy bounded { ");
     for index in 0..65 {
-        source.push_str(&format!("rule r{index:02} {{ when actor.id == \"33333333333333333333333333333333\" then allow }} "));
+        write!(source, "rule r{index:02} {{ when actor.id == \"33333333333333333333333333333333\" then allow }} ").unwrap();
     }
     source.push_str("default deny \"unknown actor\" }");
     let too_many = compile_and_seal(&source).unwrap();

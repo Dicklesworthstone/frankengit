@@ -4,6 +4,7 @@ use fgit_policy::{
     reference_profile::{self, ReferencePolicyRefusal},
 };
 use fgit_types::RefName;
+use std::fmt::Write;
 
 #[test]
 fn structural_rules_and_default_only_policies_are_supported() {
@@ -27,10 +28,12 @@ fn structural_rules_and_default_only_policies_are_supported() {
 fn large_transport_policy_fits_canonical_activation_decoder_limits() {
     let mut source = String::from("policy transport { ");
     for index in 0..40 {
-        source.push_str(&format!(
+        write!(
+            source,
             "rule r{index:02} {{ when ref.name == \"{}\" then deny \"retained\" }} ",
             "a".repeat(900)
-        ));
+        )
+        .unwrap();
     }
     source.push_str("default allow }");
     assert!(source.len() > 16 * 1024);

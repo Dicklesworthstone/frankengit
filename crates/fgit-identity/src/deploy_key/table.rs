@@ -283,7 +283,7 @@ fn hex<const N: usize>(text: &str) -> Option<[u8; N]> {
         return None;
     }
     let mut decoded = [0; N];
-    for (byte, pair) in decoded.iter_mut().zip(text.chunks_exact(2)) {
+    for (byte, pair) in decoded.iter_mut().zip(text.as_chunks::<2>().0) {
         *byte = hex_digit(pair[0])? * 16 + hex_digit(pair[1])?;
     }
     Some(decoded)

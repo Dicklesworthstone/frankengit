@@ -58,7 +58,7 @@ impl<'a> BeadsProcess<'a> {
         if !program.is_file() || !root.is_dir() || !root.join("beads.db").is_file() {
             return Err(BeadsTransportRefusal::Unavailable);
         }
-        let mut adapter = Self {
+        let adapter = Self {
             program,
             root,
             deadline,
@@ -147,7 +147,7 @@ impl<'a> BeadsProcess<'a> {
         Ok(())
     }
 
-    fn write(&mut self, arguments: &[String]) -> BeadsWriteOutcome {
+    fn write(&self, arguments: &[String]) -> BeadsWriteOutcome {
         match self.invoke(arguments, true) {
             Ok(_) => BeadsWriteOutcome::Completed,
             Err(failure) if !failure.started => BeadsWriteOutcome::NotStarted(failure.reason),
@@ -159,7 +159,7 @@ impl<'a> BeadsProcess<'a> {
     }
 
     #[cfg(unix)]
-    fn invoke(&mut self, arguments: &[String], tracker: bool) -> Result<Vec<u8>, Failure> {
+    fn invoke(&self, arguments: &[String], tracker: bool) -> Result<Vec<u8>, Failure> {
         use std::io::{self, Read};
         use std::os::fd::OwnedFd;
         use std::os::unix::net::UnixStream;
@@ -236,7 +236,7 @@ impl<'a> BeadsProcess<'a> {
                             bytes.extend_from_slice(&buffer[..count]);
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                         Err(_) => return Err(BeadsTransportRefusal::ProcessFailed),
                     }
                 }
@@ -252,19 +252,20 @@ impl<'a> BeadsProcess<'a> {
                     Err(_) => break BeadsTransportRefusal::ProcessFailed,
                 };
             }
-            if let Some(status) = status {
-                if stdout_eof && stderr_eof {
-                    return if status.success() {
-                        Ok(output)
-                    } else {
-                        // A nonzero exit never proves a write did not occur.
-                        Err(Failure {
-                            reason: BeadsTransportRefusal::ProcessFailed,
-                            started: true,
-                            quiescent: true,
-                        })
-                    };
-                }
+            if let Some(status) = status
+                && stdout_eof
+                && stderr_eof
+            {
+                return if status.success() {
+                    Ok(output)
+                } else {
+                    // A nonzero exit never proves a write did not occur.
+                    Err(Failure {
+                        reason: BeadsTransportRefusal::ProcessFailed,
+                        started: true,
+                        quiescent: true,
+                    })
+                };
             }
             std::thread::sleep(Duration::from_millis(5));
         };
@@ -285,7 +286,7 @@ impl<'a> BeadsProcess<'a> {
     }
 
     #[cfg(not(unix))]
-    fn invoke(&mut self, _arguments: &[String], _tracker: bool) -> Result<Vec<u8>, Failure> {
+    fn invoke(&self, _arguments: &[String], _tracker: bool) -> Result<Vec<u8>, Failure> {
         Err(Failure {
             reason: BeadsTransportRefusal::Unsupported,
             started: false,
@@ -388,10 +389,10 @@ mod tests {
             let created =
                 tracker.command(&["create", "Native task", "--type", "task", "--json"], true);
             let json = fgit_schema::json::parse(&created).expect("real create JSON");
-            tracker.id = json.object().expect("real create object")["id"]
+            json.object().expect("real create object")["id"]
                 .text()
                 .expect("real task id")
-                .to_owned();
+                .clone_into(&mut tracker.id);
             tracker
         }
 

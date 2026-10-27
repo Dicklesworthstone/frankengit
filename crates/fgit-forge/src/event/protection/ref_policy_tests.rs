@@ -1,6 +1,7 @@
 use super::tests::{actor, policy};
 use super::*;
 use fgit_codec::{DecodeLimits, decode_body, encode_body};
+use std::fmt::Write;
 
 fn event(
     protection: ReviewProtection,
@@ -220,7 +221,7 @@ fn source_and_frame_paths_share_strict_profile_and_exact_bytes() {
     for size in 0..frame.len() {
         assert!(decode_ref_policy(&frame[..size]).is_err());
     }
-    let mut suffix = frame.clone();
+    let mut suffix = frame;
     suffix.push(0);
     assert!(decode_ref_policy(&suffix).is_err());
     assert!(compile_ref_policy("policy p { rule protected { when ref.update == fast_forward then allow } default allow }").is_err());
@@ -236,10 +237,12 @@ fn source_and_frame_paths_share_strict_profile_and_exact_bytes() {
 
     let mut source = String::from("policy large { ");
     for index in 0..40 {
-        source.push_str(&format!(
+        write!(
+            source,
             "rule r{index:02} {{ when ref.name == \"{}\" then deny \"retained\" }} ",
             "a".repeat(900)
-        ));
+        )
+        .unwrap();
     }
     source.push_str("default allow }");
     let snapshot = compile_ref_policy(&source).unwrap();

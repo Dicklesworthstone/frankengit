@@ -38,7 +38,7 @@ fn segmented_search_never_skips_transient_matches_and_matches_linear_oracle() {
                 random ^= random << 13;
                 random ^= random >> 7;
                 random ^= random << 17;
-                random & 15 == 0
+                random.trailing_zeros() >= 4
             })
             .collect();
         check_pattern(&values);

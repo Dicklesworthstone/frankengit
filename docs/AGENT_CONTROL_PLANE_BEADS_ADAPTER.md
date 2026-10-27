@@ -170,7 +170,7 @@ cross-head transfer, broker durability, or an ECC publication path.
 
 ## Focused verification
 
-`cargo test --locked --offline -p fgit-agent --test beads` exercises complete
+`cargo test --locked --offline -p fgit-cli --bin fg agent_tasks::beads_tests` exercises complete
 history, preserved user context, control substitution, deadline expiry, ready
 filtering, bounded hostile JSON, lost replies, flush failures, unavailable
 exports, and non-quiescent writers.
@@ -182,8 +182,8 @@ and stops after the database mutation but before export:
 
 ```sh
 FGIT_BEADS_NATIVE_BR=/absolute/path/to/br \
-  cargo test --locked --offline -p fgit-agent --test beads \
-  native::real_br_two_clients_history_and_fresh_process_reconciliation \
+  cargo test --locked --offline -p fgit-cli --bin fg \
+  agent_tasks::beads_tests::native::real_br_two_clients_history_and_fresh_process_reconciliation \
   -- --ignored --nocapture
 ```
 

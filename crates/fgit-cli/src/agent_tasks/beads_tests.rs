@@ -28,11 +28,9 @@ use fgit_resource::{Grade, ResourceVector};
 use fgit_schema::json::{self, Value};
 use fgit_types::{Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryId};
 
-// Exercise the actual product process implementation without bringing the
-// unrelated node/runtime dependency graph into this focused crate test.
+// Exercise the product process implementation in its owning host crate.
 #[cfg(unix)]
-#[path = "../../fgit-cli/src/agent_tasks/process.rs"]
-mod native_transport;
+use super::process as native_transport;
 
 fn digest(byte: u8) -> Digest {
     let root = outcome_index_root(&[]).unwrap();
