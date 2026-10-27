@@ -14,6 +14,7 @@ use std::time::Instant;
 #[cfg(test)]
 use std::{path::PathBuf, time::Duration};
 
+#[cfg(test)]
 use fgit_crypto::lowercase_hex;
 use fgit_node::TerminationSignals;
 #[cfg(test)]

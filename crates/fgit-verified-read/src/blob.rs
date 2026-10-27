@@ -225,7 +225,7 @@ pub fn validate_blob_path(path: &[u8]) -> Result<usize, VerifiedBlobRefusal> {
     Ok(count)
 }
 
-fn bound(field: &'static str, observed: usize, limit: usize) -> CodecRefusal {
+const fn bound(field: &'static str, observed: usize, limit: usize) -> CodecRefusal {
     CodecRefusal::LengthBoundExceeded {
         field,
         observed: observed as u64,

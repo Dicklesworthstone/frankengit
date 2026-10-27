@@ -162,7 +162,8 @@ impl AuthorityStore for ObservedStore {
                 None => {}
             }
         }
-        if let Some(value) = self.overrides.lock().unwrap().get(key).cloned() {
+        let override_read = self.overrides.lock().unwrap().get(key).cloned();
+        if let Some(value) = override_read {
             return Ok(value);
         }
         self.inner.read_immutable(key)
@@ -219,6 +220,7 @@ impl AuthorityStore for ObservedStore {
 
 // Deterministic test-only async adapter. Both resolvers see the same reference
 // store contract, including the actual atomic publisher used by the interleave.
+// Defer each operation until first poll, just as an async function would.
 impl AsyncAuthorityStore for ObservedStore {
     type Context = ();
 
@@ -230,69 +232,83 @@ impl AsyncAuthorityStore for ObservedStore {
         AuthorityStore::limits(self)
     }
 
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        AuthorityStore::put_if_absent(self, key, body)
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(AuthorityStore::put_if_absent(self, key, body)))
     }
 
-    async fn read_immutable(
+    fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        AuthorityStore::read_immutable(self, key)
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(AuthorityStore::read_immutable(self, key)))
     }
 
-    async fn initialize_head(
+    fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        AuthorityStore::initialize_head(self, key, generation, body)
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::initialize_head(self, key, generation, body))
+        })
     }
 
-    async fn read_head(&self, _: &(), key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        AuthorityStore::read_head(self, key)
-    }
-
-    async fn compare_exchange_head(
+    fn read_head(
         &self,
-        _: &(),
+        (): &(),
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(AuthorityStore::read_head(self, key)))
+    }
+
+    fn compare_exchange_head(
+        &self,
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        AuthorityStore::compare_exchange_head(self, key, expected, generation, body)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::compare_exchange_head(
+                self, key, expected, generation, body,
+            ))
+        })
     }
 
-    async fn publish_head_with_outcomes(
+    fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        AuthorityStore::publish_head_with_outcomes(
-            self, key, expected, generation, body, outcomes, witness,
-        )
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::publish_head_with_outcomes(
+                self, key, expected, generation, body, outcomes, witness,
+            ))
+        })
     }
 
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        AuthorityStore::authenticate_head_receipt(self, receipt)
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::authenticate_head_receipt(self, receipt))
+        })
     }
 }
 
@@ -383,6 +399,102 @@ fn ready<F: Future>(future: F) -> F::Output {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("reference reads do not suspend"),
     }
+}
+
+#[test]
+fn adapter_defers_every_store_operation_until_first_poll() {
+    use fgit_authority::{DuplicateScan, FaultableAuthorityStore, scan_for_existing_decisions};
+
+    let store = ObservedStore::new();
+    let HeadRead::Present(receipt) = store.inner.read_head(&store.head).unwrap() else {
+        panic!("fixture head exists");
+    };
+    let DuplicateScan::Absent(witness) =
+        scan_for_existing_decisions(&store.inner, &store.head, &[transaction()]).unwrap()
+    else {
+        panic!("fixture transaction is undecided");
+    };
+    let key = ImmutableKey::new(b"first-poll/body".to_vec()).unwrap();
+    let other_head = HeadKey::new(b"first-poll/head".to_vec()).unwrap();
+    let mut successor: RepositoryAuthorityHeadBody =
+        decode_body(receipt.body(), DecodeLimits::DEFAULT).unwrap();
+    successor.predecessor_head_id = Some(authority_head_identity(&successor).unwrap());
+    successor.generation = successor.generation.next().unwrap();
+    let successor_body = fgit_codec::encode_body(&successor).unwrap();
+
+    // A ready(sync_call()) rewrite would perform reads or writes on construction.
+    // Check unpolled drop as well as the first poll, using actual store effects.
+    macro_rules! on_first_poll {
+        ($operation:expr) => {{
+            let before = store.inner.effect_log();
+            {
+                let _unpolled = $operation;
+                assert_eq!(store.inner.effect_log(), before);
+            }
+            assert_eq!(store.inner.effect_log(), before);
+            let future = $operation;
+            assert_eq!(store.inner.effect_log(), before);
+            let result = ready(future).unwrap();
+            assert_eq!(store.inner.effect_log().len(), before.len() + 1);
+            result
+        }};
+    }
+
+    assert_eq!(
+        on_first_poll!(AsyncAuthorityStore::put_if_absent(
+            &store,
+            &(),
+            &key,
+            b"body"
+        )),
+        PutOutcome::Created,
+    );
+    assert_eq!(
+        on_first_poll!(AsyncAuthorityStore::read_immutable(&store, &(), &key)),
+        ImmutableRead::Present(b"body".to_vec()),
+    );
+    let HeadInit::Created(other_receipt) = on_first_poll!(AsyncAuthorityStore::initialize_head(
+        &store,
+        &(),
+        &other_head,
+        receipt.generation(),
+        receipt.body(),
+    )) else {
+        panic!("first poll initializes the other head");
+    };
+    assert_eq!(
+        on_first_poll!(AsyncAuthorityStore::read_head(&store, &(), &store.head)),
+        HeadRead::Present(receipt.clone()),
+    );
+    on_first_poll!(AsyncAuthorityStore::authenticate_head_receipt(
+        &store,
+        &(),
+        &receipt
+    ));
+    assert!(matches!(
+        on_first_poll!(AsyncAuthorityStore::compare_exchange_head(
+            &store,
+            &(),
+            &other_head,
+            other_receipt.token(),
+            successor.generation,
+            &successor_body,
+        )),
+        CasOutcome::Committed(_),
+    ));
+    assert!(matches!(
+        on_first_poll!(AsyncAuthorityStore::publish_head_with_outcomes(
+            &store,
+            &(),
+            &store.head,
+            receipt.token(),
+            successor.generation,
+            &successor_body,
+            &[],
+            &witness,
+        )),
+        CasOutcome::Committed(_),
+    ));
 }
 
 #[test]

@@ -59,7 +59,7 @@ const fn generous() -> MergeBaseLimits {
 struct Generator(u64);
 
 impl Generator {
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;

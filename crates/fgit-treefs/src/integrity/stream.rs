@@ -113,7 +113,11 @@ fn verify_blob<A: fgit_crypto::GitHashAlgorithm, E>(
 ) -> Result<(), BlobGraphError<E>> {
     let mut hash = GitObjectHasher::<A>::new(ObjectKind::Blob, length as u64);
     let mut remaining = length;
-    let mut buffer = [0_u8; CHUNK_BYTES];
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(CHUNK_BYTES)
+        .map_err(|_| GraphRefusal::Allocation)?;
+    buffer.resize(CHUNK_BYTES, 0_u8);
     while remaining != 0 {
         checkpoint(live)?;
         let offered = remaining.min(buffer.len());

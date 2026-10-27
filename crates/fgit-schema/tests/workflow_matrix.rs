@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 use fgit_schema::workflow::{Limits, WorkflowGraph, WorkflowRefusal, compile};
+use std::fmt::Write as _;
 
 fn workflow(matrix: &str, extra: &str) -> String {
     format!(
@@ -192,11 +193,11 @@ fn explicit_failure_policy_and_unknown_strategy_fields_are_not_ignored() {
 fn dimensions(a: usize, b: usize) -> String {
     let mut matrix = String::from("        mode:\n");
     for n in 0..a {
-        matrix.push_str(&format!("          - m{n}\n"));
+        writeln!(matrix, "          - m{n}").unwrap();
     }
     matrix.push_str("        target:\n");
     for n in 0..b {
-        matrix.push_str(&format!("          - t{n}\n"));
+        writeln!(matrix, "          - t{n}").unwrap();
     }
     matrix
 }

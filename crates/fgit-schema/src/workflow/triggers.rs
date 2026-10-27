@@ -127,10 +127,10 @@ impl WorkflowGraph {
             .any(|trigger| trigger.branch_filter.is_some())
     }
 }
-fn malformed(span: Span, expected: &'static str) -> WorkflowRefusal {
+const fn malformed(span: Span, expected: &'static str) -> WorkflowRefusal {
     WorkflowRefusal::Malformed { expected, span }
 }
-fn bounded(
+const fn bounded(
     observed: usize,
     allowed: usize,
     limit: &'static str,

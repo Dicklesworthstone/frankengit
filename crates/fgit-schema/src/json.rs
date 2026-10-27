@@ -37,6 +37,7 @@ pub enum Value {
     Object(Object),
 }
 impl Value {
+    #[must_use]
     pub const fn object(&self) -> Option<&Object> {
         if let Self::Object(value) = self {
             Some(value)
@@ -44,6 +45,7 @@ impl Value {
             None
         }
     }
+    #[must_use]
     pub fn text(&self) -> Option<&str> {
         if let Self::String(value) = self {
             Some(value)
@@ -51,6 +53,7 @@ impl Value {
             None
         }
     }
+    #[must_use]
     pub fn unsigned(&self) -> Option<u64> {
         if let Self::Number(value) = self {
             decimal(value).ok()
@@ -70,9 +73,11 @@ impl Value {
 pub fn text(value: impl Into<String>) -> Value {
     Value::String(value.into())
 }
+#[must_use]
 pub fn number(value: u64) -> Value {
     Value::Number(value.to_string())
 }
+#[must_use]
 pub fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
     Value::Object(
         fields

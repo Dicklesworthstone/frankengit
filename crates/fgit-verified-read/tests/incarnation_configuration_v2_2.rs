@@ -21,7 +21,7 @@ fn root<T: CanonicalBody>(body: &T) -> Digest {
     let id = body_id(&CryptoBodyIdentity, body).unwrap();
     Digest::new(id.algorithm(), *id.digest())
 }
-fn configuration(format: GitHashAlgorithm) -> RepositoryIncarnationConfigurationBodyV2_2 {
+const fn configuration(format: GitHashAlgorithm) -> RepositoryIncarnationConfigurationBodyV2_2 {
     RepositoryIncarnationConfigurationBodyV2_2 {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: format,

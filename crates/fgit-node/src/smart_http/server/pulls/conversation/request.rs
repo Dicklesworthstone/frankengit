@@ -16,7 +16,7 @@ use super::super::super::issues::{
 };
 
 #[derive(Debug)]
-pub(in crate::smart_http::server::pulls) struct Request<'a> {
+pub(in crate::smart_http::server) struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub page: Page,

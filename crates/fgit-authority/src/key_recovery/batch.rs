@@ -4,7 +4,18 @@ use std::collections::BTreeMap;
 
 use fgit_codec::RepositoryAuthorityHeadBody;
 
-use super::*;
+use super::{
+    AsyncAuthorityStore, HeadKey, IdempotencyKey, LIMITS, OutcomeLookup, RecoveryFailure,
+    RecoveryScope, RefusalCode, RequestRecovery, TransactionSealBody, TransactionSealId, TxId,
+    binding_identity, check, check_head, checked_seal, decode_body, finish, head_receipt,
+    idempotency_binding_key, integrity, seal_key,
+};
+#[cfg(test)]
+use super::{
+    AuthenticatedHead, AuthorityFailure, AuthorityStore, CANONICAL_CODEC_VERSION, DecodeLimits,
+    HeadRead, HeadReadReceipt, ImmutableRead, OutcomeFailure, PrincipalId, RepositoryId,
+    encode_body, recover_request, recover_request_async,
+};
 use crate::{
     TerminalOutcome, indexed_outcome_async, next_batch_to_replay, read_authority_head_body_async,
     read_decision_batch_body_async, reconcile_outcome,
@@ -25,7 +36,7 @@ enum PendingRecovery {
 
 /// Recover a bounded list of original keys without replaying history per key.
 ///
-/// All key bindings and seals pass the same checks as [`recover_request_async`].
+/// All key bindings and seals pass the same checks as [`super::recover_request_async`].
 /// Accelerator hints are read BEFORE the authenticated head used for the shared
 /// replay: a concurrent atomic publication therefore cannot leave a hint newer
 /// than that snapshot. Each answer still passes [`reconcile_outcome`], so absent

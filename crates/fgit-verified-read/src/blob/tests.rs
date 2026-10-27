@@ -223,7 +223,7 @@ fn a_ref_proof_cannot_be_substituted_with_another_configuration_domain_or_layout
         verified(&wrong_width),
         Err(VerifiedBlobRefusal::ObjectFormatMismatch)
     ));
-    let mut unproven = original.clone();
+    let mut unproven = original;
     unproven.ref_proof.configuration = None;
     assert!(matches!(
         verified(&unproven),

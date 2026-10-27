@@ -511,7 +511,7 @@ fn unicode_on_new_block_mapping_keys_is_preserved_and_unknown_workflow_fields_re
                 );
                 let error = compile(&source, &Limits::DEFAULT).unwrap_err();
                 assert!(
-                    matches!(&error, WorkflowRefusal::FieldUnknown { key: actual, .. } if &**actual == key),
+                    matches!(&error, WorkflowRefusal::FieldUnknown { key: actual, .. } if **actual == key),
                     "{error:?}"
                 );
             }

@@ -108,7 +108,10 @@ impl AncestryQueryScratch {
         Ok(true)
     }
 
-    fn examine_edge<C, E>(&mut self, limits: MergeBaseLimits) -> Result<(), MergeBaseError<C, E>> {
+    const fn examine_edge<C, E>(
+        &mut self,
+        limits: MergeBaseLimits,
+    ) -> Result<(), MergeBaseError<C, E>> {
         if self.work.examined_edges >= limits.max_edges {
             return Err(MergeBaseError::EdgeLimitExceeded {
                 limit: limits.max_edges,
@@ -217,12 +220,12 @@ impl<C: Clone + Ord> CommitAncestryIndex<C> {
     }
 
     #[must_use]
-    pub fn commit_count(&self) -> usize {
+    pub const fn commit_count(&self) -> usize {
         self.identities.len()
     }
 
     #[must_use]
-    pub fn edge_count(&self) -> usize {
+    pub const fn edge_count(&self) -> usize {
         self.parents.len()
     }
 

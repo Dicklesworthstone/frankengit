@@ -17,10 +17,12 @@ pub struct MatrixBinding {
     values: Variables,
 }
 impl MatrixBinding {
+    #[must_use]
     pub fn source_job(&self) -> &str {
         &self.source_job
     }
-    pub fn values(&self) -> &BTreeMap<String, String> {
+    #[must_use]
+    pub const fn values(&self) -> &BTreeMap<String, String> {
         &self.values
     }
 }
@@ -176,10 +178,10 @@ pub(super) fn lower_jobs(
     Ok(jobs)
 }
 
-fn invalid(expected: &'static str, span: Span) -> WorkflowRefusal {
+const fn invalid(expected: &'static str, span: Span) -> WorkflowRefusal {
     WorkflowRefusal::Malformed { expected, span }
 }
-fn limit(
+const fn limit(
     name: &'static str,
     allowed: usize,
     observed: usize,

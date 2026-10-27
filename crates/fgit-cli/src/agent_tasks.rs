@@ -102,7 +102,7 @@ fn run_with(arguments: &[String], output: &mut impl Write) -> Result<u8, String>
     let lifetime = options.timeout.min(crate::command_timeout_duration());
     let clock = Clock::start(lifetime)?;
     let signals = TerminationSignals::install().map_err(|error| error.to_string())?;
-    let mut node = OneNode::open_existing(
+    let node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
             .with_object_format(options.format),
     )

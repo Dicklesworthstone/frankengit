@@ -26,6 +26,7 @@ pub enum ContextRefusal {
     WorkingDirectory,
 }
 impl ContextRefusal {
+    #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
             Self::Entries => "at most 64 explicit step environment entries",
@@ -81,12 +82,15 @@ impl StepContext {
             working_directory,
         })
     }
-    pub fn environment(&self) -> &BTreeMap<String, String> {
+    #[must_use]
+    pub const fn environment(&self) -> &BTreeMap<String, String> {
         &self.environment
     }
+    #[must_use]
     pub fn working_directory(&self) -> Option<&str> {
         self.working_directory.as_deref()
     }
+    #[must_use]
     pub fn is_default(&self) -> bool {
         self.environment.is_empty() && self.working_directory.is_none()
     }
@@ -199,7 +203,7 @@ pub(super) fn lower(node: &Node) -> Result<StepContext, WorkflowRefusal> {
     };
     StepContext::new(environment, working_directory).map_err(|error| invalid(error, node.span()))
 }
-fn invalid(error: ContextRefusal, span: Span) -> WorkflowRefusal {
+const fn invalid(error: ContextRefusal, span: Span) -> WorkflowRefusal {
     WorkflowRefusal::Malformed {
         expected: error.description(),
         span,
