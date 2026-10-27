@@ -105,7 +105,7 @@ struct Observe<'a> {
 }
 
 impl<'a> Observe<'a> {
-    fn new(body: Option<&'a [u8]>) -> Self {
+    const fn new(body: Option<&'a [u8]>) -> Self {
         Self {
             body,
             calls: 0,

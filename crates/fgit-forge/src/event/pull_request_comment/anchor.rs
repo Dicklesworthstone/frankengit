@@ -25,6 +25,7 @@ pub enum SourceCommentComparison {
     MergeBase,
 }
 impl SourceCommentComparison {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
@@ -39,6 +40,7 @@ pub enum SourceCommentSide {
     After,
 }
 impl SourceCommentSide {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Before => "before",
@@ -55,6 +57,7 @@ pub enum SourceCommentStatus {
     Outdated,
 }
 impl SourceCommentStatus {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Exact => "exact",
@@ -131,6 +134,7 @@ impl SourceCommentAnchor {
         Ok(())
     }
 
+    #[must_use]
     pub fn status(&self, version: AggregateVersion, data: &PullRequestData) -> SourceCommentStatus {
         if self.pull_request_version == version
             && self.source_ref == data.source_ref

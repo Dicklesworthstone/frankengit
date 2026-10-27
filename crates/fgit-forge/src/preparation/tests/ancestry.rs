@@ -189,7 +189,7 @@ fn malformed_parent_graphs_refuse_and_the_repaired_source_succeeds() {
                 1 => changed.parents = vec![ids[1], ids[1]],
                 2 => {
                     changed.tree =
-                        GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap()
+                        GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
                 }
                 _ => {
                     let foreign = if format == GitHashAlgorithm::Sha1 {

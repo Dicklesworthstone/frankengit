@@ -69,10 +69,8 @@ impl WorkflowExecutor for Executor<'_> {
             && (self.output_error
                 || self.cancel_on_capture.is_some()
                 || self.stop_before_capture.is_some());
-        if selected {
-            if let Some(stop) = self.stop_before_capture {
-                stop.set(true);
-            }
+        if selected && let Some(stop) = self.stop_before_capture {
+            stop.set(true);
         }
         selected
     }

@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 //! Explicit non-source inputs in a reserved private job namespace. The caller
 //! verifies provenance and grants transfer; these bytes never become Git input.
-use super::*;
+use super::{DOMAIN, HostRefusal, SparseWorkspacePlan, frame, read_regular, validate_path};
+use crate::Commitment;
+use fgit_codec::Encoder;
+use fgit_crypto::GitHashAlgorithm;
+use fgit_treefs::{FileMode, TreePath};
+use std::{collections::BTreeSet, fs::File, sync::Arc};
 
 /// Owned, bounded bytes supplied by an already-authorized workflow controller.
 /// `provenance` binds the producing observation, not a cache authorization.
@@ -91,11 +96,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
                     .as_bytes(),
             )?;
             frame(&mut bound, input.provenance.digest().bytes().as_bytes())?;
-            bound.write_raw_byte(if input.mode == FileMode::Executable {
-                1
-            } else {
-                0
-            });
+            bound.write_raw_byte(u8::from(input.mode == FileMode::Executable));
         }
         if files.iter().any(|path| dirs.contains(path)) {
             return Err(HostRefusal::IdentityMismatch);
@@ -145,14 +146,19 @@ pub(super) fn verify_retained(root: &File, inputs: &[JobInput]) -> Result<(), Ho
 
 #[cfg(test)]
 mod tests {
+    use super::super::{HostEpoch, SparseWorkspace};
     use super::*;
-    use fgit_crypto::{GitObjectKind, GitOid, Sha1};
+    use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
     use fgit_git_object::ParseLimits;
     use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
-    use fgit_treefs::{BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant};
+    use fgit_treefs::{
+        BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant, SparseLimits,
+        SparseManifest, TreeCapability, WorkspaceId,
+    };
     use fgit_types::{
         CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryCommitId, RepositoryId,
     };
+    use std::collections::BTreeMap;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -270,8 +276,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            plan.clone()
-                .with_job_inputs(vec![input(b"a", b"x", b"x"); 65])
+            plan.with_job_inputs(vec![input(b"a", b"x", b"x"); 65])
                 .is_err()
         );
         assert!(
@@ -431,7 +436,8 @@ mod tests {
                 0 => {}
                 1 => std::fs::write(&file, b"forged!").unwrap(),
                 2 => {
-                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap()
+                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
                 }
                 3 => std::fs::remove_file(&file).unwrap(),
                 4 => std::fs::hard_link(&file, root.join("alias")).unwrap(),
@@ -478,9 +484,7 @@ mod tests {
                 );
                 let _settled = workspace.close().unwrap();
             } else {
-                let refusal = reopened
-                    .err()
-                    .expect("tampering must refuse before tool access");
+                let refusal = reopened.expect_err("tampering must refuse before tool access");
                 match mutation {
                     1 | 2 | 3 | 8 => assert_eq!(refusal, HostRefusal::IdentityMismatch),
                     4 | 6 => assert!(matches!(refusal, HostRefusal::UnsupportedEntry(_))),

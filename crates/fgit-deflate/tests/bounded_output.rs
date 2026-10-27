@@ -162,7 +162,7 @@ fn cancellation_and_resource_limits_survive_output_yields() {
             match inflater.push_with_bounded_output(input, 64, &mut NeverCancel) {
                 Err(error) => break error,
                 Ok(BoundedStreamProgress::OutputReady) => {
-                    inflater.take_output();
+                    drop(inflater.take_output());
                     input = &[];
                 }
                 Ok(other) => panic!("expected {resource:?}, got {other:?}"),

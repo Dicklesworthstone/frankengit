@@ -346,7 +346,7 @@ fn omission_validation_preserves_native_identity_disjoint_order_and_combined_lim
     }
     assert!(
         validate(
-            &[valid.clone()],
+            std::slice::from_ref(&valid),
             format,
             MAX_INDEX_DOCUMENTS,
             0,
@@ -356,7 +356,7 @@ fn omission_validation_preserves_native_identity_disjoint_order_and_combined_lim
     );
     assert!(
         validate(
-            &[valid.clone()],
+            std::slice::from_ref(&valid),
             format,
             0,
             MAX_SOURCE_BYTES - valid.source_bytes + 1,
@@ -366,7 +366,7 @@ fn omission_validation_preserves_native_identity_disjoint_order_and_combined_lim
     );
     assert_eq!(
         validate(
-            &[valid.clone()],
+            std::slice::from_ref(&valid),
             format,
             MAX_INDEX_DOCUMENTS - 1,
             MAX_SOURCE_BYTES - valid.source_bytes,
@@ -681,7 +681,7 @@ fn omissions_must_fit_results_before_preparation_and_manifest_decode() {
     // Produce correctly committed, canonical hostile metadata by bypassing
     // the public constructor in this module-private codec fixture. Selection
     // must reject the same inventory instead of deferring failure to queries.
-    let mut forged = prepared.manifest.clone();
+    let mut forged = prepared.manifest;
     forged.omissions = omissions;
     let metadata = forged.payloads(&mut || true).unwrap();
     let payload = metadata.iter().find(|row| row.kind == "manifest").unwrap();
