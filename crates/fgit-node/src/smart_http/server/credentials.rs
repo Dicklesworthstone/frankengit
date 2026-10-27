@@ -490,7 +490,7 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
         if scoped_refs {
             grant.ref_write_scope =
                 RefWriteScope::parse(fields.next().ok_or(CredentialFailure::InvalidFile)?)
-                    .map_err(|()| CredentialFailure::InvalidFile)?
+                    .map_err(|_| CredentialFailure::InvalidFile)?
                     .map(Arc::new);
         }
         if fields.next().is_some() || !digests.insert(digest) {
