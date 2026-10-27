@@ -146,9 +146,13 @@ impl Unpacked {
         covered
     }
 
+    /// Whole-closure reference for pack-local tests. Production reviews use
+    /// `check_frontier_coverage` for the authenticated sparse frontier.
+    ///
     /// An extra uploaded object is not silently hidden from review. Permit
     /// only Git-reachable objects and their transitive pack-local delta bases;
     /// the latter are counted separately and never called candidate content.
+    #[cfg(test)]
     pub(super) fn check_coverage(
         &self,
         closure: &BTreeSet<GitOid>,
