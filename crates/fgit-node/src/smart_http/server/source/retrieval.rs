@@ -17,25 +17,37 @@ use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
 use std::collections::BTreeMap;
 use std::io::Read;
 
+mod agent;
 mod context;
+pub use agent::source_agent_context_json;
 
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub repository_route: &'a str,
     hydrate: bool,
+    agent: bool,
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(repository_route) = read_route(head, "/api/v1/source/agent-context")? {
+            return Ok(Some(Self {
+                repository_route,
+                hydrate: true,
+                agent: true,
+            }));
+        }
         if let Some(repository_route) = read_route(head, "/api/v1/source/context-initial")? {
             return Ok(Some(Self {
                 repository_route,
                 hydrate: true,
+                agent: false,
             }));
         }
         read_route(head, "/api/v1/source/search-initial").map(|route| {
             route.map(|repository_route| Self {
                 repository_route,
                 hydrate: false,
+                agent: false,
             })
         })
     }
@@ -256,6 +268,9 @@ pub(super) fn execute(
 ) -> Result<JsonReply, ApiError> {
     if session.authenticated_session().is_none() {
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
+    }
+    if _request.agent {
+        return agent::execute(node, read, framing, reader, http, maximum);
     }
     if _request.hydrate {
         return context::execute(node, session, read, framing, reader, http, maximum);

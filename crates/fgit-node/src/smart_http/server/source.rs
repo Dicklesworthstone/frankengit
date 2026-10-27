@@ -16,7 +16,7 @@ mod regex;
 mod replay;
 mod request;
 mod retrieval;
-pub use retrieval::source_retrieval_json;
+pub use retrieval::{source_agent_context_json, source_retrieval_json};
 pub(super) mod review;
 mod symbols;
 mod tags;

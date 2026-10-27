@@ -655,7 +655,7 @@ Prompt injection inside repository or retrieved text cannot widen capabilities, 
 
 See [`docs/AGENT_PROTOCOL.md`](docs/AGENT_PROTOCOL.md).
 
-### Available local context command
+### Available agent context interfaces
 
 `fg agent context` reads real indexed source from an existing node into an
 Agent Protocol `ContextPacket`. It requires an explicit trusted-local grant and
@@ -664,6 +664,13 @@ source identity, index generations, omissions, byte ranges and expiry into the
 result. Repository excerpts are emitted separately as untrusted data. A moved
 expected head, missing required index, expired request or exceeded output bound
 refuses; the command does not rebuild indexes or publish changes.
+
+The authenticated HTTP `source/agent-context` endpoint and the independently
+granted MCP `frankengit_agent_context` tool now use that same implementation.
+HTTP binds the sponsor to the current read credential; MCP binds it to the
+operator's launch principal and exact repository incarnation. Client arguments
+cannot select a different identity. Both preserve exact evidence and explicit
+partial results, with finite deadlines and complete-document output bounds.
 
 This is a read-only, invocation-local run. It does not create a durable run
 controller, authenticate a remote agent principal or grant effects. Complete

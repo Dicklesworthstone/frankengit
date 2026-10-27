@@ -248,6 +248,7 @@ fn seeded(format: GitHashAlgorithm, indexes: bool) -> (Scratch, NodeTools) {
         writes: Default::default(),
         outcomes: false,
         principal: None,
+        agent_context: false,
         artifacts: false,
         artifact_root: None,
         max_messages: 16,
@@ -452,4 +453,176 @@ fn missing_indexes_fail_typed_instead_of_answering_empty() {
     assert!(!error.invalid);
     assert_eq!(error.code, "source_index_uninitialized");
     assert!(!backend.call(CONTEXT, &base()).unwrap_err().invalid);
+}
+
+#[test]
+fn agent_context_uses_the_real_native_packet_with_launch_sponsorship_in_both_formats() {
+    use super::super::agent_context;
+    use crate::mcp::protocol::Server;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut source_backend) = seeded(format, true);
+        assert_eq!(
+            source_backend
+                .call(agent_context::NAME, &base())
+                .unwrap_err()
+                .code,
+            "tool_not_granted"
+        );
+        let mut options = source_backend.options.clone();
+        options.source = false;
+        options.agent_context = true;
+        options.principal = Some(PrincipalId::from_bytes([0xc8; 16]));
+        source_backend.close().unwrap();
+        let mut backend = NodeTools::open(options).unwrap();
+        let before = backend
+            .node
+            .runtime()
+            .block_on(backend.node.authenticate_authority_head())
+            .unwrap();
+        assert_eq!(backend.tools().len(), 1);
+        assert!(!backend.is_mutation(agent_context::NAME));
+        assert_eq!(
+            backend.call(INITIAL, &base()).unwrap_err().code,
+            "tool_not_granted"
+        );
+
+        let document = backend.call(agent_context::NAME, &base()).unwrap();
+        assert_eq!(field(&document, &["type"]).text(), Some("agent_context"));
+        assert_eq!(field(&document, &["read_only"]), &Value::Bool(true));
+        assert_eq!(
+            field(&document, &["publication_authorized"]),
+            &Value::Bool(false)
+        );
+        assert_eq!(
+            field(&document, &["sponsor", "principal_id"]).text(),
+            Some(PrincipalId::from_bytes([0xc8; 16]).to_string().as_str())
+        );
+        assert_eq!(
+            field(&document, &["sponsor", "authentication"]).text(),
+            Some("operator-asserted")
+        );
+        assert_eq!(
+            field(&document, &["sponsor", "authorization_host"]).text(),
+            Some("trusted-local-mcp")
+        );
+        assert_eq!(
+            field(
+                &document,
+                &["retrieval_evidence", "source", "object_format"]
+            )
+            .text(),
+            Some(format.as_str())
+        );
+        let sources = array(field(&document, &["untrusted_sources"]));
+        assert!(!sources.is_empty());
+        assert!(sources.iter().any(|source| {
+            field(source, &["untrusted_utf8"])
+                .text()
+                .is_some_and(|bytes| bytes.contains("pub fn Thing() {}"))
+        }));
+        assert!(sources.iter().all(|source| {
+            !field(source, &["untrusted_bytes_hex"])
+                .text()
+                .unwrap()
+                .is_empty()
+        }));
+        assert!(
+            !field(&document, &["context_packet", "packet_id"])
+                .text()
+                .unwrap()
+                .is_empty()
+        );
+        let mut pinned = base();
+        pinned.insert(
+            "expected_head".into(),
+            field(&document, &["authority_receipt", "head"]).clone(),
+        );
+        assert!(backend.call(agent_context::NAME, &pinned).is_ok());
+        pinned.insert(
+            "expected_head".into(),
+            text(format!("alg:2:{}", "05".repeat(32))),
+        );
+        assert_eq!(
+            backend.call(agent_context::NAME, &pinned).unwrap_err().code,
+            "source_snapshot_moved"
+        );
+        let mut too_small = base();
+        too_small.insert("max_output_bytes".into(), json::number(128));
+        assert_eq!(
+            backend
+                .call(agent_context::NAME, &too_small)
+                .unwrap_err()
+                .code,
+            "resource_limit"
+        );
+        let mut injected = base();
+        injected.insert("principal".into(), text("00".repeat(16)));
+        assert_eq!(
+            backend
+                .call(agent_context::NAME, &injected)
+                .unwrap_err()
+                .code,
+            "unknown_argument"
+        );
+
+        // Real MCP request lifecycle: partial native evidence is usable data,
+        // never a mutation receipt or permission to hide the omission.
+        let mut server = Server::new(&backend).unwrap();
+        server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"agent-context-test","version":"1"}}}"#).unwrap();
+        assert!(
+            server
+                .receive(
+                    &mut backend,
+                    br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+                )
+                .is_none()
+        );
+        let response = server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"frankengit_agent_context","arguments":{"reference":"refs/heads/main","terms_hex":["5468696e67"],"context_max_files":1}}}"#).unwrap();
+        let result = response.object().unwrap()["result"].object().unwrap();
+        assert_eq!(result["isError"], Value::Bool(false));
+        let partial = &result["structuredContent"];
+        assert_eq!(field(partial, &["complete"]), &Value::Bool(false));
+        assert!(!array(field(partial, &["untrusted_sources"])).is_empty());
+        assert_eq!(
+            field(partial, &["publication_authorized"]),
+            &Value::Bool(false)
+        );
+        let after = backend
+            .node
+            .runtime()
+            .block_on(backend.node.authenticate_authority_head())
+            .unwrap();
+        assert_eq!(before.receipt(), after.receipt());
+        backend.close().unwrap();
+    }
+}
+
+#[test]
+fn agent_context_missing_index_refuses_without_rebuilding_or_moving_authority() {
+    use super::super::agent_context;
+    let (_scratch, source_backend) = seeded(GitHashAlgorithm::Sha1, false);
+    let mut options = source_backend.options.clone();
+    options.source = false;
+    options.agent_context = true;
+    options.principal = Some(PrincipalId::from_bytes([0xc8; 16]));
+    source_backend.close().unwrap();
+    let mut backend = NodeTools::open(options).unwrap();
+    let before = backend
+        .node
+        .runtime()
+        .block_on(backend.node.authenticate_authority_head())
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            backend.call(agent_context::NAME, &base()).unwrap_err().code,
+            "source_index_uninitialized"
+        );
+    }
+    let after = backend
+        .node
+        .runtime()
+        .block_on(backend.node.authenticate_authority_head())
+        .unwrap();
+    assert_eq!(before.receipt(), after.receipt());
+    backend.close().unwrap();
 }

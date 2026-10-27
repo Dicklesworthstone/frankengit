@@ -52,6 +52,7 @@ impl Fixture {
             },
             outcomes: true,
             principal: Some(ACTOR),
+            agent_context: false,
             artifacts: false,
             artifact_root: None,
             max_messages: 64,

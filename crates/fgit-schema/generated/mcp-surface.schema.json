@@ -26,6 +26,149 @@
       },
       "additionalProperties": false
     },
+    "frankengit_agent_context": {
+      "title": "frankengit_agent_context",
+      "description": "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Returns authority, run and packet commitments, index generations and explicit omissions under a launch-bound operator sponsor. Requires an independent agent-context read grant; grants no publication, process execution or durable run.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full visible native ref, such as refs/heads/main.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "terms_hex": {
+              "type": "array",
+              "description": "Up to 32 exact search terms as lowercase hex; at most 128 decoded bytes per term.",
+              "x-classification": "untrusted_content",
+              "maxLength": 8192
+            },
+            "path_prefixes_hex": {
+              "type": "array",
+              "description": "Up to 128 byte-preserving path prefixes; narrows selection, never source-read authorization.",
+              "x-classification": "selector_position",
+              "maxLength": 65536
+            },
+            "symbol_kinds": {
+              "type": "array",
+              "description": "Up to eight native symbol-kind selectors.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional exact authenticated authority-head token; mismatch refuses before source disclosure.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "symbol_name_hex": {
+              "type": "string",
+              "description": "Exact symbol name bytes as lowercase hex.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "symbol_match": {
+              "type": "string",
+              "description": "Native symbol match profile: exact or prefix.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "symbol_policy": {
+              "type": "string",
+              "description": "required or optional; optional preserves explicit channel omissions.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "minimum_lexical_token": {
+              "type": "string",
+              "description": "Minimum lexical index generation token, paired with its number.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "minimum_lexical_number": {
+              "type": "string",
+              "description": "Canonical unsigned decimal lexical generation number.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "minimum_symbol_token": {
+              "type": "string",
+              "description": "Minimum symbol index generation token, paired with its number.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "minimum_symbol_number": {
+              "type": "string",
+              "description": "Canonical unsigned decimal symbol generation number.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "context_selection": {
+              "type": "string",
+              "description": "Only raw-path-prefix is supported by this agent profile.",
+              "x-classification": "selector_position",
+              "maxLength": 64
+            },
+            "max_results_per_channel": {
+              "type": "integer",
+              "description": "Native search result ceiling, at most 1024 per channel.",
+              "x-classification": "system_metadata"
+            },
+            "max_work": {
+              "type": "integer",
+              "description": "Shared native search work envelope, bounded by the native profile.",
+              "x-classification": "system_metadata"
+            },
+            "max_payload_bytes": {
+              "type": "integer",
+              "description": "Shared index payload byte envelope; channels cannot borrow another envelope.",
+              "x-classification": "system_metadata"
+            },
+            "max_result_bytes": {
+              "type": "integer",
+              "description": "Shared native search result byte envelope.",
+              "x-classification": "system_metadata"
+            },
+            "context_max_files": {
+              "type": "integer",
+              "description": "At most 32 hydrated source files; omitted matches remain explicit.",
+              "x-classification": "system_metadata"
+            },
+            "context_radius_bytes": {
+              "type": "integer",
+              "description": "At most 4096 source bytes around an anchor.",
+              "x-classification": "system_metadata"
+            },
+            "context_max_source_bytes": {
+              "type": "integer",
+              "description": "At most 64 MiB of native source hydration.",
+              "x-classification": "system_metadata"
+            },
+            "context_max_excerpt_bytes": {
+              "type": "integer",
+              "description": "At most 1 MiB of exact excerpt bytes, further bounded by full output size.",
+              "x-classification": "system_metadata"
+            },
+            "expires_after_secs": {
+              "type": "integer",
+              "description": "1..300 seconds, default 30, shortened by the native session deadline; actual lifetime is committed.",
+              "x-classification": "system_metadata"
+            },
+            "max_output_bytes": {
+              "type": "integer",
+              "description": "1..1048576 bytes for the complete JSON document; overflow refuses without a partial packet.",
+              "x-classification": "system_metadata"
+            }
+          },
+          "required": ["reference", "terms_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_ambient_fs_read": {
       "title": "frankengit_ambient_fs_read",
       "description": "Ambient filesystem read outside admitted treefs workspaces is prohibited. Returns typed refusal.",

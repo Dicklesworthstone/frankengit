@@ -106,3 +106,21 @@ and binary excerpts, authority preconditions, missing indexes, bounded-output
 and hydration refusals, partial selection, and explicit local-grant checks.
 The shared-host cases cover request cancellation and foreign namespace refusal.
 Test definitions alone are not a claim that these commands have passed.
+
+The shared document implementation now lives in
+`fgit_node::source_retrieval::agent_context::document`, with the original CLI API
+retained as a trusted-local wrapper. The authenticated HTTP
+`source/agent-context` route and the in-process `source_agent_context_json` host
+entry point construct the same receipt, run, packet and omission commitments.
+HTTP sponsorship is fixed to the checked source-read credential principal;
+operator assertions remain explicit on trusted-local hosts. The transport does
+not turn either attribution into canonical IAM or durable agent execution.
+
+`cargo test -p fgit-node --test agent_context_http` defines production TCP tests
+for SHA-1 and SHA-256, authenticated sponsor/source evidence, raw binary and
+prompt-injection-shaped excerpts, fresh run identity, exact-head preconditions,
+partial selection, serialized-byte limits, source-grant separation, next-request
+credential revocation, and absence of authority changes. Native document tests
+also exercise cancellation, foreign namespace refusal and missing-index refusal
+beside an explicitly built index. These are test definitions, not a recorded
+whole-system verification result. See [the command and HTTP contract](AGENT_CONTEXT_COMMAND.md).

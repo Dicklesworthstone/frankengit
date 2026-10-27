@@ -420,6 +420,14 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - red-team prompt/tool/context suites;
 - canonical revalidation of any agent proposal.
 
+The implemented agent-context read boundary uses the native authenticated
+receipt, invocation-only read run and ContextPacket across CLI, HTTP and MCP.
+HTTP sponsorship is fixed by the current repository-read credential; MCP
+requires an independent launch grant, principal and incarnation pin. Caller
+fields and repository text cannot replace these identities or add operations.
+Exact source bytes remain separate untrusted data, and omissions remain visible.
+This read path grants no durable agent credential, effect or publication right.
+
 ### 7.7 CI runner, workflow, cache, and supply-chain execution attacks
 
 **Threats**

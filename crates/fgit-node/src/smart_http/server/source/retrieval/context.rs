@@ -9,9 +9,9 @@ use crate::source_retrieval::context::{ContextLimits, InitialContext, PROFILE as
 use crate::source_retrieval::context::ranked::{self, ContextRanking};
 
 pub(super) struct ContextCommand {
-    initial: Command,
-    limits: ContextLimits,
-    ranked: bool,
+    pub(super) initial: Command,
+    pub(super) limits: ContextLimits,
+    pub(super) ranked: bool,
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<ContextCommand, ApiError> {
     command_fields(parse_form(bytes, 197)?, format)

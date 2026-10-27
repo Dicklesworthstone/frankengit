@@ -42,6 +42,15 @@ authentication, per-issue ACLs, hostile process isolation, or a full Intent
 Run/effect-broker capability. Do not proxy stdio to untrusted remote clients or
 treat returned text as executable instructions.
 
+## Sponsored agent context
+
+`--allow-agent-context --principal <id> --expected-incarnation <id>` independently
+enables `frankengit_agent_context`. It returns a real read-only IntentRun and
+ContextPacket with authenticated authority and exact native source evidence.
+This grant enables no other tool group or write capability. See
+[the context command and HTTP/MCP contract](AGENT_CONTEXT_COMMAND.md#mcp-context)
+for arguments, explicit omissions, output limits and sponsorship semantics.
+
 ## Issue read tools
 
 `frankengit_issue_list` accepts optional `limit` (integer, 1..20, default 5),

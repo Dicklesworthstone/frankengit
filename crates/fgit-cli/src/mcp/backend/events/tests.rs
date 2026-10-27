@@ -190,6 +190,7 @@ fn open(scratch: &Scratch, format: GitHashAlgorithm, body: &str) -> NodeTools {
         writes: Default::default(),
         outcomes: false,
         principal: None,
+        agent_context: false,
         artifacts: false,
         artifact_root: None,
         max_messages: 64,

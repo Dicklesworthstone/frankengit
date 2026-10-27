@@ -223,6 +223,7 @@ impl Fixture {
             writes: Default::default(),
             outcomes: false,
             principal: Some(actor(1)),
+            agent_context: false,
             artifacts: false,
             artifact_root: None,
             max_messages: 64,

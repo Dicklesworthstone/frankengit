@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 51,
-  "active_count": 47,
+  "total_count": 52,
+  "active_count": 48,
   "unsupported_count": 4,
   "tools": [
     {
@@ -34,6 +34,34 @@
       "refusal_codes": ["generic_admin_prohibited"],
       "cli_command": "",
       "rest_api_path": ""
+    },
+    {
+      "name": "frankengit_agent_context",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "agent",
+      "support_profile": "active",
+      "description": "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Returns authority, run and packet commitments, index generations and explicit omissions under a launch-bound operator sponsor. Requires an independent agent-context read grant; grants no publication, process execution or durable run.",
+      "read_mutation": "read_only",
+      "capability": "read_agent_context",
+      "principal": "operator_bound",
+      "idempotency": "not_applicable",
+      "authority_root": "current_repository_incarnation",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 1048576,
+        "max_depth": 24,
+        "max_items": 10000,
+        "max_fan_out": 3,
+        "max_duration_ms": 300000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "authenticated_agent_context",
+      "cancellation": "serial_graceful_drain",
+      "refusal_codes": ["agent_context_incarnation_mismatch", "agent_context_sponsor_mismatch", "agent_context_sponsor_required", "agent_context_unavailable", "caller_selected_agent_identity", "duplicate_field", "expected_array", "expected_string", "incomplete_index_generation", "index_checkpoint_unavailable", "index_generation_mismatch", "integer_overflow", "invalid_agent_context_lifetime", "invalid_agent_context_report", "invalid_agent_context_request", "invalid_browse_query", "invalid_context_limits", "invalid_hex_bytes", "invalid_index_generation", "invalid_index_limit", "invalid_index_limits", "invalid_index_query", "invalid_initial_limits", "invalid_initial_query", "invalid_integer", "invalid_limit", "invalid_ref", "invalid_repository_path", "invalid_search_query", "invalid_search_scope", "invalid_snapshot_token", "invalid_symbol_query", "missing_initial_field", "not_a_directory", "not_a_file", "not_found", "object_format_mismatch", "range_outside_file", "ref_does_not_select_commit", "reference_required", "repository_unavailable", "request_timeout", "resource_limit", "source_commit_moved", "source_index_stale", "source_index_uninitialized", "source_read_context_mismatch", "source_snapshot_mismatch", "source_snapshot_moved", "symbol_index_stale", "symbol_index_uninitialized", "symbol_options_without_name", "symlink_not_followed", "too_many_symbol_kinds", "too_many_values", "tool_not_granted", "unknown_argument", "unknown_initial_field", "unsupported_agent_context_precondition", "unsupported_agent_context_selection", "unsupported_context_selection", "unsupported_symbol_kind", "unsupported_symbol_match", "unsupported_symbol_policy", "unused_initial_field"],
+      "cli_command": "fg agent context",
+      "rest_api_path": "POST /{repository}/api/v1/source/agent-context"
     },
     {
       "name": "frankengit_ambient_fs_read",

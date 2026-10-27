@@ -114,6 +114,8 @@ pub struct CapabilityRequirement(pub &'static str);
 impl CapabilityRequirement {
     pub const READ_CANONICAL_OBJECT: Self = Self("read_canonical_object");
     pub const READ_DERIVED_GENERATION: Self = Self("read_derived_generation");
+    /// Independent sponsored context read; does not add a native agent effect class.
+    pub const READ_AGENT_CONTEXT: Self = Self("read_agent_context");
     /// Whole launch-selected trusted-workflow custody namespace, including hidden-ref outputs.
     pub const READ_WORKFLOW_ARTIFACT: Self = Self("read_workflow_artifact");
     pub const TREEFS_WORKSPACE: Self = Self("treefs_workspace");
@@ -129,9 +131,10 @@ impl CapabilityRequirement {
     pub const CONSUME_BUDGET: Self = Self("consume_budget");
 
     /// All valid capability strings.
-    pub const ALL_VALID: [&'static str; 14] = [
+    pub const ALL_VALID: [&'static str; 15] = [
         "read_canonical_object",
         "read_derived_generation",
+        "read_agent_context",
         "read_workflow_artifact",
         "treefs_workspace",
         "execute_sandboxed_process",
@@ -407,6 +410,9 @@ pub enum EvidenceReceiptClass {
     /// Fully verified immutable artifact identity, complete payload and custody scope.
     /// Stored provenance is not authenticated producer, check or publication evidence.
     VerifiedArtifactCustody,
+    /// Authenticated invocation-only agent run, ContextPacket and exact source evidence.
+    /// This is neither a durable execution record nor canonical agent authentication.
+    AuthenticatedAgentContext,
 }
 
 impl EvidenceReceiptClass {
@@ -419,6 +425,7 @@ impl EvidenceReceiptClass {
             Self::HistoricalOutcomeRecord => "historical_outcome_record",
             Self::AttestedMergeReceipt => "attested_merge_receipt",
             Self::VerifiedArtifactCustody => "verified_artifact_custody",
+            Self::AuthenticatedAgentContext => "authenticated_agent_context",
         }
     }
 }

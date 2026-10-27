@@ -11,6 +11,7 @@ use fgit_agent::{
 };
 use fgit_crypto::sha256_digest;
 
+pub mod document;
 mod read;
 pub use read::{AgentContextRead, AgentContextReadError, AgentSourceContext};
 

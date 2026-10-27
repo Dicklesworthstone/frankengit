@@ -1,5 +1,6 @@
 //! Real node operations, not fixtures or a CLI subprocess. Grants and principal
 //! are fixed at launch; repository text never selects an admission identity.
+mod agent_context;
 mod artifacts;
 mod candidate;
 mod checks;
@@ -124,6 +125,9 @@ impl NodeTools {
 
 pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     let mut tools = Vec::new();
+    if options.agent_context {
+        tools.push(agent_context::tool());
+    }
     if options.artifacts {
         tools.extend(artifacts::tools());
     }
@@ -182,6 +186,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         issues: true,
         pulls: true,
         source: true,
+        agent_context: true,
         artifacts: true,
         artifact_root: None,
         writes: super::WriteGrants {
@@ -247,6 +252,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.outcomes && name == outcomes::NAME {
             return outcomes::call(self, args);
+        }
+        if self.options.agent_context && name == agent_context::NAME {
+            return agent_context::call(self, args);
         }
         if self.options.artifacts && artifacts::is_tool(name) {
             return artifacts::call(self, name, args);
@@ -486,7 +494,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 47);
+        assert_eq!(server_names.len(), 48);
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
         let append = issue_writes::tools()

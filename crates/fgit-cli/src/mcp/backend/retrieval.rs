@@ -67,7 +67,7 @@ pub(super) fn tools() -> Vec<Tool> {
 
 /// Translate JSON arguments into the routes' form fields. Shape and type
 /// errors refuse here; the node owns every semantic rule and bound.
-fn fields(args: &Object, context: bool) -> Result<Vec<(String, String)>, ToolError> {
+pub(super) fn fields(args: &Object, context: bool) -> Result<Vec<(String, String)>, ToolError> {
     let mut allowed: Vec<&str> = vec!["reference"];
     allowed.extend(LISTS.iter().map(|(name, ..)| *name));
     allowed.extend(STRINGS);
@@ -193,7 +193,7 @@ fn refusal(code: &'static str) -> ToolError {
     }
 }
 
-fn input_schema(context: bool) -> Value {
+pub(super) fn input_schema(context: bool) -> Value {
     let mut properties = Object::new();
     let string_schema = |max: u64, description: &str| {
         object([

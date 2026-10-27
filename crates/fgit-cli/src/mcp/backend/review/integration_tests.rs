@@ -38,6 +38,7 @@ impl Scratch {
             writes: Default::default(),
             outcomes: false,
             principal: None,
+            agent_context: false,
             artifacts: false,
             artifact_root: None,
             max_messages: 32,

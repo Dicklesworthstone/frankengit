@@ -6,7 +6,7 @@ use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnat
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
 /// Independent launch-time mutation ceilings. None implies a read/recovery grant.
 #[derive(Clone, Copy, Debug, Default)]
@@ -33,6 +33,7 @@ struct Options {
     issues: bool,
     pulls: bool,
     source: bool,
+    agent_context: bool,
     artifacts: bool,
     artifact_root: Option<PathBuf>,
     writes: WriteGrants,
@@ -45,6 +46,7 @@ impl Options {
         if !(self.issues
             || self.pulls
             || self.source
+            || self.agent_context
             || self.artifacts
             || self.writes.any()
             || self.outcomes)
@@ -74,14 +76,17 @@ impl Options {
                 );
             }
         }
-        let principal_scoped = self.writes.any() || self.outcomes;
+        let principal_scoped = self.writes.any() || self.outcomes || self.agent_context;
         if principal_scoped && (self.principal.is_none() || self.incarnation.is_none()) {
             return Err(
-                "writes and recovery require --principal and --expected-incarnation".into(),
+                "writes, recovery and agent context require --principal and --expected-incarnation"
+                    .into(),
             );
         }
         if !principal_scoped && self.principal.is_some() {
-            return Err("--principal requires an explicit write or outcome grant".into());
+            return Err(
+                "--principal requires an explicit write, outcome or agent-context grant".into(),
+            );
         }
         Ok(())
     }
@@ -134,6 +139,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             | "--allow-issues"
             | "--allow-pulls"
             | "--allow-source"
+            | "--allow-agent-context"
             | "--allow-issue-writes"
             | "--allow-pull-writes"
             | "--allow-source-writes"
@@ -189,6 +195,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
         issues: flags.contains_key("--allow-issues"),
         pulls: flags.contains_key("--allow-pulls"),
         source: flags.contains_key("--allow-source"),
+        agent_context: flags.contains_key("--allow-agent-context"),
         artifacts: flags.contains_key("--allow-artifacts"),
         artifact_root: flags
             .get("--artifact-root")
@@ -372,3 +379,6 @@ mod mutation_grant_tests {
 
 #[cfg(test)]
 mod artifact_grant_tests;
+
+#[cfg(test)]
+mod agent_context_grant_tests;

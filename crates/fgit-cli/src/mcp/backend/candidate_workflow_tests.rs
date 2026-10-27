@@ -87,6 +87,7 @@ impl Fixture {
             writes: WriteGrants::default(),
             outcomes: true,
             principal: Some(actor(OPENER)),
+            agent_context: false,
             artifacts: false,
             artifact_root: None,
             max_messages: 128,

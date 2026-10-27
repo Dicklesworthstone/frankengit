@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! Complete immutable MCP registry. Existing definitions remain byte-identical
 //! in core; explicit additional tools join them at compile time in canonical order.
+mod agent_context;
 mod append;
 mod artifacts;
 mod core;
@@ -66,7 +67,8 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 4] = [
+const ADDITIONS: [McpToolEntry; 5] = [
+    agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,
     TRANSACTION,

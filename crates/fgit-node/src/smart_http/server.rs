@@ -23,7 +23,7 @@ mod outcomes;
 mod protection;
 mod pulls;
 mod source;
-pub use source::source_retrieval_json;
+pub use source::{source_agent_context_json, source_retrieval_json};
 mod stock_receive;
 
 use std::io::{self, Read, Write};

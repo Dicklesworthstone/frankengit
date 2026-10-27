@@ -1,11 +1,11 @@
-use super::{AgentContextRequest, MAX_OUTPUT_BYTES, PROFILE};
-use fgit_agent::{AuthorityReadReceipt, ContextPacket, IntentRun};
-use fgit_forge::source_symbols::SymbolMatchMode;
-use fgit_node::source_retrieval::context::InitialContext;
-use fgit_node::source_retrieval::current_index::{
+use super::{AgentContextRequest, profile, sponsor_authentication};
+use crate::source_retrieval::context::InitialContext;
+use crate::source_retrieval::current_index::{
     GenerationActivation, IndexedLexicalReport, LexicalSource,
 };
-use fgit_node::source_retrieval::{SymbolChannel, SymbolPolicy, SymbolUnavailable};
+use crate::source_retrieval::{SymbolChannel, SymbolPolicy, SymbolUnavailable};
+use fgit_agent::{AuthorityReadReceipt, ContextPacket, IntentRun};
+use fgit_forge::source_symbols::SymbolMatchMode;
 use fgit_resource::algebra::Grade;
 use fgit_schema::json::{Value, number, object, text};
 use fgit_types::{Digest, InternalObjectId};
@@ -89,9 +89,12 @@ pub(super) fn intent(input: &AgentContextRequest<'_>) -> Value {
             ])
         });
     object([
-        ("profile", text(PROFILE)),
+        ("profile", text(profile(input))),
         ("sponsor_id", text(input.sponsor.to_string())),
-        ("sponsor_authentication", text("operator-asserted")),
+        (
+            "sponsor_authentication",
+            text(sponsor_authentication(input)),
+        ),
         ("authorization_host", text(input.authorization.host())),
         ("reference_hex", bytes(input.reference.as_bytes())),
         ("terms_hex", list_bytes(input.query.content().terms())),
@@ -464,7 +467,7 @@ pub(super) fn document(
     let document = object([
         ("type", text("agent_context")),
         ("schema_version", number(1)),
-        ("profile", text(PROFILE)),
+        ("profile", text(profile(input))),
         ("complete", Value::Bool(complete)),
         ("read_only", Value::Bool(true)),
         ("publication_authorized", Value::Bool(false)),
@@ -473,7 +476,7 @@ pub(super) fn document(
             "sponsor",
             object([
                 ("principal_id", text(input.sponsor.to_string())),
-                ("authentication", text("operator-asserted")),
+                ("authentication", text(sponsor_authentication(input))),
                 ("authorization_host", text(input.authorization.host())),
             ]),
         ),
@@ -550,9 +553,8 @@ pub(super) fn document(
         ("evidence_commitment", bytes(&evidence_commitment)),
         ("untrusted_sources", Value::Array(sources)),
     ]);
-    // The final encoder applies the caller's smaller bound; this preflight
-    // also bounds temporary JSON before a host receives the prepared answer.
-    document.encode(MAX_OUTPUT_BYTES).map_err(str::to_owned)?;
+    // The owner encodes once against the caller's exact finite byte bound.
+    // Keeping the value private means no partially encoded packet escapes.
     live()?;
     Ok(document)
 }
