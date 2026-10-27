@@ -1,7 +1,7 @@
 use super::*;
-use crate::preparation::{CommitInput, MergeEntry};
+use crate::preparation::{CommitInput, MergeEntry, MergeSourceError};
 use fgit_crypto::{GitObjectKind, git_object_id};
-use std::cell::Cell;
+use std::{cell::Cell, collections::BTreeMap};
 #[derive(Default)]
 struct Source {
     commits: BTreeMap<GitOid, CommitInput>,
@@ -208,20 +208,26 @@ fn complete_inventory_limit_refuses_instead_of_returning_a_matching_prefix() {
 
 #[test]
 fn ambiguous_best_bases_are_not_replaced_by_an_arbitrary_parent() {
-    let f = GitHashAlgorithm::Sha256;
-    let mut s = Source::default();
-    let t = s.tree_id(f, &[]);
-    let root = s.commit_id(f, t, &[], "root");
-    let a = s.commit_id(f, t, &[root], "a");
-    let b = s.commit_id(f, t, &[root], "b");
-    let left = s.commit_id(f, t, &[a, b], "left");
-    let right = s.commit_id(f, t, &[b, a], "right");
+    let format = GitHashAlgorithm::Sha256;
+    let mut source = Source::default();
+    let tree = source.tree_id(format, &[]);
+    let root = source.commit_id(format, tree, &[], "root");
+    let first = source.commit_id(format, tree, &[root], "a");
+    let second = source.commit_id(format, tree, &[root], "b");
+    let left = source.commit_id(format, tree, &[first, second], "left");
+    let right = source.commit_id(format, tree, &[second, first], "right");
     assert!(matches!(
-        compare_source_paths(&s, f, Some(left), right, ComparisonMode::MergeBase),
+        compare_source_paths(
+            &source,
+            format,
+            Some(left),
+            right,
+            ComparisonMode::MergeBase
+        ),
         Err(ReviewError::MultipleMergeBases(_))
     ));
     assert!(
-        compare_source_paths(&s, f, Some(left), right, ComparisonMode::Direct)
+        compare_source_paths(&source, format, Some(left), right, ComparisonMode::Direct)
             .unwrap()
             .paths
             .is_empty()

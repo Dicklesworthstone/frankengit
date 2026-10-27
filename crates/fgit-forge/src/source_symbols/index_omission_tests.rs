@@ -148,7 +148,7 @@ fn omissions_require_disjoint_ordered_native_sources_and_closed_diagnostics() {
             "invalid omission: {candidate:?}"
         );
     }
-    let mut bounded = manifest.clone();
+    let mut bounded = manifest;
     bounded.omissions[0].reason = OmissionReason::FileBytes;
     bounded.omissions[0].byte_offset = None;
     bounded.omissions[0].limit = Some(1);

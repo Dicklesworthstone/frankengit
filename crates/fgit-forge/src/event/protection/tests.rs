@@ -244,7 +244,7 @@ fn required_checks_have_a_required_wire_kind_and_preserve_review_only_encoding()
     let old = initial();
     assert_eq!(old.payload.kind(), 9);
     let original = encode_body(&old).unwrap();
-    let mut new = old.clone();
+    let mut new = old;
     let ForgeEventPayload::ReviewProtectionChanged(change) = &mut new.payload else {
         panic!()
     };
@@ -278,7 +278,7 @@ fn check_only_policies_are_explicit_bounded_and_canonical() {
     invalid.branches[0].required_checks.push(required_check());
     assert!(invalid.validate().is_err());
     for job in [
-        "".to_owned(),
+        String::new(),
         "a\nb".to_owned(),
         "\u{85}".to_owned(),
         "λ".repeat(513),

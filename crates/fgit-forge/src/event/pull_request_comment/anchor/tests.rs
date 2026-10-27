@@ -7,6 +7,7 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_types::{GitHashAlgorithm, PrincipalId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 #[derive(Default)]
 struct Source {
@@ -71,7 +72,7 @@ impl Source {
         );
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").unwrap();
         }
         body.push_str("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nsource anchor\n");
         let commit = git_object_id(format, GitObjectKind::Commit, body.as_bytes());

@@ -17,9 +17,7 @@ fn append_commitment_reuses_legacy_comment_bytes_at_a_fixed_non_open_position() 
     let legacy = IssueCommand {
         number: intent.number,
         expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
-        action: IssueAction::Comment {
-            body: intent.body.clone(),
-        },
+        action: IssueAction::Comment { body: intent.body },
     }
     .proposed_event(actor)
     .unwrap();

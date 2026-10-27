@@ -69,11 +69,11 @@ impl Drop for Work {
         // its working directory while it might still write delayed output.
         let end = Instant::now() + Duration::from_secs(3);
         for name in ["worker.pid", "grandchild.pid"] {
-            if let Ok(text) = fs::read_to_string(self.0.join(name)) {
-                if let Ok(pid) = text.trim().parse::<u32>() {
-                    while running(pid) && Instant::now() < end {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
+            if let Ok(text) = fs::read_to_string(self.0.join(name))
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                while running(pid) && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
         }

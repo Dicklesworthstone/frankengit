@@ -266,7 +266,7 @@ impl RecoveredEffectJournal {
                     .try_into()
                     .map_err(|_| EffectJournalCodecRefusal::Format)?,
             ) as usize;
-            if length > MAX_EFFECT_JOURNAL_FRAME_BYTES || length < 73 {
+            if !(73..=MAX_EFFECT_JOURNAL_FRAME_BYTES).contains(&length) {
                 return Err(EffectJournalCodecRefusal::Format);
             }
             let Some(frame) = remaining.get(..length + 4) else {
@@ -624,7 +624,7 @@ fn decode_event(
     }
 }
 
-fn class_code(v: EffectClass) -> u8 {
+const fn class_code(v: EffectClass) -> u8 {
     match v {
         EffectClass::PureCanonicalRead => 1,
         EffectClass::DerivedLocalWrite => 2,
@@ -634,7 +634,7 @@ fn class_code(v: EffectClass) -> u8 {
         EffectClass::ExternalEffect => 6,
     }
 }
-fn read_class(v: u8) -> Result<EffectClass> {
+const fn read_class(v: u8) -> Result<EffectClass> {
     match v {
         1 => Ok(EffectClass::PureCanonicalRead),
         2 => Ok(EffectClass::DerivedLocalWrite),
@@ -645,7 +645,7 @@ fn read_class(v: u8) -> Result<EffectClass> {
         _ => Err(EffectJournalCodecRefusal::Format),
     }
 }
-fn obligation_code(v: ObligationClass) -> u8 {
+const fn obligation_code(v: ObligationClass) -> u8 {
     match v {
         ObligationClass::ObjectAdmissionPermit => 1,
         ObligationClass::PreparedTxnSlot => 2,
@@ -668,7 +668,7 @@ fn read_obligation(v: u8) -> Result<ObligationClass> {
         .copied()
         .ok_or(EffectJournalCodecRefusal::Format)
 }
-fn event_code(v: LifecycleEvent) -> u8 {
+const fn event_code(v: LifecycleEvent) -> u8 {
     match v {
         LifecycleEvent::Commit => 1,
         LifecycleEvent::Abort => 2,
@@ -679,7 +679,7 @@ fn event_code(v: LifecycleEvent) -> u8 {
         LifecycleEvent::Leak => 7,
     }
 }
-fn read_event(v: u8) -> Result<LifecycleEvent> {
+const fn read_event(v: u8) -> Result<LifecycleEvent> {
     match v {
         1 => Ok(LifecycleEvent::Commit),
         2 => Ok(LifecycleEvent::Abort),
@@ -691,14 +691,14 @@ fn read_event(v: u8) -> Result<LifecycleEvent> {
         _ => Err(EffectJournalCodecRefusal::Format),
     }
 }
-fn failure_code(v: TerminalFailureReason) -> u8 {
+const fn failure_code(v: TerminalFailureReason) -> u8 {
     match v {
         TerminalFailureReason::PermanentDownstreamRejection => 1,
         TerminalFailureReason::ValidityWindowExpired => 2,
         TerminalFailureReason::OperatorDecision => 3,
     }
 }
-fn read_failure(v: u8) -> Result<TerminalFailureReason> {
+const fn read_failure(v: u8) -> Result<TerminalFailureReason> {
     match v {
         1 => Ok(TerminalFailureReason::PermanentDownstreamRejection),
         2 => Ok(TerminalFailureReason::ValidityWindowExpired),
@@ -706,7 +706,7 @@ fn read_failure(v: u8) -> Result<TerminalFailureReason> {
         _ => Err(EffectJournalCodecRefusal::Format),
     }
 }
-fn escalation_code(v: EscalationReason) -> u8 {
+const fn escalation_code(v: EscalationReason) -> u8 {
     match v {
         EscalationReason::IndeterminateDelivery => 1,
         EscalationReason::RetryBudgetExhausted => 2,
@@ -714,7 +714,7 @@ fn escalation_code(v: EscalationReason) -> u8 {
         EscalationReason::PolicyRequiresHuman => 4,
     }
 }
-fn read_escalation(v: u8) -> Result<EscalationReason> {
+const fn read_escalation(v: u8) -> Result<EscalationReason> {
     match v {
         1 => Ok(EscalationReason::IndeterminateDelivery),
         2 => Ok(EscalationReason::RetryBudgetExhausted),
