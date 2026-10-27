@@ -63,6 +63,7 @@ fn source_candidate(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, Candi
         expected_version: ExpectedVersion::NewStream,
         expected_epoch: PolicyEpoch::FIRST,
         protection: ReviewProtection {
+            ref_policy: None,
             administrators: vec![OWNER],
             branches: vec![ProtectedBranch {
                 required_approvals: 1,

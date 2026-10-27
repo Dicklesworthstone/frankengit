@@ -9,6 +9,38 @@ import { run, parseArgs, intentSummary } from '../../scripts/fg_protection_admin
 import { TOKEN, ACTOR, REVIEWER, SCOPE, HEAD, POLICY, NEXT, ref, state, json, peer, files } from './protection_fixtures.mjs';
 const plan = extra => prepareIntent({ endpoint: 'https://forge.example/team/repo.git', token: TOKEN, principal_id: ACTOR,
   expectedScope: SCOPE, snapshot: state(), replacement: NEXT, nonce: 'e'.repeat(32), ...extra });
+// Opaque native-schema transport fixture; policy compilation remains Rust-owned.
+const refPolicy = () => ({ snapshot_id: `frankengit/policy-snapshot/v1/v1.0/alg:2/${'d'.repeat(64)}`,
+  profile: 'reference_facts_v1', mode: 'enforce', frame_hex: '000102ff' });
+
+test('ref-policy-only snapshots retain exact frames in intents, forms and change summaries', () => {
+  const replacement = { administrators: [ACTOR], branches: [], ref_policy: refPolicy() };
+  const intent = plan({ snapshot: state({ policy: replacement }), replacement });
+  assert.deepEqual(snapshotReply(state({ policy: replacement })).policy, replacement);
+  assert.deepEqual(intent.source.policy.ref_policy, refPolicy());
+  assert.deepEqual(intent.replacement.ref_policy, refPolicy());
+  assert.equal(new URLSearchParams(intent.request.body).get('ref_policy_frame_hex'), refPolicy().frame_hex);
+  assert.equal(new URLSearchParams(intent.request.body).has('clear'), false);
+  assert.deepEqual(validateIntent(JSON.parse(canonical(intent))), intent);
+  assert.deepEqual(intentSummary(intent).ref_policy, { before: refPolicy().snapshot_id, after: refPolicy().snapshot_id, changed: false });
+  assert.throws(() => plan({ snapshot: state({ policy: replacement }), replacement, clear: true }), /explicit_clear/);
+  const removed = plan({ snapshot: state({ policy: replacement }), replacement: { administrators: [ACTOR], branches: [] }, clear: true });
+  assert.deepEqual(intentSummary(removed).ref_policy, { before: refPolicy().snapshot_id, after: null, changed: true });
+  assert.equal(new URLSearchParams(removed.request.body).has('ref_policy_frame_hex'), false);
+  for (const path of ['source', 'replacement']) {
+    const edited = structuredClone(intent);
+    (path === 'source' ? edited.source.policy : edited.replacement).ref_policy.frame_hex = 'ff';
+    assert.throws(() => validateIntent(edited), /integrity/);
+  }
+});
+test('absent or null ref policy preserves historical intent bytes and malformed descriptors refuse', () => {
+  assert.deepEqual(plan({ snapshot: state({ policy: { ...POLICY, ref_policy: null } }), replacement: { ...NEXT, ref_policy: null } }), plan());
+  for (const change of [{ mode: 'audit' }, { profile: 'other' }, { snapshot_id: 'other/domain' },
+    { frame_hex: '' }, { frame_hex: 'A0' }, { frame_hex: '0' }, { frame_hex: '00'.repeat(65537) }, { grant: 'admin' }]) {
+    assert.throws(() => policy({ ...NEXT, ref_policy: { ...refPolicy(), ...change } }));
+  }
+  assert.throws(() => snapshotReply(state({ enabled: false, policy: { administrators: [ACTOR], branches: [], ref_policy: refPolicy() } })));
+});
 
 test('both native hash domains retain exact strings above the safe-number ceiling', () => {
   for (const object_format of ['sha1', 'sha256']) {

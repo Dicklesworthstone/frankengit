@@ -1,4 +1,93 @@
 use super::*;
+
+const REF_POLICY: &str = r#"policy retained_tags {
+    rule keep { when ref.name matches "refs/tags/release-*" and ref.update == delete then deny "retained tag" }
+    default allow
+}"#;
+
+struct PolicyFile(PathBuf);
+impl PolicyFile {
+    fn new(bytes: &[u8]) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fg-policy-input-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = std::fs::File::create_new(&path).unwrap();
+        file.write_all(bytes).unwrap();
+        Self(path)
+    }
+    fn argument(&self) -> String {
+        self.0.to_str().unwrap().to_owned()
+    }
+}
+impl Drop for PolicyFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn cli_activates_source_and_exact_frame_as_the_same_complete_policy() {
+    let source = PolicyFile::new(REF_POLICY.as_bytes());
+    let mut args = input();
+    args.truncate(args.len() - 2);
+    args.extend(["--policy-source".into(), source.argument()]);
+    let Operation::Set { command, .. } = parse(&args).unwrap().operation else {
+        panic!()
+    };
+    assert!(command.protection.branches.is_empty());
+    let snapshot = command.protection.ref_policy.as_ref().unwrap();
+    let encoded = snapshot.encode().unwrap();
+    let frame = PolicyFile::new(&encoded);
+    args.truncate(args.len() - 2);
+    args.extend(["--policy-frame".into(), frame.argument()]);
+    let Operation::Set {
+        command: restored, ..
+    } = parse(&args).unwrap().operation
+    else {
+        panic!()
+    };
+    assert_eq!(restored, command);
+    let report = policy_json(&command.protection).unwrap();
+    assert!(report.contains(&snapshot.id().to_string()));
+    assert!(report.contains(&bytes_hex(&encoded)));
+    args.push("--clear".into());
+    assert!(parse(&args).is_err());
+}
+
+#[test]
+fn cli_policy_files_refuse_invalid_unsupported_oversized_and_ambiguous_inputs() {
+    for bytes in [
+        b"not a policy".to_vec(),
+        vec![0xff],
+        vec![b' '; MAX_REF_POLICY_SOURCE_BYTES + 1],
+        b"policy unavailable { rule r { when principal.kind == agent then allow } default deny \"no\" }".to_vec(),
+        b"policy unavailable { rule r { when ref.update == fast_forward then allow } default deny \"no\" }".to_vec(),
+    ] {
+        let file = PolicyFile::new(&bytes);
+        let mut args = input();
+        args.extend(["--policy-source".into(), file.argument()]);
+        assert!(parse(&args).is_err());
+    }
+    let source = PolicyFile::new(REF_POLICY.as_bytes());
+    let mut args = input();
+    args.extend(["--policy-source".into(), source.argument()]);
+    assert!(parse(&args).is_ok());
+    args.extend(["--policy-frame".into(), source.argument()]);
+    assert!(parse(&args).is_err());
+    args.truncate(args.len() - 4);
+    args.extend(["--policy-frame".into(), source.argument()]);
+    assert!(parse(&args).is_err());
+    args.truncate(args.len() - 2);
+    args.extend([
+        "--policy-source".into(),
+        std::env::temp_dir().to_str().unwrap().into(),
+    ]);
+    assert!(parse(&args).is_err());
+}
 fn input() -> Vec<String> {
     vec![
         "set".into(),
@@ -134,7 +223,11 @@ fn required_check_cli_binds_full_job_names_and_explicit_publisher_graph_and_sour
         rule.required_checks[0].source_ref.as_bytes(),
         b"refs/heads/ci-candidate"
     );
-    assert!(policy_json(&command.protection).contains("\"required_checks\":["));
+    assert!(
+        policy_json(&command.protection)
+            .unwrap()
+            .contains("\"required_checks\":[")
+    );
     args.extend(["--require-check".into(), check]);
     assert!(
         parse(&args).is_err(),
@@ -209,7 +302,11 @@ fn quorum_cli_supports_n_of_m_and_preserves_legacy_unanimity() {
         command.protection.branches[0].reviewers,
         legacy.protection.branches[0].reviewers
     );
-    assert!(policy_json(&command.protection).contains("\"required_approvals\":2"));
+    assert!(
+        policy_json(&command.protection)
+            .unwrap()
+            .contains("\"required_approvals\":2")
+    );
     let mut reordered = input();
     reordered.splice(
         4..4,

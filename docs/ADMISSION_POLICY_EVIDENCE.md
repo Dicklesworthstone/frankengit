@@ -9,8 +9,9 @@ policy selection, snapshots, verdicts, and traces.
 This applies to the node-owned direct ref materializer used by receive,
 source import, workspace publication, and other ordinary ref transitions,
 including each child of a receive microbatch. An attempt that changes no refs
-retains the historical evidence profile. Native merge and metadata evidence
-also retain their existing profile; their review/check obligations remain in
+retains the historical evidence profile. Native merge evidence retains its
+historical profile unless an activated repository DSL policy selects schema
+1.2. Metadata remains unchanged; native review/check obligations remain in
 their own canonical gates.
 
 ## Exact version preservation
@@ -19,9 +20,11 @@ their own canonical gates.
 | --- | --- | --- |
 | 1.0 | Transaction ID, request digest, staged principal snapshot ID, policy epoch | Original payload, frame and root remain unchanged. No compiled-policy replay is claimed. |
 | 1.1 | The 1.0 fields plus authority-head identity, actual input ref root, native HEAD and review selectors, native old/new ref values, evaluated snapshots, verdicts and traces | Authenticate provenance and replay the recorded snapshots against the recorded structural facts. |
+| 1.2 | The complete 1.1 structural receipt plus the canonically activated repository DSL snapshot, direct/native-merge publication kind, verdict and trace | Require exact equality with the snapshot selected by the original authenticated forge frontier, then replay those stored bytes and facts. |
 
 `PolicyDecisionEvidence` remains the exact schema-1.0 canonical type.
-`EvaluatedPolicyDecisionEvidence` owns schema 1.1. `PolicyDecisionRecord`
+`EvaluatedPolicyDecisionEvidence` owns schema 1.1 and
+`ActivatedPolicyDecisionEvidence` owns schema 1.2. `PolicyDecisionRecord`
 dispatches supported minors, reproduces the selected minor's original bytes,
 and computes its original root. Unknown minors, profiles, substituted snapshot
 identities, malformed inputs, changed verdicts, and changed traces are refused.
@@ -119,12 +122,19 @@ alternative, reopens the node, and checks byte-identical replay and cancellation
 with a successful retry. Execution status is reported separately from this
 coverage inventory; these tests are not transport E2E evidence.
 
-## Remaining policy activation work
+## Activated repository DSL policies
 
-Arbitrary stored repository DSL snapshots still require canonical activation
-and complete authenticated input-fact integration across all publication
-paths. The incarnation configuration's existing `policy_root` continues to
-identify hidden-ref policy and cannot be reused as a compiled-policy ID.
-Immutable policy placement alone remains staging, not activation. This change
-closes durable reference-policy evidence binding without claiming those
-separate authority transitions or the entire policy-integrity bead complete.
+[Canonical ref-policy activation](CANONICAL_REF_POLICY_ACTIVATION.md) now
+selects a bounded stored DSL snapshot through the existing protection aggregate
+and advances its epoch in the same authority-head CAS. Direct ref publication
+and native merges retain schema 1.2 evidence when one is installed. Native
+merge evidence names the complete coupled merge/ref fold; its review/check
+acceptance remains the existing canonical gate. Original sealed-package clients
+can prepare the exact current evidence through the new read-only node helper.
+
+The first profile accepts ref-name/scope and structural create/delete/update
+facts. Predicates requiring actor, ancestry, force, aggregates or evidence are
+rejected before activation. The incarnation configuration's `policy_root`
+continues to identify hidden-ref policy and is never reinterpreted as a compiled
+policy ID. Immutable placement alone remains staging. Complete authenticated
+input facts, rollout/break-glass and the full policy-integrity bead remain open.

@@ -470,6 +470,7 @@ fn incremental_atomic_update_cannot_bypass_repository_required_review_protection
             expected_version: ExpectedVersion::NewStream,
             expected_epoch: fgit_types::PolicyEpoch::FIRST,
             protection: ReviewProtection {
+                ref_policy: None,
                 administrators: vec![principal()],
                 branches: vec![ProtectedBranch {
                     required_approvals: 1,

@@ -26,7 +26,7 @@ export function referenceLabel(encoded) {
   catch { return '[Non-UTF-8 reference; use its exact hex bytes.]'; }
 }
 
-export function editorPolicy(administrators, rules, observedBranches = []) {
+export function editorPolicy(administrators, rules, observedBranches = [], observedRefPolicy = null) {
   const lines = (value, maximum, count) => {
     if (typeof value !== 'string' || value.length > maximum) throw new Error('Protection editor exceeds its input limit.');
     const rows = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -50,7 +50,7 @@ export function editorPolicy(administrators, rules, observedBranches = []) {
     if (!reviewers.length && !checks.length) throw new Error('A protected branch needs reviewers or configured checks.');
     return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
-  }) };
+  }), ...(observedRefPolicy ? { ref_policy: structuredClone(observedRefPolicy) } : {}) };
 }
 export function mountProtection(doc, { client, events = doc.defaultView } = {}) {
   if (!client) throw new Error('A native protection client is required.');
@@ -115,9 +115,11 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       ui.policy.append(node('p', 'Review protection is not installed. Initial administrator bootstrap is local-only.'));
       clearEditor(); return;
     }
-    ui.policy.append(node('h2', policy.branches.length ? 'Required-review protection enabled' : 'Review protection disabled; administrators retained'),
+    ui.policy.append(node('h2', policy.branches.length || policy.ref_policy ? 'Repository protection enabled' : 'Review protection disabled; administrators retained'),
       node('h3', 'Policy administrators'));
     for (const person of policy.administrators) ui.policy.append(node('p', person));
+    if (policy.ref_policy) ui.policy.append(node('h3', 'Enforced repository ref policy'), node('p', policy.ref_policy.snapshot_id),
+      node('p', 'The exact ref policy snapshot is preserved when editing administrators and branches. Clear-all removes it explicitly; use the protection CLI or API to replace it.'));
     for (const branch of policy.branches) {
       const section = node('article');
       section.append(node('h3', referenceLabel(branch.reference_hex)), node('p', `Exact reference bytes: ${branch.reference_hex}`),
@@ -158,7 +160,8 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       render(selected); say('Complete native policy inspected. No transaction was created.');
     }, 'Reading the complete native protection policy…');
   };
-  const prepare = () => run(() => client.stage(editorPolicy(ui.administrators.value, ui.rules.value, client.observed?.policy?.branches ?? []), ui.clear.checked), () => {
+  const prepare = () => run(() => client.stage(editorPolicy(ui.administrators.value, ui.rules.value, client.observed?.policy?.branches ?? [],
+    ui.clear.checked ? null : client.observed?.policy?.ref_policy ?? null), ui.clear.checked), () => {
     ui.terminal.textContent = ''; ui.receipt.value = ''; say('Replacement frozen, not submitted. Review the complete policy and confirm explicitly.');
   }, 'Preparing one exact policy replacement without publication…');
   function settle(result) {

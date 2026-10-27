@@ -144,6 +144,9 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
         crate::evidence::PolicyDecisionRecord::Evaluated(body) => {
             stage(store, cx, repository, POLICY, body.as_ref()).await?
         }
+        crate::evidence::PolicyDecisionRecord::Activated(body) => {
+            stage(store, cx, repository, POLICY, body.as_ref()).await?
+        }
     }
     stage(
         store,

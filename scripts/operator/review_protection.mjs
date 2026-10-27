@@ -96,8 +96,18 @@ function requiredChecks(values) {
   if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('duplicate_required_check');
   return result;
 }
+function refPolicy(value) {
+  fields(value, ['snapshot_id', 'profile', 'mode', 'frame_hex']);
+  const id = opaque(value.snapshot_id);
+  if (!id.startsWith('frankengit/policy-snapshot/v1/') || value.profile !== 'reference_facts_v1' || value.mode !== 'enforce' ||
+      typeof value.frame_hex !== 'string' || !value.frame_hex.length || value.frame_hex.length > 128 * 1024 ||
+      value.frame_hex.length % 2 || !/^[0-9a-f]+$/.test(value.frame_hex)) fail('invalid_ref_policy');
+  // The native decoder verifies the canonical frame and derives its identity.
+  // The client retains the complete observed descriptor in the frozen intent.
+  return { snapshot_id: id, profile: value.profile, mode: value.mode, frame_hex: value.frame_hex };
+}
 export function policy(value) {
-  fields(value, ['administrators', 'branches']);
+  fields(value, ['administrators', 'branches', ...(Object.hasOwn(value, 'ref_policy') ? ['ref_policy'] : [])]);
   if (!Array.isArray(value.branches) || value.branches.length > LIMITS.branches) fail('invalid_branch_count');
   const branches = value.branches.map(row => {
     fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
@@ -114,7 +124,8 @@ export function policy(value) {
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('duplicate_branch');
-  return { administrators: people(value.administrators, LIMITS.administrators), branches };
+  return { administrators: people(value.administrators, LIMITS.administrators), branches,
+    ...(value.ref_policy !== undefined && value.ref_policy !== null ? { ref_policy: refPolicy(value.ref_policy) } : {}) };
 }
 const SCOPE_FIELDS = ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format'];
 export function snapshotReply(value, expectedScope = null, expectedHead = null) {
@@ -128,13 +139,13 @@ export function snapshotReply(value, expectedScope = null, expectedHead = null) 
   if (expectedHead !== null && value.source_head !== head(expectedHead)) fail('source_head_changed');
   if (value.installed !== (value.version !== '0')) fail('inconsistent_installed_policy');
   const normalized = value.installed ? policy(value.policy) : null;
-  if ((!value.installed && value.policy !== null) || value.enabled !== Boolean(normalized?.branches.length)) fail('inconsistent_enabled_policy');
+  if ((!value.installed && value.policy !== null) || value.enabled !== Boolean(normalized?.branches.length || normalized?.ref_policy)) fail('inconsistent_enabled_policy');
   return { scope: selected, source_head: value.source_head, policy_epoch: value.policy_epoch,
     version: value.version, installed: value.installed, enabled: value.enabled, policy: normalized };
 }
 function command(source, replacement, clear) {
   decimal(source.version, 1n, U64_MAX - 1n); decimal(source.policy_epoch, 1n, U64_MAX - 1n);
-  if (typeof clear !== 'boolean' || clear !== (replacement.branches.length === 0)) fail('explicit_clear_required_only_for_empty_branches');
+  if (typeof clear !== 'boolean' || clear !== (replacement.branches.length === 0 && !replacement.ref_policy)) fail('explicit_clear_required_only_for_empty_protection');
   const form = new URLSearchParams({ expected_version: source.version, expected_epoch: source.policy_epoch });
   for (const person of replacement.administrators) form.append('administrator', person);
   for (const row of replacement.branches) for (const person of row.required_reviewers) form.append('required_reviewer', `${row.reference_hex}:${person}`);
@@ -144,6 +155,7 @@ function command(source, replacement, clear) {
   for (const row of replacement.branches) if (Object.hasOwn(row, 'required_approvals')) {
     form.append('required_approvals', `${row.reference_hex}:${row.required_approvals}`);
   }
+  if (replacement.ref_policy) form.set('ref_policy_frame_hex', replacement.ref_policy.frame_hex);
   if (clear) form.set('clear', 'true');
   const body = form.toString();
   if (Buffer.byteLength(body) > LIMITS.command) fail('command_byte_limit');

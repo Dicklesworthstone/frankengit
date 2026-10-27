@@ -830,6 +830,7 @@ dependencies = [
  "fgit-codec",
  "fgit-crypto",
  "fgit-diff",
+ "fgit-policy",
  "fgit-treefs",
  "fgit-types",
 ]

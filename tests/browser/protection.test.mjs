@@ -2,7 +2,34 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProtectionClient, protectionPolicy, protectionBranch, protectionChanges, protectionU64, protectionSnapshot, protectionJson,
   PROTECTION_RECEIPT_LIMIT, requestBody, fastForwardCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-actions.mjs';
-import { TOKEN, ROTATED, ADMIN, REVIEWER, OTHER, HREF, hex, policy, snapshot, terminal, recovered, response, harness, deferred, webcrypto } from './protection-fixtures.mjs';
+import { TOKEN, ROTATED, ADMIN, REVIEWER, OTHER, HREF, hex, policy, refPolicy, snapshot, terminal, recovered, response, harness, deferred, webcrypto } from './protection-fixtures.mjs';
+
+test('ref-policy-only requests bind exact frame bytes through export, restore and explicit clearing', async () => {
+  const selected = { administrators: [ADMIN], branches: [], ref_policy: refPolicy() };
+  const h = harness({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready(); const pending = await h.client.stage(selected);
+  assert.deepEqual(pending.intent.source.policy.ref_policy, refPolicy());
+  assert.equal(new URLSearchParams(pending.intent.body).get('ref_policy_frame_hex'), refPolicy().frame_hex);
+  assert.equal(new URLSearchParams(pending.intent.body).has('clear'), false);
+  const exported = h.client.exportReceipt();
+  const restored = harness(); await restored.client.connect(TOKEN, ADMIN); await restored.client.restoreReceipt(exported);
+  assert.deepEqual(restored.client.pending.intent, pending.intent);
+  const tampered = JSON.parse(exported); tampered.intent.replacement.ref_policy.frame_hex = 'ff';
+  const fresh = harness(); await fresh.client.connect(TOKEN, ADMIN);
+  await assert.rejects(fresh.client.restoreReceipt(JSON.stringify(tampered)));
+  assert.equal(fresh.client.pending, null);
+  assert.deepEqual(protectionChanges(selected, { administrators: [ADMIN], branches: [] }).ref_policy,
+    { before: refPolicy().snapshot_id, after: null, changed: true });
+});
+test('null ref-policy fields preserve old normalization and malformed profiles or frames refuse', () => {
+  assert.deepEqual(protectionPolicy({ ...policy(), ref_policy: null }), protectionPolicy(policy()));
+  assert.deepEqual(protectionSnapshot(snapshot('sha1', { policy: { ...policy(), ref_policy: null } })), protectionSnapshot(snapshot()));
+  for (const change of [{ profile: 'other' }, { mode: 'audit' }, { snapshot_id: 'other/domain' },
+    { frame_hex: '' }, { frame_hex: 'A0' }, { frame_hex: '0' }, { frame_hex: '00'.repeat(65537) }, { grant: true }]) {
+    assert.throws(() => protectionPolicy({ ...policy(), ref_policy: { ...refPolicy(), ...change } }));
+  }
+  assert.throws(() => protectionSnapshot(snapshot('sha1', { enabled: false, policy: { administrators: [ADMIN], branches: [], ref_policy: refPolicy() } })));
+});
 
 for (const format of ['sha1', 'sha256']) {
   test(`${format}: load, edit, stage and publish exact full replacement with full-width counters`, async () => {

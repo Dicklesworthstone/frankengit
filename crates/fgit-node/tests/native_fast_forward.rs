@@ -471,6 +471,7 @@ fn fast_forward_does_not_bypass_mandatory_reviews() {
         expected_version: ExpectedVersion::NewStream,
         expected_epoch: PolicyEpoch::FIRST,
         protection: ReviewProtection {
+            ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
                 required_approvals: 1,

@@ -34,12 +34,17 @@ const MAX_TRACE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
 const MAX_SUBJECTS: usize = fgit_policy::basis::MAX_SUBJECTS;
 
+#[path = "policy_evidence/activated.rs"]
+mod activated;
+pub use activated::{ActivatedPolicyDecisionEvidence, RefPolicyPublication};
+
 /// Exact supported policy-evidence minor. The legacy variant is not a claim
 /// that the historical record retained an evaluated compiled snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PolicyDecisionRecord {
     Legacy(PolicyDecisionEvidence),
     Evaluated(Box<EvaluatedPolicyDecisionEvidence>),
+    Activated(Box<ActivatedPolicyDecisionEvidence>),
 }
 
 impl PolicyDecisionRecord {
@@ -48,6 +53,7 @@ impl PolicyDecisionRecord {
         match self {
             Self::Legacy(body) => body,
             Self::Evaluated(body) => &body.base,
+            Self::Activated(body) => &body.references.base,
         }
     }
 
@@ -55,6 +61,7 @@ impl PolicyDecisionRecord {
         match self {
             Self::Legacy(body) => evidence_root(body),
             Self::Evaluated(body) => evidence_root(body.as_ref()),
+            Self::Activated(body) => evidence_root(body.as_ref()),
         }
     }
 
@@ -62,6 +69,11 @@ impl PolicyDecisionRecord {
         match self {
             Self::Legacy(body) => encode_body(body),
             Self::Evaluated(body) => {
+                let bytes = encode_body(body.as_ref())?;
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Ok(bytes)
+            }
+            Self::Activated(body) => {
                 let bytes = encode_body(body.as_ref())?;
                 bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
                 Ok(bytes)
@@ -88,11 +100,17 @@ impl PolicyDecisionRecord {
                     bytes, limits,
                 )?))
             }
+            2 => {
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Self::Activated(Box::new(decode_body::<ActivatedPolicyDecisionEvidence>(
+                    bytes, limits,
+                )?))
+            }
             minor => {
                 return Err(CodecRefusal::schema_minor_unsupported(
                     PolicyDecisionEvidence::DOMAIN,
                     minor,
-                    1,
+                    2,
                 ));
             }
         };
@@ -100,6 +118,29 @@ impl PolicyDecisionRecord {
             return Err(invalid("policy_decision.noncanonical"));
         }
         Ok(value)
+    }
+
+    /// Structural provenance shared by both evaluated evidence versions.
+    #[must_use]
+    pub fn evaluated(&self) -> Option<&EvaluatedPolicyDecisionEvidence> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Evaluated(body) => Some(body),
+            Self::Activated(body) => Some(&body.references),
+        }
+    }
+
+    pub(super) fn verify_decision(
+        &self,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        fold: &TransactionFoldReport,
+    ) -> Result<(), RefusalCode> {
+        match self {
+            Self::Legacy(_) => Ok(()),
+            Self::Evaluated(body) => body.verify_decision(context, basis, fold),
+            Self::Activated(body) => body.verify_decision(context, basis, fold),
+        }
     }
 }
 
@@ -174,7 +215,15 @@ impl RefPolicyEvaluation {
         inputs: Vec<RefUpdateFact>,
     ) -> Result<Self, RefusalCode> {
         // Bound work and possible trace growth BEFORE allocating the evaluator's
-        // subject/visit graph. Each admitted profile contains exactly one rule.
+        // subject/visit graph. Frozen profiles have one rule; installed policies
+        // also reserve their bounded rule/predicate multiplicity.
+        if profile == Profile::RepositoryRefV1 {
+            fgit_policy::reference_profile::validate_evaluation(
+                &snapshot,
+                inputs.iter().map(RefUpdateFact::name),
+            )
+            .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+        }
         let estimate = inputs
             .iter()
             .try_fold(0_usize, |used, fact| {
@@ -408,6 +457,7 @@ impl EvaluatedPolicyDecisionEvidence {
             .filter(|fact| match profile {
                 Profile::HeadDeletionV1 => self.head_target.as_ref() == Some(fact.name()),
                 Profile::DirectReviewV1 => self.review_branches.binary_search(fact.name()).is_ok(),
+                Profile::RepositoryRefV1 => true,
             })
             .map(RefPolicyInput::evaluator_fact)
             .collect()
@@ -456,6 +506,7 @@ impl EvaluatedPolicyDecisionEvidence {
 enum Profile {
     HeadDeletionV1,
     DirectReviewV1,
+    RepositoryRefV1,
 }
 
 impl Profile {
@@ -463,28 +514,35 @@ impl Profile {
         match self {
             Self::HeadDeletionV1 => 1,
             Self::DirectReviewV1 => 2,
+            Self::RepositoryRefV1 => 3,
         }
     }
     const fn name(self) -> &'static str {
         match self {
             Self::HeadDeletionV1 => "admission_head_deletion_v1",
             Self::DirectReviewV1 => "admission_direct_review_v1",
+            Self::RepositoryRefV1 => "repository_ref_v1",
         }
     }
     const fn reason(self) -> &'static str {
         match self {
             Self::HeadDeletionV1 => "default branch deletion is prohibited",
             Self::DirectReviewV1 => "direct update requires canonical review",
+            Self::RepositoryRefV1 => "repository policy",
         }
     }
     fn predicate(self) -> Predicate {
         match self {
             Self::HeadDeletionV1 => Predicate::UpdateKindEquals(RefUpdateKind::Delete),
             Self::DirectReviewV1 => Predicate::Always,
+            Self::RepositoryRefV1 => Predicate::Never,
         }
     }
 
     fn snapshot(self) -> Result<PolicySnapshot, CodecRefusal> {
+        if self == Self::RepositoryRefV1 {
+            return Err(invalid("policy_decision.repository_snapshot_required"));
+        }
         let rule = CompiledRule::new(
             RuleId::try_new(b"protect")?,
             self.predicate(),
@@ -500,6 +558,9 @@ impl Profile {
     }
 
     fn accepts(self, snapshot: &PolicySnapshot) -> bool {
+        if self == Self::RepositoryRefV1 {
+            return fgit_policy::reference_profile::validate(snapshot).is_ok();
+        }
         let policy = snapshot.policy();
         let rules = policy.rules();
         policy.name().as_str() == self.name()
@@ -582,7 +643,9 @@ impl CanonicalBody for EvaluatedPolicyDecisionEvidence {
                     frame,
                     DecodeLimits {
                         frame_bytes: (MAX_SNAPSHOT_BYTES as u64).min(inherited.frame_bytes),
-                        byte_string_bytes: 4096.min(inherited.byte_string_bytes),
+                        // This bound also covers the canonical payload envelope.
+                        byte_string_bytes: (MAX_SNAPSHOT_BYTES as u64)
+                            .min(inherited.byte_string_bytes),
                         elements: 16.min(inherited.elements),
                         depth: 8.min(inherited.depth.saturating_sub(1)),
                     },

@@ -97,6 +97,210 @@ fn evaluated(bodies: &DecisionEvidenceBodies) -> &EvaluatedPolicyDecisionEvidenc
 }
 
 #[test]
+fn large_activated_snapshot_roundtrips_its_complete_evidence_frame() {
+    let mut source = String::from("policy large { ");
+    for index in 0..40 {
+        source.push_str(&format!(
+            "rule r{index:02} {{ when ref.name == \"{}\" then deny \"retained\" }} ",
+            "a".repeat(900)
+        ));
+    }
+    source.push_str("default allow }");
+    let snapshot = fgit_forge::event::protection::compile_ref_policy(&source).unwrap();
+    assert!(snapshot.encode().unwrap().len() > 32 * 1024);
+    let algorithm = GitHashAlgorithm::Sha256;
+    let (context, basis, current, request, fold) = folded(
+        algorithm,
+        name(b"refs/heads/topic"),
+        name(b"refs/heads/main"),
+        Some(oid(algorithm, 1)),
+        Some(oid(algorithm, 2)),
+    );
+    let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+    bodies
+        .record_activated_policy(
+            &context,
+            &basis,
+            &current,
+            RootLayoutVersion::LegacyWholeBody,
+            &fold,
+            Vec::new(),
+            snapshot.clone(),
+            RefPolicyPublication::Direct,
+        )
+        .unwrap();
+    let frame = bodies.policy_decision().encode().unwrap();
+    let decoded = PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(&decoded, bodies.policy_decision());
+    assert_eq!(decoded.encode().unwrap(), frame);
+    let PolicyDecisionRecord::Activated(record) = decoded else {
+        panic!("activated record");
+    };
+    assert_eq!(record.evaluation().snapshot_id(), snapshot.id());
+    record.replay().unwrap();
+}
+
+#[test]
+fn activated_repository_policy_binds_exact_snapshot_and_replays_both_native_hash_formats() {
+    for algorithm in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (context, basis, current, request, fold) = folded(
+            algorithm,
+            name(b"refs/heads/topic"),
+            name(b"refs/heads/main"),
+            Some(oid(algorithm, 1)),
+            Some(oid(algorithm, 2)),
+        );
+        let snapshot = fgit_forge::event::protection::compile_ref_policy("policy immutable_tags { rule tags { when ref.name matches \"refs/tags/**\" then deny \"release protected\" } default allow }").unwrap();
+        let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+        bodies
+            .record_activated_policy(
+                &context,
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &fold,
+                Vec::new(),
+                snapshot.clone(),
+                RefPolicyPublication::Direct,
+            )
+            .unwrap();
+        let PolicyDecisionRecord::Activated(record) = bodies.policy_decision() else {
+            panic!("activated record");
+        };
+        assert_eq!(record.evaluation().snapshot_id(), snapshot.id());
+        assert_eq!(record.evaluation().decision(), Decision::Allow);
+        assert!(record.evaluation().trace().contains("update_unclassified"));
+        record
+            .verify_provenance(
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &[],
+                &snapshot,
+            )
+            .unwrap();
+        let replacement =
+            fgit_forge::event::protection::compile_ref_policy("policy unrelated { default allow }")
+                .unwrap();
+        assert!(
+            record
+                .verify_provenance(
+                    &basis,
+                    &current,
+                    RootLayoutVersion::LegacyWholeBody,
+                    &[],
+                    &replacement
+                )
+                .is_err()
+        );
+        let frame = bodies.policy_decision().encode().unwrap();
+        assert_eq!(
+            read_frame_header(&frame, DecodeLimits::DEFAULT)
+                .unwrap()
+                .0
+                .schema
+                .minor(),
+            2
+        );
+        let decoded = PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
+        assert_eq!(&decoded, bodies.policy_decision());
+        assert_eq!(decoded.encode().unwrap(), frame);
+        assert_eq!(
+            decoded.root().unwrap(),
+            bodies.policy_decision().root().unwrap()
+        );
+        let mut forged_trace = frame;
+        let marker = b"decision allow";
+        let position = forged_trace
+            .windows(marker.len())
+            .rposition(|bytes| bytes == marker)
+            .unwrap();
+        forged_trace[position + marker.len() - 1] = b'x';
+        assert!(
+            PolicyDecisionRecord::decode(&forged_trace, DecodeLimits::DEFAULT).is_err(),
+            "a well-framed changed DSL trace cannot survive replay"
+        );
+        bodies
+            .verify_decision(&context, &basis, &request, &fold)
+            .unwrap();
+    }
+}
+
+#[test]
+fn installed_delete_denial_has_update_twin_and_preserves_literal_hostile_ref_names() {
+    let snapshot = fgit_forge::event::protection::compile_ref_policy("policy immutable { rule no_delete { when ref.update == delete then deny \"keep history\" } default allow }").unwrap();
+    for next in [None, Some(oid(GitHashAlgorithm::Sha1, 2))] {
+        let (context, basis, current, request, fold) = folded(
+            GitHashAlgorithm::Sha1,
+            name(b"refs/heads/quoted\"-default-allow"),
+            name(b"refs/heads/main"),
+            Some(oid(GitHashAlgorithm::Sha1, 1)),
+            next,
+        );
+        let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+        let result = bodies.record_activated_policy(
+            &context,
+            &basis,
+            &current,
+            RootLayoutVersion::LegacyWholeBody,
+            &fold,
+            Vec::new(),
+            snapshot.clone(),
+            RefPolicyPublication::Direct,
+        );
+        if next.is_none() {
+            assert_eq!(result, Err(RefusalCode::ProtectedRefTransitionDenied));
+        } else {
+            result.unwrap();
+            bodies
+                .verify_decision(&context, &basis, &request, &fold)
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn activated_evidence_cannot_call_a_direct_write_a_reviewed_merge_or_accept_unavailable_facts() {
+    let (context, basis, current, request, fold) = folded(
+        GitHashAlgorithm::Sha256,
+        name(b"refs/heads/topic"),
+        name(b"refs/heads/main"),
+        Some(oid(GitHashAlgorithm::Sha256, 1)),
+        Some(oid(GitHashAlgorithm::Sha256, 2)),
+    );
+    let allowed =
+        fgit_forge::event::protection::compile_ref_policy("policy p { default allow }").unwrap();
+    for (snapshot, publication) in [
+        (allowed.clone(), RefPolicyPublication::NativeMerge),
+        (fgit_policy::compile_and_seal("policy p { rule mfa { when not actor.authentication >= multi_factor then allow } default allow }").unwrap(), RefPolicyPublication::Direct),
+    ] {
+        let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+        assert!(bodies.record_activated_policy(&context, &basis, &current, RootLayoutVersion::LegacyWholeBody,
+            &fold, Vec::new(), snapshot, publication).is_err());
+    }
+    let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+    bodies
+        .record_activated_policy(
+            &context,
+            &basis,
+            &current,
+            RootLayoutVersion::LegacyWholeBody,
+            &fold,
+            Vec::new(),
+            allowed,
+            RefPolicyPublication::Direct,
+        )
+        .unwrap();
+    let frame = bodies.policy_decision().encode().unwrap();
+    for length in [0, 1, frame.len() / 2, frame.len() - 1] {
+        assert!(PolicyDecisionRecord::decode(&frame[..length], DecodeLimits::DEFAULT).is_err());
+    }
+    let mut suffix = frame;
+    suffix.push(0);
+    assert!(PolicyDecisionRecord::decode(&suffix, DecodeLimits::DEFAULT).is_err());
+}
+
+#[test]
 fn historical_v1_0_keeps_exact_frame_root_and_requires_explicit_version_dispatch() {
     let (context, basis, request, fold) = fixture();
     let bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
@@ -368,10 +572,10 @@ fn exact_minor_dispatch_refuses_future_schema_truncation_suffix_and_tight_bounds
     let mut future = frame.clone();
     let (_, header) = read_frame_header(&future, DecodeLimits::DEFAULT).unwrap();
     let minor = header.offset() as usize - 2;
-    future[minor..minor + 2].copy_from_slice(&2_u16.to_be_bytes());
+    future[minor..minor + 2].copy_from_slice(&3_u16.to_be_bytes());
     assert!(matches!(
         PolicyDecisionRecord::decode(&future, DecodeLimits::DEFAULT),
-        Err(CodecRefusal::SchemaMinorUnsupported { observed: 2, .. })
+        Err(CodecRefusal::SchemaMinorUnsupported { observed: 3, .. })
     ));
     PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
 }

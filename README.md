@@ -181,6 +181,19 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Canonical reference policy activation
+
+`fg protection set --policy-source <file>` now activates bounded repository DSL
+rules through the existing administrator-controlled policy transition. The
+same source or canonical frame can be supplied through the HTTP and MCP
+protection APIs. Rules can constrain reference names, namespaces and
+creation/deletion/update shape across ordinary publication and native merges;
+unsupported actor, ancestry, time and evidence facts refuse installation.
+Admission retains the selected compiled snapshot, decision and trace with the
+RCR, and administrative replacement preserves historical outcomes. The
+[protection guide](docs/MANDATORY_REVIEW_PROTECTION.md) describes complete
+replacement, exact version/epoch requirements, inspection and examples.
+
 ### Repository-side agent triage
 
 The checked-in `scripts/bv_compat.sh` launcher is an operational compatibility

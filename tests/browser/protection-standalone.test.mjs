@@ -8,6 +8,22 @@ const browser = new URL('../../crates/fgit-node/src/smart_http/server/browser/',
 const html = readFileSync(new URL('protection.html', browser), 'utf8');
 const script = readFileSync(new URL('protection-view.mjs', browser), 'utf8');
 import { harness, deferred, snapshot, actor, reviewer, token, hex } from './protection-standalone-fixture.mjs';
+import { refPolicy } from './protection-fixtures.mjs';
+
+test('standalone editor displays and preserves an observed ref policy unless clear-all is explicit', async () => {
+  const calls = [];
+  const h = harness({
+    async load() { this.observed = { ...snapshot(), policy: { administrators: [actor], branches: [], ref_policy: refPolicy() } }; return this.observed; },
+    async stage(replacement, clear) { calls.push({ replacement, clear }); },
+  });
+  await h.connect();
+  assert.match(h.get('policy').textContent, /Repository protection enabled/);
+  assert.ok(h.get('policy').textContent.includes(refPolicy().snapshot_id));
+  h.get('administrators').value = reviewer; await h.get('edit').fire('submit');
+  assert.deepEqual(calls[0], { replacement: { administrators: [reviewer], branches: [], ref_policy: refPolicy() }, clear: false });
+  h.get('clear').checked = true; await h.get('edit').fire('submit');
+  assert.deepEqual(calls[1], { replacement: { administrators: [reviewer], branches: [] }, clear: true });
+});
 
 test('standalone page binds the existing client to exactly the same repository API root', () => {
   for (const origin of ['https://forge.example', 'http://127.0.0.1:8123', 'http://localhost:8123', 'http://[::1]:8123']) {

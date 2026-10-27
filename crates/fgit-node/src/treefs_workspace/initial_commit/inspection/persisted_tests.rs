@@ -247,6 +247,7 @@ fn successful_inspection_grants_no_branch_protection_exception_and_pins_remain_s
                     expected_version: ExpectedVersion::NewStream,
                     expected_epoch: PolicyEpoch::FIRST,
                     protection: ReviewProtection {
+                        ref_policy: None,
                         administrators: vec![actor(1)],
                         branches: vec![ProtectedBranch {
                             required_approvals: 1,

@@ -13,10 +13,12 @@ listed reviewer to approve the exact native merge candidate. It supports current
 policy administrators, replacement, disabling, and ownership rotation. The
 [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md) also
 lets these administrators require exact-candidate results from explicitly named
-publishers, source branches, workflow graphs and jobs. The general compiled-policy
-language, review-count thresholds, glob rules, generic status-check receipts,
-signed-commit requirements, merge queues, remote identity and metadata ACLs
-remain separate. The existing compiled-policy storage remains separate.
+publishers, source branches, workflow graphs and jobs. Administrators may also
+activate a bounded compiled DSL over reference names, scopes and
+creation/deletion/update shape. Actor, authentication strength, ancestry, time,
+generic evidence, signed-commit, merge-queue and metadata ACL predicates remain
+outside that profile. Stored bytes become selected policy only through this
+administrator-authorized canonical transition.
 
 **Upgrade every writer before activating this profile.** Enforcement is in this
 version of the embedded node. Arbitrary application-supplied lower-level authority
@@ -53,6 +55,43 @@ reviewers and 32 workflow checks per branch are accepted. Each protected branch
 requires at least one reviewer or check. The first administrator set must contain the installing principal.
 Subsequent changes are authorized by the **old** administrator set. Supplying a
 new administrator list cannot authorize its own installation.
+
+### Activate a compiled reference policy
+
+`--policy-source <file>` compiles a regular UTF-8 file of at most 64 KiB.
+`--policy-frame <file>` installs the exact bounded canonical snapshot bytes.
+The options are mutually exclusive and can be combined with reviewer/check
+requirements, or used alone. For example, this policy prevents deletion of
+release tags while allowing other reference transitions subject to the other
+canonical gates:
+
+```text
+policy release_tags {
+  rule keep_release {
+    when ref.name matches "refs/tags/release-*" and ref.update == delete
+    then deny "release tags are retained"
+  }
+  default allow
+}
+```
+
+Pass the policy file to the same exact-version command:
+
+```sh
+fg protection set "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
+  --trusted-local --principal "$ADMIN_ID" \
+  --idempotency-key install-reference-policy-1 \
+  --expected-version "$POLICY_VERSION" --expected-epoch "$POLICY_EPOCH" \
+  --admin "$ADMIN_ID" --policy-source ./release-tags.policy
+```
+
+This is a complete replacement, including branch requirements and the optional
+DSL. Omitted components are removed; supply every review/check selector you
+intend to retain. Inspection includes the selected DSL identity and canonical
+frame as `ref_policy.frame_hex`. Source spelling and rule order do not replace
+canonical snapshot identity. Unsupported facts, malformed source, noncanonical
+frames and resource-limit violations refuse before publication. `--clear`
+removes both branch requirements and the DSL, while preserving ownership.
 
 Disabling is explicit and retains administrative ownership:
 

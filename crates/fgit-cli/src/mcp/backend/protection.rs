@@ -184,9 +184,12 @@ impl ProtectionTools {
         result.insert("installed".into(), Value::Bool(policy.is_some()));
         result.insert(
             "enabled".into(),
-            Value::Bool(policy.is_some_and(|p| !p.branches.is_empty())),
+            Value::Bool(policy.is_some_and(|p| !p.branches.is_empty() || p.ref_policy.is_some())),
         );
-        result.insert("policy".into(), policy.map_or(Value::Null, policy_value));
+        result.insert(
+            "policy".into(),
+            policy.map(policy_value).transpose()?.unwrap_or(Value::Null),
+        );
         result.insert("complete".into(), Value::Bool(true));
         result.insert("transaction_created".into(), Value::Bool(false));
         result.insert("published".into(), Value::Bool(false));
@@ -194,8 +197,26 @@ impl ProtectionTools {
     }
 }
 
-fn policy_value(policy: &ReviewProtection) -> Value {
-    object([
+fn policy_value(policy: &ReviewProtection) -> Result<Value, ToolError> {
+    policy
+        .validate()
+        .map_err(|_| ToolError::failed("invalid_protection_state"))?;
+    let ref_policy = match &policy.ref_policy {
+        Some(snapshot) => object([
+            ("snapshot_id", text(snapshot.id().to_string())),
+            ("profile", text("reference_facts_v1")),
+            ("mode", text("enforce")),
+            (
+                "frame_hex",
+                text(hex(&snapshot
+                    .encode()
+                    .map_err(|_| ToolError::failed("invalid_policy_frame"))?)),
+            ),
+        ]),
+        None => Value::Null,
+    };
+    Ok(object([
+        ("ref_policy", ref_policy),
         (
             "administrators",
             Value::Array(
@@ -259,7 +280,7 @@ fn policy_value(policy: &ReviewProtection) -> Value {
                     .collect(),
             ),
         ),
-    ])
+    ]))
 }
 
 /// Every tool this profile can serve, for the registry parity check.
@@ -282,7 +303,7 @@ pub(super) fn tool() -> Tool {
     );
     Tool {
         name: SHOW,
-        description: "Read complete required-review protection, administrators, version and policy epoch at one authenticated head. Absent policy differs from an installed policy with no protected branches. Read-only; does not grant administration or code access.",
+        description: "Read complete required-review protection, optional reference DSL snapshot and canonical frame, administrators, version and policy epoch at one authenticated head. Absent policy differs from an installed policy with no protected branches. Read-only; does not grant administration or code access.",
         schema: mutations::input_schema(properties, &[]),
     }
 }

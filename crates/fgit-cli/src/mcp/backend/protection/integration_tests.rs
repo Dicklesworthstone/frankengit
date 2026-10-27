@@ -141,6 +141,65 @@ fn assert_refused(value: &Value, code: &str) {
 }
 
 #[test]
+fn activated_ref_policy_roundtrips_mcp_restart_and_historical_retry() {
+    let mut source = String::from("policy retained { ");
+    for index in 0..40 {
+        source.push_str(&format!(
+            "rule r{index:02} {{ when ref.name == \"{}\" then deny \"retained\" }} ",
+            "a".repeat(900)
+        ));
+    }
+    source.push_str("default allow }");
+    assert!(source.len() > json::REQUEST_LIMITS.string);
+    assert!(source.len() < json::MAX_INPUT);
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::new(format);
+        let mut tools = fixture.open(7, ADMIN);
+        let mut server = start(&mut tools);
+        let mut original = command("install-dsl", "0", "1", ADMIN, false);
+        original.insert("ref_policy_source".into(), text(&source));
+        let installed = Value::Object(
+            result(&invoke(
+                &mut server,
+                &mut tools,
+                2,
+                write::NAME,
+                original.clone(),
+            ))
+            .clone(),
+        );
+        assert_committed(&installed);
+        let shown = invoke(&mut server, &mut tools, 3, SHOW, Object::new());
+        assert_eq!(result(&shown)["enabled"], Value::Bool(true));
+        let selected = result(&shown)["policy"].object().unwrap()["ref_policy"].clone();
+        let frame = selected.object().unwrap()["frame_hex"].clone();
+        assert!(frame.text().unwrap().len() > json::MAX_INPUT);
+        tools.close().unwrap();
+        let mut tools = fixture.open(7, ADMIN);
+        let mut server = start(&mut tools);
+        let shown = invoke(&mut server, &mut tools, 2, SHOW, Object::new());
+        assert_eq!(
+            result(&shown)["policy"].object().unwrap()["ref_policy"],
+            selected
+        );
+        let mut replacement = command("reinstall-exact-frame", "1", "2", ADMIN, false);
+        replacement.insert("ref_policy_frame_hex".into(), frame);
+        let replaced = invoke(&mut server, &mut tools, 3, write::NAME, replacement);
+        assert_committed(&Value::Object(result(&replaced).clone()));
+        let after = invoke(&mut server, &mut tools, 4, SHOW, Object::new());
+        assert_eq!(
+            result(&after)["policy"].object().unwrap()["ref_policy"],
+            selected
+        );
+        let retry = invoke(&mut server, &mut tools, 5, write::NAME, original);
+        assert_eq!(result(&retry), installed.object().unwrap());
+        let shown = invoke(&mut server, &mut tools, 6, SHOW, Object::new());
+        assert_eq!(result(&shown), result(&after));
+        tools.close().unwrap();
+    }
+}
+
+#[test]
 fn launch_grants_require_principal_for_write_or_recovery_and_never_imply_read() {
     let base = vec![
         "/unused".into(),
@@ -382,7 +441,13 @@ fn invoke(
         ),
     ]);
     server
-        .receive(tools, request.encode(json::MAX_INPUT).unwrap().as_bytes())
+        .receive(
+            tools,
+            request
+                .encode(protocol::MAX_MESSAGE_BYTES)
+                .unwrap()
+                .as_bytes(),
+        )
         .unwrap()
 }
 fn result(value: &Value) -> &Object {

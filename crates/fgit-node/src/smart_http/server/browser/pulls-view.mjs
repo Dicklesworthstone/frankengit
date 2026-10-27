@@ -634,7 +634,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
   administrators.maxLength = 32 * 33; administrators.rows = 4;
   named(editor, 'div', 'branches');
   button(editor, 'add-branch', 'Add protected branch');
-  const clear = field(editor, 'clear', 'Explicitly remove ALL branch protection (requires no branch rules)'); clear.type = 'checkbox';
+  const clear = field(editor, 'clear', 'Explicitly remove ALL branch protection and the repository ref policy (requires no branch rules)'); clear.type = 'checkbox';
   button(editor, 'preview', 'Preview all changes — do not prepare or send').type = 'submit';
   named(panel, 'pre', 'changes');
   button(panel, 'stage', 'Prepare this exact preview — do not send');
@@ -742,7 +742,8 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     return { replacement: protectionPolicy({ administrators: people(administrators),
       branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers),
         ...(row.required_checks.length ? { required_checks: row.required_checks } : {}),
-        ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}) })) }), clear: clear.checked };
+        ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}) })),
+      ...(!clear.checked && client.observed?.policy?.ref_policy ? { ref_policy: client.observed.policy.ref_policy } : {}) }), clear: clear.checked };
   }
   function requireDraftAccess() {
     if (!client.connected || client.recoveryOnly || client.pending || !client.observed?.policy) fail('Load an installed policy with an ordinary protection connection and no pending request.');
@@ -794,9 +795,10 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       `Object format: ${source.scope.format}\nSource head: ${source.head}\nPolicy version: ${source.version}\nPolicy epoch: ${source.epoch}\n` +
       `Complete policy:\n${JSON.stringify(source.policy, null, 2)}`);
     if (!source.policy) { status('No policy is installed. Remote bootstrap is forbidden; first installation is trusted-local only.'); return; }
+    if (source.policy.ref_policy) nodes.snapshot.textContent += displayText(`\nEnforced repository ref policy: ${source.policy.ref_policy.snapshot_id}\nThis editor preserves its exact snapshot unless clear-all is selected.`);
     administrators.value = source.policy.administrators.join('\n');
     for (const row of source.policy.branches) addRow(row);
-    status(source.policy.branches.length ? 'Complete installed policy loaded. Editing and previewing do not publish.'
+    status(source.policy.branches.length || source.policy.ref_policy ? 'Complete installed policy loaded. Editing and previewing do not publish.'
       : 'Installed policy has no protected branches. Administrators still exist; this is not an uninstalled policy.');
   }));
   administrators.addEventListener('input', changed); clear.addEventListener('change', changed);
@@ -807,11 +809,11 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
   on('editor', 'submit', () => run(async () => {
     requireDraftAccess(); preview = null; nodes.changes.textContent = '';
     const proposed = draft();
-    if (proposed.clear !== (proposed.replacement.branches.length === 0)) fail('An empty branch policy needs explicit clear-all confirmation; clear-all cannot accompany branch rules.');
+    if (proposed.clear !== (proposed.replacement.branches.length === 0 && !proposed.replacement.ref_policy)) fail('An empty protection policy needs explicit clear-all confirmation; clear-all cannot accompany branch rules or a ref policy.');
     const source = client.observed;
     preview = { ...proposed, source };
     nodes.changes.textContent = displayText(`PREVIEW ONLY — no request prepared or sent\nExpected version: ${source.version}\nExpected epoch: ${source.epoch}\n` +
-      `Clear ALL branch protection: ${proposed.clear}\n` +
+      `Clear ALL branch protection and ref policy: ${proposed.clear}\n` +
       `All changes:\n${JSON.stringify(protectionChanges(source.policy, proposed.replacement), null, 2)}\n` +
       `Complete replacement:\n${JSON.stringify(proposed.replacement, null, 2)}`);
     status('Review every administrator and branch/reviewer addition and removal. Omitted entries are deleted, not preserved. Prepare explicitly to save this exact preview.');

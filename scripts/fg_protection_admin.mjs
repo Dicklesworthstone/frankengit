@@ -23,7 +23,10 @@ or saved intents. Preparation reads the complete native policy and writes only
 an immutable local intent; it sends no mutation. Remote bootstrap is refused.
 A complete replacement preserves ONLY its explicitly listed administrators and
 branches, including required_checks selectors and any numeric required_approvals quorum.\nOmitted required_approvals requires all eligible reviewers; choose 1 through their count\nfor N-of-M approval, or 0 for a check-only branch. --clear is mandatory
-for removing all branch rules. Every successful
+for removing all branch rules when no repository ref policy remains. Preserve an
+active DSL policy by retaining its complete ref_policy descriptor from inspect,
+including its canonical frame_hex. Omitting it removes that DSL component.
+Every successful
 replacement advances the policy epoch and invalidates earlier approvals.
 Sending requires the original token and digest confirmation. A prior send marker
 also requires --retry; only identical bytes and the original key are retried.
@@ -90,6 +93,10 @@ export function intentSummary(intent) {
         ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}),
         ...(quorumChanged ? { required_approvals_before: beforeApprovals, required_approvals_after: afterApprovals } : {}) };
     }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || Object.hasOwn(row, 'required_approvals_after')),
+    ...(before.ref_policy || after.ref_policy ? { ref_policy: {
+      before: before.ref_policy?.snapshot_id ?? null, after: after.ref_policy?.snapshot_id ?? null,
+      changed: JSON.stringify(before.ref_policy ?? null) !== JSON.stringify(after.ref_policy ?? null),
+    } } : {}),
     clears_all_branch_protection: intent.clear, replacement_invalidates_earlier_approvals: true,
     mutation_sent_by_this_command: false, original_outcome: 'not_queried' };
 }

@@ -301,6 +301,16 @@ pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> 
 }
 
 pub(super) fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, String)>, ApiError> {
+    form_with_field_limit(bytes, maximum_fields, None)
+}
+
+/// Override one named field's decoded byte limit without changing the whole
+/// form, field-name, or default issue-body limits used by existing routes.
+pub(super) fn form_with_field_limit(
+    bytes: &[u8],
+    maximum_fields: usize,
+    field_limit: Option<(&str, usize)>,
+) -> Result<Vec<(String, String)>, ApiError> {
     if bytes.len() > MAX_FORM_BYTES {
         return Err(ApiError::too_large());
     }
@@ -326,7 +336,10 @@ pub(super) fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, S
         {
             return Err(ApiError::bad("invalid_field_name"));
         }
-        let value = decode(&field[equals + 1..], MAX_BODY_BYTES)?;
+        let maximum_value = field_limit
+            .filter(|(field_name, _)| *field_name == key)
+            .map_or(MAX_BODY_BYTES, |(_, maximum)| maximum);
+        let value = decode(&field[equals + 1..], maximum_value)?;
         result.try_reserve(1).map_err(|_| ApiError::unavailable())?;
         result.push((key, value));
     }

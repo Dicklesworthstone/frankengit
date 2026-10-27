@@ -4,8 +4,9 @@ use fgit_forge::{
     AggregateVersion, ExpectedVersion,
     event::protection::{
         MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-        MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck,
-        ReviewProtection,
+        MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES,
+        ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
+        compile_ref_policy, decode_ref_policy,
     },
 };
 use fgit_types::{DecisionOutcome, PolicyEpoch, PrincipalId, RefName};
@@ -17,12 +18,21 @@ use super::{
 };
 
 pub(super) const NAME: &str = "frankengit_protection_set";
+const REQUIRED_FIELDS: &[&str] = &[
+    "idempotency_key",
+    "expected_version",
+    "expected_epoch",
+    "administrators",
+    "branches",
+];
 const FIELDS: &[&str] = &[
     "idempotency_key",
     "expected_version",
     "expected_epoch",
     "administrators",
     "branches",
+    "ref_policy_source",
+    "ref_policy_frame_hex",
 ];
 const MAX_REF_BYTES: usize = fgit_types::MAX_REF_NAME_LEN;
 
@@ -135,10 +145,23 @@ pub(super) fn tool() -> Tool {
             ),
         ]),
     );
+    properties.insert("ref_policy_source".into(), object([
+        ("type", text("string")),
+        ("minLength", json::number(1)),
+        ("maxLength", json::number(MAX_REF_POLICY_SOURCE_BYTES as u64)),
+        ("description", text("Optional complete reference-only policy DSL. Compiled and validated before sealing; actor, ancestry, time and evidence predicates are unavailable and refuse. Mutually exclusive with ref_policy_frame_hex. Omitting both removes the DSL component on this COMPLETE replacement.")),
+    ]));
+    properties.insert("ref_policy_frame_hex".into(), object([
+        ("type", text("string")),
+        ("minLength", json::number(2)),
+        ("maxLength", json::number((MAX_REF_POLICY_FRAME_BYTES * 2) as u64)),
+        ("pattern", text("^(?:[0-9a-f]{2})+$")),
+        ("description", text("Exact canonical policy frame returned by protection_show, encoded as lowercase hex. Retains the selected compiled snapshot without needing its original source. Mutually exclusive with ref_policy_source. Protection requests carrying source/frame have a 256 KiB envelope; all other fields retain the ordinary MCP limits.")),
+    ]));
     Tool {
         name: NAME,
-        description: "Replace complete required-review and trusted-workflow protection at an exact version and policy epoch. Version zero requests first installation by the explicitly trusted local operator. Current canonical administrators authorize subsequent changes; the new list never authorizes itself. Original key and complete command must remain identical on retry. No Git refs move. Subject to the existing 64 KiB MCP input limit.",
-        schema: mutations::input_schema(properties, FIELDS),
+        description: "Replace complete required-review, trusted-workflow and optional reference DSL protection at an exact version and policy epoch. Omitted DSL source/frame removes that component. Version zero requests first installation by the explicitly trusted local operator. Current canonical administrators authorize subsequent changes; the new list never authorizes itself. Original key and complete command must remain identical on retry. No Git refs move. Source/frame requests have a bounded 256 KiB envelope; the other fields retain ordinary MCP limits.",
+        schema: mutations::input_schema(properties, REQUIRED_FIELDS),
     }
 }
 
@@ -177,6 +200,33 @@ fn principals(
 }
 pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
     require_fields(args, FIELDS)?;
+    let ref_policy = match (
+        args.get("ref_policy_source"),
+        args.get("ref_policy_frame_hex"),
+    ) {
+        (Some(_), Some(_)) => return Err(ToolError::invalid("ambiguous_ref_policy")),
+        (Some(value), None) => Some(
+            compile_ref_policy(
+                value
+                    .text()
+                    .ok_or(ToolError::invalid("invalid_ref_policy_source"))?,
+            )
+            .map_err(|_| ToolError::invalid("invalid_ref_policy"))?,
+        ),
+        (None, Some(value)) => {
+            let bytes = unhex(
+                value
+                    .text()
+                    .ok_or(ToolError::invalid("invalid_ref_policy_frame"))?,
+                MAX_REF_POLICY_FRAME_BYTES,
+            )?;
+            Some(
+                decode_ref_policy(&bytes)
+                    .map_err(|_| ToolError::invalid("invalid_ref_policy_frame"))?,
+            )
+        }
+        (None, None) => None,
+    };
     let expected_version = match mutations::number(args, "expected_version")? {
         0 => ExpectedVersion::NewStream,
         value => {
@@ -275,6 +325,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
     let protection = ReviewProtection {
         administrators,
         branches,
+        ref_policy,
     };
     protection
         .validate()
@@ -288,6 +339,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     let command = parse(args)?;
+    let requested_policy = policy_value(&command.protection)?;
     let session = mutations::session(backend, mutations::key(args)?)?;
     let principal = session
         .authenticated_session()
@@ -349,7 +401,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             Value::Null
         },
     );
-    result.insert("requested_policy".into(), policy_value(&command.protection));
+    result.insert("requested_policy".into(), requested_policy);
     result.insert("complete".into(), Value::Bool(true));
     result.insert("refs_changed".into(), Value::Bool(false));
     result.insert("delivery_acknowledged".into(), Value::Null);

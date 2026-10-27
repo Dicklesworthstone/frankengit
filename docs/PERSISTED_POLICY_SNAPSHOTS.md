@@ -2,7 +2,10 @@
 
 `fgit-admission::policy_bridge::persisted` stores and evaluates the existing
 `fgit-policy` compiled snapshots through the existing authority object store.
-It does not activate a policy or make the opt-in candidate-review gate mandatory.
+Immutable staging by this module does not activate a policy. The separate
+[canonical ref-policy activation path](CANONICAL_REF_POLICY_ACTIVATION.md)
+selects a bounded compiled snapshot through the existing administrator-owned
+protection aggregate and authority-head CAS.
 
 ## Exact identity before evaluation
 
@@ -60,16 +63,14 @@ not grant the right to read, activate or evaluate it for an authorized action.
 The storage owner must enforce access, and the admission owner must select the
 ID through authenticated repository policy before using its verdict.
 
-There is no configuration-selection or activation mutation in this change.
 Staged policy existence is not authority and creates no new retention root.
-This does not alter `merge apply`, receive-pack, source import or workspace
-publication. The opt-in `apply-reviewed` gate remains as documented in
-[the exact-candidate review workflow](EXACT_CANDIDATE_REVIEW_WORKFLOW.md).
-Repository-wide mandatory review protection remains unfinished: it must select
-and bind policy through authenticated configuration and enforce the same
-preconditions across every applicable publication path and every CAS replan.
+The activation path embeds exact canonical snapshot bytes in a protection
+event, selects it through the authenticated forge frontier, and enforces it
+in direct-ref and native-merge publication, including CAS replans. Existing
+review/check protection remains independently mandatory when installed.
 Principal facts, review receipts, graph facts and evaluation time still need
-independent provenance; the pure policy evaluator does not authenticate them.
+independent provenance; the pure policy evaluator does not authenticate them,
+and the first activation profile refuses predicates requiring them.
 
 ## Verification status
 

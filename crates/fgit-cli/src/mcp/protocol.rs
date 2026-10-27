@@ -7,6 +7,9 @@ use std::io::{self, BufRead, Write};
 pub const VERSION: &str = "2025-06-18";
 pub const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_RESULT: usize = 2 * 1024 * 1024;
+/// The protection tool can carry a complete 64 KiB snapshot as hex. Ordinary
+/// requests retain the shared 64 KiB input and 16 KiB string limits.
+pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 // The complete native tool registry includes independent conversation reads
 // and appends. Discovery remains finite and subject to MAX_RESPONSE.
 const MAX_TOOLS: usize = 64;
@@ -107,7 +110,7 @@ impl Server {
         })
     }
     pub fn receive(&mut self, backend: &mut impl ReadTools, input: &[u8]) -> Option<Value> {
-        let value = match json::parse(input) {
+        let value = match parse_request(input) {
             Ok(value) => value,
             Err(_) => return Some(error(Value::Null, -32700, "Invalid bounded JSON")),
         };
@@ -453,6 +456,65 @@ pub fn serve(
     }
     Ok(())
 }
+/// Only the explicitly named policy source/frame may exceed the ordinary
+/// string limit. Reparse a redacted envelope under the original limits so a
+/// larger policy cannot enlarge unrelated arguments, metadata, or tools.
+fn parse_request(input: &[u8]) -> Result<Value, &'static str> {
+    match json::parse(input) {
+        Ok(value) => return Ok(value),
+        Err("input_limit" | "string_limit") => {}
+        Err(error) => return Err(error),
+    }
+    let value = json::parse_with(
+        input,
+        json::Limits {
+            input: MAX_MESSAGE_BYTES,
+            string: fgit_forge::event::protection::MAX_REF_POLICY_FRAME_BYTES * 2,
+            ..json::REQUEST_LIMITS
+        },
+    )?;
+    let mut envelope = value.clone();
+    let Value::Object(request) = &mut envelope else {
+        return Err("policy_request_required");
+    };
+    if request.get("method").and_then(Value::text) != Some("tools/call") {
+        return Err("policy_request_required");
+    }
+    let Some(Value::Object(params)) = request.get_mut("params") else {
+        return Err("policy_request_required");
+    };
+    if params.get("name").and_then(Value::text) != Some("frankengit_protection_set") {
+        return Err("policy_request_required");
+    }
+    let Some(Value::Object(arguments)) = params.get_mut("arguments") else {
+        return Err("policy_request_required");
+    };
+    let (field, maximum) = match (
+        arguments.contains_key("ref_policy_source"),
+        arguments.contains_key("ref_policy_frame_hex"),
+    ) {
+        (true, false) => (
+            "ref_policy_source",
+            fgit_forge::event::protection::MAX_REF_POLICY_SOURCE_BYTES,
+        ),
+        (false, true) => (
+            "ref_policy_frame_hex",
+            fgit_forge::event::protection::MAX_REF_POLICY_FRAME_BYTES * 2,
+        ),
+        _ => return Err("one_policy_input_required"),
+    };
+    if arguments
+        .get(field)
+        .and_then(Value::text)
+        .is_none_or(|text| text.len() > maximum)
+    {
+        return Err("policy_string_limit");
+    }
+    arguments.insert(field.into(), text(""));
+    json::parse(envelope.encode(json::MAX_INPUT)?.as_bytes())?;
+    Ok(value)
+}
+
 fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     let mut message = Vec::new();
     loop {
@@ -472,10 +534,10 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
         }
         let end = buffer.iter().position(|b| *b == b'\n');
         let take = end.unwrap_or(buffer.len());
-        if take > json::MAX_INPUT.saturating_sub(message.len()) {
+        if take > MAX_MESSAGE_BYTES.saturating_sub(message.len()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "MCP message exceeds 64 KiB",
+                "MCP message exceeds 256 KiB",
             ));
         }
         message
@@ -689,3 +751,6 @@ mod tests {
 
 #[cfg(test)]
 mod mutation_tests;
+
+#[cfg(test)]
+mod protection_tests;

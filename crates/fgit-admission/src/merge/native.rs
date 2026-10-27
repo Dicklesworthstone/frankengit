@@ -34,6 +34,7 @@ mod metadata;
 #[cfg(test)]
 mod metadata_read_tests;
 pub mod objects;
+pub mod policy_preparation;
 pub mod prepare;
 pub mod progress;
 pub mod protection;
@@ -617,7 +618,7 @@ where
             }) {
                 return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
             }
-            let prepared = prepare_event(
+            let mut prepared = prepare_event(
                 context,
                 &intent.event,
                 &closure,
@@ -627,6 +628,17 @@ where
                 &resolved,
             )
             .map_err(ProjectionFailure::Refuse)?;
+            protection::attach_prepared_policy_at(
+                store,
+                cx,
+                context,
+                &basis,
+                &resolved,
+                &mut prepared,
+                crate::evidence::RefPolicyPublication::NativeMerge,
+                &|| projection.merge_checkpoint(cx).is_err(),
+            )
+            .await?;
             if let Some(package) = sealed {
                 let record = &prepared.materialization.record;
                 let expected = CommitEvidence {

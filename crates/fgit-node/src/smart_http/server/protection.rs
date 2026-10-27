@@ -10,8 +10,8 @@ use fgit_admission::merge::native::protection::ProtectionState;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
     MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-    MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck,
-    ReviewProtection,
+    MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, ProtectedBranch, ProtectionCommand,
+    RequiredWorkflowCheck, ReviewProtection, compile_ref_policy, decode_ref_policy,
 };
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, ForgeEventPayload};
 use fgit_types::{
@@ -22,7 +22,8 @@ use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
 
 use super::super::drive_request_while;
 use super::issues::{
-    ApiError, Reply, admission_error, parse_decimal, parse_form, parse_snapshot, quote, read_form,
+    ApiError, Reply, admission_error, parse_decimal, parse_form, parse_form_with_field_limit,
+    parse_snapshot, quote, read_form,
 };
 use super::{Profile, Status, retry_key};
 use crate::{
@@ -32,7 +33,7 @@ use crate::{
 const ROUTE: &str = "/api/v1/protection";
 const MAX_COMMAND_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_COMMAND_FIELDS: usize = 3
+const MAX_COMMAND_FIELDS: usize = 5
     + MAX_POLICY_ADMINISTRATORS
     + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS + 1);
 
@@ -270,11 +271,17 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
         return Err(ApiError::too_large());
     }
     let (mut expected_version, mut expected_epoch, mut clear) = (None, None, None);
+    let mut ref_policy = None;
     let mut administrators = BTreeSet::new();
     let mut quorums = BTreeMap::<RefName, u16>::new();
     let mut branches: BTreeMap<RefName, (BTreeSet<PrincipalId>, BTreeSet<RequiredWorkflowCheck>)> =
         BTreeMap::new();
-    for (name, value) in parse_form(bytes, MAX_COMMAND_FIELDS)? {
+    for (name, value) in parse_form_with_field_limit(
+        bytes,
+        MAX_COMMAND_FIELDS,
+        "ref_policy_frame_hex",
+        2 * MAX_REF_POLICY_FRAME_BYTES,
+    )? {
         match name.as_str() {
             "expected_version" => {
                 set_once(&mut expected_version, parse_decimal(&value)?)?;
@@ -354,6 +361,18 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
                     return Err(ApiError::too_large());
                 }
             }
+            "ref_policy_source" => {
+                let snapshot =
+                    compile_ref_policy(&value).map_err(|_| ApiError::bad("invalid_ref_policy"))?;
+                set_once(&mut ref_policy, snapshot)?;
+            }
+            "ref_policy_frame_hex" => {
+                let bytes = hex_bytes(&value, MAX_REF_POLICY_FRAME_BYTES)
+                    .map_err(|_| ApiError::bad("invalid_ref_policy_frame"))?;
+                let snapshot = decode_ref_policy(&bytes)
+                    .map_err(|_| ApiError::bad("invalid_ref_policy_frame"))?;
+                set_once(&mut ref_policy, snapshot)?;
+            }
             "clear" => {
                 if value != "true" {
                     return Err(ApiError::bad("invalid_clear"));
@@ -379,13 +398,14 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
     expected_epoch
         .next()
         .map_err(|_| ApiError::bad("epoch_exhausted"))?;
-    if branches.is_empty() != clear.is_some() {
+    if (branches.is_empty() && ref_policy.is_none()) != clear.is_some() {
         return Err(ApiError::bad("explicit_protection_replacement_required"));
     }
     if quorums.keys().any(|name| !branches.contains_key(name)) {
         return Err(ApiError::bad("approval_count_without_branch"));
     }
     let protection = ReviewProtection {
+        ref_policy,
         administrators: administrators.into_iter().collect(),
         branches: branches
             .into_iter()
@@ -481,6 +501,16 @@ fn binding(node: &OneNode) -> String {
 
 fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
     protection.validate().map_err(|_| ApiError::unavailable())?;
+    let ref_policy = match &protection.ref_policy {
+        Some(snapshot) => format!(
+            "{{\"snapshot_id\":{},\"profile\":\"reference_facts_v1\",\"mode\":\"enforce\",\"frame_hex\":{}}}",
+            quote(&snapshot.id().to_string()),
+            quote(&hex(&snapshot
+                .encode()
+                .map_err(|_| ApiError::unavailable())?)),
+        ),
+        None => "null".to_owned(),
+    };
     let administrators = protection
         .administrators
         .iter()
@@ -512,7 +542,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
             .collect::<Vec<_>>()
             .join(",");
     Ok(format!(
-        "{{\"administrators\":[{administrators}],\"branches\":[{branches}]}}"
+        "{{\"administrators\":[{administrators}],\"branches\":[{branches}],\"ref_policy\":{ref_policy}}}"
     ))
 }
 
@@ -532,7 +562,7 @@ fn snapshot(node: &OneNode, selected: &ProtectionState) -> Result<String, ApiErr
         (
             event.version.get(),
             true,
-            !change.protection.branches.is_empty(),
+            !change.protection.branches.is_empty() || change.protection.ref_policy.is_some(),
             policy_json(&change.protection)?,
         )
     } else {

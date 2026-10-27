@@ -205,6 +205,7 @@ fn reviewed_resolved_squash_publishes_one_atomic_transition_and_retries_after_re
                     expected_version: ExpectedVersion::NewStream,
                     expected_epoch: PolicyEpoch::FIRST,
                     protection: ReviewProtection {
+                        ref_policy: None,
                         administrators: vec![actor(1)],
                         branches: vec![ProtectedBranch {
                             required_approvals: 1,

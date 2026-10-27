@@ -68,6 +68,7 @@ fn install(node: &OneNode, required: &RequiredWorkflowCheck, key: &[u8]) -> Prot
             .unwrap_or(ExpectedVersion::NewStream),
         expected_epoch: selected.policy_epoch,
         protection: ReviewProtection {
+            ref_policy: None,
             administrators: vec![publisher()],
             branches: ["main", "release"]
                 .into_iter()
@@ -300,6 +301,7 @@ fn configured_checks_bind_exact_candidates_and_latest_publisher_results_on_every
             // An older full-policy replacement cannot remove a newly installed check.
             let stale_clear = ProtectionCommand {
                 protection: ReviewProtection {
+                    ref_policy: None,
                     administrators: vec![publisher()],
                     branches: Vec::new(),
                 },

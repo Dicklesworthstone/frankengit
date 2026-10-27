@@ -20,6 +20,7 @@ fn protection_context(f: &Fixture, who: u8, key: &[u8]) -> AdmissionContext {
 
 fn protection_policy(names: &[&[u8]], administrators: &[u8], reviewers: &[u8]) -> ReviewProtection {
     let mut policy = ReviewProtection {
+        ref_policy: None,
         administrators: administrators.iter().copied().map(actor).collect(),
         branches: names
             .iter()

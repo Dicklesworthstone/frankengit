@@ -37,6 +37,14 @@ pub(super) fn parse_form(
 ) -> Result<Vec<(String, String)>, ApiError> {
     request::form(bytes, maximum_fields)
 }
+pub(super) fn parse_form_with_field_limit(
+    bytes: &[u8],
+    maximum_fields: usize,
+    field_name: &str,
+    maximum_value: usize,
+) -> Result<Vec<(String, String)>, ApiError> {
+    request::form_with_field_limit(bytes, maximum_fields, Some((field_name, maximum_value)))
+}
 pub(super) fn parse_decimal(text: &str) -> Result<u64, ApiError> {
     request::decimal(text)
 }

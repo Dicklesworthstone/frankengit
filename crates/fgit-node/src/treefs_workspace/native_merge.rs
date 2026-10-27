@@ -64,6 +64,35 @@ pub(in crate::treefs_workspace) fn bundle_merge_intent(
 }
 
 impl OneNode {
+    /// Compute the original sealed-package API's exact evidence under the
+    /// current canonical policy. This read-only preparation validates native
+    /// objects and review/check gates but neither seals nor publishes a request.
+    /// A later publication independently checks the same evidence; a policy or
+    /// ref change can make it stale. The optional digest selects the existing
+    /// workspace-bound seal profile; it does not claim workspace ownership.
+    pub async fn prepare_sealed_merge_evidence_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        sealed: &SealedMerge<'_>,
+        workspace_snapshot: Option<[u8; 32]>,
+    ) -> Result<
+        fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
+        AdmissionError,
+    > {
+        let projection = NodeNativeMergeProjection {
+            node: self,
+            inner: self.durable_admission_projection(context)?,
+            object_limits: MergeObjectLimits::default(),
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
+        };
+        fgit_admission::merge::native::policy_preparation::prepare_sealed_native_merge_evidence_async(
+            &self.authority, request.authority(), context, sealed, workspace_snapshot, &projection,
+        ).await
+    }
+
     /// Native continuation of the original sealed-package node API. Preserve
     /// its request identity, but use the same native-object validation and
     /// coupled Ref + Forge + Outbox publication as the reviewed-intent API.

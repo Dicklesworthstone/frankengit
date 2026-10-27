@@ -246,6 +246,7 @@ where
         .await
         .map_err(infrastructure)?;
     if let Some(policy) = selected.protection() {
+        enforce_installed_snapshot(policy, refs, &effects.refs)?;
         let has_protected = effects.refs.keys().any(|name| {
             policy
                 .branch(name)
@@ -343,9 +344,20 @@ where
             .map_err(ProjectionFailure::Unavailable)?;
     if let Some(selected) = selected {
         let branches = review_branches(&selected);
-        evidence
-            .record_ref_policies(context, basis, current, layout, fold, branches)
-            .map_err(ProjectionFailure::Refuse)?;
+        match selected.protection().and_then(|p| p.ref_policy.as_ref()) {
+            Some(snapshot) => evidence.record_activated_policy(
+                context,
+                basis,
+                current,
+                layout,
+                fold,
+                branches,
+                snapshot.clone(),
+                crate::evidence::RefPolicyPublication::Direct,
+            ),
+            None => evidence.record_ref_policies(context, basis, current, layout, fold, branches),
+        }
+        .map_err(ProjectionFailure::Refuse)?;
     }
     live(cancelled).map_err(infrastructure)?;
     Ok(evidence)
@@ -369,10 +381,183 @@ where
     let selected = read_at(store, cx, basis, cancelled)
         .await
         .map_err(infrastructure)?;
+    // A historical 1.1 record may not substitute for a receipt from an epoch
+    // with an activated DSL snapshot.
+    if selected
+        .protection()
+        .is_some_and(|p| p.ref_policy.is_some())
+    {
+        return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+    }
     record
         .verify_provenance(basis, current, layout, &review_branches(&selected))
         .map_err(ProjectionFailure::Unavailable)?;
     live(cancelled).map_err(infrastructure)
+}
+
+/// Validate the evidence version and exact policy selected by its original
+/// authenticated publication basis. No current policy reinterprets history.
+pub async fn verify_policy_decision_record_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    current: &crate::CanonicalRefState,
+    layout: fgit_types::RootLayoutVersion,
+    record: &crate::evidence::PolicyDecisionRecord,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    match record {
+        crate::evidence::PolicyDecisionRecord::Legacy(_) => {
+            return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+        }
+        crate::evidence::PolicyDecisionRecord::Evaluated(record) => {
+            return verify_direct_decision_evidence_at(
+                store, cx, basis, current, layout, record, cancelled,
+            )
+            .await;
+        }
+        crate::evidence::PolicyDecisionRecord::Activated(record) => {
+            let selected = read_at(store, cx, basis, cancelled)
+                .await
+                .map_err(infrastructure)?;
+            let snapshot = selected
+                .protection()
+                .and_then(|p| p.ref_policy.as_ref())
+                .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+            record
+                .verify_provenance(
+                    basis,
+                    current,
+                    layout,
+                    &review_branches(&selected),
+                    snapshot,
+                )
+                .map_err(ProjectionFailure::Unavailable)?;
+        }
+    }
+    live(cancelled).map_err(infrastructure)
+}
+
+/// Historical 1.0 evidence remains valid only where no activated DSL selected
+/// an additional ref decision. Metadata-only records do not call this gate.
+pub async fn verify_legacy_ref_policy_absence_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let selected = read_at(store, cx, basis, cancelled)
+        .await
+        .map_err(infrastructure)?;
+    if selected
+        .protection()
+        .is_some_and(|p| p.ref_policy.is_some())
+    {
+        return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+    }
+    live(cancelled).map_err(infrastructure)
+}
+
+/// Bind the installed DSL decision into a completely folded native/legacy
+/// merge before any immutable evidence or RCR is staged. Metadata operations
+/// have no ref effects and are deliberately outside the DSL ref-policy scope.
+pub async fn attach_prepared_policy_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    resolved: &NativeMergeBasis,
+    prepared: &mut crate::merge::PreparedNativeMerge,
+    publication: crate::evidence::RefPolicyPublication,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let selected = if publication == crate::evidence::RefPolicyPublication::Direct {
+        enforce_direct_selected_at(
+            store,
+            cx,
+            basis,
+            resolved.refs.refs(),
+            &prepared.fold,
+            cancelled,
+        )
+        .await?
+        .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?
+    } else {
+        if !matches!(
+            prepared.event.events.as_slice(),
+            [ForgeEvent {
+                payload: ForgeEventPayload::MergeCommittedNative(_),
+                ..
+            }]
+        ) {
+            return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+        }
+        read_at(store, cx, basis, cancelled)
+            .await
+            .map_err(infrastructure)?
+    };
+    if let Some(snapshot) = selected.protection().and_then(|p| p.ref_policy.as_ref()) {
+        prepared
+            .evidence
+            .record_activated_policy(
+                context,
+                basis,
+                &resolved.refs,
+                resolved.root_layout,
+                &prepared.fold,
+                review_branches(&selected),
+                snapshot.clone(),
+                publication,
+            )
+            .map_err(ProjectionFailure::Refuse)?;
+        prepared.materialization.record.policy_decision_root = prepared
+            .evidence
+            .policy_decision()
+            .root()
+            .map_err(ProjectionFailure::Unavailable)?;
+    }
+    live(cancelled).map_err(infrastructure)
+}
+
+fn enforce_installed_snapshot(
+    policy: &ReviewProtection,
+    refs: &BTreeMap<RefName, GitOid>,
+    effects: &BTreeMap<RefName, fgit_reference::effect::RefEffect>,
+) -> Result<(), ProjectionFailure> {
+    let Some(snapshot) = &policy.ref_policy else {
+        return Ok(());
+    };
+    fgit_policy::reference_profile::validate_evaluation(snapshot, effects.keys())
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ResourceBudgetExceeded))?;
+    let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+    let id = source.pin(snapshot.clone());
+    let verdict = crate::policy_bridge::evaluate_effects_protection(
+        &source,
+        &id,
+        &crate::policy_bridge::SubjectCodeMap::default(),
+        PrincipalId::from_bytes([0; 16]),
+        crate::policy_bridge::default_principal_snapshot_id(),
+        refs,
+        effects,
+        fgit_policy::PolicyInstant::from_seconds(0),
+    )
+    .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+    if let Some(code) = verdict.refusal {
+        return Err(ProjectionFailure::Refuse(code));
+    }
+    Ok(())
 }
 
 fn review_branches(selected: &ProtectionState) -> Vec<RefName> {
@@ -425,6 +610,16 @@ where
         .await
         .map_err(infrastructure)?;
     let merge = intent.merge().map_err(infrastructure)?;
+    if let Some(policy) = selected.protection() {
+        enforce_installed_snapshot(
+            policy,
+            refs,
+            &BTreeMap::from([(
+                merge.target_ref.clone(),
+                fgit_reference::effect::RefEffect::Set(merge.merge_commit),
+            )]),
+        )?;
+    }
     if let Some(rule) = selected
         .protection()
         .and_then(|p| p.branch(&merge.target_ref))

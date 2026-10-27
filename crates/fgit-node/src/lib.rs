@@ -1597,7 +1597,28 @@ impl DurableAdmissionMaterializer {
             .bodies
             .verify_decision(&context, basis, request, fold)
             .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
-        if let PolicyDecisionRecord::Evaluated(record) = provider.bodies.policy_decision() {
+        if matches!(
+            provider.bodies.policy_decision(),
+            PolicyDecisionRecord::Legacy(_)
+        ) && fold
+            .effects()
+            .is_some_and(|effects| !effects.refs.is_empty())
+        {
+            fgit_admission::merge::native::protection::verify_legacy_ref_policy_absence_at(
+                authority,
+                cx,
+                basis,
+                is_cancelled,
+            )
+            .await
+            .map_err(|failure| {
+                AdmissionMaterializationRefusal::CanonicalRoot(match failure {
+                    fgit_admission::ProjectionFailure::Refuse(code)
+                    | fgit_admission::ProjectionFailure::Unavailable(code) => code,
+                })
+            })?;
+        }
+        if let Some(record) = provider.bodies.policy_decision().evaluated() {
             verify_policy_overlay_history_in(
                 authority,
                 cx,
@@ -1628,13 +1649,13 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::EvidenceInvalid,
                 ));
             }
-            fgit_admission::merge::native::protection::verify_direct_decision_evidence_at(
+            fgit_admission::merge::native::protection::verify_policy_decision_record_at(
                 authority,
                 cx,
                 basis,
                 &overlay,
                 layout,
-                record,
+                provider.bodies.policy_decision(),
                 is_cancelled,
             )
             .await
@@ -2808,19 +2829,14 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
                         Box::new(error),
                     ))
                 })?;
-        let previous_refs = prepared_basis.ref_state.refs().clone();
-        let prepared = fgit_admission::merge::prepare_native_merge(
-            context,
-            sealed,
-            tx_id,
-            attempt,
-            basis,
-            &fgit_admission::merge::NativeMergeBasis {
-                refs: prepared_basis.ref_state,
-                root_layout: prepared_basis.root_layout,
-                forge: delivery.forge,
-                outbox: delivery.outbox,
-            },
+        let resolved = fgit_admission::merge::NativeMergeBasis {
+            refs: prepared_basis.ref_state,
+            root_layout: prepared_basis.root_layout,
+            forge: delivery.forge,
+            outbox: delivery.outbox,
+        };
+        let mut prepared = fgit_admission::merge::prepare_native_merge(
+            context, sealed, tx_id, attempt, basis, &resolved,
         )
         .map_err(AsyncProjectionFailure::Refuse)?;
         if prepared.refs != *next_state {
@@ -2830,12 +2846,14 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
         }
         // Legacy digest packages carry no authenticated exact-candidate votes.
         // They cannot bypass a protected target through a different materializer.
-        fgit_admission::merge::native::protection::enforce_direct_at(
+        fgit_admission::merge::native::protection::attach_prepared_policy_at(
             authority,
             cx,
+            context,
             basis,
-            &previous_refs,
-            &prepared.fold,
+            &resolved,
+            &mut prepared,
+            fgit_admission::evidence::RefPolicyPublication::Direct,
             &is_cancelled,
         )
         .await?;

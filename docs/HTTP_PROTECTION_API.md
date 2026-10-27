@@ -1,15 +1,15 @@
 # Review protection administration over HTTP
 
 The native HTTP service can inspect and replace the repository's mandatory
-exact-candidate review policy. It calls the existing
+exact-candidate review policy and bounded reference-only DSL policy. It calls the existing
 `read_review_protection_in` and `admit_review_protection_durable_in` node APIs.
 The canonical policy supplies the current administrators. Credentials identify
 principals and grant transport access; they do not make a principal an
 administrator.
 
 This remains the bounded, loopback-only, operator-managed HTTP profile.
-TLS termination, public identity providers, organization/team IAM and the
-general compiled-policy language remain outside this interface. The underlying
+TLS termination, public identity providers, organization/team IAM and policies
+requiring unavailable actor, ancestry, time or evidence facts remain outside this interface. The underlying
 enforcement and writer-upgrade requirements are described in
 [MANDATORY_REVIEW_PROTECTION.md](MANDATORY_REVIEW_PROTECTION.md).
 
@@ -71,7 +71,12 @@ policy.
 
 A never-installed policy has `version: "0"`, `installed: false` and
 `policy: null`. An explicitly disabled policy retains its version and
-administrators, has an empty branch array and reports `enabled: false`.
+administrators, has an empty branch array, no DSL snapshot and reports `enabled: false`.
+An installed DSL snapshot alone reports `enabled: true`. The optional
+`policy.ref_policy` contains `snapshot_id`, `profile: "reference_facts_v1"`,
+`mode: "enforce"`, and the complete canonical `frame_hex`; it is null when no
+DSL component is installed. The frame permits exact replacement without
+recompiling or reconstructing the original source.
 Policy administrators are lowercase principal IDs. Each branch contains
 `reference_hex`, `required_reviewers` and `required_checks`; hex preserves exact
 native branch bytes, including non-UTF-8 names. Each check contains
@@ -102,9 +107,11 @@ Every request is a complete replacement:
 | Repeated `administrator` | One to 32 lowercase 32-hex-character principal IDs. |
 | Repeated `required_reviewer` | `REFERENCE_BYTES_HEX:PRINCIPAL_ID`, with lowercase hex and an exact `refs/heads/*` reference. |
 | Repeated `required_check` | `TARGET_REF_HEX:SOURCE_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; refs name exact `refs/heads/*`, publisher is a 32-character principal ID, graph is 64 lowercase hex characters, and job is exact UTF-8 encoded as hex. |
-| `clear` | Exactly `true` to disable branch requirements; mutually exclusive with reviewer and check entries. |
+| `ref_policy_source` | Optional UTF-8 policy source, at most 64 KiB, compiled and validated against the available reference facts before sealing. |
+| `ref_policy_frame_hex` | Optional canonical compiled policy frame as lowercase hex, at most 64 KiB decoded. Mutually exclusive with `ref_policy_source`. |
+| `clear` | Exactly `true` to disable branch and DSL requirements; mutually exclusive with reviewer, check and DSL entries. |
 
-Supply reviewers, workflow checks, or explicitly supply `clear=true`. Native
+Supply reviewers, workflow checks, a DSL policy, or explicitly supply `clear=true`. Native
 bounds are 64 branches, 32 reviewers and 32 checks per branch, 1,024 bytes per
 reference and 1,024 UTF-8 bytes per job. Job names must be nonempty and contain
 no control characters. Repeated sets are canonically sorted; duplicates refuse. Numeric strings cannot have leading
@@ -132,6 +139,13 @@ The policy transaction itself does not move Git refs. Preserve every intended
 check selector when replacing administrators or reviewers. The browser and
 operator helpers retain configured selectors; the form remains an explicit
 complete replacement, so omitted requirements are removed.
+This also applies to the DSL component: include `ref_policy_frame_hex` from the
+selected policy when retaining it while changing administrators or branch rules.
+Omitting both DSL fields removes it. Source and frame inputs select the same
+canonical snapshot; neither can grant administration or bypass current review
+and workflow requirements. The policy can constrain native reference names,
+scopes and creation/deletion/update shape. It cannot require a fact the node
+does not authenticate for this profile.
 
 ## Receipts and recovery
 

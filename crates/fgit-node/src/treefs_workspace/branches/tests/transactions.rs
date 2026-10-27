@@ -323,6 +323,7 @@ fn mandatory_review_protection_rejects_whole_transaction_not_just_protected_memb
             expected_version: ExpectedVersion::NewStream,
             expected_epoch: PolicyEpoch::FIRST,
             protection: ReviewProtection {
+                ref_policy: None,
                 administrators: vec![principal()],
                 branches: vec![ProtectedBranch {
                     required_approvals: 1,

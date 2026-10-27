@@ -52,6 +52,7 @@ impl Fixture {
                 expected_version: ExpectedVersion::NewStream,
                 expected_epoch: PolicyEpoch::try_new(1).unwrap(),
                 protection: ReviewProtection {
+                    ref_policy: None,
                     administrators: vec![ADMIN],
                     branches: vec![ProtectedBranch {
                         required_approvals: 1,
@@ -195,11 +196,12 @@ fn wrong_repository_incarnation_never_opens_a_policy_reader() {
 #[test]
 fn installed_disabled_policy_is_not_reinterpreted_as_no_policy() {
     let policy = ReviewProtection {
+        ref_policy: None,
         administrators: vec![ADMIN],
         branches: Vec::new(),
     };
     policy.validate().unwrap();
-    let value = policy_value(&policy);
+    let value = policy_value(&policy).unwrap();
     assert_eq!(
         value.object().unwrap()["branches"],
         Value::Array(Vec::new())

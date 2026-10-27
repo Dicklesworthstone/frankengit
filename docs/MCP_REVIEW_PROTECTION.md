@@ -5,6 +5,8 @@ inspect, replace and recover canonical required-review protection over the
 existing MCP stdio server. It calls the same native authority reader and durable
 admission used by `fg protection`. It also carries the explicit
 [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
+It can also activate the bounded reference-only DSL through the same canonical
+administrator transition and policy epoch.
 The existing code-agent profile gains no policy-administration capability.
 The required canonical check-policy extension introduces no dependency.
 
@@ -55,6 +57,10 @@ without selecting a newer head.
 
 Reading requires its own `--allow-read`; replacement does not perform a hidden
 read to fill missing expected values.
+An installed DSL is returned in `policy.ref_policy` with its `snapshot_id`,
+`profile: "reference_facts_v1"`, `mode: "enforce"` and exact canonical
+`frame_hex`. The field is null when absent. An active DSL reports `enabled: true`
+even when there are no required-review branches.
 
 ## Replace the complete policy
 
@@ -87,6 +93,24 @@ positive predecessor version. Epochs must be positive. Exhausted values,
 numeric JSON values, leading zeros, omitted predecessors and implicit “latest”
 selectors refuse before admission.
 
+Two optional, mutually exclusive string arguments select the DSL component:
+`ref_policy_source` compiles UTF-8 policy source; `ref_policy_frame_hex` accepts
+the exact canonical frame returned by inspection. The native source and decoded
+frame limits are each 64 KiB. This tool admits a 256 KiB whole-message envelope
+when carrying one policy source/frame, allowing the complete frame as 128 KiB
+of hexadecimal text. Only that named field receives the larger string bound;
+the remaining envelope is checked against the ordinary 64 KiB input and
+16 KiB string limits. Reference names, scopes and creation/deletion/update shape are the
+available facts. Actor, authentication-strength, ancestry, force intent, time,
+evidence and aggregate predicates refuse installation instead of receiving
+invented values. These rules apply to ordinary ref publication and native
+merges; they cannot bypass required reviews or checks.
+
+Replacement is complete: omitting both DSL arguments removes that component.
+Preserve the inspected `frame_hex` when changing only administrators or review
+requirements. Snapshot bytes and the actual decision are retained in canonical
+admission evidence; knowledge of a snapshot ID is not an activation grant.
+
 Principal IDs are canonical 32-character lowercase hexadecimal strings.
 Administrator and reviewer lists must be strictly sorted and unique; the
 administrator list must be nonempty. A protected branch may have no reviewers
@@ -105,16 +129,18 @@ respectively. The job is nonempty UTF-8, at most 1,024 bytes, without controls.
 Selectors are strictly sorted and unique by source-reference bytes, publisher,
 graph, then UTF-8 job bytes. Reads emit every selector unchanged.
 
-The existing MCP envelope limits also apply: 64 KiB per input, bounded JSON
-depth, item count and node count. A policy whose complete representation exceeds
-those limits must be managed through another admitted surface. Individual
+Other MCP requests retain the 64 KiB input limit. The policy-specific envelope
+retains the existing JSON depth, item-count and node-count bounds, and does not
+enlarge unrelated arguments or metadata. A policy whose complete representation
+exceeds those limits must be managed through another admitted surface. Individual
 native collection limits do not waive the transport budget.
 
 An explicit empty `branches` array disables required reviews and workflow
-checks while retaining administrator ownership and immutable history. Omitting
-`branches` never disables protection. Every listed reviewer remains mandatory;
-all configured workflow checks must also pass for the exact candidate. This
-surface adds no quorum, wildcard or override semantics.
+checks while retaining administrator ownership and immutable history. A DSL
+component may remain active independently. Omitting `branches` never disables
+protection. Required approval counts default to all listed reviewers, and all
+configured workflow checks must pass for the exact candidate. DSL name patterns
+do not alter the exact selectors used by the review/check component.
 
 First installation is authorized by the explicit trusted-operator write grant;
 the installing principal must be in the first administrator set. For every

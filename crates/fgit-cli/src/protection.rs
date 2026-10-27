@@ -3,8 +3,9 @@ use crate::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
     MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-    MAX_PROTECTED_BRANCHES, ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck,
-    ReviewProtection,
+    MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES,
+    ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
+    compile_ref_policy, decode_ref_policy,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
@@ -12,7 +13,11 @@ use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, PolicyEpoch, PrincipalId, RefName,
     RepositoryId, TenantId, TxId,
 };
-use std::{collections::BTreeMap, io::Write, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+    path::PathBuf,
+};
 
 const USAGE: &str = "usage: fg protection show <storage-root> <tenant-id> <repository-id> --trusted-local [--object-format sha1|sha256]\n\
 usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-local\n\
@@ -21,14 +26,18 @@ usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-lo
   [--require-reviewer <refs/heads/branch>:<id> ...]\n\
   [--require-approvals <refs/heads/branch>:<count> ...]\n\
   [--require-check <target-ref>:<source-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
+  [--policy-source <UTF-8-policy-file> | --policy-frame <canonical-policy-frame>]\n\
   [--clear]\n\
   [--object-format sha1|sha256]\n\
-Set replaces the COMPLETE policy. Listed reviewers are eligible approvers; the default requires all.\n\
+Set replaces the COMPLETE policy, including its optional DSL component. Omission removes that component.\n\
+--policy-source compiles bounded reference-only rules; --policy-frame installs the same canonical bytes.\n\
+The DSL may constrain reference names and creation/deletion; unavailable actor, ancestry, time and evidence facts refuse.\n\
+Listed reviewers are eligible approvers; the default requires all.\n\
 --require-approvals selects N approvals from that branch's eligible reviewers (1 through their count).\n\
 A check-only branch has zero required approvals. Opener and submitter cannot contribute votes.\n\
 Every check requires the latest trusted publisher result for the exact NEW commit.\n\
 Its source ref must still name that commit; the workflow graph and UTF-8 job name must match exactly.\n\
---clear disables branch protection but retains explicit administrators and immutable history.\n\
+--clear disables branch and DSL protection but retains explicit administrators and immutable history.\n\
 Current administrators authorize replacement; the new list does not authorize itself.\n\
 All embedded-node ref publications enforce installed rules. No per-mutation opt-in is needed.\n\
 First installation requires a trusted repository operator; this is not remote authentication.";
@@ -108,6 +117,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "--require-reviewer"
                         | "--require-approvals"
                         | "--require-check"
+                        | "--policy-source"
+                        | "--policy-frame"
                 ))
         {
             return Err(format!(
@@ -230,9 +241,33 @@ fn parse(args: &[String]) -> Result<Options, String> {
         };
         let expected_epoch = PolicyEpoch::try_new(number(get("--expected-epoch")?)?)
             .map_err(|_| "policy epoch must be positive")?;
-        if clear == !branches.is_empty() {
+        let ref_policy = match (
+            singleton.get("--policy-source"),
+            singleton.get("--policy-frame"),
+        ) {
+            (Some(_), Some(_)) => return Err("choose --policy-source or --policy-frame".into()),
+            (Some(path), None) => {
+                let bytes = policy_file(path, MAX_REF_POLICY_SOURCE_BYTES)?;
+                let source =
+                    std::str::from_utf8(&bytes).map_err(|_| "policy source must be UTF-8")?;
+                Some(
+                    compile_ref_policy(source)
+                        .map_err(|error| format!("invalid ref policy: {error}"))?,
+                )
+            }
+            (None, Some(path)) => {
+                let bytes = policy_file(path, MAX_REF_POLICY_FRAME_BYTES)?;
+                Some(
+                    decode_ref_policy(&bytes)
+                        .map_err(|error| format!("invalid policy frame: {error}"))?,
+                )
+            }
+            (None, None) => None,
+        };
+        if clear == (!branches.is_empty() || ref_policy.is_some()) {
             return Err(
-                "supply review/check requirements OR explicit --clear, never both/neither".into(),
+                "supply review/check/DSL requirements OR explicit --clear, never both/neither"
+                    .into(),
             );
         }
         if quorums.keys().any(|name| !branches.contains_key(name)) {
@@ -261,6 +296,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             protection: ReviewProtection {
                 administrators: admins,
                 branches,
+                ref_policy,
             },
         };
         command
@@ -282,6 +318,25 @@ fn parse(args: &[String]) -> Result<Options, String> {
         operation,
     })
 }
+fn policy_file(path: &str, maximum: usize) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect policy file: {error}"))?;
+    if !metadata.is_file() || metadata.len() > maximum as u64 {
+        return Err(format!(
+            "policy file must be a regular file of at most {maximum} bytes"
+        ));
+    }
+    let file =
+        std::fs::File::open(path).map_err(|error| format!("cannot open policy file: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read policy file: {error}"))?;
+    if bytes.len() > maximum {
+        return Err("policy file exceeded its byte limit while reading".into());
+    }
+    Ok(bytes)
+}
 fn graph_bytes(text: &str) -> Result<[u8; 32], String> {
     if text.len() != 64
         || !text
@@ -300,15 +355,26 @@ fn graph_bytes(text: &str) -> Result<[u8; 32], String> {
 fn bytes_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
-fn policy_json(policy: &ReviewProtection) -> String {
+fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
+    policy.validate().map_err(|error| error.to_string())?;
+    let ref_policy = match &policy.ref_policy {
+        Some(snapshot) => format!(
+            "{{\"snapshot_id\":{},\"profile\":\"reference_facts_v1\",\"mode\":\"enforce\",\"frame_hex\":{}}}",
+            quote(&snapshot.id().to_string()),
+            quote(&bytes_hex(
+                &snapshot.encode().map_err(|error| error.to_string())?
+            )),
+        ),
+        None => "null".into(),
+    };
     let ids = |ids: &[PrincipalId]| {
         ids.iter()
             .map(|id| quote(&id.to_string()))
             .collect::<Vec<_>>()
             .join(",")
     };
-    format!(
-        "{{\"administrators\":[{}],\"branches\":[{}]}}",
+    Ok(format!(
+        "{{\"administrators\":[{}],\"branches\":[{}],\"ref_policy\":{}}}",
         ids(&policy.administrators),
         policy
             .branches
@@ -336,15 +402,16 @@ fn policy_json(policy: &ReviewProtection) -> String {
                 )
             })
             .collect::<Vec<_>>()
-            .join(",")
-    )
+            .join(","),
+        ref_policy,
+    ))
 }
 fn publication_json(
     tx: TxId,
     terminal: &TerminalOutcome,
     command: &ProtectionCommand,
     cleanup: Option<&str>,
-) -> String {
+) -> Result<String, String> {
     let (outcome, committed, record, refusal, code) = match terminal.outcome {
         DecisionOutcome::Committed {
             repository_commit_id,
@@ -382,7 +449,7 @@ fn publication_json(
     } else {
         "null".into()
     };
-    format!(
+    Ok(format!(
         concat!(
             "{{\"type\":\"review_protection_publication\",\"schema_version\":1,\"tx_id\":{},",
             "\"decision_sequence\":{},\"outcome\":{},\"committed\":{},\"repository_commit_id\":{},",
@@ -400,10 +467,10 @@ fn publication_json(
         version,
         command.expected_epoch.get(),
         epoch,
-        policy_json(&command.protection),
+        policy_json(&command.protection)?,
         cleanup.is_none(),
         cleanup.map(quote).unwrap_or_else(|| "null".into())
-    )
+    ))
 }
 pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"]
@@ -428,10 +495,10 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         Set(TxId, TerminalOutcome),
     }
     let result: Result<ResultValue, String> = match &options.operation {
-        Operation::Show => service.and_then(|()| node.runtime().block_on(node.read_review_protection_in(&request)).map_err(|e| e.to_string())).map(|state| {
-            let policy = state.protection().map(policy_json).unwrap_or_else(|| "null".into());
-            ResultValue::Show(format!("{{\"type\":\"review_protection\",\"schema_version\":1,\"source_head\":{},\"policy_epoch\":{},\"version\":{},\"installed\":{},\"policy\":{},\"node_closed\":true}}",
-                quote(&state.source_head.to_string()), state.policy_epoch.get(), state.version().map_or(0, AggregateVersion::get), state.event.is_some(), policy))
+        Operation::Show => service.and_then(|()| node.runtime().block_on(node.read_review_protection_in(&request)).map_err(|e| e.to_string())).and_then(|state| {
+            let policy = state.protection().map(policy_json).transpose()?.unwrap_or_else(|| "null".into());
+            Ok(ResultValue::Show(format!("{{\"type\":\"review_protection\",\"schema_version\":1,\"source_head\":{},\"policy_epoch\":{},\"version\":{},\"installed\":{},\"policy\":{},\"node_closed\":true}}",
+                quote(&state.source_head.to_string()), state.policy_epoch.get(), state.version().map_or(0, AggregateVersion::get), state.event.is_some(), policy)))
         }),
         Operation::Set { principal, key, command } => {
             let session = LoopbackReceiveSession::authenticated(*principal, key.clone());
@@ -456,7 +523,13 @@ pub fn run(args: &[String]) -> Result<u8, String> {
             let Operation::Set { command, .. } = &options.operation else {
                 return Err("policy result mismatch".into());
             };
-            let report = publication_json(tx, &terminal, command, cleanup.as_deref());
+            let report =
+                publication_json(tx, &terminal, command, cleanup.as_deref()).map_err(|error| {
+                    format!(
+                        "transaction {tx} has terminal {:?}; receipt rendering failed: {error}",
+                        terminal.outcome
+                    )
+                })?;
             write_terminal_receipt(&mut std::io::stdout().lock(), &report, tx, &terminal)
                 .map_err(|e| format!("{e}; cleanup: {cleanup:?}"))?;
             if let Some(error) = cleanup {

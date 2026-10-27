@@ -9,6 +9,67 @@ pub const MAX_PROTECTED_BRANCHES: usize = 64;
 pub const MAX_POLICY_ADMINISTRATORS: usize = 32;
 pub const MAX_BRANCH_REVIEWERS: usize = 32;
 pub const MAX_BRANCH_REQUIRED_CHECKS: usize = 32;
+pub const MAX_REF_POLICY_SOURCE_BYTES: usize = fgit_policy::syntax::MAX_SOURCE_LEN;
+pub const MAX_REF_POLICY_FRAME_BYTES: usize =
+    fgit_policy::reference_profile::MAX_REFERENCE_POLICY_BYTES;
+
+/// Compile the exact bounded factual profile used by every administration
+/// transport. This does not stage or activate the resulting snapshot.
+pub fn compile_ref_policy(
+    source: &str,
+) -> Result<fgit_policy::PolicySnapshot, RefPolicyCompileRefusal> {
+    let snapshot = fgit_policy::compile_and_seal(source)
+        .map_err(|error| RefPolicyCompileRefusal::Compile(Box::new(error)))?;
+    fgit_policy::reference_profile::validate(&snapshot)
+        .map_err(RefPolicyCompileRefusal::Profile)?;
+    Ok(snapshot)
+}
+
+/// Accept only the exact canonical bytes and supported factual profile. The
+/// same decoder serves activation commands and historical event readers.
+pub fn decode_ref_policy(frame: &[u8]) -> Result<fgit_policy::PolicySnapshot, CodecRefusal> {
+    decode_ref_policy_with_limits(frame, fgit_codec::DecodeLimits::DEFAULT)
+}
+fn decode_ref_policy_with_limits(
+    frame: &[u8],
+    inherited: fgit_codec::DecodeLimits,
+) -> Result<fgit_policy::PolicySnapshot, CodecRefusal> {
+    if frame.len() > MAX_REF_POLICY_FRAME_BYTES {
+        return Err(invalid_native("review_protection.ref_policy_bytes"));
+    }
+    let snapshot = fgit_policy::PolicySnapshot::decode(
+        frame,
+        fgit_codec::DecodeLimits {
+            frame_bytes: (MAX_REF_POLICY_FRAME_BYTES as u64).min(inherited.frame_bytes),
+            // The canonical envelope reads its entire payload as one byte
+            // string. Literal sizes remain bounded by the reference profile.
+            byte_string_bytes: (MAX_REF_POLICY_FRAME_BYTES as u64).min(inherited.byte_string_bytes),
+            elements: 4096.min(inherited.elements),
+            depth: 32.min(inherited.depth.saturating_sub(1)),
+        },
+    )?;
+    if snapshot.encode()? != frame {
+        return Err(invalid_native("review_protection.ref_policy_noncanonical"));
+    }
+    fgit_policy::reference_profile::validate(&snapshot)
+        .map_err(|_| invalid_native("review_protection.ref_policy"))?;
+    Ok(snapshot)
+}
+
+#[derive(Debug)]
+pub enum RefPolicyCompileRefusal {
+    Compile(Box<fgit_policy::PolicyCompileRefusal>),
+    Profile(fgit_policy::reference_profile::ReferencePolicyRefusal),
+}
+impl core::fmt::Display for RefPolicyCompileRefusal {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Compile(error) => write!(out, "repository ref policy compilation: {error}"),
+            Self::Profile(error) => core::fmt::Display::fmt(error, out),
+        }
+    }
+}
+impl std::error::Error for RefPolicyCompileRefusal {}
 
 /// One administrator-selected trusted publisher and exact workflow job. The
 /// configured branch must still name the proposed NEW commit at admission.
@@ -51,6 +112,10 @@ pub struct ReviewProtection {
     pub administrators: Vec<PrincipalId>,
     /// Empty disables protection without erasing policy ownership/history.
     pub branches: Vec<ProtectedBranch>,
+    /// Optional complete repository ref policy. Its canonical bytes are retained
+    /// in the administrator-authorized event; immutable placement alone never
+    /// selects it. None disables the DSL component on complete replacement.
+    pub ref_policy: Option<fgit_policy::PolicySnapshot>,
 }
 fn principals(values: &[PrincipalId], maximum: usize) -> Result<(), CodecRefusal> {
     if values.is_empty() || values.len() > maximum || values.windows(2).any(|p| p[0] >= p[1]) {
@@ -61,6 +126,10 @@ fn principals(values: &[PrincipalId], maximum: usize) -> Result<(), CodecRefusal
 impl ReviewProtection {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
         principals(&self.administrators, MAX_POLICY_ADMINISTRATORS)?;
+        if let Some(snapshot) = &self.ref_policy {
+            fgit_policy::reference_profile::validate(snapshot)
+                .map_err(|_| invalid_native("review_protection.ref_policy"))?;
+        }
         if self.branches.len() > MAX_PROTECTED_BRANCHES
             || self.branches.windows(2).any(|p| p[0].name >= p[1].name)
         {
@@ -139,6 +208,17 @@ impl NativeProtectionEvent {
     }
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
+        // Kind 16 wraps an explicitly named historical protection encoding.
+        // This preserves every old byte when no custom policy is selected.
+        if self.protection.ref_policy.is_some() {
+            out.write_scalar(if self.protection.has_review_quorum() {
+                14_u32
+            } else if self.protection.has_required_checks() {
+                13_u32
+            } else {
+                9_u32
+            });
+        }
         out.write_opaque_id(self.actor.as_bytes());
         out.write_scalar(self.expected_epoch.get());
         out.write_scalar(self.protection.administrators.len() as u32);
@@ -169,7 +249,24 @@ impl NativeProtectionEvent {
                 }
             }
         }
+        if let Some(snapshot) = &self.protection.ref_policy {
+            out.write_bytes("review_protection.ref_policy", &snapshot.encode()?)?;
+        }
         Ok(())
+    }
+    pub(super) fn read_with_policy(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let (checks, quorum) = match input.read_scalar::<u32>("review_protection.base_kind")? {
+            9 => (false, false),
+            13 => (true, false),
+            14 => (true, true),
+            _ => return Err(invalid_native("review_protection.base_kind")),
+        };
+        let mut value = Self::read(input, checks, quorum)?;
+        let frame = input.read_bytes("review_protection.ref_policy")?;
+        let snapshot = decode_ref_policy_with_limits(frame, input.limits())?;
+        value.protection.ref_policy = Some(snapshot);
+        value.validate()?;
+        Ok(value)
     }
     pub(super) fn read(
         input: &mut Decoder<'_>,
@@ -260,6 +357,7 @@ impl NativeProtectionEvent {
             protection: ReviewProtection {
                 administrators,
                 branches,
+                ref_policy: None,
             },
         };
         value.validate()?;
@@ -354,3 +452,6 @@ mod tests;
 
 #[cfg(test)]
 mod quorum_tests;
+
+#[cfg(test)]
+mod ref_policy_tests;

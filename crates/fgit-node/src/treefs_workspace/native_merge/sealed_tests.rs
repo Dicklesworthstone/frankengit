@@ -471,6 +471,86 @@ fn apply(
     ))
 }
 
+#[test]
+fn original_sealed_api_prepares_activated_policy_evidence_without_changing_authority() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = new_node(&scratch, format);
+        let f = fixture(&node, &scratch, true);
+        let policy = fgit_forge::event::protection::compile_ref_policy(
+            "policy release_tags { rule tags { when ref.name matches \"refs/tags/**\" then deny \"release locked\" } default allow }",
+        ).unwrap();
+        let command = fgit_forge::event::protection::ProtectionCommand {
+            expected_version: ExpectedVersion::NewStream,
+            expected_epoch: snapshot(&node).basis().body().policy_epoch,
+            protection: fgit_forge::event::protection::ReviewProtection {
+                administrators: vec![principal()],
+                branches: Vec::new(),
+                ref_policy: Some(policy),
+            },
+        };
+        let request = node.request_context();
+        committed(
+            node.runtime()
+                .block_on(node.admit_review_protection_durable_in(
+                    &request,
+                    &session(b"activate-sealed-policy"),
+                    &command,
+                    AdmissionLimits::default(),
+                ))
+                .unwrap()
+                .1,
+        );
+        let mut offer = offered(&node, &f, 1, 7, b"activated-sealed");
+        let before = snapshot(&node);
+        let prepared = node
+            .runtime()
+            .block_on(node.prepare_sealed_merge_evidence_in(
+                &request,
+                &context(&node, b"activated-sealed"),
+                &offer.sealed(WorkspaceEpoch::from_u64(7)),
+                None,
+            ))
+            .unwrap();
+        assert_eq!(prepared.basis, before.basis().id());
+        assert_eq!(prepared.policy_epoch, before.basis().body().policy_epoch);
+        assert_ne!(
+            prepared.evidence.policy_decision_root,
+            offer.evidence.policy_decision_root
+        );
+        assert_eq!(
+            snapshot(&node).basis(),
+            before.basis(),
+            "preparation publishes no seal, decision or head"
+        );
+        offer.evidence = prepared.evidence;
+        let outcome = committed(apply(&node, &offer, b"activated-sealed", 7).unwrap());
+        assert_eq!(
+            seal_attempt_for(
+                &context(&node, b"activated-sealed"),
+                &offer.sealed(WorkspaceEpoch::from_u64(7))
+            )
+            .unwrap()
+            .derive()
+            .unwrap()
+            .0,
+            prepared.tx_id
+        );
+        assert_eq!(
+            apply(&node, &offer, b"activated-sealed", 7).unwrap(),
+            outcome
+        );
+        assert_eq!(snapshot(&node).snapshot().refs[&target_ref()], f.candidate);
+        node.shutdown().unwrap();
+        let reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        assert_eq!(
+            apply(&reopened, &offer, b"activated-sealed", 7).unwrap(),
+            outcome
+        );
+        reopened.shutdown().unwrap();
+    }
+}
+
 fn expected_entry(
     node: &OneNode,
     before: &MaterializedAdmission,

@@ -21,7 +21,8 @@ use crate::AdmissionContext;
 #[path = "policy_evidence.rs"]
 mod policy_decision;
 pub use policy_decision::{
-    EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord, RefPolicyEvaluation, RefPolicyInput,
+    ActivatedPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord,
+    RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
 };
 
 /// Stable refusal-record detail for a refusal supported by
@@ -397,9 +398,7 @@ impl DecisionEvidenceBodies {
         if self.policy_decision.base() != expected.policy_decision.base() {
             return Err(RefusalCode::EvidenceInvalid);
         }
-        if let PolicyDecisionRecord::Evaluated(record) = &self.policy_decision {
-            record.verify_decision(context, basis, fold)?;
-        }
+        self.policy_decision.verify_decision(context, basis, fold)?;
         expected.policy_decision = self.policy_decision.clone();
         if expected != *self {
             return Err(RefusalCode::EvidenceInvalid);
@@ -428,6 +427,32 @@ impl DecisionEvidenceBodies {
             review_branches,
         )?;
         self.policy_decision = PolicyDecisionRecord::Evaluated(Box::new(record));
+        Ok(())
+    }
+
+    pub(crate) fn record_activated_policy(
+        &mut self,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        current: &crate::CanonicalRefState,
+        layout: fgit_types::RootLayoutVersion,
+        fold: &TransactionFoldReport,
+        review_branches: Vec<fgit_types::RefName>,
+        snapshot: fgit_policy::PolicySnapshot,
+        publication: RefPolicyPublication,
+    ) -> Result<(), RefusalCode> {
+        let record = ActivatedPolicyDecisionEvidence::evaluate(
+            self.policy_decision.base().clone(),
+            context,
+            basis,
+            current,
+            layout,
+            fold,
+            review_branches,
+            snapshot,
+            publication,
+        )?;
+        self.policy_decision = PolicyDecisionRecord::Activated(Box::new(record));
         Ok(())
     }
     #[must_use]

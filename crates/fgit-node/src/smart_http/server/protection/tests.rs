@@ -5,6 +5,126 @@
 use super::*;
 use fgit_wire::smart_http::head;
 
+fn encoded_policy(source: &str) -> String {
+    source
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect()
+}
+
+#[test]
+fn http_reference_policy_source_and_frame_preserve_complete_canonical_replacement() {
+    let prefix = format!(
+        "expected_version=1&expected_epoch=2&administrator={}",
+        person(1)
+    );
+    let source = "policy retain { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained tag\" } default allow }";
+    let body = format!("{prefix}&ref_policy_source={}", encoded_policy(source));
+    let command = parse_command(body.as_bytes()).unwrap();
+    assert!(command.protection.branches.is_empty());
+    let snapshot = command.protection.ref_policy.as_ref().unwrap();
+    let frame = hex(&snapshot.encode().unwrap());
+    let from_frame = format!("{prefix}&ref_policy_frame_hex={frame}");
+    assert_eq!(parse_command(from_frame.as_bytes()).unwrap(), command);
+    let shown = policy_json(&command.protection).unwrap();
+    assert!(shown.contains(&snapshot.id().to_string()));
+    assert!(shown.contains(&format!("\"frame_hex\":\"{frame}\"")));
+    for invalid in [
+        format!("{body}&ref_policy_frame_hex={frame}"),
+        format!("{body}&ref_policy_source={}", encoded_policy(source)),
+        format!("{body}&clear=true"),
+        format!("{prefix}&ref_policy_frame_hex=00"),
+    ] {
+        assert!(parse_command(invalid.as_bytes()).is_err());
+    }
+    let cleared = parse_command(format!("{prefix}&clear=true").as_bytes()).unwrap();
+    assert!(cleared.protection.ref_policy.is_none());
+    assert_eq!(
+        cleared.protection.administrators,
+        command.protection.administrators
+    );
+}
+
+#[test]
+fn http_large_reference_policy_frame_roundtrips_without_expanding_other_form_limits() {
+    let prefix = format!(
+        "expected_version=1&expected_epoch=2&administrator={}",
+        person(1)
+    );
+    let literal = "a".repeat(900);
+    let mut source = String::from("policy large { ");
+    for index in 0..40 {
+        source.push_str(&format!(
+            "rule r{index:02} {{ when ref.name == \"{literal}\" then deny \"blocked\" }} "
+        ));
+    }
+    source.push_str("default allow }");
+    let source_form = format!("{prefix}&ref_policy_source={}", encoded_policy(&source));
+    assert!(source_form.len() < MAX_COMMAND_BYTES);
+    let command = parse_command(source_form.as_bytes()).unwrap();
+    let snapshot = command.protection.ref_policy.as_ref().unwrap();
+    let frame_hex = hex(&snapshot.encode().unwrap());
+    let old_field_limit = fgit_forge::event::issue::MAX_BODY_BYTES;
+    assert!(frame_hex.len() > old_field_limit);
+    assert!(frame_hex.len() <= 2 * MAX_REF_POLICY_FRAME_BYTES);
+    let frame_form = format!("{prefix}&ref_policy_frame_hex={frame_hex}");
+    assert!(frame_form.len() < MAX_COMMAND_BYTES);
+    assert_eq!(parse_command(frame_form.as_bytes()).unwrap(), command);
+    assert!(
+        policy_json(&command.protection)
+            .unwrap()
+            .contains(&frame_hex)
+    );
+
+    // The shared issue/PR parser still rejects the same oversized field. Only
+    // canonical policy-frame hex receives the protection route's larger bound.
+    assert_eq!(
+        parse_form(frame_form.as_bytes(), MAX_COMMAND_FIELDS)
+            .unwrap_err()
+            .code,
+        "resource_limit"
+    );
+    for name in ["body", "ref_policy_source", "administrator"] {
+        let form = format!("{prefix}&{name}={}", "a".repeat(old_field_limit + 1));
+        assert_eq!(
+            parse_command(form.as_bytes()).unwrap_err().code,
+            "resource_limit"
+        );
+    }
+    let oversized_frame = format!(
+        "{prefix}&ref_policy_frame_hex={}",
+        "a".repeat(2 * MAX_REF_POLICY_FRAME_BYTES + 1)
+    );
+    assert!(oversized_frame.len() < MAX_COMMAND_BYTES);
+    assert_eq!(
+        parse_command(oversized_frame.as_bytes()).unwrap_err().code,
+        "resource_limit"
+    );
+}
+
+#[test]
+fn http_reference_policy_refuses_unavailable_authenticated_facts_before_publication() {
+    for source in [
+        "policy malformed { default maybe }",
+        "policy unavailable { rule r { when principal.kind == human then allow } default deny \"no\" }",
+        "policy unavailable { rule r { when ref.force_requested then allow } default deny \"no\" }",
+        "policy unavailable { rule r { when ref.update == fast_forward then allow } default deny \"no\" }",
+    ] {
+        let body = format!("{}&ref_policy_source={}", form(), encoded_policy(source));
+        assert_eq!(
+            parse_command(body.as_bytes()).unwrap_err().code,
+            "invalid_ref_policy"
+        );
+    }
+    let permitted = format!(
+        "{}&ref_policy_source={}",
+        form(),
+        encoded_policy("policy valid { default allow }")
+    );
+    assert!(parse_command(permitted.as_bytes()).is_ok());
+}
+
 fn person(byte: u8) -> String {
     PrincipalId::from_bytes([byte; 16]).to_string()
 }

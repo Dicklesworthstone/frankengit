@@ -83,6 +83,7 @@ fn fixture(format: GitHashAlgorithm, before: u64, policy: bool) -> PreparedNativ
             expected_version: ExpectedVersion::NewStream,
             expected_epoch: epoch(before),
             protection: ReviewProtection {
+                ref_policy: None,
                 administrators: vec![actor],
                 branches: vec![ProtectedBranch {
                     required_approvals: 1,

@@ -138,6 +138,7 @@ pub mod eval;
 pub mod glob;
 pub mod program;
 pub mod protected_ref;
+pub mod reference_profile;
 pub mod rollout;
 pub mod syntax;
 

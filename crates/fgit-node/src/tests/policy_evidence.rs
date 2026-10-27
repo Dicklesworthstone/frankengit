@@ -2,7 +2,7 @@
 //! microbatch. These are native regressions, not a transport E2E claim.
 
 use super::*;
-use crate::{DurableAdmissionEvidence, read_policy_decision_in};
+use crate::{DurableAdmissionEvidence, LoopbackReceiveSession, read_policy_decision_in};
 use fgit_admission::evidence::PolicyDecisionRecord;
 use fgit_reference::effect::FoldBasis;
 use fgit_reference::intent::{Intent, RefIntent, Statement};
@@ -375,4 +375,148 @@ fn published_policy_evidence_reopens_replays_microbatch_overlays_and_rejects_orp
 
 fn fold_effect_delete(name: &RefName) -> BTreeMap<RefName, fgit_reference::effect::RefEffect> {
     BTreeMap::from([(name.clone(), fgit_reference::effect::RefEffect::Delete)])
+}
+
+#[test]
+fn activated_policy_refuses_legacy_evidence_downgrade_and_accepts_exact_new_receipt() {
+    let scratch = ScratchDirectory::new();
+    let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    let request = node.request_context();
+    let (context, mut model, _) = evidence_request(&node);
+    let object = node
+        .put_git_object(ObjectType::Blob, b"policy proof subject".to_vec())
+        .unwrap();
+    model.statements = vec![Statement {
+        intents: vec![Intent::Ref(RefIntent::Update {
+            name: RefName::try_new(b"refs/tags/topic").unwrap(),
+            expected: ExpectedRefState::Absent,
+            new: object.identity(),
+            force: false,
+        })],
+        mismatch_policy: MismatchPolicy::TxnAbort,
+    }];
+    for active in [false, true] {
+        if active {
+            let before = node
+                .runtime()
+                .block_on(node.materialize_admission_in(&request))
+                .unwrap();
+            let command = fgit_forge::event::protection::ProtectionCommand {
+                expected_version: fgit_forge::ExpectedVersion::NewStream,
+                expected_epoch: before.basis().body().policy_epoch,
+                protection: fgit_forge::event::protection::ReviewProtection {
+                    administrators: vec![context.principal_id],
+                    branches: Vec::new(),
+                    ref_policy: Some(
+                        fgit_forge::event::protection::compile_ref_policy(
+                            "policy p { default allow }",
+                        )
+                        .unwrap(),
+                    ),
+                },
+            };
+            let session = LoopbackReceiveSession::authenticated(
+                context.principal_id,
+                fgit_authority::IdempotencyKey::new(b"activate-downgrade-test".to_vec()).unwrap(),
+            );
+            let (_, outcome) = node
+                .runtime()
+                .block_on(node.admit_review_protection_durable_in(
+                    &request,
+                    &session,
+                    &command,
+                    AdmissionLimits::default(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                outcome.outcome,
+                fgit_types::DecisionOutcome::Committed { .. }
+            ));
+        }
+        let selected = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let current = CanonicalRefState::new_with_head_target(
+            selected.snapshot().refs.clone(),
+            selected.snapshot().head_target.clone().unwrap(),
+        )
+        .unwrap();
+        let fold = fgit_txn::IntentEvaluator::new().evaluate(
+            FoldBasis {
+                refs: current.refs(),
+                forge_positions: &BTreeMap::new(),
+                retention: &BTreeSet::new(),
+                outbox: &BTreeMap::new(),
+            },
+            &model,
+        );
+        let legacy = fgit_admission::evidence::DecisionEvidenceBodies::derive(
+            &context,
+            selected.basis(),
+            &model,
+            &fold,
+        )
+        .unwrap();
+        let mut candidates = vec![legacy];
+        if active {
+            candidates.push(
+                node.runtime()
+                    .block_on(
+                        fgit_admission::merge::native::protection::direct_decision_evidence_at(
+                            &node.authority,
+                            request.authority(),
+                            &context,
+                            selected.basis(),
+                            &current,
+                            selected.root_layout(),
+                            &model,
+                            &fold,
+                            &|| false,
+                        ),
+                    )
+                    .unwrap(),
+            );
+        }
+        for (index, bodies) in candidates.into_iter().enumerate() {
+            node.runtime()
+                .block_on(node.admission_materializer.stage_evidence_bodies_in(
+                    &node.authority,
+                    request.authority(),
+                    &bodies,
+                    &|| false,
+                ))
+                .unwrap();
+            let provider = DurableAdmissionEvidence::from_bodies(
+                context.clone(),
+                selected.basis(),
+                &model,
+                bodies,
+            )
+            .unwrap();
+            let observed =
+                node.runtime()
+                    .block_on(node.admission_materializer.read_decision_evidence_in(
+                        &node.authority,
+                        request.authority(),
+                        context.clone(),
+                        selected.basis(),
+                        &model,
+                        &fold,
+                        provider.commit_evidence_record(),
+                        &|| false,
+                    ));
+            if active && index == 0 {
+                assert!(matches!(
+                    observed,
+                    Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                        RefusalCode::EvidenceInvalid
+                    ))
+                ));
+            } else {
+                observed.unwrap();
+            }
+        }
+    }
+    node.shutdown().unwrap();
 }

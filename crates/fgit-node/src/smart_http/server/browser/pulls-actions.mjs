@@ -226,8 +226,20 @@ function protectionChecks(values) {
   if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('Duplicate required workflow check.');
   return result;
 }
+function protectionRefPolicy(value) {
+  protectionFields(value, ['snapshot_id', 'profile', 'mode', 'frame_hex']);
+  const id = opaque(value.snapshot_id);
+  if (!id.startsWith('frankengit/policy-snapshot/v1/') || value.profile !== 'reference_facts_v1' || value.mode !== 'enforce') {
+    fail('Unsupported repository ref policy descriptor.');
+  }
+  // The native decoder authenticates this frame's identity and factual profile.
+  // Preserve the exact observed bytes; this client does not evaluate policy.
+  unhex(value.frame_hex, 64 * 1024);
+  if (!value.frame_hex.length) fail('Empty repository ref policy frame.');
+  return { snapshot_id: id, profile: value.profile, mode: value.mode, frame_hex: value.frame_hex };
+}
 export function protectionPolicy(value) {
-  protectionFields(value, ['administrators', 'branches']);
+  protectionFields(value, ['administrators', 'branches', ...(Object.hasOwn(value, 'ref_policy') ? ['ref_policy'] : [])]);
   if (!Array.isArray(value.branches) || value.branches.length > 64) fail('Select at most 64 protected branches.');
   const branches = value.branches.map(row => {
     protectionFields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
@@ -244,7 +256,8 @@ export function protectionPolicy(value) {
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('Duplicate protected branch.');
-  return { administrators: protectionPeople(value.administrators), branches };
+  return { administrators: protectionPeople(value.administrators), branches,
+    ...(value.ref_policy !== undefined && value.ref_policy !== null ? { ref_policy: protectionRefPolicy(value.ref_policy) } : {}) };
 }
 export function protectionSnapshot(reply, expectedScope = null, expectedHead = null) {
   protectionFields(reply, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
@@ -254,7 +267,7 @@ export function protectionSnapshot(reply, expectedScope = null, expectedHead = n
   if (reply.type !== 'repository_review_protection' || reply.complete !== true || reply.transaction_created !== false || reply.published !== false ||
       reply.installed !== (version !== '0') || (expectedHead !== null && head !== snapshot(expectedHead))) fail('Invalid or moved protection snapshot.');
   const policy = reply.installed ? protectionPolicy(reply.policy) : null;
-  if ((!reply.installed && reply.policy !== null) || reply.enabled !== Boolean(policy?.branches.length)) fail('Inconsistent protection installation.');
+  if ((!reply.installed && reply.policy !== null) || reply.enabled !== Boolean(policy?.branches.length || policy?.ref_policy)) fail('Inconsistent protection installation.');
   return { scope, head, version, epoch, policy };
 }
 function protectionSource(value) {
@@ -286,10 +299,14 @@ export function protectionChanges(before, after) {
       ...(quorumChanged ? { required_approvals_before: oldApprovals, required_approvals_after: nextApprovals } : {}) });
   }
   return { administrators_added: difference(after.administrators, before.administrators),
-    administrators_removed: difference(before.administrators, after.administrators), branches };
+    administrators_removed: difference(before.administrators, after.administrators), branches,
+    ...(before.ref_policy || after.ref_policy ? { ref_policy: {
+      before: before.ref_policy?.snapshot_id ?? null, after: after.ref_policy?.snapshot_id ?? null,
+      changed: !protectionEqual(before.ref_policy ?? null, after.ref_policy ?? null),
+    } } : {}) };
 }
 function protectionBody(source, replacement, clear) {
-  if (typeof clear !== 'boolean' || clear !== (replacement.branches.length === 0)) fail('Empty protection requires explicit clear; clear cannot accompany branch rules.');
+  if (typeof clear !== 'boolean' || clear !== (replacement.branches.length === 0 && !replacement.ref_policy)) fail('Empty protection requires explicit clear; clear cannot accompany branch rules or a ref policy.');
   return form({ expected_version: source.version, expected_epoch: source.epoch,
     administrator: replacement.administrators,
     required_reviewer: replacement.branches.flatMap(row => row.required_reviewers.map(person => `${row.reference_hex}:${person}`)),
@@ -297,6 +314,7 @@ function protectionBody(source, replacement, clear) {
       `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(utf8.encode(check.job))}`)),
     required_approvals: replacement.branches.filter(row => Object.hasOwn(row, 'required_approvals'))
       .map(row => `${row.reference_hex}:${row.required_approvals}`),
+    ...(replacement.ref_policy ? { ref_policy_frame_hex: replacement.ref_policy.frame_hex } : {}),
     ...(clear ? { clear: 'true' } : {}) });
 }
 async function protectionIntent(value, crypto) {

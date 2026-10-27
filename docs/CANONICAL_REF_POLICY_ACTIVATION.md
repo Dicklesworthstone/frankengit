@@ -1,0 +1,134 @@
+# Canonically activated repository ref policy
+
+The `reference_facts_v1` profile makes a stored, administrator-selected DSL
+snapshot effective on ordinary ref publication and native merges. It is part
+of the existing complete review/check protection policy. It is not selected
+by a local file, an immutable object's existence, or the hidden-ref
+configuration `policy_root`.
+
+## Operator flow
+
+For a repository at protection version 0 and policy epoch 1, an operator can
+install a policy that makes release tags immutable:
+
+```text
+policy release_tags {
+  rule immutable_tags {
+    when ref.name matches "refs/tags/**" and ref.update == delete
+    then deny "release tags cannot be deleted"
+  }
+  default allow
+}
+```
+
+Use `fg protection show` to obtain the current version, epoch, administrators,
+review/check requirements and selected compiled snapshot. Use
+`fg protection set ... --policy-source <path>` to compile the source, or
+`--policy-frame <path>` to submit a previously stored canonical snapshot frame.
+Both paths use the same compiler/profile validator and exact frame decoder.
+HTTP and MCP protection administration accept the equivalent source or frame
+input and return the exact snapshot identity and canonical frame.
+
+Protection set remains a **complete replacement**: include the administrators,
+review requirements, checks and DSL policy intended for the next version.
+Omitting the DSL field selects `None`; it does not implicitly carry forward an
+old policy. Only the current administrators can replace or remove the policy.
+The version and epoch are exact preconditions, not hints to be refreshed after
+a race. First installation retains the existing trusted repository-operator
+bootstrap boundary. An asserted principal identifier is not remote login.
+
+## Supported facts and semantics
+
+The first profile accepts ordinary DSL boolean composition, ref-name/ref-scope
+selectors, and `create`, `delete`, or `update_unclassified` update kinds. Default
+allow/deny and bounded multiple rules are supported. Native ref names remain
+byte-oriented data; no caller name is interpolated into source. The policy
+engine's established deny-precedence semantics apply.
+
+An existing-to-existing ref update is `update_unclassified` because this gate
+does not authenticate ancestry. Actor/authentication/membership predicates,
+force intent, fast-forward/non-fast-forward, aggregate reads and accepted
+evidence predicates are rejected at installation, including negation and
+unreachable branches. Empty or invented facts never make those conditions
+evaluate successfully. Supporting these facts requires their own authenticated
+attempt-bound integration; source text cannot grant it.
+
+Policies apply to surviving ref effects, including creates/deletes and each
+driver-owned receive microbatch overlay. A metadata-only protection change is
+outside this ref-policy scope, so administrators can replace a deny-all policy.
+Identity/no-op operations with no surviving ref effects do not create a new
+ref-policy decision. Existing hidden-ref, capability, quota, native object,
+required-review and exact-check gates continue to apply independently.
+
+## Canonical selection and publication
+
+The existing `ReviewProtection` aggregate owns the complete settings and
+administrator list. Its exact-version transaction publishes a new event,
+forge-position root and next policy epoch in one authority-head CAS. The RCR
+is authorized under the predecessor epoch, while the successor head selects
+the next epoch. CAS loss repeats selection/validation against the new basis;
+it cannot silently rebase the submitted policy version or epoch.
+
+Forge event kind 16 retains the exact canonical compiled policy frame and an
+explicit historical review/check/quorum base kind. The frame is bounded,
+strictly decoded, re-identified and re-encoded before acceptance. Existing
+kinds 9, 13 and 14 retain their original bytes when no DSL policy is selected.
+Older readers refuse kind 16 rather than treating the new policy as absent.
+Embedding the frame retains it with the existing forge event; there is no new
+mutable authority, policy database or dangling snapshot retention root.
+
+The shared direct-ref materializer evaluates the selected snapshot before
+staging evidence and before CAS. The shared native merge driver independently
+does the same for merge commits, fast-forwards and squash publication. Legacy
+merge packages use the stricter direct-ref protection path. Native merge
+review/check validation remains in its existing gate; a DSL allow never
+substitutes for a review or check.
+
+## Decision evidence and historical recovery
+
+Policy-decision schema 1.2 embeds the existing 1.1 structural receipt plus the
+activated snapshot, its identity, actual verdict and deterministic rule trace.
+It distinguishes direct publication from native merge publication. The latter
+requires the coupled merge/ref fold; a direct write cannot label itself a
+reviewed merge. Every native ref value and the exact pre-decision ref root are
+retained. The snapshot is evaluated from stored bytes during replay, without
+recompiling source or consulting current policy.
+
+The durable reader authenticates the original authority/forge selection and
+requires the recorded snapshot to equal the selected snapshot. It rejects a
+self-consistent alternative allowing policy and rejects 1.0/1.1-only ref evidence for
+an original basis that had an activated policy. Microbatch overlays retain the
+existing canonical decision-history checks. Historical 1.0 and 1.1 records
+keep their original identities and interpretation.
+
+Original sealed-package clients can call
+`OneNode::prepare_sealed_merge_evidence_in` to obtain the exact current evidence
+before freezing their supplied `CommitEvidence`. This read-only operation
+authenticates the basis, validates native objects and review/check gates, and
+computes the complete fold under the activated snapshot. It creates no seal
+or decision. The result names the observed head, epoch and original transaction
+identity. Publication independently verifies it; a concurrent policy/ref
+change can make it stale. The optional workspace snapshot selects the existing
+workspace-bound seal profile and does not assert workspace ownership.
+
+## Bounds and verification boundary
+
+Source and compiled frame each have a 64 KiB ceiling. The activated profile
+admits at most 64 unique rules, 4,096 predicate/set-member checks and predicate depth 16. Before engine
+allocation, each evaluation reserves at most 1,000,000 predicate visits and a
+conservative 2 MiB trace envelope. The total policy-decision frame remains
+bounded at 8 MiB. Decoders enforce caller limits before copying bounded
+fields, and caller limits can only narrow the profile.
+
+Focused regression tests cover profile refusal/permit twins; historical event
+byte preservation; administrator/epoch/version fencing; exact frame decoding;
+snapshot substitution; structural-fact replay in both Git hash formats; and
+bounded evaluation. Persisted node tests cover real import/native merge
+denial and permitted twins, replacement, original sealed-package preparation,
+restart and historical terminal recovery. HTTP/MCP tests exercise their actual
+administration adapters. Execution results are recorded separately; the test
+inventory is not a claim of a passed full release, crash or power-loss campaign.
+
+This implements enforce mode for the bounded ref-fact profile. Canary/shadow
+rollout, break-glass, time windows, authenticated actor/ancestry/evidence facts,
+and the complete policy-integrity bead remain separate unfinished work.

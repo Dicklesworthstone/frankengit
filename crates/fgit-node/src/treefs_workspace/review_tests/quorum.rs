@@ -16,6 +16,7 @@ fn install(fixture: &mut Fixture, reviewers: &[u8], required_approvals: u16, key
             .unwrap_or(ExpectedVersion::NewStream),
         expected_epoch: current.policy_epoch,
         protection: ReviewProtection {
+            ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
                 name: target(),

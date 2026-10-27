@@ -20,6 +20,7 @@ use fgit_codec::{
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
+use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, compile_ref_policy};
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload, NativeMerge};
 use fgit_git_object::ObjectType;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
@@ -320,6 +321,205 @@ fn refs(node: &OneNode) -> BTreeMap<RefName, GitOid> {
         .snapshot()
         .refs
         .clone()
+}
+
+fn set_ref_policy(node: &OneNode, source: &str, key: &[u8]) -> TerminalOutcome {
+    let request = node.request_context();
+    let before = node
+        .runtime()
+        .block_on(node.read_review_protection_in(&request))
+        .unwrap();
+    let command = ProtectionCommand {
+        expected_version: before
+            .version()
+            .map_or(ExpectedVersion::NewStream, ExpectedVersion::Exactly),
+        expected_epoch: before.policy_epoch,
+        protection: ReviewProtection {
+            administrators: vec![PrincipalId::from_bytes([0x82; 16])],
+            branches: Vec::new(),
+            ref_policy: Some(compile_ref_policy(source).unwrap()),
+        },
+    };
+    node.runtime()
+        .block_on(node.admit_review_protection_durable_in(
+            &request,
+            &session(key),
+            &command,
+            AdmissionLimits::default(),
+        ))
+        .unwrap()
+        .1
+}
+
+#[test]
+fn activated_ref_policy_blocks_native_merge_and_replacement_preserves_historical_decisions() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let configuration = config(&scratch.0, format);
+        let (mut node, _) = OneNode::init(configuration.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &scratch.0, format, true);
+        let source = "policy freeze_main { rule freeze { when ref.name matches \"refs/heads/main\" then deny \"maintenance\" } default allow }";
+        assert!(matches!(
+            set_ref_policy(&node, source, b"install-freeze").outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let snapshot = compile_ref_policy(source).unwrap();
+        node.shutdown().unwrap();
+        let mut node = OneNode::open_existing(configuration.clone()).unwrap();
+        let head = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
+        node.bring_into_service(head.receipt().generation())
+            .unwrap();
+        let selected = node
+            .runtime()
+            .block_on(node.read_review_protection_in(&node.request_context()))
+            .unwrap();
+        assert_eq!(
+            selected.protection().unwrap().ref_policy.as_ref(),
+            Some(&snapshot)
+        );
+        let offered = intent(&f, 1, ExpectedVersion::NewStream);
+        let refused = apply(&node, &offered, b"frozen-merge").unwrap();
+        assert!(
+            matches!(
+                refused.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::ProtectedRefTransitionDenied,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(refs(&node)[&main_ref()], f.target);
+        // Administrative recovery remains available even though the current
+        // ref policy denies the proposed code change.
+        assert!(matches!(
+            set_ref_policy(
+                &node,
+                "policy released { default allow }",
+                b"release-freeze"
+            )
+            .outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        assert_eq!(apply(&node, &offered, b"frozen-merge").unwrap(), refused);
+        assert_eq!(refs(&node)[&main_ref()], f.target);
+        let committed = apply(&node, &offered, b"released-merge").unwrap();
+        assert!(
+            matches!(committed.outcome, DecisionOutcome::Committed { .. }),
+            "{committed:?}"
+        );
+        assert_eq!(refs(&node)[&main_ref()], f.candidate);
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&node.request_context()))
+            .unwrap();
+        let retained = history.last().unwrap().batch.committed_rcrs[0].policy_decision_root;
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(configuration).unwrap();
+        let head = reopened
+            .runtime()
+            .block_on(reopened.authenticate_authority_head())
+            .unwrap();
+        reopened
+            .bring_into_service(head.receipt().generation())
+            .unwrap();
+        assert_eq!(
+            apply(&reopened, &offered, b"released-merge").unwrap(),
+            committed
+        );
+        let history = reopened
+            .runtime()
+            .block_on(reopened.snapshot_history_in(&reopened.request_context()))
+            .unwrap();
+        assert_eq!(
+            history.last().unwrap().batch.committed_rcrs[0].policy_decision_root,
+            retained
+        );
+        assert_eq!(refs(&reopened)[&main_ref()], f.candidate);
+        reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn activated_ref_policy_governs_real_source_import_and_survives_reopen() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let configuration = config(&scratch.0, format);
+        let (mut node, _) = OneNode::init(configuration.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &scratch.0, format, true);
+        let policy = "policy namespace { rule blocked { when ref.name matches \"refs/heads/restricted\" and ref.update == create then deny \"reserved namespace\" } default allow }";
+        assert!(matches!(
+            set_ref_policy(&node, policy, b"install-namespace-policy").outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let source = scratch.0.join("source");
+        let restricted_path = source.join("refs/heads/restricted");
+        fs::write(&restricted_path, format!("{}\n", f.source)).unwrap();
+        let refused = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &node.request_context(),
+                &source,
+                PrincipalId::from_bytes([0x82; 16]),
+                b"restricted-import",
+            ))
+            .unwrap();
+        assert!(refused.commands.iter().any(|command| matches!(
+            command.terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ProtectedRefTransitionDenied,
+                ..
+            }
+        )));
+        let restricted = RefName::try_new(b"refs/heads/restricted").unwrap();
+        assert!(!refs(&node).contains_key(&restricted));
+        assert_eq!(refs(&node)[&main_ref()], f.target);
+        // The same native commit and importer are permitted in the neighboring
+        // namespace; only the policy subject changes.
+        fs::rename(&restricted_path, source.join("refs/heads/allowed")).unwrap();
+        let permitted = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &node.request_context(),
+                &source,
+                PrincipalId::from_bytes([0x82; 16]),
+                b"allowed-import",
+            ))
+            .unwrap();
+        assert!(
+            permitted.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ))
+        );
+        let allowed = RefName::try_new(b"refs/heads/allowed").unwrap();
+        assert_eq!(refs(&node)[&allowed], f.source);
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(configuration).unwrap();
+        let head = reopened
+            .runtime()
+            .block_on(reopened.authenticate_authority_head())
+            .unwrap();
+        reopened
+            .bring_into_service(head.receipt().generation())
+            .unwrap();
+        let selected = reopened
+            .runtime()
+            .block_on(reopened.read_review_protection_in(&reopened.request_context()))
+            .unwrap();
+        assert_eq!(
+            selected.protection().unwrap().ref_policy.as_ref(),
+            Some(&compile_ref_policy(policy).unwrap())
+        );
+        assert_eq!(refs(&reopened)[&allowed], f.source);
+        assert!(!refs(&reopened).contains_key(&restricted));
+        reopened.shutdown().unwrap();
+    }
 }
 fn delivery_entry(
     tx_id: TxId,

@@ -156,6 +156,7 @@ fn real_cli_does_not_turn_trusted_local_into_a_review_bypass() {
         expected_epoch: PolicyEpoch::FIRST,
         protection: ReviewProtection {
             administrators: vec![actor(2)],
+            ref_policy: None,
             branches: vec![ProtectedBranch {
                 required_approvals: 1,
                 required_checks: Vec::new(),

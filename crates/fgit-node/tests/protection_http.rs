@@ -54,6 +54,7 @@ fn install(node: &OneNode) -> u64 {
         expected_version: ExpectedVersion::NewStream,
         expected_epoch: before.policy_epoch,
         protection: ReviewProtection {
+            ref_policy: None,
             administrators: vec![OWNER],
             branches: vec![ProtectedBranch {
                 required_approvals: 1,
@@ -109,6 +110,57 @@ fn post_policy(endpoint: &Endpoint, token: char, key: Option<&str>, body: &str) 
         &request(endpoint, "POST", PATH, token, &headers, body.as_bytes()),
         true,
     )
+}
+
+#[test]
+fn activated_ref_policy_is_admin_authorized_over_http_and_retained_after_restart() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let node = init(&root, format, true);
+        let epoch = install(&node);
+        let source = "policy release_tags { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained tag\" } default allow }";
+        let snapshot = fgit_forge::event::protection::compile_ref_policy(source).unwrap();
+        let credentials = root.0.join("credentials");
+        replace(
+            &credentials,
+            &(header(&node)
+                + &row('a', OWNER, "protection-read,protection-write")
+                + &row('b', FOREIGN, "protection-write")),
+        );
+        let server = Server::start(node, &credentials, 4, false, false);
+        let body = format!(
+            "expected_version=1&expected_epoch={epoch}&administrator={OWNER}&ref_policy_source={}",
+            encode(source.as_bytes())
+        );
+        let denied = post_policy(&server.client, 'b', Some("foreign-dsl"), &body);
+        status(&denied, 409);
+        let installed = post_policy(&server.client, 'a', Some("http-dsl"), &body);
+        assert_committed(&installed);
+        let shown = get(&server.client, PATH, 'a');
+        status(&shown, 200);
+        assert!(shown.body.contains("\"enabled\":true"));
+        assert!(shown.body.contains(&snapshot.id().to_string()));
+        let frame = snapshot
+            .encode()
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(shown.body.contains(&frame));
+        let retry = post_policy(&server.client, 'a', Some("http-dsl"), &body);
+        assert_eq!(retry.body, installed.body);
+        assert_eq!(server.finish().accepted_sessions(), 4);
+        let mut reopened = reopen(&root.config(format).with_http_protection_admin());
+        let selected = reopened
+            .runtime()
+            .block_on(reopened.read_review_protection_in(&reopened.request_context()))
+            .unwrap();
+        assert_eq!(
+            selected.protection().unwrap().ref_policy.as_ref(),
+            Some(&snapshot)
+        );
+        reopened.shutdown().unwrap();
+    }
 }
 
 #[test]

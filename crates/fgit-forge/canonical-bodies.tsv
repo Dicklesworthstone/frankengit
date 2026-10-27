@@ -1,6 +1,6 @@
 # fgit-canonical-body-descriptions-v1
 # family<TAB>canonical payload description
-forge-event	One tagged forge aggregate event encoded with its aggregate identity, version, actor and event-specific payload in stream order.
+forge-event	One tagged forge aggregate event encoded with its aggregate identity, version, actor and event-specific payload in stream order; protection kind 16 embeds an explicit historical protection base kind and exact canonical repository ref-policy snapshot, preserving historical kinds 9, 13 and 14.
 forge-event-batch	An ordered sequence of forge-event payloads admitted together; sequence order is replay semantics.
 forge-ref-intent	Ref name bytes, expected native Git tip, and replacement native Git tip for one conditional forge-side ref movement.
 frankengit.federation-bundle	Exported offline work bundle containing basis capsule, proposed intents, embedded effect descriptors, carried evidence, and detached signature.

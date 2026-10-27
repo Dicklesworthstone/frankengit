@@ -421,6 +421,7 @@ fn a_merge_grant_and_weaker_requested_reviewer_list_cannot_bypass_mandatory_prot
             expected_version: ExpectedVersion::NewStream,
             expected_epoch: candidate.epoch,
             protection: ReviewProtection {
+                ref_policy: None,
                 administrators: vec![OWNER],
                 branches: vec![ProtectedBranch {
                     required_approvals: 2,

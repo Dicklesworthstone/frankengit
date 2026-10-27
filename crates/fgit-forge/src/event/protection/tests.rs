@@ -5,6 +5,7 @@ pub(super) fn actor(n: u8) -> PrincipalId {
 }
 pub(super) fn policy() -> ReviewProtection {
     ReviewProtection {
+        ref_policy: None,
         administrators: vec![actor(1)],
         branches: vec![ProtectedBranch {
             required_checks: Vec::new(),
@@ -85,6 +86,7 @@ fn proposed_administrators_cannot_authorize_their_own_enrolment_or_disabled_poli
         &first,
         1,
         ReviewProtection {
+            ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![],
         },

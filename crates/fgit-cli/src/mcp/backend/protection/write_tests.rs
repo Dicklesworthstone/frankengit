@@ -279,12 +279,83 @@ fn discovered_write_schema_requires_the_complete_canonical_command() {
         ),
     );
     let properties = schema["properties"].object().unwrap();
-    assert_eq!(properties.len(), 5);
+    assert_eq!(properties.len(), 7);
+    assert!(properties.contains_key("ref_policy_source"));
+    assert!(properties.contains_key("ref_policy_frame_hex"));
     assert!(
         properties["branches"].object().unwrap()["description"]
             .text()
             .unwrap()
             .contains("empty array")
+    );
+}
+
+#[test]
+fn mcp_ref_policy_source_and_displayed_frame_seal_the_same_snapshot() {
+    let mut args = arguments();
+    args.insert("branches".into(), Value::Array(Vec::new()));
+    args.insert("ref_policy_source".into(), text(
+        "policy retained_tags { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained\" } default allow }",
+    ));
+    let command = write::parse(&args).unwrap();
+    let shown = policy_value(&command.protection).unwrap();
+    let policy = shown.object().unwrap()["ref_policy"].object().unwrap();
+    assert_eq!(policy["mode"].text(), Some("enforce"));
+    assert_eq!(
+        policy["snapshot_id"].text(),
+        Some(
+            command
+                .protection
+                .ref_policy
+                .as_ref()
+                .unwrap()
+                .id()
+                .to_string()
+                .as_str()
+        )
+    );
+    args.remove("ref_policy_source");
+    args.insert("ref_policy_frame_hex".into(), policy["frame_hex"].clone());
+    assert_eq!(write::parse(&args).unwrap(), command);
+    args.remove("ref_policy_frame_hex");
+    assert!(
+        write::parse(&args).unwrap().protection.ref_policy.is_none(),
+        "omission is complete replacement, not implicit retention"
+    );
+}
+
+#[test]
+fn mcp_ref_policy_refuses_unavailable_facts_corrupt_frames_and_ambiguous_requests() {
+    let mut args = arguments();
+    for source in [
+        "policy invalid { default maybe }",
+        "policy unavailable { rule r { when principal.kind == human then allow } default deny \"no\" }",
+        "policy unavailable { rule r { when ref.force_requested then allow } default deny \"no\" }",
+        "policy unavailable { rule r { when ref.update == fast_forward then allow } default deny \"no\" }",
+    ] {
+        args.insert("ref_policy_source".into(), text(source));
+        assert_eq!(write::parse(&args).unwrap_err().code, "invalid_ref_policy");
+    }
+    args.insert(
+        "ref_policy_source".into(),
+        text("policy valid { default allow }"),
+    );
+    assert!(write::parse(&args).is_ok());
+    args.insert("ref_policy_frame_hex".into(), text("00"));
+    assert_eq!(
+        write::parse(&args).unwrap_err().code,
+        "ambiguous_ref_policy"
+    );
+    args.remove("ref_policy_source");
+    assert_eq!(
+        write::parse(&args).unwrap_err().code,
+        "invalid_ref_policy_frame"
+    );
+    args.remove("ref_policy_frame_hex");
+    args.insert("ref_policy_source".into(), Value::Bool(true));
+    assert_eq!(
+        write::parse(&args).unwrap_err().code,
+        "invalid_ref_policy_source"
     );
 }
 
@@ -308,7 +379,7 @@ fn mcp_required_checks_roundtrip_and_cannot_disappear_through_missing_fields() {
         "build:linux λ"
     );
     assert!(command.protection.branches[0].reviewers.is_empty());
-    let Value::Object(policy) = policy_value(&command.protection) else {
+    let Value::Object(policy) = policy_value(&command.protection).unwrap() else {
         panic!()
     };
     let Value::Array(branches) = policy.get("branches").unwrap() else {
@@ -344,7 +415,7 @@ fn mcp_approval_quorum_is_numeric_optional_and_preserves_default_command_identit
         command.protection.branches[0].reviewers,
         legacy.protection.branches[0].reviewers
     );
-    let Value::Object(policy) = policy_value(&command.protection) else {
+    let Value::Object(policy) = policy_value(&command.protection).unwrap() else {
         panic!("policy")
     };
     let Value::Array(branches) = policy.get("branches").unwrap() else {

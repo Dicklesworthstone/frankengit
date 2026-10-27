@@ -16,5 +16,6 @@ fgit-chronicle.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-diff.workspace = true
+fgit-policy.workspace = true
 fgit-treefs.workspace = true
 fgit-types.workspace = true

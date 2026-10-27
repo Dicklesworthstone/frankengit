@@ -393,6 +393,7 @@ fn current_review_protection_blocks_root_creation_without_weakening_other_branch
             expected_version: ExpectedVersion::NewStream,
             expected_epoch: PolicyEpoch::FIRST,
             protection: ReviewProtection {
+                ref_policy: None,
                 administrators: vec![actor(1)],
                 branches: vec![ProtectedBranch {
                     required_approvals: 1,
