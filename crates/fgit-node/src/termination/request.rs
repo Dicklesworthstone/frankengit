@@ -37,6 +37,34 @@ impl NodeRequestContext {
             crate::PackContextCheckpoint::Live
         )
     }
+
+    /// Run an operation with an explicitly owned cooperative stop observer.
+    ///
+    /// The runtime owns the observer as a blocking child. `requested` must be
+    /// bounded and nonblocking; once it returns true, only the derived request
+    /// is cancelled. The original context remains available for settlement.
+    /// This does not install process signal handlers or extend the inherited
+    /// deadline, poll budget, or authority. A service must create a new finite
+    /// parent for each separately admitted operation, never for a live retry.
+    ///
+    /// `work` must drain and finalize its effects before returning. Its result
+    /// and the observer's cleanup result remain separate so cleanup failure
+    /// cannot erase an already persisted outcome. The observer is explicitly
+    /// joined before this method returns.
+    ///
+    /// # Errors
+    ///
+    /// The observer could not start; `work` has not been invoked.
+    pub fn run_until_stopped<T>(
+        &self,
+        runtime: &NodeRuntime,
+        requested: impl Fn() -> bool + Send + 'static,
+        work: impl FnOnce(&NodeRequestContext) -> T,
+    ) -> io::Result<(T, io::Result<()>)> {
+        let owner = bind(runtime, self, requested)?;
+        let result = work(owner.request());
+        Ok((result, owner.finish()))
+    }
 }
 
 impl TerminationSignals {
@@ -53,9 +81,7 @@ impl TerminationSignals {
         parent: &NodeRequestContext,
         work: impl FnOnce(&NodeRequestContext) -> T,
     ) -> io::Result<(T, io::Result<()>)> {
-        let owner = bind(runtime, parent, move || self.requested())?;
-        let result = work(owner.request());
-        Ok((result, owner.finish()))
+        parent.run_until_stopped(runtime, move || self.requested(), work)
     }
 }
 

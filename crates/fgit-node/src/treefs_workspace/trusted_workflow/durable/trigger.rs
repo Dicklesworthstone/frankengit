@@ -7,6 +7,7 @@ use fgit_types::RepositoryDecisionBatchId;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
+mod cancellation;
 mod pull_request;
 mod reporting;
 
@@ -18,6 +19,7 @@ pub struct TrustedRefWorkflowPoll {
     state: &'static str,
     event: String,
     dispatch: Option<TrustedWorkflowDispatch>,
+    execution_settled: bool,
 }
 impl TrustedRefWorkflowPoll {
     pub fn state(&self) -> &'static str {
@@ -26,13 +28,30 @@ impl TrustedRefWorkflowPoll {
     pub fn dispatch(&self) -> Option<&TrustedWorkflowDispatch> {
         self.dispatch.as_ref()
     }
+    /// The request stopped while selecting inputs, before this poll reserved
+    /// any event or started execution. Existing custody is never released.
+    pub fn stopped_before_reservation(&self) -> bool {
+        self.state == "stopped_before_reservation"
+    }
+    /// The selected event's durable settlement was verified, or its handoff
+    /// and settlement marker were written and synced by this poll. Closed
+    /// child processes alone do not establish this local recovery boundary.
+    pub fn execution_settled(&self) -> bool {
+        self.execution_settled
+    }
     pub fn requires_reconciliation(&self) -> bool {
-        self.state == "blocked_unresolved" || self.dispatch.as_ref().is_some_and(|run| !closed(run))
+        self.state == "blocked_unresolved"
+            || self
+                .dispatch
+                .as_ref()
+                .is_some_and(|run| !self.execution_settled || !closed(run))
     }
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"type\":\"workflow_ref_poll\",\"schema_version\":1,\"state\":\"{}\",\"event\":{},\"dispatch\":{}}}",
+            "{{\"type\":\"workflow_ref_poll\",\"schema_version\":1,\"state\":\"{}\",\"stopped_before_reservation\":{},\"execution_settled\":{},\"event\":{},\"dispatch\":{}}}",
             self.state,
+            self.stopped_before_reservation(),
+            self.execution_settled,
             self.event,
             self.dispatch
                 .as_ref()
@@ -54,7 +73,17 @@ struct Selected {
 enum Selection {
     Absent,
     ChangedBeforeReservation,
+    StoppedBeforeReservation,
     Ready(Selected),
+}
+
+fn stopped_poll() -> TrustedRefWorkflowPoll {
+    TrustedRefWorkflowPoll {
+        state: "stopped_before_reservation",
+        event: "null".into(),
+        dispatch: None,
+        execution_settled: false,
+    }
 }
 
 impl OneNode {
@@ -116,6 +145,9 @@ impl OneNode {
         if !reference.as_bytes().starts_with(b"refs/heads/") {
             return Err(invalid("ref watcher requires a branch"));
         }
+        if !workspace_request_live(request) {
+            return Ok(stopped_poll());
+        }
         let selection = match pull_number {
             Some(number) => {
                 self.select_pull_request_workflow_event(request, reference, number)
@@ -126,6 +158,7 @@ impl OneNode {
         let selected = match selection {
             Selection::Absent => None,
             Selection::Ready(selected) => Some(selected),
+            Selection::StoppedBeforeReservation => return Ok(stopped_poll()),
             Selection::ChangedBeforeReservation => {
                 // No event or execution custody was acquired. Another bounded
                 // poll may select again; failures AFTER reservation stay blocked.
@@ -133,6 +166,7 @@ impl OneNode {
                     state: "source_moved",
                     event: "null".into(),
                     dispatch: None,
+                    execution_settled: false,
                 });
             }
         };
@@ -165,6 +199,7 @@ impl OneNode {
                         hex(entry.path().as_os_str().as_bytes())
                     ),
                     dispatch: None,
+                    execution_settled: false,
                 });
             }
         }
@@ -177,6 +212,7 @@ impl OneNode {
                 },
                 event: "null".into(),
                 dispatch: None,
+                execution_settled: false,
             });
         };
         let batch = selected.batch.as_internal_object_id();
@@ -240,6 +276,7 @@ impl OneNode {
                     state: "previously_settled",
                     event,
                     dispatch: None,
+                    execution_settled: true,
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -249,7 +286,7 @@ impl OneNode {
             return Err(invalid("ref watcher retained-event limit exceeded"));
         }
         if !workspace_request_live(request) {
-            return Err(invalid("ref watcher cancelled before reservation"));
+            return Ok(stopped_poll());
         }
         fs::DirBuilder::new()
             .mode(0o700)
@@ -299,7 +336,7 @@ impl OneNode {
                     "{e}; original event retained; never replay automatically"
                 ))
             })?;
-        if closed(&dispatch) && workspace_request_live(request) {
+        let execution_settled = if closed(&dispatch) && workspace_request_live(request) {
             reporting::capture(
                 &event_directory,
                 scope,
@@ -311,12 +348,16 @@ impl OneNode {
             write_new(&event_directory.join("settled"), key.as_bytes())
                 .and_then(|()| File::open(&event_directory)?.sync_all())
                 .map_err(|e| retained(e.to_string()))?;
-        }
+            true
+        } else {
+            false
+        };
         drop(owner);
         Ok(TrustedRefWorkflowPoll {
             state: "dispatched",
             event,
             dispatch: Some(dispatch),
+            execution_settled,
         })
     }
 
@@ -325,9 +366,17 @@ impl OneNode {
         request: &NodeRequestContext,
         reference: &RefName,
     ) -> Result<Selection, TrustedWorkflowFailure> {
-        let state = self.materialize_admission_in(request).await.map_err(|e| {
-            TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Authority(Box::new(e)))
-        })?;
+        let state = match self.materialize_admission_in(request).await {
+            Ok(state) => state,
+            Err(error) if cancellation::materialization(&error) => {
+                return Ok(Selection::StoppedBeforeReservation);
+            }
+            Err(error) => {
+                return Err(TrustedWorkflowFailure::Source(
+                    NodeWorkspaceRefusal::Authority(Box::new(error)),
+                ));
+            }
+        };
         if state.snapshot().hidden_refs.hides(reference.as_bytes()) {
             return Ok(Selection::Absent);
         }
@@ -335,13 +384,24 @@ impl OneNode {
             return Ok(Selection::Absent);
         };
         let head = state.basis().id();
-        let history = self.snapshot_history_in(request).await.map_err(|e| {
-            TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Authority(Box::new(e)))
-        })?;
-        let after = self
-            .authenticate_authority_head_in(request)
-            .await
-            .map_err(|e| invalid_owned(e.to_string()))?;
+        let history = match self.snapshot_history_in(request).await {
+            Ok(history) => history,
+            Err(error) if cancellation::materialization(&error) => {
+                return Ok(Selection::StoppedBeforeReservation);
+            }
+            Err(error) => {
+                return Err(TrustedWorkflowFailure::Source(
+                    NodeWorkspaceRefusal::Authority(Box::new(error)),
+                ));
+            }
+        };
+        let after = match self.authenticate_authority_head_in(request).await {
+            Ok(after) => after,
+            Err(error) if cancellation::node_read(&error) => {
+                return Ok(Selection::StoppedBeforeReservation);
+            }
+            Err(error) => return Err(invalid_owned(error.to_string())),
+        };
         if crate::authority_head_id(&after.body().map_err(|e| invalid_owned(e.to_string()))?)
             .map_err(|e| invalid_owned(e.to_string()))?
             != head
@@ -369,7 +429,7 @@ impl OneNode {
         }
         let previous_commit = changes.next().and_then(|(_, value)| value);
         if !workspace_request_live(request) {
-            return Err(invalid("ref watcher source selection cancelled"));
+            return Ok(Selection::StoppedBeforeReservation);
         }
         Ok(Selection::Ready(Selected {
             head,

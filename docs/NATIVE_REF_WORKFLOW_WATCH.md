@@ -69,6 +69,50 @@ capture/input flags match `fg workflow dispatch`. The global leading
 idle waits; no poll resets that request budget. Defaults are one poll, 1000 ms
 between polls, the native workflow limits, and the configured command deadline.
 
+### Continuous service
+
+Use an explicit service lifetime for sustained trusted CI:
+
+```sh
+fg workflow watch NODE TENANT REPOSITORY refs/heads/main \
+  --trusted-local --workflow ci --input ci --run-parent /private/runs \
+  --continuous --stop-file /private/control/workflow.stop \
+  --attempt-timeout-secs 300 --interval-ms 1000
+```
+
+The stop file must initially be absent and its parent must already exist. Create
+that regular file, or send SIGTERM/SIGINT, to stop admission and drain active
+execution. The watcher never deletes or rewrites it; a pre-existing entry refuses
+before repository open. A replaced parent, symlink, special file or failed stop
+observation stops work with an error. These controls govern the local service,
+not repository authorization.
+
+`--continuous` and `--polls` are mutually exclusive. Without an explicit global
+`--timeout-secs`, the service has no fixed lifetime deadline. Each attempt still
+has a fresh finite request: pending check recovery, one poll/dispatch, and the
+resulting check publication share that request's deadline and work budgets.
+`--attempt-timeout-secs` accepts 1–3600 seconds and defaults to 300; it is only
+available in continuous mode. An explicit leading `--timeout-secs` remains an
+absolute limit on the **whole service**, including idle waits, and narrows each
+new attempt to the remaining time. No active attempt renews its authority.
+
+The continuous service emits `workflow_watch_ready` with its configured attempt
+and optional lifetime limits before any poll or check publication. Its final
+summary adds `continuous` and `operator_stopped`. An idle operator stop exits 0;
+non-green execution, exhausted deadlines or unresolved custody remain nonzero.
+Stop observation runs as an owned child of the node's existing runtime during
+synchronous execution and joins before node shutdown. Signal subscriptions and
+stop state remain live across attempts and idle intervals.
+
+All existing trust, latest-state/coalescing, permanent event identity, canonical
+check publication and restart rules apply. This mode does not increase the 1024
+retained-event limit, prune custody, automatically retry interrupted scripts, or
+turn trusted-host execution into a sandbox. `--publish-checks` and native PR
+selection compose with the same service lifetime. The real-binary
+`scripts/e2e/suites/workflow/watch_continuous.sh` campaign exercises successive
+source updates, canonical checks, restart suppression, finite attempt/whole-service
+deadlines and active process drain in SHA-1 and SHA-256 repositories.
+
 The CLI installs one runtime-owned signal observer for the complete watch.
 SIGTERM/SIGINT stop future polls, reach active synchronous native execution,
 and leave cleanup/retained journals to their existing owners. An idle watcher
