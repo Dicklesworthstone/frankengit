@@ -2,6 +2,8 @@
 //! Large independent sessions and smaller atomic transactions share one parser
 //! without sharing their command-count ceiling or changing wire-order semantics.
 
+use std::fmt::Write as _;
+
 use fgit_wire::receive::{
     ReceiveContext, ReceiveError, ReceiveEvent, ReceiveLimits, ReceivePack, ReceivePhase,
     SignedPushProfile,
@@ -30,10 +32,12 @@ fn command(format: GitObjectFormat, name: usize, first: bool, atomic: bool) -> P
     let zero = "0".repeat(format.digest_len() * 2);
     let mut line = format!("{old} {zero} refs/tags/session-{name:05}");
     if first {
-        line.push_str(&format!(
+        write!(
+            line,
             "\0report-status object-format={format}{}",
             if atomic { " atomic" } else { "" }
-        ));
+        )
+        .unwrap();
     }
     Packet::Data(line.into_bytes())
 }

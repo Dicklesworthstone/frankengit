@@ -63,17 +63,17 @@ fn every_nonactivation_field_and_each_exact_activation_value_is_checked() {
     type MutateHead = fn(&mut RepositoryAuthorityHeadBody);
     let mutations: &[(&str, MutateHead)] = &[
         ("repository", |h| {
-            h.repository_id = RepositoryId::from_bytes([0xfd; 16])
+            h.repository_id = RepositoryId::from_bytes([0xfd; 16]);
         }),
         ("generation", |h| {
-            h.generation = h.generation.next().unwrap()
+            h.generation = h.generation.next().unwrap();
         }),
         ("predecessor", |h| h.predecessor_head_id = None),
         ("tail", |h| h.decision_tail_id = None),
         ("decision sequence", |h| h.latest_decision_sequence = None),
         ("committed RCR", |h| h.latest_committed_rcr_id = None),
         ("repository sequence", |h| {
-            h.latest_repository_sequence = None
+            h.latest_repository_sequence = None;
         }),
         ("refs", |h| h.ref_root = digest_of(0xfe)),
         ("forge", |h| h.forge_position_root = digest_of(0xfe)),
@@ -83,7 +83,7 @@ fn every_nonactivation_field_and_each_exact_activation_value_is_checked() {
         ("configuration", |h| h.configuration_root = digest_of(0xfe)),
         ("policy", |h| h.policy_epoch = PolicyEpoch::FIRST),
         ("registry", |h| {
-            h.format_registry_epoch = RegistryEpoch::FIRST
+            h.format_registry_epoch = RegistryEpoch::FIRST;
         }),
         ("checkpoint", |h| h.last_checkpoint_id = None),
     ];
@@ -106,16 +106,16 @@ fn canonical_capsule_identity_and_every_predecessor_binding_are_required() {
     let mutations: &[(&str, MutateCapsule)] = &[
         ("head identity", |c| c.head_id = head_id()),
         ("head generation", |c| {
-            c.head_generation = c.head_generation.next().unwrap()
+            c.head_generation = c.head_generation.next().unwrap();
         }),
         ("repository", |c| {
-            c.repository_id = RepositoryId::from_bytes([0xfd; 16])
+            c.repository_id = RepositoryId::from_bytes([0xfd; 16]);
         }),
         ("tail", |c| c.decision_tail_id = None),
         ("decision sequence", |c| c.latest_decision_sequence = None),
         ("committed RCR", |c| c.latest_committed_rcr_id = None),
         ("repository sequence", |c| {
-            c.latest_repository_sequence = None
+            c.latest_repository_sequence = None;
         }),
         ("refs", |c| c.ref_root = digest_of(0xfe)),
         ("forge", |c| c.forge_position_root = digest_of(0xfe)),
@@ -123,10 +123,10 @@ fn canonical_capsule_identity_and_every_predecessor_binding_are_required() {
         ("configuration", |c| c.configuration_root = digest_of(0xfe)),
         ("policy", |c| c.policy_epoch = PolicyEpoch::FIRST),
         ("registry", |c| {
-            c.format_registry_epoch = RegistryEpoch::FIRST
+            c.format_registry_epoch = RegistryEpoch::FIRST;
         }),
         ("capsule predecessor", |c| {
-            c.predecessor_capsule_id = Some(capsule_id())
+            c.predecessor_capsule_id = Some(capsule_id());
         }),
     ];
     let (basis, successor, bytes) = activated(advanced_head());

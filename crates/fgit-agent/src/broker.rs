@@ -463,7 +463,7 @@ impl EffectJournal {
         &self.entries
     }
 
-    fn ensure_writable(&self) -> Result<(), EffectJournalRefusal> {
+    const fn ensure_writable(&self) -> Result<(), EffectJournalRefusal> {
         if self.persistence_failed {
             Err(EffectJournalRefusal::PersistencePoisoned)
         } else {

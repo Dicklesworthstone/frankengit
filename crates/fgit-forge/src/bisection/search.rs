@@ -1,6 +1,10 @@
 //! One search algorithm for dense sequences and sparse published-batch positions.
 //! The caller authenticates history; observations here never grant authority.
-use super::*;
+use super::{
+    BisectionRange, BisectionReceipt, BisectionRefusal, BisectionTermination, DecisionSequence,
+    MonotonicityShape, PolicyEpoch, PredicateOutcome, ProbeRecord, RepositoryAuthorityHeadId,
+    RepositoryId, TransitionDirection, logarithmic_probe_budget,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeObservation {
@@ -15,7 +19,7 @@ enum Positions<'a> {
     Published(&'a [DecisionSequence]),
 }
 impl Positions<'_> {
-    fn len(&self) -> u64 {
+    const fn len(&self) -> u64 {
         match self {
             Self::Dense(range) => range.len(),
             Self::Published(values) => values.len() as u64,
@@ -120,13 +124,16 @@ fn run(
         outcome
     };
     let result = (|| {
-        if let Positions::Published(values) = &positions {
-            if values.first() != Some(&range.start())
+        if let Positions::Published(values) = &positions
+            && (values.first() != Some(&range.start())
                 || values.last() != Some(&range.end())
-                || values.windows(2).any(|pair| pair[0] >= pair[1])
-            {
-                return Err(BisectionRefusal::AmbiguousRange { message: "published positions must be ordered, unique and include both range endpoints".into() });
-            }
+                || values.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(BisectionRefusal::AmbiguousRange {
+                message:
+                    "published positions must be ordered, unique and include both range endpoints"
+                        .into(),
+            });
         }
         match shape {
             MonotonicityShape::GuaranteedMonotone { expected_direction } => {

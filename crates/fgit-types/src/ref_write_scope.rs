@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn malformed_empty_duplicate_and_pseudoref_selectors_fail_closed() {
         for field in [
-            "".to_owned(),
+            String::new(),
             "*".to_owned(),
             "exact:".to_owned(),
             "exact:0".to_owned(),

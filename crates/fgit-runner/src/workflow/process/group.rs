@@ -57,7 +57,7 @@ impl ProcessGroup {
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             ) {
                 Ok(status) => return Ok(status.is_some()),
-                Err(rustix::io::Errno::INTR) => continue,
+                Err(rustix::io::Errno::INTR) => {}
                 Err(error) => {
                     if error == rustix::io::Errno::CHILD {
                         self.ownership_lost = true;

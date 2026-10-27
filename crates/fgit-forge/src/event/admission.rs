@@ -15,7 +15,10 @@ pub enum ForgeCommandProfile {
 }
 
 #[must_use]
-pub fn classify_event(event: &ForgeEvent, profile: ForgeCommandProfile) -> ForgeAdmissionRule {
+pub const fn classify_event(
+    event: &ForgeEvent,
+    profile: ForgeCommandProfile,
+) -> ForgeAdmissionRule {
     let operation = match profile {
         ForgeCommandProfile::AppendIssueCommentV1 => match &event.payload {
             ForgeEventPayload::IssueChangedNative(change)

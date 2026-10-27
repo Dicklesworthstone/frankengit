@@ -1,5 +1,8 @@
 //! Complete structural changes for native trigger selection. No blob payloads.
-use super::*;
+use super::{
+    ComparisonMode, GitHashAlgorithm, GitOid, MergeBaseLimits, MergeBaseResult, MergeObjectSource,
+    ReviewError, ReviewOptions, Walker, is_tree, source_merge_bases,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourcePathChanges {

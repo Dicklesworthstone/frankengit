@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Contended batch publication must resolve its children with one authoritative
 //! replay. A real rival is published inside the candidate's CAS call; only the
 //! subsequent loss-classification reads are counted.
@@ -151,7 +152,8 @@ impl AuthorityStore for ObservedStore {
                 .unwrap()
                 .entry(key.clone())
                 .or_default() += 1;
-            if let Some(value) = self.overrides.lock().unwrap().get(key).cloned() {
+            let override_value = self.overrides.lock().unwrap().get(key).cloned();
+            if let Some(value) = override_value {
                 return Ok(value);
             }
         }
@@ -222,8 +224,8 @@ impl AuthorityStore for ObservedStore {
     }
 }
 
-// Immediate test-only adapter: both production signatures drive the same
-// reference authority and the same deterministic publication interleave.
+// Poll-driven test-only adapter: the asynchronous signature runs the same
+// reference effect and deterministic interleave only when first polled.
 impl AsyncAuthorityStore for ObservedStore {
     type Context = ();
 
@@ -235,69 +237,84 @@ impl AsyncAuthorityStore for ObservedStore {
         AuthorityStore::limits(self)
     }
 
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        AuthorityStore::put_if_absent(self, key, body)
+    ) -> impl core::future::Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(AuthorityStore::put_if_absent(self, key, body)))
     }
 
-    async fn read_immutable(
+    fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        AuthorityStore::read_immutable(self, key)
+    ) -> impl core::future::Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(AuthorityStore::read_immutable(self, key)))
     }
 
-    async fn initialize_head(
+    fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        AuthorityStore::initialize_head(self, key, generation, body)
+    ) -> impl core::future::Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::initialize_head(self, key, generation, body))
+        })
     }
 
-    async fn read_head(&self, _: &(), key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        AuthorityStore::read_head(self, key)
-    }
-
-    async fn compare_exchange_head(
+    fn read_head(
         &self,
-        _: &(),
+        (): &(),
+        key: &HeadKey,
+    ) -> impl core::future::Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(AuthorityStore::read_head(self, key)))
+    }
+
+    fn compare_exchange_head(
+        &self,
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        AuthorityStore::compare_exchange_head(self, key, expected, generation, body)
+    ) -> impl core::future::Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::compare_exchange_head(
+                self, key, expected, generation, body,
+            ))
+        })
     }
 
-    async fn publish_head_with_outcomes(
+    fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        AuthorityStore::publish_head_with_outcomes(
-            self, key, expected, generation, body, outcomes, witness,
-        )
+    ) -> impl core::future::Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::publish_head_with_outcomes(
+                self, key, expected, generation, body, outcomes, witness,
+            ))
+        })
     }
 
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        AuthorityStore::authenticate_head_receipt(self, receipt)
+    ) -> impl core::future::Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send
+    {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(AuthorityStore::authenticate_head_receipt(self, receipt))
+        })
     }
 }
 
@@ -486,6 +503,29 @@ fn ready<F: Future>(future: F) -> F::Output {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("reference operations do not suspend"),
     }
+}
+
+#[test]
+fn an_unpolled_async_observer_does_not_read_or_publish_reference_state() {
+    let scenario = Scenario::new(&[200]);
+    let store = &scenario.store;
+    let expected = head(&store.inner, &store.head);
+    store.classifying.store(true, Ordering::SeqCst);
+
+    let unpolled = AsyncAuthorityStore::read_head(store, &(), &store.head);
+    assert_eq!(store.classification_heads.load(Ordering::SeqCst), 0);
+    drop(unpolled);
+    assert_eq!(store.classification_heads.load(Ordering::SeqCst), 0);
+
+    let observed = ready(AsyncAuthorityStore::read_head(store, &(), &store.head)).unwrap();
+    let HeadRead::Present(observed) = observed else {
+        panic!("the initialized reference head remains present");
+    };
+    assert_eq!(observed.body(), expected.body());
+    assert_eq!(observed.token(), expected.token());
+    assert_eq!(store.classification_heads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.classification_writes.load(Ordering::SeqCst), 0);
+    assert_eq!(store.candidate_cas.load(Ordering::SeqCst), 0);
 }
 
 #[test]

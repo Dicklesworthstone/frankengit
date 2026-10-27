@@ -48,7 +48,7 @@ impl OmissionReason {
             Self::TableBytes => 9,
         }
     }
-    fn read(tag: u8) -> Result<Self, Error> {
+    const fn read(tag: u8) -> Result<Self, Error> {
         Ok(match tag {
             1 => Self::FileBytes,
             2 => Self::InvalidUtf8,

@@ -249,13 +249,9 @@ fn scoped_refresh_cannot_change_coverage_namespace_or_claim_a_changed_blob_as_re
         Err(IndexError::SourceMismatch)
     ));
     let other_memory = MemoryAuthorityStore::new(StoreInstanceId::from_raw(983));
-    let other_instance = ScopedLexicalIndexStore::new(
-        &other_memory,
-        source.namespace,
-        source.reference.clone(),
-        scope,
-    )
-    .unwrap();
+    let other_instance =
+        ScopedLexicalIndexStore::new(&other_memory, source.namespace, source.reference, scope)
+            .unwrap();
     assert!(matches!(
         other_instance.load_refresh_base(&selected, LexicalReadLimits::default(), &mut || true),
         Err(IndexError::SourceMismatch)

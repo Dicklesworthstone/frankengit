@@ -208,7 +208,7 @@ const fn text_selector(profile: ReferencePolicyProfile, selector: Selector) -> b
             && matches!(selector, Selector::ActorId))
 }
 
-fn reserve_bytes(used: &mut usize, extra: usize) -> Result<(), ReferencePolicyRefusal> {
+const fn reserve_bytes(used: &mut usize, extra: usize) -> Result<(), ReferencePolicyRefusal> {
     *used = used.saturating_add(extra);
     if *used > MAX_REFERENCE_POLICY_BYTES {
         Err(ReferencePolicyRefusal::ResourceLimit)

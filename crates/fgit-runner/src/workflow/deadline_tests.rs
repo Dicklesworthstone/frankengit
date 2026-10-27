@@ -388,7 +388,7 @@ fn cancellation_and_containment_keep_precedence_over_an_exhausted_cap() {
         );
         match fault {
             Fault::CancelThenRebound | Fault::IndependentCancellation => {
-                assert_eq!(report.jobs[0].outcome, JobOutcome::Cancelled)
+                assert_eq!(report.jobs[0].outcome, JobOutcome::Cancelled);
             }
             Fault::Finish => assert_eq!(report.jobs[0].outcome, JobOutcome::Refused),
             _ => {

@@ -139,10 +139,10 @@ impl BeadsTaskRecord {
             .get(BEADS_HISTORY_KEY)
             .map(BeadsTaskClaimHistory::parse)
             .transpose()?;
-        if let Some(history) = &history {
-            if history.beads_id() != id {
-                return Err(BeadsRefusal::Document("history_task_mismatch"));
-            }
+        if let Some(history) = &history
+            && history.beads_id() != id
+        {
+            return Err(BeadsRefusal::Document("history_task_mismatch"));
         }
         Ok(Self {
             document,
@@ -779,7 +779,7 @@ fn matches_owner(record: &BeadsTaskRecord, request: &BeadsClaimRequest) -> bool 
         && record.assignee() == Some(request.actor())
 }
 
-fn debt(
+const fn debt(
     request: BeadsClaimRequest,
     stage: BeadsReconciliationStage,
     reason: BeadsRefusal,
@@ -838,7 +838,7 @@ fn history_for(
         .after_snapshot()
         .lease()
         .ok_or(BeadsRefusal::UnsupportedTransition)?;
-    let mut surfaces = lease
+    let surfaces = lease
         .reserved_surfaces()
         .iter()
         .map(|surface| {
@@ -860,7 +860,7 @@ fn history_for(
         .collect::<Vec<_>>();
     // Persisted order is canonical JSON order, independent of enum layout.
     let mut encoded = surfaces
-        .drain(..)
+        .into_iter()
         .map(|surface| {
             let encoded = surface
                 .encode(MAX_BEADS_METADATA_BYTES)
@@ -1042,7 +1042,7 @@ fn hex_field<const N: usize>(fields: &Object, key: &str) -> Result<[u8; N], Bead
         return Err(BeadsRefusal::Document("identity_width"));
     }
     let mut bytes = [0; N];
-    for (target, pair) in bytes.iter_mut().zip(value.chunks_exact(2)) {
+    for (target, pair) in bytes.iter_mut().zip(value.as_chunks::<2>().0) {
         let digit = |b| match b {
             b'0'..=b'9' => Ok(b - b'0'),
             b'a'..=b'f' => Ok(b - b'a' + 10),

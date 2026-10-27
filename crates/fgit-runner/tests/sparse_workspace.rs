@@ -995,7 +995,7 @@ fn fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots()
 struct ChildReaper(std::process::Child);
 impl Drop for ChildReaper {
     fn drop(&mut self) {
-        if let Ok(None) = self.0.try_wait() {
+        if matches!(self.0.try_wait(), Ok(None)) {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
@@ -1144,7 +1144,7 @@ fn lease_contention_returns_typed_busy_refusal_after_bound_and_uncontended_twin_
     let uncontended = create(
         &scratch,
         &uncontended_obligations,
-        workspace_plan.clone(),
+        workspace_plan,
         b"uncontended",
     );
     assert!(
@@ -1297,9 +1297,10 @@ fn host_subprocess_driver() {
         let release_marker = root.join(".parent-release-child");
         let start = Instant::now();
         while !release_marker.exists() {
-            if start.elapsed() > Duration::from_secs(10) {
-                panic!("child timed out waiting for parent release marker");
-            }
+            assert!(
+                start.elapsed() <= Duration::from_secs(10),
+                "child timed out waiting for parent release marker"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         std::process::exit(77);
