@@ -112,6 +112,18 @@ run_constitution() {
   cargo metadata --locked --no-deps --format-version 1 >/dev/null
 }
 
+run_cargo_with_job_cap() {
+  local subcommand="$1"
+  shift
+  # Match native tool builds: make the caller's cap visible both to Cargo
+  # and to RCH's argv-based slot reservation. Keep Cargo's default when unset.
+  if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
+    cargo "$subcommand" --jobs "$CARGO_BUILD_JOBS" "$@"
+  else
+    cargo "$subcommand" "$@"
+  fi
+}
+
 run_fast() {
   run_docs
   run_constitution
@@ -120,7 +132,7 @@ run_fast() {
   echo_step "Checking formatting"
   cargo fmt --all -- --check
   echo_step "Checking workspace"
-  cargo check --workspace --all-targets --locked
+  run_cargo_with_job_cap check --workspace --all-targets --locked
   # FG-048a: the generated schema artifacts are committed, and this is
   # what keeps that safe. `check` never writes, so a verify run cannot
   # repair the drift it is supposed to report.
@@ -132,9 +144,9 @@ run_fast() {
   # in-development EXPECTED-RED) silently masks every acceptance test that would
   # have run after it. That truncation produced a false-green orchestrator close
   # of the fg007b/§5.2 acceptance suite; the flag makes every failure visible.
-  cargo test --workspace --all-targets --locked --no-fail-fast
+  run_cargo_with_job_cap test --workspace --all-targets --locked --no-fail-fast
   echo_step "Running Clippy"
-  cargo clippy --workspace --all-targets --locked -- -D warnings
+  run_cargo_with_job_cap clippy --workspace --all-targets --locked -- -D warnings
 }
 
 # The product lane (frankengit-root-doctrine-x2mv.4.18). It builds `fg` once
