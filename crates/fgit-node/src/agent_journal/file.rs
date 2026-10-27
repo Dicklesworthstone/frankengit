@@ -37,6 +37,8 @@ pub enum AgentJournalHostRefusal {
     OutcomeUnknown,
     /// Bytes failed the exact profile, chain, anchor, or semantic replay checks.
     Codec(EffectJournalCodecRefusal),
+    /// The saved run could not be bounded, pinned or independently authenticated.
+    RunCheckpoint(fgit_agent::run_checkpoint::RunCheckpointRefusal),
 }
 
 impl fmt::Display for AgentJournalHostRefusal {
@@ -75,7 +77,7 @@ pub(crate) fn journal_path(
     Ok(directory.join(name))
 }
 
-fn checked_directory(directory: &Path) -> Result<PathBuf, AgentJournalHostRefusal> {
+pub(super) fn checked_directory(directory: &Path) -> Result<PathBuf, AgentJournalHostRefusal> {
     if !directory.is_absolute() {
         return Err(AgentJournalHostRefusal::Path);
     }

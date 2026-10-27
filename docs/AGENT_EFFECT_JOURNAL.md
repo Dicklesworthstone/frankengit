@@ -8,6 +8,35 @@ executor, task persistence, runner, ECC assembly or publication requirements.
 
 ## Native entry points
 
+`OneNode::create_restorable_agent_broker_in` additionally stores the complete
+original run in an immutable `<run-id>.fg-agent-run` checkpoint before exposing
+the checked journal-backed broker. It accepts the original backend
+`HeadReadReceipt`, reauthenticates it through this node's existing authority
+store, and requires it to reproduce the run's exact authenticated receipt.
+The checkpoint retains the original token, head key, head bytes, generation,
+observation time, verifier profile, operation scope, every budget grade and
+expiry. It creates no repository authority, task claim or new capability.
+
+After process restart, `OneNode::recover_agent_journal_in` needs only the run
+ID, an independently retained complete run commitment, and the independently
+retained acknowledged journal tail. It loads the bounded checkpoint,
+reauthenticates the original receipt against the real persisted issuance ledger,
+reconstructs the exact original run, and reads the anchored journal. The caller
+does not need to reconstruct an `IntentRun` from memory or fixture inputs.
+The returned `RecoveredAgentJournal` provides the original run, inspected
+history and `reconciliation_report`; it never returns an issuing broker.
+
+The embedded authority provider retains issuance records across reopen and
+authenticates superseded receipts by their exact opaque token, key, generation
+and bytes. Recovery therefore remains possible after the current repository
+head advances, without relabeling an old observation as current. An expired run
+can still expose cleanup debt; restoration never refreshes expiry, increases
+scope or resets spent-resource history. A wrong store, slot, token, body or
+complete-run pin refuses before a recovered run is returned.
+
+The existing lower-level entry points remain available when the caller already
+has the original independently authenticated run:
+
 `fgit_node::agent_journal::create_checked_broker_in` takes a runtime-owned
 `asupersync::Cx`, an existing absolute operator-owned directory, the complete
 authenticated `IntentRun`, a region and an agent instance. It creates a new
@@ -31,6 +60,17 @@ limits and cooperative cancellation, not a hard deadline for an unresponsive OS
 filesystem operation. The directory and its ancestors belong to the operator;
 hostile namespace replacement and filesystems without reliable local locking and
 sync are outside this profile.
+
+The run checkpoint is a separate immutable local recovery input, using profile
+`frankengit-agent-run-checkpoint` version 1. Its total bound is 64 KiB, including
+at most 32 KiB of original head bytes and a 256-byte head key; lengths are checked
+before copying. Unknown versions, truncation and trailing bytes refuse. Both
+checkpoint and journal creation use `create_new`, file synchronization and
+directory synchronization. A crash or cancellation between their creation
+steps may leave one or both files; no broker has escaped, and another creation
+refuses instead of overwriting the uncertain setup. A checkpoint file is never
+itself an independent run commitment or journal-tail anchor. Hostile replacement
+of local files cannot supply those externally retained pins.
 
 ## Responsibility before successful return
 
@@ -133,3 +173,19 @@ fault-model tests, not claims about real disk hardware failures. The authority
 source in these focused tests is the repository's reference authority engine,
 not a persisted-node or full agent-run execution test. Test source alone is not
 a revision-bound execution result.
+
+`crates/fgit-agent/tests/run_checkpoint.rs` executes the exact native checkpoint
+and journal file modules with the reference authority provider. It covers
+complete original-run restoration, changed current heads, expired-run cleanup,
+wrong-store and forged receipt refusals, scope/budget/expiry substitution,
+independent pins, every truncated prefix, version and size bounds, cancellation,
+create-new refusal and nonempty journal recovery without the original run object.
+
+`crates/fgit-node/tests/agent_journal_checkpoint.rs` exercises the actual embedded
+provider: create a checked broker and nonempty journal, advance authority through
+ordinary native merge admission, close the node, reopen storage, and recover the
+original run and history in a fresh child process in both Git hash formats. The
+independent run and tail pins cross that process boundary separately. It also checks exact retries,
+wrong pins, cancellation and unchanged repository authority during recovery.
+Execution of that integration test is a separate gate; its presence and successful
+type checking alone do not establish an executed persisted-node result.

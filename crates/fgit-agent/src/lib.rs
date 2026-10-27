@@ -10,6 +10,9 @@
 //! authority read. [`authority_identity`] identifies the exact read event and
 //! [`run_identity`] commits the complete machine-enforced run. [`situation`],
 //! [`frontier`], [`pulse`], and [`plan`] form the observe/orient/plan tower.
+//! [`run_checkpoint`] transports original runs across restart but restores them
+//! only after the selected authority store reauthenticates the original receipt
+//! and the complete run matches an independently retained commitment.
 //!
 //! Task coordination has two deliberately separate vocabularies. [`task_projection`]
 //! remains the multi-row backend-neutral snapshot/mutation protocol used by the
@@ -102,6 +105,7 @@ pub mod pulse;
 pub mod reconcile;
 pub mod refresh;
 mod run_cancellation;
+pub mod run_checkpoint;
 pub mod run_identity;
 pub mod situation;
 pub mod task_adapter;
@@ -261,6 +265,9 @@ pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
 pub use run_cancellation::{
     RunCancellationCompletion, RunCancellationCompletionId, RunCancellationCompletionRefusal,
     RunCancellationId, RunCancellationIntent, RunCancellationRequestRefusal,
+};
+pub use run_checkpoint::{
+    MAX_RUN_CHECKPOINT_BYTES, MAX_RUN_CHECKPOINT_HEAD_BYTES, RunCheckpoint, RunCheckpointRefusal,
 };
 pub use run_identity::{
     IntentRunBinding, IntentRunCommitment, IntentRunIdentityRefusal, IntentRunRetry,
