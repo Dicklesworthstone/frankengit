@@ -853,6 +853,33 @@ pub struct RevocationCheckedEffectBroker {
 }
 
 impl RevocationCheckedEffectBroker {
+    /// Opens the checked facade with a fresh, exact-run durable responsibility log.
+    /// Recovery is read-only and cannot reopen an issuing broker.
+    pub fn open_with_journal(
+        run: IntentRun,
+        region: RegionId,
+        agent_instance_id: AgentInstanceId,
+        sink: Box<dyn crate::effect_journal::EffectJournalSink>,
+    ) -> Result<Self, RevocationCheckedEffectRefusal> {
+        let run_commitment = run.commitment()?;
+        let broker = EffectBroker::open_with_journal(run.clone(), region, agent_instance_id, sink)
+            .map_err(RevocationCheckedEffectRefusal::Journal)?;
+        Ok(Self {
+            run,
+            run_commitment,
+            broker,
+            authorizations: Vec::new(),
+        })
+    }
+
+    /// Exact acknowledged tail; ambiguity refuses instead of exposing an old prefix.
+    pub fn durable_position(
+        &self,
+    ) -> Result<Option<crate::effect_journal::EffectJournalPosition>, crate::EffectJournalRefusal>
+    {
+        self.broker.durable_position()
+    }
+
     /// Opens the facade and binds the exact run used by the owned broker.
     ///
     /// # Errors

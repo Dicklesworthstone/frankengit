@@ -48,6 +48,37 @@ pub struct RevocationCheckedEffectBroker {
 }
 
 impl RevocationCheckedEffectBroker {
+    /// Opens the checked facade with a fresh, exact-run durable responsibility log.
+    /// Recovery is read-only and cannot reopen an issuing broker.
+    pub fn open_with_journal(
+        run: IntentRun,
+        region: RegionId,
+        agent_instance_id: AgentInstanceId,
+        sink: Box<dyn crate::effect_journal::EffectJournalSink>,
+    ) -> Result<Self, RevocationCheckedEffectRefusal> {
+        let run_commitment = run.commitment()?;
+        let inner = crate::effect_authorization::RevocationCheckedEffectBroker::open_with_journal(
+            run.clone(),
+            region,
+            agent_instance_id,
+            sink,
+        )?;
+        Ok(Self {
+            run,
+            run_commitment,
+            inner,
+            dispatch_authorizations: Vec::new(),
+        })
+    }
+
+    /// Exact acknowledged tail; ambiguity refuses instead of exposing an old prefix.
+    pub fn durable_position(
+        &self,
+    ) -> Result<Option<crate::effect_journal::EffectJournalPosition>, crate::EffectJournalRefusal>
+    {
+        self.inner.durable_position()
+    }
+
     /// Opens a checked broker over one exact complete Intent Run.
     ///
     /// # Errors
@@ -397,6 +428,28 @@ impl RevocationAuthorizedDeferredOutboxEffect {
                     },
                 ))
             }
+            Err(ReconciliationRefused::AfterEscalation { effect, source }) => {
+                Err(RevocationAuthorizedReconciliationRefused::AfterEscalation {
+                    effect: Box::new(RevocationAuthorizedEscalatedOutboxEffect {
+                        initial_authorization,
+                        dispatch_authorization,
+                        request,
+                        effect: *effect,
+                    }),
+                    source,
+                })
+            }
+            Err(ReconciliationRefused::BeforeSettlement { effect, source }) => Err(
+                RevocationAuthorizedReconciliationRefused::BeforeSettlement {
+                    effect: Box::new(Self {
+                        initial_authorization,
+                        dispatch_authorization,
+                        request,
+                        deferred: *effect,
+                    }),
+                    source,
+                },
+            ),
             Err(ReconciliationRefused::WrongPlan { effect }) => {
                 Err(RevocationAuthorizedReconciliationRefused::WrongPlan {
                     effect: Box::new(Self {
@@ -424,6 +477,20 @@ impl RevocationAuthorizedDeferredOutboxEffect {
 #[must_use]
 #[derive(Debug)]
 pub enum RevocationAuthorizedReconciliationRefused {
+    /// Escalation retained a live named-owner obligation despite a failed append.
+    AfterEscalation {
+        /// Proof-carrying named-owner obligation.
+        effect: Box<RevocationAuthorizedEscalatedOutboxEffect>,
+        /// Durable journal refusal.
+        source: crate::EffectJournalRefusal,
+    },
+    /// Persistence stopped before downstream I/O; all proof layers and debt remain owned.
+    BeforeSettlement {
+        /// Still-owned effect.
+        effect: Box<RevocationAuthorizedDeferredOutboxEffect>,
+        /// Durable journal refusal.
+        source: crate::EffectJournalRefusal,
+    },
     /// The plan names another downstream key or idempotency contract.
     WrongPlan {
         /// Still-owned proof-carrying deferred effect.
@@ -449,8 +516,16 @@ impl RevocationAuthorizedReconciliationRefused {
     #[must_use]
     pub fn into_effect(self) -> Option<RevocationAuthorizedDeferredOutboxEffect> {
         match self {
-            Self::WrongPlan { effect } => Some(*effect),
-            Self::AfterSettlement { .. } => None,
+            Self::WrongPlan { effect } | Self::BeforeSettlement { effect, .. } => Some(*effect),
+            Self::AfterSettlement { .. } | Self::AfterEscalation { .. } => None,
+        }
+    }
+    /// Recovers proof-carrying escalation debt after its persistence failed.
+    #[must_use]
+    pub fn into_escalated(self) -> Option<RevocationAuthorizedEscalatedOutboxEffect> {
+        match self {
+            Self::AfterEscalation { effect, .. } => Some(*effect),
+            _ => None,
         }
     }
 }
@@ -458,6 +533,14 @@ impl RevocationAuthorizedReconciliationRefused {
 impl fmt::Display for RevocationAuthorizedReconciliationRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AfterEscalation { source, .. } => write!(
+                formatter,
+                "escalation retained debt after journal failure: {source}"
+            ),
+            Self::BeforeSettlement { source, .. } => write!(
+                formatter,
+                "durable journal stopped downstream reconciliation: {source}"
+            ),
             Self::WrongPlan { .. } => formatter
                 .write_str("authorized reconciliation plan does not match the deferred effect"),
             Self::AfterSettlement { source, .. } => write!(

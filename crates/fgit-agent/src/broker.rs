@@ -8,9 +8,10 @@
 //!
 //! # Boundary
 //!
-//! The journal is append-only and replayable for the live [`IntentRun`]. It is
-//! not a durable outbox: persistence belongs to the authority/evidence path
-//! that owns root-last publication. The in-process record is still a real
+//! The journal is append-only and replayable for the live [`IntentRun`]. A host
+//! may supply an [`EffectJournalSink`] to persist responsibility before grants
+//! escape. This does not publish an outbox or repository state: canonical
+//! publication still belongs to the authority/evidence path. The record is a real
 //! protocol boundary: it uses real `fgit-resource` reservations and the
 //! external path owns a real [`OutboxEffectPermit`] through reconciliation.
 //! It never converts an ambiguous downstream response into success.
@@ -35,6 +36,7 @@ use fgit_types::PrincipalId;
 use crate::{
     capability::{Capability, CapabilityId, LogicalTime},
     classes::{ClassSet, OperationClass},
+    effect_journal::{EffectJournalPersistenceRefusal, EffectJournalPosition, EffectJournalSink},
     intent::{IntentRun, RunId},
     protocol::AuthorityReadReceipt,
     run_identity::{IntentRunCommitment, IntentRunIdentityRefusal},
@@ -296,6 +298,17 @@ impl EffectJournalReplay {
 /// Why a journal cannot be appended or replayed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectJournalRefusal {
+    /// A durable append failed or became ambiguous; new work is stopped.
+    Persistence(EffectJournalPersistenceRefusal),
+    /// A previous persistence failure requires restart/inspection before work.
+    PersistencePoisoned,
+    /// The durable writer was not fresh or did not name this exact run.
+    PersistenceBinding,
+    /// A replayed transition erased charged resources or exceeded its reservation.
+    BudgetAccounting {
+        /// Effect whose conserved charge changed illegally.
+        effect_id: EffectId,
+    },
     /// An accepted-effect event was structurally incomplete.
     InvalidAcceptance {
         /// The malformed effect identity.
@@ -358,6 +371,18 @@ pub enum EffectJournalRefusal {
 impl fmt::Display for EffectJournalRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Persistence(source) => {
+                write!(formatter, "effect journal persistence refused: {source:?}")
+            }
+            Self::PersistencePoisoned => {
+                formatter.write_str("effect journal requires recovery after a persistence failure")
+            }
+            Self::PersistenceBinding => formatter
+                .write_str("effect journal writer does not bind this fresh authenticated run"),
+            Self::BudgetAccounting { effect_id } => write!(
+                formatter,
+                "effect journal charge for {effect_id} is not conserved"
+            ),
             Self::InvalidAcceptance { effect_id } => {
                 write!(
                     formatter,
@@ -421,6 +446,8 @@ struct EffectJournal {
     records: Vec<EffectRecord>,
     positions: BTreeMap<EffectId, usize>,
     entries: Vec<EffectJournalEntry>,
+    sink: Option<Box<dyn EffectJournalSink>>,
+    persistence_failed: bool,
 }
 
 impl EffectJournal {
@@ -436,15 +463,40 @@ impl EffectJournal {
         &self.entries
     }
 
-    fn append(&mut self, event: EffectJournalEvent) {
-        self.entries.push(EffectJournalEntry {
+    fn ensure_writable(&self) -> Result<(), EffectJournalRefusal> {
+        if self.persistence_failed {
+            Err(EffectJournalRefusal::PersistencePoisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn append(&mut self, event: EffectJournalEvent) -> Result<(), EffectJournalRefusal> {
+        let entry = EffectJournalEntry {
             sequence: u64::try_from(self.entries.len()).unwrap_or(u64::MAX),
             event,
-        });
+        };
+        let result = if self.persistence_failed {
+            Err(EffectJournalRefusal::PersistencePoisoned)
+        } else if let Some(sink) = &mut self.sink {
+            sink.append(&entry)
+                .map_err(EffectJournalRefusal::Persistence)
+        } else {
+            Ok(())
+        };
+        // A post-effect failure must not erase the in-process obligation. Keep
+        // the observed event even if the durable writer cannot acknowledge it.
+        self.entries.push(entry);
+        if result.is_err() {
+            self.persistence_failed = true;
+        }
+        result
     }
 
     fn accept(&mut self, record: EffectRecord) -> Result<(), EffectJournalRefusal> {
+        self.ensure_writable()?;
         if record.obligation_state != ObligationState::Reserved
+            || !record.budget_consumed.is_zero()
             || record.terminal_outcome.is_some()
             || record.obligation_class.is_some()
             || record.external_idempotency_key.is_some()
@@ -485,8 +537,7 @@ impl EffectJournal {
         let position = self.records.len();
         self.positions.insert(record.effect_id, position);
         self.records.push(record.clone());
-        self.append(EffectJournalEvent::Accepted(Box::new(record)));
-        Ok(())
+        self.append(EffectJournalEvent::Accepted(Box::new(record)))
     }
 
     fn record_mut(
@@ -519,8 +570,7 @@ impl EffectJournal {
             effect_id,
             obligation_class,
             external_idempotency_key,
-        });
-        Ok(())
+        })
     }
 
     fn lifecycle(
@@ -572,6 +622,11 @@ impl EffectJournal {
         } else {
             budget_consumed
         };
+        if !record.budget_reserved.dominates(&budget_consumed)
+            || !budget_consumed.dominates(&record.budget_consumed)
+        {
+            return Err(EffectJournalRefusal::BudgetAccounting { effect_id });
+        }
         record.obligation_state = state;
         record.budget_consumed = budget_consumed;
         record.output_commitments.clone_from(&output_commitments);
@@ -588,8 +643,7 @@ impl EffectJournal {
             output_commitments,
             reconciliation_evidence,
             terminal_outcome,
-        });
-        Ok(())
+        })
     }
 
     fn replay(entries: &[EffectJournalEntry]) -> Result<EffectJournalReplay, EffectJournalRefusal> {
@@ -705,6 +759,13 @@ impl ReservedOutboxEffect {
         attempt: u32,
         actual: &ResourceVector,
     ) -> Result<DeferredOutboxEffect, Box<OutboxCommitRefused>> {
+        let writable = self.journal.borrow().ensure_writable();
+        if let Err(source) = writable {
+            return Err(Box::new(OutboxCommitRefused::JournalBeforeCommit {
+                effect: Box::new(self),
+                source,
+            }));
+        }
         let Self {
             effect_id,
             idempotency_key,
@@ -807,6 +868,13 @@ impl DeferredOutboxEffect {
                 effect: Box::new(self),
             });
         }
+        let persistence = self.journal.borrow().ensure_writable();
+        if let Err(source) = persistence {
+            return Err(ReconciliationRefused::BeforeSettlement {
+                effect: Box::new(self),
+                source,
+            });
+        }
         let Self {
             effect_id,
             idempotency_key: _,
@@ -862,22 +930,26 @@ impl DeferredOutboxEffect {
                     owner: receipt.owner(),
                     reason: receipt.reason(),
                 };
-                journal
-                    .borrow_mut()
-                    .lifecycle(
-                        effect_id,
-                        LifecycleEvent::Escalate,
-                        ResourceVector::ZERO,
-                        output_commitments,
-                        Some(evidence),
-                        Some(terminal_outcome),
-                    )
-                    .map_err(ReconciliationRefused::AfterSettlement)?;
-                Ok(ExternalEffectOutcome::Escalated(EscalatedOutboxEffect {
+                let recorded = journal.borrow_mut().lifecycle(
+                    effect_id,
+                    LifecycleEvent::Escalate,
+                    ResourceVector::ZERO,
+                    output_commitments,
+                    Some(evidence),
+                    Some(terminal_outcome),
+                );
+                let effect = EscalatedOutboxEffect {
                     effect_id,
                     receipt,
                     journal,
-                }))
+                };
+                if let Err(source) = recorded {
+                    return Err(ReconciliationRefused::AfterEscalation {
+                        effect: Box::new(effect),
+                        source,
+                    });
+                }
+                Ok(ExternalEffectOutcome::Escalated(effect))
             }
         }
     }
@@ -1005,6 +1077,13 @@ impl core::error::Error for OutboxReservationRefused {}
 #[must_use]
 #[derive(Debug)]
 pub enum OutboxCommitRefused {
+    /// A previously failed journal stopped dispatch before the resource commit.
+    JournalBeforeCommit {
+        /// Still abortable reservation.
+        effect: Box<ReservedOutboxEffect>,
+        /// Persistence failure requiring recovery.
+        source: EffectJournalRefusal,
+    },
     /// The shared resource ledger rejected the requested charge.
     Resource(Box<ResourceOutboxCommitRefusal>),
     /// The resource committed, but the broker journal could not mirror it.
@@ -1039,6 +1118,7 @@ impl OutboxCommitRefused {
     #[must_use]
     pub fn into_reserved(self) -> Option<ReservedOutboxEffect> {
         match self {
+            Self::JournalBeforeCommit { effect, .. } => Some(*effect),
             Self::Resource(refusal) => {
                 let ResourceOutboxCommitRefusal {
                     effect_id,
@@ -1063,7 +1143,7 @@ impl OutboxCommitRefused {
     #[must_use]
     pub fn into_deferred(self) -> Option<DeferredOutboxEffect> {
         match self {
-            Self::Resource(_) => None,
+            Self::Resource(_) | Self::JournalBeforeCommit { .. } => None,
             Self::JournalAfterCommit(refusal) => Some((*refusal).into_deferred()),
         }
     }
@@ -1092,6 +1172,21 @@ impl JournalOutboxCommitRefusal {
 #[must_use]
 #[derive(Debug)]
 pub enum ReconciliationRefused {
+    /// An escalation still owns live debt even when its durable append fails.
+    AfterEscalation {
+        /// Named-owner obligation; it has not settled.
+        effect: Box<EscalatedOutboxEffect>,
+        /// Failed journal append.
+        source: EffectJournalRefusal,
+    },
+    /// Persistence stopped before any downstream request. Responsibility stays
+    /// owned; the caller cannot turn an unrecorded dispatch into a retry.
+    BeforeSettlement {
+        /// Still-owned deferred effect.
+        effect: Box<DeferredOutboxEffect>,
+        /// Durable journal failure preventing downstream I/O.
+        source: EffectJournalRefusal,
+    },
     /// The caller supplied a plan for a different downstream contract.
     WrongPlan {
         /// The still-owned deferred effect.
@@ -1106,8 +1201,17 @@ impl ReconciliationRefused {
     #[must_use]
     pub fn into_effect(self) -> Option<DeferredOutboxEffect> {
         match self {
-            Self::WrongPlan { effect } => Some(*effect),
-            Self::AfterSettlement(_) => None,
+            Self::WrongPlan { effect } | Self::BeforeSettlement { effect, .. } => Some(*effect),
+            Self::AfterSettlement(_) | Self::AfterEscalation { .. } => None,
+        }
+    }
+
+    /// Retains the named-owner obligation after failed escalation persistence.
+    #[must_use]
+    pub fn into_escalated(self) -> Option<EscalatedOutboxEffect> {
+        match self {
+            Self::AfterEscalation { effect, .. } => Some(*effect),
+            _ => None,
         }
     }
 }
@@ -1115,6 +1219,14 @@ impl ReconciliationRefused {
 impl fmt::Display for ReconciliationRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AfterEscalation { source, .. } => write!(
+                formatter,
+                "effect escalated but journal persistence failed: {source}"
+            ),
+            Self::BeforeSettlement { source, .. } => write!(
+                formatter,
+                "effect journal stopped downstream reconciliation: {source}"
+            ),
             Self::WrongPlan { .. } => formatter
                 .write_str("reconciliation plan does not match the effect's downstream key"),
             Self::AfterSettlement(source) => {
@@ -1139,6 +1251,39 @@ pub struct EffectBroker {
 }
 
 impl EffectBroker {
+    /// Opens a fresh broker backed by a host-owned durable journal. An existing
+    /// journal is inspection/recovery evidence, never a fresh issuing broker.
+    pub fn open_with_journal(
+        run: IntentRun,
+        region: RegionId,
+        agent_instance_id: AgentInstanceId,
+        sink: Box<dyn EffectJournalSink>,
+    ) -> Result<Self, EffectJournalRefusal> {
+        let commitment = run
+            .commitment()
+            .map_err(|_| EffectJournalRefusal::PersistenceBinding)?;
+        let expected_position = crate::effect_journal::EffectJournalEncoder::new(&run)
+            .map_err(|_| EffectJournalRefusal::PersistenceBinding)?
+            .0
+            .position();
+        if run.authority_read_receipt().is_none()
+            || sink.run_commitment() != commitment
+            || sink.position() != expected_position
+        {
+            return Err(EffectJournalRefusal::PersistenceBinding);
+        }
+        let broker = Self::open(run, region, agent_instance_id);
+        broker.journal.borrow_mut().sink = Some(sink);
+        Ok(broker)
+    }
+
+    /// Exact successfully acknowledged tail. After an ambiguous append this
+    /// refuses rather than presenting an older prefix as the complete history.
+    pub fn durable_position(&self) -> Result<Option<EffectJournalPosition>, EffectJournalRefusal> {
+        let journal = self.journal.borrow();
+        journal.ensure_writable()?;
+        Ok(journal.sink.as_ref().map(|sink| sink.position()))
+    }
     /// Opens a broker over `run`, with the run's budget as region capacity.
     #[must_use]
     pub fn open(run: IntentRun, region: RegionId, agent_instance_id: AgentInstanceId) -> Self {
@@ -1197,6 +1342,10 @@ impl EffectBroker {
                 effect_id: request.effect_id,
             });
         }
+        self.journal
+            .borrow()
+            .ensure_writable()
+            .map_err(|source| BrokerRefusal::Journal { source })?;
         let run_commitment = self.run.commitment()?;
         if !self.run.is_open_at(now) {
             return Err(BrokerRefusal::RunExpired {
@@ -1254,10 +1403,12 @@ impl EffectBroker {
             reconciliation_evidence: None,
             accepted_at: now,
         };
-        self.journal
-            .borrow_mut()
-            .accept(record.clone())
-            .map_err(|source| BrokerRefusal::Journal { source })?;
+        if let Err(source) = self.journal.borrow_mut().accept(record.clone()) {
+            // A failed append never exposes the grant. Explicit release avoids
+            // turning a definite pre-effect refusal into a resource leak.
+            let _released = budget.release();
+            return Err(BrokerRefusal::Journal { source });
+        }
         Ok(EffectGrant {
             record,
             budget,

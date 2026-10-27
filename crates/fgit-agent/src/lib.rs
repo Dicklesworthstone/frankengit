@@ -66,7 +66,7 @@
 //! authority.
 //!
 //! Concrete product-host adoption, action execution, ECC assembly, canonical
-//! publication orchestration, durable codecs for the agent control objects, and
+//! publication orchestration, durable codecs for the remaining agent control objects, and
 //! robot/API surfaces remain outside the current boundary.
 
 pub mod action_packet;
@@ -86,6 +86,7 @@ pub mod descendant_revocation;
 pub mod ecc;
 mod effect_authorization;
 pub mod effect_dispatch;
+pub mod effect_journal;
 pub mod frontier;
 mod frontier_policy;
 mod handoff;

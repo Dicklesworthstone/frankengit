@@ -303,6 +303,117 @@ impl DownstreamChannel for Delivered {
     }
 }
 
+#[test]
+fn failed_durable_escalation_retains_both_authorization_layers_and_live_debt() {
+    use fgit_agent::effect_journal::{
+        EffectJournalEncoder, EffectJournalPersistenceRefusal, EffectJournalPosition,
+        EffectJournalSink,
+    };
+    #[derive(Debug)]
+    struct FailEscalation {
+        encoder: EffectJournalEncoder,
+        acknowledged: EffectJournalPosition,
+    }
+    impl EffectJournalSink for FailEscalation {
+        fn run_commitment(&self) -> fgit_agent::IntentRunCommitment {
+            self.encoder.run_commitment()
+        }
+        fn position(&self) -> EffectJournalPosition {
+            self.acknowledged
+        }
+        fn append(
+            &mut self,
+            entry: &fgit_agent::EffectJournalEntry,
+        ) -> Result<(), EffectJournalPersistenceRefusal> {
+            self.encoder.encode(entry).unwrap();
+            if entry.sequence == 4 {
+                return Err(EffectJournalPersistenceRefusal::OutcomeUnknown);
+            }
+            self.acknowledged = self.encoder.position();
+            Ok(())
+        }
+    }
+    struct Unknown;
+    impl DownstreamChannel for Unknown {
+        fn deliver(&mut self, _: &IdempotencyKey, _: u32) -> DeliveryVerdict {
+            DeliveryVerdict::AmbiguousTimeout
+        }
+        fn probe(&mut self, _: &IdempotencyKey) -> ProbeVerdict {
+            ProbeVerdict::Unknown
+        }
+    }
+    let fixture = fixture(591);
+    let chain = verified_chain();
+    let revocations = current_revocations(&fixture, 20, 30, 0);
+    let (encoder, _) = EffectJournalEncoder::new(&fixture.run).unwrap();
+    let sink = FailEscalation {
+        acknowledged: encoder.position(),
+        encoder,
+    };
+    let mut broker = CurrentAuthorityRevocationCheckedEffectBroker::open_with_journal(
+        fixture.run,
+        RegionId::new(91),
+        AgentInstanceId::new(91),
+        Box::new(sink),
+    )
+    .unwrap();
+    let request = request(91);
+    let grant = broker
+        .request_high_value(&chain, &revocations, LogicalTime::new(21), &request)
+        .unwrap();
+    let initial = grant.authorization();
+    let mut dispatch = dispatch(0x91);
+    dispatch.idempotency_strength = DownstreamIdempotency::Weak;
+    let reserved = broker.reserve_authorized_outbox(grant, dispatch).unwrap();
+    let deferred = broker
+        .dispatch_authorized_outbox(
+            reserved,
+            &chain,
+            &revocations,
+            LogicalTime::new(22),
+            1,
+            &egress(100),
+        )
+        .unwrap();
+    let at_dispatch = deferred.dispatch_authorization();
+    let generic_initial = deferred.generic().initial_authorization();
+    let generic_dispatch = deferred.generic().dispatch_authorization();
+    let failure = deferred
+        .reconcile(
+            &mut plan(&dispatch),
+            &mut Unknown,
+            PrincipalId::from_bytes([0x91; 16]),
+            |attempt| DownstreamAck {
+                receipt: opaque(0x92),
+                attempt,
+            },
+            Vec::new(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        failure,
+        CurrentAuthorityReconciliationRefused::AfterEscalation { .. }
+    ));
+    let live = failure
+        .into_escalated()
+        .expect("failed persistence must not drop escalation ownership");
+    assert_eq!(live.initial_authorization(), initial);
+    assert_eq!(live.dispatch_authorization(), at_dispatch);
+    assert_eq!(live.generic().initial_authorization(), generic_initial);
+    assert_eq!(live.generic().dispatch_authorization(), generic_dispatch);
+    assert_eq!(live.request(), request);
+    assert!(
+        live.resolve_failed(
+            fgit_resource::TerminalFailureReason::OperatorDecision,
+            Vec::new()
+        )
+        .is_err()
+    );
+    assert_eq!(broker.records()[0].budget_consumed, egress(100));
+    assert!(broker.durable_position().is_err());
+    assert!(broker.close().is_quiescent());
+}
+
 const fn plan(dispatch: &OutboxDispatch) -> ReconcilePlan {
     ReconcilePlan::new(
         dispatch.idempotency,

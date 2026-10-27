@@ -16,6 +16,8 @@
 
 extern crate self as fgit_node;
 
+pub mod agent_journal;
+
 /// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
 /// service lane. The standalone worker and HTTP service share this controller.
 #[path = "bin/fg-index-maintain.rs"]
