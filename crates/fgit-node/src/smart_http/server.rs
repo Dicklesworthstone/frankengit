@@ -818,11 +818,12 @@ impl From<NodeSmartHttpRefusal> for Status {
     }
 }
 
-fn authenticated_session(
+/// Authenticate the request and check its route and service permission. It
+/// allocates nothing, so a caller may run it before choosing an attempt.
+fn authorized_grant(
     request: &RequestHead<'_>,
-    raw_head: &[u8],
     profile: &Profile,
-) -> Result<LoopbackReceiveSession, Status> {
+) -> Result<credentials::Grant, Status> {
     let grant = profile
         .credentials
         .authenticate(request.authorization())
@@ -835,6 +836,15 @@ fn authenticated_session(
     {
         return Err(Status::Forbidden);
     }
+    Ok(grant)
+}
+
+fn authenticated_session(
+    request: &RequestHead<'_>,
+    raw_head: &[u8],
+    profile: &Profile,
+) -> Result<LoopbackReceiveSession, Status> {
+    let grant = authorized_grant(request, profile)?;
     let key = retry_key(raw_head)?;
     let key = if request.operation == Operation::Rpc(Service::ReceivePack) {
         key.ok_or(Status::BadRequest)?

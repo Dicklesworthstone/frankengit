@@ -17,7 +17,7 @@ use std::io::Write;
 use asupersync::util::{EntropySource, OsEntropy};
 use fgit_wire::smart_http::{HttpLimits, HttpVersion, Operation, Service, head, parse_head};
 
-use super::{Profile, Status, authenticated_session, retry_key};
+use super::{Profile, Status, authenticated_session, authorized_grant, retry_key};
 
 const MARKER: &str = "/.fgit-receive/";
 const DISCOVERY: &str = "/info/refs?service=git-receive-pack";
@@ -72,6 +72,21 @@ fn adapt_with_nonce(
         let normalized = rewrite(&bytes, route, tail, &key, profile.http)?;
         return Ok(Some(normalized));
     }
+    if suffix == RPC {
+        // Git adopts a redirected base only after its first request (http.c
+        // http_request_recoverable). With a credential helper that request
+        // is the 401 challenge, so the discovery redirect lands on a retry
+        // and Git posts the RPC to the unscoped route with no key
+        // (frankengit-g8fo). Such an RPC is a fresh attempt, exactly as a
+        // fresh discovery would be. An explicit key keeps its own identity.
+        let request = parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        if retry_key(&bytes[..request.consumed])?.is_some() {
+            return Ok(Some(bytes));
+        }
+        authorized_grant(&request, profile)?;
+        let key = format!("{KEY_PREFIX}{}", identifier(nonce()));
+        return rewrite(&bytes, route, RPC, &key, profile.http).map(Some);
+    }
     if suffix != DISCOVERY {
         return Ok(Some(bytes));
     }
@@ -84,12 +99,7 @@ fn adapt_with_nonce(
     if retry_key(&bytes[..request.consumed])?.is_some() {
         return Ok(Some(bytes));
     }
-    let mut identifier = String::with_capacity(NONCE_HEX_BYTES);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in nonce() {
-        identifier.push(char::from(HEX[usize::from(byte >> 4)]));
-        identifier.push(char::from(HEX[usize::from(byte & 15)]));
-    }
+    let identifier = identifier(nonce());
     // The redirect is same-origin, constructed from a configured canonical
     // route, not Host, Forwarded, or any caller-selected redirect destination.
     let target = format!("{route}{MARKER}{identifier}{DISCOVERY}");
@@ -106,6 +116,17 @@ fn adapt_with_nonce(
     )?;
     writer.flush()?;
     Ok(None)
+}
+
+/// The attempt identifier: lower-case hex of one fresh 32-byte nonce.
+fn identifier(nonce: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut identifier = String::with_capacity(NONCE_HEX_BYTES);
+    for byte in nonce {
+        identifier.push(char::from(HEX[usize::from(byte >> 4)]));
+        identifier.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    identifier
 }
 
 fn rewrite(

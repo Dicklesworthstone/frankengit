@@ -79,6 +79,23 @@ class Commands:
             env[f"GIT_CONFIG_VALUE_{index}"] = value
         return self.run([self.git, *args], env=env)
 
+    def helper_git(self, password: str, version: int, *args: str) -> subprocess.CompletedProcess:
+        # A stock credential helper: Git sends its first request without
+        # credentials, receives the 401 challenge and retries with the
+        # helper's answer. The password stays out of argv and config files.
+        env = self.env.copy()
+        env["FG_SMOKE_HELPER_PASSWORD"] = password
+        helper = ('!f() { if test "$1" = get; then printf "%s\\n" username=git; '
+                  'printf "password=%s\\n" "$FG_SMOKE_HELPER_PASSWORD"; fi; }; f')
+        config = [("credential.helper", ""), ("credential.helper", helper),
+                  ("protocol.version", str(version)), ("http.proxy", "")]
+        env["GIT_CONFIG_COUNT"] = str(len(config))
+        for index, (name, value) in enumerate(config):
+            env[f"GIT_CONFIG_KEY_{index}"] = name
+            env[f"GIT_CONFIG_VALUE_{index}"] = value
+        return subprocess.run([self.git, *args], env=env, capture_output=True, text=True,
+                              timeout=self.timeout)
+
 
 def seed(commands: Commands, root: Path, fmt: str) -> tuple[Path, str]:
     source = root / "source"
@@ -200,6 +217,19 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> None:
         commands.remote_git(token, 2, "-C", str(source), "push", url, ":refs/tags/http-release", key="tag-delete")
         refs = commands.remote_git(token, 2, "ls-remote", url)
         require("refs/tags/http-release" not in refs, "delete-only push left the tag visible")
+        # With a credential helper the attempt-scoped discovery redirect lands
+        # on Git's authenticated retry, which Git never adopts as its base, so
+        # the push RPC arrives unscoped and without a key (frankengit-g8fo).
+        commands.local_git("-C", str(source), "branch", "helper-auth", "HEAD")
+        denied = commands.helper_git("0" * 64, 2, "-C", str(source), "push", url, "refs/heads/helper-auth")
+        require(denied.returncode != 0, "a wrong credential-helper password was accepted")
+        require("refs/heads/helper-auth" not in commands.remote_git(token, 2, "ls-remote", url),
+                "a refused credential-helper push published a ref")
+        pushed = commands.helper_git(token, 2, "-C", str(source), "push", url, "refs/heads/helper-auth")
+        require(pushed.returncode == 0,
+                redact(f"credential-helper push failed ({pushed.returncode}): {pushed.stderr[-4000:]}"))
+        require(f"{tip}\trefs/heads/helper-auth" in commands.remote_git(token, 2, "ls-remote", url).splitlines(),
+                "credential-helper push did not publish its branch")
     with server(fg, commands, root, token_file, receive=False) as url:
         headers = {"Authorization": f"Bearer {token}"}
         require(http_status(url + "/info/refs?service=git-receive-pack", headers) == 403,

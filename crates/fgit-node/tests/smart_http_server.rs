@@ -482,15 +482,18 @@ fn authentication_and_framing_fail_before_continue_or_publication() {
             ),
             "400",
         ),
+        // A key-less receive RPC is a fresh attempt for an authenticated
+        // client (frankengit-g8fo), so without credentials it must still be
+        // refused before 100-continue and before an attempt is chosen.
         (
             request(
                 &server,
                 "POST",
                 "/git-receive-pack",
-                &post_headers("receive-pack", 4, "Expect: 100-continue\r\n"),
+                &post_headers("receive-pack", 4, "Expect: 100-continue\r\n").replace(&auth(), ""),
                 b"",
             ),
-            "400",
+            "401",
         ),
         (
             request(

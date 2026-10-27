@@ -230,6 +230,70 @@ fn scoped_url_never_authenticates_a_post_or_overrides_revocation() {
     );
 }
 
+/// Git with a credential helper follows the discovery redirect only on its
+/// authenticated retry, never adopts it as the base, and posts the RPC to the
+/// unscoped route without a key (frankengit-g8fo).
+#[test]
+fn unscoped_keyless_rpc_is_a_fresh_attempt_only_after_authentication() {
+    let input = || request("POST", &format!("/repo.git{RPC}"), RPC_HEADERS, b"0000");
+    let mut readonly = profile();
+    readonly.allow_receive = false;
+    for (bytes, profile, expected) in [
+        (
+            String::from_utf8(input())
+                .unwrap()
+                .replace(&format!("Authorization: Bearer {}\r\n", "a".repeat(64)), "")
+                .into_bytes(),
+            profile(),
+            Status::Unauthorized,
+        ),
+        (
+            String::from_utf8(input())
+                .unwrap()
+                .replace(&"a".repeat(64), &"b".repeat(64))
+                .into_bytes(),
+            profile(),
+            Status::Unauthorized,
+        ),
+        (input(), readonly, Status::Forbidden),
+    ] {
+        let mut output = Vec::new();
+        assert_eq!(
+            adapt_with_nonce(
+                bytes,
+                &profile,
+                &mut HttpVersion::Http11,
+                &mut output,
+                || panic!("no attempt before authentication and receive permission")
+            ),
+            Err(expected)
+        );
+        assert!(output.is_empty());
+    }
+
+    let profile = profile();
+    let (first, output) = run(input(), &profile, 0x42).unwrap();
+    let first = first.unwrap();
+    assert!(output.is_empty(), "an RPC is forwarded, never redirected");
+    let text = String::from_utf8(first.clone()).unwrap();
+    assert!(text.starts_with("POST /repo.git/git-receive-pack HTTP/1.1\r\n"));
+    assert!(text.contains(&format!(
+        "Idempotency-Key: {KEY_PREFIX}{}\r\n",
+        "42".repeat(32)
+    )));
+    assert!(first.ends_with(b"\r\n\r\n0000"), "the body is untouched");
+    let parsed = parse_head(&first, profile.http).unwrap().unwrap();
+    assert!(authenticated_session(&parsed, &first[..parsed.consumed], &profile).is_ok());
+
+    // Another key-less RPC is another attempt, never an alias of the first.
+    let second = run(input(), &profile, 0x43).unwrap().0.unwrap();
+    let second_head = parse_head(&second, profile.http).unwrap().unwrap();
+    assert_ne!(
+        retry_key(&first[..parsed.consumed]).unwrap(),
+        retry_key(&second[..second_head.consumed]).unwrap()
+    );
+}
+
 #[test]
 fn explicit_keys_and_unrelated_services_are_byte_for_byte_unchanged() {
     let profile = profile();

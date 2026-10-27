@@ -33,6 +33,22 @@ duplicate, empty and hop-by-hop keys are refused. Original and synthesized
 headers both obey byte/count limits. Body bytes and transfer framing are copied
 unchanged; there is no new pack buffer or content-derived transaction key.
 
+## Challenge-authenticated clients (frankengit-g8fo)
+
+Git adopts a redirected base only after its first request (`http.c`
+`http_request_recoverable` in Git 2.54.0). A client that authenticates through a
+credential helper sends that first request without credentials and gets the 401
+challenge. The redirect then arrives on the authenticated retry: Git follows it
+for that one GET but posts its receive RPC to the unscoped route with no key.
+
+An unscoped receive RPC without an explicit `Idempotency-Key` is therefore a
+fresh attempt. After the same authentication, route and receive-permission checks,
+and before any entropy is drawn, the adapter supplies a new
+`fg-http-v1-{identifier}` key. That is exactly what a new discovery would select.
+The client lacks only the reconnect recovery that an attempt URL gives, and stock
+Git does not use it. An unauthenticated or unpermitted key-less RPC is still
+refused before `100 Continue`, and an explicit key keeps its own identity.
+
 ## What constitutes a retry
 
 Reusing the same attempt URL and same authenticated principal retains the
@@ -98,6 +114,10 @@ read-only refusal. The key replay twin recreates the branch first: retrying an
 old deletion must recover its earlier acknowledgement without deleting the
 newly recreated branch. Every listener must drain. Failure artifacts are
 retained, and the shared harness records the suite's terminal result.
+
+`scripts/e2e/suites/transport/smart_http_smoke.sh` pushes through a credential
+helper (401 challenge, then retry), beside a wrong-password twin that publishes
+nothing. `scripts/e2e/suites/git-lfs/basic_transfer.sh` takes the same path.
 
 The separate `scripts/tests/smart_http_discovery_oracle.py` uses
 `git-http-backend` only in a development test. It establishes the Git client's
