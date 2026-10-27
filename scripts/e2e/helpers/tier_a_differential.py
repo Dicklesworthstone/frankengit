@@ -44,6 +44,7 @@ LOG = open(WORK / 'commands.log', 'a', encoding='utf-8')
 DIVERGENCES = {
     'allow-reachable-sha1-in-want': 'DIV-TA-001: fg serves reachable-object wants inside its exact-head visible-graph proof; upstream needs uploadpack.allowReachableSHA1InWant',
     'filter': 'DIV-TA-002: fg serves object filters inside its visibility proof; upstream needs uploadpack.allowFilter',
+    'push-options': 'DIV-TA-006: fg seals push options into the sealed request and advertises them; upstream needs receive.advertisePushOptions',
 }
 # Report-status reasons that differ only in wording, as exact (upstream, fg)
 # pairs. The accept/refuse decision must still match; any other wording

@@ -234,10 +234,14 @@ It compares:
   deletion of HEAD's branch, and a directory/file refname conflict.
 
 Declared divergences are capabilities `fg` advertises that upstream advertises
-only under non-default configuration. Both are served inside `fg`'s exact-head
-visible-graph proof:
+only under non-default configuration. The first two are served inside `fg`'s
+exact-head visible-graph proof:
 - DIV-TA-001: `allow-reachable-sha1-in-want`;
-- DIV-TA-002: `filter`.
+- DIV-TA-002: `filter`;
+- DIV-TA-006: `push-options` on `git-receive-pack`. Upstream advertises it only
+  with `receive.advertisePushOptions`. `fg` advertises it on every transport
+  since 9db4d8bd (frankengit-321s) and seals the options into the request's
+  canonical digest.
 
 Every other capability `fg` advertises must also be advertised by pinned Git,
 and the Tier A capability subset must match exactly.
