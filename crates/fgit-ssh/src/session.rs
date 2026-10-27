@@ -25,7 +25,8 @@ use fgit_identity::deploy_key::DeployKeyBinding;
 use fgit_types::{PrincipalId, RepositoryId};
 
 use crate::auth::{
-    AuthRefusal, SshCommandAuthorizer, StaticDeployKeyAuthorizer, verify_client_signature,
+    AuthRefusal, SshCommandAuthorizer, SshCommandGrant, StaticDeployKeyAuthorizer,
+    verify_client_signature,
 };
 use crate::command::{CommandParseRefusal, SshGitCommand};
 use crate::crypto::{
@@ -184,7 +185,7 @@ pub struct SshServerSession {
     incoming_buffer: Vec<u8>,
     userauth_service_accepted: bool,
     authenticated_key: Option<[u8; 32]>,
-    authenticated_principal: Option<PrincipalId>,
+    authenticated_grant: Option<SshCommandGrant>,
     client_channel_id: Option<u32>,
     server_channel_id: u32,
     client_window_size: u32,
@@ -270,7 +271,7 @@ impl SshServerSession {
             incoming_buffer: Vec::new(),
             userauth_service_accepted: false,
             authenticated_key: None,
-            authenticated_principal: None,
+            authenticated_grant: None,
             client_channel_id: None,
             server_channel_id: 0,
             client_window_size: DEFAULT_WINDOW_SIZE,
@@ -312,9 +313,20 @@ impl SshServerSession {
     }
 
     /// The principal selected by successful Git command authorization.
+    /// This identity alone is not a write grant: receive consumers must retain
+    /// the complete [`Self::authenticated_grant`] including its ref ceiling.
     #[must_use]
     pub const fn authenticated_principal(&self) -> Option<PrincipalId> {
-        self.authenticated_principal
+        match &self.authenticated_grant {
+            Some(grant) => Some(grant.principal()),
+            None => None,
+        }
+    }
+
+    /// The exact grant selected at exec, retained unchanged across rekey.
+    #[must_use]
+    pub const fn authenticated_grant(&self) -> Option<&SshCommandGrant> {
+        self.authenticated_grant.as_ref()
     }
 
     /// The active Git command, if authorized and running.
@@ -886,13 +898,13 @@ impl SshServerSession {
                             RepositoryId::from_bytes(repo_bytes)
                         };
 
-                    match self.authorizer.authorize_command(
+                    match self.authorizer.authorize_command_grant(
                         pub_key,
                         repo_id,
                         parsed_command.service(),
                     ) {
-                        Ok(principal) => {
-                            self.authenticated_principal = Some(principal);
+                        Ok(grant) => {
+                            self.authenticated_grant = Some(grant);
                             self.active_command = Some(parsed_command);
                             self.phase = SessionPhase::ActiveChannel;
                             if want_reply {

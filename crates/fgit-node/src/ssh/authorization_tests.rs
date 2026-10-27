@@ -155,3 +155,57 @@ fn deadline_or_disconnect_during_source_io_discards_an_otherwise_valid_grant() {
     );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn session_authorization_preserves_the_complete_scope_and_refuses_legacy_write_consumers() {
+    struct Scoped;
+    impl SshCommandAuthorizer for Scoped {
+        fn authorize_command(
+            &self,
+            _: &[u8; 32],
+            _: RepositoryId,
+            _: SshGitService,
+        ) -> Result<PrincipalId, AuthRefusal> {
+            panic!("scoped source must never use the principal-only fallback");
+        }
+        fn authorize_command_grant(
+            &self,
+            key: &[u8; 32],
+            repository_id: RepositoryId,
+            service: SshGitService,
+        ) -> Result<SshCommandGrant, AuthRefusal> {
+            assert_eq!(key, &[7; 32]);
+            assert_eq!(repository_id, repository());
+            assert_eq!(service, SshGitService::ReceivePack);
+            Ok(SshCommandGrant::new(
+                principal(),
+                fgit_types::ref_write_scope::RefWriteScope::parse(
+                    "prefix:726566732f68656164732f6167656e742f",
+                )
+                .unwrap(),
+            ))
+        }
+    }
+    let (client, peer) = pair();
+    let source = SessionCommandAuthorizer {
+        source: Arc::new(Scoped),
+        deadline: deadline(Duration::from_secs(5)),
+        peer,
+    };
+    let grant = source
+        .authorize_command_grant(&[7; 32], repository(), SshGitService::ReceivePack)
+        .unwrap();
+    assert_eq!(grant.principal(), principal());
+    assert!(
+        grant
+            .ref_write_scope()
+            .unwrap()
+            .permits(b"refs/heads/agent/topic")
+    );
+    assert!(!grant.ref_write_scope().unwrap().permits(b"refs/heads/main"));
+    assert_eq!(
+        source.authorize_command(&[7; 32], repository(), SshGitService::ReceivePack),
+        Err(AuthRefusal::RefWriteScopeRequired)
+    );
+    drop(client);
+}

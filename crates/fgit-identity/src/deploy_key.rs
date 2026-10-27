@@ -52,7 +52,8 @@ use crate::revocation::RevocationEvidence;
 
 mod table;
 pub use table::{
-    DeployKeyTableRefusal, MAX_DEPLOY_KEY_TABLE_BYTES, MAX_DEPLOY_KEY_TABLE_ROWS,
+    DeployKeyCommandGrant, DeployKeyTableRefusal, MAX_DEPLOY_KEY_TABLE_BYTES,
+    MAX_DEPLOY_KEY_TABLE_ROWS, SCOPED_DEPLOY_KEY_TABLE_HEADER, parse_deploy_key_command_grants,
     parse_deploy_key_table,
 };
 

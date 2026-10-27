@@ -17,8 +17,8 @@ pub mod wire;
 pub mod x25519;
 
 pub use auth::{
-    AuthRefusal, SshCommandAuthorizer, StaticDeployKeyAuthorizer, authorize_deploy_key,
-    verify_client_signature,
+    AuthRefusal, SshCommandAuthorizer, SshCommandGrant, StaticDeployKeyAuthorizer,
+    authorize_deploy_key, verify_client_signature,
 };
 pub use command::{CommandParseRefusal, SshGitCommand, SshGitService};
 pub use crypto::{

@@ -12,11 +12,12 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use fgit_identity::deploy_key::{
-    DeployKeyBinding, DeployKeyTableRefusal, MAX_DEPLOY_KEY_TABLE_BYTES, parse_deploy_key_table,
+    DeployKeyCommandGrant, DeployKeyRefusal, DeployKeyScope, DeployKeyTableRefusal,
+    MAX_DEPLOY_KEY_TABLE_BYTES, parse_deploy_key_command_grants,
 };
 use fgit_identity::revocation::RevocationEvidence;
 use fgit_ssh::command::SshGitService;
-use fgit_ssh::{AuthRefusal, SshCommandAuthorizer, authorize_deploy_key};
+use fgit_ssh::{AuthRefusal, SshCommandAuthorizer, SshCommandGrant};
 use fgit_types::{PrincipalId, RepositoryId};
 
 /// A live SSH authorization file could not be validated completely.
@@ -72,9 +73,12 @@ impl Error for FileDeployKeyRefusal {
 ///
 /// This is an operator-maintained authentication configuration. Each row is
 /// `<pubkey-hex> <principal-hex> <scopes>`, where scopes contain `read` and/or
-/// `write`. Blank lines and `#` comments are accepted; an empty table revokes
+/// `write`. A `frankengit-ssh-deploy-keys-v2` header instead requires a fourth
+/// column holding `all`, `none`, or bounded exact/prefix native-ref selectors.
+/// The complete principal and ceiling are retained together for one command.
+/// Blank lines and `#` comments are accepted; an empty table revokes
 /// every grant. The exact grammar and finite bounds belong to
-/// [`parse_deploy_key_table`]. Both repository identifiers are explicit aliases
+/// [`parse_deploy_key_command_grants`]. Both repository identifiers are explicit aliases
 /// for the same served repository, preserving the static transport profile.
 ///
 /// Construction validates the current file, but authorizations never reuse that
@@ -121,7 +125,7 @@ impl FileDeployKeyAuthorizer {
         }
     }
 
-    fn read_bindings(&self) -> Result<Vec<DeployKeyBinding>, FileDeployKeyRefusal> {
+    fn read_bindings(&self) -> Result<Vec<DeployKeyCommandGrant>, FileDeployKeyRefusal> {
         let before = fs::symlink_metadata(&self.path).map_err(unavailable)?;
         private_regular_metadata(&before)?;
         let file = open_regular_file(&self.path)?;
@@ -137,7 +141,7 @@ impl FileDeployKeyAuthorizer {
         if !same_snapshot(&opened, &named)? {
             return Err(FileDeployKeyRefusal::UnsafeFile);
         }
-        parse_deploy_key_table(&bytes, self.repository_id, self.route_repository_id)
+        parse_deploy_key_command_grants(&bytes, self.repository_id, self.route_repository_id)
             .map_err(FileDeployKeyRefusal::InvalidTable)
     }
 }
@@ -149,16 +153,40 @@ impl SshCommandAuthorizer for FileDeployKeyAuthorizer {
         repository_id: RepositoryId,
         service: SshGitService,
     ) -> Result<PrincipalId, AuthRefusal> {
-        let bindings = self
+        self.authorize_command_grant(authenticated_key, repository_id, service)?
+            .principal_without_scope(service)
+    }
+
+    fn authorize_command_grant(
+        &self,
+        authenticated_key: &[u8; 32],
+        repository_id: RepositoryId,
+        service: SshGitService,
+    ) -> Result<SshCommandGrant, AuthRefusal> {
+        let grants = self
             .read_bindings()
             .map_err(|_| AuthRefusal::AuthorizationSourceUnavailable)?;
-        authorize_deploy_key(
-            &bindings,
-            authenticated_key,
-            repository_id,
-            service,
-            RevocationEvidence::Live,
-        )
+        let key = fgit_crypto::VerifyingKey::from_bytes(*authenticated_key);
+        // The complete table parser rejects duplicate keys before this lookup.
+        // Deliberate route aliases have distinct repository IDs.
+        let grant = grants
+            .iter()
+            .find(|grant| {
+                grant.binding().repository_id() == repository_id && grant.binding().key() == &key
+            })
+            .ok_or(AuthRefusal::DeployKey(DeployKeyRefusal::NoBindingForKey))?;
+        let scope = match service {
+            SshGitService::UploadPack => DeployKeyScope::Read,
+            SshGitService::ReceivePack => DeployKeyScope::Write,
+        };
+        let principal =
+            grant
+                .binding()
+                .authorize(&key, repository_id, scope, RevocationEvidence::Live)?;
+        Ok(SshCommandGrant::new(
+            principal,
+            grant.ref_write_scope().cloned(),
+        ))
     }
 }
 

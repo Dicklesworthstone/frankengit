@@ -252,7 +252,7 @@ fn successful_authentication_and_exec_cannot_be_replaced() {
         REMOTE_CHANNEL,
     );
     let key = session.authenticated_key;
-    let principal = session.authenticated_principal;
+    let principal = session.authenticated_principal();
     assert!(principal.is_some());
 
     // A valid signature by a different key used to reset the phase and key.
@@ -275,7 +275,7 @@ fn successful_authentication_and_exec_cannot_be_replaced() {
         } else {
             assert!(responses.is_empty());
         }
-        assert_eq!(session.authenticated_principal, principal);
+        assert_eq!(session.authenticated_principal(), principal);
         assert_eq!(
             session
                 .active_command

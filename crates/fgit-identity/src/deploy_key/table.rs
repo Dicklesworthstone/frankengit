@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use fgit_crypto::{PUBLIC_KEY_BYTES, VerifyingKey};
+use fgit_types::ref_write_scope::RefWriteScope;
 use fgit_types::{OPAQUE_ID_LEN, PrincipalId, RepositoryId};
 
 use super::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
@@ -15,6 +16,31 @@ pub const MAX_DEPLOY_KEY_TABLE_BYTES: usize = 64 * 1024;
 
 /// Maximum logical key registrations, before repository-route alias expansion.
 pub const MAX_DEPLOY_KEY_TABLE_ROWS: usize = 256;
+
+/// Explicit header for tables whose fourth column grants native reference writes.
+pub const SCOPED_DEPLOY_KEY_TABLE_HEADER: &str = "frankengit-ssh-deploy-keys-v2";
+
+/// One operator-owned command grant. The canonical binding retains its existing
+/// wire bytes; this host-selected ceiling is not canonical repository policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeployKeyCommandGrant {
+    binding: DeployKeyBinding,
+    ref_write_scope: Option<RefWriteScope>,
+}
+
+impl DeployKeyCommandGrant {
+    /// The validated repository, principal, public key and service grants.
+    #[must_use]
+    pub const fn binding(&self) -> &DeployKeyBinding {
+        &self.binding
+    }
+
+    /// Additional ref-write ceiling; absence preserves an unrestricted legacy grant.
+    #[must_use]
+    pub const fn ref_write_scope(&self) -> Option<&RefWriteScope> {
+        self.ref_write_scope.as_ref()
+    }
+}
 
 /// A deploy-key table is unusable as a whole, never a partially accepted grant.
 /// Diagnostics name positions and limits without retaining key or file contents.
@@ -28,7 +54,7 @@ pub enum DeployKeyTableRefusal {
     RowLimitExceeded { line: usize, limit: usize },
     /// A registration omits its public key, principal or scope column.
     MissingFields { line: usize },
-    /// A fourth field is present and does not begin a trailing `#` comment.
+    /// A field after the required columns does not begin a trailing `#` comment.
     UnexpectedField { line: usize },
     /// The key is not 32 hex-encoded bytes or a usable Ed25519 public key.
     InvalidPublicKey { line: usize },
@@ -36,6 +62,8 @@ pub enum DeployKeyTableRefusal {
     InvalidPrincipal { line: usize },
     /// The scope column contains an unknown or empty comma-separated scope.
     InvalidScopes { line: usize },
+    /// A versioned row lacks a valid, bounded native ref-write ceiling.
+    InvalidRefWriteScope { line: usize },
     /// A logical public key was registered more than once, even identically.
     DuplicateKey { first_line: usize, line: usize },
     /// The canonical deploy-key registration predicate refused the row.
@@ -80,6 +108,12 @@ impl std::fmt::Display for DeployKeyTableRefusal {
             }
             Self::InvalidScopes { line } => {
                 write!(out, "deploy-key table line {line} has invalid scopes")
+            }
+            Self::InvalidRefWriteScope { line } => {
+                write!(
+                    out,
+                    "deploy-key table line {line} has an invalid ref-write scope"
+                )
             }
             Self::DuplicateKey { first_line, line } => write!(
                 out,
@@ -131,6 +165,33 @@ pub fn parse_deploy_key_table(
     repository_id: RepositoryId,
     route_repository_id: RepositoryId,
 ) -> Result<Vec<DeployKeyBinding>, DeployKeyTableRefusal> {
+    parse_table(bytes, repository_id, route_repository_id, false)
+        .map(|grants| grants.into_iter().map(|grant| grant.binding).collect())
+}
+
+/// Parse legacy or explicitly versioned command grants as one bounded snapshot.
+///
+/// A legacy table has the original three-column grammar and grants unrestricted
+/// native ref writes when `write` is present. A table beginning with
+/// [`SCOPED_DEPLOY_KEY_TABLE_HEADER`] requires a fourth column on every row:
+/// `all`, `none`, or the exact/prefix grammar of [`RefWriteScope::parse`].
+/// Missing fields, mixed versions, duplicate keys and invalid unrelated rows
+/// refuse the complete table. The legacy parser deliberately rejects v2 input
+/// so a consumer that cannot carry ceilings never silently widens a grant.
+pub fn parse_deploy_key_command_grants(
+    bytes: &[u8],
+    repository_id: RepositoryId,
+    route_repository_id: RepositoryId,
+) -> Result<Vec<DeployKeyCommandGrant>, DeployKeyTableRefusal> {
+    parse_table(bytes, repository_id, route_repository_id, true)
+}
+
+fn parse_table(
+    bytes: &[u8],
+    repository_id: RepositoryId,
+    route_repository_id: RepositoryId,
+    allow_versioned: bool,
+) -> Result<Vec<DeployKeyCommandGrant>, DeployKeyTableRefusal> {
     if bytes.len() > MAX_DEPLOY_KEY_TABLE_BYTES {
         return Err(DeployKeyTableRefusal::ByteLimitExceeded {
             observed: bytes.len(),
@@ -140,6 +201,8 @@ pub fn parse_deploy_key_table(
     let text = std::str::from_utf8(bytes).map_err(|_| DeployKeyTableRefusal::InvalidUtf8)?;
     let mut bindings = Vec::new();
     let mut keys = BTreeMap::new();
+    let mut first = true;
+    let mut versioned = false;
     for (index, row) in text.lines().enumerate() {
         let line = index + 1;
         let mut fields = row.split_whitespace();
@@ -149,6 +212,15 @@ pub fn parse_deploy_key_table(
         if public_key.starts_with('#') {
             continue;
         }
+        if first && allow_versioned && public_key == SCOPED_DEPLOY_KEY_TABLE_HEADER {
+            if fields.next().is_some_and(|field| !field.starts_with('#')) {
+                return Err(DeployKeyTableRefusal::UnexpectedField { line });
+            }
+            first = false;
+            versioned = true;
+            continue;
+        }
+        first = false;
         if keys.len() == MAX_DEPLOY_KEY_TABLE_ROWS {
             return Err(DeployKeyTableRefusal::RowLimitExceeded {
                 line,
@@ -161,6 +233,15 @@ pub fn parse_deploy_key_table(
         let scopes = fields
             .next()
             .ok_or(DeployKeyTableRefusal::MissingFields { line })?;
+        let ref_write_scope = if versioned {
+            let field = fields
+                .next()
+                .ok_or(DeployKeyTableRefusal::InvalidRefWriteScope { line })?;
+            RefWriteScope::parse(field)
+                .map_err(|_| DeployKeyTableRefusal::InvalidRefWriteScope { line })?
+        } else {
+            None
+        };
         if fields.next().is_some_and(|field| !field.starts_with('#')) {
             return Err(DeployKeyTableRefusal::UnexpectedField { line });
         }
@@ -180,9 +261,13 @@ pub fn parse_deploy_key_table(
             return Err(DeployKeyTableRefusal::DuplicateKey { first_line, line });
         }
         let key = VerifyingKey::from_bytes(public_bytes);
-        let register = |repository_id| {
-            DeployKeyBinding::register(repository_id, principal, key, &scopes)
-                .map_err(|refusal| DeployKeyTableRefusal::Registration { line, refusal })
+        let register = |repository_id| -> Result<DeployKeyCommandGrant, DeployKeyTableRefusal> {
+            let binding = DeployKeyBinding::register(repository_id, principal, key, &scopes)
+                .map_err(|refusal| DeployKeyTableRefusal::Registration { line, refusal })?;
+            Ok(DeployKeyCommandGrant {
+                binding,
+                ref_write_scope: ref_write_scope.clone(),
+            })
         };
         bindings.push(register(repository_id)?);
         if route_repository_id != repository_id {

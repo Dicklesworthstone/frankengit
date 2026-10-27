@@ -18,7 +18,9 @@ use std::time::Duration;
 use fgit_identity::deploy_key::DeployKeyBinding;
 use fgit_ssh::command::SshGitService;
 use fgit_ssh::session::{SessionPhase, SshServerSession, SshSessionError};
-use fgit_ssh::{AuthRefusal, SigningKey, SshCommandAuthorizer, StaticDeployKeyAuthorizer};
+use fgit_ssh::{
+    AuthRefusal, SigningKey, SshCommandAuthorizer, SshCommandGrant, StaticDeployKeyAuthorizer,
+};
 use fgit_types::{PrincipalId, RepositoryId};
 use fgit_wire::{UploadPackRepository, WireLimits};
 
@@ -333,12 +335,22 @@ impl SshCommandAuthorizer for SessionCommandAuthorizer {
         repository_id: RepositoryId,
         service: SshGitService,
     ) -> Result<PrincipalId, AuthRefusal> {
+        self.authorize_command_grant(authenticated_key, repository_id, service)?
+            .principal_without_scope(service)
+    }
+
+    fn authorize_command_grant(
+        &self,
+        authenticated_key: &[u8; 32],
+        repository_id: RepositoryId,
+        service: SshGitService,
+    ) -> Result<SshCommandGrant, AuthRefusal> {
         if self.deadline.expired() || !crate::tcp_peer_connected(&self.peer) {
             return Err(AuthRefusal::AuthorizationSourceUnavailable);
         }
         let grant = self
             .source
-            .authorize_command(authenticated_key, repository_id, service);
+            .authorize_command_grant(authenticated_key, repository_id, service);
         if self.deadline.expired() || !crate::tcp_peer_connected(&self.peer) {
             return Err(AuthRefusal::AuthorizationSourceUnavailable);
         }
@@ -677,7 +689,7 @@ impl OneNode {
             return false;
         }
 
-        let principal = session.authenticated_principal();
+        let grant = session.authenticated_grant().cloned();
         // GIT_PROTOCOL selects the same wire version as a daemon greeting.
         let git_protocol = session
             .git_protocol()
@@ -740,7 +752,7 @@ impl OneNode {
                         .serve_ssh_receive_pack(
                             &mut reader,
                             &mut writer,
-                            principal,
+                            grant,
                             &git_protocol,
                             writers,
                             quota,
@@ -934,13 +946,14 @@ impl OneNode {
     /// same guarded receive coordinator as raw TCP and smart HTTP: fresh-basis
     /// quarantine after ingress, the complete-session retry key, and a fatal
     /// UNKNOWN response (never invented `ng` rows) when admission may already
-    /// have committed. The writer is the deploy key's principal, falling back
-    /// to the operator's receive principal as before.
+    /// have committed. The exact deploy-key principal and ref ceiling selected
+    /// at exec travel together; missing authorization never falls back to an
+    /// operator principal.
     fn serve_ssh_receive_pack<R: Read, W: ReceiveResponseWriter>(
         &self,
         reader: &mut R,
         writer: &mut W,
-        principal: Option<PrincipalId>,
+        grant: Option<SshCommandGrant>,
         git_protocol: &[u8],
         writers: &crate::WriterGate,
         quota: &PushQuota,
@@ -951,7 +964,11 @@ impl OneNode {
         self.serve_guarded_receive_session(
             reader,
             writer,
-            principal.or(self.git_daemon_receive_principal),
+            grant.as_ref().map(SshCommandGrant::principal),
+            grant
+                .as_ref()
+                .and_then(SshCommandGrant::ref_write_scope)
+                .cloned(),
             ingress,
             Some(quota),
             Some(writers),
@@ -1064,3 +1081,6 @@ mod tests {
         assert!(ssh_git_service(false, b"version=1").is_ok());
     }
 }
+
+#[cfg(test)]
+mod ref_scope_tests;

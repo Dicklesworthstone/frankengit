@@ -136,7 +136,7 @@ impl SshServerSession {
         self.discard_next_kex_packet = false;
         self.userauth_service_accepted = false;
         self.authenticated_key = None;
-        self.authenticated_principal = None;
+        self.authenticated_grant = None;
         self.active_command = None;
         self.rekey = RekeyState::default();
     }

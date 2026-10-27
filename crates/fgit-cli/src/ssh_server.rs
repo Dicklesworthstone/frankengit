@@ -30,7 +30,13 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--max-in-flight <1..16>]
   [--continuous --stop-file <absent-path>]
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
-  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]";
+  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]
+
+Deploy-key files retain the three-column legacy format. To limit native ref writes,
+start the file with frankengit-ssh-deploy-keys-v2 and give every row a fourth field:
+all | none | exact:<lowercase-ref-hex> | prefix:<lowercase-namespace-hex>.
+Separate multiple selectors with commas; prefix namespaces must end in a slash.
+The complete file is reloaded at each command; see docs/SSH_REF_WRITE_SCOPES.md.";
 
 struct Prepared {
     configuration: NodeConfig,

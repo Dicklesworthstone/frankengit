@@ -271,6 +271,7 @@ impl OneNode {
             &mut reader,
             &mut writer,
             self.git_daemon_receive_principal,
+            None,
             &ingress,
             shared_quota,
             writers,
@@ -313,12 +314,14 @@ impl OneNode {
     /// supplies the repository route bound into the retry key: the raw TCP
     /// binding reads it from the git-daemon greeting, SSH takes it from the
     /// authorized exec request. `principal` is the authenticated writer;
-    /// `None` is refused before any byte of the request is read.
+    /// `None` is refused before any byte of the request is read. The optional
+    /// immutable ref ceiling comes from that same command authorization.
     pub(crate) fn serve_guarded_receive_session<R, W, G, F>(
         &self,
         reader: &mut R,
         writer: &mut W,
         principal: Option<fgit_types::PrincipalId>,
+        ref_write_scope: Option<std::sync::Arc<fgit_types::ref_write_scope::RefWriteScope>>,
         ingress: &GitDaemonSessionDeadline,
         shared_quota: Option<&crate::PushQuota>,
         writers: Option<&crate::WriterGate>,
@@ -407,8 +410,20 @@ impl OneNode {
                     }
                 }
             };
-            let session =
-                LoopbackReceiveSession::authenticated(principal, retry_key(&route, &prefix)?);
+            let authenticated =
+                crate::AuthenticatedReceiveSession::new(principal, retry_key(&route, &prefix)?)
+                    .with_ref_write_scope(ref_write_scope);
+            // Check every original command before reading PACK bytes, acquiring
+            // a writer slot, binding retry keys or publishing any microbatch.
+            // The native admission boundary independently repeats this check.
+            if ready
+                .commands
+                .iter()
+                .any(|command| !authenticated.permits_ref_write_bytes(&command.ref_name))
+            {
+                return Err(NodeSmartHttpRefusal::RefWriteScopeDenied);
+            }
+            let session = LoopbackReceiveSession::Authenticated(authenticated);
             let mut input_bytes = prefix.len() as u64;
             drop(prefix);
             if ready.requires_pack() {

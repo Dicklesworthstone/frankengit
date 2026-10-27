@@ -146,6 +146,80 @@ mod unix {
     }
 
     #[test]
+    fn versioned_scopes_reload_atomically_without_widening_an_admitted_command() {
+        use fgit_identity::deploy_key::SCOPED_DEPLOY_KEY_TABLE_HEADER;
+        let scratch = Scratch::new();
+        let path = scratch.file();
+        let field = "prefix:726566732f68656164732f6167656e742f";
+        let table = |scope: &str| {
+            format!(
+                "{SCOPED_DEPLOY_KEY_TABLE_HEADER}\n{} {scope}\n",
+                row(1, 11, "read,write").trim_end()
+            )
+        };
+        private_write(&path, table(field).as_bytes());
+        let source = open_source(&path);
+        let admitted = source
+            .authorize_command_grant(&key(1), repository(), SshGitService::ReceivePack)
+            .unwrap();
+        assert_eq!(admitted.principal(), principal(11));
+        assert!(
+            admitted
+                .ref_write_scope()
+                .unwrap()
+                .permits(b"refs/heads/agent/topic")
+        );
+        assert!(
+            !admitted
+                .ref_write_scope()
+                .unwrap()
+                .permits(b"refs/heads/main")
+        );
+        assert_eq!(
+            source.authorize_command(&key(1), repository(), SshGitService::ReceivePack),
+            Err(AuthRefusal::RefWriteScopeRequired)
+        );
+        assert_eq!(
+            source.authorize_command(&key(1), route(), SshGitService::UploadPack),
+            Ok(principal(11))
+        );
+        replace(&path, table("none").as_bytes());
+        let narrowed = source
+            .authorize_command_grant(&key(1), repository(), SshGitService::ReceivePack)
+            .unwrap();
+        assert!(
+            !narrowed
+                .ref_write_scope()
+                .unwrap()
+                .permits(b"refs/heads/agent/topic")
+        );
+        assert!(
+            admitted
+                .ref_write_scope()
+                .unwrap()
+                .permits(b"refs/heads/agent/topic")
+        );
+        replace(&path, table("prefix:invalid").as_bytes());
+        assert_eq!(
+            source.authorize_command_grant(&key(1), repository(), SshGitService::ReceivePack),
+            Err(AuthRefusal::AuthorizationSourceUnavailable)
+        );
+        replace(&path, table("all").as_bytes());
+        assert_eq!(
+            source.authorize_command(&key(1), repository(), SshGitService::ReceivePack),
+            Ok(principal(11))
+        );
+        replace(
+            &path,
+            format!("{SCOPED_DEPLOY_KEY_TABLE_HEADER}\n").as_bytes(),
+        );
+        assert!(matches!(
+            source.authorize_command_grant(&key(1), repository(), SshGitService::ReceivePack),
+            Err(AuthRefusal::DeployKey(DeployKeyRefusal::NoBindingForKey))
+        ));
+    }
+
+    #[test]
     fn malformed_or_unavailable_replacement_never_reuses_a_previously_valid_grant() {
         let scratch = Scratch::new();
         let path = scratch.file();

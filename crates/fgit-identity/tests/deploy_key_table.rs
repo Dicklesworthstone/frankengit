@@ -295,3 +295,107 @@ fn byte_and_logical_row_limits_have_exact_accepted_boundaries() {
         }),
     );
 }
+
+#[test]
+fn versioned_ref_ceilings_preserve_native_bytes_and_the_original_binding_encoding() {
+    use fgit_identity::deploy_key::{
+        SCOPED_DEPLOY_KEY_TABLE_HEADER, parse_deploy_key_command_grants,
+    };
+    let field = format!(
+        "exact:{},prefix:{}",
+        hex(b"refs/tags/release-\xff"),
+        hex(b"refs/heads/agent/")
+    );
+    let source = format!(
+        "# command policy\n{SCOPED_DEPLOY_KEY_TABLE_HEADER}\n{} {field} # bounded writes\n",
+        row(1, 1, "read,write")
+    );
+    let selected = parse_deploy_key_command_grants(source.as_bytes(), REPOSITORY, ROUTE).unwrap();
+    let legacy = parse(&row(1, 1, "read,write")).unwrap();
+    assert_eq!(selected.len(), legacy.len());
+    for (grant, original) in selected.iter().zip(&legacy) {
+        assert_eq!(grant.binding(), original);
+        assert_eq!(
+            fgit_codec::encode_body(grant.binding()).unwrap(),
+            fgit_codec::encode_body(original).unwrap()
+        );
+        let ceiling = grant.ref_write_scope().unwrap();
+        assert!(ceiling.permits(b"refs/tags/release-\xff"));
+        assert!(ceiling.permits(b"refs/heads/agent/topic"));
+        assert!(!ceiling.permits(b"refs/heads/agents/topic"));
+        assert!(!ceiling.permits(b"refs/heads/main"));
+    }
+    assert!(
+        parse(&source).is_err(),
+        "a legacy reader must not discard v2 ceilings"
+    );
+}
+
+#[test]
+fn scoped_tables_keep_legacy_all_and_explicit_none_distinct() {
+    use fgit_identity::deploy_key::{
+        SCOPED_DEPLOY_KEY_TABLE_HEADER, parse_deploy_key_command_grants,
+    };
+    let legacy = row(1, 1, "write");
+    let parse_grants =
+        |text: &str| parse_deploy_key_command_grants(text.as_bytes(), REPOSITORY, REPOSITORY);
+    assert!(
+        parse_grants(&legacy).unwrap()[0]
+            .ref_write_scope()
+            .is_none()
+    );
+    let all = format!("{SCOPED_DEPLOY_KEY_TABLE_HEADER}\n{legacy} all");
+    assert!(parse_grants(&all).unwrap()[0].ref_write_scope().is_none());
+    let none = format!("{SCOPED_DEPLOY_KEY_TABLE_HEADER}\n{legacy} none");
+    assert!(
+        !parse_grants(&none).unwrap()[0]
+            .ref_write_scope()
+            .unwrap()
+            .permits(b"refs/heads/main")
+    );
+    assert!(
+        parse_grants(SCOPED_DEPLOY_KEY_TABLE_HEADER)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn scoped_table_missing_mixed_or_invalid_unrelated_rows_refuse_the_whole_snapshot() {
+    use fgit_identity::deploy_key::{
+        SCOPED_DEPLOY_KEY_TABLE_HEADER, parse_deploy_key_command_grants,
+    };
+    let valid = format!(
+        "{} prefix:{}",
+        row(1, 1, "read,write"),
+        hex(b"refs/heads/agent/")
+    );
+    let header = SCOPED_DEPLOY_KEY_TABLE_HEADER;
+    let forbidden = [
+        format!("{header}\n{}", row(1, 1, "write")),
+        format!(
+            "{header}\n{} # missing explicit ceiling",
+            row(1, 1, "write")
+        ),
+        format!(
+            "{header}\n{valid}\n{} prefix:{}",
+            row(2, 2, "read"),
+            hex(b"refs/heads/main")
+        ),
+        format!("{header}\n{valid}\n{valid}"),
+        format!("{header}\n{valid}\n{header}"),
+        format!("{}\n{header}\n{valid}", row(2, 2, "read")),
+        valid.clone(),
+        format!("{header}\n{valid} extra"),
+    ];
+    for source in forbidden {
+        assert!(
+            parse_deploy_key_command_grants(source.as_bytes(), REPOSITORY, ROUTE).is_err(),
+            "{source}"
+        );
+    }
+    assert!(
+        parse_deploy_key_command_grants(format!("{header}\n{valid}").as_bytes(), REPOSITORY, ROUTE)
+            .is_ok()
+    );
+}

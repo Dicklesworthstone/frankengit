@@ -12,6 +12,7 @@ pub mod layout;
 pub mod native;
 pub mod numeric;
 pub mod probability;
+pub mod ref_write_scope;
 pub mod refs;
 pub mod routing;
 pub mod vocabulary;

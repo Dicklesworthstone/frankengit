@@ -369,7 +369,9 @@ fn ssh_receive_command_limit_reports_counts_and_accepts_the_boundary_twin() {
             let result = node.serve_ssh_receive_pack(
                 &mut input,
                 &mut output,
-                Some(PrincipalId::from_bytes([0x73; 16])),
+                Some(SshCommandGrant::unrestricted(PrincipalId::from_bytes(
+                    [0x73; 16],
+                ))),
                 b"",
                 &writers,
                 &quota,

@@ -4,9 +4,11 @@
 //! defined in `fgit-identity`, returning the authoritative [`PrincipalId`].
 
 use core::fmt::{self, Display, Formatter};
+use std::sync::Arc;
 
 use fgit_identity::deploy_key::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
 use fgit_identity::revocation::RevocationEvidence;
+use fgit_types::ref_write_scope::RefWriteScope;
 use fgit_types::{PrincipalId, RepositoryId};
 
 use crate::command::SshGitService;
@@ -30,6 +32,8 @@ pub enum AuthRefusal {
     /// reuse of an earlier grant. The diagnostic is fixed so filesystem paths
     /// and untrusted source contents cannot escape through the SSH response.
     AuthorizationSourceUnavailable,
+    /// A principal-only caller cannot preserve this grant's reference ceiling.
+    RefWriteScopeRequired,
 }
 
 impl Display for AuthRefusal {
@@ -45,6 +49,9 @@ impl Display for AuthRefusal {
                     formatter,
                     "deploy key does not grant required scope `{requested}`"
                 )
+            }
+            Self::RefWriteScopeRequired => {
+                formatter.write_str("SSH write authorization requires its ref-write scope")
             }
             Self::AuthorizationSourceUnavailable => {
                 formatter.write_str("SSH command authorization source is unavailable")
@@ -64,6 +71,58 @@ impl From<CryptoError> for AuthRefusal {
 impl From<DeployKeyRefusal> for AuthRefusal {
     fn from(err: DeployKeyRefusal) -> Self {
         Self::DeployKey(err)
+    }
+}
+
+/// The exact principal and native ref ceiling selected for one verified command.
+/// Service and repository authorization must succeed before constructing this
+/// value. Ref ceilings can narrow writes but never confer read or write service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SshCommandGrant {
+    principal: PrincipalId,
+    ref_write_scope: Option<Arc<RefWriteScope>>,
+}
+
+impl SshCommandGrant {
+    /// Preserve the historical unrestricted ref ceiling of a legacy authorizer.
+    #[must_use]
+    pub const fn unrestricted(principal: PrincipalId) -> Self {
+        Self {
+            principal,
+            ref_write_scope: None,
+        }
+    }
+
+    /// Select the principal and ceiling atomically from one authorization snapshot.
+    #[must_use]
+    pub fn new(principal: PrincipalId, ref_write_scope: Option<RefWriteScope>) -> Self {
+        Self {
+            principal,
+            ref_write_scope: ref_write_scope.map(Arc::new),
+        }
+    }
+
+    /// The principal authenticated by the command boundary.
+    #[must_use]
+    pub const fn principal(&self) -> PrincipalId {
+        self.principal
+    }
+
+    /// A shared immutable ceiling held for the admitted command's lifetime.
+    #[must_use]
+    pub const fn ref_write_scope(&self) -> Option<&Arc<RefWriteScope>> {
+        self.ref_write_scope.as_ref()
+    }
+
+    /// Refuse a principal-only write consumer rather than discarding a ceiling.
+    pub fn principal_without_scope(
+        &self,
+        service: SshGitService,
+    ) -> Result<PrincipalId, AuthRefusal> {
+        if service == SshGitService::ReceivePack && self.ref_write_scope.is_some() {
+            return Err(AuthRefusal::RefWriteScopeRequired);
+        }
+        Ok(self.principal)
     }
 }
 
@@ -92,6 +151,19 @@ pub trait SshCommandAuthorizer: Send + Sync {
         repository_id: RepositoryId,
         service: SshGitService,
     ) -> Result<PrincipalId, AuthRefusal>;
+
+    /// Resolve one complete command grant. Legacy sources grant their historical
+    /// unrestricted ceiling; scoped sources override this method and refuse
+    /// scoped writes through the principal-only compatibility method.
+    fn authorize_command_grant(
+        &self,
+        authenticated_key: &[u8; 32],
+        repository_id: RepositoryId,
+        service: SshGitService,
+    ) -> Result<SshCommandGrant, AuthRefusal> {
+        self.authorize_command(authenticated_key, repository_id, service)
+            .map(SshCommandGrant::unrestricted)
+    }
 }
 
 /// Explicit fixed deploy-key grants for the lifetime of this source.

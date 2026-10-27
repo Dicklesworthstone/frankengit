@@ -124,6 +124,7 @@ fn corrupt_packs_are_refused_while_another_writer_holds_the_only_permit() {
             &mut Cursor::new(&body),
             &mut Output::default(),
             Some(PRINCIPAL),
+            None,
             &deadline(Duration::from_secs(30)),
             None,
             Some(&gate),

@@ -389,3 +389,103 @@ fn the_existing_static_constructor_keeps_its_read_and_write_grants() {
         allowed(&session, &packets, 0xab, service);
     }
 }
+
+struct ScopedAuthorizer {
+    ceiling: Mutex<fgit_types::ref_write_scope::RefWriteScope>,
+}
+
+impl SshCommandAuthorizer for ScopedAuthorizer {
+    fn authorize_command(
+        &self,
+        _: &[u8; 32],
+        _: RepositoryId,
+        _: SshGitService,
+    ) -> Result<PrincipalId, AuthRefusal> {
+        Err(AuthRefusal::RefWriteScopeRequired)
+    }
+
+    fn authorize_command_grant(
+        &self,
+        key: &[u8; 32],
+        repository: RepositoryId,
+        service: SshGitService,
+    ) -> Result<fgit_ssh::SshCommandGrant, AuthRefusal> {
+        let principal = authorize_deploy_key(
+            &grants(11, &[DeployKeyScope::Read, DeployKeyScope::Write]),
+            key,
+            repository,
+            service,
+            RevocationEvidence::Live,
+        )?;
+        Ok(fgit_ssh::SshCommandGrant::new(
+            principal,
+            Some(self.ceiling.lock().unwrap().clone()),
+        ))
+    }
+}
+
+#[test]
+fn encrypted_exec_carries_the_exact_ceiling_without_principal_only_fallback_or_reload() {
+    use fgit_types::ref_write_scope::RefWriteScope;
+    let source = Arc::new(ScopedAuthorizer {
+        ceiling: Mutex::new(
+            RefWriteScope::parse("prefix:726566732f68656164732f6167656e742f")
+                .unwrap()
+                .unwrap(),
+        ),
+    });
+    let start = |seed| {
+        let authorizer: Arc<dyn SshCommandAuthorizer> = source.clone();
+        let (mut session, mut client, key) = key_exchange_with_authorizer(
+            Arc::new(DetEntropy::new(seed)),
+            true,
+            [0x33; 32],
+            Some(authorizer),
+        );
+        open_channel(&mut session, &mut client, &key, 4096, 1024);
+        (session, client)
+    };
+    let (mut first, mut first_client) = start(701);
+    let packets = exec(&mut first, &mut first_client, "git-receive-pack 'repo.git'");
+    allowed(&first, &packets, 11, SshGitService::ReceivePack);
+    let original = first.authenticated_grant().unwrap().clone();
+    assert!(
+        original
+            .ref_write_scope()
+            .unwrap()
+            .permits(b"refs/heads/agent/topic")
+    );
+    assert!(
+        !original
+            .ref_write_scope()
+            .unwrap()
+            .permits(b"refs/heads/main")
+    );
+    assert_eq!(
+        original.principal_without_scope(SshGitService::ReceivePack),
+        Err(AuthRefusal::RefWriteScopeRequired)
+    );
+    *source.ceiling.lock().unwrap() = RefWriteScope::parse("none").unwrap().unwrap();
+    let (mut second, mut second_client) = start(702);
+    let packets = exec(
+        &mut second,
+        &mut second_client,
+        "git-receive-pack 'repo.git'",
+    );
+    allowed(&second, &packets, 11, SshGitService::ReceivePack);
+    assert!(
+        !second
+            .authenticated_grant()
+            .unwrap()
+            .ref_write_scope()
+            .unwrap()
+            .permits(b"refs/heads/agent/topic")
+    );
+    assert_eq!(first.authenticated_grant(), Some(&original));
+    exec(&mut first, &mut first_client, "git-upload-pack 'repo.git'");
+    assert_eq!(
+        first.authenticated_grant(),
+        Some(&original),
+        "a second exec cannot replace an already authorized command"
+    );
+}
