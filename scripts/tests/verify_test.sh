@@ -123,6 +123,25 @@ test -x "$FG_BIN" && test -x "$FG_MCP_BIN"
         tests = next(r for r in rows if r["kind"] == "cargo" and r["args"][0] == "test")
         self.assertEqual(tests["args"], ["test", "--workspace", "--all-targets", "--locked", "--no-fail-fast"])
 
+    def test_fast_forwards_requested_jobs_to_every_compiler_without_losing_gate_arguments(self):
+        for jobs in ["1", "3"]:
+            with self.subTest(jobs=jobs):
+                self.log = self.base / ("commands-jobs-" + jobs + ".jsonl")
+                _, rows = self.invoke("fast", changes={"CARGO_BUILD_JOBS": jobs,
+                                                       "TEST_LOG": str(self.log)})
+                work = [r for r in rows if r["kind"] == "cargo"
+                        and r["args"][0] in ["check", "test", "clippy"]]
+                self.assertEqual([r["args"] for r in work], [
+                    ["check", "--jobs", jobs, "--workspace", "--all-targets", "--locked"],
+                    ["test", "--jobs", jobs, "--workspace", "--all-targets", "--locked", "--no-fail-fast"],
+                    ["clippy", "--jobs", jobs, "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
+                ])
+                builds = [r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build"]
+                self.assertEqual(len(builds), 3)
+                self.assertTrue(all(r["args"][1:6] == ["--locked", "--target", HOST, "--jobs", jobs]
+                                    for r in builds))
+                self.assertTrue(all(r["bypass"] is None for r in work + builds))
+
     def test_e2e_builds_both_returned_native_binaries_once(self):
         _, rows = self.invoke("e2e")
         builds = [r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build"]
