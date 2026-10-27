@@ -169,6 +169,27 @@ pub enum LooseGitImportRefusal {
     Node(Box<NodeRefusal>),
 }
 
+impl LooseGitImportRefusal {
+    /// The import's expanded-byte limit and the bytes observed past it, for a
+    /// refusal that a larger `--max-expanded-mib` profile could admit. Both
+    /// the graph walk and a packed source's expansion enforce that limit; a
+    /// real repository is packed, so it usually stops in the pack.
+    #[must_use]
+    pub fn expanded_bytes_exceeded(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::TotalObjectBytesExceeded { limit, observed } => Some((*limit, *observed)),
+            Self::PackedObject { source, .. } => match source.as_ref() {
+                PackError::TotalExpandedLimit { actual, limit } => Some((
+                    u64::try_from(*limit).unwrap_or(u64::MAX),
+                    u64::try_from(*actual).unwrap_or(u64::MAX),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 impl Display for LooseGitImportRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -244,11 +265,20 @@ impl Display for LooseGitImportRefusal {
                 "local Git ref input {} is {observed} bytes, exceeding {limit}",
                 path.display()
             ),
-            Self::PackedObject { path, source } => write!(
-                formatter,
-                "local Git packed object source {} refused: {source}",
-                path.display()
-            ),
+            Self::PackedObject { path, source } => match source.as_ref() {
+                // The import's expanded-byte profile, reached while expanding
+                // a pack's members (reachable or not).
+                PackError::TotalExpandedLimit { actual, limit } => write!(
+                    formatter,
+                    "packed object bytes {actual} exceed import limit {limit} in local Git packed object source {}",
+                    path.display()
+                ),
+                _ => write!(
+                    formatter,
+                    "local Git packed object source {} refused: {source}",
+                    path.display()
+                ),
+            },
             Self::ObjectAlternatesUnsupported(path) => write!(
                 formatter,
                 "loose import refuses undeclared object alternates at {}",

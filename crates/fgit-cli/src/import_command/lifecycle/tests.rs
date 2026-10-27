@@ -236,6 +236,36 @@ fn byte_limit_refusals_name_the_profile_flag_and_only_admission_failures_are_unc
     );
     assert!(!text.contains("rerun with"), "{text}");
 
+    // A packed source reaches the profile while expanding the pack, which is
+    // where a real repository's import stops. It names the same flag.
+    let packed = |source: fgit_pack::PackError| {
+        NodeSourceImportRefusal::Staging(Box::new(LooseGitImportRefusal::PackedObject {
+            path: Box::new("objects/pack/pack-1.pack".into()),
+            source: Box::new(source),
+        }))
+    };
+    let expanded = packed(fgit_pack::PackError::TotalExpandedLimit {
+        actual: 1_050_000,
+        limit: 1_048_576,
+    });
+    let Failure::Refused(text) = failure(&expanded, Some(MIB)) else {
+        panic!("a staging refusal precedes sealing");
+    };
+    assert!(
+        text.starts_with("packed object bytes 1050000 exceed import limit 1048576"),
+        "{text}"
+    );
+    assert!(
+        text.contains("rerun with --max-expanded-mib 2 or more"),
+        "{text}"
+    );
+    // Any other pack refusal is not a profile limit and carries no hint.
+    let truncated = packed(fgit_pack::PackError::Truncated { context: "header" });
+    assert_eq!(
+        failure(&truncated, None),
+        Failure::Refused(truncated.to_string())
+    );
+
     // Other refusals before sealing carry no hint.
     for refusal in [
         NodeSourceImportRefusal::Staging(Box::new(LooseGitImportRefusal::ObjectLimitExceeded {

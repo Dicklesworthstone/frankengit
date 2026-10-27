@@ -2,7 +2,7 @@
 //! A cleanup failure never erases an authenticated terminal publication result.
 use super::{MAX_EXPANDED_MIB, Options, receipt};
 use crate::publication_support::{describe, write_terminal_receipt};
-use fgit_node::{LooseGitImportRefusal, NodeRequestContext, NodeSourceImportRefusal, OneNode};
+use fgit_node::{NodeRequestContext, NodeSourceImportRefusal, OneNode};
 use fgit_types::{DecisionOutcome, RepositoryIncarnationId};
 use std::io::Write;
 
@@ -22,12 +22,11 @@ pub(super) fn failure(error: &NodeSourceImportRefusal, maximum_bytes: Option<u64
     match error {
         NodeSourceImportRefusal::Admission(_) => Failure::Uncertain(error.to_string()),
         NodeSourceImportRefusal::Staging(staging) => {
-            let hint = match staging.as_ref() {
-                LooseGitImportRefusal::TotalObjectBytesExceeded { limit, observed } => {
-                    profile_hint(*limit, *observed, maximum_bytes)
-                }
-                _ => String::new(),
-            };
+            let hint = staging
+                .expanded_bytes_exceeded()
+                .map_or_else(String::new, |(limit, observed)| {
+                    profile_hint(limit, observed, maximum_bytes)
+                });
             Failure::Refused(format!("{error}{hint}"))
         }
         NodeSourceImportRefusal::Idempotency(_)
