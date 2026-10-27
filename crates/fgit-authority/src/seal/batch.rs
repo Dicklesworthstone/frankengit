@@ -64,7 +64,7 @@ impl Prepared {
         Ok(())
     }
 
-    fn check_count(&self, outcomes: &[PutOutcome]) -> Result<(), SealFailure> {
+    const fn check_count(&self, outcomes: &[PutOutcome]) -> Result<(), SealFailure> {
         if outcomes.len() != self.identities.len() {
             return Err(SealFailure::SlotContentUnexpected {
                 slot: "immutable batch outcome count",

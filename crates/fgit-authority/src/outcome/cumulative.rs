@@ -4,14 +4,20 @@
 //! nor permits a cache to authorize a different head. The ordinary replay APIs
 //! remain the fallback when another writer wins or the retained set is lost.
 
-use super::*;
+use super::{
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityStore, AuthorityVersionToken,
+    CumulativeOutcomes, DuplicateAbsenceWitness, DuplicateScan, HeadKey, HeadRead, HeadReadReceipt,
+    OutcomeFailure, PublicationOutcome, RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody,
+    TenantId, TerminalOutcome, TxId, authority_head_identity, decision_batch_identity,
+    fold_outcome_index, publish_decisions_impl, publish_decisions_impl_async,
+};
 
 /// Publish using a complete outcome set already collected at `expected`.
 ///
 /// The set replaces only the duplicate-history scan. A fresh authenticated
 /// head must select its exact token and root, and the ordinary atomic
 /// head/outcome replacement still checks that token. An accelerator miss never
-/// establishes absence. Generic callers can continue using [`publish_decisions`].
+/// establishes absence. Generic callers can continue using [`super::publish_decisions`].
 pub fn publish_decisions_with_cumulative<S>(
     store: &S,
     head_key: &HeadKey,
@@ -62,7 +68,7 @@ where
     .await
 }
 
-fn mismatch(field: &'static str) -> OutcomeFailure {
+const fn mismatch(field: &'static str) -> OutcomeFailure {
     OutcomeFailure::CumulativePublicationMismatch { field }
 }
 

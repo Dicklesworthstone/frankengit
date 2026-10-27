@@ -1,6 +1,12 @@
 //! One authoritative decision-history walk for several transaction identities.
 
-use super::*;
+use super::{
+    AsyncAuthorityStore, AuthorityStore, BTreeMap, HeadKey, HeadRead, OutcomeFailure,
+    OutcomeLookup, RepositoryDecisionBatchBody, RepositoryId, TenantId, TerminalOutcome, TxId,
+    head_body_of, indexed_outcome, indexed_outcome_async, next_batch_to_replay,
+    read_decision_batch_body, read_decision_batch_body_async, read_predecessor,
+    read_predecessor_async, reconcile_outcome,
+};
 
 #[derive(Clone, Copy)]
 struct Observation {
@@ -54,7 +60,7 @@ fn finish(
 /// All accelerator hints are read before selecting that head. A concurrent
 /// atomic publication therefore cannot supply a hint newer than the selected
 /// history. Hints never prove absence or replace replay, and each result uses
-/// the same fail-closed reconciliation as [`resolve_outcome`].
+/// the same fail-closed reconciliation as [`super::resolve_outcome`].
 ///
 /// Results preserve requested order, including duplicate identities. Duplicates
 /// share one hint and one history observation. Empty input performs no I/O.
@@ -62,7 +68,7 @@ fn finish(
 /// not the repository's history; the output is proportional to the input slice.
 ///
 /// Replay reidentifies complete canonical batch and predecessor bodies with
-/// the ordinary readers and retains [`MAX_REPLAY_BATCHES`]. It stops as soon
+/// the ordinary readers and retains [`super::MAX_REPLAY_BATCHES`]. It stops as soon
 /// as every requested terminal is found, without reading older predecessors.
 /// If any target remains undecided, the bounded walk must reach genesis. No
 /// partial result is returned after a read, integrity, or resource failure.
