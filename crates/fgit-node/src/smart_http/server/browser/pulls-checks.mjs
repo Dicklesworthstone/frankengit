@@ -65,13 +65,14 @@ export function checksReply(reply, number, observed, { after = null, limit = 20,
   return { ...selected, reply };
 }
 
-export function appendChecksPanel(doc, parent, { client, observed, run, current, status, displayText }) {
+export function appendChecksPanel(doc, parent, { client, observed, run, current, status, displayText, evidence = null }) {
   const element = (tag, value = '') => { const node = doc.createElement(tag); node.textContent = displayText(value); return node; };
   const item = (target, tag, value) => { const node = element(tag, value); target.append(node); return node; };
   const panel = element('section'), output = element('div'), paging = element('div');
   item(panel, 'h3', 'Published workflow observations');
   item(panel, 'p', 'These authenticated publisher observations refer to the recorded source ref and commit. They do not establish independent execution verification or merge permission.');
   const load = item(panel, 'button', 'Load checks at this snapshot'); load.type = 'button';
+  const evidenceAccess = evidence?.(panel);
   item(output, 'p', 'Checks have not been loaded for this PR snapshot.');
   panel.append(output, paging); parent.append(panel);
   function render(result) {
@@ -92,6 +93,7 @@ export function appendChecksPanel(doc, parent, { client, observed, run, current,
         `Attempt: ${check.attempt_id}\nWorkflow graph: ${check.graph_root}\nEvidence: ${check.evidence_sha256} · ${check.evidence_bytes} bytes`);
       if (check.conclusion === 'success') item(section, 'p', 'The publisher reports a successful verified trusted-workflow job. This observation does not establish independent verification, satisfy protected-branch policy by itself, or grant merge permission.');
       if (check.conclusion === 'action_required') item(section, 'p', 'Independent verification is still required. This observation is not a passing required check.');
+      evidenceAccess?.appendCheck(section, result, check);
     }
     item(output, 'p', reply.complete ? 'All observations after this page cursor are shown.' : 'More observations remain at this exact snapshot.');
     if (reply.next_after !== null) {
@@ -102,6 +104,7 @@ export function appendChecksPanel(doc, parent, { client, observed, run, current,
   function read(after = null) {
     return run('read', async guard => {
       if (!current()) fail('The selected PR changed.');
+      evidenceAccess?.clearRows();
       output.replaceChildren(); paging.replaceChildren(); load.disabled = true;
       item(output, 'p', 'Loading observations at the selected PR snapshot…');
       try {
@@ -121,4 +124,5 @@ export function appendChecksPanel(doc, parent, { client, observed, run, current,
     });
   }
   load.addEventListener('click', event => { event.preventDefault(); void read(); });
+  return () => { evidenceAccess?.close(); load.disabled = true; };
 }

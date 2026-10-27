@@ -81,7 +81,8 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{
-    PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary,
+    PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
+    WorkflowCheckSummary,
 };
 pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,

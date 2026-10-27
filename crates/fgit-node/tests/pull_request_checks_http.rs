@@ -168,7 +168,7 @@ fn checks_read_requires_its_own_grant_and_preserves_the_selected_pr_snapshot() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies() {
+fn actual_workflow_checks_keep_summaries_private_and_disclose_exact_evidence_under_both_grants() {
     use fgit_authority::IdempotencyKey;
     use fgit_forge::event::workflow_check::{NativeWorkflowCheck, WorkflowCheckRecord};
     use fgit_node::{LoopbackReceiveSession, OneNode};
@@ -259,8 +259,16 @@ fn actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies()
         }
         let before = generation(&node);
         let credentials = root.0.join("credentials");
-        grants(&node, &credentials);
-        let server = Server::start(node, &credentials, 4, true, false);
+        let header = grants(&node, &credentials);
+        replace(
+            &credentials,
+            &(header.clone()
+                + &row('a', OWNER, "pulls-read")
+                + &row('b', OWNER, "pulls-write")
+                + &row('c', OWNER, "pulls-read,artifact-read")
+                + &row('f', OWNER, "artifact-read")),
+        );
+        let server = Server::start(node, &credentials, 16, true, false);
         committed(&post(
             &server.client,
             7,
@@ -301,8 +309,138 @@ fn actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies()
         assert!(all.body.contains("\"conclusion\":\"failure\""));
         assert!(all.body.contains("\"merge_permission\":null"));
         assert!(!all.body.contains("\"evidence\":"));
+        assert!(!all.body.contains("\"evidence_hex\":"));
         assert!(!all.body.contains("PRIVATE-EXECUTION-OUTPUT"));
-        assert_eq!(server.finish().accepted_sessions(), 4);
+        let selected_head = token(&first);
+        for (id, record) in &records {
+            // 5..6
+            let evidence = get(
+                &server.client,
+                &format!(
+                    "/api/v1/pulls/7/checks/evidence?check={id}&expected_head={selected_head}"
+                ),
+                'c',
+            );
+            status(&evidence, 200);
+            assert!(evidence.body.starts_with(
+                "{\"type\":\"pull_request_check_evidence\",\"schema_version\":1,\"read_only\":true,"
+            ));
+            assert_eq!(token(&evidence), selected_head);
+            assert!(evidence.body.contains(&format!("\"id\":\"{id}\"")));
+            assert!(
+                evidence
+                    .body
+                    .contains("\"after\":null,\"limit\":1,\"next_after\":null,\"complete\":true")
+            );
+            assert!(evidence.body.contains("\"merge_permission\":null"));
+            let expected_hex: String = record
+                .evidence
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let returned_hex = evidence
+                .body
+                .split_once("\"evidence_hex\":\"")
+                .unwrap()
+                .1
+                .split('"')
+                .next()
+                .unwrap();
+            assert_eq!(returned_hex, expected_hex);
+            let report =
+                fgit_runner::coordinator::delivery::journal::history::decode_trusted_observation(
+                    &record.evidence,
+                    fgit_runner::Commitment::of_bytes(&record.evidence),
+                    fgit_forge::event::workflow_check::MAX_CHECK_EVIDENCE_BYTES,
+                    &|| true,
+                )
+                .unwrap()
+                .report_json();
+            let offset = record.evidence.len() - report.len();
+            assert_eq!(&record.evidence[offset..], report.as_bytes());
+            assert!(evidence.body.contains(&format!(
+                "\"report\":{{\"offset\":{offset},\"bytes\":{},\"json\":",
+                report.len()
+            )));
+            assert!(
+                !evidence.body.contains(&"c".repeat(64)),
+                "credential must not enter evidence"
+            );
+        }
+        let evidence_route = format!(
+            "/api/v1/pulls/7/checks/evidence?check={}&expected_head={selected_head}",
+            ids[0]
+        );
+        for denied in ['a', 'b', 'f'] {
+            // 7..9
+            let response = get(&server.client, &evidence_route, denied);
+            status(&response, 403);
+            assert!(!response.body.contains("evidence_hex"));
+            assert!(!response.body.contains("source_tip"));
+        }
+        status(&get(&server.client, &evidence_route, 'z'), 401); // 10
+        status(
+            &get(
+                &server.client,
+                &format!("/api/v1/pulls/7/checks/evidence?check={}", ids[0]),
+                'c',
+            ),
+            400,
+        ); // 11
+        let missing = get(
+            &server.client,
+            &format!(
+                "/api/v1/pulls/7/checks/evidence?check={}&expected_head={selected_head}",
+                WorkflowCheckId::from_bytes([0; 32])
+            ),
+            'c',
+        ); // 12
+        status(&missing, 404);
+        let absent = get(
+            &server.client,
+            &format!(
+                "/api/v1/pulls/8/checks/evidence?check={}&expected_head={selected_head}",
+                ids[0]
+            ),
+            'c',
+        ); // 13
+        status(&absent, 404);
+        assert_eq!(
+            missing.body, absent.body,
+            "unknown checks and PRs must share a generic absence"
+        );
+        assert!(!absent.body.contains("source_head"));
+        assert!(!absent.body.contains("evidence_hex"));
+        status(
+            &exchange(
+                &server.client,
+                &request(
+                    &server.client,
+                    "GET",
+                    &evidence_route,
+                    'c',
+                    "Idempotency-Key: no-write\r\n",
+                    &[],
+                ),
+                true,
+            ),
+            400,
+        ); // 14
+        status(
+            &get(
+                &server.client,
+                &format!(
+                    "/api/v1/pulls/7/checks/evidence?check={}&expected_head=alg:2:{}",
+                    ids[0],
+                    "ff".repeat(32)
+                ),
+                'c',
+            ),
+            409,
+        ); // 15
+        replace(&credentials, &(header + &row('c', OWNER, "pulls-read")));
+        status(&get(&server.client, &evidence_route, 'c'), 403); // 16
+        assert_eq!(server.finish().accepted_sessions(), 16);
         let node = reopen(&config);
         assert_eq!(
             generation(&node),

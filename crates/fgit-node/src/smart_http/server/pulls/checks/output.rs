@@ -1,13 +1,15 @@
-//! Exact read summaries. No evidence body, implicit success or merge authority.
+//! Exact read summaries and separately authorized, bounded evidence bodies.
+//! Neither response establishes independent execution truth or merge authority.
 
 use super::super::super::issues::{ApiError, quote};
 use super::request::Page;
-use crate::{OneNode, PullRequestChecksPage, WorkflowCheckSummary};
+use crate::{OneNode, PullRequestCheckEvidence, PullRequestChecksPage, WorkflowCheckSummary};
 use fgit_forge::PullRequestNumber;
 use fgit_forge::event::workflow_check::{WorkflowCheckConclusion, WorkflowCheckId};
 use fgit_types::RepositoryAuthorityHeadId;
 
 pub(super) const MAX_REPLY_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_EVIDENCE_REPLY_BYTES: usize = 8 * 1024 * 1024;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -155,6 +157,179 @@ pub(super) fn page(
     Ok(out)
 }
 
+/// This envelope is constructed only after the evidence route has authorized
+/// both pulls-read and artifact-read. The SHA-256 identifies inline canonical
+/// event evidence; it is not a workflow-artifact address.
+pub(super) fn evidence(
+    node: &OneNode,
+    number: PullRequestNumber,
+    check: WorkflowCheckId,
+    expected_head: RepositoryAuthorityHeadId,
+    result: &PullRequestCheckEvidence,
+    maximum: usize,
+    live: &dyn Fn() -> bool,
+) -> Result<String, ApiError> {
+    if !live() {
+        return Err(ApiError::unavailable());
+    }
+    result
+        .validate(number, check, expected_head)
+        .map_err(|_| ApiError::unavailable())?;
+    let selected = page(
+        node,
+        number,
+        Page {
+            after: None,
+            limit: 1,
+            expected_head: Some(expected_head),
+        },
+        Some(&result.page),
+        maximum,
+    )?;
+    let report = trusted_report(node, result, live);
+    if !live() {
+        return Err(ApiError::unavailable());
+    }
+    let mut out = String::new();
+    append(
+        &mut out,
+        "{\"type\":\"pull_request_check_evidence\",\"schema_version\":1,\"read_only\":true,\"page\":",
+        maximum,
+    )?;
+    append(&mut out, &selected, maximum)?;
+    append(&mut out, ",\"evidence_hex\":\"", maximum)?;
+    append_hex(&mut out, &result.evidence, maximum, live)?;
+    append(&mut out, "\",\"report\":", maximum)?;
+    if let Some((offset, json)) = report {
+        append(
+            &mut out,
+            &format!("{{\"offset\":{offset},\"bytes\":{},\"json\":", json.len()),
+            maximum,
+        )?;
+        append(&mut out, &quote(&json), maximum)?;
+        append(&mut out, "}", maximum)?;
+    } else {
+        append(&mut out, "null", maximum)?;
+    }
+    append(&mut out, "}", maximum)?;
+    if !live() {
+        return Err(ApiError::unavailable());
+    }
+    Ok(out)
+}
+
+fn append_hex(
+    out: &mut String,
+    bytes: &[u8],
+    maximum: usize,
+    live: &dyn Fn() -> bool,
+) -> Result<(), ApiError> {
+    let length = bytes.len().checked_mul(2).ok_or_else(ApiError::too_large)?;
+    if out
+        .len()
+        .checked_add(length)
+        .is_none_or(|size| size > maximum)
+    {
+        return Err(ApiError::too_large());
+    }
+    out.try_reserve(length)
+        .map_err(|_| ApiError::unavailable())?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for chunk in bytes.chunks(4096) {
+        if !live() {
+            return Err(ApiError::unavailable());
+        }
+        for byte in chunk {
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_report(
+    node: &OneNode,
+    result: &PullRequestCheckEvidence,
+    live: &dyn Fn() -> bool,
+) -> Option<(usize, String)> {
+    use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
+    use fgit_runner::Commitment;
+    use fgit_runner::coordinator::delivery::journal::history::decode_trusted_observation;
+
+    let row = result.page.checks.first()?;
+    let expected = Commitment::try_from_digest(Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(&row.evidence_sha256).ok()?,
+    ))
+    .ok()?;
+    let decoded = decode_trusted_observation(
+        &result.evidence,
+        expected,
+        fgit_forge::event::workflow_check::MAX_CHECK_EVIDENCE_BYTES,
+        live,
+    )
+    .ok()?;
+    let report = decoded.report();
+    if decoded.tenant() != node.tenant_id
+        || decoded.repository() != node.repository_id
+        || decoded.source_commit() != result.page.source_tip
+        || decoded.run_id().commitment().digest().bytes().as_bytes() != row.run_id
+        || decoded
+            .attempt_id()
+            .commitment()
+            .digest()
+            .bytes()
+            .as_bytes()
+            != row.attempt_id
+        || report.graph.digest().bytes().as_bytes() != row.graph_root
+        || report.jobs.len() != 1
+        || report.jobs[0].id != row.job
+        || (report_conclusion(report.jobs[0].outcome) != row.conclusion
+            // Older trusted-local publishers retained successful reports as
+            // ActionRequired. Display their logs without upgrading that fact.
+            && !(row.conclusion == WorkflowCheckConclusion::ActionRequired
+                && report.jobs[0].outcome == fgit_runner::workflow::JobOutcome::Succeeded))
+    {
+        return None;
+    }
+    // The decoder round-trips the entire canonical frame. Retain an explicit
+    // byte-span check as well: clients can prove this display JSON is the exact
+    // final length-framed field of the selected evidence, not detached output.
+    let json = decoded.report_json();
+    let offset = result.evidence.len().checked_sub(json.len())?;
+    let prefix = offset.checked_sub(8)?;
+    if result.evidence.get(offset..)? != json.as_bytes()
+        || result.evidence.get(prefix..offset)? != (json.len() as u64).to_be_bytes()
+    {
+        return None;
+    }
+    Some((offset, json))
+}
+
+#[cfg(target_os = "linux")]
+const fn report_conclusion(value: fgit_runner::workflow::JobOutcome) -> WorkflowCheckConclusion {
+    use fgit_runner::workflow::JobOutcome;
+    match value {
+        JobOutcome::Succeeded => WorkflowCheckConclusion::Success,
+        JobOutcome::Skipped => WorkflowCheckConclusion::ActionRequired,
+        JobOutcome::Failed | JobOutcome::Refused | JobOutcome::OutputLimit => {
+            WorkflowCheckConclusion::Failure
+        }
+        JobOutcome::Cancelled => WorkflowCheckConclusion::Cancelled,
+        JobOutcome::TimedOut => WorkflowCheckConclusion::TimedOut,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn trusted_report(
+    _node: &OneNode,
+    _result: &PullRequestCheckEvidence,
+    _live: &dyn Fn() -> bool,
+) -> Option<(usize, String)> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +374,16 @@ mod tests {
         assert_eq!(out, "abc");
         append(&mut out, "d", 4).unwrap();
         assert_eq!(out, "abcd");
+    }
+    #[test]
+    fn evidence_encoding_checks_expansion_and_cancellation_before_disclosure() {
+        let bytes = [0, 31, 255];
+        let mut out = String::from("x");
+        assert!(append_hex(&mut out, &bytes, 6, &|| true).is_err());
+        assert_eq!(out, "x");
+        assert!(append_hex(&mut out, &bytes, 7, &|| false).is_err());
+        assert_eq!(out, "x");
+        append_hex(&mut out, &bytes, 7, &|| true).unwrap();
+        assert_eq!(out, "x001fff");
     }
 }

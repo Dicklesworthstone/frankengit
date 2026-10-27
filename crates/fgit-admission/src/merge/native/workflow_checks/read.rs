@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::PublicationBasis;
-use fgit_codec::{DecodeLimits, ForgePositionStateEntry, decode_body};
+use fgit_codec::{CanonicalForgePositionState, DecodeLimits, ForgePositionStateEntry, decode_body};
 use fgit_forge::aggregate::{AggregateId, AggregateVersion, PullRequestNumber};
 use fgit_forge::event::workflow_check::{
     MAX_CHECK_EVIDENCE_BYTES, MAX_CHECK_JOB_BYTES, NativeWorkflowCheck, WorkflowCheckConclusion,
@@ -53,6 +53,43 @@ pub struct PullRequestChecksPage {
     pub source_current: bool,
     pub checks: Vec<WorkflowCheckSummary>,
     pub next_after: Option<WorkflowCheckId>,
+}
+
+/// Exact canonical execution bytes selected for one visible PR observation.
+/// Hosts must independently authorize disclosure of execution output; ordinary
+/// PR-summary access is deliberately insufficient for this body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PullRequestCheckEvidence {
+    pub page: PullRequestChecksPage,
+    pub evidence: Vec<u8>,
+}
+
+impl PullRequestCheckEvidence {
+    pub fn validate(
+        &self,
+        number: PullRequestNumber,
+        check: WorkflowCheckId,
+        expected_head: RepositoryAuthorityHeadId,
+    ) -> Result<(), RefusalCode> {
+        self.page
+            .validate_window(number, None, 1, Some(expected_head))?;
+        if !self.page.source_current
+            || self.page.checks.len() != 1
+            || self.page.next_after.is_some()
+            || self.evidence.is_empty()
+            || self.evidence.len() > MAX_CHECK_EVIDENCE_BYTES
+        {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        let selected = &self.page.checks[0];
+        if selected.id != check
+            || selected.evidence_bytes != self.evidence.len() as u64
+            || selected.evidence_sha256 != fgit_crypto::sha256_digest(&self.evidence)
+        {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        Ok(())
+    }
 }
 
 impl PullRequestChecksPage {
@@ -131,54 +168,15 @@ where
     if limit == 0 || limit > MAX_PAGE {
         return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
     }
-    checkpoint(cancelled)?;
-    let positions = storage::load_forge_positions(store, cx, basis).await?;
-    checkpoint(cancelled)?;
-    let aggregate = AggregateId::PullRequest(number);
-    let Some(frontier) = positions.entry(storage::aggregate_label(aggregate)?) else {
-        return Ok(None);
-    };
     let mut scan = ScanBudget::default();
-    let batch = read_batch(store, cx, basis, frontier, &mut scan, cancelled).await?;
-    let event = batch
-        .events
-        .into_iter()
-        .rev()
-        .find(|event| event.aggregate == aggregate)
-        .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-    let (source_ref, target_ref, source_tip, target_tip) = match event.payload {
-        ForgeEventPayload::PullRequestChangedNative(change) => (
-            change.data.source_ref,
-            change.data.target_ref,
-            change.data.source_tip,
-            change.data.target_tip,
-        ),
-        ForgeEventPayload::MergeCommittedNative(merge) => (
-            merge.source_ref,
-            merge.target_ref,
-            merge.source_tip,
-            merge.target_tip_before,
-        ),
-        // Legacy digest-only PRs have no native source coordinate to select.
-        _ => return Ok(None),
-    };
-    if !visible(&source_ref, &target_ref) {
+    let Some((positions, mut page)) = read_pull_request_subject(
+        store, cx, basis, number, refs, visible, &mut scan, cancelled,
+    )
+    .await?
+    else {
         return Ok(None);
-    }
-    let source_current = refs.get(&source_ref) == Some(&source_tip);
-    let mut page = PullRequestChecksPage {
-        source_head: basis.id(),
-        number,
-        pull_request_version: event.version,
-        source_ref,
-        target_ref,
-        source_tip,
-        target_tip,
-        source_current,
-        checks: Vec::new(),
-        next_after: None,
     };
-    if source_current {
+    if page.source_current {
         // Stream labels are canonical encodings of the full 256-bit identity.
         // Sorting the typed IDs makes the cursor contract independent of label
         // representation, forge insertion order, run names and event timing.
@@ -211,26 +209,152 @@ where
                 page.next_after = page.checks.last().map(|check| check.id);
                 break;
             }
-            let record = change.record;
-            let evidence_sha256 = fgit_crypto::sha256_digest(&record.evidence);
+            let row = summary(&change);
             checkpoint(cancelled)?;
-            page.checks.push(WorkflowCheckSummary {
-                id,
-                publisher: change.actor,
-                run_id: record.run_id,
-                attempt_id: record.attempt_id,
-                graph_root: record.graph_root,
-                job: record.job,
-                conclusion: record.conclusion,
-                evidence_sha256,
-                evidence_bytes: record.evidence.len() as u64,
-            });
+            page.checks.push(row);
         }
     }
     checkpoint(cancelled)?;
     page.validate_window(number, after, limit, Some(basis.id()))
         .map_err(unavailable)?;
     Ok(Some(page))
+}
+
+/// Read the exact canonical evidence of one selected PR check. The serving
+/// boundary must separately authorize execution-output disclosure and select
+/// the caller's required head before invoking this reader. Current visibility
+/// is checked before the selected check body is read. No other check streams,
+/// execution journals, artifact indexes or delivery bodies are consulted.
+pub async fn read_pull_request_evidence_at<S, V, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    number: PullRequestNumber,
+    refs: &BTreeMap<RefName, GitOid>,
+    check: WorkflowCheckId,
+    visible: &V,
+    cancelled: &C,
+) -> Result<Option<PullRequestCheckEvidence>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    V: Fn(&RefName, &RefName) -> bool + Sync,
+    C: Fn() -> bool + Sync,
+{
+    let mut scan = ScanBudget::default();
+    let Some((positions, mut page)) = read_pull_request_subject(
+        store, cx, basis, number, refs, visible, &mut scan, cancelled,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !page.source_current {
+        return Ok(None);
+    }
+    let label = storage::aggregate_label(AggregateId::WorkflowCheck(check))?;
+    let Some(frontier) = positions.entry(label) else {
+        return Ok(None);
+    };
+    if frontier.successor_position() != 1 {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    let batch = read_batch(store, cx, basis, frontier, &mut scan, cancelled).await?;
+    let change = observation(batch, check)?;
+    if change.record.source_ref != page.source_ref || change.record.source_commit != page.source_tip
+    {
+        return Ok(None);
+    }
+    page.checks.push(summary(&change));
+    let result = PullRequestCheckEvidence {
+        page,
+        evidence: change.record.evidence,
+    };
+    result
+        .validate(number, check, basis.id())
+        .map_err(unavailable)?;
+    checkpoint(cancelled)?;
+    Ok(Some(result))
+}
+
+async fn read_pull_request_subject<S, V, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    number: PullRequestNumber,
+    refs: &BTreeMap<RefName, GitOid>,
+    visible: &V,
+    scan: &mut ScanBudget,
+    cancelled: &C,
+) -> Result<Option<(CanonicalForgePositionState, PullRequestChecksPage)>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    V: Fn(&RefName, &RefName) -> bool + Sync,
+    C: Fn() -> bool + Sync,
+{
+    checkpoint(cancelled)?;
+    let positions = storage::load_forge_positions(store, cx, basis).await?;
+    checkpoint(cancelled)?;
+    let aggregate = AggregateId::PullRequest(number);
+    let Some(frontier) = positions.entry(storage::aggregate_label(aggregate)?) else {
+        return Ok(None);
+    };
+    let batch = read_batch(store, cx, basis, frontier, scan, cancelled).await?;
+    let event = batch
+        .events
+        .into_iter()
+        .rev()
+        .find(|event| event.aggregate == aggregate)
+        .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+    let (source_ref, target_ref, source_tip, target_tip) = match event.payload {
+        ForgeEventPayload::PullRequestChangedNative(change) => (
+            change.data.source_ref,
+            change.data.target_ref,
+            change.data.source_tip,
+            change.data.target_tip,
+        ),
+        ForgeEventPayload::MergeCommittedNative(merge) => (
+            merge.source_ref,
+            merge.target_ref,
+            merge.source_tip,
+            merge.target_tip_before,
+        ),
+        // Legacy digest-only PRs have no native source coordinate to select.
+        _ => return Ok(None),
+    };
+    if !visible(&source_ref, &target_ref) {
+        return Ok(None);
+    }
+    let page = PullRequestChecksPage {
+        source_head: basis.id(),
+        number,
+        pull_request_version: event.version,
+        source_current: refs.get(&source_ref) == Some(&source_tip),
+        source_ref,
+        target_ref,
+        source_tip,
+        target_tip,
+        checks: Vec::new(),
+        next_after: None,
+    };
+    page.validate_window(number, None, 1, Some(basis.id()))
+        .map_err(unavailable)?;
+    checkpoint(cancelled)?;
+    Ok(Some((positions, page)))
+}
+
+fn summary(change: &NativeWorkflowCheck) -> WorkflowCheckSummary {
+    let record = &change.record;
+    WorkflowCheckSummary {
+        id: change.id(),
+        publisher: change.actor,
+        run_id: record.run_id,
+        attempt_id: record.attempt_id,
+        graph_root: record.graph_root,
+        job: record.job.clone(),
+        conclusion: record.conclusion,
+        evidence_sha256: fgit_crypto::sha256_digest(&record.evidence),
+        evidence_bytes: record.evidence.len() as u64,
+    }
 }
 
 fn observation(

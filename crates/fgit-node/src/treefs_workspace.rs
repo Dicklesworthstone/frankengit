@@ -21,7 +21,10 @@ mod protection;
 mod publication;
 mod pull_request;
 pub use issues::IssueReadRefusal;
-pub use pull_request::{PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary};
+pub use pull_request::{
+    PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
+    WorkflowCheckSummary,
+};
 pub use pull_request::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };

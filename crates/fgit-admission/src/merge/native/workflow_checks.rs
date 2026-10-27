@@ -6,7 +6,10 @@
 use std::future::Future;
 
 mod read;
-pub use read::{PullRequestChecksPage, WorkflowCheckSummary, read_pull_request_page_at};
+pub use read::{
+    PullRequestCheckEvidence, PullRequestChecksPage, WorkflowCheckSummary,
+    read_pull_request_evidence_at, read_pull_request_page_at,
+};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, ScopedEntry, SealAttempt, SemanticRequest,

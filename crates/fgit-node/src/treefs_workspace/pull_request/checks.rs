@@ -2,6 +2,7 @@
 
 use fgit_admission::AdmissionError;
 use fgit_admission::merge::native::workflow_checks;
+use fgit_chronicle::PublicationBasis;
 use fgit_forge::aggregate::PullRequestNumber;
 use fgit_forge::event::workflow_check::WorkflowCheckId;
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
@@ -9,8 +10,14 @@ use fgit_types::{RefusalCode, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use super::snapshots;
-use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};
-pub use workflow_checks::{PullRequestChecksPage, WorkflowCheckSummary};
+use crate::{AdmissionMaterializationRefusal, CanonicalRefState, NodeRequestContext, OneNode};
+pub use workflow_checks::{PullRequestCheckEvidence, PullRequestChecksPage, WorkflowCheckSummary};
+
+struct CheckSelection {
+    basis: PublicationBasis,
+    refs: CanonicalRefState,
+    hidden_refs: RefVisibility,
+}
 
 impl OneNode {
     /// Bounded workflow observations for the PR's exact recorded source. A
@@ -36,6 +43,68 @@ impl OneNode {
         if after.is_some() && expected_head.is_none() {
             return Err(PullRequestChecksReadRefusal::UnpinnedContinuation);
         }
+        let selected = self
+            .select_pull_request_checks_in(request, expected_head)
+            .await?;
+        let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
+            [source, target].iter().all(|name| {
+                !visibility.hides(name.as_bytes()) && !selected.hidden_refs.hides(name.as_bytes())
+            })
+        };
+        workflow_checks::read_pull_request_page_at(
+            &self.authority,
+            request.authority(),
+            &selected.basis,
+            number,
+            selected.refs.refs(),
+            after,
+            limit,
+            &visible,
+            &|| !super::super::workspace_request_live(request),
+        )
+        .await
+        .map_err(|error| PullRequestChecksReadRefusal::Admission(Box::new(error)))
+    }
+
+    /// Return one exact check's canonical evidence at a mandatory selected head.
+    /// The host must authorize both PR reads and execution-output disclosure.
+    /// Current caller/hidden-ref visibility still applies to retained snapshots;
+    /// neither a digest nor possession of a check ID grants disclosure authority.
+    pub async fn read_pull_request_check_evidence_in(
+        &self,
+        request: &NodeRequestContext,
+        visibility: &RefVisibility,
+        number: PullRequestNumber,
+        check: WorkflowCheckId,
+        expected_head: RepositoryAuthorityHeadId,
+    ) -> Result<Option<PullRequestCheckEvidence>, PullRequestChecksReadRefusal> {
+        let selected = self
+            .select_pull_request_checks_in(request, Some(expected_head))
+            .await?;
+        let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
+            [source, target].iter().all(|name| {
+                !visibility.hides(name.as_bytes()) && !selected.hidden_refs.hides(name.as_bytes())
+            })
+        };
+        workflow_checks::read_pull_request_evidence_at(
+            &self.authority,
+            request.authority(),
+            &selected.basis,
+            number,
+            selected.refs.refs(),
+            check,
+            &visible,
+            &|| !super::super::workspace_request_live(request),
+        )
+        .await
+        .map_err(|error| PullRequestChecksReadRefusal::Admission(Box::new(error)))
+    }
+
+    async fn select_pull_request_checks_in(
+        &self,
+        request: &NodeRequestContext,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<CheckSelection, PullRequestChecksReadRefusal> {
         admits_read(self.cell_state(), ReadMode::Current)
             .map_err(PullRequestChecksReadRefusal::Cell)?;
         let current = self
@@ -71,25 +140,11 @@ impl OneNode {
                 AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress),
             )));
         }
-        let refs = ref_state.refs();
-        let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
-            [source, target].iter().all(|name| {
-                !visibility.hides(name.as_bytes()) && !current.hidden_refs.hides(name.as_bytes())
-            })
-        };
-        workflow_checks::read_pull_request_page_at(
-            &self.authority,
-            request.authority(),
-            &selected,
-            number,
-            refs,
-            after,
-            limit,
-            &visible,
-            &|| !super::super::workspace_request_live(request),
-        )
-        .await
-        .map_err(|error| PullRequestChecksReadRefusal::Admission(Box::new(error)))
+        Ok(CheckSelection {
+            basis: selected,
+            refs: ref_state,
+            hidden_refs: current.hidden_refs,
+        })
     }
 }
 

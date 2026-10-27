@@ -5,7 +5,10 @@
 mod checks;
 mod conversation;
 mod fast_forward;
-pub use checks::{PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary};
+pub use checks::{
+    PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
+    WorkflowCheckSummary,
+};
 pub use conversation::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
