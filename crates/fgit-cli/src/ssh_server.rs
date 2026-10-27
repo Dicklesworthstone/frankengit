@@ -202,48 +202,47 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     route_repo_bytes.copy_from_slice(&route_digest[..16]);
     let route_repo_id = RepositoryId::from_bytes(route_repo_bytes);
 
-    let authorizer: Arc<dyn SshCommandAuthorizer> = if let Some(path) =
-        flags.get("--deploy-keys-file")
-    {
-        if ["--deploy-key", "--principal", "--scopes"]
-            .iter()
-            .any(|flag| flags.contains_key(flag))
-        {
-            return Err(
+    let authorizer: Arc<dyn SshCommandAuthorizer> =
+        if let Some(path) = flags.get("--deploy-keys-file") {
+            if ["--deploy-key", "--principal", "--scopes"]
+                .iter()
+                .any(|flag| flags.contains_key(flag))
+            {
+                return Err(
                 "--deploy-keys-file cannot be combined with --deploy-key, --principal or --scopes"
                     .into(),
             );
-        }
-        Arc::new(
-            FileDeployKeyAuthorizer::try_new(PathBuf::from(*path), repository, route_repo_id)
-                .map_err(|error| format!("cannot load deploy keys file: {error}"))?,
-        )
-    } else if let Some(key_hex) = flags.get("--deploy-key") {
-        let principal_hex = flags
-            .get("--principal")
-            .ok_or_else(|| "--principal is required when --deploy-key is specified".to_owned())?;
-        let scopes_str = flags
-            .get("--scopes")
-            .ok_or_else(|| "--scopes is required when --deploy-key is specified".to_owned())?;
+            }
+            Arc::new(
+                FileDeployKeyAuthorizer::try_new(PathBuf::from(*path), repository, route_repo_id)
+                    .map_err(|error| format!("cannot load deploy keys file: {error}"))?,
+            )
+        } else if let Some(key_hex) = flags.get("--deploy-key") {
+            let principal_hex = flags.get("--principal").ok_or_else(|| {
+                "--principal is required when --deploy-key is specified".to_owned()
+            })?;
+            let scopes_str = flags
+                .get("--scopes")
+                .ok_or_else(|| "--scopes is required when --deploy-key is specified".to_owned())?;
 
-        let pub_bytes = parse_hex_key_32(key_hex, "deploy key")?;
-        let principal = PrincipalId::from_hex(principal_hex).map_err(|e| e.to_string())?;
-        let scopes = parse_scopes(scopes_str)?;
+            let pub_bytes = parse_hex_key_32(key_hex, "deploy key")?;
+            let principal = PrincipalId::from_hex(principal_hex).map_err(|e| e.to_string())?;
+            let scopes = parse_scopes(scopes_str)?;
 
-        let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
-        let b1 = DeployKeyBinding::register(repository, principal, fgit_key, &scopes)
-            .map_err(|e| format!("cannot register deploy key: {e}"))?;
-        let mut deploy_keys = vec![b1];
-
-        if route_repo_id != repository {
-            let b2 = DeployKeyBinding::register(route_repo_id, principal, fgit_key, &scopes)
+            let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
+            let b1 = DeployKeyBinding::register(repository, principal, fgit_key, &scopes)
                 .map_err(|e| format!("cannot register deploy key: {e}"))?;
-            deploy_keys.push(b2);
-        }
-        Arc::new(StaticDeployKeyAuthorizer::new(deploy_keys))
-    } else {
-        return Err("either --deploy-key or --deploy-keys-file must be provided".into());
-    };
+            let mut deploy_keys = vec![b1];
+
+            if route_repo_id != repository {
+                let b2 = DeployKeyBinding::register(route_repo_id, principal, fgit_key, &scopes)
+                    .map_err(|e| format!("cannot register deploy key: {e}"))?;
+                deploy_keys.push(b2);
+            }
+            Arc::new(StaticDeployKeyAuthorizer::new(deploy_keys))
+        } else {
+            return Err("either --deploy-key or --deploy-keys-file must be provided".into());
+        };
 
     let mut configuration = NodeConfig::new(PathBuf::from(*root), tenant, repository);
     if let Some(value) = flags.get("--expected-incarnation") {
