@@ -43,8 +43,7 @@ use fgit_types::{
     RegistryEpoch, RepositoryCommitId, RepositoryId,
 };
 
-#[path = "../../fgit-node/src/agent_journal/file.rs"]
-mod native_file;
+use super::file as native_file;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
@@ -385,7 +384,7 @@ fn truncation_corruption_reordering_and_valid_prefix_rollback_refuse() {
     assert_eq!(broker.abort(grant).unwrap().amount(), amount(250));
     let tail = broker.durable_position().unwrap().unwrap();
     assert!(broker.close().is_quiescent());
-    let bytes = fs::read(native_file::journal_path(&scratch.0, &run).unwrap()).unwrap();
+    let bytes = fs::read(native_file::journal_path(&scratch.0, &run)).unwrap();
     assert!(RecoveredEffectJournal::decode(&run, &bytes, Some(tail)).is_ok());
     let header_len = EffectJournalEncoder::new(&run).unwrap().1.len();
     for cut in [
@@ -817,7 +816,11 @@ fn native_process_child() {
 fn a_fresh_process_recovers_post_commit_debt_after_owner_death_without_dispatching() {
     let scratch = Scratch::new();
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "native_process_child", "--nocapture"])
+        .args([
+            "--exact",
+            "agent_journal::effect_journal_tests::native_process_child",
+            "--nocapture",
+        ])
         .env("FGIT_AGENT_JOURNAL_CHILD", &scratch.0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

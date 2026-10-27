@@ -159,8 +159,9 @@ capability identity is not a reconstructed authorization proof.
 
 ## Concrete validation surfaces
 
-`crates/fgit-agent/tests/effect_journal.rs` includes the exact native file module
-and exercises real writes, syncs, lock contention, reopen and a child process
+`crates/fgit-node/src/agent_journal/effect_journal_tests.rs` exercises the owning
+native file module directly as node unit cases: real writes, syncs, lock contention,
+reopen and a child process
 that exits without destructors while holding an unresolved outbox obligation.
 The acknowledged tail crosses that process boundary separately; the receiving
 process reconstructs the original-run debt without a downstream call.
@@ -174,8 +175,9 @@ source in these focused tests is the repository's reference authority engine,
 not a persisted-node or full agent-run execution test. Test source alone is not
 a revision-bound execution result.
 
-`crates/fgit-agent/tests/run_checkpoint.rs` executes the exact native checkpoint
-and journal file modules with the reference authority provider. It covers
+`crates/fgit-node/src/agent_journal/run_checkpoint_tests.rs` exercises the native
+checkpoint and journal modules in their owning crate with the reference authority
+provider. It covers
 complete original-run restoration, changed current heads, expired-run cleanup,
 wrong-store and forged receipt refusals, scope/budget/expiry substitution,
 independent pins, every truncated prefix, version and size bounds, cancellation,

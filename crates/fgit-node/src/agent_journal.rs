@@ -21,7 +21,11 @@ use fgit_authority::HeadReadReceipt;
 use fgit_resource::RegionId;
 
 mod checkpoint;
+#[cfg(test)]
+mod effect_journal_tests;
 mod file;
+#[cfg(test)]
+mod run_checkpoint_tests;
 pub use file::AgentJournalHostRefusal;
 
 /// Opens a new single-writer journal and the existing production checked

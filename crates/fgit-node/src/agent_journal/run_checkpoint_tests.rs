@@ -27,10 +27,7 @@ use fgit_codec::{RepositoryAuthorityHeadBody, encode_body};
 use fgit_resource::{Grade, RegionId, ResourceVector};
 use fgit_types::{HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryId};
 
-#[path = "../../fgit-node/src/agent_journal/checkpoint.rs"]
-mod checkpoint;
-#[path = "../../fgit-node/src/agent_journal/file.rs"]
-mod file;
+use super::{checkpoint, file};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);

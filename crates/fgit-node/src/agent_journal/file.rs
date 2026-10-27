@@ -50,7 +50,7 @@ impl core::error::Error for AgentJournalHostRefusal {}
 
 type Checkpoint = Box<dyn Fn() -> Result<(), EffectJournalPersistenceRefusal>>;
 
-pub(crate) struct FileEffectJournal {
+pub(super) struct FileEffectJournal {
     file: File,
     encoder: EffectJournalEncoder,
     acknowledged: EffectJournalPosition,
@@ -67,14 +67,11 @@ impl fmt::Debug for FileEffectJournal {
     }
 }
 
-pub(crate) fn journal_path(
-    directory: &Path,
-    run: &IntentRun,
-) -> Result<PathBuf, AgentJournalHostRefusal> {
+pub(super) fn journal_path(directory: &Path, run: &IntentRun) -> PathBuf {
     // Numeric run IDs cannot be reused with a different body in this store.
     // The exact complete commitment is verified in the file header.
     let name = format!("{:032x}.fg-agent-journal", run.run_id().value());
-    Ok(directory.join(name))
+    directory.join(name)
 }
 
 pub(super) fn checked_directory(directory: &Path) -> Result<PathBuf, AgentJournalHostRefusal> {
@@ -92,7 +89,7 @@ pub(super) fn checked_directory(directory: &Path) -> Result<PathBuf, AgentJourna
 }
 
 impl FileEffectJournal {
-    pub(crate) fn create(
+    pub(super) fn create(
         directory: &Path,
         run: &IntentRun,
         checkpoint: Checkpoint,
@@ -107,7 +104,7 @@ impl FileEffectJournal {
             .sync_all()
             .map_err(|_| AgentJournalHostRefusal::OutcomeUnknown)?;
         checkpoint().map_err(|_| AgentJournalHostRefusal::Cancelled)?;
-        let path = journal_path(&directory, run)?;
+        let path = journal_path(&directory, run);
         let mut options = OpenOptions::new();
         options.read(true).append(true).create_new(true);
         #[cfg(unix)]
@@ -186,7 +183,7 @@ impl EffectJournalSink for FileEffectJournal {
     }
 }
 
-pub(crate) fn recover(
+pub(super) fn recover(
     directory: &Path,
     run: &IntentRun,
     expected_tail: Option<EffectJournalPosition>,
@@ -194,7 +191,7 @@ pub(crate) fn recover(
 ) -> Result<RecoveredEffectJournal, AgentJournalHostRefusal> {
     checkpoint()?;
     let directory = checked_directory(directory)?;
-    let path = journal_path(&directory, run)?;
+    let path = journal_path(&directory, run);
     let metadata = std::fs::symlink_metadata(&path).map_err(|_| AgentJournalHostRefusal::Read)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(AgentJournalHostRefusal::Path);

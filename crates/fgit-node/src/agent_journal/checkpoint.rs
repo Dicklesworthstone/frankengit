@@ -13,7 +13,7 @@ use fgit_agent::{
 
 use super::file::{AgentJournalHostRefusal, checked_directory};
 
-pub(crate) fn create(
+pub(super) fn create(
     directory: &Path,
     run: &RunCheckpoint,
     check: &dyn Fn() -> Result<(), AgentJournalHostRefusal>,
@@ -51,7 +51,7 @@ pub(crate) fn create(
     check()
 }
 
-pub(crate) fn read(
+pub(super) fn read(
     directory: &Path,
     run_id: RunId,
     expected_run: &[u8; 32],
