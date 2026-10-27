@@ -1,0 +1,125 @@
+# Native CI owned by the HTTP service
+
+On Linux, `fg serve-http` can own one native workflow controller alongside its
+accepted HTTP sessions. The operator selects its branch, workflow directory,
+source inputs, private run parent and optional check publisher at startup. The
+controller uses the same canonical source selection, execution custody and check
+admission as [`fg workflow watch`](NATIVE_REF_WORKFLOW_WATCH.md).
+
+## Explicit host execution authority
+
+This is trusted local execution. Every future selected script runs with the
+service account's host privileges. Trust every principal and every write path
+that can change those scripts or their inputs. The input list selects copied
+source files; it does not constrain scripts' access to the host.
+
+`--workflow-trusted-local` is a separate required acknowledgement. The existing
+HTTP `--trusted-local` transport acknowledgement alone cannot enable execution.
+No HTTP request, bearer token, workflow text or repository file can select the
+controller's run parent, publisher, watched branch or execution configuration.
+There is no workflow-execution HTTP endpoint, and this profile does not provide
+hostile-code isolation or an untrusted pull-request runner.
+
+## Starting a service
+
+Provision the ordinary incarnation-bound scoped credentials described by
+`fg serve-http --help`, and create the private run directory with mode 0700.
+The stop file must be absent in an existing operator-owned directory.
+
+```sh
+fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
+  --trusted-local --credentials-file /private/http-credentials \
+  --continuous --stop-file /private/control/http.stop \
+  --expected-incarnation INCARNATION \
+  --workflow-trusted-local --workflow-format sha256 \
+  --workflow-ref refs/heads/main --workflow-dir ci \
+  --workflow-input ci --workflow-input src \
+  --workflow-run-parent /private/workflow-runs \
+  --workflow-interval-ms 1000 --workflow-attempt-timeout-secs 300 \
+  --workflow-publish-checks --workflow-principal PUBLISHER \
+  --allow-pulls --allow-receive
+```
+
+All workflow selection flags are explicit. `--workflow-input` repeats for distinct
+top-level paths; the workflow directory must be included in those inputs.
+`--workflow-format` must match the repository's SHA-1 or SHA-256 object format.
+The polling interval accepts 10–60000 milliseconds and defaults to 1000. Each
+attempt accepts a 1–3600 second deadline and defaults to 300. Pending publication,
+one source poll and its resulting publication share that finite request; an
+active attempt never renews its budget. Existing per-step, per-run and output
+limits continue to apply.
+
+The CLI requires `--continuous --stop-file` so its signal and file controls own
+execution drain. Create the regular stop file or send SIGTERM/SIGINT to stop the
+listener and its controller. The file is retained. The native library also
+offers a bounded listener wrapper for embedding owners that manage their own
+process controls.
+
+The workflow service requires `--credentials-file`. Each network endpoint remains
+independently disabled until its ordinary enable flag is present, and each token
+still needs that endpoint's scope. A workflow controller does not enable source
+queries, Git receive, PR writes or artifact downloads. The example enables PR
+APIs and Git receive explicitly; omit those flags to keep them disabled. Credential
+rotation/revocation governs network grants; it does not replace the local
+operator's explicit workflow service configuration.
+
+## Checks, PRs and retained logs
+
+Execution alone does not publish checks. Supply **both**
+`--workflow-publish-checks --workflow-principal PUBLISHER`, together with
+`--expected-incarnation`, to use the existing canonical check publication path.
+The original reporting identity remains permanently bound to its custody scope.
+Pending publication recovers under original identities before new execution;
+failed or skipped job observations are never promoted to success.
+
+Optional `--workflow-pull-request NUMBER` selects the native same-repository PR
+profile. The PR must be open and its source branch must match `--workflow-ref`.
+It executes the current source head, retains the existing separate PR custody,
+and does not construct a synthetic merge. See
+[native PR workflow selection](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md).
+
+Optional `--workflow-artifact-logs --artifact-root /private/artifacts` captures
+bounded raw stdout/stderr using existing immutable artifact custody. Defaults
+are 16 MiB per payload and 64 MiB cumulative payloads per dispatch. Logs may
+contain secrets printed by trusted scripts; they are not redacted. The HTTP
+artifact surface still requires the independent `artifact-read` scope. See
+[HTTP workflow artifacts](HTTP_WORKFLOW_ARTIFACTS.md) for its entire-incarnation
+disclosure boundary. The dedicated foreground workflow commands retain their
+additional explicit file-capture and artifact-input options.
+
+## Readiness, stop and recovery
+
+The worker authenticates the exact repository incarnation, obtains exclusive
+controller ownership, validates existing execution custody and reconciles
+pending checks before HTTP readiness. It then waits for the listener's readiness
+callback to succeed before starting scripts. A broken readiness output cannot
+start a workflow. This lifetime lock supplements the existing per-event custody
+locks; permanent event identities remain the protection against duplicate work.
+
+`smart_http_listening` includes `workflow_enabled`. On stop, HTTP acceptance
+retires and the controller receives a cooperative stop before accepted sessions
+are joined. Active workflow processes drain under their existing native owners.
+The worker's node closes before the listener emits `workflow_service_drained`;
+the usual `smart_http_drained` follows the outer node's close. The workflow receipt
+reports observed execution/check counts, non-green results, interruption,
+reconciliation, publication pending, and node/service failure separately.
+
+An ordinary failed build can settle and the service can execute a later source
+event. Unknown or interrupted execution, corrupt custody, incomplete publication
+or a worker failure stops the service. An idle clean stop exits 0. A requested
+shutdown that drains normally but reports non-green execution, interruption,
+unresolved custody or known pending publication exits 1. Startup, controller
+operation (including an exhausted attempt), output or cleanup failure exits 2.
+A successful transport close is not proof of green CI. A cancelled read-only
+publication scan alone does not invent pending work; that field retains observed
+publication responsibility until a complete recovery pass clears it.
+
+Retain the run parent across restarts and restores. The existing 1024 retained
+event limit per scope remains enforced; no automatic deletion, identity reset,
+retry of interrupted scripts or all-events delivery queue is introduced.
+Intermediate branch tips may coalesce between polls. An unresolved event blocks
+later events and refuses service readiness on restart until reconciled.
+
+Source index maintenance can run alongside CI with its existing explicit flags.
+Both workers belong to the same listener's stop/drain path; enabling CI grants
+no source access and does not replace index progress ownership.

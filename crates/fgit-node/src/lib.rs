@@ -67,6 +67,9 @@ pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
     BundleInspectionRefusal, PullRequestInspectionRefusal,
 };
+/// Operator-owned native CI, with canonical event custody and explicit drain.
+#[cfg(target_os = "linux")]
+pub use treefs_workspace::workflow_watch;
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::{
     DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES,

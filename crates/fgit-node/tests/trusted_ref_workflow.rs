@@ -468,6 +468,8 @@ fn a_completed_process_report_without_event_settlement_remains_unresolved_after_
 
 #[path = "trusted_ref_workflow/check_reporting.rs"]
 mod check_reporting;
+#[path = "trusted_ref_workflow/service.rs"]
+mod service;
 
 #[path = "trusted_ref_workflow/pull_requests.rs"]
 mod pull_requests;

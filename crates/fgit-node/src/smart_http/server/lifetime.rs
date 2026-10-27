@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use fgit_types::PrincipalId;
 
-use super::{CredentialSource, MAX_SESSIONS, NodeSmartHttpRefusal, OneNode};
+use super::{Controllers, CredentialSource, MAX_SESSIONS, NodeSmartHttpRefusal, OneNode};
 use crate::GitDaemonServerReceipt;
 
 pub(super) enum Acceptance<'a> {
@@ -101,8 +101,7 @@ impl OneNode {
             false,
             false,
             Acceptance::UntilStopped(should_stop),
-            None,
-            None,
+            Controllers::default(),
         )
     }
 
@@ -135,8 +134,7 @@ impl OneNode {
             allow_pulls,
             allow_source,
             Acceptance::UntilStopped(should_stop),
-            None,
-            None,
+            Controllers::default(),
         )
     }
 }

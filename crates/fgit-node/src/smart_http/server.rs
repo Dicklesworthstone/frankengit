@@ -23,6 +23,8 @@ mod outcomes;
 mod protection;
 mod pulls;
 mod source;
+#[cfg(target_os = "linux")]
+mod workflow;
 pub use source::{source_agent_context_json, source_retrieval_json};
 mod stock_receive;
 
@@ -65,6 +67,18 @@ const IO_CHUNK: usize = 16 * 1024;
 const MAX_IN_FLIGHT: usize = 16;
 const MAX_SESSIONS: usize = 1_000_000;
 const FRAMING_ALLOWANCE: u64 = 4 * 1024 * 1024;
+
+/// Local owners are configured before serving and never from request data.
+#[derive(Default)]
+struct Controllers<'a> {
+    maintenance: Option<crate::index_maintenance::MaintenanceConfig>,
+    on_ready: Option<&'a dyn Fn() -> io::Result<()>>,
+    #[cfg(target_os = "linux")]
+    workflow: Option<crate::workflow_watch::WorkflowWatchConfig>,
+    #[cfg(target_os = "linux")]
+    on_workflow_drained:
+        Option<&'a dyn Fn(&crate::workflow_watch::WorkflowWatchReceipt) -> io::Result<()>>,
+}
 
 #[derive(Clone)]
 struct Profile {
@@ -425,8 +439,7 @@ impl OneNode {
                 max_sessions: server_limits.max_sessions(),
                 idle_timeout,
             },
-            None,
-            None,
+            Controllers::default(),
         )
     }
 
@@ -441,8 +454,7 @@ impl OneNode {
         allow_pulls: bool,
         allow_source: bool,
         acceptance: lifetime::Acceptance<'_>,
-        maintenance: Option<crate::index_maintenance::MaintenanceConfig>,
-        on_ready: Option<&dyn Fn() -> io::Result<()>>,
+        controllers: Controllers<'_>,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener
             .local_addr()
@@ -460,6 +472,12 @@ impl OneNode {
         if !(1..=MAX_IN_FLIGHT).contains(&max_in_flight) || !acceptance.valid() {
             return Err(invalid_configuration(
                 "invalid bounded Smart HTTP service limits",
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if controllers.workflow.is_some() && controllers.on_workflow_drained.is_none() {
+            return Err(invalid_configuration(
+                "workflow service requires a terminal observation callback",
             ));
         }
         credentials.validate().map_err(credential_error)?;
@@ -530,33 +548,66 @@ impl OneNode {
         listener
             .set_nonblocking(true)
             .map_err(|source| io_error("configure HTTP listener", source))?;
-        let maintenance = match maintenance
+        let mut failure = None;
+        let maintenance = match controllers
+            .maintenance
             .map(|config| maintenance::Worker::start(self, config))
             .transpose()
         {
             Ok(worker) => worker,
             Err(error) => {
-                return match listener.set_nonblocking(false) {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(io_error(
-                        "restore HTTP listener after index maintenance startup failure",
-                        io::Error::other(format!("{error}; {cleanup}")),
-                    )),
-                };
+                failure = Some(error);
+                None
             }
         };
+        #[cfg(target_os = "linux")]
+        let on_workflow_drained = controllers.on_workflow_drained;
+        #[cfg(target_os = "linux")]
+        let (mut workflow, startup_stopped) = if failure.is_none() {
+            match (controllers.workflow, on_workflow_drained) {
+                (Some(config), Some(observe)) => {
+                    let stop = match &acceptance {
+                        lifetime::Acceptance::UntilStopped(stop) => Some(*stop),
+                        lifetime::Acceptance::Bounded { .. } => None,
+                    };
+                    match workflow::Worker::start(self, config, observe, stop) {
+                        Ok(worker) => {
+                            let stopped = worker.is_none();
+                            (worker, stopped)
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            (None, false)
+                        }
+                    }
+                }
+                _ => (None, false),
+            }
+        } else {
+            (None, false)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let startup_stopped = false;
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<PendingSession> = Vec::new();
         let mut accepted = 0;
         let mut last_activity = Instant::now();
-        let mut failure = on_ready.and_then(|ready| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(ready))
-                .unwrap_or_else(|_| Err(io::Error::other("HTTP readiness callback panicked")))
-                .err()
-                .map(|error| io_error("report Smart HTTP readiness", error))
-        });
-        while failure.is_none() {
+        if failure.is_none() && !startup_stopped {
+            failure = controllers.on_ready.and_then(|ready| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(ready))
+                    .unwrap_or_else(|_| Err(io::Error::other("HTTP readiness callback panicked")))
+                    .err()
+                    .map(|error| io_error("report Smart HTTP readiness", error))
+            });
+        }
+        #[cfg(target_os = "linux")]
+        if failure.is_none() && !startup_stopped {
+            if let Some(worker) = &mut workflow {
+                failure = worker.activate().err();
+            }
+        }
+        while failure.is_none() && !startup_stopped {
             let mut index = 0;
             while index < pending.len() {
                 if pending[index].finished.load(Ordering::Acquire) {
@@ -574,6 +625,14 @@ impl OneNode {
                 failure = Some(io_error(
                     "supervise source index maintenance",
                     io::Error::other("index maintenance stopped while HTTP acceptance was active"),
+                ));
+                break;
+            }
+            #[cfg(target_os = "linux")]
+            if workflow.as_ref().is_some_and(workflow::Worker::finished) {
+                failure = Some(io_error(
+                    "supervise workflow service",
+                    io::Error::other("workflow service stopped while HTTP acceptance was active"),
                 ));
                 break;
             }
@@ -640,8 +699,24 @@ impl OneNode {
         if let Some(worker) = &maintenance {
             worker.request_stop();
         }
+        #[cfg(target_os = "linux")]
+        if let Some(worker) = &workflow {
+            worker.request_stop();
+        }
         for child in pending {
             (child.join)();
+        }
+        #[cfg(target_os = "linux")]
+        if let (Some(worker), Some(observe)) = (workflow, on_workflow_drained) {
+            if let Err(error) = worker.finish(observe) {
+                failure = Some(match failure {
+                    Some(service) => io_error(
+                        "drain workflow service after HTTP service failure",
+                        io::Error::other(format!("{service}; {error}")),
+                    ),
+                    None => error,
+                });
+            }
         }
         if let Some(worker) = maintenance {
             if let Err(error) = worker.finish() {

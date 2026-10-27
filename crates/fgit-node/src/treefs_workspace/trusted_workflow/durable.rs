@@ -8,6 +8,7 @@ mod dispatch;
 mod publication;
 mod recovery;
 mod trigger;
+pub use trigger::service as workflow_watch;
 
 use super::{TrustedWorkflowFailure, TrustedWorkflowRun, hex};
 use fgit_runner::coordinator::delivery::journal::attempt::{
