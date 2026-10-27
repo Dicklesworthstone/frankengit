@@ -741,16 +741,24 @@ fn terminal_failure_and_late_resolution_preserve_committed_resource_spend() {
                 panic!("weak unknown result must retain responsibility");
             };
             if resolution == 1 {
-                effect
+                let settled = effect
                     .resolve_acknowledged(acknowledgement(1), Vec::new())
                     .unwrap();
+                assert_eq!(
+                    settled.state(),
+                    fgit_resource::ObligationState::Acknowledged
+                );
             } else {
-                effect
+                let settled = effect
                     .resolve_failed(
                         fgit_resource::TerminalFailureReason::OperatorDecision,
                         Vec::new(),
                     )
                     .unwrap();
+                assert_eq!(
+                    settled.state(),
+                    fgit_resource::ObligationState::TerminallyFailed
+                );
             }
         }
         let records = broker.records();
@@ -771,7 +779,7 @@ fn terminal_failure_and_late_resolution_preserve_committed_resource_spend() {
         let permitted = broker
             .request(&external_capability(), t(20), &external_request(73, 750))
             .unwrap();
-        broker.abort(permitted).unwrap();
+        assert_eq!(broker.abort(permitted).unwrap().amount(), egress(750));
         assert!(broker.close().is_quiescent());
     }
 }

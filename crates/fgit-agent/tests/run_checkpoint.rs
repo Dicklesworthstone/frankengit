@@ -106,8 +106,7 @@ fn exact_original_run_restores_after_authority_advancement_and_expiry() {
         .unwrap()
         .encode()
         .unwrap();
-    let original = run.clone();
-    drop(run);
+    let original = run;
     let mut next = authenticated.body().unwrap();
     next.predecessor_head_id = Some(authority_head_identity(&next).unwrap());
     next.generation = HeadGeneration::try_new(2).unwrap();
@@ -380,7 +379,10 @@ fn actual_files_restore_journal_without_the_original_run_object() {
             },
         )
         .unwrap();
-    broker.abort_low_risk(grant).unwrap();
+    assert_eq!(
+        broker.abort_low_risk(grant).unwrap().amount(),
+        ResourceVector::single(Grade::Bytes, 64)
+    );
     let tail = broker.durable_position().unwrap().unwrap();
     assert!(broker.close().is_quiescent());
     drop(authenticated);

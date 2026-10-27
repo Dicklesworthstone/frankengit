@@ -159,7 +159,7 @@ fn dispatch() -> OutboxDispatch {
         idempotency_strength: DownstreamIdempotency::Strong,
     }
 }
-fn plan(dispatch: &OutboxDispatch) -> ReconcilePlan {
+const fn plan(dispatch: &OutboxDispatch) -> ReconcilePlan {
     ReconcilePlan::new(
         dispatch.idempotency,
         dispatch.idempotency_strength,
@@ -172,7 +172,7 @@ fn ack(attempt: u32) -> DownstreamAck {
         attempt,
     }
 }
-fn owner() -> PrincipalId {
+const fn owner() -> PrincipalId {
     PrincipalId::from_bytes([82; 16])
 }
 
@@ -280,7 +280,7 @@ fn checked_broker_uses_the_same_writer_and_preserves_single_owner_custody() {
         )
         .unwrap();
     assert_eq!(broker.durable_position().unwrap().unwrap().entries, 1);
-    broker.abort_low_risk(grant).unwrap();
+    assert_eq!(broker.abort_low_risk(grant).unwrap().amount(), amount(250));
     let tail = broker.durable_position().unwrap().unwrap();
     assert!(broker.close().is_quiescent());
     let restored = native_file::recover(&scratch.0, &run, Some(tail), &|| Ok(())).unwrap();
@@ -337,7 +337,7 @@ fn a_well_hashed_replay_cannot_reduce_spend_at_a_later_lifecycle_event() {
         .unwrap()
         .dispatch(1, &amount(200))
         .unwrap();
-    deferred
+    let ExternalEffectOutcome::Acknowledged(settled) = deferred
         .reconcile(
             &mut plan(&outbox),
             &mut Channel::default(),
@@ -345,7 +345,11 @@ fn a_well_hashed_replay_cannot_reduce_spend_at_a_later_lifecycle_event() {
             ack,
             Vec::new(),
         )
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("successful downstream observation must acknowledge the effect");
+    };
+    assert_eq!(settled.state(), ObligationState::Acknowledged);
     let mut entries = broker.journal();
     assert!(broker.close().is_quiescent());
     let EffectJournalEvent::Lifecycle {
@@ -378,7 +382,7 @@ fn truncation_corruption_reordering_and_valid_prefix_rollback_refuse() {
         )
         .unwrap();
     let prefix = broker.durable_position().unwrap().unwrap();
-    broker.abort(grant).unwrap();
+    assert_eq!(broker.abort(grant).unwrap().amount(), amount(250));
     let tail = broker.durable_position().unwrap().unwrap();
     assert!(broker.close().is_quiescent());
     let bytes = fs::read(native_file::journal_path(&scratch.0, &run).unwrap()).unwrap();
