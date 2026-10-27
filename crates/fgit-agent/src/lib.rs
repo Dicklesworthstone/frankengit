@@ -101,6 +101,7 @@ mod learning;
 pub mod outcome_learning;
 pub mod plan;
 pub mod protocol;
+pub mod publication;
 pub mod pulse;
 pub mod reconcile;
 pub mod refresh;
@@ -250,6 +251,11 @@ pub use protocol::{
     AgentRefTransaction, AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId,
     ContextSource, MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES,
     ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
+};
+pub use publication::{
+    AgentPublicationBinding, AgentPublicationEvidence, AgentPublicationRefusal,
+    AgentPublicationSubject, MAX_PUBLICATION_BYTES, MAX_PUBLICATION_EVIDENCE_RECORDS,
+    MAX_PUBLICATION_EVIDENCE_REFERENCES, MAX_PUBLICATION_METADATA_BYTES, MAX_PUBLICATION_OBJECTS,
 };
 pub use pulse::{
     AgentControlPulse, AgentControlPulseId, PulseExclusionCounts, PulseRefusal, PulseSelection,

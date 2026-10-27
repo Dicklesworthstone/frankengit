@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 //! Real authority and context-packet boundary tests for FG-030.
 
+#[path = "publication/fixture.rs"]
+mod publication_fixture;
+
 use fgit_agent::{
     AuthorityBasisRef, AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket,
     ContextSource, IntentRun, LogicalTime, MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal,
@@ -336,7 +339,12 @@ fn path(bytes: &[u8]) -> TreePath {
 
 fn agent_workspace_and_proposal(
     receipt: &AuthorityReadReceipt,
-) -> (WorkspaceSnapshotBody<Sha1>, ProposedTransaction<Sha1>) {
+) -> (
+    WorkspaceSnapshotBody<Sha1>,
+    ProposedTransaction<Sha1>,
+    Overlay,
+    fgit_treefs::ExportPlan<Sha1>,
+) {
     let workspace_id = WorkspaceId::from_bytes([0x63; 16]);
     let mut source = MemorySource::default();
     let base_blob = source.insert(GitObjectKind::Blob, b"fn original() {}\n".to_vec());
@@ -413,13 +421,13 @@ fn agent_workspace_and_proposal(
         }],
     )
     .expect("a real TreeFS export seals a target-disjoint proposal");
-    (snapshot, proposal)
+    (snapshot, proposal, overlay, plan)
 }
 
 #[test]
 fn authenticated_workspace_proposal_uses_the_ordinary_retry_safe_ref_seal() {
     let (store, receipt) = authority_store_and_receipt();
-    let (snapshot, proposal) = agent_workspace_and_proposal(&receipt);
+    let (snapshot, proposal, overlay, export) = agent_workspace_and_proposal(&receipt);
     let binding = WorkspaceBinding::bind(
         IntentRun::new_authenticated(
             RunId::new(0x030),
@@ -437,9 +445,12 @@ fn authenticated_workspace_proposal_uses_the_ordinary_retry_safe_ref_seal() {
     .expect("TreeFS workspace is pinned to its authenticated authority base");
     let packet = ContextPacket::build(receipt, control(), Vec::new())
         .expect("the same authority generation permits a bounded packet");
+    let packets = [packet];
+    let evidence =
+        publication_fixture::Evidence::new(&binding, &proposal, &packets, &overlay, &export);
 
     let transaction = binding
-        .prepare_ref_transaction(proposal, &[packet])
+        .prepare_ref_transaction(proposal, &packets, evidence.input(&overlay, &export))
         .expect("the run, workspace, proposal, and context share one authority basis");
     assert_eq!(
         transaction.semantic_request().request_schema(),
