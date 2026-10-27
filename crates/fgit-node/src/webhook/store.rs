@@ -124,6 +124,12 @@ fn encode_records<T: PartialEq>(
     Ok(bytes)
 }
 
+/// The lock descriptor is close-on-exec, but a child forked by any sibling
+/// thread holds a copy of it, and so the flock, until that child execs. Wait a
+/// bounded moment for such a transient holder; a live writer still refuses.
+const WRITER_LOCK_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+const WRITER_LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(2);
+
 fn lock_writer(path: &Path) -> Result<File, String> {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
@@ -152,8 +158,16 @@ fn lock_writer(path: &Path) -> Result<File, String> {
     {
         return Err("webhook writer lock is not a regular file".into());
     }
-    file.try_lock()
-        .map_err(|error| format!("webhook writer lock unavailable: {error}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < WRITER_LOCK_GRACE => {
+                std::thread::sleep(WRITER_LOCK_STEP);
+            }
+            Err(error) => return Err(format!("webhook writer lock unavailable: {error}")),
+        }
+    }
     // Never unlink this inode: another process may already be waiting on it.
     Ok(file)
 }
@@ -806,6 +820,22 @@ mod tests {
         assert!(store.list().is_empty());
         drop(lock);
         store.register(registration(1)).unwrap();
+        assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn a_transient_writer_lock_holder_inside_the_grace_does_not_refuse() {
+        let dir = Directory::new();
+        let store = WebhookStore::open(dir.0.clone()).unwrap();
+        // A second open description of the lock stands in for the copy a
+        // child forked by a sibling thread holds until it execs.
+        let holder = lock_writer(&dir.0.join("registrations.json")).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(holder);
+        });
+        store.register(registration(1)).unwrap();
+        releaser.join().unwrap();
         assert_eq!(store.list().len(), 1);
     }
 
