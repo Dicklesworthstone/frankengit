@@ -120,7 +120,9 @@ fn ancestry_is_not_the_force_flag_and_effects_have_no_force_intent() {
             Predicate::UpdateKindIn(vec![kind]),
         ] {
             let expected = match kind {
-                RefUpdateKind::Create | RefUpdateKind::Delete => Ok(()),
+                RefUpdateKind::Create
+                | RefUpdateKind::Delete
+                | RefUpdateKind::UnclassifiedUpdate => Ok(()),
                 RefUpdateKind::FastForward | RefUpdateKind::NonFastForward => {
                     missing(MissingAdmissionFact::VerifiedAncestry)
                 }

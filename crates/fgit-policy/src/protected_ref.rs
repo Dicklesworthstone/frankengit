@@ -421,6 +421,11 @@ pub fn evaluate_protected_ref(
             verdicts.push(RequirementVerdict::Passed {
                 check_name: "fast_forward_only",
             });
+        } else if subject.kind() == RefUpdateKind::UnclassifiedUpdate {
+            verdicts.push(RequirementVerdict::Failed {
+                check_name: "fast_forward_only",
+                reason: "commit ancestry was not established for this update".to_owned(),
+            });
         } else if subject.kind() == RefUpdateKind::NonFastForward {
             verdicts.push(RequirementVerdict::Failed {
                 check_name: "fast_forward_only",

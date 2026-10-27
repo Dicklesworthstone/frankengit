@@ -223,6 +223,7 @@ pub fn evaluate(
     input: &PolicyInputRoot,
 ) -> Result<PolicyEvaluation, PolicyEvalRefusal> {
     let policy = snapshot.policy();
+    require_ancestry(policy, input)?;
     require_aggregates(policy, input)?;
 
     let actor_id = input.principal().principal().to_string();
@@ -251,6 +252,66 @@ pub fn evaluate(
         decision: overall,
         subjects,
     })
+}
+
+/// Missing ancestry is not a false fast-forward predicate. Inspect the entire
+/// compiled policy before evaluation, including negation and unreachable arms.
+fn require_ancestry(
+    policy: &CompiledPolicy,
+    input: &PolicyInputRoot,
+) -> Result<(), PolicyEvalRefusal> {
+    let Some(subject) = input
+        .updates()
+        .iter()
+        .find(|subject| subject.kind() == RefUpdateKind::UnclassifiedUpdate)
+    else {
+        return Ok(());
+    };
+    let mut remaining = crate::syntax::MAX_SOURCE_LEN;
+    for rule in policy.rules() {
+        let mut pending = vec![(rule.predicate(), 0_u32)];
+        while let Some((predicate, depth)) = pending.pop() {
+            if remaining == 0 || depth > crate::program::MAX_PREDICATE_DEPTH {
+                return Err(PolicyEvalRefusal::PredicateLimitExceeded {
+                    rule: refusal_name(rule.id().as_str()),
+                });
+            }
+            remaining -= 1;
+            let needs = match predicate {
+                Predicate::UpdateKindEquals(kind) => matches!(
+                    kind,
+                    RefUpdateKind::FastForward | RefUpdateKind::NonFastForward
+                ),
+                Predicate::UpdateKindIn(kinds) => kinds.iter().any(|kind| {
+                    matches!(
+                        kind,
+                        RefUpdateKind::FastForward | RefUpdateKind::NonFastForward
+                    )
+                }),
+                Predicate::Not(inner) => {
+                    pending.push((inner, depth + 1));
+                    false
+                }
+                Predicate::All(children) | Predicate::Any(children) => {
+                    if children.len().saturating_add(pending.len()) > remaining {
+                        return Err(PolicyEvalRefusal::PredicateLimitExceeded {
+                            rule: refusal_name(rule.id().as_str()),
+                        });
+                    }
+                    pending.extend(children.iter().map(|child| (child, depth + 1)));
+                    false
+                }
+                _ => false,
+            };
+            if needs {
+                return Err(PolicyEvalRefusal::AncestryUnavailable {
+                    rule: refusal_name(rule.id().as_str()),
+                    name: subject.name().as_bytes().to_vec(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refuses before any subject is decided when a declared aggregate is absent.

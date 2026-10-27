@@ -657,6 +657,12 @@ impl std::error::Error for PolicyInputRefusal {}
 /// said it needed and did not get.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PolicyEvalRefusal {
+    /// A rule, including a negated or otherwise short-circuited predicate,
+    /// requires ancestry that the caller explicitly has not classified.
+    AncestryUnavailable { rule: Box<str>, name: Vec<u8> },
+    /// A custom snapshot exceeded the finite predicate walk used to establish
+    /// that an unclassified input can be evaluated without missing facts.
+    PredicateLimitExceeded { rule: Box<str> },
     /// A rule reads an aggregate the input root did not supply a reading for.
     ///
     /// Defaulting the reading to zero would be a decision this crate is not
@@ -673,6 +679,15 @@ pub enum PolicyEvalRefusal {
 impl fmt::Display for PolicyEvalRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AncestryUnavailable { rule, name } => write!(
+                formatter,
+                "rule `{rule}` reads commit ancestry for `{}`, which the input root did not establish",
+                lossy(name)
+            ),
+            Self::PredicateLimitExceeded { rule } => write!(
+                formatter,
+                "rule `{rule}` exceeds the bounded policy fact-availability walk"
+            ),
             Self::AggregateMissing { rule, name } => write!(
                 formatter,
                 "rule `{rule}` reads aggregate `{name}`, which the input root did not supply"

@@ -124,7 +124,7 @@ fn check_predicate(
 
 const fn ancestry_fact(kind: RefUpdateKind) -> Option<MissingAdmissionFact> {
     match kind {
-        RefUpdateKind::Create | RefUpdateKind::Delete => None,
+        RefUpdateKind::Create | RefUpdateKind::Delete | RefUpdateKind::UnclassifiedUpdate => None,
         RefUpdateKind::FastForward | RefUpdateKind::NonFastForward => {
             Some(MissingAdmissionFact::VerifiedAncestry)
         }

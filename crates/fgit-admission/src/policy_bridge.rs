@@ -324,7 +324,7 @@ pub fn ref_updates_from_effects(
             fgit_reference::effect::RefEffect::Delete => (None, fgit_policy::RefUpdateKind::Delete),
             fgit_reference::effect::RefEffect::Set(oid) => {
                 if previous.is_some() {
-                    (Some(*oid), fgit_policy::RefUpdateKind::FastForward)
+                    (Some(*oid), fgit_policy::RefUpdateKind::UnclassifiedUpdate)
                 } else {
                     (Some(*oid), fgit_policy::RefUpdateKind::Create)
                 }
@@ -359,11 +359,7 @@ pub fn ref_updates_from_commands(
             fgit_authority::ProposedNew::Delete => (None, fgit_policy::RefUpdateKind::Delete),
             fgit_authority::ProposedNew::Update(oid) => {
                 if previous.is_some() {
-                    if command.force {
-                        (Some(oid), fgit_policy::RefUpdateKind::NonFastForward)
-                    } else {
-                        (Some(oid), fgit_policy::RefUpdateKind::FastForward)
-                    }
+                    (Some(oid), fgit_policy::RefUpdateKind::UnclassifiedUpdate)
                 } else {
                     (Some(oid), fgit_policy::RefUpdateKind::Create)
                 }

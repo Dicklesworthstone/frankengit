@@ -63,7 +63,9 @@ fn sample_input_root(
     let (prev, next) = match kind {
         RefUpdateKind::Create => (None, Some(oid(1))),
         RefUpdateKind::Delete => (Some(oid(1)), None),
-        RefUpdateKind::FastForward | RefUpdateKind::NonFastForward => (Some(oid(1)), Some(oid(2))),
+        RefUpdateKind::FastForward
+        | RefUpdateKind::NonFastForward
+        | RefUpdateKind::UnclassifiedUpdate => (Some(oid(1)), Some(oid(2))),
     };
     let update = RefUpdateFact::try_new(name, prev, next, kind, force).expect("valid update fact");
     let principal = PrincipalFacts::try_new(

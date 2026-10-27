@@ -249,15 +249,20 @@ pub enum RefUpdateKind {
     NonFastForward,
     /// The ref exists and would be removed.
     Delete,
+    /// The ref exists and would change, but commit ancestry has not been
+    /// established. This is neither a fast-forward nor a non-fast-forward
+    /// assertion. An ancestry-sensitive evaluator must refuse these facts.
+    UnclassifiedUpdate,
 }
 
 impl RefUpdateKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Create,
         Self::FastForward,
         Self::NonFastForward,
         Self::Delete,
+        Self::UnclassifiedUpdate,
     ];
 
     /// The stable lowercase token used in source text and in traces.
@@ -268,6 +273,7 @@ impl RefUpdateKind {
             Self::FastForward => "fast_forward",
             Self::NonFastForward => "non_fast_forward",
             Self::Delete => "delete",
+            Self::UnclassifiedUpdate => "update_unclassified",
         }
     }
 
@@ -285,6 +291,7 @@ impl RefUpdateKind {
             Self::FastForward => 2,
             Self::NonFastForward => 3,
             Self::Delete => 4,
+            Self::UnclassifiedUpdate => 5,
         }
     }
 
@@ -296,6 +303,7 @@ impl RefUpdateKind {
             2 => Some(Self::FastForward),
             3 => Some(Self::NonFastForward),
             4 => Some(Self::Delete),
+            5 => Some(Self::UnclassifiedUpdate),
             _ => None,
         }
     }

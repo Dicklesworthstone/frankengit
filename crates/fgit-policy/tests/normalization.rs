@@ -65,10 +65,12 @@ fn leaf(generator: &mut SplitMix64) -> Predicate {
             pattern: RefPattern::compile(patterns[generator.below(patterns.len())])
                 .expect("a corpus pattern compiles"),
         },
-        6 => Predicate::UpdateKindEquals(RefUpdateKind::ALL[generator.below(4)]),
+        6 => Predicate::UpdateKindEquals(
+            RefUpdateKind::ALL[generator.below(RefUpdateKind::ALL.len())],
+        ),
         7 => Predicate::UpdateKindIn(
             (0..=generator.below(3))
-                .map(|_| RefUpdateKind::ALL[generator.below(4)])
+                .map(|_| RefUpdateKind::ALL[generator.below(RefUpdateKind::ALL.len())])
                 .collect(),
         ),
         8 => Predicate::PrincipalKindIn(
