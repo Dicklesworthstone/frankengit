@@ -219,7 +219,7 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    enforce_direct_selected_at(store, cx, basis, refs, fold, cancelled)
+    enforce_direct_selected_at(store, cx, basis, refs, fold, None, cancelled)
         .await
         .map(|_| ())
 }
@@ -230,6 +230,7 @@ async fn enforce_direct_selected_at<S, C>(
     basis: &PublicationBasis,
     refs: &BTreeMap<RefName, GitOid>,
     fold: &fgit_txn::TransactionFoldReport,
+    principal: Option<PrincipalId>,
     cancelled: &C,
 ) -> Result<Option<ProtectionState>, ProjectionFailure>
 where
@@ -246,7 +247,7 @@ where
         .await
         .map_err(infrastructure)?;
     if let Some(policy) = selected.protection() {
-        enforce_installed_snapshot(policy, refs, &effects.refs)?;
+        enforce_installed_snapshot(policy, refs, &effects.refs, principal)?;
         let has_protected = effects.refs.keys().any(|name| {
             policy
                 .branch(name)
@@ -337,8 +338,16 @@ where
     {
         return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
     }
-    let selected =
-        enforce_direct_selected_at(store, cx, basis, current.refs(), fold, cancelled).await?;
+    let selected = enforce_direct_selected_at(
+        store,
+        cx,
+        basis,
+        current.refs(),
+        fold,
+        Some(context.principal_id),
+        cancelled,
+    )
+    .await?;
     let mut evidence =
         crate::evidence::DecisionEvidenceBodies::derive(context, basis, request, fold)
             .map_err(ProjectionFailure::Unavailable)?;
@@ -438,6 +447,24 @@ where
                 )
                 .map_err(ProjectionFailure::Unavailable)?;
         }
+        crate::evidence::PolicyDecisionRecord::ActorActivated(record) => {
+            let selected = read_at(store, cx, basis, cancelled)
+                .await
+                .map_err(infrastructure)?;
+            let snapshot = selected
+                .protection()
+                .and_then(|p| p.ref_policy.as_ref())
+                .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+            record
+                .verify_provenance(
+                    basis,
+                    current,
+                    layout,
+                    &review_branches(&selected),
+                    snapshot,
+                )
+                .map_err(ProjectionFailure::Unavailable)?;
+        }
     }
     live(cancelled).map_err(infrastructure)
 }
@@ -490,6 +517,7 @@ where
             basis,
             resolved.refs.refs(),
             &prepared.fold,
+            Some(context.principal_id),
             cancelled,
         )
         .await?
@@ -535,27 +563,41 @@ fn enforce_installed_snapshot(
     policy: &ReviewProtection,
     refs: &BTreeMap<RefName, GitOid>,
     effects: &BTreeMap<RefName, fgit_reference::effect::RefEffect>,
+    principal: Option<PrincipalId>,
 ) -> Result<(), ProjectionFailure> {
     let Some(snapshot) = &policy.ref_policy else {
         return Ok(());
     };
-    fgit_policy::reference_profile::validate_evaluation(snapshot, effects.keys())
+    let profile = fgit_policy::reference_profile::classify(snapshot)
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+    let principal = match profile {
+        fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceFactsV1 => {
+            // Frozen ref-only predicates cannot inspect this compatibility fact.
+            principal.unwrap_or_else(|| PrincipalId::from_bytes([0; 16]))
+        }
+        fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1 => {
+            principal.ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?
+        }
+    };
+    fgit_policy::reference_profile::validate_evaluation_for(profile, snapshot, effects.keys())
         .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ResourceBudgetExceeded))?;
-    let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
-    let id = source.pin(snapshot.clone());
-    let verdict = crate::policy_bridge::evaluate_effects_protection(
-        &source,
-        &id,
-        &crate::policy_bridge::SubjectCodeMap::default(),
-        PrincipalId::from_bytes([0; 16]),
+    let updates = crate::policy_bridge::ref_updates_from_effects(refs, effects)
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+    let input = crate::policy_bridge::build_input_root(
+        principal,
         crate::policy_bridge::default_principal_snapshot_id(),
-        refs,
-        effects,
+        updates,
         fgit_policy::PolicyInstant::from_seconds(0),
     )
     .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
-    if let Some(code) = verdict.refusal {
-        return Err(ProjectionFailure::Refuse(code));
+    // This profile can observe only the supplied principal identifier. It
+    // cannot inspect compatibility kind/strength/memberships/snapshot/instant.
+    let verdict = fgit_policy::evaluate(snapshot, &input)
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+    if verdict.decision() != fgit_policy::Decision::Allow {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::ProtectedRefTransitionDenied,
+        ));
     }
     Ok(())
 }
@@ -618,6 +660,7 @@ where
                 merge.target_ref.clone(),
                 fgit_reference::effect::RefEffect::Set(merge.merge_commit),
             )]),
+            Some(submitter),
         )?;
     }
     if let Some(rule) = selected
@@ -727,6 +770,58 @@ mod direct_policy_tests {
     use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
     use fgit_types::{GitOid, GitOidSha1, RefName};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn installed_actor_policy_requires_actual_principal_and_has_permit_twin() {
+        let principal = PrincipalId::from_bytes([0x33; 16]);
+        let policy = ReviewProtection {
+            administrators: vec![principal],
+            branches: Vec::new(),
+            ref_policy: Some(fgit_forge::event::protection::compile_ref_policy(
+                "policy releases { rule publishers { when actor.id == \"33333333333333333333333333333333\" then allow } default deny \"publisher required\" }"
+            ).unwrap()),
+        };
+        let target = RefName::try_new(b"refs/tags/release").unwrap();
+        let effects = BTreeMap::from([(
+            target,
+            fgit_reference::effect::RefEffect::Set(GitOid::Sha1(GitOidSha1::from_bytes([1; 20]))),
+        )]);
+        let refs = BTreeMap::new();
+        enforce_installed_snapshot(&policy, &refs, &effects, Some(principal)).unwrap();
+        assert!(matches!(
+            enforce_installed_snapshot(
+                &policy,
+                &refs,
+                &effects,
+                Some(PrincipalId::from_bytes([0x99; 16]))
+            ),
+            Err(ProjectionFailure::Refuse(
+                RefusalCode::ProtectedRefTransitionDenied
+            ))
+        ));
+        assert!(matches!(
+            enforce_installed_snapshot(&policy, &refs, &effects, None),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))
+        ));
+
+        // In particular, a compatibility path without identity cannot satisfy
+        // an administrator's rule allowing the all-zero principal identifier.
+        let mut zero = policy;
+        zero.ref_policy = Some(fgit_forge::event::protection::compile_ref_policy(
+            "policy zero { rule selected { when actor.id == \"00000000000000000000000000000000\" then allow } default deny \"selected principal\" }"
+        ).unwrap());
+        assert!(matches!(
+            enforce_installed_snapshot(&zero, &refs, &effects, None),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))
+        ));
+        enforce_installed_snapshot(
+            &zero,
+            &refs,
+            &effects,
+            Some(PrincipalId::from_bytes([0; 16])),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn non_utf8_protection_cannot_disappear_into_default_allow() {

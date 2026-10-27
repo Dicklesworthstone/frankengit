@@ -5,7 +5,7 @@ inspect, replace and recover canonical required-review protection over the
 existing MCP stdio server. It calls the same native authority reader and durable
 admission used by `fg protection`. It also carries the explicit
 [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
-It can also activate the bounded reference-only DSL through the same canonical
+It can also activate the bounded ref-fact/actor-ID DSL through the same canonical
 administrator transition and policy epoch.
 The existing code-agent profile gains no policy-administration capability.
 The required canonical check-policy extension introduces no dependency.
@@ -58,9 +58,12 @@ without selecting a newer head.
 Reading requires its own `--allow-read`; replacement does not perform a hidden
 read to fill missing expected values.
 An installed DSL is returned in `policy.ref_policy` with its `snapshot_id`,
-`profile: "reference_facts_v1"`, `mode: "enforce"` and exact canonical
+`profile` (`reference_facts_v1` or `reference_actor_id_v1`), `mode: "enforce"` and exact canonical
 `frame_hex`. The field is null when absent. An active DSL reports `enabled: true`
-even when there are no required-review branches.
+even when there are no required-review branches. The actor-ID profile is
+selected only when the snapshot reads `actor.id`; its canonical event and
+decision evidence use distinct versions so an older reader cannot silently
+drop the actor restriction.
 
 ## Replace the complete policy
 
@@ -100,8 +103,10 @@ frame limits are each 64 KiB. This tool admits a 256 KiB whole-message envelope
 when carrying one policy source/frame, allowing the complete frame as 128 KiB
 of hexadecimal text. Only that named field receives the larger string bound;
 the remaining envelope is checked against the ordinary 64 KiB input and
-16 KiB string limits. Reference names, scopes and creation/deletion/update shape are the
-available facts. Actor, authentication-strength, ancestry, force intent, time,
+16 KiB string limits. Reference names, scopes, creation/deletion/update shape and
+the exact request `actor.id` are the available facts. In this trusted-local
+profile that ID is the operator-asserted launch principal, not remote identity
+authentication. Actor kind, membership, authentication strength, ancestry, force intent, time,
 evidence and aggregate predicates refuse installation instead of receiving
 invented values. These rules apply to ordinary ref publication and native
 merges; they cannot bypass required reviews or checks.

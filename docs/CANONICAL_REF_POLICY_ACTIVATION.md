@@ -1,7 +1,7 @@
 # Canonically activated repository ref policy
 
-The `reference_facts_v1` profile makes a stored, administrator-selected DSL
-snapshot effective on ordinary ref publication and native merges. It is part
+The `reference_facts_v1` and `reference_actor_id_v1` profiles make a stored,
+administrator-selected DSL snapshot effective on ordinary ref publication and native merges. It is part
 of the existing complete review/check protection policy. It is not selected
 by a local file, an immutable object's existence, or the hidden-ref
 configuration `policy_root`.
@@ -45,8 +45,33 @@ allow/deny and bounded multiple rules are supported. Native ref names remain
 byte-oriented data; no caller name is interpolated into source. The policy
 engine's established deny-precedence semantics apply.
 
+The `reference_actor_id_v1` profile additionally permits `actor.id` equality,
+set membership and glob predicates, including boolean composition and negation.
+It observes the exact principal identifier from the admission context bound to
+the sealed request. IDs use their canonical lowercase 32-hex-digit spelling.
+For example, an administrator can restrict release-tag writes to one publisher:
+
+```text
+policy releases {
+  rule publisher {
+    when ref.name matches "refs/tags/**" and
+         not actor.id == "33333333333333333333333333333333"
+    then deny "release publisher required"
+  }
+  default allow
+}
+```
+
+The new profile preserves each transport's existing trust boundary. HTTP uses
+the principal established by its credential authorization. Trusted local CLI
+and MCP operations use the operator-supplied principal; this does not create a
+general remote identity service or prove MFA. A compatibility adapter without
+a principal refuses an actor policy instead of substituting a zero identifier.
+Inspection reports the smallest supported profile: a policy without actor-ID
+predicates remains `reference_facts_v1` with its historical encoding.
+
 An existing-to-existing ref update is `update_unclassified` because this gate
-does not authenticate ancestry. Actor/authentication/membership predicates,
+does not authenticate ancestry. Actor kind/snapshot/authentication/membership predicates,
 force intent, fast-forward/non-fast-forward, aggregate reads and accepted
 evidence predicates are rejected at installation, including negation and
 unreachable branches. Empty or invented facts never make those conditions
@@ -69,11 +94,14 @@ is authorized under the predecessor epoch, while the successor head selects
 the next epoch. CAS loss repeats selection/validation against the new basis;
 it cannot silently rebase the submitted policy version or epoch.
 
-Forge event kind 16 retains the exact canonical compiled policy frame and an
+Forge event kind 16 retains the exact canonical compiled ref-only policy frame and an
 explicit historical review/check/quorum base kind. The frame is bounded,
 strictly decoded, re-identified and re-encoded before acceptance. Existing
 kinds 9, 13 and 14 retain their original bytes when no DSL policy is selected.
-Older readers refuse kind 16 rather than treating the new policy as absent.
+Actor-ID policies require kind 17 with the same bounded protection/frame shape.
+Kind 16 refuses actor predicates, and kind 17 refuses a ref-only snapshot, so
+upgrading a reader cannot reinterpret old bytes or create a second encoding.
+Older readers refuse unknown required kinds rather than treating the policy as absent.
 Embedding the frame retains it with the existing forge event; there is no new
 mutable authority, policy database or dangling snapshot retention root.
 
@@ -93,6 +121,14 @@ requires the coupled merge/ref fold; a direct write cannot label itself a
 reviewed merge. Every native ref value and the exact pre-decision ref root are
 retained. The snapshot is evaluated from stored bytes during replay, without
 recompiling source or consulting current policy.
+
+Schema 1.3 records the actor-ID profile with the same structural commitments,
+selected snapshot and publication distinction. Its principal is the exact
+admission principal retained by the structural receipt and checked against the
+sealed request and staged principal snapshot. Replay alone is not principal
+authentication: even a substituted principal that also satisfies the policy
+must fail the enclosing decision's identity check. Schema 1.2 remains ref-only
+and rejects an actor policy, including a relabelled 1.3 payload.
 
 The durable reader authenticates the original authority/forge selection and
 requires the recorded snapshot to equal the selected snapshot. It rejects a
@@ -129,6 +165,6 @@ restart and historical terminal recovery. HTTP/MCP tests exercise their actual
 administration adapters. Execution results are recorded separately; the test
 inventory is not a claim of a passed full release, crash or power-loss campaign.
 
-This implements enforce mode for the bounded ref-fact profile. Canary/shadow
-rollout, break-glass, time windows, authenticated actor/ancestry/evidence facts,
+This implements enforce mode for the bounded ref-fact and actor-ID profiles. Canary/shadow
+rollout, break-glass, time windows, authenticated actor attributes/ancestry/evidence facts,
 and the complete policy-integrity bead remain separate unfinished work.

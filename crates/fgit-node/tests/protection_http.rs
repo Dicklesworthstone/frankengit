@@ -114,12 +114,15 @@ fn post_policy(endpoint: &Endpoint, token: char, key: Option<&str>, body: &str) 
 
 #[test]
 fn activated_ref_policy_is_admin_authorized_over_http_and_retained_after_restart() {
+    for (source, profile) in [
+        ("policy release_tags { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained tag\" } default allow }".to_owned(), "reference_facts_v1"),
+        (format!("policy release_authors {{ rule release {{ when actor.id == \"{OWNER}\" then allow }} default deny \"release principal required\" }}"), "reference_actor_id_v1"),
+    ] {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
         let node = init(&root, format, true);
         let epoch = install(&node);
-        let source = "policy release_tags { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained tag\" } default allow }";
-        let snapshot = fgit_forge::event::protection::compile_ref_policy(source).unwrap();
+        let snapshot = fgit_forge::event::protection::compile_ref_policy(&source).unwrap();
         let credentials = root.0.join("credentials");
         replace(
             &credentials,
@@ -139,6 +142,7 @@ fn activated_ref_policy_is_admin_authorized_over_http_and_retained_after_restart
         let shown = get(&server.client, PATH, 'a');
         status(&shown, 200);
         assert!(shown.body.contains("\"enabled\":true"));
+        assert!(shown.body.contains(&format!("\"profile\":\"{profile}\"")));
         assert!(shown.body.contains(&snapshot.id().to_string()));
         let frame = snapshot
             .encode()
@@ -160,6 +164,7 @@ fn activated_ref_policy_is_admin_authorized_over_http_and_retained_after_restart
             Some(&snapshot)
         );
         reopened.shutdown().unwrap();
+    }
     }
 }
 

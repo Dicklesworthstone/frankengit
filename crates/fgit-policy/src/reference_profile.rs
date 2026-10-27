@@ -16,6 +16,40 @@ pub const MAX_REFERENCE_POLICY_DEPTH: u32 = 16;
 pub const MAX_REFERENCE_POLICY_EVALUATION_WORK: usize = 1_000_000;
 pub const MAX_REFERENCE_POLICY_TRACE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Closed factual profiles. Historical ref-only decisions never learn new
+/// facts; the actor profile additionally observes only the principal identifier
+/// bound to the sealed transaction, not authentication or membership claims.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferencePolicyProfile {
+    ReferenceFactsV1,
+    ReferenceActorIdV1,
+}
+impl ReferencePolicyProfile {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ReferenceFactsV1 => "reference_facts_v1",
+            Self::ReferenceActorIdV1 => "reference_actor_id_v1",
+        }
+    }
+}
+
+/// Select the smallest supported profile. Forge event and evidence versions
+/// retain this choice; an old ref-only record cannot acquire actor semantics
+/// merely because its reader was upgraded.
+pub fn classify(
+    snapshot: &PolicySnapshot,
+) -> Result<ReferencePolicyProfile, ReferencePolicyRefusal> {
+    match validate(snapshot) {
+        Ok(_) => Ok(ReferencePolicyProfile::ReferenceFactsV1),
+        Err(ReferencePolicyRefusal::UnsupportedFacts) => {
+            validate_for(ReferencePolicyProfile::ReferenceActorIdV1, snapshot)?;
+            Ok(ReferencePolicyProfile::ReferenceActorIdV1)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePolicyRefusal {
     UnsupportedFacts,
@@ -40,6 +74,14 @@ impl std::error::Error for ReferencePolicyRefusal {}
 /// Inspect the complete program and bound its encoded size and evaluator work.
 /// The returned count is used to reserve work before evaluating any subjects.
 pub fn validate(snapshot: &PolicySnapshot) -> Result<usize, ReferencePolicyRefusal> {
+    validate_for(ReferencePolicyProfile::ReferenceFactsV1, snapshot)
+}
+
+/// Validate one named factual profile without relaxing any resource bound.
+pub fn validate_for(
+    profile: ReferencePolicyProfile,
+    snapshot: &PolicySnapshot,
+) -> Result<usize, ReferencePolicyRefusal> {
     let policy = snapshot.policy();
     if !policy.aggregates().is_empty() || !policy.evidence().is_empty() {
         return Err(ReferencePolicyRefusal::UnsupportedFacts);
@@ -67,7 +109,7 @@ pub fn validate(snapshot: &PolicySnapshot) -> Result<usize, ReferencePolicyRefus
                     .reason()
                     .map_or(0, |reason| reason.as_str().len()),
         )?;
-        inspect(rule.predicate(), 0, &mut remaining, &mut bytes)?;
+        inspect(profile, rule.predicate(), 0, &mut remaining, &mut bytes)?;
     }
     // The program was bounded before encoding can recursively allocate.
     if snapshot
@@ -87,7 +129,15 @@ pub fn validate_evaluation<'a>(
     snapshot: &PolicySnapshot,
     names: impl IntoIterator<Item = &'a fgit_types::RefName>,
 ) -> Result<(), ReferencePolicyRefusal> {
-    let predicates = validate(snapshot)?.max(1);
+    validate_evaluation_for(ReferencePolicyProfile::ReferenceFactsV1, snapshot, names)
+}
+
+pub fn validate_evaluation_for<'a>(
+    profile: ReferencePolicyProfile,
+    snapshot: &PolicySnapshot,
+    names: impl IntoIterator<Item = &'a fgit_types::RefName>,
+) -> Result<(), ReferencePolicyRefusal> {
+    let predicates = validate_for(profile, snapshot)?.max(1);
     let rules = snapshot.policy().rules().len().saturating_add(1);
     let mut count = 0_usize;
     let mut trace = 0_usize;
@@ -104,6 +154,7 @@ pub fn validate_evaluation<'a>(
 }
 
 fn inspect(
+    profile: ReferencePolicyProfile,
     predicate: &Predicate,
     depth: u32,
     remaining: &mut usize,
@@ -118,22 +169,18 @@ fn inspect(
         Predicate::Always | Predicate::Never => Ok(()),
         Predicate::All(children) | Predicate::Any(children) => {
             for child in children {
-                inspect(child, depth + 1, remaining, bytes)?;
+                inspect(profile, child, depth + 1, remaining, bytes)?;
             }
             Ok(())
         }
-        Predicate::Not(child) => inspect(child, depth + 1, remaining, bytes),
-        Predicate::TextEquals { selector, value }
-            if matches!(selector, Selector::RefName | Selector::RefScope) =>
-        {
+        Predicate::Not(child) => inspect(profile, child, depth + 1, remaining, bytes),
+        Predicate::TextEquals { selector, value } if text_selector(profile, *selector) => {
             if value.as_str().len() > MAX_TEXT_LITERAL_LEN {
                 return Err(ReferencePolicyRefusal::ResourceLimit);
             }
             reserve_bytes(bytes, value.as_str().len())
         }
-        Predicate::TextIn { selector, values }
-            if matches!(selector, Selector::RefName | Selector::RefScope) =>
-        {
+        Predicate::TextIn { selector, values } if text_selector(profile, *selector) => {
             if values.len() > MAX_SET_ELEMENTS || values.len() > *remaining {
                 return Err(ReferencePolicyRefusal::ResourceLimit);
             }
@@ -146,15 +193,19 @@ fn inspect(
             }
             Ok(())
         }
-        Predicate::TextMatches { selector, pattern }
-            if matches!(selector, Selector::RefName | Selector::RefScope) =>
-        {
+        Predicate::TextMatches { selector, pattern } if text_selector(profile, *selector) => {
             reserve_bytes(bytes, pattern.as_str().len())
         }
         Predicate::UpdateKindEquals(kind) if structural(*kind) => Ok(()),
         Predicate::UpdateKindIn(kinds) if kinds.iter().all(|kind| structural(*kind)) => Ok(()),
         _ => Err(ReferencePolicyRefusal::UnsupportedFacts),
     }
+}
+
+const fn text_selector(profile: ReferencePolicyProfile, selector: Selector) -> bool {
+    matches!(selector, Selector::RefName | Selector::RefScope)
+        || (matches!(profile, ReferencePolicyProfile::ReferenceActorIdV1)
+            && matches!(selector, Selector::ActorId))
 }
 
 fn reserve_bytes(used: &mut usize, extra: usize) -> Result<(), ReferencePolicyRefusal> {

@@ -503,8 +503,12 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
     protection.validate().map_err(|_| ApiError::unavailable())?;
     let ref_policy = match &protection.ref_policy {
         Some(snapshot) => format!(
-            "{{\"snapshot_id\":{},\"profile\":\"reference_facts_v1\",\"mode\":\"enforce\",\"frame_hex\":{}}}",
+            "{{\"snapshot_id\":{},\"profile\":{},\"mode\":\"enforce\",\"frame_hex\":{}}}",
             quote(&snapshot.id().to_string()),
+            quote(
+                fgit_forge::event::protection::ref_policy_profile_name(snapshot)
+                    .map_err(|_| ApiError::unavailable())?
+            ),
             quote(&hex(&snapshot
                 .encode()
                 .map_err(|_| ApiError::unavailable())?)),

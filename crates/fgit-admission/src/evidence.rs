@@ -21,8 +21,8 @@ use crate::AdmissionContext;
 #[path = "policy_evidence.rs"]
 mod policy_decision;
 pub use policy_decision::{
-    ActivatedPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord,
-    RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
+    ActivatedPolicyDecisionEvidence, ActorPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence,
+    PolicyDecisionRecord, RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
 };
 
 /// Stable refusal-record detail for a refusal supported by
@@ -441,6 +441,23 @@ impl DecisionEvidenceBodies {
         snapshot: fgit_policy::PolicySnapshot,
         publication: RefPolicyPublication,
     ) -> Result<(), RefusalCode> {
+        let profile = fgit_policy::reference_profile::classify(&snapshot)
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if profile == fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1 {
+            let record = ActorPolicyDecisionEvidence::evaluate(
+                self.policy_decision.base().clone(),
+                context,
+                basis,
+                current,
+                layout,
+                fold,
+                review_branches,
+                snapshot,
+                publication,
+            )?;
+            self.policy_decision = PolicyDecisionRecord::ActorActivated(Box::new(record));
+            return Ok(());
+        }
         let record = ActivatedPolicyDecisionEvidence::evaluate(
             self.policy_decision.base().clone(),
             context,

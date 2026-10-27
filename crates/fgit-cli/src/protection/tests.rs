@@ -4,6 +4,10 @@ const REF_POLICY: &str = r#"policy retained_tags {
     rule keep { when ref.name matches "refs/tags/release-*" and ref.update == delete then deny "retained tag" }
     default allow
 }"#;
+const ACTOR_POLICY: &str = r#"policy release_authors {
+    rule release { when actor.id == "33333333333333333333333333333333" then allow }
+    default deny "release principal required"
+}"#;
 
 struct PolicyFile(PathBuf);
 impl PolicyFile {
@@ -31,31 +35,37 @@ impl Drop for PolicyFile {
 
 #[test]
 fn cli_activates_source_and_exact_frame_as_the_same_complete_policy() {
-    let source = PolicyFile::new(REF_POLICY.as_bytes());
-    let mut args = input();
-    args.truncate(args.len() - 2);
-    args.extend(["--policy-source".into(), source.argument()]);
-    let Operation::Set { command, .. } = parse(&args).unwrap().operation else {
-        panic!()
-    };
-    assert!(command.protection.branches.is_empty());
-    let snapshot = command.protection.ref_policy.as_ref().unwrap();
-    let encoded = snapshot.encode().unwrap();
-    let frame = PolicyFile::new(&encoded);
-    args.truncate(args.len() - 2);
-    args.extend(["--policy-frame".into(), frame.argument()]);
-    let Operation::Set {
-        command: restored, ..
-    } = parse(&args).unwrap().operation
-    else {
-        panic!()
-    };
-    assert_eq!(restored, command);
-    let report = policy_json(&command.protection).unwrap();
-    assert!(report.contains(&snapshot.id().to_string()));
-    assert!(report.contains(&bytes_hex(&encoded)));
-    args.push("--clear".into());
-    assert!(parse(&args).is_err());
+    for (source_text, profile) in [
+        (REF_POLICY, "reference_facts_v1"),
+        (ACTOR_POLICY, "reference_actor_id_v1"),
+    ] {
+        let source = PolicyFile::new(source_text.as_bytes());
+        let mut args = input();
+        args.truncate(args.len() - 2);
+        args.extend(["--policy-source".into(), source.argument()]);
+        let Operation::Set { command, .. } = parse(&args).unwrap().operation else {
+            panic!()
+        };
+        assert!(command.protection.branches.is_empty());
+        let snapshot = command.protection.ref_policy.as_ref().unwrap();
+        let encoded = snapshot.encode().unwrap();
+        let frame = PolicyFile::new(&encoded);
+        args.truncate(args.len() - 2);
+        args.extend(["--policy-frame".into(), frame.argument()]);
+        let Operation::Set {
+            command: restored, ..
+        } = parse(&args).unwrap().operation
+        else {
+            panic!()
+        };
+        assert_eq!(restored, command);
+        let report = policy_json(&command.protection).unwrap();
+        assert!(report.contains(&format!("\"profile\":\"{profile}\"")));
+        assert!(report.contains(&snapshot.id().to_string()));
+        assert!(report.contains(&bytes_hex(&encoded)));
+        args.push("--clear".into());
+        assert!(parse(&args).is_err());
+    }
 }
 
 #[test]

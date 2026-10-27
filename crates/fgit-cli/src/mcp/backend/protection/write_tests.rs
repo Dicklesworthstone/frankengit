@@ -292,36 +292,46 @@ fn discovered_write_schema_requires_the_complete_canonical_command() {
 
 #[test]
 fn mcp_ref_policy_source_and_displayed_frame_seal_the_same_snapshot() {
-    let mut args = arguments();
-    args.insert("branches".into(), Value::Array(Vec::new()));
-    args.insert("ref_policy_source".into(), text(
-        "policy retained_tags { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained\" } default allow }",
-    ));
-    let command = write::parse(&args).unwrap();
-    let shown = policy_value(&command.protection).unwrap();
-    let policy = shown.object().unwrap()["ref_policy"].object().unwrap();
-    assert_eq!(policy["mode"].text(), Some("enforce"));
-    assert_eq!(
-        policy["snapshot_id"].text(),
-        Some(
-            command
-                .protection
-                .ref_policy
-                .as_ref()
-                .unwrap()
-                .id()
-                .to_string()
-                .as_str()
-        )
-    );
-    args.remove("ref_policy_source");
-    args.insert("ref_policy_frame_hex".into(), policy["frame_hex"].clone());
-    assert_eq!(write::parse(&args).unwrap(), command);
-    args.remove("ref_policy_frame_hex");
-    assert!(
-        write::parse(&args).unwrap().protection.ref_policy.is_none(),
-        "omission is complete replacement, not implicit retention"
-    );
+    for (source, profile) in [
+        (
+            "policy retained_tags { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained\" } default allow }",
+            "reference_facts_v1",
+        ),
+        (
+            "policy release_authors { rule release { when actor.id == \"33333333333333333333333333333333\" then allow } default deny \"release principal required\" }",
+            "reference_actor_id_v1",
+        ),
+    ] {
+        let mut args = arguments();
+        args.insert("branches".into(), Value::Array(Vec::new()));
+        args.insert("ref_policy_source".into(), text(source));
+        let command = write::parse(&args).unwrap();
+        let shown = policy_value(&command.protection).unwrap();
+        let policy = shown.object().unwrap()["ref_policy"].object().unwrap();
+        assert_eq!(policy["mode"].text(), Some("enforce"));
+        assert_eq!(policy["profile"].text(), Some(profile));
+        assert_eq!(
+            policy["snapshot_id"].text(),
+            Some(
+                command
+                    .protection
+                    .ref_policy
+                    .as_ref()
+                    .unwrap()
+                    .id()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        args.remove("ref_policy_source");
+        args.insert("ref_policy_frame_hex".into(), policy["frame_hex"].clone());
+        assert_eq!(write::parse(&args).unwrap(), command);
+        args.remove("ref_policy_frame_hex");
+        assert!(
+            write::parse(&args).unwrap().protection.ref_policy.is_none(),
+            "omission is complete replacement, not implicit retention"
+        );
+    }
 }
 
 #[test]

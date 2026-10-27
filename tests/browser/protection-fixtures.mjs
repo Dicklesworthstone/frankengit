@@ -7,8 +7,8 @@ export const HREF = 'https://forge.example/team/repo.git/ui/pulls/';
 export const hex = value => Buffer.from(value).toString('hex');
 export const policy = () => ({ administrators: [ADMIN], branches: [{ reference_hex: hex('refs/heads/main'), required_reviewers: [REVIEWER] }] });
 // Opaque native-schema transport fixture, not a compiled-policy proof.
-export const refPolicy = () => ({ snapshot_id: `frankengit/policy-snapshot/v1/v1.0/alg:2/${'d'.repeat(64)}`,
-  profile: 'reference_facts_v1', mode: 'enforce', frame_hex: '000102ff' });
+export const refPolicy = (profile = 'reference_facts_v1') => ({ snapshot_id: `frankengit/policy-snapshot/v1/v1.0/alg:2/${'d'.repeat(64)}`,
+  profile, mode: 'enforce', frame_hex: '000102ff' });
 export function snapshot(format = 'sha1', patch = {}) {
   return { type: 'repository_review_protection', schema_version: 1, tenant_id: '3'.repeat(32), repository_id: '4'.repeat(32),
     repository_incarnation: '5'.repeat(32), object_format: format, source_head: `alg:2:${'6'.repeat(64)}`,

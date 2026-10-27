@@ -108,19 +108,22 @@ test('removing the last branch requires explicit clear-all and does not remove a
   assert.equal(form.get('clear'), 'true'); assert.deepEqual(form.getAll('administrator'), [ADMIN]);
   assert.deepEqual(form.getAll('required_reviewer'), []); assert.equal(h.calls.length, 1);
 });
-test('PR editor preserves the enforced ref policy while editing administrators or removing the last branch', async () => {
-  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: { ...policy(), ref_policy: refPolicy() } })) : null });
-  await h.ready(); assert.ok(h.node('snapshot').textContent.includes(refPolicy().snapshot_id));
+for (const profile of ['reference_facts_v1', 'reference_actor_id_v1']) {
+test(`${profile}: PR editor preserves the enforced policy while editing administrators or removing the last branch`, async () => {
+  const compiled = refPolicy(profile);
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: { ...policy(), ref_policy: compiled } })) : null });
+  await h.ready(); assert.ok(h.node('snapshot').textContent.includes(compiled.snapshot_id));
   h.node('administrators').value = OTHER;
   await h.rows()[0].remove.emit('click');
   await h.stage();
-  assert.deepEqual(h.client.pending.intent.replacement.ref_policy, refPolicy());
+  assert.deepEqual(h.client.pending.intent.replacement.ref_policy, compiled);
   const form = new URLSearchParams(h.client.pending.intent.body);
-  assert.equal(form.get('ref_policy_frame_hex'), refPolicy().frame_hex);
+  assert.equal(form.get('ref_policy_frame_hex'), compiled.frame_hex);
   assert.equal(form.has('clear'), false);
   assert.deepEqual(h.client.pending.intent.replacement.branches, []);
   assert.equal(h.calls.length, 1, 'editing does not publish');
 });
+}
 test('PR editor clears an enforced ref policy only through explicit empty clear-all', async () => {
   const p = { administrators: [ADMIN], branches: [], ref_policy: refPolicy() };
   const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: p })) : null });

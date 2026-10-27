@@ -15,35 +15,46 @@ fn encoded_policy(source: &str) -> String {
 
 #[test]
 fn http_reference_policy_source_and_frame_preserve_complete_canonical_replacement() {
-    let prefix = format!(
-        "expected_version=1&expected_epoch=2&administrator={}",
-        person(1)
-    );
-    let source = "policy retain { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained tag\" } default allow }";
-    let body = format!("{prefix}&ref_policy_source={}", encoded_policy(source));
-    let command = parse_command(body.as_bytes()).unwrap();
-    assert!(command.protection.branches.is_empty());
-    let snapshot = command.protection.ref_policy.as_ref().unwrap();
-    let frame = hex(&snapshot.encode().unwrap());
-    let from_frame = format!("{prefix}&ref_policy_frame_hex={frame}");
-    assert_eq!(parse_command(from_frame.as_bytes()).unwrap(), command);
-    let shown = policy_json(&command.protection).unwrap();
-    assert!(shown.contains(&snapshot.id().to_string()));
-    assert!(shown.contains(&format!("\"frame_hex\":\"{frame}\"")));
-    for invalid in [
-        format!("{body}&ref_policy_frame_hex={frame}"),
-        format!("{body}&ref_policy_source={}", encoded_policy(source)),
-        format!("{body}&clear=true"),
-        format!("{prefix}&ref_policy_frame_hex=00"),
+    for (source, profile) in [
+        (
+            "policy retain { rule keep { when ref.name matches \"refs/tags/**\" and ref.update == delete then deny \"retained tag\" } default allow }",
+            "reference_facts_v1",
+        ),
+        (
+            "policy release_authors { rule release { when actor.id == \"33333333333333333333333333333333\" then allow } default deny \"release principal required\" }",
+            "reference_actor_id_v1",
+        ),
     ] {
-        assert!(parse_command(invalid.as_bytes()).is_err());
+        let prefix = format!(
+            "expected_version=1&expected_epoch=2&administrator={}",
+            person(1)
+        );
+        let body = format!("{prefix}&ref_policy_source={}", encoded_policy(source));
+        let command = parse_command(body.as_bytes()).unwrap();
+        assert!(command.protection.branches.is_empty());
+        let snapshot = command.protection.ref_policy.as_ref().unwrap();
+        let frame = hex(&snapshot.encode().unwrap());
+        let from_frame = format!("{prefix}&ref_policy_frame_hex={frame}");
+        assert_eq!(parse_command(from_frame.as_bytes()).unwrap(), command);
+        let shown = policy_json(&command.protection).unwrap();
+        assert!(shown.contains(&format!("\"profile\":\"{profile}\"")));
+        assert!(shown.contains(&snapshot.id().to_string()));
+        assert!(shown.contains(&format!("\"frame_hex\":\"{frame}\"")));
+        for invalid in [
+            format!("{body}&ref_policy_frame_hex={frame}"),
+            format!("{body}&ref_policy_source={}", encoded_policy(source)),
+            format!("{body}&clear=true"),
+            format!("{prefix}&ref_policy_frame_hex=00"),
+        ] {
+            assert!(parse_command(invalid.as_bytes()).is_err());
+        }
+        let cleared = parse_command(format!("{prefix}&clear=true").as_bytes()).unwrap();
+        assert!(cleared.protection.ref_policy.is_none());
+        assert_eq!(
+            cleared.protection.administrators,
+            command.protection.administrators
+        );
     }
-    let cleared = parse_command(format!("{prefix}&clear=true").as_bytes()).unwrap();
-    assert!(cleared.protection.ref_policy.is_none());
-    assert_eq!(
-        cleared.protection.administrators,
-        command.protection.administrators
-    );
 }
 
 #[test]

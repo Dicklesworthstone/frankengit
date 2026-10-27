@@ -20,9 +20,18 @@ pub fn compile_ref_policy(
 ) -> Result<fgit_policy::PolicySnapshot, RefPolicyCompileRefusal> {
     let snapshot = fgit_policy::compile_and_seal(source)
         .map_err(|error| RefPolicyCompileRefusal::Compile(Box::new(error)))?;
-    fgit_policy::reference_profile::validate(&snapshot)
+    fgit_policy::reference_profile::classify(&snapshot)
         .map_err(RefPolicyCompileRefusal::Profile)?;
     Ok(snapshot)
+}
+
+/// Stable factual-profile label for operator and transport projections.
+pub fn ref_policy_profile_name(
+    snapshot: &fgit_policy::PolicySnapshot,
+) -> Result<&'static str, RefPolicyCompileRefusal> {
+    fgit_policy::reference_profile::classify(snapshot)
+        .map(|profile| profile.name())
+        .map_err(RefPolicyCompileRefusal::Profile)
 }
 
 /// Accept only the exact canonical bytes and supported factual profile. The
@@ -51,7 +60,7 @@ fn decode_ref_policy_with_limits(
     if snapshot.encode()? != frame {
         return Err(invalid_native("review_protection.ref_policy_noncanonical"));
     }
-    fgit_policy::reference_profile::validate(&snapshot)
+    fgit_policy::reference_profile::classify(&snapshot)
         .map_err(|_| invalid_native("review_protection.ref_policy"))?;
     Ok(snapshot)
 }
@@ -127,7 +136,7 @@ impl ReviewProtection {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
         principals(&self.administrators, MAX_POLICY_ADMINISTRATORS)?;
         if let Some(snapshot) = &self.ref_policy {
-            fgit_policy::reference_profile::validate(snapshot)
+            fgit_policy::reference_profile::classify(snapshot)
                 .map_err(|_| invalid_native("review_protection.ref_policy"))?;
         }
         if self.branches.len() > MAX_PROTECTED_BRANCHES
@@ -208,7 +217,7 @@ impl NativeProtectionEvent {
     }
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
-        // Kind 16 wraps an explicitly named historical protection encoding.
+        // Kinds 16 and 17 wrap an explicitly named historical protection encoding.
         // This preserves every old byte when no custom policy is selected.
         if self.protection.ref_policy.is_some() {
             out.write_scalar(if self.protection.has_review_quorum() {
@@ -255,6 +264,21 @@ impl NativeProtectionEvent {
         Ok(())
     }
     pub(super) fn read_with_policy(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Self::read_with_profile(
+            input,
+            fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceFactsV1,
+        )
+    }
+    pub(super) fn read_with_actor_policy(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Self::read_with_profile(
+            input,
+            fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1,
+        )
+    }
+    fn read_with_profile(
+        input: &mut Decoder<'_>,
+        profile: fgit_policy::reference_profile::ReferencePolicyProfile,
+    ) -> Result<Self, CodecRefusal> {
         let (checks, quorum) = match input.read_scalar::<u32>("review_protection.base_kind")? {
             9 => (false, false),
             13 => (true, false),
@@ -264,6 +288,9 @@ impl NativeProtectionEvent {
         let mut value = Self::read(input, checks, quorum)?;
         let frame = input.read_bytes("review_protection.ref_policy")?;
         let snapshot = decode_ref_policy_with_limits(frame, input.limits())?;
+        if fgit_policy::reference_profile::classify(&snapshot).ok() != Some(profile) {
+            return Err(invalid_native("review_protection.ref_policy_profile"));
+        }
         value.protection.ref_policy = Some(snapshot);
         value.validate()?;
         Ok(value)

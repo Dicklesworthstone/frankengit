@@ -43,6 +43,7 @@ const KIND_REQUIRED_CHECK_PROTECTION_CHANGED: u32 = 13;
 const KIND_REVIEW_QUORUM_PROTECTION_CHANGED: u32 = 14;
 const KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED: u32 = 15;
 const KIND_REPOSITORY_REF_POLICY_CHANGED: u32 = 16;
+const KIND_REPOSITORY_ACTOR_REF_POLICY_CHANGED: u32 = 17;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -178,8 +179,14 @@ impl ForgeEventPayload {
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
             Self::ReviewProtectionChanged(change) => {
-                if change.protection.ref_policy.is_some() {
-                    KIND_REPOSITORY_REF_POLICY_CHANGED
+                if let Some(snapshot) = &change.protection.ref_policy {
+                    if fgit_policy::reference_profile::classify(snapshot).ok()
+                        == Some(fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1)
+                    {
+                        KIND_REPOSITORY_ACTOR_REF_POLICY_CHANGED
+                    } else {
+                        KIND_REPOSITORY_REF_POLICY_CHANGED
+                    }
                 } else if change.protection.has_review_quorum() {
                     KIND_REVIEW_QUORUM_PROTECTION_CHANGED
                 } else if change.protection.has_required_checks() {
@@ -490,6 +497,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         ),
         KIND_REPOSITORY_REF_POLICY_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read_with_policy(input)?,
+        ),
+        KIND_REPOSITORY_ACTOR_REF_POLICY_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
+            protection::NativeProtectionEvent::read_with_actor_policy(input)?,
         ),
         KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(
             workflow_check::NativeWorkflowCheck::read(input)?,

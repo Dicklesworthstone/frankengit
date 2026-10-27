@@ -99,7 +99,7 @@ function requiredChecks(values) {
 function refPolicy(value) {
   fields(value, ['snapshot_id', 'profile', 'mode', 'frame_hex']);
   const id = opaque(value.snapshot_id);
-  if (!id.startsWith('frankengit/policy-snapshot/v1/') || value.profile !== 'reference_facts_v1' || value.mode !== 'enforce' ||
+  if (!id.startsWith('frankengit/policy-snapshot/v1/') || !['reference_facts_v1', 'reference_actor_id_v1'].includes(value.profile) || value.mode !== 'enforce' ||
       typeof value.frame_hex !== 'string' || !value.frame_hex.length || value.frame_hex.length > 128 * 1024 ||
       value.frame_hex.length % 2 || !/^[0-9a-f]+$/.test(value.frame_hex)) fail('invalid_ref_policy');
   // The native decoder verifies the canonical frame and derives its identity.

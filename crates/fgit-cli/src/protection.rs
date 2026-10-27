@@ -30,8 +30,8 @@ usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-lo
   [--clear]\n\
   [--object-format sha1|sha256]\n\
 Set replaces the COMPLETE policy, including its optional DSL component. Omission removes that component.\n\
---policy-source compiles bounded reference-only rules; --policy-frame installs the same canonical bytes.\n\
-The DSL may constrain reference names and creation/deletion; unavailable actor, ancestry, time and evidence facts refuse.\n\
+--policy-source compiles bounded ref-fact and actor.id rules; --policy-frame installs the same canonical bytes.\n\
+The DSL may constrain reference names, creation/deletion and the request's actor.id; other actor attributes, ancestry, time and evidence facts refuse.\n\
 Listed reviewers are eligible approvers; the default requires all.\n\
 --require-approvals selects N approvals from that branch's eligible reviewers (1 through their count).\n\
 A check-only branch has zero required approvals. Opener and submitter cannot contribute votes.\n\
@@ -359,8 +359,12 @@ fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
     policy.validate().map_err(|error| error.to_string())?;
     let ref_policy = match &policy.ref_policy {
         Some(snapshot) => format!(
-            "{{\"snapshot_id\":{},\"profile\":\"reference_facts_v1\",\"mode\":\"enforce\",\"frame_hex\":{}}}",
+            "{{\"snapshot_id\":{},\"profile\":{},\"mode\":\"enforce\",\"frame_hex\":{}}}",
             quote(&snapshot.id().to_string()),
+            quote(
+                fgit_forge::event::protection::ref_policy_profile_name(snapshot)
+                    .map_err(|error| error.to_string())?
+            ),
             quote(&bytes_hex(
                 &snapshot.encode().map_err(|error| error.to_string())?
             )),

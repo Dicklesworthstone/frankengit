@@ -68,9 +68,15 @@ The activation path embeds exact canonical snapshot bytes in a protection
 event, selects it through the authenticated forge frontier, and enforces it
 in direct-ref and native-merge publication, including CAS replans. Existing
 review/check protection remains independently mandatory when installed.
-Principal facts, review receipts, graph facts and evaluation time still need
-independent provenance; the pure policy evaluator does not authenticate them,
-and the first activation profile refuses predicates requiring them.
+The ref-only activation profile refuses principal facts. A separate
+`reference_actor_id_v1` profile accepts only the exact principal identifier
+bound by admission to the sealed request, using required event kind 17 and
+policy-decision schema 1.3. HTTP retains its credential-established principal;
+trusted local CLI and MCP retain their operator-assertion boundary. Actor
+attributes, authentication strength, memberships, review receipts, graph facts
+and evaluation time still require independent provenance and remain refused.
+The pure policy evaluator does not authenticate identities. Old ref-only event
+kind 16 and evidence schema 1.2 remain closed to actor predicates.
 
 ## Verification status
 

@@ -40,6 +40,37 @@ impl ActivatedPolicyDecisionEvidence {
         snapshot: PolicySnapshot,
         publication: RefPolicyPublication,
     ) -> Result<Self, RefusalCode> {
+        let value = Self::evaluate_for(
+            Profile::RepositoryRefV1,
+            base,
+            context,
+            basis,
+            current,
+            layout,
+            fold,
+            review_branches,
+            snapshot,
+            publication,
+        )?;
+        let bytes = encode_body(&value).map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
+        if bytes.len() > MAX_FRAME_BYTES {
+            return Err(RefusalCode::ResourceBudgetExceeded);
+        }
+        Ok(value)
+    }
+
+    pub(super) fn evaluate_for(
+        profile: Profile,
+        base: PolicyDecisionEvidence,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        current: &CanonicalRefState,
+        layout: RootLayoutVersion,
+        fold: &TransactionFoldReport,
+        review_branches: Vec<RefName>,
+        snapshot: PolicySnapshot,
+        publication: RefPolicyPublication,
+    ) -> Result<Self, RefusalCode> {
         let references = EvaluatedPolicyDecisionEvidence::evaluate(
             base,
             context,
@@ -53,11 +84,11 @@ impl ActivatedPolicyDecisionEvidence {
             },
         )?;
         let evaluation = RefPolicyEvaluation::evaluate(
-            Profile::RepositoryRefV1,
+            profile,
             snapshot,
             references.principal,
             references.base.principal_snapshot_id,
-            references.subjects(Profile::RepositoryRefV1)?,
+            references.subjects(profile)?,
         )?;
         let value = Self {
             references,
@@ -65,27 +96,25 @@ impl ActivatedPolicyDecisionEvidence {
             evaluation,
         };
         value.verify_decision(context, basis, fold)?;
-        let bytes = encode_body(&value).map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
-        if bytes.len() > MAX_FRAME_BYTES {
-            return Err(RefusalCode::ResourceBudgetExceeded);
-        }
         Ok(value)
     }
 
     pub fn replay(&self) -> Result<(), RefusalCode> {
         self.references.replay()?;
-        if self.evaluation.profile != Profile::RepositoryRefV1
-            || (self.publication == RefPolicyPublication::NativeMerge
-                && !self.references.review_branches.is_empty())
+        if !matches!(
+            self.evaluation.profile,
+            Profile::RepositoryRefV1 | Profile::RepositoryActorIdV1
+        ) || (self.publication == RefPolicyPublication::NativeMerge
+            && !self.references.review_branches.is_empty())
         {
             return Err(RefusalCode::EvidenceInvalid);
         }
         let actual = RefPolicyEvaluation::evaluate(
-            Profile::RepositoryRefV1,
+            self.evaluation.profile,
             self.evaluation.snapshot.clone(),
             self.references.principal,
             self.references.base.principal_snapshot_id,
-            self.references.subjects(Profile::RepositoryRefV1)?,
+            self.references.subjects(self.evaluation.profile)?,
         )?;
         if actual != self.evaluation {
             return Err(RefusalCode::EvidenceInvalid);
@@ -145,13 +174,15 @@ impl ActivatedPolicyDecisionEvidence {
     }
 }
 
-impl CanonicalBody for ActivatedPolicyDecisionEvidence {
-    const DOMAIN: DomainTag = PolicyDecisionEvidence::DOMAIN;
-    const SCHEMA_FAMILY: SchemaFamily = PolicyDecisionEvidence::SCHEMA_FAMILY;
-    const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 2;
-
-    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+impl ActivatedPolicyDecisionEvidence {
+    pub(super) fn write_fields(
+        &self,
+        out: &mut Encoder,
+        profile: Profile,
+    ) -> Result<(), CodecRefusal> {
+        if self.evaluation.profile != profile || !profile.accepts(&self.evaluation.snapshot) {
+            return Err(invalid("policy_decision.activated_profile"));
+        }
         let references = encode_body(&self.references)?;
         bound(
             "policy_decision.references",
@@ -176,7 +207,10 @@ impl CanonicalBody for ActivatedPolicyDecisionEvidence {
         out.write_text("policy_decision.trace", &self.evaluation.trace)
     }
 
-    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+    pub(super) fn read_fields(
+        input: &mut Decoder<'_>,
+        profile: Profile,
+    ) -> Result<Self, CodecRefusal> {
         let frame = input.read_bytes("policy_decision.references")?;
         bound("policy_decision.references", frame.len(), MAX_FRAME_BYTES)?;
         let mut limits = input.limits();
@@ -215,7 +249,7 @@ impl CanonicalBody for ActivatedPolicyDecisionEvidence {
             references,
             publication,
             evaluation: RefPolicyEvaluation {
-                profile: Profile::RepositoryRefV1,
+                profile,
                 snapshot,
                 decision,
                 trace: trace.to_owned(),
@@ -225,5 +259,19 @@ impl CanonicalBody for ActivatedPolicyDecisionEvidence {
             .replay()
             .map_err(|_| invalid("policy_decision.activated_replay"))?;
         Ok(value)
+    }
+}
+
+impl CanonicalBody for ActivatedPolicyDecisionEvidence {
+    const DOMAIN: DomainTag = PolicyDecisionEvidence::DOMAIN;
+    const SCHEMA_FAMILY: SchemaFamily = PolicyDecisionEvidence::SCHEMA_FAMILY;
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 2;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        self.write_fields(out, Profile::RepositoryRefV1)
+    }
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Self::read_fields(input, Profile::RepositoryRefV1)
     }
 }

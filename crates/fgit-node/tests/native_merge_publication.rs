@@ -304,14 +304,172 @@ fn apply(
     offered: &NativeMergeIntent,
     key: &[u8],
 ) -> Result<TerminalOutcome, NodeReceiveTransportRefusal> {
+    apply_as(node, offered, key, PrincipalId::from_bytes([0x82; 16]))
+}
+fn apply_as(
+    node: &OneNode,
+    offered: &NativeMergeIntent,
+    key: &[u8],
+    principal: PrincipalId,
+) -> Result<TerminalOutcome, NodeReceiveTransportRefusal> {
     let request = node.request_context();
+    let authenticated = LoopbackReceiveSession::authenticated(
+        principal,
+        IdempotencyKey::new(key.to_vec()).unwrap(),
+    );
     node.runtime().block_on(node.admit_native_merge_durable_in(
         &request,
-        &session(key),
+        &authenticated,
         offered,
         AdmissionLimits::default(),
         MergeObjectLimits::default(),
     ))
+}
+
+#[test]
+fn actor_id_policy_binds_native_merge_principal_and_historical_retry_after_replacement() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let configuration = config(&scratch.0, format);
+        let (mut node, _) = OneNode::init(configuration.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &scratch.0, format, true);
+        let owner = PrincipalId::from_bytes([0x82; 16]);
+        let foreign = PrincipalId::from_bytes([0x83; 16]);
+        let policy = |principal| {
+            format!(
+                "policy release_authors {{ rule release {{ when actor.id == \"{principal}\" then allow }} default deny \"release principal required\" }}"
+            )
+        };
+        assert!(matches!(
+            set_ref_policy(&node, &policy(owner), b"install-actor-policy").outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let offered = intent(&f, 1, ExpectedVersion::NewStream);
+        // The same request and key are independently scoped by the existing
+        // session principal. This test uses the trusted-local identity boundary.
+        let key = b"actor-bound-merge";
+        let refused = apply_as(&node, &offered, key, foreign).unwrap();
+        assert!(
+            matches!(
+                refused.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::ProtectedRefTransitionDenied,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(refs(&node)[&main_ref()], f.target);
+        let committed = apply_as(&node, &offered, key, owner).unwrap();
+        assert!(
+            matches!(committed.outcome, DecisionOutcome::Committed { .. }),
+            "{committed:?}"
+        );
+        assert_eq!(refs(&node)[&main_ref()], f.candidate);
+        assert!(matches!(
+            set_ref_policy(&node, &policy(foreign), b"replace-actor-policy").outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(configuration).unwrap();
+        let head = reopened
+            .runtime()
+            .block_on(reopened.authenticate_authority_head())
+            .unwrap();
+        reopened
+            .bring_into_service(head.receipt().generation())
+            .unwrap();
+        assert_eq!(
+            apply_as(&reopened, &offered, key, owner).unwrap(),
+            committed
+        );
+        assert_eq!(
+            apply_as(&reopened, &offered, key, foreign).unwrap(),
+            refused
+        );
+        assert_eq!(refs(&reopened)[&main_ref()], f.candidate);
+        reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn actor_id_policy_governs_direct_import_with_the_original_principal_after_reopen() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let configuration = config(&scratch.0, format);
+        let (mut node, _) = OneNode::init(configuration.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &scratch.0, format, true);
+        let owner = PrincipalId::from_bytes([0x82; 16]);
+        let foreign = PrincipalId::from_bytes([0x83; 16]);
+        let policy = format!(
+            "policy release_authors {{ rule release {{ when actor.id == \"{owner}\" then allow }} default deny \"release principal required\" }}"
+        );
+        assert!(matches!(
+            set_ref_policy(&node, &policy, b"install-import-actor-policy").outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let source = scratch.0.join("source");
+        fs::write(source.join("refs/heads/release"), format!("{}\n", f.source)).unwrap();
+        // Keep the already imported fixture refs out of this establish-if-absent
+        // import, so only the caller's principal decides the new release ref.
+        for name in ["main", "topic"] {
+            fs::rename(source.join("refs/heads").join(name), scratch.0.join(name)).unwrap();
+        }
+        node.shutdown().unwrap();
+        let mut node = OneNode::open_existing(configuration).unwrap();
+        let head = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
+        node.bring_into_service(head.receipt().generation())
+            .unwrap();
+        let selected = node
+            .runtime()
+            .block_on(node.read_review_protection_in(&node.request_context()))
+            .unwrap();
+        assert_eq!(
+            selected.protection().unwrap().ref_policy.as_ref(),
+            Some(&compile_ref_policy(&policy).unwrap())
+        );
+        let denied = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &node.request_context(),
+                &source,
+                foreign,
+                b"actor-bound-import",
+            ))
+            .unwrap();
+        assert!(denied.commands.iter().any(|command| matches!(
+            command.terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ProtectedRefTransitionDenied,
+                ..
+            }
+        )));
+        let release = RefName::try_new(b"refs/heads/release").unwrap();
+        assert!(!refs(&node).contains_key(&release));
+        assert_eq!(refs(&node)[&main_ref()], f.target);
+        let permitted = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &node.request_context(),
+                &source,
+                owner,
+                b"actor-bound-import",
+            ))
+            .unwrap();
+        assert!(
+            permitted.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ))
+        );
+        assert_eq!(refs(&node)[&release], f.source);
+        node.shutdown().unwrap();
+    }
 }
 fn refs(node: &OneNode) -> BTreeMap<RefName, GitOid> {
     let request = node.request_context();

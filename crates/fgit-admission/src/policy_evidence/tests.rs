@@ -97,6 +97,198 @@ fn evaluated(bodies: &DecisionEvidenceBodies) -> &EvaluatedPolicyDecisionEvidenc
 }
 
 #[test]
+fn actor_policy_receipt_binds_actual_principal_and_exact_selected_snapshot() {
+    let selected = fgit_forge::event::protection::compile_ref_policy("policy releases { rule publishers { when actor.id in { \"33333333333333333333333333333333\", \"44444444444444444444444444444444\" } then allow } default deny \"publisher required\" }").unwrap();
+    let replacement = fgit_forge::event::protection::compile_ref_policy("policy replacement { rule publishers { when actor.id in { \"33333333333333333333333333333333\", \"44444444444444444444444444444444\", \"55555555555555555555555555555555\" } then allow } default deny \"publisher required\" }").unwrap();
+    for algorithm in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (context, basis, current, request, fold) = folded(
+            algorithm,
+            name(b"refs/tags/release"),
+            name(b"refs/heads/main"),
+            None,
+            Some(oid(algorithm, 2)),
+        );
+        let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+        bodies
+            .record_activated_policy(
+                &context,
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &fold,
+                Vec::new(),
+                selected.clone(),
+                RefPolicyPublication::Direct,
+            )
+            .unwrap();
+        let PolicyDecisionRecord::ActorActivated(record) = bodies.policy_decision() else {
+            panic!("actor profile")
+        };
+        assert_eq!(record.references().principal, context.principal_id);
+        record.replay().unwrap();
+        record
+            .verify_provenance(
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &[],
+                &selected,
+            )
+            .unwrap();
+        assert_eq!(
+            record.verify_provenance(
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &[],
+                &replacement
+            ),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+        bodies
+            .verify_decision(&context, &basis, &request, &fold)
+            .unwrap();
+
+        let frame = bodies.policy_decision().encode().unwrap();
+        assert_eq!(
+            read_frame_header(&frame, DecodeLimits::DEFAULT)
+                .unwrap()
+                .0
+                .schema
+                .minor(),
+            3
+        );
+        let decoded = PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
+        assert_eq!(&decoded, bodies.policy_decision());
+        assert_eq!(decoded.encode().unwrap(), frame);
+        assert_eq!(
+            decoded.root().unwrap(),
+            bodies.policy_decision().root().unwrap()
+        );
+
+        // Both principals satisfy this policy, so replay alone cannot identify
+        // the actual submitter. Exact decision verification must still refuse
+        // substituting another allowed principal for the one in the seal.
+        let mut substitute = record.as_ref().clone();
+        substitute.0.references.principal = PrincipalId::from_bytes([0x44; 16]);
+        substitute.replay().unwrap();
+        assert_eq!(
+            substitute.verify_decision(&context, &basis, &fold),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+
+        let mut other = context.clone();
+        other.principal_id = PrincipalId::from_bytes([0x99; 16]);
+        let mut denied = DecisionEvidenceBodies::derive(&other, &basis, &request, &fold).unwrap();
+        assert_eq!(
+            denied.record_activated_policy(
+                &other,
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &fold,
+                Vec::new(),
+                selected.clone(),
+                RefPolicyPublication::Direct
+            ),
+            Err(RefusalCode::ProtectedRefTransitionDenied)
+        );
+
+        // A different allowing policy is not the authority-selected policy.
+        let mut replaced =
+            DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+        replaced
+            .record_activated_policy(
+                &context,
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &fold,
+                Vec::new(),
+                replacement.clone(),
+                RefPolicyPublication::Direct,
+            )
+            .unwrap();
+        let PolicyDecisionRecord::ActorActivated(replaced) = replaced.policy_decision() else {
+            panic!("actor profile")
+        };
+        replaced.replay().unwrap();
+        assert_eq!(
+            replaced.verify_provenance(
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &[],
+                &selected
+            ),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+    }
+}
+
+#[test]
+fn actor_receipts_cannot_be_encoded_or_decoded_as_historical_ref_only_evidence() {
+    let (context, basis, current, request, fold) = folded(
+        GitHashAlgorithm::Sha1,
+        name(b"refs/tags/release"),
+        name(b"refs/heads/main"),
+        None,
+        Some(oid(GitHashAlgorithm::Sha1, 2)),
+    );
+    let snapshot = fgit_forge::event::protection::compile_ref_policy("policy actors { rule owner { when actor.id == \"33333333333333333333333333333333\" then allow } default deny \"owner\" }").unwrap();
+    let mut bodies = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+    bodies
+        .record_activated_policy(
+            &context,
+            &basis,
+            &current,
+            RootLayoutVersion::LegacyWholeBody,
+            &fold,
+            Vec::new(),
+            snapshot,
+            RefPolicyPublication::Direct,
+        )
+        .unwrap();
+    let PolicyDecisionRecord::ActorActivated(record) = bodies.policy_decision() else {
+        panic!("actor profile")
+    };
+    assert!(
+        encode_body(&record.0).is_err(),
+        "schema1.2 encoder cannot accept actor facts"
+    );
+
+    struct Relabelled<'a>(&'a ActorPolicyDecisionEvidence);
+    impl CanonicalBody for Relabelled<'_> {
+        const DOMAIN: DomainTag = PolicyDecisionEvidence::DOMAIN;
+        const SCHEMA_FAMILY: SchemaFamily = PolicyDecisionEvidence::SCHEMA_FAMILY;
+        const SCHEMA_MAJOR: u16 = 1;
+        const SCHEMA_MINOR: u16 = 2;
+        fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+            self.0.write_payload(out)
+        }
+        fn read_payload(_: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+            Err(invalid("test.relabelled"))
+        }
+    }
+    let relabelled = encode_body(&Relabelled(record)).unwrap();
+    assert!(
+        PolicyDecisionRecord::decode(&relabelled, DecodeLimits::DEFAULT).is_err(),
+        "a well-framed minor downgrade must not extend historical facts"
+    );
+    assert!(
+        decode_body::<ActivatedPolicyDecisionEvidence>(&relabelled, DecodeLimits::DEFAULT).is_err()
+    );
+
+    let frame = bodies.policy_decision().encode().unwrap();
+    for size in [0, 1, frame.len() / 2, frame.len() - 1] {
+        assert!(PolicyDecisionRecord::decode(&frame[..size], DecodeLimits::DEFAULT).is_err());
+    }
+    let mut suffix = frame;
+    suffix.push(0);
+    assert!(PolicyDecisionRecord::decode(&suffix, DecodeLimits::DEFAULT).is_err());
+}
+
+#[test]
 fn large_activated_snapshot_roundtrips_its_complete_evidence_frame() {
     let mut source = String::from("policy large { ");
     for index in 0..40 {
@@ -572,10 +764,10 @@ fn exact_minor_dispatch_refuses_future_schema_truncation_suffix_and_tight_bounds
     let mut future = frame.clone();
     let (_, header) = read_frame_header(&future, DecodeLimits::DEFAULT).unwrap();
     let minor = header.offset() as usize - 2;
-    future[minor..minor + 2].copy_from_slice(&3_u16.to_be_bytes());
+    future[minor..minor + 2].copy_from_slice(&4_u16.to_be_bytes());
     assert!(matches!(
         PolicyDecisionRecord::decode(&future, DecodeLimits::DEFAULT),
-        Err(CodecRefusal::SchemaMinorUnsupported { observed: 3, .. })
+        Err(CodecRefusal::SchemaMinorUnsupported { observed: 4, .. })
     ));
     PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
 }

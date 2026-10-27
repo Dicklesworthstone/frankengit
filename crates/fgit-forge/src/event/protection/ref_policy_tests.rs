@@ -23,6 +23,111 @@ fn installed(source: &str) -> ReviewProtection {
 }
 
 #[test]
+fn actor_policy_has_its_own_required_event_kind_and_cannot_relabel_ref_only_history() {
+    let source = "policy releases { rule publisher { when actor.id == \"33333333333333333333333333333333\" then allow } default deny \"publisher required\" }";
+    let actor_policy = compile_ref_policy(source).unwrap();
+    assert_eq!(
+        ref_policy_profile_name(&actor_policy).unwrap(),
+        "reference_actor_id_v1"
+    );
+    assert_eq!(
+        decode_ref_policy(&actor_policy.encode().unwrap()).unwrap(),
+        actor_policy
+    );
+    let actor_event = event(
+        installed(source),
+        ExpectedVersion::NewStream,
+        PolicyEpoch::FIRST,
+        actor(1),
+    );
+    assert_eq!(actor_event.payload.kind(), 17);
+    let frame = encode_body(&actor_event).unwrap();
+    let decoded = decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(decoded, actor_event);
+    assert_eq!(encode_body(&decoded).unwrap(), frame);
+
+    let ForgeEventPayload::ReviewProtectionChanged(change) = &actor_event.payload else {
+        panic!("protection")
+    };
+    let mut bytes = Encoder::new();
+    change.write(&mut bytes).unwrap();
+    let bytes = bytes.into_bytes();
+    assert!(
+        NativeProtectionEvent::read_with_policy(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT))
+            .is_err(),
+        "kind16 must remain ref-only"
+    );
+    let mut input = Decoder::new(&bytes, DecodeLimits::DEFAULT);
+    assert_eq!(
+        NativeProtectionEvent::read_with_actor_policy(&mut input).unwrap(),
+        *change
+    );
+    input.finish().unwrap();
+
+    let ref_event = event(
+        installed("policy p { default allow }"),
+        ExpectedVersion::NewStream,
+        PolicyEpoch::FIRST,
+        actor(1),
+    );
+    assert_eq!(ref_event.payload.kind(), 16);
+    let ForgeEventPayload::ReviewProtectionChanged(change) = &ref_event.payload else {
+        panic!("protection")
+    };
+    let mut bytes = Encoder::new();
+    change.write(&mut bytes).unwrap();
+    let bytes = bytes.into_bytes();
+    assert!(
+        NativeProtectionEvent::read_with_actor_policy(&mut Decoder::new(
+            &bytes,
+            DecodeLimits::DEFAULT
+        ))
+        .is_err(),
+        "one ref-only snapshot must not gain two event encodings"
+    );
+    assert!(
+        NativeProtectionEvent::read_with_policy(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT))
+            .is_ok()
+    );
+}
+
+#[test]
+fn actor_selection_retains_existing_admin_and_epoch_fences() {
+    let first = event(
+        installed("policy old { default allow }"),
+        ExpectedVersion::NewStream,
+        PolicyEpoch::FIRST,
+        actor(1),
+    );
+    let epoch = PolicyEpoch::FIRST.next().unwrap();
+    let settings = installed(
+        "policy actors { rule owner { when actor.id == \"33333333333333333333333333333333\" then allow } default deny \"owner\" }",
+    );
+    let next = event(
+        settings.clone(),
+        ExpectedVersion::Exactly(first.version),
+        epoch,
+        actor(1),
+    );
+    validate_transition(Some(&first), &next, epoch).unwrap();
+    assert_eq!(
+        validate_transition(Some(&first), &next, PolicyEpoch::FIRST),
+        Err(RefusalCode::EvidenceStale)
+    );
+    let unauthorized = event(
+        settings,
+        ExpectedVersion::Exactly(first.version),
+        epoch,
+        actor(9),
+    );
+    assert_eq!(
+        validate_transition(Some(&first), &unauthorized, epoch),
+        Err(RefusalCode::ProtectedRefTransitionDenied)
+    );
+    assert!(compile_ref_policy("policy p { rule r { when actor.id == \"33333333333333333333333333333333\" and actor.authentication >= multi_factor then allow } default allow }").is_err());
+}
+
+#[test]
 fn activated_snapshot_is_a_required_new_kind_and_preserves_each_old_profile() {
     for quorum in [false, true] {
         for checks in [false, true] {

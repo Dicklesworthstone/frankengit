@@ -15,10 +15,17 @@ policy administrators, replacement, disabling, and ownership rotation. The
 lets these administrators require exact-candidate results from explicitly named
 publishers, source branches, workflow graphs and jobs. Administrators may also
 activate a bounded compiled DSL over reference names, scopes and
-creation/deletion/update shape. Actor, authentication strength, ancestry, time,
+creation/deletion/update shape. The separate `reference_actor_id_v1` profile
+also permits `actor.id` selectors over the exact sealed admission principal.
+Actor kind/snapshot/membership, authentication strength, ancestry, time,
 generic evidence, signed-commit, merge-queue and metadata ACL predicates remain
 outside that profile. Stored bytes become selected policy only through this
 administrator-authorized canonical transition.
+
+The actor-ID profile retains the existing identity boundary: HTTP uses its
+credential-established principal, while trusted local CLI/MCP use the operator's
+principal assertion. This feature does not establish general remote identity
+or MFA. A path without a principal cannot evaluate an actor-ID policy.
 
 **Upgrade every writer before activating this profile.** Enforcement is in this
 version of the embedded node. Arbitrary application-supplied lower-level authority
@@ -186,6 +193,12 @@ existing canonical refusal path. Request cancellation and resource failures
 remain distinct from evidence that a transaction did not commit.
 
 ## Encoding compatibility
+
+Ref-only DSL policies retain required event kind 16 and policy evidence 1.2.
+Policies containing `actor.id` require kind 17 and evidence 1.3; older readers
+refuse them. Neither a new reader nor a relabelled payload can extend the
+facts available to an old record. Inspection names the actual factual profile
+alongside the exact snapshot identity and frame.
 
 Existing forge-event tags 1–8 retain their exact meanings and bytes. Review-only
 policies keep their original tag-9 bytes. A policy with any required workflow

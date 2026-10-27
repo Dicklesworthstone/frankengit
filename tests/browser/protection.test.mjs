@@ -4,12 +4,14 @@ import { ProtectionClient, protectionPolicy, protectionBranch, protectionChanges
   PROTECTION_RECEIPT_LIMIT, requestBody, fastForwardCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-actions.mjs';
 import { TOKEN, ROTATED, ADMIN, REVIEWER, OTHER, HREF, hex, policy, refPolicy, snapshot, terminal, recovered, response, harness, deferred, webcrypto } from './protection-fixtures.mjs';
 
-test('ref-policy-only requests bind exact frame bytes through export, restore and explicit clearing', async () => {
-  const selected = { administrators: [ADMIN], branches: [], ref_policy: refPolicy() };
+for (const profile of ['reference_facts_v1', 'reference_actor_id_v1']) {
+test(`${profile}: requests bind exact frame bytes and profile through export, restore and explicit clearing`, async () => {
+  const compiled = refPolicy(profile);
+  const selected = { administrators: [ADMIN], branches: [], ref_policy: compiled };
   const h = harness({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
   await h.ready(); const pending = await h.client.stage(selected);
-  assert.deepEqual(pending.intent.source.policy.ref_policy, refPolicy());
-  assert.equal(new URLSearchParams(pending.intent.body).get('ref_policy_frame_hex'), refPolicy().frame_hex);
+  assert.deepEqual(pending.intent.source.policy.ref_policy, compiled);
+  assert.equal(new URLSearchParams(pending.intent.body).get('ref_policy_frame_hex'), compiled.frame_hex);
   assert.equal(new URLSearchParams(pending.intent.body).has('clear'), false);
   const exported = h.client.exportReceipt();
   const restored = harness(); await restored.client.connect(TOKEN, ADMIN); await restored.client.restoreReceipt(exported);
@@ -18,9 +20,14 @@ test('ref-policy-only requests bind exact frame bytes through export, restore an
   const fresh = harness(); await fresh.client.connect(TOKEN, ADMIN);
   await assert.rejects(fresh.client.restoreReceipt(JSON.stringify(tampered)));
   assert.equal(fresh.client.pending, null);
+  const changedProfile = JSON.parse(exported);
+  changedProfile.intent.replacement.ref_policy.profile = profile === 'reference_facts_v1' ? 'reference_actor_id_v1' : 'reference_facts_v1';
+  await assert.rejects(fresh.client.restoreReceipt(JSON.stringify(changedProfile)));
+  assert.equal(fresh.client.pending, null);
   assert.deepEqual(protectionChanges(selected, { administrators: [ADMIN], branches: [] }).ref_policy,
-    { before: refPolicy().snapshot_id, after: null, changed: true });
+    { before: compiled.snapshot_id, after: null, changed: true });
 });
+}
 test('null ref-policy fields preserve old normalization and malformed profiles or frames refuse', () => {
   assert.deepEqual(protectionPolicy({ ...policy(), ref_policy: null }), protectionPolicy(policy()));
   assert.deepEqual(protectionSnapshot(snapshot('sha1', { policy: { ...policy(), ref_policy: null } })), protectionSnapshot(snapshot()));

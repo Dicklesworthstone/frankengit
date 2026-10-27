@@ -1,7 +1,7 @@
 # Review protection administration over HTTP
 
 The native HTTP service can inspect and replace the repository's mandatory
-exact-candidate review policy and bounded reference-only DSL policy. It calls the existing
+exact-candidate review policy and bounded ref-fact/actor-ID DSL policy. It calls the existing
 `read_review_protection_in` and `admit_review_protection_durable_in` node APIs.
 The canonical policy supplies the current administrators. Credentials identify
 principals and grant transport access; they do not make a principal an
@@ -9,7 +9,7 @@ administrator.
 
 This remains the bounded, loopback-only, operator-managed HTTP profile.
 TLS termination, public identity providers, organization/team IAM and policies
-requiring unavailable actor, ancestry, time or evidence facts remain outside this interface. The underlying
+requiring actor kind, authentication strength, membership, ancestry, time or evidence facts remain outside this interface. The underlying
 enforcement and writer-upgrade requirements are described in
 [MANDATORY_REVIEW_PROTECTION.md](MANDATORY_REVIEW_PROTECTION.md).
 
@@ -73,10 +73,16 @@ A never-installed policy has `version: "0"`, `installed: false` and
 `policy: null`. An explicitly disabled policy retains its version and
 administrators, has an empty branch array, no DSL snapshot and reports `enabled: false`.
 An installed DSL snapshot alone reports `enabled: true`. The optional
-`policy.ref_policy` contains `snapshot_id`, `profile: "reference_facts_v1"`,
+`policy.ref_policy` contains `snapshot_id`, a factual `profile`,
 `mode: "enforce"`, and the complete canonical `frame_hex`; it is null when no
 DSL component is installed. The frame permits exact replacement without
 recompiling or reconstructing the original source.
+The profile is `reference_facts_v1` for ref-only policies and
+`reference_actor_id_v1` when the policy also reads `actor.id`. Actor-ID rules
+use the principal bound to the authenticated request, never a principal
+supplied in a policy form field. The latter profile has a distinct canonical
+event/evidence version; older readers refuse it rather than losing the actor
+restriction. Browser editors retain the exact observed profile and frame.
 Policy administrators are lowercase principal IDs. Each branch contains
 `reference_hex`, `required_reviewers` and `required_checks`; hex preserves exact
 native branch bytes, including non-UTF-8 names. Each check contains
@@ -107,7 +113,7 @@ Every request is a complete replacement:
 | Repeated `administrator` | One to 32 lowercase 32-hex-character principal IDs. |
 | Repeated `required_reviewer` | `REFERENCE_BYTES_HEX:PRINCIPAL_ID`, with lowercase hex and an exact `refs/heads/*` reference. |
 | Repeated `required_check` | `TARGET_REF_HEX:SOURCE_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; refs name exact `refs/heads/*`, publisher is a 32-character principal ID, graph is 64 lowercase hex characters, and job is exact UTF-8 encoded as hex. |
-| `ref_policy_source` | Optional UTF-8 policy source, at most 64 KiB, compiled and validated against the available reference facts before sealing. |
+| `ref_policy_source` | Optional UTF-8 policy source, at most 64 KiB, compiled and validated against the available reference facts and exact request `actor.id` before sealing. |
 | `ref_policy_frame_hex` | Optional canonical compiled policy frame as lowercase hex, at most 64 KiB decoded. Mutually exclusive with `ref_policy_source`. |
 | `clear` | Exactly `true` to disable branch and DSL requirements; mutually exclusive with reviewer, check and DSL entries. |
 

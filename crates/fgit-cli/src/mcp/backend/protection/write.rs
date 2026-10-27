@@ -149,7 +149,7 @@ pub(super) fn tool() -> Tool {
         ("type", text("string")),
         ("minLength", json::number(1)),
         ("maxLength", json::number(MAX_REF_POLICY_SOURCE_BYTES as u64)),
-        ("description", text("Optional complete reference-only policy DSL. Compiled and validated before sealing; actor, ancestry, time and evidence predicates are unavailable and refuse. Mutually exclusive with ref_policy_frame_hex. Omitting both removes the DSL component on this COMPLETE replacement.")),
+        ("description", text("Optional complete policy DSL over ref facts and the request's actor.id. Compiled and validated before sealing; actor kind, authentication strength, membership, ancestry, time and evidence predicates are unavailable and refuse. The actor ID uses this transport's existing trusted-local principal boundary. Mutually exclusive with ref_policy_frame_hex. Omitting both removes the DSL component on this COMPLETE replacement.")),
     ]));
     properties.insert("ref_policy_frame_hex".into(), object([
         ("type", text("string")),

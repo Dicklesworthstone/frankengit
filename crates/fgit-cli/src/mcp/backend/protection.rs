@@ -204,7 +204,13 @@ fn policy_value(policy: &ReviewProtection) -> Result<Value, ToolError> {
     let ref_policy = match &policy.ref_policy {
         Some(snapshot) => object([
             ("snapshot_id", text(snapshot.id().to_string())),
-            ("profile", text("reference_facts_v1")),
+            (
+                "profile",
+                text(
+                    fgit_forge::event::protection::ref_policy_profile_name(snapshot)
+                        .map_err(|_| ToolError::failed("invalid_policy_profile"))?,
+                ),
+            ),
             ("mode", text("enforce")),
             (
                 "frame_hex",
