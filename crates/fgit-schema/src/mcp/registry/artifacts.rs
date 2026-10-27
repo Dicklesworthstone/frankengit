@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(READ.input_fields[1].max_bytes, Some(20));
         assert_eq!(READ.input_fields[2].field_type, "integer");
         assert_eq!(READ.pagination, PaginationRules::OffsetBytes);
-        assert!(READ.budget.max_output_bytes >= 2 * (131072 + 16384));
+        const { assert!(READ.budget.max_output_bytes >= 2 * (131072 + 16384)) };
     }
 
     #[test]

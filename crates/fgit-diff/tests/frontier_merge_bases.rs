@@ -95,7 +95,7 @@ fn frontier(
 struct Generator(u64);
 
 impl Generator {
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -303,11 +303,11 @@ fn arbitrary_parent_shortcuts_and_extreme_hints_match_all_three_oracles() {
         let mut dag = Dag::random(&mut generator, count);
         // Parent distance is independent of either discovery depth or hint.
         // Long shortcuts and octopus parents defeat depth-based pruning.
-        for node in 1..count {
+        for (node, parents) in dag.parents.iter_mut().enumerate().take(count).skip(1) {
             for _ in 0..generator.below(9) {
                 let parent = generator.below(node);
-                if !dag.parents[node].contains(&parent) {
-                    dag.parents[node].push(parent);
+                if !parents.contains(&parent) {
+                    parents.push(parent);
                 }
             }
         }
@@ -553,7 +553,7 @@ fn commit_and_edge_limits_are_inclusive_and_report_the_work_spent() {
                 limit: needed.examined_edges - 1
             })
         );
-        assert!(work.examined_edges <= needed.examined_edges - 1);
+        assert!(work.examined_edges < needed.examined_edges);
         checked += 1;
     }
     // A zero commit limit refuses before any read. A zero edge limit refuses
@@ -666,20 +666,29 @@ fn crisscross_and_octopus_bases_are_exact_above_a_long_shared_history() {
         let parents = if id == 0 { Vec::new() } else { vec![id - 1] };
         graph.link(id, &parents, i64::try_from(id).unwrap());
     }
-    let (a, b, c, x, y, octopus, lone) = (1001, 1002, 1003, 1004, 1005, 1006, 1007);
-    graph.link(a, &[300], 400);
-    graph.link(b, &[300], 401);
-    graph.link(c, &[300], 402);
-    graph.link(x, &[a, b], 500);
-    graph.link(y, &[b, a], 501);
-    graph.link(octopus, &[x, y, c], 600);
+    let (left_parent, right_parent, third_parent, x, y, octopus, lone) =
+        (1001, 1002, 1003, 1004, 1005, 1006, 1007);
+    graph.link(left_parent, &[300], 400);
+    graph.link(right_parent, &[300], 401);
+    graph.link(third_parent, &[300], 402);
+    graph.link(x, &[left_parent, right_parent], 500);
+    graph.link(y, &[right_parent, left_parent], 501);
+    graph.link(octopus, &[x, y, third_parent], 600);
     graph.link(lone, &[], 700);
     let cases: [(u64, u64, Outcome); 7] = [
-        (x, y, Ok(MergeBaseResult::Bases(vec![a, b]))),
-        (octopus, c, Ok(MergeBaseResult::Bases(vec![c]))),
+        (
+            x,
+            y,
+            Ok(MergeBaseResult::Bases(vec![left_parent, right_parent])),
+        ),
+        (
+            octopus,
+            third_parent,
+            Ok(MergeBaseResult::Bases(vec![third_parent])),
+        ),
         (octopus, y, Ok(MergeBaseResult::Bases(vec![y]))),
-        (x, c, Ok(MergeBaseResult::Bases(vec![300]))),
-        (a, 150, Ok(MergeBaseResult::Bases(vec![150]))),
+        (x, third_parent, Ok(MergeBaseResult::Bases(vec![300]))),
+        (left_parent, 150, Ok(MergeBaseResult::Bases(vec![150]))),
         (octopus, lone, Ok(MergeBaseResult::NoCommonAncestor)),
         (lone, lone, Ok(MergeBaseResult::Bases(vec![lone]))),
     ];
@@ -708,7 +717,7 @@ fn crisscross_and_octopus_bases_are_exact_above_a_long_shared_history() {
         Err(MergeBaseError::CommitLimitExceeded { limit: 100 })
     );
     // A unique base needs no drain at all.
-    let (_, unique) = frontier(&graph, octopus, c, generous());
+    let (_, unique) = frontier(&graph, octopus, third_parent, generous());
     assert!(unique.visited_commits < 12, "{unique:?}");
 }
 

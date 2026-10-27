@@ -141,7 +141,7 @@ fn identity(index: usize) -> CommitId {
     let value = u64::try_from(index).expect("bounded graph ordinal");
     let mut identity = [0_u8; 32];
     let mut state = value ^ 0x7862_6d76_3436_0002;
-    for chunk in identity.chunks_exact_mut(8) {
+    for chunk in identity.as_chunks_mut::<8>().0 {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;

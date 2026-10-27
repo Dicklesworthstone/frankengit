@@ -1,5 +1,5 @@
 //! Selection over a complete bounded path inventory. Never substring or regex.
-use super::*;
+use super::{BranchFilter, MAX_MATCH_BYTES, TriggerSelectionError};
 const MAX_PATHS: usize = 512;
 const MAX_PATH_BYTES: usize = 256 * 1024;
 const MAX_WORK: usize = 16 * 1024 * 1024;

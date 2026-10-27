@@ -96,12 +96,14 @@ const fn assemble() -> [McpToolEntry; core::REGISTRY.len() + ADDITIONS.len()] {
 }
 /// The single public registry consumed by discovery, validation and generators.
 pub static REGISTRY: &[McpToolEntry] = &assemble();
+#[must_use]
 pub fn find_tool(name: &str) -> Option<&'static McpToolEntry> {
     ADDITIONS
         .iter()
         .find(|entry| entry.name == name)
         .or_else(|| core::find_tool(name))
 }
+#[must_use]
 pub fn find_tool_version(name: &str, version: u32) -> Option<&'static McpToolEntry> {
     ADDITIONS
         .iter()
