@@ -13,16 +13,20 @@ pub struct TrustedRefCheckPublication {
     pub previously_reported: usize,
     pub committed: usize,
     pub refused: usize,
+    /// Stopped between complete events, before the next event's preparation or
+    /// admission. This does not acknowledge or discard any outstanding custody.
+    pub request_stopped: bool,
     pub error: Option<String>,
 }
 impl TrustedRefCheckPublication {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"type\":\"workflow_watch_publication\",\"schema_version\":1,\"events_reported\":{},\"previously_reported\":{},\"committed_decisions\":{},\"refused_decisions\":{},\"error\":{},\"execution_retried\":false,\"refs_changed\":false}}",
+            "{{\"type\":\"workflow_watch_publication\",\"schema_version\":1,\"events_reported\":{},\"previously_reported\":{},\"committed_decisions\":{},\"refused_decisions\":{},\"request_stopped\":{},\"error\":{},\"execution_retried\":false,\"refs_changed\":false}}",
             self.events_reported,
             self.previously_reported,
             self.committed,
             self.refused,
+            self.request_stopped,
             self.error.as_deref().map_or_else(|| "null".into(), quote)
         )
     }
@@ -88,11 +92,14 @@ impl OneNode {
         let mut result = TrustedRefCheckPublication::default();
         let work: Result<(), TrustedWorkflowFailure> = async {
             if pull_number == Some(0) { return Err(invalid("pull-request number must be positive")); }
-            if !request.checkpoint_is_live() { return Err(invalid("watch check publication cancelled")); }
             if !reference.as_bytes().starts_with(b"refs/heads/") || reference.as_bytes().len() > 4096
                 || directory.is_empty() || directory.len() > 4096 || !parent.is_absolute()
                 || fgit_treefs::TreePath::parse_default(directory).is_err() {
                 return Err(invalid("invalid watch check publication scope"));
+            }
+            if !request.checkpoint_is_live() {
+                result.request_stopped = true;
+                return Ok(());
             }
             check_directory(parent)?;
             let scope = match pull_number {
@@ -104,7 +111,10 @@ impl OneNode {
             let reporter = commitment(&[b"frankengit/watch-reporter/v1", &scope, publisher.as_bytes()]);
             bind_reporter(&root, &reporter)?;
             for entry in event_entries(&root)? {
-                if !request.checkpoint_is_live() { return Err(invalid("watch check publication cancelled")); }
+                if !request.checkpoint_is_live() {
+                    result.request_stopped = true;
+                    return Ok(());
+                }
                 let path = entry.path();
                 let name = entry.file_name();
                 let key = name.to_str().and_then(|s|s.strip_prefix("event-")).filter(|s|lower_hash(s))

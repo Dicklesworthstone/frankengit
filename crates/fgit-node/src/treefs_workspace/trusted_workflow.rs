@@ -7,6 +7,7 @@ mod completion;
 mod durable;
 use artifacts::TrustedWorkflowArtifactConfig;
 use candidate::WorkflowInputs;
+pub use durable::workflow_watch;
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};

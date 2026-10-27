@@ -1,6 +1,10 @@
-//! Native latest-state polling with one owned signal and finite command lifetime.
+//! Native latest-state polling with finite attempts and explicit service lifetime.
+#[cfg(target_os = "linux")]
+mod continuous;
+
 use super::Options;
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <repository-id> <branch>
@@ -8,6 +12,7 @@ const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <reposi
   --run-parent <absolute-private-directory> [--object-format sha1|sha256]
   [--pull-request <positive-native-pr-number>]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
+  [--continuous --stop-file <initially-absent-path> [--attempt-timeout-secs <1..3600>]]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
   [--artifact-root <absolute-private-directory>] [--artifact-logs]
   Artifact capture/input flags have the same meaning as workflow dispatch.
@@ -16,6 +21,15 @@ const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <reposi
 
 Default: one poll, 1000 ms between repeated polls. The global --timeout-secs
 bounds the whole command, including idle waits; no poll renews that budget.
+Continuous mode replaces --polls with an explicitly owned service lifetime.
+Each attempt (pending publication, one poll, and resulting publication) has a
+fresh finite deadline: 300 seconds by default, or --attempt-timeout-secs.
+An explicit global --timeout-secs still bounds the WHOLE service, including idle
+waits, and caps each attempt's remaining time. No live attempt renews its budget.
+Create the initially absent regular stop file, or send SIGTERM/SIGINT, to drain.
+The stop file is never removed. A failed stop-file observation also stops work.
+Continuous readiness is emitted before polling; an idle operator stop exits 0.
+Custody remains bounded to 1024 distinct events per scope; retain it on restart.
 Trust ALL future selected workflow scripts with host-user privileges. This is
 Linux trusted-local execution, not a hostile-code sandbox or a remote listener.
 Canonical import, receive and merge ref changes qualify. Intermediate tips missed
@@ -51,6 +65,8 @@ struct WatchOptions {
     interval: Duration,
     publisher: Option<fgit_types::PrincipalId>,
     pull_request: Option<u64>,
+    stop_file: Option<PathBuf>,
+    attempt_timeout: Duration,
 }
 fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
     if text.is_empty()
@@ -67,7 +83,7 @@ fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
 fn options(args: &[String]) -> Result<WatchOptions, String> {
     if args.len() < 5
         || args[0] != "watch"
-        || args.len() > 2109
+        || args.len() > 2114
         || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -78,11 +94,34 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let mut publish = false;
     let mut publisher = None;
     let mut pull_request = None;
+    let mut continuous = false;
+    let mut stop_file = None;
+    let mut attempt_timeout = None;
     let mut i = 5;
     while i < args.len() {
         let flag = &args[i];
         i += 1;
-        if flag == "--pull-request" {
+        if flag == "--continuous" {
+            if continuous {
+                return Err("duplicate --continuous".into());
+            }
+            continuous = true;
+        } else if flag == "--stop-file" {
+            let value = args.get(i).ok_or("missing --stop-file path")?;
+            i += 1;
+            if value.is_empty() || value.len() > 4096 {
+                return Err("invalid --stop-file path".into());
+            }
+            if stop_file.replace(PathBuf::from(value)).is_some() {
+                return Err("duplicate --stop-file".into());
+            }
+        } else if flag == "--attempt-timeout-secs" {
+            let value = args.get(i).ok_or("missing --attempt-timeout-secs")?;
+            i += 1;
+            if attempt_timeout.replace(number(value, 1, 3600)?).is_some() {
+                return Err("duplicate --attempt-timeout-secs".into());
+            }
+        } else if flag == "--pull-request" {
             let value = args.get(i).ok_or("missing --pull-request number")?;
             i += 1;
             let number = super::publish::decimal(value, 1, u64::MAX)?;
@@ -135,12 +174,23 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     if publish && execution.incarnation.is_none() {
         return Err("automatic check publication requires --expected-incarnation".into());
     }
+    if continuous != stop_file.is_some() {
+        return Err("--continuous and --stop-file must be supplied together".into());
+    }
+    if continuous && polls.is_some() {
+        return Err("--continuous cannot be combined with --polls".into());
+    }
+    if !continuous && attempt_timeout.is_some() {
+        return Err("--attempt-timeout-secs requires --continuous".into());
+    }
     Ok(WatchOptions {
         publisher,
         pull_request,
         execution,
         polls: polls.unwrap_or(1),
         interval: Duration::from_millis(u64::from(interval.unwrap_or(1000))),
+        stop_file,
+        attempt_timeout: Duration::from_secs(u64::from(attempt_timeout.unwrap_or(300))),
     })
 }
 
@@ -163,18 +213,22 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
 
 #[derive(Default)]
 struct Summary {
-    polls: u32,
-    dispatched: u32,
+    polls: u64,
+    dispatched: u64,
     non_green: bool,
     stopped: bool,
     reconcile: bool,
     publication_enabled: bool,
     checks_committed: usize,
     checks_refused: usize,
+    continuous: bool,
+    operator_stopped: bool,
+    lifetime_expired: bool,
 }
 #[cfg(target_os = "linux")]
 fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode, TerminationSignals};
+    let started = Instant::now();
     let config = options
         .execution
         .artifacts
@@ -182,6 +236,13 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
         .map(super::artifacts::Options::node_config)
         .transpose()?;
     let opt = &options.execution;
+    // Refuse a stale control before opening canonical state or reporting ready.
+    let stop_file = options
+        .stop_file
+        .as_deref()
+        .map(crate::service_stop::StopFile::arm)
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let signals = TerminationSignals::install().map_err(|e| e.to_string())?;
     let mut node = OneNode::open_existing(
         NodeConfig::new(opt.storage.clone(), opt.tenant, opt.repository)
@@ -190,6 +251,7 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
     .map_err(|e| e.to_string())?;
     let mut summary = Summary {
         publication_enabled: options.publisher.is_some(),
+        continuous: stop_file.is_some(),
         ..Summary::default()
     };
     let mut monitor = None;
@@ -206,88 +268,32 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
             .map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
+        if let Some(stop_file) = stop_file {
+            return continuous::run(
+                &node,
+                &options,
+                config.as_ref(),
+                signals,
+                stop_file,
+                started,
+                &mut summary,
+                &mut monitor,
+                output,
+            );
+        }
         let (result, cleanup) =
             super::with_signal_request(&node, signals, |request| -> Result<(), String> {
                 for index in 0..options.polls {
-                    if !request.checkpoint_is_live() {
-                        summary.stopped = true;
-                        break;
-                    }
-                    if let Some(publisher) = options.publisher {
-                        publish_pending(
-                            &node,
-                            request,
-                            opt,
-                            publisher,
-                            options.pull_request,
-                            &mut summary,
-                            output,
-                        )?;
-                    }
-                    let poll = node
-                        .runtime()
-                        .block_on(async {
-                            match options.pull_request {
-                                Some(number) => {
-                                    node.poll_trusted_pull_request_workflows_in(
-                                        request,
-                                        &opt.reference,
-                                        number,
-                                        &opt.workflow,
-                                        &opt.parent,
-                                        &opt.inputs,
-                                        Default::default(),
-                                        config.as_ref(),
-                                    )
-                                    .await
-                                }
-                                None => {
-                                    node.poll_trusted_ref_workflows_in(
-                                        request,
-                                        &opt.reference,
-                                        &opt.workflow,
-                                        &opt.parent,
-                                        &opt.inputs,
-                                        Default::default(),
-                                        config.as_ref(),
-                                    )
-                                    .await
-                                }
-                            }
-                        })
-                        .map_err(|e| e.to_string())?;
-                    summary.polls += 1;
-                    summary.dispatched += u32::from(poll.dispatch().is_some());
-                    summary.non_green |= poll.dispatch().is_some_and(|d| !d.succeeded());
-                    summary.reconcile |= poll.requires_reconciliation();
-                    writeln!(
+                    poll_once(
+                        &node,
+                        request,
+                        &options,
+                        config.as_ref(),
+                        &mut summary,
                         output,
-                        "{{\"type\":\"workflow_watch_poll\",\"index\":{},\"poll\":{}}}",
-                        summary.polls,
-                        poll.to_json()
-                    )
-                    .and_then(|()| output.flush())
-                    .map_err(|e| {
-                        format!("watch output failed; preserve original event custody: {e}")
-                    })?;
-                    if !request.checkpoint_is_live() {
-                        summary.stopped = true;
-                        summary.reconcile |= poll.dispatch().is_some();
+                    )?;
+                    if summary.stopped || summary.reconcile {
                         break;
-                    }
-                    if summary.reconcile {
-                        break;
-                    }
-                    if let Some(publisher) = options.publisher {
-                        publish_pending(
-                            &node,
-                            request,
-                            opt,
-                            publisher,
-                            options.pull_request,
-                            &mut summary,
-                            output,
-                        )?;
                     }
                     if index + 1 < options.polls
                         && !wait_interval(options.interval, &|| request.checkpoint_is_live())
@@ -308,6 +314,111 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
         operation.err().as_deref(),
         cleanup.as_deref(),
     )
+}
+#[cfg(target_os = "linux")]
+fn poll_once(
+    node: &fgit_node::OneNode,
+    request: &fgit_node::NodeRequestContext,
+    options: &WatchOptions,
+    config: Option<&fgit_node::TrustedWorkflowArtifactConfig>,
+    summary: &mut Summary,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let opt = &options.execution;
+    if summary.stopped || !request.checkpoint_is_live() {
+        summary.stopped = true;
+        return Ok(());
+    }
+    if let Some(publisher) = options.publisher {
+        publish_pending(
+            node,
+            request,
+            opt,
+            publisher,
+            options.pull_request,
+            summary,
+            output,
+        )?;
+    }
+    if summary.stopped || !request.checkpoint_is_live() {
+        summary.stopped = true;
+        return Ok(());
+    }
+    let poll = node
+        .runtime()
+        .block_on(async {
+            match options.pull_request {
+                Some(number) => {
+                    node.poll_trusted_pull_request_workflows_in(
+                        request,
+                        &opt.reference,
+                        number,
+                        &opt.workflow,
+                        &opt.parent,
+                        &opt.inputs,
+                        Default::default(),
+                        config,
+                    )
+                    .await
+                }
+                None => {
+                    node.poll_trusted_ref_workflows_in(
+                        request,
+                        &opt.reference,
+                        &opt.workflow,
+                        &opt.parent,
+                        &opt.inputs,
+                        Default::default(),
+                        config,
+                    )
+                    .await
+                }
+            }
+        })
+        .map_err(|error| {
+            summary.reconcile |=
+                matches!(&error, fgit_node::TrustedWorkflowFailure::Journal { .. });
+            error.to_string()
+        })?;
+    summary.polls = summary
+        .polls
+        .checked_add(1)
+        .ok_or("watch poll counter exhausted")?;
+    summary.dispatched += u64::from(poll.dispatch().is_some());
+    summary.non_green |= poll.dispatch().is_some_and(|d| !d.succeeded());
+    summary.reconcile |= poll.requires_reconciliation();
+    summary.stopped |= poll.stopped_before_reservation();
+    writeln!(
+        output,
+        "{{\"type\":\"workflow_watch_poll\",\"index\":{},\"poll\":{}}}",
+        summary.polls,
+        poll.to_json()
+    )
+    .and_then(|()| output.flush())
+    .map_err(|e| format!("watch output failed; preserve original event custody: {e}"))?;
+    if summary.stopped || !request.checkpoint_is_live() {
+        summary.stopped = true;
+        summary.reconcile |= poll.dispatch().is_some();
+        return Ok(());
+    }
+    if summary.reconcile {
+        return Ok(());
+    }
+    if let Some(publisher) = options.publisher {
+        publish_pending(
+            node,
+            request,
+            opt,
+            publisher,
+            options.pull_request,
+            summary,
+            output,
+        )?;
+    }
+    if !request.checkpoint_is_live() {
+        summary.stopped = true;
+    }
+    Ok(())
 }
 #[cfg(target_os = "linux")]
 fn publish_pending(
@@ -355,6 +466,7 @@ fn publish_pending(
     summary.checks_refused += result.refused;
     summary.non_green |= result.refused != 0;
     summary.reconcile |= result.error.is_some();
+    summary.stopped |= result.request_stopped;
     writeln!(output, "{}", result.to_json())
         .and_then(|()| output.flush())
         .map_err(|e| format!("watch publication receipt failed; preserve original custody: {e}"))?;
@@ -384,11 +496,16 @@ fn finish(
     cleanup: Option<&str>,
 ) -> Result<u8, String> {
     let optional = |value: Option<&str>| value.map_or_else(|| "null".into(), super::quote);
-    writeln!(output,"{{\"type\":\"workflow_watch_result\",\"schema_version\":1,\"polls\":{},\"dispatched\":{},\"non_green\":{},\"request_stopped\":{},\"requires_reconciliation\":{},\"publication_enabled\":{},\"committed_check_decisions\":{},\"refused_check_decisions\":{},\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}",summary.polls,summary.dispatched,summary.non_green,summary.stopped,summary.reconcile,summary.publication_enabled,summary.checks_committed,summary.checks_refused,cleanup.is_none(),optional(operation),optional(cleanup)).and_then(|()|output.flush()).map_err(|e|format!("watch summary output incomplete: {e}"))?;
+    writeln!(output,"{{\"type\":\"workflow_watch_result\",\"schema_version\":1,\"continuous\":{},\"operator_stopped\":{},\"polls\":{},\"dispatched\":{},\"non_green\":{},\"request_stopped\":{},\"requires_reconciliation\":{},\"publication_enabled\":{},\"committed_check_decisions\":{},\"refused_check_decisions\":{},\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}",summary.continuous,summary.operator_stopped,summary.polls,summary.dispatched,summary.non_green,summary.stopped,summary.reconcile,summary.publication_enabled,summary.checks_committed,summary.checks_refused,cleanup.is_none(),optional(operation),optional(cleanup)).and_then(|()|output.flush()).map_err(|e|format!("watch summary output incomplete: {e}"))?;
     Ok(if operation.is_some() || cleanup.is_some() {
         2
     } else {
-        u8::from(summary.non_green || summary.stopped || summary.reconcile)
+        u8::from(
+            summary.non_green
+                || summary.reconcile
+                || summary.lifetime_expired
+                || (summary.stopped && !(summary.continuous && summary.operator_stopped)),
+        )
     })
 }
 #[cfg(test)]

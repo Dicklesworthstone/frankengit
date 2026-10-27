@@ -152,6 +152,10 @@ fn ordinary_failed_jobs_report_failure_but_unresolved_execution_is_not_publishab
     let polled = poll!(f).unwrap();
     assert!(!polled.dispatch().unwrap().succeeded());
     assert!(!polled.requires_reconciliation());
+    assert!(
+        polled.execution_settled(),
+        "a recorded ordinary failure is settled, not successful"
+    );
     let mut output = String::new();
     let result = report!(f, |s: &str| {
         output.push_str(s);
@@ -172,6 +176,7 @@ fn ordinary_failed_jobs_report_failure_but_unresolved_execution_is_not_publishab
 #[test]
 fn pre_cancelled_reporting_and_foreign_journal_pins_have_no_canonical_effect() {
     let f = Fixture::new(GitHashAlgorithm::Sha256, "push", "true");
+    let original_head = head(&f);
     let request = f.node().command_request_context(None);
     request.cancel();
     let stopped = f
@@ -185,7 +190,11 @@ fn pre_cancelled_reporting_and_foreign_journal_pins_have_no_canonical_effect() {
             publisher(),
             |_| panic!("cancelled"),
         ));
-    assert!(stopped.error.is_some());
+    assert!(stopped.error.is_none(), "{stopped:?}");
+    assert!(stopped.request_stopped);
+    assert_eq!(stopped.committed, 0);
+    assert_eq!(stopped.refused, 0);
+    assert_eq!(head(&f), original_head);
     assert_eq!(fs::read_dir(f.parent()).unwrap().count(), 0);
     let polled = poll!(f).unwrap();
     let run = &polled.dispatch().unwrap().runs()[0];
@@ -204,4 +213,69 @@ fn pre_cancelled_reporting_and_foreign_journal_pins_have_no_canonical_effect() {
     assert_eq!(head(&f), before);
     fs::write(run.run_directory.join("check-proposals.journal"), bytes).unwrap();
     assert_eq!(report!(f, |_: &str| Ok(())).committed, 1);
+}
+
+#[test]
+fn stopping_an_active_report_preserves_original_pending_checks_and_never_reruns_jobs() {
+    for stop_after_decision in [false, true] {
+        let mut f = Fixture::new(
+            GitHashAlgorithm::Sha256,
+            "push",
+            "true\n  second:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: true",
+        );
+        poll!(f).unwrap();
+        let before = head(&f);
+        let n = f.node();
+        let request = n.command_request_context(None);
+        let mut first_decision = None;
+        let interrupted = n
+            .runtime()
+            .block_on(n.publish_trusted_ref_workflow_checks_in(
+                &request,
+                &reference(),
+                b"ci",
+                &f.parent(),
+                publisher(),
+                |line| {
+                    let decision = line.contains("\"type\":\"workflow_check_set_decision\"");
+                    if decision {
+                        first_decision = Some(line.to_owned());
+                    }
+                    if decision == stop_after_decision {
+                        request.cancel();
+                    }
+                    Ok(())
+                },
+            ));
+        assert!(interrupted.error.is_some(), "{interrupted:?}");
+        assert!(
+            !interrupted.request_stopped,
+            "an active event is not an idle stop"
+        );
+        assert_eq!(interrupted.committed, usize::from(stop_after_decision));
+        if !stop_after_decision {
+            assert_eq!(head(&f), before);
+        }
+        assert_eq!(f.count(), "x");
+        f.reopen();
+        let mut replay = Vec::new();
+        let resumed = report!(f, |line: &str| {
+            replay.push(line.to_owned());
+            Ok(())
+        });
+        assert!(resumed.error.is_none(), "{resumed:?}");
+        assert!(!resumed.request_stopped);
+        assert_eq!(resumed.committed, 2);
+        if let Some(first) = first_decision {
+            assert!(
+                replay.contains(&first),
+                "the original canonical decision must be recovered"
+            );
+        }
+        assert_eq!(poll!(f).unwrap().state(), "previously_settled");
+        assert_eq!(f.count(), "x");
+        let completed_head = head(&f);
+        assert_eq!(report!(f, |_: &str| Ok(())).previously_reported, 1);
+        assert_eq!(head(&f), completed_head);
+    }
 }

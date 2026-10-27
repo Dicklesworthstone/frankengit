@@ -238,11 +238,27 @@ fn canonical_ref_updates_execute_once_and_unrelated_head_changes_do_not_retrigge
         let first = poll!(f).unwrap();
         assert_eq!(first.state(), "dispatched");
         assert!(first.dispatch().unwrap().succeeded());
+        assert!(first.execution_settled());
+        let event_directory = first.dispatch().unwrap().run_directory.parent().unwrap();
+        let event_key = event_directory
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .strip_prefix("event-")
+            .unwrap();
+        assert_eq!(
+            fs::read(event_directory.join("settled")).unwrap(),
+            event_key.as_bytes()
+        );
+        assert!(event_directory.join("check-sources").is_file());
         assert_eq!(f.count(), "x");
         let event = first.to_json();
         assert!(event.contains(&f.tip.to_string()));
         f.reopen();
-        assert_eq!(poll!(f).unwrap().state(), "previously_settled");
+        let repeated = poll!(f).unwrap();
+        assert_eq!(repeated.state(), "previously_settled");
+        assert!(repeated.execution_settled());
         assert_eq!(f.count(), "x");
         f.update_ref(
             RefName::try_new(b"refs/heads/other").unwrap(),
@@ -284,12 +300,15 @@ fn interrupted_execution_blocks_new_ref_events_even_after_restart() {
         ))
         .unwrap();
     assert!(result.requires_reconciliation());
+    assert!(!result.stopped_before_reservation());
+    assert!(!result.execution_settled());
     assert_eq!(f.count(), "x");
     f.advance();
     f.reopen();
     let stopped = poll!(f).unwrap();
     assert_eq!(stopped.state(), "blocked_unresolved");
     assert!(stopped.requires_reconciliation());
+    assert!(!stopped.execution_settled());
     assert_eq!(f.count(), "x");
 }
 #[test]
@@ -297,6 +316,7 @@ fn no_matching_definitions_is_a_zero_run_not_a_passing_check() {
     let f = Fixture::new(GitHashAlgorithm::Sha1, "workflow_dispatch", "true");
     let p = poll!(f).unwrap();
     assert!(p.dispatch().unwrap().runs().is_empty());
+    assert!(p.execution_settled());
     assert_eq!(f.count(), "");
     assert_eq!(poll!(f).unwrap().state(), "previously_settled");
 }
@@ -338,12 +358,17 @@ fn owner_contention_and_corrupt_settlement_refuse_beside_valid_recovery() {
 }
 #[test]
 fn cancellation_and_invalid_names_do_not_create_execution_custody() {
-    let f = Fixture::new(GitHashAlgorithm::Sha1, "push", "true");
-    let n = f.node();
-    let request = n.command_request_context(None);
-    request.cancel();
-    assert!(
-        n.runtime()
+    for fmt in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(fmt, "push", "true");
+        let n = f.node();
+        let before = n
+            .runtime()
+            .block_on(n.authenticate_authority_head())
+            .unwrap();
+        let request = n.command_request_context(None);
+        request.cancel();
+        let stopped = n
+            .runtime()
             .block_on(n.poll_trusted_ref_workflows_in(
                 &request,
                 &reference(),
@@ -351,30 +376,100 @@ fn cancellation_and_invalid_names_do_not_create_execution_custody() {
                 &f.parent(),
                 &[b"ci".to_vec()],
                 Default::default(),
-                None
+                None,
             ))
-            .is_err()
-    );
-    assert_eq!(fs::read_dir(f.parent()).unwrap().count(), 0);
-    assert!(
-        n.runtime()
-            .block_on(n.poll_trusted_ref_workflows_in(
-                &n.command_request_context(None),
-                &RefName::try_new(b"refs/tags/v1").unwrap(),
+            .unwrap();
+        assert_eq!(stopped.state(), "stopped_before_reservation");
+        assert!(stopped.stopped_before_reservation());
+        assert!(!stopped.execution_settled());
+        assert!(stopped.dispatch().is_none());
+        assert!(!stopped.requires_reconciliation());
+        assert!(
+            stopped
+                .to_json()
+                .contains("\"stopped_before_reservation\":true")
+        );
+        let pr_stopped = n
+            .runtime()
+            .block_on(n.poll_trusted_pull_request_workflows_in(
+                &request,
+                &reference(),
+                7,
                 b"ci",
                 &f.parent(),
                 &[b"ci".to_vec()],
                 Default::default(),
-                None
+                None,
             ))
-            .is_err()
-    );
-    assert_eq!(f.count(), "");
-    assert_eq!(poll!(f).unwrap().state(), "dispatched");
+            .unwrap();
+        assert!(pr_stopped.stopped_before_reservation());
+        assert!(!pr_stopped.execution_settled());
+        assert_eq!(fs::read_dir(f.parent()).unwrap().count(), 0);
+        let after = n
+            .runtime()
+            .block_on(n.authenticate_authority_head())
+            .unwrap();
+        assert_eq!(before.receipt(), after.receipt());
+        assert!(
+            n.runtime()
+                .block_on(n.poll_trusted_ref_workflows_in(
+                    &request,
+                    &RefName::try_new(b"refs/tags/v1").unwrap(),
+                    b"ci",
+                    &f.parent(),
+                    &[b"ci".to_vec()],
+                    Default::default(),
+                    None
+                ))
+                .is_err(),
+            "an already cancelled request cannot hide invalid input"
+        );
+        assert_eq!(f.count(), "");
+        assert_eq!(poll!(f).unwrap().state(), "dispatched");
+    }
+}
+
+#[test]
+fn a_completed_process_report_without_event_settlement_remains_unresolved_after_restart() {
+    let mut f = Fixture::new(GitHashAlgorithm::Sha256, "push", "true");
+    let completed = poll!(f).unwrap();
+    assert!(completed.dispatch().unwrap().succeeded());
+    assert!(completed.execution_settled());
+    assert!(!completed.requires_reconciliation());
+    let event = completed
+        .dispatch()
+        .unwrap()
+        .run_directory
+        .parent()
+        .unwrap();
+    assert!(event.join("check-sources").is_file());
+    // Reproduce a crash prefix: real successful child reports and the immutable
+    // handoff exist, but the final event acknowledgement did not survive.
+    fs::remove_file(event.join("settled")).unwrap();
+    let before = f
+        .node()
+        .runtime()
+        .block_on(f.node().authenticate_authority_head())
+        .unwrap();
+    f.reopen();
+    let blocked = poll!(f).unwrap();
+    assert_eq!(blocked.state(), "blocked_unresolved");
+    assert!(!blocked.execution_settled());
+    assert!(blocked.requires_reconciliation());
+    assert!(blocked.dispatch().is_none());
+    assert_eq!(f.count(), "x");
+    let after = f
+        .node()
+        .runtime()
+        .block_on(f.node().authenticate_authority_head())
+        .unwrap();
+    assert_eq!(before.body().unwrap(), after.body().unwrap());
 }
 
 #[path = "trusted_ref_workflow/check_reporting.rs"]
 mod check_reporting;
+#[path = "trusted_ref_workflow/service.rs"]
+mod service;
 
 #[path = "trusted_ref_workflow/pull_requests.rs"]
 mod pull_requests;

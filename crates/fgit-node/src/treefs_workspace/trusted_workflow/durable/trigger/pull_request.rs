@@ -107,10 +107,16 @@ impl OneNode {
         let after = number
             .checked_sub(1)
             .ok_or_else(|| invalid("pull-request number must be positive"))?;
-        let page = self
+        let page = match self
             .read_pull_requests_in(request, &RefVisibility::new(), after, 1, None)
             .await
-            .map_err(|error| invalid_owned(error.to_string()))?;
+        {
+            Ok(page) => page,
+            Err(error) if cancellation::pull_request_read(&error) => {
+                return Ok(Selection::StoppedBeforeReservation);
+            }
+            Err(error) => return Err(invalid_owned(error.to_string())),
+        };
         let Some(view) = page
             .pull_requests
             .into_iter()
@@ -125,12 +131,17 @@ impl OneNode {
         if event.action == PullRequestAction::Close || event.data.source_ref != *reference {
             return Ok(Selection::Absent);
         }
-        let state = self
-            .materialize_admission_in(request)
-            .await
-            .map_err(|error| {
-                TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Authority(Box::new(error)))
-            })?;
+        let state = match self.materialize_admission_in(request).await {
+            Ok(state) => state,
+            Err(error) if cancellation::materialization(&error) => {
+                return Ok(Selection::StoppedBeforeReservation);
+            }
+            Err(error) => {
+                return Err(TrustedWorkflowFailure::Source(
+                    NodeWorkspaceRefusal::Authority(Box::new(error)),
+                ));
+            }
+        };
         if state.basis().id() != page.source_head {
             return Ok(Selection::ChangedBeforeReservation);
         }

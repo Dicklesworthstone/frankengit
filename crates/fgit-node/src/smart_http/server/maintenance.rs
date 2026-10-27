@@ -14,7 +14,7 @@ use crate::index_maintenance::{
 };
 use crate::{GitDaemonServerLimits, GitDaemonServerReceipt, OneNode};
 
-use super::{NodeSmartHttpRefusal, io_error, lifetime::Acceptance};
+use super::{Controllers, NodeSmartHttpRefusal, io_error, lifetime::Acceptance};
 
 pub(super) struct Worker {
     control: MaintenanceControl,
@@ -157,8 +157,11 @@ impl OneNode {
                 max_sessions: limits.max_sessions(),
                 idle_timeout,
             },
-            Some(maintenance),
-            Some(on_ready),
+            Controllers {
+                maintenance: Some(maintenance),
+                on_ready: Some(on_ready),
+                ..Controllers::default()
+            },
         )
     }
 
@@ -189,8 +192,11 @@ impl OneNode {
             allow_pulls,
             true,
             Acceptance::UntilStopped(should_stop),
-            Some(maintenance),
-            Some(on_ready),
+            Controllers {
+                maintenance: Some(maintenance),
+                on_ready: Some(on_ready),
+                ..Controllers::default()
+            },
         )
     }
 }

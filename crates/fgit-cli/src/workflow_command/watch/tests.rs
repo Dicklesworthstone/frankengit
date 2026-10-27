@@ -23,6 +23,7 @@ fn defaults_and_finite_polling_options_parse_without_io() {
     let opts = options(&args()).unwrap();
     assert_eq!(opts.polls, 1);
     assert_eq!(opts.interval, Duration::from_secs(1));
+    assert!(opts.stop_file.is_none());
     assert_eq!(opts.execution.workflow, b"ci");
     let mut input = args();
     input.extend([
@@ -34,6 +35,78 @@ fn defaults_and_finite_polling_options_parse_without_io() {
     let opts = options(&input).unwrap();
     assert_eq!(opts.polls, 10000);
     assert_eq!(opts.interval, Duration::from_millis(10));
+}
+#[test]
+fn continuous_lifetime_requires_explicit_control_and_preserves_finite_attempts() {
+    let input = [
+        args(),
+        vec![
+            "--continuous".into(),
+            "--stop-file".into(),
+            "watch.stop".into(),
+        ],
+    ]
+    .concat();
+    let opts = options(&input).unwrap();
+    assert_eq!(opts.stop_file, Some(PathBuf::from("watch.stop")));
+    assert_eq!(opts.attempt_timeout, Duration::from_secs(300));
+    let mut configured = input.clone();
+    configured.extend(["--attempt-timeout-secs".into(), "3600".into()]);
+    assert_eq!(
+        options(&configured).unwrap().attempt_timeout,
+        Duration::from_secs(3600)
+    );
+    for flags in [
+        vec!["--continuous"],
+        vec!["--stop-file", "watch.stop"],
+        vec!["--continuous", "--stop-file", ""],
+        vec!["--attempt-timeout-secs", "2"],
+    ] {
+        let mut bad = args();
+        bad.extend(flags.into_iter().map(str::to_owned));
+        assert!(options(&bad).is_err(), "{bad:?}");
+    }
+    for flags in [
+        vec!["--polls", "1"],
+        vec!["--continuous"],
+        vec!["--stop-file", "another.stop"],
+        vec!["--attempt-timeout-secs", "0"],
+        vec!["--attempt-timeout-secs", "3601"],
+        vec!["--attempt-timeout-secs", "01"],
+        vec!["--attempt-timeout-secs", "1.5"],
+        vec!["--attempt-timeout-secs", "2", "--attempt-timeout-secs", "3"],
+    ] {
+        let mut bad = input.clone();
+        bad.extend(flags.into_iter().map(str::to_owned));
+        assert!(options(&bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn idle_operator_stop_is_success_but_never_hides_failed_or_unresolved_work() {
+    let mut summary = Summary {
+        continuous: true,
+        operator_stopped: true,
+        stopped: true,
+        ..Default::default()
+    };
+    let mut output = Vec::new();
+    assert_eq!(finish(&mut output, &summary, None, None).unwrap(), 0);
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("\"continuous\":true"));
+    assert!(text.contains("\"operator_stopped\":true"));
+    summary.reconcile = true;
+    assert_eq!(finish(&mut Vec::new(), &summary, None, None).unwrap(), 1);
+    summary.reconcile = false;
+    summary.non_green = true;
+    assert_eq!(finish(&mut Vec::new(), &summary, None, None).unwrap(), 1);
+    summary.non_green = false;
+    summary.lifetime_expired = true;
+    assert_eq!(finish(&mut Vec::new(), &summary, None, None).unwrap(), 1);
+    assert_eq!(
+        finish(&mut Vec::new(), &summary, Some("stop control lost"), None).unwrap(),
+        2
+    );
 }
 #[test]
 fn user_supplied_event_and_execution_identity_cannot_override_history() {
