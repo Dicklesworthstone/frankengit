@@ -23,7 +23,7 @@ impl Limits {
         records: 65_536,
     };
 
-    fn validate(self) -> Result<(), AdmissionError> {
+    const fn validate(self) -> Result<(), AdmissionError> {
         if self.batches == 0
             || self.batches > Self::DEFAULT.batches
             || self.records == 0

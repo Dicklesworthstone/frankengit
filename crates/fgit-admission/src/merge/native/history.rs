@@ -671,7 +671,7 @@ impl ReverseProgress {
         Ok(())
     }
 
-    fn created(&mut self) -> Result<(), AdmissionError> {
+    const fn created(&mut self) -> Result<(), AdmissionError> {
         if self.passed_creation || (self.latest.is_some() && !self.passed_origin) {
             return Err(unavailable(RefusalCode::EvidenceMissing));
         }

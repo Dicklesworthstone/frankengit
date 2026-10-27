@@ -1,5 +1,14 @@
 //! Exact schema 1.3: ref facts plus the sealed principal identifier.
-use super::*;
+use super::{
+    ActivatedPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence, MAX_FRAME_BYTES,
+    PolicyDecisionEvidence, Profile, RefPolicyEvaluation, RefPolicyPublication,
+};
+use crate::{AdmissionContext, CanonicalRefState};
+use fgit_chronicle::PublicationBasis;
+use fgit_codec::{CanonicalBody, CodecRefusal, Decoder, Encoder, encode_body};
+use fgit_policy::PolicySnapshot;
+use fgit_txn::TransactionFoldReport;
+use fgit_types::{DomainTag, RefName, RefusalCode, RootLayoutVersion, SchemaFamily};
 
 /// An actor-aware policy receipt. The new minor is required: schema 1.2 keeps
 /// its closed ref-only semantics and must refuse a policy observing actor.id.

@@ -1,5 +1,16 @@
 //! Exact schema 1.2: the authority-selected repository DSL and its decision.
-use super::*;
+use super::{
+    EvaluatedPolicyDecisionEvidence, MAX_FRAME_BYTES, MAX_SNAPSHOT_BYTES, MAX_TRACE_BYTES,
+    PolicyDecisionEvidence, Profile, RefPolicyEvaluation, bound, invalid,
+};
+use crate::{AdmissionContext, CanonicalRefState};
+use fgit_chronicle::PublicationBasis;
+use fgit_codec::{
+    CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Encoder, decode_body, encode_body,
+};
+use fgit_policy::{Decision, PolicySnapshot, PolicySnapshotId};
+use fgit_txn::TransactionFoldReport;
+use fgit_types::{DomainTag, RefName, RefusalCode, RootLayoutVersion, SchemaFamily};
 
 /// The review gate is different for direct writes and native merges. Both
 /// evaluate the same activated repository policy over their exact ref effects.

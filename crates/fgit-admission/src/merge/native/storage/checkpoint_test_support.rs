@@ -11,7 +11,7 @@ use fgit_chronicle::{
 };
 use fgit_codec::{CryptoBodyIdentity, encode_body};
 
-pub(crate) fn stage_checkpoint(
+pub(in crate::merge::native) fn stage_checkpoint(
     store: &(impl AuthorityStore + ?Sized),
     basis: &PublicationBasis,
 ) -> (PublicationBasis, ImmutableKey) {

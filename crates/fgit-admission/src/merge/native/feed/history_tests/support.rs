@@ -45,7 +45,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -54,7 +54,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         self.keys.lock().unwrap().push(key.clone());
@@ -72,7 +72,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -82,7 +82,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         let result = self.backend.read_head(key);
@@ -90,7 +90,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -103,7 +103,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         let result = self.backend.authenticate_head_receipt(receipt);

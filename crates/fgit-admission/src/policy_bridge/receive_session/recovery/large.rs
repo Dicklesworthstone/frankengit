@@ -5,11 +5,18 @@
 //! The binding request is never sealed or published. Each real child keeps the
 //! original receive schema, per-index key and one-command request.
 
-use super::*;
-use fgit_authority::{PushOption, ScopedEntry, canonical_request_digest};
-use fgit_types::{AsciiSlug, SchemaFamily, SchemaId};
+use super::{codec, invalid};
+use fgit_authority::{
+    ExpectedOld, ProposedNew, PushOption, ScopedEntry, SealAttempt, SemanticRequest,
+    canonical_request_digest,
+};
+use fgit_codec::{DecodeLimits, Decoder, Encoder, decode_body, encode_body};
+use fgit_types::{AsciiSlug, RefName, RefusalCode, SchemaFamily, SchemaId};
 
-use crate::{MAX_RECEIVE_SESSION_COMMANDS, MAX_SESSION_OPTION_COPY_BYTES};
+use crate::{
+    AdmissionContext, AdmissionError, MAX_ADMISSION_COMMANDS, MAX_RECEIVE_SESSION_COMMANDS,
+    MAX_SESSION_OPTION_COPY_BYTES, SessionPlan, seal_attempt,
+};
 
 pub(super) const VERSION: u32 = 2;
 pub(super) const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -184,7 +191,7 @@ impl Descriptor {
         Ok(())
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(super) const fn len(&self) -> usize {
         self.wire_order.len()
     }
 
@@ -291,7 +298,7 @@ impl Descriptor {
         }
         let namespace = AsciiSlug::from_static("receive-session");
         let mut entries = vec![ScopedEntry::new(
-            namespace.clone(),
+            namespace,
             AsciiSlug::from_static("command-count"),
             u32::try_from(self.len())
                 .map_err(|_| invalid())?
@@ -304,7 +311,7 @@ impl Descriptor {
             out.write_digest(&canonical_request_digest(chunk)?)
                 .map_err(codec)?;
             entries.push(ScopedEntry::new(
-                namespace.clone(),
+                namespace,
                 binding_key("chunk", index)?,
                 out.into_bytes(),
             )?);
@@ -323,7 +330,7 @@ impl Descriptor {
                 out.write_scalar(u16::try_from(position).map_err(|_| invalid())?);
             }
             entries.push(ScopedEntry::new(
-                namespace.clone(),
+                namespace,
                 binding_key("wire-order", index)?,
                 out.into_bytes(),
             )?);

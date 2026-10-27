@@ -105,11 +105,11 @@ fn source_only_and_every_stale_candidate_coordinate_contribute_no_approval() {
                 6 => review.subject.target_tip = oid(format, "55"),
                 7 => {
                     review.subject.source_ref =
-                        RefName::try_new(b"refs/heads/other-source").unwrap()
+                        RefName::try_new(b"refs/heads/other-source").unwrap();
                 }
                 _ => {
                     review.subject.target_ref =
-                        RefName::try_new(b"refs/heads/other-target").unwrap()
+                        RefName::try_new(b"refs/heads/other-target").unwrap();
                 }
             }
             let missing = Fixture::new(format, 0, vec![stale.clone(), vote(format, 12)]);

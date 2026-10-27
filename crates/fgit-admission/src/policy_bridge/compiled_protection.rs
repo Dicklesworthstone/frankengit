@@ -371,7 +371,7 @@ mod tests {
                 &target,
                 principal,
                 &BTreeMap::new(),
-                &[absent_delete.clone()]
+                std::slice::from_ref(&absent_delete)
             ),
             None,
             "an unborn HEAD has no branch to delete"

@@ -564,7 +564,7 @@ impl Profile {
             Self::RepositoryRefV1 | Self::RepositoryActorIdV1 => "repository policy",
         }
     }
-    fn predicate(self) -> Predicate {
+    const fn predicate(self) -> Predicate {
         match self {
             Self::HeadDeletionV1 => Predicate::UpdateKindEquals(RefUpdateKind::Delete),
             Self::DirectReviewV1 => Predicate::Always,
@@ -778,7 +778,7 @@ fn read_bounded_sequence<'a, T>(
     Ok(values)
 }
 
-fn bound(field: &'static str, bytes: usize, maximum: usize) -> Result<(), CodecRefusal> {
+const fn bound(field: &'static str, bytes: usize, maximum: usize) -> Result<(), CodecRefusal> {
     if bytes > maximum {
         Err(CodecRefusal::LengthBoundExceeded {
             field,
@@ -790,7 +790,7 @@ fn bound(field: &'static str, bytes: usize, maximum: usize) -> Result<(), CodecR
     }
 }
 
-fn invalid(field: &'static str) -> CodecRefusal {
+const fn invalid(field: &'static str) -> CodecRefusal {
     CodecRefusal::VariantUnknown {
         field,
         observed: 0,

@@ -37,7 +37,7 @@ impl Store {
     fn new(limits: AuthorityLimits) -> Self {
         Self {
             backend: MemoryAuthorityStore::with_config(fgit_authority::MemoryStoreConfig {
-                instance: StoreInstanceId::from_raw(0x4_007_01),
+                instance: StoreInstanceId::from_raw(0x0040_0701),
                 limits,
                 ..fgit_authority::MemoryStoreConfig::default()
             }),

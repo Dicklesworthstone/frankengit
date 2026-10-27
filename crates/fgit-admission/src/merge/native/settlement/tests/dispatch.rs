@@ -38,34 +38,38 @@ impl DispatchTransport<()> for Routes {
     fn routes(&self) -> &[DispatchRoute] {
         &self.definitions
     }
-    async fn deliver<'a>(
+    fn deliver<'a>(
         &'a mut self,
-        _: &'a (),
+        (): &'a (),
         route: u64,
         _: &'a DeliveryRequest<'_>,
         attempt: u32,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
-    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
-        checkpoint()?;
-        self.calls.push((route, attempt));
-        if let Some(stop) = &self.stopped {
-            stop.store(true, Ordering::SeqCst);
+    ) -> impl Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + 'a {
+        async move {
+            checkpoint()?;
+            self.calls.push((route, attempt));
+            if let Some(stop) = &self.stopped {
+                stop.store(true, Ordering::SeqCst);
+            }
+            Ok((
+                self.outcomes.pop_front().expect("unexpected send"),
+                b"actual scripted observation".to_vec(),
+            ))
         }
-        Ok((
-            self.outcomes.pop_front().expect("unexpected send"),
-            b"actual scripted observation".to_vec(),
-        ))
     }
-    async fn probe<'a>(
+    fn probe<'a>(
         &'a mut self,
-        _: &'a (),
+        (): &'a (),
         _: u64,
         _: &'a DeliveryRequest<'_>,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
-    ) -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
-        checkpoint()?;
-        self.probes += 1;
-        Ok((ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec()))
+    ) -> impl Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + 'a {
+        async move {
+            checkpoint()?;
+            self.probes += 1;
+            Ok((ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec()))
+        }
     }
 }
 fn drive(
@@ -692,7 +696,7 @@ fn repeated_explicit_attempts_reference_the_original_event_instead_of_a_replay_c
     let nested = crate::merge::native::dispatch::replay::ReplayIntent {
         source: first,
         expected_source_effect: failure.root().unwrap(),
-        ..intent.clone()
+        ..intent
     };
     let before = f.basis().id();
     let mut context = f.context.clone();

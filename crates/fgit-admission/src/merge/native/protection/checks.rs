@@ -20,7 +20,7 @@ const MAX_SCAN_BATCHES: usize = 65_536;
 const MAX_SCAN_EVENTS: usize = 65_536;
 const MAX_SCAN_BYTES: usize = 128 * 1024 * 1024;
 
-fn denied() -> ProjectionFailure {
+const fn denied() -> ProjectionFailure {
     ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
 }
 

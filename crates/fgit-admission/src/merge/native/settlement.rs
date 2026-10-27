@@ -502,8 +502,7 @@ where
                     .await?;
                 if current.state() != ObligationState::Committed
                     || next.ordinal() != 0
-                    || effect.map(|e| storage::root(e)).transpose()?
-                        != Some(next.origin_effect_root())
+                    || effect.map(storage::root).transpose()? != Some(next.origin_effect_root())
                     || current
                         .transition(LifecycleEvent::Defer, None)
                         .map_err(codec_error)?

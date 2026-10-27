@@ -131,33 +131,43 @@ impl CanonicalDispatchProgress {
         body.validate()?;
         Ok(body)
     }
+    #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository
     }
+    #[must_use]
     pub const fn delivery_key(&self) -> AsciiSlug {
         self.key
     }
+    #[must_use]
     pub const fn destination(&self) -> AsciiSlug {
         self.destination
     }
+    #[must_use]
     pub const fn payload_root(&self) -> Digest {
         self.payload
     }
+    #[must_use]
     pub const fn origin_effect_root(&self) -> Digest {
         self.origin
     }
+    #[must_use]
     pub const fn owner(&self) -> PrincipalId {
         self.owner
     }
+    #[must_use]
     pub const fn ordinal(&self) -> u32 {
         self.ordinal
     }
+    #[must_use]
     pub const fn predecessor_progress_root(&self) -> Option<Digest> {
         self.previous
     }
+    #[must_use]
     pub fn routes(&self) -> &[RouteProgress] {
         &self.routes
     }
+    #[must_use]
     pub const fn finished_effect_root(&self) -> Option<Digest> {
         match self.action {
             Action::Finish { effect } => Some(effect),
@@ -168,12 +178,13 @@ impl CanonicalDispatchProgress {
         let id = body_id(&CryptoBodyIdentity, self)?;
         Ok(Digest::new(id.algorithm(), *id.digest()))
     }
+    #[must_use]
     pub fn matches_plan(&self, owner: PrincipalId, routes: &[DispatchRoute]) -> bool {
         self.owner == owner
             && self.routes.len() == routes.len()
             && self.routes.iter().zip(routes).all(|(a, b)| a.route == *b)
     }
-    pub(in crate::merge::native) fn admits_new_send(&self) -> bool {
+    pub(in crate::merge::native) const fn admits_new_send(&self) -> bool {
         matches!(self.action, Action::Start | Action::Dispatch { .. })
     }
     pub fn dispatch(&self, route: u64, at: u64) -> Result<Self, CodecRefusal> {
@@ -597,7 +608,7 @@ impl CanonicalBody for CanonicalDispatchProgress {
     }
 }
 
-fn invalid(field: &'static str) -> CodecRefusal {
+const fn invalid(field: &'static str) -> CodecRefusal {
     CodecRefusal::VariantUnknown {
         field,
         observed: 0,

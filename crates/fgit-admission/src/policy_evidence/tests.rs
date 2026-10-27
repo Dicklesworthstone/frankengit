@@ -6,6 +6,7 @@ use fgit_reference::intent::{Intent, RefIntent, Statement, TransactionRequest};
 use fgit_reference::refs::ExpectedRefState;
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, MismatchPolicy};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
 fn name(bytes: &[u8]) -> RefName {
     RefName::try_new(bytes).unwrap()
@@ -292,10 +293,12 @@ fn actor_receipts_cannot_be_encoded_or_decoded_as_historical_ref_only_evidence()
 fn large_activated_snapshot_roundtrips_its_complete_evidence_frame() {
     let mut source = String::from("policy large { ");
     for index in 0..40 {
-        source.push_str(&format!(
+        write!(
+            source,
             "rule r{index:02} {{ when ref.name == \"{}\" then deny \"retained\" }} ",
             "a".repeat(900)
-        ));
+        )
+        .unwrap();
     }
     source.push_str("default allow }");
     let snapshot = fgit_forge::event::protection::compile_ref_policy(&source).unwrap();

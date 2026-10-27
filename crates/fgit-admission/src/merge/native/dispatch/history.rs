@@ -244,7 +244,7 @@ where
     history::checkpoint(cancelled)
 }
 
-fn bad() -> AdmissionError {
+const fn bad() -> AdmissionError {
     unavailable(RefusalCode::EvidenceInvalid)
 }
 

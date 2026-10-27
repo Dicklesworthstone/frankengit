@@ -33,6 +33,11 @@ use fgit_types::{
 
 use super::super::*;
 
+enum CreationParent {
+    Current,
+    Explicit(Option<RepositoryCommitId>),
+}
+
 struct Reads {
     memory: MemoryAuthorityStore,
     keys: Mutex<Vec<ImmutableKey>>,
@@ -71,7 +76,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -79,7 +84,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         self.keys.lock().unwrap().push(key.clone());
@@ -97,7 +102,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -106,14 +111,14 @@ impl AsyncAuthorityStore for Reads {
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         std::future::ready(self.memory.read_head(key))
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -126,7 +131,7 @@ impl AsyncAuthorityStore for Reads {
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         std::future::ready(self.memory.authenticate_head_receipt(receipt))
@@ -341,7 +346,7 @@ impl Fixture {
         self.basis = PublicationBasis::new(authority_head_identity(&head).unwrap(), head);
     }
     fn create(&mut self) {
-        let record = self.creation_record(None, None);
+        let record = self.creation_record(CreationParent::Current, None);
         self.creation = Some(self.heads.len());
         self.append(vec![record]);
     }
@@ -356,7 +361,7 @@ impl Fixture {
     }
     fn creation_record(
         &mut self,
-        parent_override: Option<Option<RepositoryCommitId>>,
+        parent: CreationParent,
         payload_override: Option<Digest>,
     ) -> RepositoryCommitRecord {
         let events = ForgeEventBatch::of_one(ForgeEvent {
@@ -371,7 +376,10 @@ impl Fixture {
         });
         let payload = self.stage(storage::EVENT_NAMESPACE, &events);
         let tx_id = tx(self.next_tx + 1);
-        let predecessor = parent_override.unwrap_or(self.basis.body().latest_committed_rcr_id);
+        let predecessor = match parent {
+            CreationParent::Current => self.basis.body().latest_committed_rcr_id,
+            CreationParent::Explicit(parent) => parent,
+        };
         let key = derive_outbox_delivery_key(OutboxDeliveryIdentityInput::new(
             self.basis.body().repository_id,
             AsciiSlug::from_static("forge-event"),
@@ -660,12 +668,15 @@ fn caller_entry_and_claimed_head_must_match_the_selected_bytes() {
 
 #[test]
 fn creation_requires_the_exact_transaction_parent_and_payload() {
-    for defect in 0..3 {
+    for defect in 0..4 {
         let mut fixture = Fixture::new();
-        let parent = if defect == 0 {
-            Some(Some(fgit_codec::harness::commit_id()))
-        } else {
-            None
+        if defect == 3 {
+            fixture.unrelated_commit();
+        }
+        let parent = match defect {
+            0 => CreationParent::Explicit(Some(fgit_codec::harness::commit_id())),
+            3 => CreationParent::Explicit(None),
+            _ => CreationParent::Current,
         };
         let payload = if defect == 1 {
             Some(fgit_codec::harness::digest_of(97))
@@ -682,6 +693,9 @@ fn creation_requires_the_exact_transaction_parent_and_payload() {
             "an immutable entry alone is not a creation witness"
         );
         let mut permitted = Fixture::new();
+        if defect == 3 {
+            permitted.unrelated_commit();
+        }
         permitted.create();
         assert_eq!(permitted.read().unwrap(), None);
     }
@@ -710,7 +724,7 @@ fn creation_after_a_committed_predecessor_and_refusals_is_an_exact_boundary() {
 #[test]
 fn a_later_outbox_entry_cannot_invent_membership_in_the_creation_batch() {
     let mut fixture = Fixture::new();
-    let record = fixture.creation_record(None, None);
+    let record = fixture.creation_record(CreationParent::Current, None);
     let entry = fixture.entry.take().unwrap();
     fixture.append(vec![record]);
     fixture.entry = Some(entry);
@@ -737,7 +751,7 @@ fn an_existing_binding_cannot_be_relabelled_as_a_new_obligation() {
     earlier.parent_rcr_id = fixture.basis.body().latest_committed_rcr_id;
     earlier.repository_sequence = fixture.basis.open_repository_sequence().unwrap();
     let parent = repository_commit_identity(&CryptoBodyIdentity, &earlier).unwrap();
-    let creation = fixture.creation_record(Some(Some(parent)), None);
+    let creation = fixture.creation_record(CreationParent::Explicit(Some(parent)), None);
     // The earlier head already selects the binding. A later record matching
     // its transaction/payload coordinates cannot reset its history boundary.
     fixture.append(vec![earlier]);
@@ -919,7 +933,7 @@ fn creation_and_later_progress_in_one_microbatch_share_one_verified_boundary() {
     for _ in 0..3 {
         fixture.append(Vec::new());
     }
-    let creation = fixture.creation_record(None, None);
+    let creation = fixture.creation_record(CreationParent::Current, None);
     let deferred = fixture
         .effect
         .as_ref()

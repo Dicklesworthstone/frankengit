@@ -974,7 +974,7 @@ fn is_ancestor(
     Ok(false)
 }
 
-fn ancestry_failure(error: MergeBaseError<GitOid, ProjectionFailure>) -> ProjectionFailure {
+const fn ancestry_failure(error: MergeBaseError<GitOid, ProjectionFailure>) -> ProjectionFailure {
     match error {
         MergeBaseError::Source(failure) => failure,
         MergeBaseError::CommitLimitExceeded { .. } | MergeBaseError::EdgeLimitExceeded { .. } => {
@@ -1000,7 +1000,7 @@ const fn budget() -> ProjectionFailure {
     ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
 }
 
-fn object_parse_failure(error: ObjectError) -> ProjectionFailure {
+const fn object_parse_failure(error: ObjectError) -> ProjectionFailure {
     match error {
         ObjectError::ObjectTooLarge { .. }
         | ObjectError::TooManyTreeEntries { .. }

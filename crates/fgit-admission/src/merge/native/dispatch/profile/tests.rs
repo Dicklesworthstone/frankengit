@@ -143,7 +143,7 @@ fn canonical_retry_ceiling_backoff_and_every_route_binding_are_immutable() {
     let mut altered = retry.clone();
     altered.routes[0].route.max_attempts = 16;
     assert!(altered.verify_successor_of(&sent).is_err());
-    let mut altered = retry.clone();
+    let mut altered = retry;
     altered.owner = PrincipalId::from_bytes([9; 16]);
     assert!(altered.verify_successor_of(&sent).is_err());
     assert!(
@@ -201,7 +201,7 @@ fn terminal_evidence_and_exact_predecessor_are_required() {
         )
         .unwrap();
     assert!(ack.verify_successor_of(&p).is_err());
-    let mut missing = ack.clone();
+    let mut missing = ack;
     missing.previous = Some(digest_of(88));
     assert!(missing.verify_successor_of(&sent).is_err());
 }

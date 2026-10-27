@@ -139,16 +139,16 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
     .await?;
     match prepared.evidence.policy_decision() {
         crate::evidence::PolicyDecisionRecord::Legacy(body) => {
-            stage(store, cx, repository, POLICY, body).await?
+            stage(store, cx, repository, POLICY, body).await?;
         }
         crate::evidence::PolicyDecisionRecord::Evaluated(body) => {
-            stage(store, cx, repository, POLICY, body.as_ref()).await?
+            stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
         crate::evidence::PolicyDecisionRecord::Activated(body) => {
-            stage(store, cx, repository, POLICY, body.as_ref()).await?
+            stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
         crate::evidence::PolicyDecisionRecord::ActorActivated(body) => {
-            stage(store, cx, repository, POLICY, body.as_ref()).await?
+            stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
     }
     stage(

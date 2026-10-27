@@ -536,7 +536,7 @@ fn terminal_index(
         ))
 }
 
-fn require_staged_refusal(outcome: PutOutcome) -> Result<(), AdmissionError> {
+const fn require_staged_refusal(outcome: PutOutcome) -> Result<(), AdmissionError> {
     match outcome {
         PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(()),
         PutOutcome::Conflict => Err(AdmissionError::MaterializationMismatch(

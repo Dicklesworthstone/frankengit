@@ -100,7 +100,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -150,7 +150,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         self.immutable_reads.fetch_add(1, Ordering::SeqCst);
@@ -158,7 +158,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -167,7 +167,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         self.head_reads.fetch_add(1, Ordering::SeqCst);
@@ -175,7 +175,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -188,7 +188,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -197,7 +197,8 @@ impl AsyncAuthorityStore for AsyncMemory {
         witness: &DuplicateAbsenceWitness,
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
         self.publications.fetch_add(1, Ordering::SeqCst);
-        let after = match self.race.lock().unwrap().take() {
+        let race = self.race.lock().unwrap().take();
+        let after = match race {
             Some(race) if !race.after_publication => {
                 race.publish(&self.inner);
                 None
@@ -224,7 +225,7 @@ impl AsyncAuthorityStore for AsyncMemory {
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         std::future::ready(self.inner.authenticate_head_receipt(receipt))
@@ -334,57 +335,63 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         // moves. A distinct test omits its commitment and requires stale refusal.
         Some(ReceiveValidationAuthority([42; 32]))
     }
-    async fn snapshot_async<'a>(
+    fn snapshot_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         head: &'a AuthenticatedHead,
-    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
-        self.snapshots.fetch_add(1, Ordering::SeqCst);
-        self.snapshot(basis, head)
-            .map_err(ProjectionFailure::Refuse)
+    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
+        async move {
+            self.snapshots.fetch_add(1, Ordering::SeqCst);
+            self.snapshot(basis, head)
+                .map_err(ProjectionFailure::Refuse)
+        }
     }
-    async fn materialize_commit_async<'a>(
+    fn materialize_commit_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> Result<CommitMaterialization, ProjectionFailure> {
-        self.materialize_commit(basis, request, fold, closure)
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
+        async move { self.materialize_commit(basis, request, fold, closure) }
     }
-    async fn materialize_batch_commit_async<'a>(
+    fn materialize_batch_commit_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
-        _: &'a (),
+        (): &'a (),
         state: &'a crate::microbatch::BatchRefState,
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> Result<CommitMaterialization, ProjectionFailure> {
-        self.check(request)?;
-        crate::microbatch::materialize_canonical(
-            &self.inner,
-            state.basis(),
-            state.refs().clone(),
-            request,
-            fold,
-            closure,
-        )
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
+        async move {
+            self.check(request)?;
+            crate::microbatch::materialize_canonical(
+                &self.inner,
+                state.basis(),
+                state.refs().clone(),
+                request,
+                fold,
+                closure,
+            )
+        }
     }
-    async fn materialize_refusal_async<'a>(
+    fn materialize_refusal_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         tx: TxId,
         code: RefusalCode,
-    ) -> Result<RefusalMaterialization, ProjectionFailure> {
-        self.materialize_refusal(basis, tx, code)
-            .map_err(ProjectionFailure::Refuse)
+    ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
+        async move {
+            self.materialize_refusal(basis, tx, code)
+                .map_err(ProjectionFailure::Refuse)
+        }
     }
 }
 
@@ -817,7 +824,7 @@ fn a_recovered_sequential_prefix_advances_the_original_witness_and_finishes_the_
     let commands: Vec<_> = (0..65)
         .map(|n| command(&format!("refs/heads/p{n:03}"), 0, 1))
         .collect();
-    let receive = validated(&store, commands.clone(), false);
+    let receive = validated(&store, commands, false);
     let input = basis_bound_receive_input(&receive);
     let plan = plan_session(&context(), &input, AdmissionLimits::default()).unwrap();
     let mut original = Vec::new();

@@ -476,7 +476,7 @@ where
             receipt.token(),
         )?;
         checkpoint().map_err(unavailable)?;
-        if let Some(_) = settlement::publication::publish_owned(
+        let published = settlement::publication::publish_owned(
             store,
             cx,
             context,
@@ -484,8 +484,8 @@ where
             &publication,
             tx,
         )
-        .await?
-        {
+        .await?;
+        if published.is_some() {
             // Reload selected history even on recovery; object existence grants
             // neither a new identity nor an extra send.
             let (basis, _, _) = crate::read_basis_async(store, cx, &context.head_key).await?;
@@ -666,6 +666,6 @@ fn digest_from_value(v: &[u8]) -> Result<Digest, AdmissionError> {
         DigestBytes::try_new(&v[3..]).map_err(|_| bad())?,
     ))
 }
-fn bad() -> AdmissionError {
+const fn bad() -> AdmissionError {
     unavailable(RefusalCode::EvidenceInvalid)
 }
