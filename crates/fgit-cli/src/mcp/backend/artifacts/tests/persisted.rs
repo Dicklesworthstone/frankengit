@@ -60,7 +60,7 @@ impl Fixture {
                 issues: false,
                 pulls: false,
                 source: false,
-                agent_context: true,
+                agent_context: false,
                 artifacts: true,
                 artifact_root: Some(artifact_root),
                 writes: Default::default(),
@@ -348,6 +348,34 @@ fn startup_checks_exact_incarnation_existing_private_root_and_independent_grant(
     fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(NodeTools::open(fixture.options.clone()).is_err());
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut unsponsored_context = fixture.options.clone();
+    unsponsored_context.agent_context = true;
+    let refusal = NodeTools::open(unsponsored_context)
+        .map(|backend| backend.close().unwrap())
+        .unwrap_err();
+    assert_eq!(
+        refusal,
+        "writes, recovery and agent context require --principal and --expected-incarnation"
+    );
+    let mut sponsored_context = fixture.options.clone();
+    sponsored_context.agent_context = true;
+    sponsored_context.principal = Some(fgit_types::PrincipalId::from_bytes([0xa3; 16]));
+    let combined = NodeTools::open(sponsored_context).unwrap();
+    assert_eq!(
+        combined
+            .tools()
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([INSPECT, READ, crate::mcp::backend::agent_context::NAME])
+    );
+    assert!(
+        combined
+            .tools()
+            .iter()
+            .all(|tool| !combined.is_mutation(tool.name))
+    );
+    combined.close().unwrap();
     let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
     assert_eq!(
         backend
