@@ -1,5 +1,13 @@
+use super::super::{CANONICAL_CODEC_VERSION, NEXT_STAGE, OBJECT_MAGIC};
 use super::*;
+use crate::SegmentLimits;
+use crate::local::LocalFilesystemConfig;
+use fgit_resource::OpaqueHandle;
 use fgit_types::GitHashAlgorithm;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 struct Fixture {
     root: PathBuf,
@@ -146,7 +154,7 @@ fn limits_namespace_kind_identity_and_length_are_checked_before_body_reads() {
                     GitHashAlgorithm::Sha1,
                     GitObjectKind::Blob,
                     b"wrong",
-                )
+                );
             }
             3 => envelope.declared_length += 1,
             _ => unreachable!(),

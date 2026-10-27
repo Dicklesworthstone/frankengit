@@ -52,18 +52,23 @@ impl ArtifactScope {
             trust: trust.to_owned(),
         })
     }
+    #[must_use]
     pub fn trust_domain(&self) -> &str {
         &self.trust
     }
+    #[must_use]
     pub const fn tenant(&self) -> TenantId {
         self.tenant
     }
+    #[must_use]
     pub const fn repository(&self) -> RepositoryId {
         self.repository
     }
+    #[must_use]
     pub const fn incarnation(&self) -> RepositoryIncarnationId {
         self.incarnation
     }
+    #[must_use]
     pub fn commitment(&self) -> Digest {
         let mut bytes = b"frankengit/artifact-scope/v1\0".to_vec();
         codec::scope_bytes(self, &mut bytes);

@@ -1,5 +1,8 @@
 //! Bounded lossless storage spelling. Artifact identity remains owned by artifact.rs.
-use super::*;
+use super::{
+    ArtifactIdentity, ArtifactScope, ArtifactStorageError, Digest, DigestAlgorithmId, DigestBytes,
+    HEADER_BYTES, RepositoryId, RepositoryIncarnationId, TenantId, valid_digest,
+};
 use crate::{ArtifactPayloadKind, MediaType, RetentionProfile};
 
 pub(super) fn scope_bytes(scope: &ArtifactScope, out: &mut Vec<u8>) {
@@ -21,12 +24,12 @@ pub(super) fn encode(
     scope: &ArtifactScope,
     identity: &ArtifactIdentity,
 ) -> Result<Vec<u8>, ArtifactStorageError> {
-    if let RetentionProfile::LegalHold { reason, .. } = identity.retention_profile() {
-        if reason.len() > 1024 {
-            return Err(ArtifactStorageError::InvalidInput(
-                "retention description too long",
-            ));
-        }
+    if let RetentionProfile::LegalHold { reason, .. } = identity.retention_profile()
+        && reason.len() > 1024
+    {
+        return Err(ArtifactStorageError::InvalidInput(
+            "retention description too long",
+        ));
     }
     let mut out = Vec::new();
     scope_bytes(scope, &mut out);

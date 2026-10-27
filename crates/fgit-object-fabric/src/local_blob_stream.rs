@@ -1,6 +1,9 @@
 //! Tentative file-backed blob reads, authenticated only at exact EOF.
 
-use super::*;
+use super::{
+    File, GitOid, LocalFilesystemFabric, ObjectEnvelope, ObjectKind, StorageOperation,
+    StoreRefusal, bounded_read,
+};
 use std::io::Read;
 
 use fgit_crypto::{

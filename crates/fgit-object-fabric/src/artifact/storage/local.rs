@@ -1,5 +1,9 @@
 //! Root-last immutable containers. Never use directory listings as artifact truth.
-use super::*;
+use super::{
+    ArtifactIdentity, ArtifactOperation, ArtifactPut, ArtifactScope, ArtifactStorageError,
+    CHUNK_BYTES, Digest, DigestHasher, File, HEADER_BYTES, MAGIC, Path, Sha256Hasher, codec,
+    finish, hex, io, valid_digest,
+};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -62,7 +66,8 @@ impl LocalArtifactStore {
         op.checkpoint()?;
         Ok((identity, buffer.bytes))
     }
-    pub fn scope(&self) -> &ArtifactScope {
+    #[must_use]
+    pub const fn scope(&self) -> &ArtifactScope {
         &self.scope
     }
     fn directory(&self) -> PathBuf {
@@ -327,7 +332,7 @@ impl Stage {
                         removed: false,
                     });
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(io("create artifact stage", e)),
             }
         }
@@ -396,7 +401,14 @@ fn transfer(
 ) -> Result<(), ArtifactStorageError> {
     op.admit(identity.payload_len())?;
     let mut remaining = identity.payload_len();
-    let mut chunk = [0u8; CHUNK_BYTES];
+    let mut chunk = Vec::new();
+    chunk
+        .try_reserve_exact(CHUNK_BYTES)
+        .map_err(|_| ArtifactStorageError::Io {
+            operation: "allocate artifact transfer buffer",
+            kind: std::io::ErrorKind::OutOfMemory,
+        })?;
+    chunk.resize(CHUNK_BYTES, 0_u8);
     let mut hash = Sha256Hasher::new();
     while remaining > 0 {
         op.checkpoint()?;
