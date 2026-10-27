@@ -116,6 +116,7 @@ pub(super) fn execute(
             })
         }
         Command::Mutate(commands) => {
+            super::super::require_ref_writes(authenticated, commands.iter().map(|c| &c.name))?;
             // The node checks current visibility and commit kind, preserves
             // the default branch, constructs real empty-pack quarantine proof,
             // then submits ONE atomic request to canonical policy/seal/CAS.

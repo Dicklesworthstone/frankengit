@@ -72,6 +72,12 @@ characters, optionally followed by one newline. --credentials-file is reloaded
 for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
+Optional v2 uses frankengit-http-credentials-v2 in the same bound header and adds
+a fourth field on every row: all, none, or comma-separated exact:<lowercase-hex> /
+prefix:<lowercase-hex> selectors. Prefixes must end with a slash in decoded bytes.
+At most 64 selectors / 4096 decoded bytes per row restrict every Git and native
+source/merge ref write, including deletes and both ends of renames. They do not
+filter reads or grant a service. See docs/HTTP_REF_WRITE_SCOPES.md.
 Choose scopes once in this order:
   read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read
 No scope implies another. The header must match the exact repository incarnation.

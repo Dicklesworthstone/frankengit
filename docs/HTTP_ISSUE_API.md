@@ -62,6 +62,12 @@ request reloads it; unavailable, malformed, duplicate, or foreign-incarnation
 configuration fails closed. A valid header without rows revokes every token.
 Already authenticated in-flight requests retain their bounded grants.
 
+For per-token code-reference write ceilings, the optional
+[`frankengit-http-credentials-v2` format](HTTP_REF_WRITE_SCOPES.md) adds an explicit
+exact-ref or slash-prefix field to each row. It covers Git and native source/merge
+publication while keeping read and metadata grants independent. Existing v1 files
+retain their current behavior.
+
 The listener is loopback-only and does not terminate TLS. This profile is not an
 account service, organization/team IAM, per-issue ACL model, or immediate
 revocation of ongoing publication. A separately managed TLS gateway must forward

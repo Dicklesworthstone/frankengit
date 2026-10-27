@@ -152,6 +152,7 @@ pub(super) fn execute(
             base,
             candidate,
         } if request.operation == Operation::Apply => {
+            super::super::require_ref_writes(authenticated, [&reference])?;
             // No preliminary freshness read can replace canonical expected-old
             // admission. In particular, identical terminal retries must recover
             // after the branch moves. The native publisher owns quarantine,

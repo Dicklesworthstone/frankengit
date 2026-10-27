@@ -4480,15 +4480,19 @@ impl Error for NodeSourceImportRefusal {
     }
 }
 
+mod ref_write_scope;
+
 /// Authenticated client identity carried by the receive transport boundary.
 ///
-/// The authentication boundary supplies both fields. In particular, the
+/// The authentication boundary supplies the identity and optional write ceiling.
+/// In particular, the
 /// idempotency key is a client retry identity; it is never derived from a
 /// receive request, connection identifier, or other mutable transport data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedReceiveSession {
     principal_id: PrincipalId,
     client_idempotency_key: IdempotencyKey,
+    ref_write_scope: Option<Arc<ref_write_scope::RefWriteScope>>,
 }
 
 impl AuthenticatedReceiveSession {
@@ -4498,7 +4502,32 @@ impl AuthenticatedReceiveSession {
         Self {
             principal_id,
             client_idempotency_key,
+            ref_write_scope: None,
         }
+    }
+
+    /// Narrow the existing authentication boundary's code-write grant. This is
+    /// transport-selected authority, never a field in an untrusted command.
+    pub(crate) fn with_ref_write_scope(
+        mut self,
+        scope: Option<Arc<ref_write_scope::RefWriteScope>>,
+    ) -> Self {
+        self.ref_write_scope = scope;
+        self
+    }
+
+    /// Whether authentication permits writing this exact reference. Reads and
+    /// metadata grants remain independent; ordinary publication policy applies.
+    pub(crate) fn permits_ref_write(&self, reference: &RefName) -> bool {
+        self.permits_ref_write_bytes(reference.as_bytes())
+    }
+
+    /// Wire receive names have already passed the native ref grammar. Inspect
+    /// their exact bytes without allocating one replacement name per command.
+    pub(crate) fn permits_ref_write_bytes(&self, reference: &[u8]) -> bool {
+        self.ref_write_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits(reference))
     }
 
     /// Returns the principal authenticated for this transport session.

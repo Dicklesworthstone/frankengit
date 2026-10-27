@@ -234,8 +234,7 @@ pub(super) fn authenticate(
         principal: grant.principal,
     });
     Ok((
-        LoopbackReceiveSession::authenticated(
-            grant.principal,
+        grant.session(
             IdempotencyKey::new(key.to_vec())
                 .map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
         ),

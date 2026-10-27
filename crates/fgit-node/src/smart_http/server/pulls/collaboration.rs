@@ -77,8 +77,7 @@ pub(super) fn authenticate(
     } else {
         b"review-read-no-publication".as_slice()
     };
-    Ok(LoopbackReceiveSession::authenticated(
-        grant.principal,
+    Ok(grant.session(
         IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
     ))
 }
@@ -165,6 +164,9 @@ pub(super) fn execute(
         node.object_format,
         authenticated.principal_id(),
     )?;
+    if let Command::Merge { subject, .. } = &command {
+        super::super::require_ref_writes(authenticated, [&subject.target_ref])?;
+    }
     let (tx, terminal) = match &command {
         Command::Review(command) => drive_request_while(
             node,

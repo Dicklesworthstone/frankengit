@@ -90,6 +90,7 @@ pub(super) fn execute(
             })
         }
         Command::Mutate(command) => {
+            super::super::require_ref_writes(authenticated, [command.reference()])?;
             let prepared = command
                 .prepare(node.object_format)
                 .map_err(|_| ApiError::bad("invalid_tag_command"))?;

@@ -187,8 +187,7 @@ pub(super) fn authenticate(
     let key = retry_key(raw_head)
         .map_err(|_| ApiError::bad("invalid_idempotency_key"))?
         .ok_or_else(|| ApiError::bad("idempotency_key_required"))?;
-    Ok(LoopbackReceiveSession::authenticated(
-        grant.principal,
+    Ok(grant.session(
         IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
     ))
 }
@@ -211,12 +210,13 @@ pub(super) fn execute(
     limits: HttpLimits,
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
-    let principal = session
+    let authenticated = session
         .authenticated_session()
-        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?
-        .principal_id();
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    let principal = authenticated.principal_id();
     let bytes = read_form(reader, framing, ingress_limits(limits))?;
     let command = request.command(&bytes, node.object_format)?;
+    super::super::require_ref_writes(authenticated, [&command.target_ref])?;
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,

@@ -160,10 +160,10 @@ pub(super) fn execute(
     http: HttpLimits,
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
-    let principal = session
+    let authenticated = session
         .authenticated_session()
-        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?
-        .principal_id();
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    let principal = authenticated.principal_id();
     let boundary = request.boundary.ok_or_else(ApiError::media)?;
     // Reuse the only source-upload HTTP/MIME parser, including exact terminal
     // framing, suffix refusal, field limits and bounded binary preservation.
@@ -186,6 +186,17 @@ pub(super) fn execute(
     let header = FullBundleInput::parse(payload, limits, &mut live).map_err(envelope_error)?;
     if header.format() != node.object_format {
         return Err(ApiError::bad("object_format_mismatch"));
+    }
+    match request.operation {
+        Operation::Import => super::super::super::require_ref_writes(
+            authenticated,
+            header.references().iter().map(|reference| reference.name()),
+        )?,
+        Operation::Fetch => super::super::super::require_ref_writes(
+            authenticated,
+            mappings.iter().map(|mapping| &mapping.destination),
+        )?,
+        Operation::Export => return Err(ApiError::bad("invalid_bundle_operation")),
     }
     let count = match request.operation {
         Operation::Import => header.references().len(),

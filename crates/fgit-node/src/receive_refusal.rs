@@ -41,6 +41,9 @@ pub fn client_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
         NodeSmartHttpRefusal::UnauthenticatedReceive => {
             Some("push refused: the receive transport authenticated no principal".to_owned())
         }
+        NodeSmartHttpRefusal::RefWriteScopeDenied => {
+            Some("push refused: credential does not permit writing every requested reference in this attempt; any prior outcome remains recoverable using the original key".to_owned())
+        }
         _ => None,
     }
 }
@@ -54,6 +57,9 @@ pub fn client_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
 /// transport-state causes keep their status, which clients act on: 401
 /// (credentials), 429 (quota) and 503 (a cell not taking receive work).
 pub fn request_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
+    if matches!(error, NodeSmartHttpRefusal::RefWriteScopeDenied) {
+        return client_cause(error);
+    }
     let receive = match error {
         NodeSmartHttpRefusal::Receive(error) => error.as_ref(),
         NodeSmartHttpRefusal::Rpc(rpc) => match rpc.as_ref() {

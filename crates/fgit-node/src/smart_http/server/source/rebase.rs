@@ -148,6 +148,7 @@ pub(super) fn execute(
         let boundary = request.boundary.ok_or_else(ApiError::media)?;
         let (form, bundle) = source_upload(&bytes, boundary, SourceUploadKind::Bundle, &mut live)?;
         let command = request::Apply::parse(form, node.object_format)?;
+        super::super::require_ref_writes(authenticated, [&command.reference])?;
         // The native publisher recovers a terminal transaction BEFORE mutable
         // source/onto or object checks. Never insert a fresh pre-read here.
         let result = drive_request_while(

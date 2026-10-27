@@ -68,6 +68,17 @@ impl OneNode {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeSmartHttpRefusal::UnauthenticatedReceive)?;
+        // Check the ORIGINAL complete command list before the admission driver
+        // binds child keys or selects any non-atomic microbatch. A denied
+        // sibling cannot leave a permitted prefix published.
+        if validated
+            .request()
+            .commands
+            .iter()
+            .any(|command| !authenticated.permits_ref_write_bytes(&command.ref_name))
+        {
+            return Err(NodeSmartHttpRefusal::RefWriteScopeDenied);
+        }
         self.receive_publication_admitted()?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(),

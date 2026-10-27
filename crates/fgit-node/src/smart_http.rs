@@ -104,6 +104,9 @@ pub enum NodeSmartHttpRefusal {
     UnsupportedOperation,
     /// Receive-pack is never available without caller-authenticated identity.
     UnauthenticatedReceive,
+    /// Authentication denied a destination in the complete original request;
+    /// no ref decision or transaction seal has been attempted.
+    RefWriteScopeDenied,
     /// The HTTP body ended at its declared boundary while caller-owned bytes remained.
     TrailingRequestBytes {
         count: usize,
@@ -142,6 +145,9 @@ impl Display for NodeSmartHttpRefusal {
             }
             Self::UnauthenticatedReceive => {
                 formatter.write_str("smart HTTP receive-pack requires an authenticated principal")
+            }
+            Self::RefWriteScopeDenied => {
+                formatter.write_str("credential does not permit writing every requested reference")
             }
             Self::TrailingRequestBytes { count } => {
                 write!(
@@ -284,6 +290,7 @@ impl Error for NodeSmartHttpRefusal {
             Self::RepositoryRouteMismatch
             | Self::UnsupportedOperation
             | Self::UnauthenticatedReceive
+            | Self::RefWriteScopeDenied
             | Self::TrailingRequestBytes { .. } => None,
         }
     }
@@ -1050,6 +1057,14 @@ impl OneNode {
         // select authority after admission so another push cannot stale the
         // validation basis merely by finishing while this request prepared.
         let quarantine = rpc.into_quarantine(&mut live)?;
+        if quarantine
+            .request()
+            .commands
+            .iter()
+            .any(|command| !authenticated.permits_ref_write_bytes(&command.ref_name))
+        {
+            return Err(NodeSmartHttpRefusal::RefWriteScopeDenied);
+        }
         let writer_permit = super::admit_writer(writers, &deadline)?;
         let node_request = super::NodeRequestContext {
             authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),

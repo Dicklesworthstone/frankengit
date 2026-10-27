@@ -787,6 +787,7 @@ impl From<NodeSmartHttpRefusal> for Status {
             NodeSmartHttpRefusal::Http(error) => Self::from(*error),
             NodeSmartHttpRefusal::TrailingRequestBytes { .. } => Self::BadRequest,
             NodeSmartHttpRefusal::UnauthenticatedReceive => Self::Unauthorized,
+            NodeSmartHttpRefusal::RefWriteScopeDenied => Self::Forbidden,
             NodeSmartHttpRefusal::RepositoryRouteMismatch => Self::NotFound,
             // Quota and writer containment precede admission: nothing of the
             // request was admitted, so the client is told to retry later.
@@ -841,7 +842,27 @@ fn authenticated_session(
         b"smart-http-discovery-no-publication".as_slice()
     };
     let key = IdempotencyKey::new(key.to_vec()).map_err(|_| Status::BadRequest)?;
-    Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
+    Ok(grant.session(key))
+}
+
+/// Apply authentication's code-write ceiling to every parsed destination before
+/// entering a publisher. Multi-ref commands are checked in full, including
+/// deletes and both sides of a rename; no permitted prefix may be published.
+fn require_ref_writes<'a>(
+    session: &crate::AuthenticatedReceiveSession,
+    references: impl IntoIterator<Item = &'a fgit_types::RefName>,
+) -> Result<(), issues::ApiError> {
+    if references
+        .into_iter()
+        .all(|name| session.permits_ref_write(name))
+    {
+        Ok(())
+    } else {
+        Err(issues::ApiError::new(
+            Status::Forbidden,
+            "ref_write_scope_denied",
+        ))
+    }
 }
 
 fn retry_key(raw_head: &[u8]) -> Result<Option<&[u8]>, Status> {

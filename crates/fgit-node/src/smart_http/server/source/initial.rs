@@ -76,6 +76,7 @@ pub(super) fn execute(
             reference,
             candidate,
         } => {
+            super::super::require_ref_writes(authenticated, [&reference])?;
             // A terminal retry deliberately precedes current branch-presence
             // and object checks inside the native publisher. No pre-read here
             // may reinterpret the original expected-absent command as an update.

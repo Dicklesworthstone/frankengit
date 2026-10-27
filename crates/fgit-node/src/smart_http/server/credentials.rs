@@ -14,14 +14,20 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use fgit_authority::IdempotencyKey;
 use fgit_crypto::{sha256_digest, verify_mac};
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use fgit_wire::smart_http::Service;
 
+use crate::ref_write_scope::RefWriteScope;
+use crate::{AuthenticatedReceiveSession, LoopbackReceiveSession};
+
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_GRANTS: usize = 256;
 const HEADER: &str = "frankengit-http-credentials-v1";
+const HEADER_V2: &str = "frankengit-http-credentials-v2";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct Binding {
@@ -43,7 +49,7 @@ pub(super) enum CredentialSource {
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Grant {
     pub principal: PrincipalId,
     read: bool,
@@ -61,15 +67,16 @@ pub(super) struct Grant {
     lfs_read: bool,
     lfs_write: bool,
     artifact_read: bool,
+    ref_write_scope: Option<Arc<RefWriteScope>>,
 }
 impl Grant {
-    pub const fn permits(self, service: Service) -> bool {
+    pub const fn permits(&self, service: Service) -> bool {
         match service {
             Service::UploadPack => self.read,
             Service::ReceivePack => self.receive,
         }
     }
-    pub const fn permits_issues(self, mutation: bool) -> bool {
+    pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
             self.issues_write
         } else {
@@ -77,7 +84,7 @@ impl Grant {
         }
     }
     /// PR metadata authority is separate from code publication and reviews.
-    pub const fn permits_pulls(self, mutation: bool) -> bool {
+    pub const fn permits_pulls(&self, mutation: bool) -> bool {
         if mutation {
             self.pulls_write
         } else {
@@ -85,7 +92,7 @@ impl Grant {
         }
     }
     /// A vote always uses this credential's principal, not a form field.
-    pub const fn permits_reviews(self, mutation: bool) -> bool {
+    pub const fn permits_reviews(&self, mutation: bool) -> bool {
         if mutation {
             self.reviews_write
         } else {
@@ -94,11 +101,11 @@ impl Grant {
     }
     /// Allows reviewed code publication and selection of additional named
     /// reviewers. Mandatory repository protection remains enforced at CAS.
-    pub const fn permits_reviewed_merge(self) -> bool {
+    pub const fn permits_reviewed_merge(&self) -> bool {
         self.merges_write
     }
     /// Policy inspection and administration require independent explicit grants.
-    pub const fn permits_protection(self, mutation: bool) -> bool {
+    pub const fn permits_protection(&self, mutation: bool) -> bool {
         if mutation {
             self.protection_write
         } else {
@@ -107,21 +114,30 @@ impl Grant {
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
-    pub const fn permits_outcomes(self) -> bool {
+    pub const fn permits_outcomes(&self) -> bool {
         self.outcomes_read
     }
     /// Reads the complete explicitly selected workflow artifact custody namespace.
     /// This separate grant does not inherit Git visibility or grant a check.
-    pub const fn permits_artifact_read(self) -> bool {
+    pub const fn permits_artifact_read(&self) -> bool {
         self.artifact_read
     }
     /// Artifact custody is independent from Git ref publication and metadata.
-    pub const fn permits_lfs(self, mutation: bool) -> bool {
+    pub const fn permits_lfs(&self, mutation: bool) -> bool {
         if mutation {
             self.lfs_write
         } else {
             self.lfs_read
         }
+    }
+
+    /// Carry the selected write ceiling across Git and native API dispatch.
+    /// No request payload may replace it or widen another service grant.
+    pub(super) fn session(&self, key: IdempotencyKey) -> LoopbackReceiveSession {
+        LoopbackReceiveSession::Authenticated(
+            AuthenticatedReceiveSession::new(self.principal, key)
+                .with_ref_write_scope(self.ref_write_scope.clone()),
+        )
     }
 }
 
@@ -187,6 +203,7 @@ impl CredentialSource {
                     lfs_read: false,
                     lfs_write: false,
                     artifact_read: false,
+                    ref_write_scope: None,
                 })
             }
             Self::File { path, binding } => {
@@ -390,6 +407,7 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
         lfs_read: false,
         lfs_write: false,
         artifact_read: false,
+        ref_write_scope: None,
     };
     let mut previous = 0;
     for scope in scopes.split(',') {
@@ -432,9 +450,11 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
         .next()
         .ok_or(CredentialFailure::InvalidFile)?
         .split(' ');
-    if header.next() != Some(HEADER) {
-        return Err(CredentialFailure::InvalidFile);
-    }
+    let scoped_refs = match header.next() {
+        Some(HEADER) => false,
+        Some(HEADER_V2) => true,
+        _ => return Err(CredentialFailure::InvalidFile),
+    };
     let selected = Binding {
         tenant: TenantId::from_bytes(lower_hex(
             header.next().ok_or(CredentialFailure::InvalidFile)?,
@@ -463,10 +483,16 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
         let principal = PrincipalId::from_bytes(lower_hex(
             fields.next().ok_or(CredentialFailure::InvalidFile)?,
         )?);
-        let grant = grant(
+        let mut grant = grant(
             principal,
             fields.next().ok_or(CredentialFailure::InvalidFile)?,
         )?;
+        if scoped_refs {
+            grant.ref_write_scope =
+                RefWriteScope::parse(fields.next().ok_or(CredentialFailure::InvalidFile)?)
+                    .map_err(|()| CredentialFailure::InvalidFile)?
+                    .map(Arc::new);
+        }
         if fields.next().is_some() || !digests.insert(digest) {
             return Err(CredentialFailure::InvalidFile);
         }
@@ -512,6 +538,143 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         }
+    }
+    fn scoped_header() -> String {
+        header().replacen(HEADER, HEADER_V2, 1)
+    }
+    fn scoped_row(token: &str, scope: &str, references: &str) -> String {
+        let legacy = row(token, 4, scope);
+        format!("{} {references}\n", legacy.trim_end())
+    }
+    fn selected_session(grant: &Grant) -> AuthenticatedReceiveSession {
+        let LoopbackReceiveSession::Authenticated(session) =
+            grant.session(IdempotencyKey::new(b"stable-retry-key".to_vec()).unwrap())
+        else {
+            panic!("credential must supply authentication");
+        };
+        session
+    }
+
+    #[test]
+    fn v2_ref_ceiling_is_explicit_and_independent_from_service_permissions() {
+        let token = "a".repeat(64);
+        let reference = fgit_types::RefName::try_new(b"refs/heads/main").unwrap();
+        for field in ["all", "none", "exact:726566732f68656164732f6d61696e"] {
+            let text = scoped_header() + &scoped_row(&token, "read,receive,issues-write", field);
+            let entries = parse(text.as_bytes(), binding()).unwrap();
+            let selected = &entries[0].grant;
+            assert!(selected.permits(Service::UploadPack));
+            assert!(selected.permits(Service::ReceivePack));
+            assert!(selected.permits_issues(true));
+            assert!(!selected.permits_reviewed_merge());
+            let session = selected_session(selected);
+            assert_eq!(session.principal_id(), PrincipalId::from_bytes([4; 16]));
+            assert_eq!(
+                session.client_idempotency_key().as_bytes(),
+                b"stable-retry-key"
+            );
+            assert_eq!(session.permits_ref_write(&reference), field != "none");
+            assert_eq!(
+                session.permits_ref_write_bytes(b"refs/heads/elsewhere"),
+                field == "all"
+            );
+        }
+        let legacy = parse(
+            (header() + &row(&token, 4, "receive")).as_bytes(),
+            binding(),
+        )
+        .unwrap();
+        assert!(selected_session(&legacy[0].grant).permits_ref_write(&reference));
+        // A matching selector never manufactures receive/merge or read access.
+        let read_only = parse(
+            (scoped_header() + &scoped_row(&token, "issues-write", "all")).as_bytes(),
+            binding(),
+        )
+        .unwrap();
+        assert!(!read_only[0].grant.permits(Service::UploadPack));
+        assert!(!read_only[0].grant.permits(Service::ReceivePack));
+        assert!(!read_only[0].grant.permits_reviewed_merge());
+    }
+
+    #[test]
+    fn malformed_v2_ref_fields_refuse_the_complete_table_without_legacy_fallback() {
+        let token = "a".repeat(64);
+        let first = scoped_row(&token, "receive", "all");
+        for bad in [
+            scoped_row(&"b".repeat(64), "receive", ""),
+            row(&"b".repeat(64), 4, "receive"),
+            scoped_row(&"b".repeat(64), "receive", "all extra"),
+            scoped_row(
+                &"b".repeat(64),
+                "receive",
+                "prefix:726566732f68656164732f6167656e74",
+            ),
+            scoped_row(&"b".repeat(64), "receive", "exact:48454144"),
+        ] {
+            assert!(matches!(
+                parse((scoped_header() + &first + &bad).as_bytes(), binding()),
+                Err(CredentialFailure::InvalidFile)
+            ));
+        }
+        assert!(matches!(
+            parse((header() + &first).as_bytes(), binding()),
+            Err(CredentialFailure::InvalidFile)
+        ));
+        assert!(
+            parse(scoped_header().as_bytes(), binding())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn v2_atomic_reload_narrows_future_sessions_and_revokes_without_changing_identity() {
+        let path = std::env::temp_dir().join(format!(
+            "fg-http-scoped-grants-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let source = CredentialSource::File {
+            path: path.clone(),
+            binding: binding(),
+        };
+        let token = "a".repeat(64);
+        let authorization = format!("Bearer {token}");
+        private_write(
+            &path,
+            (scoped_header() + &scoped_row(&token, "read,receive,outcomes-read", "all")).as_bytes(),
+        );
+        let original = selected_session(&source.authenticate(Some(&authorization)).unwrap());
+        let replacement = path.with_extension("replacement");
+        private_write(
+            &replacement,
+            (scoped_header() + &scoped_row(&token, "read,receive,outcomes-read", "none"))
+                .as_bytes(),
+        );
+        fs::rename(&replacement, &path).unwrap();
+        let narrowed = source.authenticate(Some(&authorization)).unwrap();
+        let current = selected_session(&narrowed);
+        assert_eq!(current.principal_id(), original.principal_id());
+        assert_eq!(
+            current.client_idempotency_key(),
+            original.client_idempotency_key()
+        );
+        assert!(original.permits_ref_write_bytes(b"refs/heads/main"));
+        assert!(!current.permits_ref_write_bytes(b"refs/heads/main"));
+        assert!(narrowed.permits(Service::UploadPack) && narrowed.permits_outcomes());
+        private_write(&replacement, b"broken replacement");
+        fs::rename(&replacement, &path).unwrap();
+        assert!(matches!(
+            source.authenticate(Some(&authorization)),
+            Err(CredentialFailure::InvalidFile)
+        ));
+        private_write(&replacement, scoped_header().as_bytes());
+        fs::rename(&replacement, &path).unwrap();
+        assert!(matches!(
+            source.authenticate(Some(&authorization)),
+            Err(CredentialFailure::UnknownCredential)
+        ));
+        fs::remove_file(path).unwrap();
     }
     fn basic(user_pass: &[u8]) -> String {
         const ALPHABET: &[u8; 64] =
