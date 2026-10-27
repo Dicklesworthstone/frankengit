@@ -51,6 +51,8 @@ pub use trusted_workflow::artifacts::{
     TrustedWorkflowStepLog,
 };
 #[cfg(target_os = "linux")]
+pub use trusted_workflow::workflow_watch;
+#[cfg(target_os = "linux")]
 pub use trusted_workflow::{TrustedWorkflowFailure, TrustedWorkflowRun};
 
 use crate::{

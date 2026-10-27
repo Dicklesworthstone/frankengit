@@ -1,5 +1,6 @@
 //! Explicit loopback repository HTTP service with operator credentials.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -21,6 +22,9 @@ use crate::publication_support::quote;
 
 use crate::service_stop as stop_file;
 
+#[cfg(target_os = "linux")]
+mod workflow;
+
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
@@ -35,6 +39,13 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --index-profile lexical|symbols --index-format sha1|sha256
    --index-ref <full-ref> [--index-ref <full-ref> ...]
    [--index-interval-secs <1..3600>] [--index-attempt-timeout-secs <1..3600>]]
+  [--workflow-trusted-local --workflow-ref <refs/heads/...>
+   --workflow-format sha1|sha256 --workflow-dir <committed-directory>
+   --workflow-input <top-level-entry> [--workflow-input <top-level-entry> ...]
+   --workflow-run-parent <absolute-private-directory>
+   [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
+   [--workflow-publish-checks --workflow-principal <id>]
+   [--workflow-pull-request <number>] [--workflow-artifact-logs]]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an
 initially absent stop file in an existing operator-owned directory. Create that
@@ -55,6 +66,19 @@ authentication and exclusive progress ownership; a controller failure drains
 the HTTP service. Stopping the listener also cancels and drains maintenance
 before node shutdown. Index work does not run inside requests and does not
 publish repository state.
+
+On Linux, the optional workflow service runs selected committed scripts as a
+native sibling of the HTTP listener. It requires --credentials-file, --continuous,
+--stop-file and a separate --workflow-trusted-local acknowledgement that trusts
+all future selected scripts with host-user privileges. Select 1-64 unique top-level
+inputs covering the workflow directory, and an existing absolute private run
+parent. The worker waits 1000 ms between polls and bounds each attempt to 300 seconds
+by default. --workflow-publish-checks and --workflow-principal require an explicit
+--expected-incarnation; --workflow-artifact-logs requires --artifact-root. Readiness
+follows exclusive workflow custody; execution begins after readiness is flushed.
+Stopping drains execution and reports workflow_service_drained before HTTP drain.
+No workflow option enables receive, source or another HTTP permission. See
+docs/NATIVE_HTTP_WORKFLOW_SERVICE.md for retained custody and recovery limits.
 
 Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
@@ -220,6 +244,8 @@ struct Options {
     idle_timeout: Duration,
     stop_file: Option<PathBuf>,
     index_maintenance: Option<MaintenanceConfig>,
+    #[cfg(target_os = "linux")]
+    workflow_service: Option<fgit_node::workflow_watch::WorkflowWatchConfig>,
 }
 
 fn number(
@@ -250,7 +276,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 {
         return Err(USAGE.into());
     }
-    if arguments.len() > 120
+    if arguments.len() > 320
         || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -269,6 +295,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     }
     let mut flags = BTreeMap::new();
     let mut index_refs = Vec::new();
+    let mut workflow_inputs = Vec::new();
     let mut index = 4;
     while index < arguments.len() {
         let name = arguments[index].as_str();
@@ -284,6 +311,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--allow-protection"
                 | "--print-credentials-header"
                 | "--continuous"
+                | "--workflow-trusted-local"
+                | "--workflow-publish-checks"
+                | "--workflow-artifact-logs"
         );
         if !boolean
             && !matches!(
@@ -313,6 +343,15 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--index-ref"
                     | "--index-interval-secs"
                     | "--index-attempt-timeout-secs"
+                    | "--workflow-ref"
+                    | "--workflow-dir"
+                    | "--workflow-input"
+                    | "--workflow-run-parent"
+                    | "--workflow-format"
+                    | "--workflow-interval-ms"
+                    | "--workflow-attempt-timeout-secs"
+                    | "--workflow-principal"
+                    | "--workflow-pull-request"
             )
         {
             return Err("unknown serve-http option".into());
@@ -336,6 +375,11 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             index_refs.push(
                 RefName::try_new(value.as_bytes()).map_err(|_| "invalid index maintenance ref")?,
             );
+        } else if name == "--workflow-input" {
+            if workflow_inputs.len() == 64 {
+                return Err("workflow service accepts at most 64 inputs".into());
+            }
+            workflow_inputs.push(value.as_bytes().to_vec());
         } else if flags.insert(name, value).is_some() {
             return Err(format!("duplicate serve-http option {name}"));
         }
@@ -360,6 +404,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     };
     let credentials = if flags.contains_key("--print-credentials-header") {
         if !index_refs.is_empty()
+            || !workflow_inputs.is_empty()
             || flags.keys().any(|name| {
                 !matches!(
                     *name,
@@ -475,6 +520,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     } else {
         None
     };
+    #[cfg(not(target_os = "linux"))]
+    if !workflow_inputs.is_empty() || flags.keys().any(|name| name.starts_with("--workflow-")) {
+        return Err("native workflow service requires Linux".into());
+    }
+    #[cfg(target_os = "linux")]
+    let workflow_service = workflow::parse(&flags, workflow_inputs)?;
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
     let limits = GitDaemonServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;
@@ -559,6 +610,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         idle_timeout,
         stop_file,
         index_maintenance,
+        #[cfg(target_os = "linux")]
+        workflow_service,
     })
 }
 
@@ -629,6 +682,11 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     };
     let lfs_enabled = options.config.http_lfs_root().is_some();
     let artifacts_enabled = options.config.workflow_artifact_root().is_some();
+    #[cfg(target_os = "linux")]
+    let workflow_enabled = options.workflow_service.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let workflow_enabled = false;
+    let workflow_non_green = Cell::new(false);
     let mut node = OneNode::open_existing(options.config).map_err(|e| e.to_string())?;
     if matches!(&options.credentials, CredentialInput::HeaderOnly) {
         let authentication = node
@@ -681,11 +739,49 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            options.allow_source, options.allow_protection, lfs_enabled, artifacts_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
+            options.allow_source, options.allow_protection, lfs_enabled, artifacts_enabled, workflow_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
         };
+        #[cfg(target_os = "linux")]
+        if let Some(workflow) = options.workflow_service {
+            let CredentialInput::Reloadable(path) = &options.credentials else {
+                return Err("workflow service requires scoped credentials".into());
+            };
+            let Some(control) = control else {
+                return Err("workflow service requires continuous stop control".into());
+            };
+            let report_workflow_drained =
+                |receipt: &fgit_node::workflow_watch::WorkflowWatchReceipt| {
+                    workflow_non_green.set(
+                        workflow_non_green.get()
+                            || receipt.non_green
+                            || receipt.interrupted
+                            || receipt.requires_reconciliation
+                            || receipt.publication_pending,
+                    );
+                    let mut output = io::stdout().lock();
+                    writeln!(output, "{}", receipt.to_json()).and_then(|()| output.flush())
+                };
+            return node
+                .serve_repository_http_with_workflow_service_until_stopped(
+                    &listener,
+                    options.limits.max_in_flight(),
+                    path,
+                    options.allow_receive,
+                    options.allow_issues,
+                    options.allow_outcomes,
+                    options.allow_pulls,
+                    options.allow_source,
+                    workflow,
+                    options.index_maintenance,
+                    &|| control.should_stop(),
+                    &report_ready,
+                    &report_workflow_drained,
+                )
+                .map_err(|error| error.to_string());
+        }
         if let Some(maintenance) = options.index_maintenance {
             let CredentialInput::Reloadable(path) = &options.credentials else {
                 return Err("index maintenance requires scoped credentials".into());
@@ -809,13 +905,17 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             ));
         }
     };
-    println!(
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "{{\"type\":\"smart_http_drained\",\"schema_version\":1,\"accepted\":{},\"completed_transports\":{},\"refused_transports\":{}}}",
         receipt.accepted_sessions(),
         receipt.completed_sessions(),
         receipt.refused_sessions()
-    );
-    Ok(0)
+    )
+    .and_then(|()| output.flush())
+    .map_err(|error| format!("cannot report HTTP drain: {error}"))?;
+    Ok(u8::from(workflow_non_green.get()))
 }
 
 #[cfg(test)]
@@ -847,6 +947,8 @@ mod tests {
         assert!(!options.allow_source);
         assert!(!options.allow_protection);
         assert!(options.index_maintenance.is_none());
+        #[cfg(target_os = "linux")]
+        assert!(options.workflow_service.is_none());
         assert!(!options.config.http_protection_admin_enabled());
         assert!(options.config.http_lfs_root().is_none());
         assert!(options.config.workflow_artifact_root().is_none());
@@ -856,6 +958,38 @@ mod tests {
         args.retain(|arg| arg != "--trusted-local");
         assert!(parse(&args).is_err());
     }
+
+    #[test]
+    fn workflow_options_are_rejected_during_header_provisioning() {
+        for flags in [
+            vec!["--workflow-trusted-local"],
+            vec!["--workflow-input", "ci"],
+            vec!["--workflow-ref", "refs/heads/main"],
+        ] {
+            let mut args = arguments()[..5].to_vec();
+            args.push("--print-credentials-header".into());
+            args.extend(flags.into_iter().map(str::to_owned));
+            assert!(
+                parse(&args)
+                    .err()
+                    .unwrap()
+                    .contains("header provisioning cannot be combined")
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn workflow_options_require_linux() {
+        let mut args = arguments()[..5].to_vec();
+        args.extend(
+            ["--credentials-file", "grants", "--workflow-input", "ci"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert!(parse(&args).err().unwrap().contains("requires Linux"));
+    }
+
     #[test]
     fn lfs_requires_an_explicit_custody_root_and_scoped_credentials() {
         let mut static_args = arguments();

@@ -10,6 +10,7 @@ use std::os::unix::fs::MetadataExt;
 mod cancellation;
 mod pull_request;
 mod reporting;
+pub mod service;
 
 const MAX_EVENTS: usize = 1024;
 
