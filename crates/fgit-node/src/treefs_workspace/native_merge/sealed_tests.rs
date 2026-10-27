@@ -446,7 +446,7 @@ fn offered(node: &OneNode, f: &Fixture, number: u64, epoch: u64, key: &[u8]) -> 
     offer.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(evidence.principal_snapshot()).unwrap(),
         forge_event_batch_root: entry.payload_root(),
-        policy_decision_root: evidence_root(evidence.policy_decision()).unwrap(),
+        policy_decision_root: evidence.policy_decision().root().unwrap(),
         invariant_evidence_root: evidence_root(evidence.invariant_evidence()).unwrap(),
         outbox_effect_root: evidence_root(evidence.outbox_effect_batch()).unwrap(),
         retention_delta_root: evidence_root(evidence.retention_delta()).unwrap(),

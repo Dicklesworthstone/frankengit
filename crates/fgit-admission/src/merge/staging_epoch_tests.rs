@@ -155,7 +155,7 @@ fn protection_stages_old_authorization_with_exact_new_epoch_in_both_hash_domains
             assert_eq!(prepared.forge.entries().len(), 1);
             assert_eq!(prepared.outbox.entries().len(), 1);
             assert_eq!(
-                root(prepared.evidence.policy_decision()).unwrap(),
+                prepared.evidence.policy_decision().root().unwrap(),
                 prepared.materialization.record.policy_decision_root
             );
         }

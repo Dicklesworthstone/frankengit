@@ -518,7 +518,7 @@ pub fn prepare_event(
         forge_event_batch_root: event_root,
         resulting_forge_position_root: roots.forge_position_root,
         policy_epoch: basis.body().policy_epoch,
-        policy_decision_root: evidence_root(evidence.policy_decision())?,
+        policy_decision_root: evidence.policy_decision().root()?,
         invariant_evidence_root: evidence_root(evidence.invariant_evidence())?,
         outbox_effect_root: evidence_root(evidence.outbox_effect_batch())?,
         retention_delta_root: evidence_root(evidence.retention_delta())?,

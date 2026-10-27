@@ -219,11 +219,28 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    enforce_direct_selected_at(store, cx, basis, refs, fold, cancelled)
+        .await
+        .map(|_| ())
+}
+
+async fn enforce_direct_selected_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
+    fold: &fgit_txn::TransactionFoldReport,
+    cancelled: &C,
+) -> Result<Option<ProtectionState>, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     let fgit_reference::effect::FoldOutcome::Folded(effects) = &fold.outcome else {
         return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
     };
     if effects.refs.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let selected = read_at(store, cx, basis, cancelled)
         .await
@@ -289,7 +306,84 @@ where
             }
         }
     }
+    live(cancelled).map_err(infrastructure)?;
+    Ok(Some(selected))
+}
+
+/// The production ref materializer's final gate. It retains the snapshots that
+/// actually decided this attempt, after resolving protection at the exact
+/// authenticated basis and checking every required status check. The caller's
+/// current refs include only driver-accepted earlier microbatch decisions.
+pub async fn direct_decision_evidence_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    current: &crate::CanonicalRefState,
+    layout: fgit_types::RootLayoutVersion,
+    request: &fgit_reference::intent::TransactionRequest,
+    fold: &fgit_txn::TransactionFoldReport,
+    cancelled: &C,
+) -> Result<crate::evidence::DecisionEvidenceBodies, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    if context.repository_id != basis.body().repository_id
+        || request.repository != context.repository_id
+        || request.tenant != context.tenant_id
+        || request.principal != context.principal_id
+    {
+        return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+    }
+    let selected =
+        enforce_direct_selected_at(store, cx, basis, current.refs(), fold, cancelled).await?;
+    let mut evidence =
+        crate::evidence::DecisionEvidenceBodies::derive(context, basis, request, fold)
+            .map_err(ProjectionFailure::Unavailable)?;
+    if let Some(selected) = selected {
+        let branches = review_branches(&selected);
+        evidence
+            .record_ref_policies(context, basis, current, layout, fold, branches)
+            .map_err(ProjectionFailure::Refuse)?;
+    }
+    live(cancelled).map_err(infrastructure)?;
+    Ok(evidence)
+}
+
+/// Verify a historical record against its selected policy, without running
+/// today's required-check acceptance or recompiling historical source text.
+pub async fn verify_direct_decision_evidence_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    current: &crate::CanonicalRefState,
+    layout: fgit_types::RootLayoutVersion,
+    record: &crate::evidence::EvaluatedPolicyDecisionEvidence,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let selected = read_at(store, cx, basis, cancelled)
+        .await
+        .map_err(infrastructure)?;
+    record
+        .verify_provenance(basis, current, layout, &review_branches(&selected))
+        .map_err(ProjectionFailure::Unavailable)?;
     live(cancelled).map_err(infrastructure)
+}
+
+fn review_branches(selected: &ProtectionState) -> Vec<RefName> {
+    selected.protection().map_or_else(Vec::new, |policy| {
+        policy
+            .branches
+            .iter()
+            .filter(|rule| !rule.reviewers.is_empty())
+            .map(|rule| rule.name.clone())
+            .collect()
+    })
 }
 /// Preserve every authority-selected branch when lowering into the text policy
 /// profile. RefName is byte-oriented: filtering or replacing invalid UTF-8 can

@@ -492,7 +492,7 @@ fn package_with_workspace(
     package.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
         forge_event_batch_root: event_root,
-        policy_decision_root: evidence_root(bodies.policy_decision()).unwrap(),
+        policy_decision_root: bodies.policy_decision().root().unwrap(),
         invariant_evidence_root: evidence_root(bodies.invariant_evidence()).unwrap(),
         outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
         retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),

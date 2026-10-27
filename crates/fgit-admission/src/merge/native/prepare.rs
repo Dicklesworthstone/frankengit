@@ -63,7 +63,11 @@ impl PreparedNativeMerge {
             principal_snapshot_id: principal_snapshot_id(self.evidence.principal_snapshot())
                 .map_err(ProjectionFailure::Unavailable)?,
             forge_event_batch_root: root(&self.events)?,
-            policy_decision_root: root(self.evidence.policy_decision())?,
+            policy_decision_root: self
+                .evidence
+                .policy_decision()
+                .root()
+                .map_err(ProjectionFailure::Unavailable)?,
             invariant_evidence_root: root(self.evidence.invariant_evidence())?,
             outbox_effect_root: root(self.evidence.outbox_effect_batch())?,
             retention_delta_root: root(self.evidence.retention_delta())?,
@@ -83,7 +87,12 @@ impl PreparedNativeMerge {
         if materialization.record.principal_snapshot_id
             != principal_snapshot_id(self.evidence.principal_snapshot())
                 .map_err(ProjectionFailure::Unavailable)?
-            || materialization.record.policy_decision_root != root(self.evidence.policy_decision())?
+            || materialization.record.policy_decision_root
+                != self
+                    .evidence
+                    .policy_decision()
+                    .root()
+                    .map_err(ProjectionFailure::Unavailable)?
             || materialization.record.retention_delta_root != root(self.evidence.retention_delta())?
         {
             return Err(incoherent("native and ref partition evidence bindings").into());

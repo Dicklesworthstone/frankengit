@@ -18,6 +18,12 @@ use fgit_types::{
 
 use crate::AdmissionContext;
 
+#[path = "policy_evidence.rs"]
+mod policy_decision;
+pub use policy_decision::{
+    EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord, RefPolicyEvaluation, RefPolicyInput,
+};
+
 /// Stable refusal-record detail for a refusal supported by
 /// [`RefusalEvidence`].
 ///
@@ -299,7 +305,7 @@ impl RefusalEvidenceBodies {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecisionEvidenceBodies {
     principal_snapshot: PrincipalSnapshot,
-    policy_decision: PolicyDecisionEvidence,
+    policy_decision: PolicyDecisionRecord,
     invariant_evidence: InvariantEvidence,
     forge_event_batch: ForgeEventBatch,
     outbox_effect_batch: OutboxEffectBatch,
@@ -320,12 +326,12 @@ impl DecisionEvidenceBodies {
         let principal_snapshot = PrincipalSnapshot::from_context(context, basis);
         let principal_snapshot_id = principal_snapshot_id(&principal_snapshot)?;
         Ok(Self {
-            policy_decision: PolicyDecisionEvidence {
+            policy_decision: PolicyDecisionRecord::Legacy(PolicyDecisionEvidence {
                 tx_id: request.tx_id,
                 request_digest: request.canonical_request_digest,
                 principal_snapshot_id,
                 policy_epoch: basis.body().policy_epoch,
-            },
+            }),
             invariant_evidence: InvariantEvidence {
                 fold_bytes: canonical_fold_bytes(request, fold)
                     .map_err(|_| RefusalCode::CanonicalFramingInvalid)?,
@@ -353,7 +359,7 @@ impl DecisionEvidenceBodies {
     #[must_use]
     pub const fn from_decoded(
         principal_snapshot: PrincipalSnapshot,
-        policy_decision: PolicyDecisionEvidence,
+        policy_decision: PolicyDecisionRecord,
         invariant_evidence: InvariantEvidence,
         forge_event_batch: ForgeEventBatch,
         outbox_effect_batch: OutboxEffectBatch,
@@ -374,8 +380,55 @@ impl DecisionEvidenceBodies {
         &self.principal_snapshot
     }
     #[must_use]
-    pub const fn policy_decision(&self) -> &PolicyDecisionEvidence {
+    pub const fn policy_decision(&self) -> &PolicyDecisionRecord {
         &self.policy_decision
+    }
+
+    /// Checks the exact request, fold and authority binding while retaining the
+    /// recorded policy version. Historical evidence is never upgraded in place.
+    pub fn verify_decision(
+        &self,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        request: &fgit_reference::intent::TransactionRequest,
+        fold: &TransactionFoldReport,
+    ) -> Result<(), RefusalCode> {
+        let mut expected = Self::derive(context, basis, request, fold)?;
+        if self.policy_decision.base() != expected.policy_decision.base() {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        if let PolicyDecisionRecord::Evaluated(record) = &self.policy_decision {
+            record.verify_decision(context, basis, fold)?;
+        }
+        expected.policy_decision = self.policy_decision.clone();
+        if expected != *self {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        Ok(())
+    }
+
+    /// Only the authority-reading protection gate can attach an evaluated
+    /// profile. A caller cannot promote a bare snapshot/root into this record.
+    pub(crate) fn record_ref_policies(
+        &mut self,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        current: &crate::CanonicalRefState,
+        layout: fgit_types::RootLayoutVersion,
+        fold: &TransactionFoldReport,
+        review_branches: Vec<fgit_types::RefName>,
+    ) -> Result<(), RefusalCode> {
+        let record = EvaluatedPolicyDecisionEvidence::evaluate(
+            self.policy_decision.base().clone(),
+            context,
+            basis,
+            current,
+            layout,
+            fold,
+            review_branches,
+        )?;
+        self.policy_decision = PolicyDecisionRecord::Evaluated(Box::new(record));
+        Ok(())
     }
     #[must_use]
     pub const fn invariant_evidence(&self) -> &InvariantEvidence {
@@ -427,7 +480,7 @@ mod tests {
 
     use super::*;
 
-    fn fixture() -> (
+    pub(super) fn fixture() -> (
         AdmissionContext,
         PublicationBasis,
         TransactionRequest,
@@ -500,7 +553,7 @@ mod tests {
         assert_eq!(first, second, "same decision derives identical body values");
 
         let snapshot_frame = encode_body(first.principal_snapshot()).expect("snapshot frames");
-        let policy_frame = encode_body(first.policy_decision()).expect("policy frames");
+        let policy_frame = first.policy_decision().encode().expect("policy frames");
         let invariant_frame = encode_body(first.invariant_evidence()).expect("invariant frames");
         let forge_frame = encode_body(first.forge_event_batch()).expect("forge frames");
         let outbox_frame = encode_body(first.outbox_effect_batch()).expect("outbox frames");
@@ -512,7 +565,7 @@ mod tests {
             first.principal_snapshot().clone()
         );
         assert_eq!(
-            decode_body::<PolicyDecisionEvidence>(&policy_frame, fgit_codec::DecodeLimits::DEFAULT)
+            PolicyDecisionRecord::decode(&policy_frame, fgit_codec::DecodeLimits::DEFAULT)
                 .expect("policy frame decodes"),
             first.policy_decision().clone()
         );

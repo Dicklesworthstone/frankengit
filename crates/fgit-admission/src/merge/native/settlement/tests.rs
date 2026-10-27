@@ -313,7 +313,7 @@ impl AsyncAdmissionProjection<Store> for Projection {
                 store,
                 repo,
                 b"frankengit/admission/policy-decision/v1/",
-                bodies.policy_decision(),
+                bodies.policy_decision().base(),
             )
             .await?,
             invariant_evidence_root: stage(

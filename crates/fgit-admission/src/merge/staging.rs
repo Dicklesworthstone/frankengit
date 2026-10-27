@@ -64,7 +64,12 @@ pub fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Admission
         || roots.compaction_generation_link.is_some()
         || principal_snapshot_id(prepared.evidence.principal_snapshot()).map_err(unavailable)?
             != record.principal_snapshot_id
-        || root(prepared.evidence.policy_decision())? != record.policy_decision_root
+        || prepared
+            .evidence
+            .policy_decision()
+            .root()
+            .map_err(unavailable)?
+            != record.policy_decision_root
         || root(prepared.evidence.invariant_evidence())? != record.invariant_evidence_root
         || root(prepared.evidence.outbox_effect_batch())? != record.outbox_effect_root
         || root(prepared.evidence.retention_delta())? != record.retention_delta_root
@@ -132,14 +137,14 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
         prepared.evidence.principal_snapshot(),
     )
     .await?;
-    stage(
-        store,
-        cx,
-        repository,
-        POLICY,
-        prepared.evidence.policy_decision(),
-    )
-    .await?;
+    match prepared.evidence.policy_decision() {
+        crate::evidence::PolicyDecisionRecord::Legacy(body) => {
+            stage(store, cx, repository, POLICY, body).await?
+        }
+        crate::evidence::PolicyDecisionRecord::Evaluated(body) => {
+            stage(store, cx, repository, POLICY, body.as_ref()).await?
+        }
+    }
     stage(
         store,
         cx,

@@ -2,7 +2,7 @@
 # family<TAB>canonical payload description
 admission-invariant-evidence	Opaque bytes of the transaction evaluator's invariant-fold witness.
 admission-object-closure	The ordered permitted Git-object closure: object identifiers and the admission evidence that authorizes them.
-admission-policy-decision	The sealed transaction identity, request digest, principal-snapshot identity, and policy epoch used for one admission decision.
+admission-policy-decision	The sealed transaction identity, request digest, principal-snapshot identity, and policy epoch used for one admission decision; exact schema 1.1 additionally retains the authority head, pre-decision ref root, native policy selectors and ref facts, evaluated compiled snapshots, verdicts, and replayable traces.
 admission-ref-delta	The canonical surviving ref effects: each target ref, old and new Git object identifiers, and the ordered effect metadata.
 admission-refusal-evidence	The principal snapshot, authority-head basis, transaction identity, policy epoch, and terminal refusal code supporting an admission refusal.
 forge-event-evidence	Opaque canonical bytes for the forge-event partition of an admitted target-disjoint effect set.
