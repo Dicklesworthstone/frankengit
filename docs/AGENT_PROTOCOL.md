@@ -568,6 +568,63 @@ If the authority head changed, policy may:
 
 A successful head CAS publishes one decision batch containing the RCR and returns the immutable transaction outcome plus new AuthorityReadReceipt. It does not return a newly minted capsule unless a checkpoint was independently created for that exact RCR. A timeout is resolved by `TxId` lookup.
 
+### 12.1 Implemented preparation gate
+
+`fgit-agent::WorkspaceBinding::prepare_ref_transaction` requires an
+`AgentPublicationEvidence` bundle. This is the sole constructor of
+`AgentRefTransaction`; a caller cannot prepare an agent ref transaction through
+an evidence-free overload. The gate consumes the existing `AgentChangePlan`,
+Context Packets, TreeFS overlay and export, Evidence-Carrying Change, named
+requirement outcomes, ECC policy, and run reconciliation report.
+
+Before collecting checks, the host derives and retains an
+`AgentPublicationSubject` with those checks. Preparation recomputes the subject
+from the complete run commitment, plan identity, exact Context Packet set,
+workspace manifest, actual overlay root, exported object identities and bodies,
+base/result trees, touched paths, and requested ref commands. A subject from
+another run budget, expiry, context, workspace, export or request refuses even
+when the numeric run ID is reused. Its tree-diff commitment identifies the
+base/result trees, overlay and touched paths; it does not replace a textual diff
+or the ordinary closure-validation boundary. Supplying a newly computed
+subject with old checks is not evidence authentication: the trusted evidence
+owner must retain the original subject and authenticate its artifacts.
+
+Preparation checks the approval mode and exact approval or exemption-policy
+root against the host's independently selected `expected_approval`. This binds
+the selection; it does not authenticate an approval, sponsor, or principal.
+Every plan requirement must appear exactly once, with the ECC's corresponding
+disposition and supporting records of the required class. This initial strict
+profile accepts only `SatisfiedWithEvidence`; partial, blocked, unsatisfied,
+omitted and not-applicable outcomes refuse. Named verifier attestations must be
+present and upheld. Requirements requesting independence must link a fully
+independent verifier, and the ECC policy's required dimensions must be supported
+by upheld attestations. Independence is computed from the existing party facts.
+
+The reconciliation report must name the same complete run and authenticated
+authority receipt, contain no unresolved effects, and precede the preparation
+time. Preparation also checks the run's observation and expiry window. Legacy
+refresh receipts contain numeric bases and cannot establish a new authenticated
+publication basis here, so they refuse with `RefreshRequiresReplan`. A moved
+base needs a newly bound run, plan, subject and evidence through the existing
+authority/refresh owners. This gate does not make an old report current or
+prevent new effects after that report; the execution owner must supply its
+current settled report and close or drain responsibility before publication.
+
+The gate bounds records, requirement references, object counts, path/overlay
+metadata and object-body bytes before retaining the binding. The resulting
+transaction keeps an immutable `AgentPublicationBinding` accessible through
+`publication_evidence()`. This evidence identity is separate from the ordinary
+semantic request and transaction identity: retrying the same sealed ref request
+with additional evidence retains the same `TxId`, and reusing its idempotency
+key for different ref semantics still refuses at the ordinary authority seal.
+
+`crates/fgit-agent/tests/publication.rs` exercises nonempty TreeFS exports in both
+Git formats through this mandatory gate and the existing reference authority's
+ordinary seal, including refusal counterparts and retry identity. It does not
+exercise native admission or a successful authority-head CAS. Effect-time
+capability/revocation checks, artifact authentication, native closure admission,
+and final head publication remain with their existing owners.
+
 ---
 
 ## 13. Delegation protocol

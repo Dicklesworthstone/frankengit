@@ -18,6 +18,7 @@ pub(in crate::smart_http::server) struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub page: Page,
+    pub evidence: Option<WorkflowCheckId>,
 }
 
 impl<'a> Request<'a> {
@@ -31,7 +32,12 @@ impl<'a> Request<'a> {
         let Some((repository_route, suffix)) = path.split_once("/api/v1/pulls/") else {
             return Ok(None);
         };
-        let Some(number) = suffix.strip_suffix("/checks") else {
+        let (number, evidence_route) = if let Some(number) = suffix.strip_suffix("/checks/evidence")
+        {
+            (number, true)
+        } else if let Some(number) = suffix.strip_suffix("/checks") {
+            (number, false)
+        } else {
             return Ok(None);
         };
         if repository_route.len() < 2
@@ -61,28 +67,39 @@ impl<'a> Request<'a> {
         {
             return Err(ApiError::bad("body_not_allowed"));
         }
-        let (mut after, mut limit, mut expected_head) = (None, None, None);
+        let (mut after, mut limit, mut expected_head, mut evidence) = (None, None, None, None);
         for (name, value) in parse_form(query.unwrap_or("").as_bytes(), 3)? {
             match name.as_str() {
-                "after" if after.is_none() => {
+                "after" if !evidence_route && after.is_none() => {
                     after = Some(
                         WorkflowCheckId::from_label(&value)
                             .ok_or_else(|| ApiError::bad("invalid_check_cursor"))?,
                     );
                 }
-                "limit" if limit.is_none() => limit = Some(parse_decimal(&value)?),
+                "limit" if !evidence_route && limit.is_none() => {
+                    limit = Some(parse_decimal(&value)?)
+                }
+                "check" if evidence_route && evidence.is_none() => {
+                    evidence = Some(
+                        WorkflowCheckId::from_label(&value)
+                            .ok_or_else(|| ApiError::bad("invalid_check_id"))?,
+                    );
+                }
                 "expected_head" if expected_head.is_none() => {
                     expected_head = Some(parse_snapshot(&value)?);
                 }
                 _ => return Err(ApiError::bad("unknown_or_duplicate_query_field")),
             }
         }
-        let limit = limit.unwrap_or(20);
+        let limit = limit.unwrap_or(if evidence_route { 1 } else { 20 });
         if !(1..=100).contains(&limit) {
             return Err(ApiError::bad("invalid_page_limit"));
         }
-        if after.is_some() && expected_head.is_none() {
+        if (evidence_route || after.is_some()) && expected_head.is_none() {
             return Err(ApiError::bad("snapshot_required"));
+        }
+        if evidence_route && evidence.is_none() {
+            return Err(ApiError::bad("check_required"));
         }
         Ok(Some(Self {
             repository_route,
@@ -92,6 +109,7 @@ impl<'a> Request<'a> {
                 limit: limit as u16,
                 expected_head,
             },
+            evidence,
         }))
     }
 }
@@ -100,6 +118,81 @@ impl<'a> Request<'a> {
 mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
+
+    #[test]
+    fn evidence_requires_an_exact_check_and_snapshot_without_page_or_write_fields() {
+        let check = WorkflowCheckId::from_bytes([0x5a; 32]).to_string();
+        let pin = format!("alg:2:{}", "ab".repeat(32));
+        for (query, accepted) in [
+            (format!("check={check}&expected_head={pin}"), true),
+            (
+                format!("expected_head={pin}&check={}", check.replace('/', "%2F")),
+                true,
+            ),
+            (String::new(), false),
+            (format!("check={check}"), false),
+            (format!("expected_head={pin}"), false),
+            (format!("check={check}&expected_head={pin}&limit=1"), false),
+            (
+                format!("check={check}&expected_head={pin}&after={check}"),
+                false,
+            ),
+            (
+                format!("check={check}&expected_head={pin}&principal=admin"),
+                false,
+            ),
+            (
+                format!("check={check}&check={check}&expected_head={pin}"),
+                false,
+            ),
+            (
+                format!("check={check}&expected_head={pin}&expected_head={pin}"),
+                false,
+            ),
+            (
+                format!("check={}&expected_head={pin}", check.to_uppercase()),
+                false,
+            ),
+            (
+                format!("check=check/{}&expected_head={pin}", "1".repeat(52)),
+                false,
+            ),
+        ] {
+            let bytes = format!(
+                "GET /repo.git/api/v1/pulls/7/checks/evidence?{query} HTTP/1.1\r\nHost: local\r\n\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            let parsed = Request::parse(&envelope);
+            assert_eq!(parsed.is_ok(), accepted, "{query}");
+            if accepted {
+                let request = parsed.unwrap().unwrap();
+                assert_eq!(
+                    request.evidence,
+                    Some(WorkflowCheckId::from_bytes([0x5a; 32]))
+                );
+                assert_eq!(request.page.limit, 1);
+                assert_eq!(request.page.after, None);
+                assert!(request.page.expected_head.is_some());
+            }
+        }
+        for (method, extra) in [
+            ("POST", ""),
+            ("GET", "Content-Length: 1\r\n"),
+            ("GET", "Transfer-Encoding: chunked\r\n"),
+            ("GET", "Git-Protocol: version=2\r\n"),
+            ("GET", "Expect: 100-continue\r\n"),
+        ] {
+            let bytes = format!(
+                "{method} /repo.git/api/v1/pulls/7/checks/evidence?check={check}&expected_head={pin} HTTP/1.1\r\nHost: local\r\n{extra}\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(Request::parse(&envelope).is_err(), "{method} {extra}");
+        }
+    }
 
     #[test]
     fn exact_checks_route_is_get_only_without_body_or_publication_semantics() {

@@ -7,6 +7,7 @@ import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, 
 import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
+import { appendCheckEvidenceAccess } from './pulls-check-evidence.mjs';
 import { sourceCommentSelection } from './pulls-comments.mjs';
 
 export const DISPLAY_BYTES = 512 * 1024;
@@ -125,8 +126,8 @@ export function fastForwardProposal(observed, scope) {
 function downloader(doc) {
   const view = doc.defaultView, urls = new Set();
   view.addEventListener('pagehide', () => { for (const url of urls) view.URL.revokeObjectURL(url); urls.clear(); });
-  return (name, text) => {
-    const url = view.URL.createObjectURL(new Blob([text], { type: 'application/json' })); urls.add(url);
+  return (name, contents, type = 'application/json') => {
+    const url = view.URL.createObjectURL(new Blob([contents], { type })); urls.add(url);
     const link = doc.createElement('a'); link.href = url; link.download = name; doc.body.append(link); link.click(); link.remove();
     view.setTimeout(() => { view.URL.revokeObjectURL(url); urls.delete(url); }, 30_000);
   };
@@ -154,6 +155,8 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   let inlineSelection = null, inlineButtons = [];
+  let closeChecks = null;
+  function clearChecks() { closeChecks?.(); closeChecks = null; }
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
   const status = message => { nodes.status.textContent = displayText(message); };
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
@@ -222,6 +225,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       : recovering ? 'No retained request. Import its original recovery receipt; do not construct a replacement command.' : 'No prepared mutation.';
   }
   function clearViews() {
+    clearChecks();
     clearComments();
     inlineButtons = [];
     selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
@@ -291,7 +295,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     if (!keepDraft) { nodes['comment-body'].value = ''; inlineSelection = null; }
   }
   function renderSelected(result) {
-    clearProposal(); fastForward = null; inlineButtons = [];
+    clearChecks(); clearProposal(); fastForward = null; inlineButtons = [];
     const row = result.reply.pull_request; nodes.selected.replaceChildren(); nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren(); reviewPage = null;
     nodes.snapshot.textContent = `Selected snapshot: ${result.head}`;
     if (!row) { selected = null; item(doc, nodes.selected, 'p', 'This PR was not found or is not disclosed.'); return; }
@@ -316,8 +320,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     mergeButton.id = 'fast-forward-stage'; mergeButton.disabled = true;
     fastForward = { row, button: mergeButton, reason: mergeReason, available: unavailable === null };
     nodes.selected.append(mergePanel);
-    appendChecksPanel(doc, nodes.selected, { client, observed: result, run,
-      current: () => client.connected && selected?.row === row, status, displayText });
+    const current = () => client.connected && selected?.row === row && !selected.stale;
+    closeChecks = appendChecksPanel(doc, nodes.selected, { client, observed: result, run, current, status, displayText,
+      evidence: panel => appendCheckEvidenceAccess(doc, panel, { observed: result, run, current, status, displayText, displayBytes,
+        download, clientOptions: { href, fetchImpl, cryptoImpl } }) });
     if (row.data) {
       item(doc, nodes.selected, 'pre', `${nativeRef(row.data, 'source_ref')} → ${nativeRef(row.data, 'target_ref')}\nSource ${row.data.source_tip}\nTarget ${row.data.target_tip}`);
       const diffPanel = element(doc, 'section'), diffOutput = element(doc, 'div');
@@ -368,7 +374,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   }
   function loadPr(number, head = null) {
     return run('read', async guard => {
-      client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren();
+      clearChecks(); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren();
       nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren();
       const result = await client.show(number, head, { render: true }); guard(); renderSelected(result);
       status(result.reply.found ? 'PR loaded. Preparing a candidate uses these observed tips, not edits in the metadata proposal form.' : 'PR not found or not disclosed.');
@@ -457,6 +463,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes.confirm.checked = false; nodes.candidate.replaceChildren();
     if (result.terminal) {
       resolution.clear();
+      clearChecks();
       if (selected) selected.stale = true;
       if (fastForward) fastForward.reason.textContent = 'A terminal decision was observed. Reload the PR explicitly before preparing another merge from current coordinates.';
     }
@@ -485,7 +492,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('disconnect', 'click', disconnect);
   on('refresh', 'click', () => loadList());
   on('select-pr', 'submit', () => run('read', async guard => {
-    const requested = number('select-number', 1); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null;
+    const requested = number('select-number', 1); clearChecks(); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null;
     nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     const result = await client.show(requested, null, { render: true }); guard(); renderSelected(result); status('Selected an explicitly refreshed PR snapshot.');
   }));
@@ -506,6 +513,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   }));
   on('new-pr', 'click', () => {
     if (operation || !client.connected || client.recoveryOnly) return;
+    clearChecks();
     clearComments();
     invalidateCandidate(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';

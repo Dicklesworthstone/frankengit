@@ -1,5 +1,6 @@
 //! Authenticated exact-PR-source workflow observations. A read grants neither
-//! execution authority nor approval; the projection never exposes evidence bodies.
+//! execution authority nor approval. Evidence bodies require a separate output
+//! disclosure grant in addition to ordinary PR read permission.
 
 mod output;
 mod request;
@@ -23,13 +24,19 @@ pub(super) fn authenticate(
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let grant = profile
         .credentials
-        .authenticate(envelope.authorization())
+        .authenticate(super::super::bearer_only(envelope.authorization()))
         .map_err(|error| ApiError::from_status(Status::from(error), false))?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
     if !profile.allow_pulls || !grant.permits_pulls(false) {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
+    }
+    if request.evidence.is_some() && !grant.permits_artifact_read() {
+        return Err(ApiError::new(
+            Status::Forbidden,
+            "artifact_read_not_granted",
+        ));
     }
     if retry_key(raw_head)
         .map_err(|_| ApiError::bad("invalid_idempotency_key"))?
@@ -59,6 +66,36 @@ pub(super) fn execute(
     );
     let context = node.session_request_context(&deadline);
     let visibility = RefVisibility::new();
+    if let Some(check) = request.evidence {
+        let head = request
+            .page
+            .expected_head
+            .ok_or_else(|| ApiError::bad("snapshot_required"))?;
+        let result = drive_request_while(
+            node,
+            &context,
+            node.read_pull_request_check_evidence_in(
+                &context,
+                &visibility,
+                request.number,
+                check,
+                head,
+            ),
+            &mut || !deadline.expired(),
+        )
+        .map_err(read_error)?
+        .ok_or_else(ApiError::not_found)?;
+        let maximum = usize::try_from(maximum_response)
+            .unwrap_or(usize::MAX)
+            .min(output::MAX_EVIDENCE_REPLY_BYTES);
+        return Ok(Reply {
+            status: Status::Success,
+            body: output::evidence(node, request.number, check, head, &result, maximum, &|| {
+                !deadline.expired()
+            })?,
+            terminal: None,
+        });
+    }
     let result = drive_request_while(
         node,
         &context,
@@ -72,13 +109,7 @@ pub(super) fn execute(
         ),
         &mut || !deadline.expired(),
     )
-    .map_err(|error| {
-        if error.is_snapshot_unavailable() {
-            ApiError::snapshot_moved()
-        } else {
-            ApiError::unavailable()
-        }
-    })?;
+    .map_err(read_error)?;
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);
@@ -91,4 +122,12 @@ pub(super) fn execute(
         body: output::page(node, request.number, request.page, result.as_ref(), maximum)?,
         terminal: None,
     })
+}
+
+fn read_error(error: crate::PullRequestChecksReadRefusal) -> ApiError {
+    if error.is_snapshot_unavailable() {
+        ApiError::snapshot_moved()
+    } else {
+        ApiError::unavailable()
+    }
 }

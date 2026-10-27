@@ -58,6 +58,55 @@ Review and merge use their existing separate grants. Outcome recovery requires
 its separate read grant; a token lacking PR-list permission can still restore
 its original saved request and query outcomes.
 
+## Inspect published checks and retained logs
+
+Open a PR and choose **Load checks at this snapshot**. The page reads canonical
+publisher observations for the PR's exact recorded source ref and commit. A
+stale source withholds checks; the browser does not silently replace the PR's
+snapshot, tips or version. An empty page does not imply that a workflow passed.
+
+To inspect a listed check, enter an evidence credential in **Workflow evidence
+and retained logs**, then choose **Connect evidence credential**. That explicit
+connection requires both `pulls-read` and `artifact-read` on the same credential.
+It never borrows the PR connection's token. Connecting retains the token only
+in page memory and clears the input; **Load evidence and logs** performs the
+authenticated read for the selected canonical check.
+
+Before displaying or enabling a download, the client validates the returned
+repository incarnation, snapshot, PR coordinates and complete check identity
+against the selected observations. It then verifies the original evidence
+bytes' SHA-256 and length. A native-decoded report must occupy the exact final
+length-framed span of those same bytes. The browser admits the known single-job
+trusted foreground report, checks its graph/job/outcome and output bounds, and
+renders step stdout, stderr and failures as inert text. Report text cannot
+become HTML, a command or merge authority.
+
+**Download exact check evidence** preserves the original canonical bytes.
+Per-step stdout/stderr downloads preserve each retained byte stream, including
+binary bytes. A clipped preview is separate from incomplete capture: a
+successful download does not turn `output_complete: false` into complete logs.
+Opaque evidence, and evidence without a supported native report decoder,
+remains available as an exact raw download without an invented log view.
+Historical `action_required` observations retain that conclusion even if their
+local report says the job succeeded.
+
+Evidence is limited to 1 MiB per check, its JSON response to 8 MiB, and each
+stream preview to 64 KiB. The known report has one job and at most 512 steps.
+Selecting another PR, reloading its metadata, disconnecting or leaving the
+page disposes the evidence credential and retained log views. Checks pagination
+and reloading at the same selected snapshot clear old output while retaining
+the explicit evidence connection. HTTP 401 (credential rejected or revoked) and
+HTTP 403 (required disclosure access refused) both discard that evidence
+credential, clear every retained log view and disable further downloads. The separate PR
+reader and its check summaries remain usable; evidence requires an explicit
+connection with both scopes before another read.
+
+These reads use the existing PR check identities and their canonical evidence;
+they do not infer artifact container IDs from evidence digests, dispatch a
+workflow, grant merge permission or establish independent execution
+verification. The HTTP boundary and platform-dependent report decoding are
+specified in [Pull-request workflow observations](PULL_REQUEST_WORKFLOW_CHECKS.md).
+
 ## Retry, recovery and cancellation
 
 One pending mutation owns fixed canonical form fields, HTTP body, bundle,
@@ -142,6 +191,7 @@ node --test tests/browser/pulls-core.test.mjs \
   tests/browser/pulls-actions.test.mjs tests/browser/pulls-view.test.mjs \
   tests/browser/pulls-resolution.test.mjs tests/browser/pulls-resolution-view.test.mjs \
   tests/browser/pulls-squash.test.mjs
+node --test tests/browser/pulls-checks*.test.mjs
 node --test tests/browser/*.test.mjs
 ```
 
@@ -155,7 +205,8 @@ live-node acceptance require their own execution evidence.
 
 Automatic construction never invents conflict resolutions; all choices enter
 the existing native resolver and its object-selection and policy checks. There
-is no inline anchored review comment editor, CI/check collection, hosted IAM,
+is no inline anchored review comment editor, workflow dispatch or arbitrary
+artifact browsing, hosted IAM,
 automatic token-rotation recovery or persistent client session here. Restored
 requests require the original valid token. These limits do not weaken native
 authority, publication, disclosure or policy checks.

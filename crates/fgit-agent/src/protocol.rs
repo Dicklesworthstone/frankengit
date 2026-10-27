@@ -35,6 +35,9 @@ use fgit_types::{
 use crate::capability::LogicalTime;
 use crate::classes::ClassSet;
 use crate::intent::{IntentRun, RunId};
+use crate::publication::{
+    AgentPublicationBinding, AgentPublicationEvidence, AgentPublicationRefusal,
+};
 
 /// Maximum source entries in one context packet.
 pub const MAX_CONTEXT_SOURCES: usize = 1_024;
@@ -474,8 +477,8 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
         self.manifest_commitment
     }
 
-    /// Converts a real `TreeFS` proposal into the ordinary sealed-ref-transaction
-    /// request shape.
+    /// Evidence-gates a real `TreeFS` proposal and converts it into the ordinary
+    /// sealed-ref-transaction request shape.
     ///
     /// This method deliberately has no authority-head mutation API. It proves
     /// that the agent path uses the same canonical request and seal as every
@@ -485,12 +488,15 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
     /// # Errors
     ///
     /// Refuses a packet from another authority position, a proposal from
-    /// another `TreeFS` workspace or base RCR, and a run that lacks
-    /// `PreparePublication` authority.
+    /// another `TreeFS` workspace or base RCR, a run that lacks
+    /// `PreparePublication` authority, or evidence that fails the complete-run,
+    /// exact-change, approval, requirement, independence and responsibility
+    /// checks. This is the only constructor of [`AgentRefTransaction`].
     pub fn prepare_ref_transaction(
         &self,
         proposal: ProposedTransaction<A>,
         context_packets: &[ContextPacket],
+        evidence: AgentPublicationEvidence<'_, A>,
     ) -> Result<AgentRefTransaction<A>, ProtocolRefusal> {
         if !self
             .run
@@ -517,6 +523,8 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
             }
         }
 
+        let publication = crate::publication::validate(self, &proposal, context_packets, evidence)
+            .map_err(ProtocolRefusal::Publication)?;
         let semantic_request = semantic_request_for_proposal::<A>(&proposal)?;
         Ok(AgentRefTransaction {
             run: self.run.clone(),
@@ -528,6 +536,7 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
                 .collect(),
             proposal,
             semantic_request,
+            publication,
         })
     }
 }
@@ -549,6 +558,7 @@ pub struct AgentRefTransaction<A: GitHashAlgorithm> {
     context_packet_ids: Vec<ContextPacketId>,
     proposal: ProposedTransaction<A>,
     semantic_request: SemanticRequest,
+    publication: AgentPublicationBinding,
 }
 
 impl<A: GitHashAlgorithm> AgentRefTransaction<A> {
@@ -599,6 +609,13 @@ impl<A: GitHashAlgorithm> AgentRefTransaction<A> {
     #[must_use]
     pub const fn semantic_request(&self) -> &SemanticRequest {
         &self.semantic_request
+    }
+
+    /// Exact evidence retained by the mandatory preparation gate. This
+    /// provenance does not alter the ordinary transaction's semantic identity.
+    #[must_use]
+    pub const fn publication_evidence(&self) -> &AgentPublicationBinding {
+        &self.publication
     }
 
     /// Produces the ordinary authority seal attempt for this prepared request.
@@ -765,6 +782,8 @@ pub enum ProtocolRefusal {
     },
     /// A context packet belongs to a different authority position.
     ContextAuthorityMismatch,
+    /// The mandatory exact-change publication evidence gate refused.
+    Publication(AgentPublicationRefusal),
     /// A shared identity type rejected a proposed ref name.
     Type(TypeRefusal),
     /// The authority request surface refused a bounded or ambiguous request.
@@ -833,6 +852,7 @@ impl fmt::Display for ProtocolRefusal {
             Self::ContextAuthorityMismatch => formatter.write_str(
                 "context packet authority receipt differs from the bound workspace",
             ),
+            Self::Publication(refusal) => write!(formatter, "{refusal}"),
             Self::Type(refusal) => write!(formatter, "agent protocol type refusal: {refusal}"),
             Self::Request(refusal) => {
                 write!(formatter, "ordinary ref request refused: {refusal}")

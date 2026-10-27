@@ -266,10 +266,12 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
-  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
+  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
+    if (typeof checkEvidenceOnly !== 'boolean' || (checkEvidenceOnly && pageSuffix !== '/ui/pulls/')) fail('Invalid workflow evidence browser profile.');
+    this.#checkEvidence = checkEvidenceOnly;
     this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#rebase = pageSuffix === '/ui/rebase/'; this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
@@ -281,7 +283,7 @@ export class Transport {
   async connect(token, requiredFingerprint = null, recovery = null) {
     this.disconnect(); const epoch = this.#epoch;
     const selected = recovery === null ? null : recoverySelection(recovery);
-    if (selected && this.#search) fail('Search has no outcome recovery profile.');
+    if (selected && (this.#search || this.#checkEvidence)) fail('This read-only connection has no outcome recovery profile.');
     if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
@@ -293,7 +295,7 @@ export class Transport {
   disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; this.#recovery = null; }
   restrictToRecovery(selection) {
     const selected = recoverySelection(selection);
-    if (!this.connected || this.#search || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
+    if (!this.connected || this.#search || this.#checkEvidence || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
     if (this.#recovery && (selected.key !== this.#recovery.key || selected.principal !== this.#recovery.principal)) fail('Reconnect explicitly before selecting another recovery identity.');
     // Receipt restoration invokes this only after verifying its original key.
     this.#recovery = selected;
@@ -310,6 +312,15 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#checkEvidence) {
+      if (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
+          statuses.length !== 1 || statuses[0] !== 200) fail('Workflow evidence is a closed read-only profile.');
+      integer(maximum, 'workflow evidence response limit', 1, REPLY_LIMIT);
+      const query = [...url.searchParams];
+      if (query.length !== 2 || url.searchParams.getAll('check').length !== 1 || url.searchParams.getAll('expected_head').length !== 1 ||
+          !/^check\/[0-9a-v]{51}[0g]$/.test(url.searchParams.get('check') ?? '') ||
+          !/^alg:2:[0-9a-f]{64}$/.test(url.searchParams.get('expected_head') ?? '')) fail('Workflow evidence needs one exact check and snapshot.');
+    }
     // The search profile has no write, artifact, recovery or alternate-method lane.
     if (this.#search && (method !== 'POST' || key !== undefined || !read || binary ||
         contentType !== 'application/x-www-form-urlencoded' || typeof body !== 'string' ||
@@ -349,7 +360,9 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#rebase
+    const allowed = this.#checkEvidence
+      ? /^pulls\/[1-9][0-9]*\/checks\/evidence\?[^#]+$/.test(path)
+      : this.#rebase
       ? /^(?:source\/(?:tree|rebase\/(?:prepare|resolve|inspect|apply))|outcomes)$/.test(path)
       : this.#replay
       ? /^(?:source\/(?:tree|inspect|apply|(?:cherry-pick|revert)\/(?:prepare|resolve))|outcomes)$/.test(path)

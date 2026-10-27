@@ -196,6 +196,27 @@ impl Fixture {
         *self.store.fault.lock().unwrap() = Some((key, response));
         self.store.fault_reads.store(0, Ordering::Relaxed);
     }
+    fn evidence<V, C>(
+        &self,
+        check: WorkflowCheckId,
+        visible: &V,
+        cancelled: &C,
+    ) -> Result<Option<PullRequestCheckEvidence>, AdmissionError>
+    where
+        V: Fn(&RefName, &RefName) -> bool + Sync,
+        C: Fn() -> bool + Sync,
+    {
+        run(read_pull_request_evidence_at(
+            &self.store,
+            &(),
+            &self.basis,
+            number(1),
+            &self.refs,
+            check,
+            visible,
+            cancelled,
+        ))
+    }
     fn clear_fault(&self) {
         *self.store.fault.lock().unwrap() = None;
         self.store.fault_reads.store(0, Ordering::Relaxed);
@@ -349,6 +370,233 @@ fn both_native_domains_filter_exact_coordinates_and_page_full_publisher_identiti
         let reversed: Vec<_> = checks.into_iter().rev().collect();
         assert_eq!(Fixture::checks(format, &reversed).page(None, 100), page);
     }
+}
+
+#[test]
+fn exact_evidence_reads_both_object_formats_without_loading_other_check_bodies() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let selected = check(format, 7);
+        let unrelated = check(format, 8);
+        let fixture = Fixture::checks(format, &[selected.clone(), unrelated.clone()]);
+        fixture.fault(
+            fixture
+                .position(AggregateId::WorkflowCheck(unrelated.id()))
+                .event_batch_root(),
+            ImmutableRead::Absent,
+        );
+        let result = fixture
+            .evidence(selected.id(), &|_, _| true, &|| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixture.store.fault_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(result.evidence, selected.record.evidence);
+        assert_eq!(result.page.checks, vec![summary(&selected)]);
+        assert_eq!(result.page.next_after, None);
+        assert_eq!(
+            result.validate(number(1), selected.id(), fixture.basis.id()),
+            Ok(())
+        );
+        refuses(
+            fixture.evidence(unrelated.id(), &|_, _| true, &|| false),
+            RefusalCode::EvidenceMissing,
+        );
+
+        let mut changed = result.clone();
+        changed.evidence[0] ^= 1;
+        assert!(
+            changed
+                .validate(number(1), selected.id(), fixture.basis.id())
+                .is_err()
+        );
+        assert!(
+            result
+                .validate(number(1), unrelated.id(), fixture.basis.id())
+                .is_err()
+        );
+        assert!(
+            result
+                .validate(number(2), selected.id(), fixture.basis.id())
+                .is_err()
+        );
+        let mut changed = result.clone();
+        changed.page.next_after = Some(selected.id());
+        assert!(
+            changed
+                .validate(number(1), selected.id(), fixture.basis.id())
+                .is_err()
+        );
+        let mut changed = result;
+        changed.page.source_current = false;
+        assert!(
+            changed
+                .validate(number(1), selected.id(), fixture.basis.id())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn evidence_is_absent_for_hidden_missing_or_moved_prs_before_selected_output_is_read() {
+    let format = GitHashAlgorithm::Sha256;
+    let selected = check(format, 7);
+    let mut fixture = Fixture::checks(format, std::slice::from_ref(&selected));
+    fixture.fault(
+        fixture
+            .position(AggregateId::WorkflowCheck(selected.id()))
+            .event_batch_root(),
+        ImmutableRead::Absent,
+    );
+    for hidden in [branch("topic"), branch("main")] {
+        assert!(
+            fixture
+                .evidence(
+                    selected.id(),
+                    &|source, target| source != &hidden && target != &hidden,
+                    &|| false
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(
+        run(read_pull_request_evidence_at(
+            &fixture.store,
+            &(),
+            &fixture.basis,
+            number(2),
+            &fixture.refs,
+            selected.id(),
+            &|_, _| true,
+            &|| false,
+        ))
+        .unwrap()
+        .is_none()
+    );
+    for deleted in [false, true] {
+        if deleted {
+            fixture.refs.remove(&branch("topic"));
+        } else {
+            fixture.refs.insert(branch("topic"), oid(format, '3'));
+        }
+        fixture.reselect();
+        assert!(
+            fixture
+                .evidence(selected.id(), &|_, _| true, &|| false)
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(fixture.store.fault_reads.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn evidence_rejects_check_substitution_from_another_pr_source_or_unpublished_body() {
+    let format = GitHashAlgorithm::Sha1;
+    let selected = check(format, 7);
+    let mut wrong_branch = check(format, 8);
+    wrong_branch.record.source_ref = branch("other");
+    let mut wrong_tip = check(format, 9);
+    wrong_tip.record.source_commit = oid(format, '4');
+    let fixture = Fixture::checks(
+        format,
+        &[selected.clone(), wrong_branch.clone(), wrong_tip.clone()],
+    );
+    for id in [
+        wrong_branch.id(),
+        wrong_tip.id(),
+        WorkflowCheckId::from_bytes([0; 32]),
+    ] {
+        assert!(
+            fixture
+                .evidence(id, &|_, _| true, &|| false)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let unstaged = check(format, 10);
+    stage(
+        &fixture.store,
+        fixture.basis.body().repository_id,
+        storage::EVENT_NAMESPACE,
+        &ForgeEventBatch::of_one(
+            unstaged
+                .record
+                .proposed_event(unstaged.actor, format)
+                .unwrap(),
+        ),
+    );
+    assert!(
+        fixture
+            .evidence(unstaged.id(), &|_, _| true, &|| false)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .evidence(selected.id(), &|_, _| true, &|| false)
+            .unwrap()
+            .unwrap()
+            .evidence,
+        selected.record.evidence
+    );
+}
+
+#[test]
+fn exact_evidence_read_refuses_missing_corrupt_substituted_and_cancelled_selected_bodies() {
+    let format = GitHashAlgorithm::Sha256;
+    let selected = check(format, 7);
+    let fixture = Fixture::checks(format, std::slice::from_ref(&selected));
+    let other = check(format, 8);
+    let other_frame = encode_body(&ForgeEventBatch::of_one(
+        other.record.proposed_event(other.actor, format).unwrap(),
+    ))
+    .unwrap();
+    for aggregate in [
+        AggregateId::PullRequest(number(1)),
+        AggregateId::WorkflowCheck(selected.id()),
+    ] {
+        for (response, code) in [
+            (ImmutableRead::Absent, RefusalCode::EvidenceMissing),
+            (
+                ImmutableRead::Present(vec![0xff, 0, 1]),
+                RefusalCode::EvidenceInvalid,
+            ),
+            (
+                ImmutableRead::Present(other_frame.clone()),
+                RefusalCode::EvidenceInvalid,
+            ),
+        ] {
+            fixture.fault(fixture.position(aggregate).event_batch_root(), response);
+            refuses(
+                fixture.evidence(selected.id(), &|_, _| true, &|| false),
+                code,
+            );
+            fixture.clear_fault();
+        }
+    }
+    refuses(
+        fixture.evidence(selected.id(), &|_, _| true, &|| true),
+        RefusalCode::CancellationInProgress,
+    );
+    let frame = encode_body(&ForgeEventBatch::of_one(
+        selected
+            .record
+            .proposed_event(selected.actor, format)
+            .unwrap(),
+    ))
+    .unwrap();
+    fixture.fault(
+        fixture
+            .position(AggregateId::WorkflowCheck(selected.id()))
+            .event_batch_root(),
+        ImmutableRead::Present(frame),
+    );
+    refuses(
+        fixture.evidence(selected.id(), &|_, _| true, &|| {
+            fixture.store.fault_reads.load(Ordering::Relaxed) != 0
+        }),
+        RefusalCode::CancellationInProgress,
+    );
 }
 
 #[test]
