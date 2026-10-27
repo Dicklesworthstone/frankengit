@@ -7,6 +7,7 @@ mod sealing;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::Poll;
 
 use fgit_authority::{
     AmbiguityReason, AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
@@ -23,7 +24,7 @@ struct Context {
 }
 
 impl Context {
-    fn live() -> Self {
+    const fn live() -> Self {
         Self {
             cancelled: AtomicBool::new(false),
             cancel_after: 0,
@@ -62,70 +63,86 @@ impl AsyncAuthorityStore for AsyncStore {
         self.inner.limits()
     }
 
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
         cx: &Context,
         key: &ImmutableKey,
         body: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        if cx.cancelled.load(Ordering::SeqCst) {
-            return Err(AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled));
-        }
-        let ordinal = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
-        if ordinal == self.fail_before.load(Ordering::SeqCst) {
-            return Err(AuthorityFailure::Refused(AuthorityRefusal::Unavailable));
-        }
-        let result = self.inner.put_if_absent(key, body);
-        if ordinal == cx.cancel_after {
-            cx.cancelled.store(true, Ordering::SeqCst);
-        }
-        if ordinal == self.lose_after.load(Ordering::SeqCst) && result.is_ok() {
-            Err(AuthorityFailure::Ambiguous(AmbiguityReason::NoResponse))
-        } else {
-            result
-        }
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            if cx.cancelled.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled)));
+            }
+            let ordinal = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if ordinal == self.fail_before.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(AuthorityFailure::Refused(
+                    AuthorityRefusal::Unavailable,
+                )));
+            }
+            let result = self.inner.put_if_absent(key, body);
+            if ordinal == cx.cancel_after {
+                cx.cancelled.store(true, Ordering::SeqCst);
+            }
+            Poll::Ready(
+                if ordinal == self.lose_after.load(Ordering::SeqCst) && result.is_ok() {
+                    Err(AuthorityFailure::Ambiguous(AmbiguityReason::NoResponse))
+                } else {
+                    result
+                },
+            )
+        })
     }
 
-    async fn read_immutable(
+    fn read_immutable(
         &self,
         _: &Context,
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        self.inner.read_immutable(key)
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(self.inner.read_immutable(key)))
     }
 
-    async fn initialize_head(
+    fn initialize_head(
         &self,
         _: &Context,
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        self.inner.initialize_head(key, generation, body)
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(self.inner.initialize_head(key, generation, body))
+        })
     }
 
-    async fn read_head(&self, _: &Context, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        self.inner.read_head(key)
+    fn read_head(
+        &self,
+        _: &Context,
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(self.inner.read_head(key)))
     }
 
-    async fn compare_exchange_head(
+    fn compare_exchange_head(
         &self,
         _: &Context,
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.inner
-            .compare_exchange_head(key, expected, generation, body)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            Poll::Ready(
+                self.inner
+                    .compare_exchange_head(key, expected, generation, body),
+            )
+        })
     }
 
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
         _: &Context,
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        self.inner.authenticate_head_receipt(receipt)
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| Poll::Ready(self.inner.authenticate_head_receipt(receipt)))
     }
 }
 
@@ -138,7 +155,7 @@ fn memory(limits: AuthorityLimits) -> MemoryAuthorityStore {
 }
 
 fn ready<F: Future>(future: F) -> F::Output {
-    use std::task::{Context as TaskContext, Poll, Waker};
+    use std::task::{Context as TaskContext, Waker};
     let mut future = std::pin::pin!(future);
     match future
         .as_mut()
@@ -161,6 +178,42 @@ fn entries(count: usize) -> Vec<(ImmutableKey, Vec<u8>)> {
 
 fn assert_absent(store: &MemoryAuthorityStore, key: &ImmutableKey) {
     assert_eq!(store.read_immutable(key).unwrap(), ImmutableRead::Absent);
+}
+
+#[test]
+fn a_write_observes_cancellation_at_first_poll_and_unpolled_drop_has_no_effect() {
+    for cancel_before_poll in [false, true] {
+        let store = AsyncStore::new(AuthorityLimits::default());
+        let cx = Context::live();
+        let target = key(0);
+        {
+            let _unpolled = store.put_if_absent(&cx, &target, b"first-poll");
+            assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+            assert_absent(&store.inner, &target);
+        }
+        assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+        assert_absent(&store.inner, &target);
+
+        let future = store.put_if_absent(&cx, &target, b"first-poll");
+        assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+        assert_absent(&store.inner, &target);
+        cx.cancelled.store(cancel_before_poll, Ordering::SeqCst);
+        if cancel_before_poll {
+            assert_eq!(
+                ready(future),
+                Err(AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled)),
+            );
+            assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+            assert_absent(&store.inner, &target);
+        } else {
+            assert_eq!(ready(future).unwrap(), PutOutcome::Created);
+            assert_eq!(store.writes.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                store.inner.read_immutable(&target).unwrap(),
+                ImmutableRead::Present(b"first-poll".to_vec()),
+            );
+        }
+    }
 }
 
 #[test]

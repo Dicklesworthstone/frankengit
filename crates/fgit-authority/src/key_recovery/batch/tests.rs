@@ -12,6 +12,7 @@ use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use std::task::Poll;
 
 struct ObservedStore {
     inner: MemoryAuthorityStore,
@@ -32,79 +33,102 @@ impl AsyncAuthorityStore for ObservedStore {
     fn limits(&self) -> AuthorityLimits {
         self.inner.limits()
     }
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.put_if_absent(key, body)
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.inner.put_if_absent(key, body))
+        })
     }
-    async fn read_immutable(
+    fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        if key.as_bytes().starts_with(crate::OUTCOME_KEY_PREFIX) {
-            let publication = self.publish_on_hint.lock().unwrap().take();
-            if let Some(attempts) = publication {
-                publish(self, &attempts);
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if key.as_bytes().starts_with(crate::OUTCOME_KEY_PREFIX) {
+                let publication = self.publish_on_hint.lock().unwrap().take();
+                if let Some(attempts) = publication {
+                    publish(self, &attempts);
+                }
             }
-        }
-        if let Some(value) = self.overrides.lock().unwrap().get(key).cloned() {
-            return Ok(value);
-        }
-        self.inner.read_immutable(key)
+            let override_read = self.overrides.lock().unwrap().get(key).cloned();
+            if let Some(value) = override_read {
+                return Poll::Ready(Ok(value));
+            }
+            Poll::Ready(self.inner.read_immutable(key))
+        })
     }
-    async fn initialize_head(
+    fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.initialize_head(key, generation, body)
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.inner.initialize_head(key, generation, body))
+        })
     }
-    async fn read_head(&self, _: &(), key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        self.heads.fetch_add(1, Ordering::SeqCst);
-        self.inner.read_head(key)
-    }
-    async fn compare_exchange_head(
+    fn read_head(
         &self,
-        _: &(),
+        (): &(),
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.heads.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.inner.read_head(key))
+        })
+    }
+    fn compare_exchange_head(
+        &self,
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner
-            .compare_exchange_head(key, expected, generation, body)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(
+                self.inner
+                    .compare_exchange_head(key, expected, generation, body),
+            )
+        })
     }
-    async fn publish_head_with_outcomes(
+    fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner
-            .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(
+                self.inner
+                    .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness),
+            )
+        })
     }
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        self.authentications.fetch_add(1, Ordering::SeqCst);
-        self.inner.authenticate_head_receipt(receipt)
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        std::future::poll_fn(move |_| {
+            self.authentications.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.inner.authenticate_head_receipt(receipt))
+        })
     }
 }
 fn ready<F: Future>(future: F) -> F::Output {
@@ -254,6 +278,37 @@ fn hint_key(store: &ObservedStore, attempt: &SealAttempt) -> ImmutableKey {
         attempt.derive().unwrap().0,
     )
     .unwrap()
+}
+
+#[test]
+fn dropping_an_unpolled_hint_read_cannot_publish_a_decision() {
+    use crate::FaultableAuthorityStore;
+
+    let (store, attempts) = setup(1);
+    seal(&store, &attempts);
+    *store.publish_on_hint.lock().unwrap() = Some(attempts.clone());
+    let (predecessor, _) = head(&store);
+    let key = hint_key(&store, &attempts[0]);
+    let before = store.inner.effect_log();
+    {
+        let _unpolled = store.read_immutable(&(), &key);
+        assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(store.inner.effect_log(), before);
+    }
+    assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.inner.effect_log(), before);
+    assert!(store.publish_on_hint.lock().unwrap().is_some());
+
+    let future = store.read_immutable(&(), &key);
+    assert_eq!(store.inner.effect_log(), before);
+    assert!(matches!(ready(future).unwrap(), ImmutableRead::Present(_)));
+    assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+    assert!(store.publish_on_hint.lock().unwrap().is_none());
+    let (successor, _) = head(&store);
+    assert_eq!(
+        successor.generation(),
+        predecessor.generation().next().unwrap()
+    );
 }
 
 #[test]
