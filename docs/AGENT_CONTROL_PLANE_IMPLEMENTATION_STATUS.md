@@ -117,6 +117,7 @@ Every object above is inert unless its module explicitly owns a store, budget re
 | `task_coordination` | repository- and exact-read-bound semantic task state; monotone freshness; claim/release/transfer applications | application is derived intent/evidence, not durable persistence; no two-authority-basis cross-head transfer |
 | `task_persistence` | exact-predecessor mutation envelope; complete authenticated reread reconciliation; confirmed/retry-safe/conflict result; persistence receipt | one authenticated-read basis governs predecessor and successor; defines no store and never retries effects |
 | `task_store` | authenticated read → at-most-one CAS → flush/no-op → authenticated reread orchestration; typed pre-effect refusal and post-effect debt | no concrete Beads or scheduler implementation; ambiguous writes are never blindly retried |
+| `beads` and CLI task host | real bounded Beads 0.7.6 task reads, authority-bound initial projection, existing-control-chain native claim preparation, complete history in the task row, one native claim attempt, explicit flush, database/export confirmation and read-only reconciliation | native ownership confirmation does not implement exact-generation `TaskProjectionStore` or expose an activatable claim; no release, transfer, or renewal; see [`AGENT_CONTROL_PLANE_BEADS_ADAPTER.md`](AGENT_CONTROL_PLANE_BEADS_ADAPTER.md) |
 | `task_persistence_gate` | validates pulse/plan/run/task basis before I/O; exposes claim/cancellation projections only after exact durable successor confirmation | no tracker transport, cross-head transfer envelope, or multi-task atomic transaction |
 | `task_recovery` | complete-run-bound restart recovery and conservative persisted release after claim/run expiry; retains evidence through success, conflict, and uncertainty | recovered continuation/transfer and host cleanup remain absent |
 | legacy `task_projection`, `task_mutation`, `task_adapter` | multi-row snapshot/mutation vocabulary; post-commit-aware one-call adapter; strict claim/release integration | backend-neutral compatibility surface; not a concrete durable backend |
@@ -287,7 +288,7 @@ Registered durable codecs and migrations remain incomplete for much of the Agent
 
 The landed library slices do not implement or imply:
 
-- concrete `br`/Beads collection, history, mutation, flush, reread, or envelope-probe I/O;
+- complete multi-row Beads collection and exact-generation task-store replacement; the bounded native ownership adapter supplies real single-task read/history/claim/flush/reread I/O without asserting the stronger persistence gate;
 - production collectors for the nine non-task situation components;
 - multi-task atomic transactions or distributed reservations;
 - a cross-head, two-authority-basis task-transfer envelope and persistence path;

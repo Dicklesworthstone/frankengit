@@ -678,6 +678,15 @@ context exits 0; bounded partial context reports its omissions and exits 3.
 See [the command and limits](docs/AGENT_CONTEXT_COMMAND.md) for setup, byte-safe
 selectors, exact-head preconditions and the JSON evidence contract.
 
+`fg agent task show` now reads an exact task through the concrete Beads adapter
+and binds its observation to a native authenticated repository head. It exposes
+an unclaimed-task snapshot when the row supports one, preserves stored claim
+history, and labels task content as untrusted data. The same adapter prepares
+native claims from the existing pulse, plan and complete run, then confirms
+ownership from both the database and flushed export. Native ownership does not
+activate an agent claim or authorize publication. See
+[the Beads command and adapter](docs/AGENT_CONTROL_PLANE_BEADS_ADAPTER.md).
+
 ---
 
 ## Deployment profiles

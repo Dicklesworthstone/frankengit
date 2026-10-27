@@ -72,6 +72,7 @@
 pub mod action_packet;
 pub mod authority_identity;
 pub mod authority_revocation;
+pub mod beads;
 pub mod broker;
 mod cancellation;
 pub mod capability;

@@ -652,6 +652,7 @@ dependencies = [
  "fgit-evidence",
  "fgit-git-object",
  "fgit-resource",
+ "fgit-schema",
  "fgit-treefs",
  "fgit-types",
 ]
