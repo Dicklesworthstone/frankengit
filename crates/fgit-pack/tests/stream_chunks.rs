@@ -255,7 +255,7 @@ fn aggregate_blob_work_sink_and_cancellation_bounds_are_independent() {
         },
         PackLimits {
             max_inflate_work: 10,
-            ..limits.clone()
+            ..limits
         },
     ] {
         assert!(

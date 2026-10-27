@@ -104,7 +104,7 @@ fn present(bytes: &[u8]) -> ImmutableRead {
     ImmutableRead::Present(bytes.to_vec())
 }
 
-fn counts(stats: BodyCacheStats) -> (u64, u64, usize) {
+const fn counts(stats: BodyCacheStats) -> (u64, u64, usize) {
     (stats.hits, stats.misses, stats.entries)
 }
 

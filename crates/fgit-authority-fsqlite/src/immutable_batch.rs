@@ -5,7 +5,10 @@
 //! Cached comparisons use committed bytes; newly inserted bytes enter the
 //! cache only after the whole transaction's COMMIT has completed.
 
-use super::*;
+use super::{
+    AuthorityRefusal, Cx, EngineError, FsqliteAuthorityStore, ImmutableKey, PutOutcome, PutStep,
+    TransientClass, blob, cap, compare_stored_body, interpret_put_if_absent, read_blob,
+};
 
 impl FsqliteAuthorityStore {
     /// One attempt of the public batch operation. Its caller preflights the

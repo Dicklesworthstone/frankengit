@@ -245,7 +245,7 @@ where
                 .into());
             }
             input.exact(
-                &mut encoded[size..size + 1],
+                &mut encoded[size..=size],
                 "pack entry header",
                 true,
                 deadline,
@@ -289,7 +289,7 @@ where
                     if size == bytes.len() {
                         return Err(PackError::InvalidOfsDelta.into());
                     }
-                    input.exact(&mut bytes[size..size + 1], "OFS_DELTA base", true, deadline)?;
+                    input.exact(&mut bytes[size..=size], "OFS_DELTA base", true, deadline)?;
                     size += 1;
                     match parse_delta_base(
                         entry_header.kind,
@@ -498,7 +498,7 @@ enum NativeHasher {
     Sha256(Sha256Hasher),
 }
 impl NativeHasher {
-    fn new(format: ObjectFormat) -> Self {
+    const fn new(format: ObjectFormat) -> Self {
         match format {
             ObjectFormat::Sha1 => Self::Sha1(Sha1Hasher::new()),
             ObjectFormat::Sha256 => Self::Sha256(Sha256Hasher::new()),
@@ -527,7 +527,7 @@ struct Input<'a, R: ?Sized> {
     crc: Option<u32>,
 }
 impl<'a, R: BufRead + ?Sized> Input<'a, R> {
-    fn new(reader: &'a mut R, format: ObjectFormat, limits: &PackLimits) -> Self {
+    const fn new(reader: &'a mut R, format: ObjectFormat, limits: &PackLimits) -> Self {
         Self {
             reader,
             native: NativeHasher::new(format),
@@ -537,7 +537,7 @@ impl<'a, R: BufRead + ?Sized> Input<'a, R> {
             crc: None,
         }
     }
-    fn position(&self) -> u64 {
+    const fn position(&self) -> u64 {
         self.bytes as u64
     }
     fn exact<E>(
@@ -594,18 +594,18 @@ impl<'a, R: BufRead + ?Sized> Input<'a, R> {
     }
 }
 
-pub(crate) fn framing_hasher() -> Sha256Hasher {
+pub fn framing_hasher() -> Sha256Hasher {
     let mut hash = Sha256Hasher::new();
     hash.update(b"frankengit/stream-pack-index-rows/v1\0");
     hash
 }
-pub(crate) fn framing_row(hash: &mut Sha256Hasher, offset: u64, end: u64, crc: u32) {
+pub fn framing_row(hash: &mut Sha256Hasher, offset: u64, end: u64, crc: u32) {
     hash.update(&offset.to_be_bytes());
     hash.update(&end.to_be_bytes());
     hash.update(&crc.to_be_bytes());
 }
 
-pub(crate) const CRC_TABLE: [u32; 256] = crc_table();
+pub const CRC_TABLE: [u32; 256] = crc_table();
 const fn crc_table() -> [u32; 256] {
     let mut table = [0_u32; 256];
     let mut i = 0;

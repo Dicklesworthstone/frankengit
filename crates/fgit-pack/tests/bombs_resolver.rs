@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[path = "support/limits.rs"]
+mod budgets;
 mod fixtures;
 
 use fgit_pack::{
@@ -47,8 +49,8 @@ fn parsed_objects(entries: &[Vec<u8>]) -> Vec<PackObject> {
     parse_quarantined_pack(
         &fixtures::pack_with_entries(entries),
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
     .expect("programmatically constructed bounded delta pack")
     .into_scalar_objects(|_| None)
@@ -76,20 +78,20 @@ fn deep_ofs_chain_hits_depth_accounting_before_resolver_stack_growth() {
     let objects = parsed_objects(&entries);
     let target = u64::try_from(previous_offset).expect("fixture offset fits u64");
 
-    let mut shallow = fixtures::limits();
+    let mut shallow = budgets::limits();
     shallow.max_delta_depth = 2;
     let resolver =
-        ScalarResolver::new(&objects, &(), &shallow, &mut fixtures::always).expect("shape");
+        ScalarResolver::new(&objects, &(), &shallow, &mut budgets::always).expect("shape");
     assert_eq!(
-        resolver.resolve_offset(target, &mut fixtures::always),
+        resolver.resolve_offset(target, &mut budgets::always),
         Err(PackError::DeltaDepthLimit { depth: 3, limit: 2 })
     );
 
     shallow.max_delta_depth = 3;
     let resolver =
-        ScalarResolver::new(&objects, &(), &shallow, &mut fixtures::always).expect("shape");
+        ScalarResolver::new(&objects, &(), &shallow, &mut budgets::always).expect("shape");
     assert_eq!(
-        resolver.resolve_offset(target, &mut fixtures::always),
+        resolver.resolve_offset(target, &mut budgets::always),
         Ok(b"x".to_vec())
     );
 }
@@ -107,14 +109,14 @@ fn ofs_fanout_refusal_has_a_one_child_pack_near_neighbor() {
     let second = delta_entry(6, &[second_distance], &copy_one_delta());
     let objects = parsed_objects(&[base.clone(), first.clone(), second]);
 
-    let mut narrow = fixtures::limits();
+    let mut narrow = budgets::limits();
     narrow.max_delta_fanout = 1;
     let resolver =
-        ScalarResolver::new(&objects, &(), &narrow, &mut fixtures::always).expect("shape");
+        ScalarResolver::new(&objects, &(), &narrow, &mut budgets::always).expect("shape");
     assert_eq!(
         resolver.resolve_offset(
             u64::try_from(first_offset).expect("fixture offset fits u64"),
-            &mut fixtures::always,
+            &mut budgets::always,
         ),
         Err(PackError::DeltaFanoutLimit {
             fanout: 2,
@@ -124,11 +126,11 @@ fn ofs_fanout_refusal_has_a_one_child_pack_near_neighbor() {
 
     let one_child = parsed_objects(&[base, first]);
     let resolver =
-        ScalarResolver::new(&one_child, &(), &narrow, &mut fixtures::always).expect("shape");
+        ScalarResolver::new(&one_child, &(), &narrow, &mut budgets::always).expect("shape");
     assert_eq!(
         resolver.resolve_offset(
             u64::try_from(first_offset).expect("fixture offset fits u64"),
-            &mut fixtures::always,
+            &mut budgets::always,
         ),
         Ok(b"x".to_vec())
     );
@@ -166,11 +168,11 @@ fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
         delta.id = Some(second_id);
     }
     {
-        let limits = fixtures::limits();
-        let resolver = ScalarResolver::new(&cyclic, &(), &limits, &mut fixtures::always)
+        let limits = budgets::limits();
+        let resolver = ScalarResolver::new(&cyclic, &(), &limits, &mut budgets::always)
             .expect("cycle is structurally bounded input");
         assert_eq!(
-            resolver.resolve_offset(first_ref_offset, &mut fixtures::always),
+            resolver.resolve_offset(first_ref_offset, &mut budgets::always),
             Err(PackError::DeltaCycle)
         );
     }
@@ -187,22 +189,22 @@ fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
     if let PackObject::Base { id, .. } | PackObject::TypedBase { id, .. } = &mut base_backed[1] {
         *id = Some(permitted_second_id);
     }
-    let limits = fixtures::limits();
-    let resolver = ScalarResolver::new(&base_backed, &(), &limits, &mut fixtures::always)
+    let limits = budgets::limits();
+    let resolver = ScalarResolver::new(&base_backed, &(), &limits, &mut budgets::always)
         .expect("base-backed REF near-neighbor is structurally bounded");
     assert_eq!(
-        resolver.resolve_offset(12, &mut fixtures::always),
+        resolver.resolve_offset(12, &mut budgets::always),
         Ok(b"x".to_vec())
     );
 
     let missing_id = oid(3);
     let thin = parsed_objects(&[delta_entry(7, missing_id.as_bytes(), &copy_one_delta())]);
     {
-        let limits = fixtures::limits();
-        let resolver = ScalarResolver::new(&thin, &(), &limits, &mut fixtures::always)
+        let limits = budgets::limits();
+        let resolver = ScalarResolver::new(&thin, &(), &limits, &mut budgets::always)
             .expect("thin pack stays parseable in quarantine");
         assert_eq!(
-            resolver.resolve_offset(12, &mut fixtures::always),
+            resolver.resolve_offset(12, &mut budgets::always),
             Err(PackError::MissingDeltaBase)
         );
     }
@@ -211,11 +213,11 @@ fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
         id: missing_id,
         bytes: b"x".to_vec(),
     };
-    let limits = fixtures::limits();
+    let limits = budgets::limits();
     let resolver =
-        ScalarResolver::new(&thin, &external, &limits, &mut fixtures::always).expect("thin shape");
+        ScalarResolver::new(&thin, &external, &limits, &mut budgets::always).expect("thin shape");
     assert_eq!(
-        resolver.resolve_offset(12, &mut fixtures::always),
+        resolver.resolve_offset(12, &mut budgets::always),
         Ok(b"x".to_vec())
     );
 }
@@ -231,7 +233,7 @@ fn raw_delta_size_and_chain_work_bombs_refuse_before_result_allocation() {
         &base,
         &copy_all,
         &PackLimits::default(),
-        &mut fixtures::always,
+        &mut budgets::always,
     );
     assert_eq!(
         accepted,
@@ -239,23 +241,23 @@ fn raw_delta_size_and_chain_work_bombs_refuse_before_result_allocation() {
         "ordinary high-copy delta remains admissible under the default resource policy"
     );
 
-    let mut total_limited = fixtures::limits();
+    let mut total_limited = budgets::limits();
     total_limited.max_object_bytes = base.len();
     total_limited.max_total_expanded_bytes = base.len() * 2 - 1;
     assert_eq!(
-        apply_delta(&base, &copy_all, &total_limited, &mut fixtures::always),
+        apply_delta(&base, &copy_all, &total_limited, &mut budgets::always),
         Err(PackError::TotalExpandedLimit {
             actual: base.len() * 2,
             limit: base.len() * 2 - 1,
         })
     );
 
-    let mut work_limited = fixtures::limits();
+    let mut work_limited = budgets::limits();
     work_limited.max_object_bytes = base.len();
     work_limited.max_total_expanded_bytes = base.len() * 2;
     work_limited.max_delta_work = base.len() - 1;
     assert_eq!(
-        apply_delta(&base, &copy_all, &work_limited, &mut fixtures::always),
+        apply_delta(&base, &copy_all, &work_limited, &mut budgets::always),
         Err(PackError::DeltaWorkLimit {
             attempted: base.len(),
             limit: base.len() - 1,

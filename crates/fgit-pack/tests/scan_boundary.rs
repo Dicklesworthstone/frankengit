@@ -3,12 +3,14 @@
 //! needs, under whole-buffer, chunked, and byte-by-byte delivery, and refuses
 //! the same malformed streams the quarantine parser refuses.
 
+#[path = "support/limits.rs"]
+mod budgets;
 mod fixtures;
 
 use fgit_pack::{ObjectFormat, PackBoundaryScanner, PackError, PackLimits, ScanStatus};
 
 const fn scanner() -> PackBoundaryScanner {
-    PackBoundaryScanner::new(ObjectFormat::Sha1, fixtures::limits())
+    PackBoundaryScanner::new(ObjectFormat::Sha1, budgets::limits())
 }
 
 fn ofs_delta_entry(distance: u8, payload: &[u8]) -> Vec<u8> {
@@ -58,7 +60,7 @@ fn one_chunk_with_a_suffix_reports_the_exact_boundary() {
 
     let mut scan = scanner();
     let status = scan
-        .push(&stream, &mut fixtures::always)
+        .push(&stream, &mut budgets::always)
         .expect("a well-formed pack scans");
 
     assert_eq!(
@@ -82,7 +84,7 @@ fn byte_by_byte_delivery_finishes_at_the_same_boundary() {
     let mut finished = None;
     for (index, byte) in pack.iter().enumerate() {
         match scan
-            .push(core::slice::from_ref(byte), &mut fixtures::always)
+            .push(core::slice::from_ref(byte), &mut budgets::always)
             .expect("every prefix of a valid pack scans")
         {
             ScanStatus::NeedInput => {}
@@ -107,7 +109,7 @@ fn an_empty_pack_is_header_plus_trailer() {
     let pack = fixtures::pack_with_entries(&[]);
     let mut scan = scanner();
     let status = scan
-        .push(&pack, &mut fixtures::always)
+        .push(&pack, &mut budgets::always)
         .expect("an empty pack scans");
     assert_eq!(
         status,
@@ -129,7 +131,7 @@ fn an_ofs_delta_base_is_part_of_the_scanned_frame() {
 
     let mut scan = scanner();
     let status = scan
-        .push(&pack, &mut fixtures::always)
+        .push(&pack, &mut budgets::always)
         .expect("a pack with an OFS_DELTA entry scans");
     assert_eq!(
         status,
@@ -147,14 +149,14 @@ fn a_truncated_stream_keeps_asking_for_input() {
         let mut fresh = scanner();
         assert_eq!(
             fresh
-                .push(&pack[..cut], &mut fixtures::always)
+                .push(&pack[..cut], &mut budgets::always)
                 .expect("a truncated prefix is not an error, only incomplete"),
             ScanStatus::NeedInput,
             "cut at {cut} must still be waiting"
         );
     }
     assert_eq!(
-        scan.push(&pack, &mut fixtures::always)
+        scan.push(&pack, &mut budgets::always)
             .expect("the complete stream scans"),
         ScanStatus::Finished {
             pack_len: u64::try_from(pack.len()).expect("length fits u64"),
@@ -172,7 +174,7 @@ fn a_lying_declared_size_is_refused_at_the_member_boundary() {
 
     let mut scan = scanner();
     let refusal = scan
-        .push(&pack, &mut fixtures::always)
+        .push(&pack, &mut budgets::always)
         .expect_err("a declared size the member does not produce is refused");
     assert!(
         matches!(
@@ -190,12 +192,12 @@ fn a_lying_declared_size_is_refused_at_the_member_boundary() {
 fn the_input_ceiling_applies_to_the_stream_not_only_a_slice() {
     let limits = PackLimits {
         max_input_bytes: 24,
-        ..fixtures::limits()
+        ..budgets::limits()
     };
     let pack = fixtures::pack_with_entries(&[fixtures::entry(3, b"a payload over the cap")]);
     let mut scan = PackBoundaryScanner::new(ObjectFormat::Sha1, limits);
     let refusal = scan
-        .push(&pack, &mut fixtures::always)
+        .push(&pack, &mut budgets::always)
         .expect_err("a stream past the input ceiling is refused");
     assert!(matches!(refusal, PackError::InputLimit { .. }));
 }

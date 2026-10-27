@@ -63,7 +63,7 @@ fn fill_blob(index: usize, offset: usize, bytes: &mut [u8]) {
 
 fn blob_id<A: GitHashAlgorithm>(index: usize, bytes: usize) -> ObjectId {
     let mut hash = GitObjectHasher::<A>::new(ObjectType::Blob, u64::try_from(bytes).unwrap());
-    let mut scratch = [0_u8; SCRATCH_BYTES];
+    let mut scratch = vec![0_u8; SCRATCH_BYTES];
     for offset in (0..bytes).step_by(SCRATCH_BYTES) {
         let length = (bytes - offset).min(scratch.len());
         fill_blob(index, offset, &mut scratch[..length]);
@@ -161,7 +161,7 @@ impl<'a> GeneratedSource<'a> {
         match spec {
             ObjectSpec::Blob(index) => {
                 assert_eq!(body.len(), self.blob_bytes);
-                let mut expected = [0_u8; SCRATCH_BYTES];
+                let mut expected = vec![0_u8; SCRATCH_BYTES];
                 for (chunk_index, chunk) in body.chunks(SCRATCH_BYTES).enumerate() {
                     let offset = chunk_index * SCRATCH_BYTES;
                     fill_blob(index, offset, &mut expected[..chunk.len()]);

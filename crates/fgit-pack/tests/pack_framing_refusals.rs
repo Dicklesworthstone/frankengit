@@ -17,6 +17,8 @@
 //! three other test targets compile that fixture and loosening it to suit a new
 //! probe is how an existing assertion quietly changes meaning.
 
+#[path = "support/limits.rs"]
+mod budgets;
 mod fixtures;
 
 use fgit_pack::{ObjectFormat, PackError, parse_quarantined_pack};
@@ -34,8 +36,8 @@ fn parse(bytes: &[u8]) -> Result<fgit_pack::QuarantinedPack, PackError> {
     parse_quarantined_pack(
         bytes,
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
 }
 

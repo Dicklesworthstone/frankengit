@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[path = "support/limits.rs"]
+mod budgets;
 mod fixtures;
 
 use fgit_deflate::{DeflateLimits, DeflateProfile, InflateRefusal, Resource, deflate_zlib};
@@ -35,7 +37,7 @@ fn visible_quarantine_bytes(result: &Result<QuarantinedPack, PackError>) -> usiz
 
 #[test]
 fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
-    let mut object_limited = fixtures::limits();
+    let mut object_limited = budgets::limits();
     object_limited.max_object_bytes = 16;
     let declared = object_limited.max_object_bytes + 1;
     let oversized = fixtures::pack_with_entries(&[fixtures::declared_entry(3, declared, &[])]);
@@ -43,7 +45,7 @@ fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
         &oversized,
         ObjectFormat::Sha1,
         &object_limited,
-        &mut fixtures::always,
+        &mut budgets::always,
     );
     assert_eq!(
         refusal,
@@ -59,7 +61,7 @@ fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
         &accepted,
         ObjectFormat::Sha1,
         &object_limited,
-        &mut fixtures::always,
+        &mut budgets::always,
     )
     .expect("near-identical entry at the declared-size ceiling is admitted to quarantine");
     assert_eq!(
@@ -67,7 +69,7 @@ fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
         object_limited.max_object_bytes
     );
 
-    let mut aggregate_limited = fixtures::limits();
+    let mut aggregate_limited = budgets::limits();
     aggregate_limited.max_object_bytes = 16;
     aggregate_limited.max_total_expanded_bytes = 15;
     let aggregate = fixtures::pack_with_entries(&[fixtures::entry(3, &[1; 16])]);
@@ -75,7 +77,7 @@ fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
         &aggregate,
         ObjectFormat::Sha1,
         &aggregate_limited,
-        &mut fixtures::always,
+        &mut budgets::always,
     );
     assert_eq!(
         refusal,
@@ -92,7 +94,7 @@ fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
             &aggregate,
             ObjectFormat::Sha1,
             &aggregate_limited,
-            &mut fixtures::always,
+            &mut budgets::always,
         )
         .is_ok(),
         "the same entry is admissible at the aggregate-byte ceiling"
@@ -103,13 +105,13 @@ fn declared_size_and_aggregate_bombs_trip_before_entry_output_allocation() {
 fn entry_and_input_budgets_refuse_before_a_quarantined_pack_is_constructed() {
     let pack = fixtures::pack_with_entries(&[fixtures::entry(3, b"ok")]);
 
-    let mut entry_limited = fixtures::limits();
+    let mut entry_limited = budgets::limits();
     entry_limited.max_entries = 0;
     let refusal = parse_quarantined_pack(
         &pack,
         ObjectFormat::Sha1,
         &entry_limited,
-        &mut fixtures::always,
+        &mut budgets::always,
     );
     assert_eq!(
         refusal,
@@ -126,19 +128,19 @@ fn entry_and_input_budgets_refuse_before_a_quarantined_pack_is_constructed() {
             &pack,
             ObjectFormat::Sha1,
             &entry_limited,
-            &mut fixtures::always,
+            &mut budgets::always,
         )
         .is_ok(),
         "the same one-entry pack is admitted at the entry ceiling"
     );
 
-    let mut input_limited = fixtures::limits();
+    let mut input_limited = budgets::limits();
     input_limited.max_input_bytes = pack.len() - 1;
     let refusal = parse_quarantined_pack(
         &pack,
         ObjectFormat::Sha1,
         &input_limited,
-        &mut fixtures::always,
+        &mut budgets::always,
     );
     assert_eq!(
         refusal,
@@ -161,7 +163,7 @@ fn caller_tightened_ratio_refuses_during_inflate_and_default_policy_accepts() {
         .expect("deterministic test bomb member");
     let pack = fixtures::pack_with_entries(&[fixtures::declared_entry(3, payload.len(), &member)]);
 
-    let mut ratio_limited = fixtures::limits();
+    let mut ratio_limited = budgets::limits();
     ratio_limited.max_input_bytes = pack.len();
     ratio_limited.max_object_bytes = payload.len();
     ratio_limited.max_total_expanded_bytes = payload.len();
@@ -170,7 +172,7 @@ fn caller_tightened_ratio_refuses_during_inflate_and_default_policy_accepts() {
         &pack,
         ObjectFormat::Sha1,
         &ratio_limited,
-        &mut fixtures::always,
+        &mut budgets::always,
     );
     assert!(matches!(
         refusal,
@@ -184,7 +186,7 @@ fn caller_tightened_ratio_refuses_during_inflate_and_default_policy_accepts() {
         &pack,
         ObjectFormat::Sha1,
         &PackLimits::default(),
-        &mut fixtures::always,
+        &mut budgets::always,
     )
     .expect("the same bounded member is accepted under the default compatibility policy");
     assert_eq!(parsed.entries()[0].inflated, payload);
@@ -196,8 +198,8 @@ fn truncated_or_untrusted_trailer_keeps_refused_pack_unobservable() {
     let parsed = read_verified_pack(
         &valid,
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
         &ExactTrailer,
     )
     .expect("zero-length blob remains a valid near-neighbor pack");
@@ -207,8 +209,8 @@ fn truncated_or_untrusted_trailer_keeps_refused_pack_unobservable() {
     let refusal = read_verified_pack(
         &truncated,
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
         &ExactTrailer,
     );
     assert_eq!(
@@ -222,8 +224,8 @@ fn truncated_or_untrusted_trailer_keeps_refused_pack_unobservable() {
     let refusal = read_verified_pack(
         &valid,
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
         &RejectTrailer,
     );
     assert_eq!(refusal, Err(PackError::TrailerChecksumMismatch));

@@ -38,12 +38,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 /// Retained bytes across all cached bodies.
-pub(crate) const BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Largest single body worth caching. A larger one would evict too much.
-pub(crate) const BODY_CACHE_MAX_ENTRY: usize = 4 * 1024 * 1024;
+pub const BODY_CACHE_MAX_ENTRY: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
-pub(crate) struct BodyCache {
+pub struct BodyCache {
     budget: usize,
     max_entry: usize,
     state: Mutex<State>,

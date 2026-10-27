@@ -2,7 +2,12 @@
 //! nor a hit grants object access: callers still select and verify source
 //! objects before consulting this accelerator.
 
-use super::*;
+use super::{
+    BTreeMap, CanonicalBlobReader, DELTA_INDEX_BLOCK_BYTES, DELTA_MAX_MATCH_CHAIN, Deadline,
+    DeflateLimits, DeflateReceipt, DeterministicPackEncoder, DigestHasher,
+    ENCODER_INPUT_CHUNK_BYTES, ObjectId, PackEntryEncoder, PackLimits, PackWriteError,
+    PackWriteProfile, Sha256Hasher, checkpoint,
+};
 use std::sync::{Arc, Mutex};
 
 // Charge fixed metadata as well as payloads, including empty delta outcomes.
@@ -381,10 +386,10 @@ impl PackComputationCache {
         if let Ok(mut state) = self.state.lock() {
             match entry.value {
                 Value::Compressed { .. } => {
-                    state.stats.compression_hits = state.stats.compression_hits.saturating_add(1)
+                    state.stats.compression_hits = state.stats.compression_hits.saturating_add(1);
                 }
                 Value::Delta { .. } => {
-                    state.stats.delta_hits = state.stats.delta_hits.saturating_add(1)
+                    state.stats.delta_hits = state.stats.delta_hits.saturating_add(1);
                 }
             }
         }
@@ -486,7 +491,7 @@ pub struct MemoizedPackEncoder {
 
 impl MemoizedPackEncoder {
     #[must_use]
-    pub fn for_profile(profile: PackWriteProfile, cache: Arc<PackComputationCache>) -> Self {
+    pub const fn for_profile(profile: PackWriteProfile, cache: Arc<PackComputationCache>) -> Self {
         Self::new(DeflateLimits::GIT_OBJECT, profile, cache)
     }
 
@@ -506,7 +511,7 @@ impl MemoizedPackEncoder {
     }
 
     #[must_use]
-    pub fn new(
+    pub const fn new(
         limits: DeflateLimits,
         profile: PackWriteProfile,
         cache: Arc<PackComputationCache>,

@@ -195,7 +195,7 @@ impl FullBundleHeader {
         &self.prerequisites
     }
     #[must_use]
-    pub fn header_bytes(&self) -> usize {
+    pub const fn header_bytes(&self) -> usize {
         self.raw.len()
     }
     /// Original bytes, including signature, capabilities and the terminating

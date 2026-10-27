@@ -1,6 +1,10 @@
 //! Bounded, tentative blob input for the versioned streaming pack profiles.
 
-use super::*;
+use super::{
+    CanonicalPackObject, Deadline, DeflateReceipt, ENCODER_INPUT_CHUNK_BYTES, ObjectFormat,
+    ObjectId, ObjectType, PackArtifactSink, PackEntryEncoder, PackError, PackOrderKey,
+    PackWriteError, PackWriteProfile, StreamingEmitter, checkpoint, encode_entry_header, fmt,
+};
 use fgit_crypto::{GitObjectHasher, NativeObjectIdentity, Sha1, Sha256};
 
 /// A synchronous bounded read into caller-owned storage. Returning zero means
@@ -186,7 +190,7 @@ impl<'a> VerifiedBlobReader<'a> {
         })
     }
 
-    fn length_error(&self, observed: usize) -> PackWriteError {
+    const fn length_error(&self, observed: usize) -> PackWriteError {
         PackWriteError::SourceLengthMismatch {
             id: self.id,
             declared: self.declared,

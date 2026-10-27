@@ -17,7 +17,9 @@ use fgit_pack::{
 fn decode_hex(text: &str) -> Vec<u8> {
     text.trim()
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect()
 }
@@ -474,9 +476,9 @@ fn streamed_header_shares_raw_name_capability_and_prerequisite_rules() {
             .is_err()
         );
     }
-    for bytes in [b"not a bundle".as_slice(), b"# v2 git bundle", b""] {
+    for mut bytes in [b"not a bundle".as_slice(), b"# v2 git bundle", b""] {
         assert!(matches!(
-            FullBundleHeader::read(&mut bytes.as_ref(), Default::default(), &mut || true),
+            FullBundleHeader::read(&mut bytes, Default::default(), &mut || true),
             Err(StreamBundleHeaderError::Bundle(FullBundleError::Invalid(
                 "header line without delimiter"
             )))

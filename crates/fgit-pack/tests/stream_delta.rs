@@ -26,7 +26,7 @@ fn program(base: usize, result: usize) -> Vec<u8> {
     bytes
 }
 fn copy(offset: usize, length: usize, output: &mut Vec<u8>) {
-    assert!(offset <= u32::MAX as usize && length <= 0xff_ffff);
+    assert!(u32::try_from(offset).is_ok() && length <= 0xff_ffff);
     output.push(0xff);
     output.extend((offset as u32).to_le_bytes());
     output.extend(&(length as u32).to_le_bytes()[..3]);
@@ -52,7 +52,7 @@ struct MemoryIo<'a> {
     cancel: Option<(&'a Cell<bool>, &'static str)>,
 }
 impl<'a> MemoryIo<'a> {
-    fn new(base: &'a [u8]) -> Self {
+    const fn new(base: &'a [u8]) -> Self {
         Self {
             base,
             output: Vec::new(),
@@ -66,10 +66,10 @@ impl<'a> MemoryIo<'a> {
         }
     }
     fn boundary(&self, name: &'static str) -> Result<(), &'static str> {
-        if let Some((live, phase)) = self.cancel {
-            if phase == name {
-                live.set(false);
-            }
+        if let Some((live, phase)) = self.cancel
+            && phase == name
+        {
+            live.set(false);
         }
         if self.fail == Some(name) {
             return Err(name);
@@ -425,7 +425,7 @@ struct GeneratedIo {
     maximum: usize,
     declared: usize,
 }
-fn pattern(at: usize) -> u8 {
+const fn pattern(at: usize) -> u8 {
     (at.wrapping_mul(71) ^ (at / 97)) as u8
 }
 impl DeltaStreamIo for GeneratedIo {
