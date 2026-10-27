@@ -1,8 +1,14 @@
+use super::super::NEXT_STAGE;
 use super::*;
+use crate::SegmentLimits;
+use crate::fabric::VerifiedObject;
+use crate::local::LocalFilesystemConfig;
 use fgit_crypto::{GitObjectKind, git_object_id, git_payload_commitment};
-use fgit_resource::{LeakDisposition, ObligationLedger, RegionId};
+use fgit_resource::{LeakDisposition, ObligationLedger, OpaqueHandle, RegionId};
 use fgit_types::GitHashAlgorithm;
 use std::io::{self, Cursor};
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 struct Fixture {
     root: PathBuf,
@@ -246,7 +252,7 @@ fn forged_hashes_short_extra_and_failed_sources_never_link() {
                 3 => claimed.payload_commitment[0] ^= 1,
                 4 => {
                     claimed.object_identity =
-                        git_object_id(format, GitObjectKind::Blob, b"different")
+                        git_object_id(format, GitObjectKind::Blob, b"different");
                 }
                 5 => {}
                 _ => unreachable!(),
@@ -463,7 +469,7 @@ fn generated_blob_above_buffered_ceiling_uses_only_chunk_buffers() {
         let placeholder = git_object_id(format, GitObjectKind::Blob, b"");
         let mut native = blob_stream::NativeHash::new(placeholder, length);
         let mut strong = blob_stream::strong_hasher(length).unwrap();
-        let chunk = [39_u8; CHUNK_BYTES];
+        let chunk = vec![39_u8; CHUNK_BYTES];
         let mut left = length;
         while left != 0 {
             let count = left.min(CHUNK_BYTES as u64) as usize;
@@ -487,7 +493,7 @@ fn generated_blob_above_buffered_ceiling_uses_only_chunk_buffers() {
         let mut generated = io::repeat(39).take(length);
         place(&fixture.fabric, env, &mut generated, length, &mut || true).unwrap();
         let mut stream = fixture.fabric.open_blob_stream_bounded(id, length).unwrap();
-        let mut buffer = [0_u8; CHUNK_BYTES];
+        let mut buffer = vec![0_u8; CHUNK_BYTES];
         let mut read = 0;
         loop {
             let count = stream.read_tentative(&mut buffer).unwrap();

@@ -4,11 +4,15 @@ use super::*;
 fn bytes(hex: &str) -> Vec<u8> {
     hex.trim()
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
         .collect()
 }
-fn fixture(format: ObjectFormat) -> (Vec<u8>, (&'static str, usize), Vec<(ObjectId, u64)>) {
+type Fixture = (Vec<u8>, (&'static str, usize), Vec<(ObjectId, u64)>);
+
+fn fixture(format: ObjectFormat) -> Fixture {
     match format {
         ObjectFormat::Sha1 => (
             bytes(include_str!(concat!(

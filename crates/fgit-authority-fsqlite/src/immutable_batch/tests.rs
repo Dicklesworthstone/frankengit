@@ -9,8 +9,10 @@ use std::task::Poll;
 use std::time::Duration;
 
 use fgit_authority::{
-    AmbiguityReason, AuthorityStore, ImmutableBatchFailure, ImmutableBatchRefusal,
+    AmbiguityReason, AsyncAuthorityStore, AuthorityFailure, AuthorityLimits, AuthorityStore,
+    HeadKey, HeadRead, ImmutableBatchFailure, ImmutableBatchRefusal, ImmutableRead,
     MAX_IMMUTABLE_BATCH_BYTES, MAX_IMMUTABLE_BATCH_ITEMS, MemoryAuthorityStore, MemoryStoreConfig,
+    StoreInstanceId,
 };
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
 use fgit_runtime::meter::{BudgetClass, ClassLimits};

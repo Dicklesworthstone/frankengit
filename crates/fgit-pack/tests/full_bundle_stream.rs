@@ -24,7 +24,7 @@ struct Source {
     loaded: RefCell<Vec<ObjectId>>,
 }
 impl Source {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             objects: BTreeMap::new(),
             loaded: RefCell::new(Vec::new()),
@@ -376,7 +376,7 @@ fn independent_budgets_are_aggregate_and_the_exact_permitted_boundary_succeeds()
         .map(|object| object.body().len())
         .max()
         .unwrap();
-    let mut exact = baseline.clone();
+    let mut exact = baseline;
     exact.pack.max_entries = receipt.object_count();
     exact.pack.max_index_entries = ids.len();
     exact.pack.max_object_bytes = largest;

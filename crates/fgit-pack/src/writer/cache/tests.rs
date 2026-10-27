@@ -1,5 +1,12 @@
 use super::*;
+use crate::writer::{DeltaSearch, cache};
+use crate::{
+    CanonicalObjectSource, CanonicalPackObject, ObjectFormat, PackArtifactSink, PackError,
+    PackOrderKey, PackPlanner, PackWriteReceipt, PackWriter, ThinBase,
+};
 use fgit_crypto::git_object_id;
+use fgit_deflate::DeflateProfile;
+use fgit_git_object::ObjectType;
 
 #[derive(Default)]
 struct Source(BTreeMap<ObjectId, CanonicalPackObject>);

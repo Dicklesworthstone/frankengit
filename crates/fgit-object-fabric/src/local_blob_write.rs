@@ -2,7 +2,15 @@
 //! Source bytes remain in private staging until both original commitments and
 //! exact EOF verify. Placement alone never publishes repository visibility.
 
-use super::*;
+use super::{
+    AdmissionAbandoned, AdmissionAbortReason, AdmittedObject, CANONICAL_CODEC_VERSION, Digest,
+    DigestBytes, ENVELOPE_SCHEMA, File, Grade, ImmutableWrite, LocalCrashPoint,
+    LocalFilesystemFabric, OBJECT_MAGIC, ObjectAdmission, ObjectAdmissionPermit, ObjectClass,
+    ObjectEnvelope, ObjectEnvelopeId, ObjectKind, PlacementAdmission, PlacementAttemptError,
+    PublicationState, PutIfAbsent, ResourceVector, StageFile, StorageOperation, StoreRefusal,
+    StructureVerdict, Write, blob_stream, fs, settle_admission_abort, storage_error,
+    sync_directory,
+};
 use std::io::{Read, Seek, SeekFrom};
 
 use fgit_crypto::DigestHasher;
@@ -202,7 +210,7 @@ impl LocalFilesystemFabric {
             write_stage(&mut stage, &encoded_length.to_be_bytes(), live)?;
             write_stage(&mut stage, encoded, live)?;
             let mut remaining = envelope.declared_length();
-            let mut buffer = [0_u8; CHUNK_BYTES];
+            let mut buffer = chunk_buffer(StorageOperation::WriteStage)?;
             while remaining != 0 {
                 let capacity = remaining.min(CHUNK_BYTES as u64) as usize;
                 let count = read_some(input, &mut buffer[..capacity], live)?;
@@ -298,8 +306,8 @@ impl LocalFilesystemFabric {
         staged
             .seek(SeekFrom::Start(payload_offset))
             .map_err(|e| storage_error(StorageOperation::ReadBody, e))?;
-        let mut actual = [0_u8; CHUNK_BYTES];
-        let mut expected = [0_u8; CHUNK_BYTES];
+        let mut actual = chunk_buffer(StorageOperation::ReadBody)?;
+        let mut expected = chunk_buffer(StorageOperation::ReadBody)?;
         loop {
             checkpoint(live)?;
             let count = match stored.read_tentative(&mut actual) {
@@ -329,6 +337,18 @@ impl LocalFilesystemFabric {
             }
         }
     }
+}
+
+fn chunk_buffer(operation: StorageOperation) -> Result<Vec<u8>, StoreRefusal> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(CHUNK_BYTES)
+        .map_err(|_| StoreRefusal::StorageIo {
+            operation,
+            kind: std::io::ErrorKind::OutOfMemory,
+        })?;
+    buffer.resize(CHUNK_BYTES, 0_u8);
+    Ok(buffer)
 }
 
 fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), StoreRefusal> {

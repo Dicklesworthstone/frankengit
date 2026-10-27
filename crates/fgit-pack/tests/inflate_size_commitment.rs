@@ -34,6 +34,8 @@
 //! predicted. The oversize case in particular does not report the variant one
 //! would expect, which is exactly why it gets a test of its own.
 
+#[path = "support/limits.rs"]
+mod budgets;
 mod fixtures;
 
 use fgit_pack::{ObjectFormat, PackError, parse_quarantined_pack};
@@ -72,8 +74,8 @@ fn parse_one(entry: Vec<u8>) -> Result<usize, PackError> {
     parse_quarantined_pack(
         &fixtures::pack_with_entries(&[entry]),
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
     .map(|pack| pack.entries().len())
 }

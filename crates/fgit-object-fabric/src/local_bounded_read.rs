@@ -25,7 +25,7 @@ fn read_error(error: io::Error) -> StoreRefusal {
     }
 }
 
-fn non_regular_file() -> StoreRefusal {
+const fn non_regular_file() -> StoreRefusal {
     StoreRefusal::StorageIo {
         operation: StorageOperation::ReadBody,
         kind: io::ErrorKind::InvalidInput,
@@ -176,7 +176,14 @@ fn read_stream<R: Read>(
             operation: StorageOperation::ReadBody,
             kind: io::ErrorKind::OutOfMemory,
         })?;
-    let mut buffer = [0_u8; READ_CHUNK_BYTES];
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(READ_CHUNK_BYTES)
+        .map_err(|_| StoreRefusal::StorageIo {
+            operation: StorageOperation::ReadBody,
+            kind: io::ErrorKind::OutOfMemory,
+        })?;
+    buffer.resize(READ_CHUNK_BYTES, 0_u8);
     loop {
         let consumed = u64::try_from(bytes.len()).map_err(|_| StoreRefusal::LengthOverflow)?;
         let remaining = maximum
@@ -238,7 +245,7 @@ mod tests {
                 ));
                 match fs::create_dir(&path) {
                     Ok(()) => return Self(path),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => panic!("create isolated test directory: {error}"),
                 }
             }

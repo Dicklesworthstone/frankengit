@@ -771,11 +771,10 @@ mod tests {
             PolicySelection::Candidate
         );
 
-        let mut seq = u64::from(DEFAULT_MIN_SUPPORT_OBSERVATIONS) + 1;
+        let first = u64::from(DEFAULT_MIN_SUPPORT_OBSERVATIONS) + 1;
         let mut alarmed_step = None;
-        for _ in 0..32 {
+        for seq in first..first + 32 {
             let step = controller.observe(seq, true, 3).unwrap();
-            seq += 1;
             if step.selection == PolicySelection::Fallback(FallbackTrigger::RegimeAlarm) {
                 alarmed_step = Some(step);
                 break;

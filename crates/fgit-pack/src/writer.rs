@@ -545,7 +545,7 @@ impl PlannedDelta {
     /// Program bytes plus the base ID a REF_DELTA entry also carries: the
     /// length a client-held base must beat. An in-pack base's OFS distance is
     /// a few bytes and is not counted, so in-pack comparisons are unchanged.
-    fn effective_len(&self) -> usize {
+    const fn effective_len(&self) -> usize {
         match self.base {
             PlannedDeltaBase::Pack(_) => self.program.len(),
             PlannedDeltaBase::Client(base) => self.program.len() + base.as_bytes().len(),
@@ -920,7 +920,7 @@ impl PackPlanner {
                 requested: order.len(),
             })?;
         let mut selector = DeltaSelector::new(self.profile, &self.limits, None)?;
-        selector.cache = self.cache.clone();
+        selector.cache.clone_from(&self.cache);
         let mut total_object_bytes = 0_usize;
         let mut delta_count = 0_usize;
         for key in order {
@@ -1518,7 +1518,7 @@ impl PackEntryEncoder for DeterministicPackEncoder {
 
 impl DeterministicPackEncoder {
     fn encode_stream_with_work(
-        &mut self,
+        &self,
         input: &mut dyn CanonicalBlobReader,
         declared_length: usize,
         deadline: &mut dyn Deadline,
@@ -1575,7 +1575,7 @@ impl DeterministicPackEncoder {
     }
 
     fn encode_with_work(
-        &mut self,
+        &self,
         input: &[u8],
         deadline: &mut dyn Deadline,
         emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
@@ -3178,7 +3178,7 @@ fn emit_insert_run(bytes: &[u8], output: &mut Vec<u8>) -> Result<(), PackWriteEr
     Ok(())
 }
 
-pub(super) fn pack_header(count: u32) -> [u8; PACK_HEADER_BYTES] {
+pub fn pack_header(count: u32) -> [u8; PACK_HEADER_BYTES] {
     let mut header = [0_u8; PACK_HEADER_BYTES];
     header[..4].copy_from_slice(b"PACK");
     header[4..8].copy_from_slice(&2_u32.to_be_bytes());
@@ -3186,7 +3186,7 @@ pub(super) fn pack_header(count: u32) -> [u8; PACK_HEADER_BYTES] {
     header
 }
 
-pub(super) fn encode_entry_header(type_code: u8, size: usize) -> Result<Vec<u8>, PackWriteError> {
+pub fn encode_entry_header(type_code: u8, size: usize) -> Result<Vec<u8>, PackWriteError> {
     if !(1..=7).contains(&type_code) || type_code == 5 {
         return Err(PackError::InvalidEntryType(type_code).into());
     }

@@ -1,7 +1,15 @@
 use super::*;
 use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::{NativeChecksumVerifier, ScalarResolver, read_verified_pack};
+use crate::{
+    CanonicalObjectSource, DeterministicPackEncoder, MemoizedPackEncoder, NativeChecksumVerifier,
+    PackComputationCache, PackLimits, PackPlanner, PackWriteReceipt, PackWriter, ScalarResolver,
+    ThinBase, object_id_from_bytes, read_verified_pack,
+};
+use fgit_crypto::{DigestHasher, Sha256Hasher};
+use fgit_deflate::{DeflateLimits, DeflateProfile, DeflateRefusal};
 
 #[derive(Default)]
 struct Sink {

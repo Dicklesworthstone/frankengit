@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[path = "support/limits.rs"]
+mod budgets;
 mod fixtures;
 
 use fgit_pack::{
@@ -43,23 +45,23 @@ fn idx_crc_and_pack_count_mismatches_refuse_index_association() {
     let parsed = parse_quarantined_pack(
         &pack,
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
     .expect("one-entry pack remains quarantined until its index associates it");
 
     let zero_crc_index = IdxV2::parse(
         &idx_with_entries(&[(1, 0, 12)]),
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
     .expect("well-formed idx with a deliberately wrong CRC");
     let crc = match validate_idx_entry_crc(
         &zero_crc_index.entries()[0],
         &raw_entry,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     ) {
         Err(PackError::IndexEntryCrcMismatch {
             expected: 0,
@@ -70,8 +72,8 @@ fn idx_crc_and_pack_count_mismatches_refuse_index_association() {
     let index = IdxV2::parse(
         &idx_with_entries(&[(1, crc, 12)]),
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
     .expect("well-formed one-entry idx");
     assert_eq!(validate_idx_pack_count(&index, parsed.header), Ok(()));
@@ -79,8 +81,8 @@ fn idx_crc_and_pack_count_mismatches_refuse_index_association() {
         validate_idx_entry_crc(
             &index.entries()[0],
             &raw_entry,
-            &fixtures::limits(),
-            &mut fixtures::always,
+            &budgets::limits(),
+            &mut budgets::always,
         ),
         Ok(())
     );
@@ -91,8 +93,8 @@ fn idx_crc_and_pack_count_mismatches_refuse_index_association() {
         validate_idx_entry_crc(
             &index.entries()[0],
             &corrupt_entry,
-            &fixtures::limits(),
-            &mut fixtures::always,
+            &budgets::limits(),
+            &mut budgets::always,
         ),
         Err(PackError::IndexEntryCrcMismatch { expected, .. }) if expected == crc
     ));
@@ -100,8 +102,8 @@ fn idx_crc_and_pack_count_mismatches_refuse_index_association() {
     let two_entry_index = IdxV2::parse(
         &idx_with_entries(&[(1, crc, 12), (2, crc, 24)]),
         ObjectFormat::Sha1,
-        &fixtures::limits(),
-        &mut fixtures::always,
+        &budgets::limits(),
+        &mut budgets::always,
     )
     .expect("independently well-formed two-entry idx");
     assert_eq!(

@@ -14,6 +14,9 @@
 //! of the gap being rediscovered by whoever next tries to compose a live node.
 
 #![forbid(unsafe_code)]
+// Keep the complete native future and its Send obligation. The pinned compiler
+// needs more than its default trait-recursion budget for this composed type.
+#![recursion_limit = "256"]
 
 use std::future::Future;
 
