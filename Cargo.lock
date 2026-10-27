@@ -733,6 +733,7 @@ name = "fgit-cli"
 version = "0.0.1"
 dependencies = [
  "fgit-admission",
+ "fgit-agent",
  "fgit-authority",
  "fgit-codec",
  "fgit-crypto",

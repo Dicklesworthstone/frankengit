@@ -56,6 +56,18 @@ fn main() -> ExitCode {
 fn run_subcommand(arguments: &[String]) -> ExitCode {
     if arguments
         .first()
+        .is_some_and(|argument| argument == "agent")
+    {
+        return match fgit_cli::agent_context::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{}", fgit_cli::agent_context::error_json(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "artifact")
     {
         return ExitCode::from(artifact_command::run(&arguments[1..]));

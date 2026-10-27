@@ -125,8 +125,10 @@ staged-file sync (frankengit-pc9g), a 24,000-object push took 17.5 s at the
 default budgets on the development host. `fg serve-http` and `fg serve-ssh` now carry stock
 clone, fetch and push:
 - `fg serve-http` is loopback-only and uses an operator token or a scoped
-  credentials file. It has a `--continuous` mode that drains on a stop file,
-  SIGTERM or SIGINT.
+  credentials file. Its [v2 credential format](docs/HTTP_REF_WRITE_SCOPES.md)
+  can restrict each token to exact refs or slash-terminated namespaces across
+  Git pushes and native code publication routes. It has a `--continuous` mode
+  that drains on a stop file, SIGTERM or SIGINT.
 - `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. Its
   private `--deploy-keys-file` is reloaded before each Git command, so key
   revocation, rotation and scope changes take effect without restarting the
@@ -649,6 +651,22 @@ An `EvidenceCarryingChange` binds:
 Prompt injection inside repository or retrieved text cannot widen capabilities, reveal secrets, suppress mandatory verification, approve itself, or alter retention/disclosure policy.
 
 See [`docs/AGENT_PROTOCOL.md`](docs/AGENT_PROTOCOL.md).
+
+### Available local context command
+
+`fg agent context` reads real indexed source from an existing node into an
+Agent Protocol `ContextPacket`. It requires an explicit trusted-local grant and
+operator-asserted sponsor, authenticates the current authority head, and binds
+source identity, index generations, omissions, byte ranges and expiry into the
+result. Repository excerpts are emitted separately as untrusted data. A moved
+expected head, missing required index, expired request or exceeded output bound
+refuses; the command does not rebuild indexes or publish changes.
+
+This is a read-only, invocation-local run. It does not create a durable run
+controller, authenticate a remote agent principal or grant effects. Complete
+context exits 0; bounded partial context reports its omissions and exits 3.
+See [the command and limits](docs/AGENT_CONTEXT_COMMAND.md) for setup, byte-safe
+selectors, exact-head preconditions and the JSON evidence contract.
 
 ---
 

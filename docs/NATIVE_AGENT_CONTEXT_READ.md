@@ -41,8 +41,11 @@ let packet = result.packet();
 
 These values must come from the host's existing authentication and run-control
 boundary. Supplying a run ID or a saved context JSON cannot create either the run
-receipt or source-read authorization. This is a native host API, not a new CLI,
-MCP tool, remotely authenticated agent principal or persistent run controller.
+receipt or source-read authorization. The native API now also has an explicit
+trusted-local [`fg agent context` adapter](AGENT_CONTEXT_COMMAND.md). That command
+authenticates the current head and opens one read-only invocation under the
+operator's source grant and asserted sponsor. It does not add an MCP or HTTP
+endpoint, remotely authenticated agent principal, or persistent run controller.
 
 ## Enforced behavior
 
@@ -90,8 +93,16 @@ boundaries, backwards time, cancellation including the final callback, visible
 omissions/optional-channel failures and explicit source advancement/reindexing.
 The tests do not use a mock retrieval service or an external Git subprocess.
 
-Rust/Cargo/rustfmt were unavailable in the implementation environment. These
-native tests have been added but have NOT been executed there; no compiler,
-formatter, native test, whole-workspace or release pass is claimed. Existing
+At the original native-API implementation, Rust/Cargo/rustfmt were unavailable
+in the implementation environment. Those native tests had been added but had
+NOT been executed there; that historical implementation claimed no compiler,
+formatter, native test, whole-workspace or release pass. Existing
 pure packet binding semantics and canonical packet bytes are unchanged by the
 shared-preflight refactor. The broader agent execution work remains incomplete.
+
+The CLI adapter adds `cargo test -p fgit-cli --test agent_context_cli`: actual
+`fg` subprocesses over persisted SHA-1/SHA-256 nodes, nonempty untrusted source
+and binary excerpts, authority preconditions, missing indexes, bounded-output
+and hydration refusals, partial selection, and explicit local-grant checks.
+The shared-host cases cover request cancellation and foreign namespace refusal.
+Test definitions alone are not a claim that these commands have passed.

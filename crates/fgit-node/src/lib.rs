@@ -7522,6 +7522,17 @@ impl NodeRequestContext {
         self.authority.cancel();
     }
 
+    /// Cooperatively checkpoint the request without exposing database powers.
+    /// This can charge native poll/work budgets. `false` means cancellation or
+    /// resource/deadline exhaustion, never proof that a mutation did not commit.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        matches!(
+            checkpoint_pack_context(&self.authority),
+            PackContextCheckpoint::Live
+        )
+    }
+
     const fn authority(&self) -> &FsqliteCx {
         &self.authority
     }
