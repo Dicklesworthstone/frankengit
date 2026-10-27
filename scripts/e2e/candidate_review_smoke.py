@@ -144,7 +144,10 @@ def validate(report, f, c, algorithm):
                            prerequisites=[f['target']], merge_base=f['base'] if c['merging'] else None,
                            source_reference_hex=SOURCE.encode().hex() if c['merging'] else None).items():
         require(report[key] == value and type(report[key]) is type(value), f'candidate binding: {key}')
-    require(report['closure_objects'] == (11 if c['merging'] else 8), 'complete native graph count')
+    # The candidate decision's validated set (docs/BOUNDED_CANDIDATE_INSPECTION.md):
+    # the uploaded commit, tree and blob plus the parent commit, or for a merge
+    # both parents and the merge base. Pack thickness never changes it.
+    require(report['closure_objects'] == (6 if c['merging'] else 4), 'candidate decision object count')
     r = report['review']
     for key, value in dict(type='source_review', complete=True, node_closed=True, tenant_id=TENANT,
                            repository_id=REPO, object_format=algorithm, before_reference_hex=TARGET.encode().hex(),
@@ -241,7 +244,7 @@ def self_test():
                           approval_granted=False, objects_staged=False, node_closed=True,
                           bundle_sha256=hashlib.sha256(c['bytes']).hexdigest(), bundle_bytes=len(c['bytes']),
                           pack_bytes=c['pack_bytes'], pack_objects=c['count'], expanded_bytes=c['expanded'],
-                          closure_objects=8, transport_only_objects=0, candidate_commit=c['commit'],
+                          closure_objects=4, transport_only_objects=0, candidate_commit=c['commit'],
                           parents=c['parents'], candidate_commit_hex=c['body'].hex(), candidate_commit_text=c['body'].decode(),
                           prerequisites=[f['target']], merge_base=None, source_reference_hex=None)
             old, new = f['old'], c['content']
@@ -257,7 +260,7 @@ def self_test():
             validate(report, f, c, algorithm)
             mutations = [('candidate_commit', f['source']), ('bundle_sha256', '00' * 32), ('parents', [f['source']]),
                          ('objects_staged', True), ('approval_granted', True), ('published_to_repository', True),
-                         ('candidate_commit_hex', ''), ('pack_objects', 0), ('closure_objects', 0),
+                         ('candidate_commit_hex', ''), ('pack_objects', 0), ('closure_objects', 0), ('closure_objects', 8),
                          ('transport_only_objects', 1), ('node_closed', False), ('candidate_origin', 'canonical')]
             for key, value in mutations:
                 bad = copy.deepcopy(report); bad[key] = value
