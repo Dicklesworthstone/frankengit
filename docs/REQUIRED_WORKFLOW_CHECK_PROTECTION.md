@@ -133,15 +133,20 @@ explicit freeze and submission. Editing a protected target carries that row's
 checks to the renamed target while retaining their exact CI source identity.
 Removing the branch rule intentionally removes all of its requirements.
 
-The standalone protection editor still preserves existing selectors when
-editing reviewer rows and uses `-` for the reviewer column of a check-only
-branch. The CLI, HTTP/MCP APIs and complete JSON policy file accepted by the
+The independent [protection page](BROWSER_PROTECTION_ADMINISTRATION.md) also
+supports adding, editing and removing selectors, without requiring PR-page
+access. Use `-` in a branch rule's reviewer column for check-only protection.
+Each check row explicitly selects its protected target as well as its CI source.
+Removing or renaming a branch rule requires explicitly removing or retargeting
+its check rows; an unmatched target is refused without discarding the draft.
+Its frozen preview includes all check additions and removals. The CLI, HTTP/MCP
+APIs and complete JSON policy file accepted by the
 [remote operator](REMOTE_REVIEW_PROTECTION.md) also support selector changes.
 
 An empty check list retains the historical review-only representation. Removing
 the last check from a branch with no reviewers is refused; explicitly remove
 the branch rule to remove its protection. Both clients use the native selector
-bounds without truncation or normalization of job text. The PR panel freezes
+bounds without truncation or normalization of job text. Both editors freeze
 all selector controls with the original request; uncertain retries retain the
 original body and idempotency key.
 

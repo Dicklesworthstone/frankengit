@@ -1,5 +1,6 @@
 // Independent protection administration uses the existing native protection
 // client. Shell coordinates are not capabilities or repository authority.
+import { protectionChanges, protectionPolicy } from './pulls-actions.mjs';
 const SUFFIX = '/ui/protection/';
 const visible = value => String(value).replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
   character => `\\u{${character.codePointAt(0).toString(16)}}`);
@@ -26,20 +27,36 @@ export function referenceLabel(encoded) {
   catch { return '[Non-UTF-8 reference; use its exact hex bytes.]'; }
 }
 
-export function editorPolicy(administrators, rules, observedBranches = [], observedRefPolicy = null) {
+export function editorPolicy(administrators, rules, observedBranches = [], observedRefPolicy = null, checkRows) {
   const lines = (value, maximum, count) => {
     if (typeof value !== 'string' || value.length > maximum) throw new Error('Protection editor exceeds its input limit.');
     const rows = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     if (rows.length > count) throw new Error('Too many protection editor rows.');
     return rows;
   };
-  return { administrators: lines(administrators, 2048, 32), branches: lines(rules, 256 * 1024, 64).map(line => {
+  // An explicit selector draft replaces all observed checks. An omitted draft
+  // retains the earlier reviewer-only helper contract for existing callers.
+  const checksByBranch = new Map();
+  if (checkRows !== undefined) {
+    if (!Array.isArray(checkRows) || checkRows.length > 64 * 32) throw new Error('Too many required workflow check rows.');
+    const fields = ['reference_hex', 'source_ref_hex', 'publisher', 'graph_root', 'job'];
+    for (const row of checkRows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).length !== fields.length ||
+          fields.some(field => !Object.hasOwn(row, field)) || typeof row.reference_hex !== 'string') {
+        throw new Error('Each required check needs a protected branch, source branch, publisher, workflow commitment and exact job name.');
+      }
+      const checks = checksByBranch.get(row.reference_hex) ?? [];
+      checks.push({ source_ref_hex: row.source_ref_hex, publisher: row.publisher, graph_root: row.graph_root, job: row.job });
+      checksByBranch.set(row.reference_hex, checks);
+    }
+  }
+  const replacement = { administrators: lines(administrators, 2048, 32), branches: lines(rules, 256 * 1024, 64).map(line => {
     const fields = line.split(/\s+/u);
     if (fields.length < 2 || fields.length > 3) throw new Error('Each rule needs reference hex, comma-separated eligible reviewer IDs, and an optional approval count or “all”.');
     const reviewers = fields[1] === '-' ? [] : fields[1].split(',');
     if (reviewers.length > 32 || reviewers.some(person => person === '')) throw new Error('Choose 1 through 32 reviewers for each rule.');
     const previous = observedBranches.find(branch => branch.reference_hex === fields[0]);
-    const checks = previous?.required_checks ?? [];
+    const checks = checkRows === undefined ? previous?.required_checks ?? [] : checksByBranch.get(fields[0]) ?? [];
     const selected = fields[2];
     if (selected !== undefined && selected !== 'all' && !/^(0|[1-9][0-9]?)$/.test(selected)) throw new Error('Approval count must be a whole number or “all”.');
     const approvals = selected === 'all' ? reviewers.length : selected !== undefined ? Number(selected)
@@ -51,11 +68,16 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
     return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
   }), ...(observedRefPolicy ? { ref_policy: structuredClone(observedRefPolicy) } : {}) };
+  const targets = new Set(replacement.branches.map(branch => branch.reference_hex));
+  if ([...checksByBranch.keys()].some(target => !targets.has(target))) {
+    throw new Error('A required workflow check targets a branch missing from the rule list. Remove or retarget its check row explicitly.');
+  }
+  return protectionPolicy(replacement);
 }
 export function mountProtection(doc, { client, events = doc.defaultView } = {}) {
   if (!client) throw new Error('A native protection client is required.');
   const ids = ['connect', 'token', 'actor', 'recovery-only', 'reload', 'disconnect', 'status', 'snapshot', 'policy',
-    'edit', 'administrators', 'rules', 'clear', 'prepare', 'confirm', 'ownership-confirm', 'send', 'retry',
+    'edit', 'administrators', 'rules', 'checks', 'add-check', 'remove-checks', 'clear', 'prepare', 'confirm', 'ownership-confirm', 'send', 'retry',
     'lookup', 'discard', 'export', 'restore', 'receipt', 'preview', 'terminal'];
   const ui = Object.fromEntries(ids.map(id => {
     const element = doc.getElementById(`protection-${id}`);
@@ -63,6 +85,7 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     return [id, element];
   }));
   let revision = 0, busy = false;
+  const checkRows = [];
   const node = (tag, content) => {
     const element = doc.createElement(tag);
     if (content !== undefined) element.textContent = visible(content);
@@ -70,16 +93,49 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
   };
   const say = message => { ui.status.textContent = visible(message); };
   function clear() { ui.snapshot.textContent = ''; ui.policy.replaceChildren(); }
-  function clearEditor() { ui.administrators.value = ''; ui.rules.value = ''; ui.clear.checked = false; }
+  function clearChecks() { checkRows.length = 0; ui.checks.replaceChildren(); }
+  function clearEditor() { ui.administrators.value = ''; ui.rules.value = ''; ui.clear.checked = false; clearChecks(); }
+  function editable() { return client.connected && !client.recoveryOnly && !client.pending && !busy && !client.busy && Boolean(client.observed?.policy); }
+  function appendCheck(reference = '', check = {}) {
+    const section = node('fieldset'), fields = {};
+    section.append(node('legend', 'Required workflow check'));
+    for (const [name, label, maximum] of [
+      ['reference_hex', 'Protected branch reference hex', 2048], ['source_ref_hex', 'CI source branch reference hex', 2048],
+      ['publisher', 'Publisher principal ID', 32], ['graph_root', 'Workflow graph commitment', 64], ['job', 'Exact job name', 1024],
+    ]) {
+      const wrapper = node('label', label), input = node('input');
+      input.type = 'text'; input.name = name; input.maxLength = maximum; input.autocomplete = 'off'; input.spellcheck = false; input.required = true;
+      input.value = name === 'reference_hex' ? reference : check[name] ?? '';
+      input.addEventListener('input', () => { unconfirm(); sync(); });
+      wrapper.append(input); section.append(wrapper); fields[name] = input;
+    }
+    const remove = node('button', 'Remove this check'); remove.type = 'button'; section.append(remove);
+    const row = { section, fields, remove };
+    remove.addEventListener('click', () => {
+      if (!editable()) return;
+      const index = checkRows.indexOf(row); if (index < 0) return;
+      checkRows.splice(index, 1); ui.checks.replaceChildren(...checkRows.map(value => value.section)); unconfirm(); sync();
+    });
+    checkRows.push(row); ui.checks.append(section);
+  }
+  function selectedChecks() {
+    return checkRows.map(row => Object.fromEntries(Object.entries(row.fields).map(([name, input]) => [name, input.value])));
+  }
   function unconfirm() { ui.confirm.checked = false; ui['ownership-confirm'].checked = false; }
   function removesActor(pending) { return pending && !pending.intent.replacement.administrators.includes(pending.intent.principal); }
   function sync() {
     const pending = client.pending, working = busy || client.busy;
     const ordinary = client.connected && !client.recoveryOnly;
-    const editable = ordinary && !pending && !working && Boolean(client.observed?.policy);
+    const canEdit = editable();
     ui.reload.disabled = !ordinary || Boolean(pending) || working;
     for (const id of ['token', 'actor', 'recovery-only']) ui[id].disabled = working;
-    for (const id of ['administrators', 'rules', 'clear', 'prepare']) ui[id].disabled = !editable;
+    for (const id of ['administrators', 'rules', 'clear', 'prepare']) ui[id].disabled = !canEdit;
+    ui['add-check'].disabled = !canEdit || checkRows.length >= 64 * 32;
+    ui['remove-checks'].disabled = !canEdit || !checkRows.length;
+    for (const row of checkRows) {
+      row.remove.disabled = !canEdit;
+      for (const input of Object.values(row.fields)) input.disabled = !canEdit;
+    }
     ui.confirm.disabled = !ordinary || !pending || working;
     ui['ownership-confirm'].disabled = !ordinary || !removesActor(pending) || working;
     const confirmed = ui.confirm.checked && (!removesActor(pending) || ui['ownership-confirm'].checked);
@@ -101,7 +157,8 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       node('p', `Original authority snapshot: ${intent.source.head}`),
       node('p', pending.sent || pending.exported ? 'Submission may have occurred. Resolve only this original request and key.' : 'Not submitted or exported by this client.'),
       node('p', client.recoveryOnly ? 'Recovery-only credential: no reads, edits, or resubmission.' : 'Sending never reads the editable form again.'),
-      node('pre', JSON.stringify(intent.replacement)));
+      node('pre', JSON.stringify(intent.replacement)), node('h3', 'Changes from the inspected policy'),
+      node('pre', JSON.stringify(protectionChanges(intent.source.policy, intent.replacement))));
     if (removesActor(pending)) ui.preview.append(node('p', 'WARNING: this replacement removes the submitting principal from the administrator set. A separate acknowledgment is required.'));
   }
   function render(selected) {
@@ -131,11 +188,11 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     }
     ui.administrators.value = policy.administrators.join('\n');
     ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'} ${branch.required_approvals ?? 'all'}`).join('\n');
-    if (policy.branches.some(branch => branch.required_checks?.length)) ui.policy.append(node('p',
-      'Configured workflow checks are preserved when editing these reviewer rows. Use the protection CLI or API to change check selectors. Removing a branch row removes all its requirements; “-” retains a check-only branch.'));
+    clearChecks();
+    for (const branch of policy.branches) for (const check of branch.required_checks ?? []) appendCheck(branch.reference_hex, check);
     ui.clear.checked = false;
   }
-  async function run(work, success, message) {
+  async function run(work, success, message, preserveEditor = false) {
     if (busy || client.busy) return;
     const current = ++revision; busy = true; unconfirm(); sync(); say(message);
     const check = () => { if (current !== revision) throw new Error('Protection operation superseded.'); };
@@ -143,7 +200,7 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       const result = await work(check); check(); success(result);
     } catch (error) {
       if (current === revision) {
-        if (!client.pending) { clear(); clearEditor(); }
+        if (!client.pending && !preserveEditor) { clear(); clearEditor(); }
         if (!client.connected) { clear(); clearEditor(); ui.actor.value = ''; ui.receipt.value = ''; }
         say(error.outcomeUnknown ? 'Outcome unknown. Preserve the original receipt and key; inspect its outcome or explicitly retry unchanged.' : error.message ?? 'Protection operation failed.');
       }
@@ -161,9 +218,9 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     }, 'Reading the complete native protection policy…');
   };
   const prepare = () => run(() => client.stage(editorPolicy(ui.administrators.value, ui.rules.value, client.observed?.policy?.branches ?? [],
-    ui.clear.checked ? null : client.observed?.policy?.ref_policy ?? null), ui.clear.checked), () => {
+    ui.clear.checked ? null : client.observed?.policy?.ref_policy ?? null, selectedChecks()), ui.clear.checked), () => {
     ui.terminal.textContent = ''; ui.receipt.value = ''; say('Replacement frozen, not submitted. Review the complete policy and confirm explicitly.');
-  }, 'Preparing one exact policy replacement without publication…');
+  }, 'Preparing one exact policy replacement without publication…', true);
   function settle(result) {
     if (!result.terminal) { say(`Original request remains unresolved (${result.state}). Absence does not prove non-commit.`); return; }
     clear(); clearEditor(); ui.receipt.value = '';
@@ -200,6 +257,12 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     }, 'Selecting the explicit protection principal and credential…');
   });
   ui.edit.addEventListener('submit', event => { event.preventDefault(); return prepare(); });
+  ui['add-check'].addEventListener('click', () => {
+    if (!editable() || checkRows.length >= 64 * 32) return;
+    const targets = ui.rules.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => line.split(/\s+/u)[0]);
+    appendCheck(targets.length === 1 ? targets[0] : ''); unconfirm(); sync();
+  });
+  ui['remove-checks'].addEventListener('click', () => { if (editable()) { clearChecks(); unconfirm(); sync(); } });
   ui.confirm.addEventListener('change', sync); ui['ownership-confirm'].addEventListener('change', sync);
   ui.send.addEventListener('click', () => send()); ui.retry.addEventListener('click', () => send(true));
   ui.lookup.addEventListener('click', recover); ui.export.addEventListener('click', exportReceipt); ui.restore.addEventListener('click', restore);
