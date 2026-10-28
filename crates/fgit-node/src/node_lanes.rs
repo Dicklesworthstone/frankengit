@@ -35,7 +35,7 @@ pub(crate) struct NodeLanes {
 }
 
 impl NodeLanes {
-    pub(crate) fn new(config: NodeConfig, capacity: usize, label: &'static str) -> Self {
+    pub(crate) const fn new(config: NodeConfig, capacity: usize, label: &'static str) -> Self {
         Self {
             config,
             idle: Mutex::new(Vec::new()),

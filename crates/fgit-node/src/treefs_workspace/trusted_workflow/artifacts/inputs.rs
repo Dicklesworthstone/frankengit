@@ -45,18 +45,23 @@ impl TrustedWorkflowArtifactInput {
             destination: target.output,
         })
     }
+    #[must_use]
     pub fn workflow_path(&self) -> &[u8] {
         self.workflow.as_bytes()
     }
+    #[must_use]
     pub fn consumer_job_id(&self) -> &str {
         &self.consumer
     }
+    #[must_use]
     pub fn producer_job_id(&self) -> &str {
         &self.producer
     }
+    #[must_use]
     pub fn output_path(&self) -> &[u8] {
         self.output.as_bytes()
     }
+    #[must_use]
     pub fn destination(&self) -> &[u8] {
         self.destination.as_bytes()
     }
@@ -125,9 +130,11 @@ impl TrustedWorkflowArtifactConfig {
         Ok(self)
     }
 
+    #[must_use]
     pub fn inputs(&self) -> &[TrustedWorkflowArtifactInput] {
         &self.inputs
     }
+    #[must_use]
     pub const fn input_total_bytes(&self) -> usize {
         self.input_total_bytes
     }

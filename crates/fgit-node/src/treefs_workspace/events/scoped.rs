@@ -308,7 +308,7 @@ fn stopped(cancelled: &dyn Fn() -> bool) -> Result<(), ForgeEventReadRefusal> {
         Ok(())
     }
 }
-fn position(cursor: ForgeEventCursor) -> (u64, u32) {
+const fn position(cursor: ForgeEventCursor) -> (u64, u32) {
     (cursor.repository_sequence, cursor.event_index)
 }
 fn project(

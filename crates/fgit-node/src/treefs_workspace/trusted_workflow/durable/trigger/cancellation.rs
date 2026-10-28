@@ -9,7 +9,7 @@ use fgit_admission::AdmissionError;
 use fgit_authority::{AmbiguityReason, AuthorityFailure, OutcomeFailure, SealFailure};
 use fgit_types::RefusalCode;
 
-fn authority(error: &AuthorityFailure) -> bool {
+const fn authority(error: &AuthorityFailure) -> bool {
     matches!(
         error,
         AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled | AmbiguityReason::Timeout)

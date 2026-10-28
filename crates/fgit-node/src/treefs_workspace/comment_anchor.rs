@@ -94,7 +94,7 @@ impl NodeNativeMergeProjection<'_> {
     }
 }
 
-fn failure(error: SourceCommentError) -> ProjectionFailure {
+const fn failure(error: SourceCommentError) -> ProjectionFailure {
     match error {
         SourceCommentError::Invalid => ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid),
         SourceCommentError::Budget

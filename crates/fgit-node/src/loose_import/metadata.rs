@@ -10,7 +10,7 @@ fn codec_error(body: &'static str, source: CodecRefusal) -> LooseGitImportRefusa
         source: Box::new(source),
     }
 }
-fn check(body: &'static str, bytes: u64, maximum: u64) -> Result<(), LooseGitImportRefusal> {
+const fn check(body: &'static str, bytes: u64, maximum: u64) -> Result<(), LooseGitImportRefusal> {
     if bytes > maximum {
         return Err(LooseGitImportRefusal::PublicationMetadataTooLarge {
             body,

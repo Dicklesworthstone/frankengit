@@ -36,6 +36,7 @@ pub enum WorkflowArtifactReadRefusal {
 }
 impl WorkflowArtifactReadRefusal {
     /// Stable transport-safe cause. Detailed storage paths are never disclosed.
+    #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Disabled => "artifact_storage_disabled",
@@ -109,11 +110,13 @@ pub struct WorkflowArtifactMetadata {
     identity: ArtifactIdentity,
 }
 impl WorkflowArtifactMetadata {
-    pub fn identity(&self) -> &ArtifactIdentity {
+    #[must_use]
+    pub const fn identity(&self) -> &ArtifactIdentity {
         &self.identity
     }
     /// Shared HTTP/MCP representation. Provenance fields are retained assertions,
     /// never a substitute for authenticated canonical workflow-check evidence.
+    #[must_use]
     pub fn json_value(&self) -> Value {
         object([
             ("type", text("artifact_metadata")),
@@ -171,12 +174,15 @@ pub struct WorkflowArtifactPayload {
     bytes: Vec<u8>,
 }
 impl WorkflowArtifactPayload {
-    pub fn metadata(&self) -> &WorkflowArtifactMetadata {
+    #[must_use]
+    pub const fn metadata(&self) -> &WorkflowArtifactMetadata {
         &self.metadata
     }
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    #[must_use]
     pub fn into_parts(self) -> (WorkflowArtifactMetadata, Vec<u8>) {
         (self.metadata, self.bytes)
     }

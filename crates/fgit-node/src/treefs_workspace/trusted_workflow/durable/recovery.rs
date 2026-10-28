@@ -15,6 +15,7 @@ impl TrustedWorkflowRun {
     /// Retain this exact local custody scope independently of the run directory
     /// for later reopening. It identifies the immutable attempt marker; it is
     /// neither a canonical check receipt nor authorization to execute again.
+    #[must_use]
     pub fn check_journal_scope(&self) -> CheckJournalScope {
         scope(self)
     }

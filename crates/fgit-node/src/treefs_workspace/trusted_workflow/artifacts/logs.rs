@@ -85,7 +85,7 @@ impl TrustedWorkflowJobLogs {
 }
 
 impl Collector<'_> {
-    pub(in crate::treefs_workspace::trusted_workflow) fn logs_enabled(&self) -> bool {
+    pub(in crate::treefs_workspace::trusted_workflow) const fn logs_enabled(&self) -> bool {
         self.session.config.capture_logs
     }
 

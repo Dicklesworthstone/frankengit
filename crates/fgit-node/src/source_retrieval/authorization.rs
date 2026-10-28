@@ -35,7 +35,7 @@ pub struct SourceReadContext {
     host: Host,
 }
 impl SourceReadContext {
-    fn new(node: &OneNode, host: Host) -> Self {
+    const fn new(node: &OneNode, host: Host) -> Self {
         Self {
             namespace: LexicalNamespace {
                 tenant: node.tenant_id,
@@ -108,7 +108,7 @@ pub(crate) struct InitialLabelInput<'a> {
     mode: InitialSourceMode,
 }
 impl<'a> InitialLabelInput<'a> {
-    pub(crate) fn exact(
+    pub(crate) const fn exact(
         content: &'a IndexedLexicalReport,
         path: &'a IndexedLexicalReport,
         symbols: &'a SymbolChannel,
@@ -123,7 +123,7 @@ impl<'a> InitialLabelInput<'a> {
             mode: InitialSourceMode::Exact,
         }
     }
-    pub(crate) fn revalidated(
+    pub(crate) const fn revalidated(
         disclosure: &'a LexicalSource,
         content: &'a IndexedLexicalReport,
         path: &'a IndexedLexicalReport,

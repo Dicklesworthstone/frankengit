@@ -63,12 +63,15 @@ impl TrustedWorkflowArtifactSelection {
             output,
         })
     }
+    #[must_use]
     pub fn workflow_path(&self) -> &[u8] {
         self.workflow.as_bytes()
     }
+    #[must_use]
     pub fn job_id(&self) -> &str {
         &self.job
     }
+    #[must_use]
     pub fn output_path(&self) -> &[u8] {
         self.output.as_bytes()
     }
@@ -148,18 +151,23 @@ impl TrustedWorkflowArtifactConfig {
             input_total_bytes: DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES,
         })
     }
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
+    #[must_use]
     pub fn selections(&self) -> &[TrustedWorkflowArtifactSelection] {
         &self.selections
     }
+    #[must_use]
     pub const fn maximum_bytes(&self) -> usize {
         self.maximum_bytes
     }
+    #[must_use]
     pub const fn total_bytes(&self) -> usize {
         self.total_bytes
     }
+    #[must_use]
     pub const fn capture_logs(&self) -> bool {
         self.capture_logs
     }

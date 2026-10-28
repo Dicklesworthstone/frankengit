@@ -275,7 +275,7 @@ impl SelectedObjectScrub {
         self.stop
     }
     #[must_use]
-    pub fn entire_selection_checked(&self) -> bool {
+    pub const fn entire_selection_checked(&self) -> bool {
         self.start_after.is_none() && self.next.is_none()
     }
     #[must_use]

@@ -64,7 +64,8 @@ pub struct Query {
     pub expected_head: Option<RepositoryAuthorityHeadId>,
 }
 impl Query {
-    pub fn new(start: DecisionSequence, predicate: Predicate) -> Self {
+    #[must_use]
+    pub const fn new(start: DecisionSequence, predicate: Predicate) -> Self {
         Self {
             start,
             end: None,
@@ -131,15 +132,18 @@ pub struct Report {
     pub search: BisectionReceipt,
 }
 impl Report {
-    pub fn complete(&self) -> bool {
+    #[must_use]
+    pub const fn complete(&self) -> bool {
         !matches!(
             self.search.termination,
             BisectionTermination::Refused { .. }
         )
     }
+    #[must_use]
     pub fn matched(&self) -> bool {
         self.complete() && self.search.transition_found.is_some()
     }
+    #[must_use]
     pub fn to_json(&self) -> String {
         receipt::render(self)
     }

@@ -92,7 +92,7 @@ impl<'a> Request<'a> {
         }
         request::Request::parse(envelope).map(|request| request.map(Self::Metadata))
     }
-    pub(super) fn is_mutation(&self) -> bool {
+    pub(super) const fn is_mutation(&self) -> bool {
         match self {
             Self::FastForward(_) => true,
             Self::Metadata(request) => request.is_mutation(),

@@ -23,10 +23,10 @@ pub struct TrustedRefWorkflowPoll {
     execution_settled: bool,
 }
 impl TrustedRefWorkflowPoll {
-    pub fn state(&self) -> &'static str {
+    pub const fn state(&self) -> &'static str {
         self.state
     }
-    pub fn dispatch(&self) -> Option<&TrustedWorkflowDispatch> {
+    pub const fn dispatch(&self) -> Option<&TrustedWorkflowDispatch> {
         self.dispatch.as_ref()
     }
     /// The request stopped while selecting inputs, before this poll reserved
@@ -37,7 +37,7 @@ impl TrustedRefWorkflowPoll {
     /// The selected event's durable settlement was verified, or its handoff
     /// and settlement marker were written and synced by this poll. Closed
     /// child processes alone do not establish this local recovery boundary.
-    pub fn execution_settled(&self) -> bool {
+    pub const fn execution_settled(&self) -> bool {
         self.execution_settled
     }
     pub fn requires_reconciliation(&self) -> bool {
@@ -454,7 +454,7 @@ fn closed(dispatch: &TrustedWorkflowDispatch) -> bool {
                 .all(|job| !job.requires_containment())
     })
 }
-fn invalid(detail: &'static str) -> TrustedWorkflowFailure {
+const fn invalid(detail: &'static str) -> TrustedWorkflowFailure {
     TrustedWorkflowFailure::InvalidInput(detail)
 }
 fn invalid_owned(detail: String) -> TrustedWorkflowFailure {
@@ -463,7 +463,7 @@ fn invalid_owned(detail: String) -> TrustedWorkflowFailure {
         source: std::io::Error::other(detail),
     }
 }
-fn io(source: std::io::Error) -> TrustedWorkflowFailure {
+const fn io(source: std::io::Error) -> TrustedWorkflowFailure {
     TrustedWorkflowFailure::Io {
         operation: "workflow trigger custody",
         source,

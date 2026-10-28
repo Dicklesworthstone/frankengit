@@ -83,25 +83,25 @@ impl ApiError {
             outcome_unknown: false,
         }
     }
-    pub(super) fn bad(code: &'static str) -> Self {
+    pub(super) const fn bad(code: &'static str) -> Self {
         Self::new(Status::BadRequest, code)
     }
-    pub(super) fn not_found() -> Self {
+    pub(super) const fn not_found() -> Self {
         Self::new(Status::NotFound, "not_found")
     }
-    pub(super) fn too_large() -> Self {
+    pub(super) const fn too_large() -> Self {
         Self::new(Status::TooLarge, "resource_limit")
     }
-    pub(super) fn media() -> Self {
+    pub(super) const fn media() -> Self {
         Self::new(Status::MediaType, "unsupported_media_type")
     }
-    pub(super) fn method() -> Self {
+    pub(super) const fn method() -> Self {
         Self::new(Status::Method, "method_not_allowed")
     }
-    pub(super) fn unavailable() -> Self {
+    pub(super) const fn unavailable() -> Self {
         Self::new(Status::Unavailable, "repository_unavailable")
     }
-    pub(super) fn snapshot_moved() -> Self {
+    pub(super) const fn snapshot_moved() -> Self {
         Self::new(Status::Conflict, "snapshot_moved")
     }
     pub(super) const fn unknown() -> Self {

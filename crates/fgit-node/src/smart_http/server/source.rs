@@ -127,7 +127,7 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.is_mutation(),
         }
     }
-    fn route(&self) -> &str {
+    const fn route(&self) -> &str {
         match &self.0 {
             RequestKind::Read(request) => request.repository_route,
             RequestKind::Regex(request) => request.repository_route,

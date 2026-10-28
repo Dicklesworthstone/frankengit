@@ -39,7 +39,7 @@ pub(super) struct HashingReader<R> {
     bytes: u64,
 }
 impl<R> HashingReader<R> {
-    pub(super) fn new(reader: R) -> Self {
+    pub(super) const fn new(reader: R) -> Self {
         Self {
             reader,
             hash: Sha256Hasher::new(),

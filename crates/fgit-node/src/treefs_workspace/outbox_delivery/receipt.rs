@@ -24,12 +24,12 @@ impl RetiredForgeDeliveryReceipt {
     }
 
     #[must_use]
-    pub fn effect(&self) -> &CanonicalOutboxEffectState {
+    pub const fn effect(&self) -> &CanonicalOutboxEffectState {
         &self.effect
     }
 
     #[must_use]
-    pub fn receipt(&self) -> &CanonicalOutboxDeliveryReceipt {
+    pub const fn receipt(&self) -> &CanonicalOutboxDeliveryReceipt {
         &self.receipt
     }
 }

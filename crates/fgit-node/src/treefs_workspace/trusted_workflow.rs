@@ -118,14 +118,17 @@ pub struct TrustedWorkflowRun {
     pub execution: WorkflowReport,
 }
 impl TrustedWorkflowRun {
+    #[must_use]
     pub fn succeeded(&self) -> bool {
         self.workspaces_closed
             && !self.request_interrupted
             && completion::succeeded(&self.execution)
     }
+    #[must_use]
     pub fn executed_commit(&self) -> GitOid {
         self.candidate.map_or(self.source_commit, |c| c.commit)
     }
+    #[must_use]
     pub fn executed_tree(&self) -> GitOid {
         self.candidate.map_or(self.source_tree, |c| c.tree)
     }

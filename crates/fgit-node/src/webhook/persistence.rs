@@ -36,14 +36,14 @@ impl Value {
         }
     }
 
-    fn number(&self) -> Option<u64> {
+    const fn number(&self) -> Option<u64> {
         match self {
             Self::Number(value) => Some(*value),
             _ => None,
         }
     }
 
-    fn boolean(&self) -> Option<bool> {
+    const fn boolean(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
             _ => None,

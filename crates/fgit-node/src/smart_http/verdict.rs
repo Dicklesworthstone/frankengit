@@ -16,7 +16,7 @@ use fgit_wire::receive::{
 /// reports a connectivity failure (frankengit-root-doctrine-x2mv.4.49).
 /// Framing, resource, authority and cancellation codes are not verdicts; they
 /// keep each transport's fatal path and never fabricate a per-ref rejection.
-pub(super) fn command_verdict_phrase(code: RefusalCode) -> Option<&'static str> {
+pub(super) const fn command_verdict_phrase(code: RefusalCode) -> Option<&'static str> {
     Some(match code {
         RefusalCode::ObjectClosureIncomplete => "missing necessary objects",
         RefusalCode::EvidenceInvalid | RefusalCode::EvidenceMissing => {

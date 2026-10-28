@@ -4301,7 +4301,9 @@ fn reachable_within_permitted_closure_bounded(
 /// one have, and it needs a full-history, unfiltered fetch. Only there does a
 /// have prove that the client holds that object's whole closure, which is
 /// what makes a client-held object a sound delta base (frankengit-pazc).
-pub(crate) fn selected_fetch_write_profile(request: &fgit_wire::PackRequest) -> PackWriteProfile {
+pub(crate) const fn selected_fetch_write_profile(
+    request: &fgit_wire::PackRequest,
+) -> PackWriteProfile {
     let options = request.options;
     if !options.ofs_delta() {
         return PackWriteProfile::COMPRESSED_NO_DELTA_V1;
@@ -5571,7 +5573,7 @@ impl GitDaemonReceiveProcessingDeadline {
         self.work.expired()
     }
 
-    fn deadline(&self) -> &GitDaemonSessionDeadline {
+    const fn deadline(&self) -> &GitDaemonSessionDeadline {
         &self.work
     }
 }
@@ -7629,7 +7631,7 @@ impl NodeConfig {
     /// Existing configurations keep their original profiles and 32 MiB limit.
     /// Receive/import object limits and the total pack envelope are separate.
     #[must_use]
-    pub fn with_selected_pack_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
+    pub const fn with_selected_pack_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
         self.selected_pack_limits.max_object_bytes = maximum_blob_bytes;
         self.selected_pack_blob_limit = Some(maximum_blob_bytes);
         self

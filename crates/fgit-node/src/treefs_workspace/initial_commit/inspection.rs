@@ -29,7 +29,7 @@ fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), NodeWorkspaceRefusa
         Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None })
     }
 }
-fn budget(name: &'static str) -> NodeWorkspaceRefusal {
+const fn budget(name: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InitialCommit(InitialCommitError::Budget(name))
 }
 

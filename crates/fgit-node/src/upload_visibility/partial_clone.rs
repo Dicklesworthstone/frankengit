@@ -50,7 +50,7 @@ impl<F: FnMut() -> bool> Work<'_, F> {
             .ok_or_else(|| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
         Ok(())
     }
-    fn count(&self, count: usize) -> Result<(), NodePackMaterializationRefusal> {
+    const fn count(&self, count: usize) -> Result<(), NodePackMaterializationRefusal> {
         if count > self.maximum {
             Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded))
         } else {

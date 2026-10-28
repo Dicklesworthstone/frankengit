@@ -34,7 +34,7 @@ fn target(index: &IndexExpectation, format: GitHashAlgorithm) -> Result<GitOid, 
     }
     Ok(id)
 }
-fn refusal(error: BinaryPatchError) -> PatchError {
+const fn refusal(error: BinaryPatchError) -> PatchError {
     match error {
         BinaryPatchError::Cancelled => PatchError::Cancelled,
         BinaryPatchError::InvalidLimits => PatchError::InvalidLimits,

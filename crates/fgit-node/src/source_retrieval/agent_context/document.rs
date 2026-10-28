@@ -71,14 +71,14 @@ impl From<&'static str> for AgentContextDocumentError {
     }
 }
 
-fn profile(input: &AgentContextRequest<'_>) -> &'static str {
+const fn profile(input: &AgentContextRequest<'_>) -> &'static str {
     if input.authorization.principal().is_some() {
         HTTP_PROFILE
     } else {
         PROFILE
     }
 }
-fn sponsor_authentication(input: &AgentContextRequest<'_>) -> &'static str {
+const fn sponsor_authentication(input: &AgentContextRequest<'_>) -> &'static str {
     if input.authorization.principal().is_some() {
         "http-repository-read-credential"
     } else {

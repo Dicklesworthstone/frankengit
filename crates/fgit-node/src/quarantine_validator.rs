@@ -239,7 +239,7 @@ impl ProductionQuarantineValidator<'_> {
     /// graph proves their typed native edges. This is not a payload scrub and
     /// does not bypass body verification for uploaded bytes or external deltas.
     /// Kept crate-private: untrusted commands cannot select this policy.
-    pub(crate) fn for_reviewed_candidate(mut self) -> Self {
+    pub(crate) const fn for_reviewed_candidate(mut self) -> Self {
         self.reuse_admitted_blobs = true;
         self
     }

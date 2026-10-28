@@ -13,11 +13,11 @@ pub(super) struct PullSelection {
     recorded_target: GitOid,
 }
 impl PullSelection {
-    pub(super) fn path_comparison_base(&self) -> GitOid {
+    pub(super) const fn path_comparison_base(&self) -> GitOid {
         self.target_commit
     }
 
-    pub(super) fn target_reference(&self) -> &RefName {
+    pub(super) const fn target_reference(&self) -> &RefName {
         &self.target
     }
 

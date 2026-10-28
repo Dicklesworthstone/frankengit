@@ -89,7 +89,7 @@ impl<'a, F: FnMut() -> bool> Work<'a, F> {
     }
 }
 
-fn budget() -> NodePackMaterializationRefusal {
+const fn budget() -> NodePackMaterializationRefusal {
     disclosure_refusal(RefusalCode::ResourceBudgetExceeded)
 }
 

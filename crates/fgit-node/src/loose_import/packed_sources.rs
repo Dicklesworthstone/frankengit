@@ -429,7 +429,7 @@ impl StreamedPack<'_> {
         pack_refusal(self.pack_path.to_path_buf(), error)
     }
 
-    fn invariant() -> LooseGitImportRefusal {
+    const fn invariant() -> LooseGitImportRefusal {
         super::control::interrupted(fgit_types::RefusalCode::InternalInvariantBreach)
     }
 

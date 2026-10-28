@@ -68,7 +68,7 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
             },
         }
     }
-    pub(super) fn merge_style(&self) -> MergeCommitStyle {
+    pub(super) const fn merge_style(&self) -> MergeCommitStyle {
         match self {
             Self::Candidate {
                 merge: Some((_, style)),
