@@ -80,6 +80,55 @@ fn service_scope_cannot_widen_or_remove_schedule_bounds() {
 }
 
 #[test]
+fn maintenance_groups_keep_independent_profiles_and_refuse_conflicting_owners() {
+    let make = |kind, format, directory| {
+        MaintenanceConfig::try_new(
+            kind,
+            format,
+            PathBuf::from(directory),
+            false,
+            Duration::from_secs(1),
+            vec![reference("refs/heads/main")],
+        )
+        .unwrap()
+    };
+    let lexical = make(IndexKind::Lexical, GitHashAlgorithm::Sha1, "/lexical");
+    let symbols = make(IndexKind::Symbols, GitHashAlgorithm::Sha1, "/symbols");
+    let group = MaintenanceGroup::try_new(vec![symbols.clone(), lexical.clone()]).unwrap();
+    assert_eq!(group.configs().len(), 2);
+    assert_eq!(group.configs()[0].kind(), IndexKind::Lexical);
+    assert_eq!(group.configs()[0].directory(), Path::new("/lexical"));
+    assert_eq!(group.configs()[1].kind(), IndexKind::Symbols);
+    assert_eq!(group.configs()[1].directory(), Path::new("/symbols"));
+    assert_eq!(MaintenanceGroup::from(lexical.clone()).configs().len(), 1);
+    assert!(MaintenanceGroup::try_new(Vec::new()).is_err());
+    assert!(
+        MaintenanceGroup::try_new(vec![lexical.clone(), symbols.clone(), lexical.clone()]).is_err()
+    );
+    assert!(
+        MaintenanceGroup::try_new(vec![
+            lexical.clone(),
+            make(IndexKind::Lexical, GitHashAlgorithm::Sha1, "/other"),
+        ])
+        .is_err()
+    );
+    assert!(
+        MaintenanceGroup::try_new(vec![
+            lexical.clone(),
+            make(IndexKind::Symbols, GitHashAlgorithm::Sha1, "/lexical"),
+        ])
+        .is_err()
+    );
+    assert!(
+        MaintenanceGroup::try_new(vec![
+            lexical,
+            make(IndexKind::Symbols, GitHashAlgorithm::Sha256, "/symbols"),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn attempt_timeout_meets_inherited_budgets_without_replacing_other_limits() {
     use fgit_runtime::{BudgetPolicy, ClassLimits};
     for inherited_timeout in [
@@ -225,6 +274,48 @@ mod native {
                 assert!(!directory.join("run.lock").exists());
                 assert!(directory.join("owner.lock").is_file());
             }
+        }
+    }
+
+    #[test]
+    fn stopped_startup_preserves_pending_recovery_and_releases_healthy_ownership() {
+        for kind in [IndexKind::Lexical, IndexKind::Symbols] {
+            let root = Scratch::new();
+            let node_config = root.initialize(GitHashAlgorithm::Sha1);
+            let node = OneNode::open_existing(node_config.clone()).unwrap();
+            let binding = kind.bind(format!(
+                "{} {} {} sha1",
+                node.tenant_id(),
+                node.repository_id(),
+                node.repository_incarnation_id(),
+            ));
+            node.shutdown().unwrap();
+            let directory = root.progress();
+            let reference = b"refs/heads/main";
+            let state = State::new(binding, &[reference.to_vec()]).unwrap();
+            let mut progress = ProgressFile::open(&directory, true, state).unwrap();
+            progress.state.begin_preparation(reference).unwrap();
+            progress.arm(reference, [9; 32]).unwrap();
+            progress.release().unwrap();
+            let checkpoint = fs::read(directory.join("checkpoint")).unwrap();
+            let control = MaintenanceControl::default();
+            control.request_stop();
+            let called = Cell::new(false);
+            let receipt = run_service_with_ready(
+                node_config,
+                config(kind, GitHashAlgorithm::Sha1, &directory, false),
+                control,
+                || {
+                    called.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(!called.get());
+            assert_eq!(receipt.pending, 1);
+            assert_eq!(receipt.attempts, 0);
+            assert_eq!(fs::read(directory.join("checkpoint")).unwrap(), checkpoint);
+            assert!(!directory.join("run.lock").exists());
         }
     }
 

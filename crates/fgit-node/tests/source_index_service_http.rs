@@ -6,7 +6,7 @@
 mod support;
 use fgit_forge::patch::PatchLimits;
 use fgit_forge::preparation::MergeMetadata;
-use fgit_node::index_maintenance::{IndexKind, MaintenanceConfig};
+use fgit_node::index_maintenance::{IndexKind, MaintenanceConfig, MaintenanceGroup};
 use fgit_node::{GitDaemonServerLimits, GitDaemonServerReceipt, OneNode};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, RefName};
 use std::fs;
@@ -25,7 +25,10 @@ fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
 fn progress(root: &Scratch) -> PathBuf {
-    let directory = root.0.join("maintenance");
+    named_progress(root, "maintenance")
+}
+fn named_progress(root: &Scratch, name: &str) -> PathBuf {
+    let directory = root.0.join(name);
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
     directory
@@ -97,7 +100,8 @@ struct MaintainedServer {
     worker: Option<JoinHandle<Result<GitDaemonServerReceipt, String>>>,
 }
 impl MaintainedServer {
-    fn start(node: OneNode, root: &Scratch, config: MaintenanceConfig) -> Self {
+    fn start(node: OneNode, root: &Scratch, config: impl Into<MaintenanceGroup>) -> Self {
+        let config = config.into();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = Endpoint {
             address: listener.local_addr().unwrap(),
@@ -210,6 +214,326 @@ fn wait_for_index(
         );
         thread::sleep(Duration::from_millis(300));
     }
+}
+
+fn group(
+    format: GitHashAlgorithm,
+    directories: &[PathBuf; 2],
+    initialize: bool,
+) -> MaintenanceGroup {
+    MaintenanceGroup::try_new(vec![
+        maintenance(IndexKind::Lexical, format, &directories[0], initialize),
+        maintenance(IndexKind::Symbols, format, &directories[1], initialize),
+    ])
+    .unwrap()
+}
+
+fn initial_form(format: GitHashAlgorithm, word: &[u8], commit: GitOid) -> String {
+    format!(
+        "{}&term_hex={}&symbol_name_hex={}&symbol_match=exact&symbol_policy=required&expected_commit={commit}",
+        common(format),
+        hex(word),
+        hex(word),
+    )
+}
+
+fn wait_for_initial(
+    client: &Endpoint,
+    format: GitHashAlgorithm,
+    word: &[u8],
+    commit: GitOid,
+) -> Reply {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let reply = post(
+            client,
+            "search-initial",
+            'a',
+            &initial_form(format, word, commit),
+            false,
+        );
+        if reply.status == 200 {
+            assert_eq!(text(&reply.body, "type"), "source_search_initial");
+            assert_eq!(text(&reply.body, "phase"), "Initial");
+            assert!(
+                reply
+                    .body
+                    .split_once("\"complete\":")
+                    .unwrap()
+                    .1
+                    .starts_with("true"),
+                "{}",
+                reply.raw
+            );
+            assert_eq!(text(&reply.body, "source_commit"), commit.to_string());
+            assert!(number(&reply.body, "returned_hits") > 0, "{}", reply.raw);
+            assert_eq!(number(&reply.body, "returned_matches"), 1, "{}", reply.raw);
+            assert!(
+                reply
+                    .body
+                    .contains("\"symbols\":{\"state\":\"available\",\"result\":{"),
+                "{}",
+                reply.raw
+            );
+            // Top-level and every returned channel retain the exact current
+            // commit; catch-up cannot serve a vector assembled from old source.
+            let mut sources = 0;
+            for field in reply.body.split("\"source_commit\":\"").skip(1) {
+                assert_eq!(field.split('"').next().unwrap(), commit.to_string());
+                sources += 1;
+            }
+            assert!(sources >= 4, "missing channel provenance: {}", reply.raw);
+            return reply;
+        }
+        assert_eq!(reply.status, 409, "{}", reply.raw);
+        assert!(
+            Instant::now() < deadline,
+            "both maintained channels did not catch up: {}",
+            reply.raw
+        );
+        thread::sleep(Duration::from_millis(300));
+    }
+}
+
+fn generation_vector(reply: &Reply) -> &str {
+    reply
+        .body
+        .split_once("\"generation_vector\":")
+        .unwrap()
+        .1
+        .split_once(",\"max_results_per_channel\":")
+        .unwrap()
+        .0
+}
+
+fn channel_token<'a>(reply: &'a Reply, channel: &str) -> &'a str {
+    text(
+        generation_vector(reply)
+            .split_once(&format!("\"{channel}\":"))
+            .unwrap()
+            .1,
+        "index_token",
+    )
+}
+
+#[test]
+fn dual_profile_http_maintenance_keeps_required_initial_current_and_resumes_both_formats() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, original) = fixture(&root, format);
+        let base = add_file(&node, original, "before.rs", "pub fn ServiceBefore() {}", 1);
+        let canonical_before = generation(&node);
+        let directories = [
+            named_progress(&root, "lexical-maintenance"),
+            named_progress(&root, "symbol-maintenance"),
+        ];
+        let server = MaintainedServer::start(node, &root, group(format, &directories, true));
+        let first = wait_for_initial(&server.client, format, b"ServiceBefore", base);
+        status(
+            &post(
+                &server.client,
+                "search-initial",
+                'b',
+                &initial_form(format, b"ServiceBefore", base),
+                false,
+            ),
+            403,
+        );
+        let writer = reopen(&config);
+        assert_eq!(generation(&writer), canonical_before);
+        let commit = add_file(&writer, base, "after.rs", "pub fn ServiceAfter() {}", 2);
+        let canonical_after = generation(&writer);
+        writer.shutdown().unwrap();
+        let updated = wait_for_initial(&server.client, format, b"ServiceAfter", commit);
+        for channel in ["lexical", "symbols"] {
+            assert_ne!(
+                channel_token(&first, channel),
+                channel_token(&updated, channel)
+            );
+        }
+        assert!(server.finish().accepted_sessions() >= 3);
+        let checkpoints = directories.each_ref().map(|directory| {
+            assert!(!directory.join("run.lock").exists());
+            assert!(directory.join("owner.lock").is_file());
+            fs::read(directory.join("checkpoint")).unwrap()
+        });
+
+        let node = reopen(&config);
+        assert_eq!(generation(&node), canonical_after);
+        let resumed = MaintainedServer::start(node, &root, group(format, &directories, false));
+        let again = wait_for_initial(&resumed.client, format, b"ServiceAfter", commit);
+        assert_eq!(generation_vector(&updated), generation_vector(&again));
+        resumed.finish();
+        for (directory, checkpoint) in directories.iter().zip(checkpoints) {
+            assert!(!directory.join("run.lock").exists());
+            assert_eq!(fs::read(directory.join("checkpoint")).unwrap(), checkpoint);
+        }
+        let node = reopen(&config);
+        assert_eq!(generation(&node), canonical_after);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn second_live_progress_owner_refuses_group_readiness_and_drains_first_owner() {
+    let root = Scratch::new();
+    let format = GitHashAlgorithm::Sha1;
+    let config = root.config(format);
+    let (node, original) = fixture(&root, format);
+    let commit = add_file(&node, original, "owned.rs", "pub fn AlreadyOwned() {}", 1);
+    let before = generation(&node);
+    let directories = [
+        named_progress(&root, "lexical-maintenance"),
+        named_progress(&root, "symbol-maintenance"),
+    ];
+    // A real separate serving lifetime owns Symbols. The attempted group may
+    // neither steal it nor strand its own earlier Lexical child on refusal.
+    let owner = MaintainedServer::start(
+        reopen(&config),
+        &root,
+        maintenance(IndexKind::Symbols, format, &directories[1], true),
+    );
+    let original_symbols = wait_for_index(
+        &owner.client,
+        IndexKind::Symbols,
+        format,
+        b"AlreadyOwned",
+        commit,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ready = AtomicBool::new(false);
+    let requested = MaintenanceGroup::try_new(vec![
+        maintenance(IndexKind::Lexical, format, &directories[0], true),
+        maintenance(IndexKind::Symbols, format, &directories[1], false),
+    ])
+    .unwrap();
+    let error = node
+        .serve_repository_http_with_index_maintenance_bounded(
+            &listener,
+            GitDaemonServerLimits::try_new(1, 1).unwrap(),
+            &root.0.join("credentials"),
+            false,
+            false,
+            false,
+            false,
+            Duration::from_secs(1),
+            requested,
+            &|| {
+                ready.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("maintenance"));
+    assert!(!ready.load(Ordering::Acquire));
+    assert!(directories[0].join("checkpoint").is_file());
+    assert!(!directories[0].join("run.lock").exists());
+    assert!(directories[1].join("run.lock").is_file());
+    assert_eq!(generation(&node), before);
+    let absent_lexical = query(
+        &owner.client,
+        IndexKind::Lexical,
+        format,
+        b"AlreadyOwned",
+        commit,
+    );
+    status(&absent_lexical, 409);
+    assert!(absent_lexical.body.contains("source_index_uninitialized"));
+    let still_owned = wait_for_index(
+        &owner.client,
+        IndexKind::Symbols,
+        format,
+        b"AlreadyOwned",
+        commit,
+    );
+    assert_eq!(
+        text(&original_symbols.body, "index_token"),
+        text(&still_owned.body, "index_token")
+    );
+    owner.finish();
+    assert!(!directories[1].join("run.lock").exists());
+
+    let resumed = MaintainedServer::start(node, &root, group(format, &directories, false));
+    wait_for_initial(&resumed.client, format, b"AlreadyOwned", commit);
+    resumed.finish();
+    for directory in &directories {
+        assert!(!directory.join("run.lock").exists());
+    }
+    let node = reopen(&config);
+    assert_eq!(generation(&node), before);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn readiness_output_failure_drains_both_owners_before_any_native_index_attempt() {
+    let root = Scratch::new();
+    let format = GitHashAlgorithm::Sha256;
+    let config = root.config(format);
+    let (node, original) = fixture(&root, format);
+    let commit = add_file(&node, original, "ready.rs", "pub fn ReadyFailure() {}", 1);
+    let before = generation(&node);
+    let directories = [
+        named_progress(&root, "lexical-maintenance"),
+        named_progress(&root, "symbol-maintenance"),
+    ];
+    let path = root.0.join("credentials");
+    credentials(&node, &path);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let both_owned_at_readiness = AtomicBool::new(false);
+    let error = node
+        .serve_repository_http_with_index_maintenance_bounded(
+            &listener,
+            GitDaemonServerLimits::try_new(1, 1).unwrap(),
+            &path,
+            false,
+            false,
+            false,
+            false,
+            Duration::from_secs(1),
+            group(format, &directories, true),
+            &|| {
+                both_owned_at_readiness.store(
+                    directories
+                        .iter()
+                        .all(|directory| directory.join("run.lock").is_file()),
+                    Ordering::Release,
+                );
+                Err(io::Error::other("readiness output unavailable"))
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("readiness output unavailable"));
+    assert!(both_owned_at_readiness.load(Ordering::Acquire));
+    for directory in &directories {
+        assert!(directory.join("checkpoint").is_file());
+        assert!(directory.join("owner.lock").is_file());
+        assert!(!directory.join("run.lock").exists());
+    }
+    assert_eq!(generation(&node), before);
+    node.shutdown().unwrap();
+    // Read through the ordinary production HTTP path with maintenance disabled:
+    // neither first nor second controller may publish before global readiness.
+    let reader = Server::start(reopen(&config), &path, 2, true, false);
+    for (kind, code) in [
+        (IndexKind::Lexical, "source_index_uninitialized"),
+        (IndexKind::Symbols, "symbol_index_uninitialized"),
+    ] {
+        let reply = query(&reader.client, kind, format, b"ReadyFailure", commit);
+        status(&reply, 409);
+        assert!(reply.body.contains(code), "{}", reply.raw);
+    }
+    reader.finish();
+    let resumed =
+        MaintainedServer::start(reopen(&config), &root, group(format, &directories, false));
+    wait_for_initial(&resumed.client, format, b"ReadyFailure", commit);
+    resumed.finish();
+    for directory in &directories {
+        assert!(!directory.join("run.lock").exists());
+    }
+    let node = reopen(&config);
+    assert_eq!(generation(&node), before);
+    node.shutdown().unwrap();
 }
 #[test]
 fn live_http_maintenance_builds_and_refreshes_lexical_and_symbols_in_both_formats() {
