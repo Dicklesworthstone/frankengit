@@ -1,12 +1,9 @@
 //! Authority-selected cherry-pick/revert preparation. The artifact is a normal
 //! single-parent candidate; all mutation remains in workspace admission.
 use std::cell::Cell;
-use std::collections::BTreeMap;
 
 use fgit_admission::ProjectionFailure;
-use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_commit_closure, validate_workspace_objects,
-};
+use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_forge::preparation::replay::{
     PreparedReplay, ReplayError, ReplayPreparation, ReplayRequest, prepare_replay,
     prepare_resolved_replay,
@@ -320,23 +317,11 @@ fn replay_bundle(
     plan: &PreparedReplay,
     limits: PreparationLimits,
 ) -> Result<(Vec<u8>, usize, usize), ReplayPreparationRefusal> {
-    let empty = CandidateSource {
-        original,
-        generated: BTreeMap::new(),
-    };
     let validation_limits = MergeObjectLimits {
         max_object_bytes: original.limits.max_object_bytes,
         ..MergeObjectLimits::default()
     };
     let mut live = || original.checkpoint().is_ok();
-    let parent = validate_commit_closure(
-        &empty,
-        plan.coordinates.request.target,
-        validation_limits,
-        &mut live,
-    );
-    original.checkpoint()?;
-    let parent = parent.map_err(ReplayPreparationRefusal::Validation)?;
     let candidate = CandidateSource {
         original,
         generated: plan
@@ -359,22 +344,20 @@ fn replay_bundle(
             ReplayPreparationRefusal::InvalidInput("constructed object failed strict validation")
         })?;
     }
-    let verified = validate_workspace_objects(
+    let needed = super::sparse_bundle::objects_above_target(
         &candidate,
-        plan.commit,
         plan.coordinates.request.target,
+        plan.commit,
+        1,
         validation_limits,
         &mut live,
     );
     original.checkpoint()?;
-    let verified = verified.map_err(ReplayPreparationRefusal::Validation)?;
+    let needed = needed.map_err(ReplayPreparationRefusal::Validation)?;
     // A one-parent candidate cannot rely on the selected source commit being
-    // fetched. Include the exact closure difference, not just planner output.
-    let needed: Vec<_> = verified
-        .objects
-        .difference(&parent.objects)
-        .copied()
-        .collect();
+    // fetched. Include all dependencies outside the proved target-tree frontier,
+    // including source-only borrowed objects; never just the planner's output.
+    let needed: Vec<_> = needed.into_iter().collect();
     if needed.len() > limits.max_objects || !needed.contains(&plan.commit) {
         return Err(ReplayPreparationRefusal::BudgetExceeded);
     }

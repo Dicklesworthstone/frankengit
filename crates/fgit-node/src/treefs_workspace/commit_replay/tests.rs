@@ -326,7 +326,44 @@ fn borrowed_source_objects_are_in_the_target_only_bundle_and_replay_round_trips(
             panic!("inverse candidate required");
         };
         assert_eq!(revert.tree, f.target_tree);
-        assert_eq!(reverted.borrowed_objects, 0);
+        // The bounded selector proves the current target tree, not every old
+        // ancestor tree. Reverting this pick sends exactly the old root tree
+        // redundantly; it does not resend its inherited blobs or source history.
+        assert_eq!(reverted.borrowed_objects, 1);
+        assert_eq!(reverted.pack_objects, revert.objects.len() + 1);
+        let reverse_bundle = reverted.bundle.as_ref().unwrap();
+        let pack_start = reverse_bundle
+            .windows(2)
+            .position(|bytes| bytes == b"\n\n")
+            .unwrap()
+            + 2;
+        let reverse_pack = fgit_pack::read_verified_pack(
+            &reverse_bundle[pack_start..],
+            format,
+            &PackLimits::default(),
+            &mut || true,
+            &fgit_pack::NativeChecksumVerifier,
+        )
+        .unwrap();
+        let expected: std::collections::BTreeSet<_> = revert
+            .objects
+            .iter()
+            .map(|object| object.body.clone())
+            .chain([node
+                .read_git_object(f.target_tree)
+                .unwrap()
+                .payload()
+                .to_vec()])
+            .collect();
+        let actual: std::collections::BTreeSet<_> = reverse_pack
+            .entries()
+            .iter()
+            .map(|entry| entry.inflated.clone())
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "the only redundant object is the historical root tree"
+        );
         assert!(node.read_git_object(revert.commit).is_err());
         let result = node
             .runtime()

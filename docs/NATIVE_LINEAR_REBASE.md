@@ -85,10 +85,16 @@ This is a ref-only outcome, not a manufactured empty commit.
 
 The source commits are not parents of their replacements. Exporting only
 newly generated objects would omit source-only blobs or subtrees reused by the
-replay. The bundle instead contains the candidate's complete reachable native
-closure minus onto's existing reachable closure. It includes borrowed original
-objects that are absent from onto history. Onto is the sole external prerequisite,
-and the advertised bundle ref is the original source branch.
+replay. The node verifies every rewritten commit back to onto, then proves a
+sparse frontier from onto's current tree along changed directory paths. It
+packs every dependency of every intermediate rewritten tree outside that
+frontier, including borrowed source-only blobs and subtrees. Unchanged blob
+payloads and old onto ancestry are not reread. Native-kind, availability,
+cancellation and work limits still apply to every reused edge; missing or
+invalid frontier metadata refuses the artifact. Objects reachable only from
+older onto history may be sent redundantly, so the complete artifact is not
+necessarily a minimum-size pack. Onto is the sole external prerequisite, and
+the advertised bundle ref is the original source branch.
 
 Preparation validates the source graph, generated objects and final closure
 without staging objects, creating a seal, moving refs, appending forge events,

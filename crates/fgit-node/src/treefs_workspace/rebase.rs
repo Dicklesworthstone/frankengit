@@ -4,7 +4,7 @@ use crate::{
     AdmissionMaterializationRefusal, NodeRequestContext, OneNode, VerifiedFabricPackSource,
 };
 use fgit_admission::ProjectionFailure;
-use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_commit_closure};
+use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_forge::preparation::rebase::resolutions::{
     RebaseCommitResolution, RebaseResolvedStep, prepare_resolved_rebase,
     validate_rebase_resolutions,
@@ -433,23 +433,20 @@ fn rebase_bundle(
         max_object_bytes: original.limits.max_object_bytes,
         ..MergeObjectLimits::default()
     };
-    let empty = CandidateSource {
-        original,
-        generated: BTreeMap::new(),
-    };
     let mut live = || original.checkpoint().is_ok();
-    let base = validate_commit_closure(&empty, plan.request.onto, validation, &mut live);
+    let needed = super::sparse_bundle::objects_above_target(
+        &candidate,
+        plan.request.onto,
+        plan.commit,
+        limits.max_commits,
+        validation,
+        &mut live,
+    );
     original.checkpoint()?;
-    let base = base.map_err(RebasePreparationRefusal::Validation)?;
-    let all = validate_commit_closure(&candidate, plan.commit, validation, &mut live);
-    original.checkpoint()?;
-    let all = all.map_err(RebasePreparationRefusal::Validation)?;
-    if !all.objects.contains(&plan.request.onto) {
-        return Err(RebasePreparationRefusal::InvalidInput(
-            "onto history absent",
-        ));
-    }
-    let needed: Vec<_> = all.objects.difference(&base.objects).copied().collect();
+    let needed: Vec<_> = needed
+        .map_err(RebasePreparationRefusal::Validation)?
+        .into_iter()
+        .collect();
     if needed.len() > limits.max_objects {
         return Err(RebasePreparationRefusal::BudgetExceeded);
     }

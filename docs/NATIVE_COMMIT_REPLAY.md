@@ -104,12 +104,17 @@ containing only newly constructed objects could omit a source-only blob or
 subtree the planner reused, producing a candidate that works locally but fails
 in a destination with only target history.
 
-The node independently validates both the target's full native closure and the
-candidate's full closure. It packs the exact set difference: candidate objects
-absent from target history, whether constructed or borrowed from source history.
-Its single prerequisite is the target commit. Source commits and unused later
-source objects are not secretly required or added. The receipt distinguishes
-`generated_objects`, `pack_objects`, and `borrowed_objects`.
+The node independently verifies the candidate's single-parent chain and a sparse
+frontier rooted in the authenticated target commit. It reads target trees along
+changed directory paths and checks the native kind and availability of reused
+edges without loading unchanged blob payloads or walking old target history.
+It packs every candidate dependency outside that proved frontier, including
+borrowed source-only blobs and subtrees. An object reachable only from older
+target history may be included redundantly; the artifact remains complete and
+does not claim to be the minimum possible pack. Its single prerequisite is the
+target commit. Source commits and unused later source objects are not secretly
+required or added. The receipt distinguishes `generated_objects`, `pack_objects`,
+and `borrowed_objects`.
 
 Every constructed object is strictly verified, and the candidate's sole parent
 and all reachable native dependencies are independently checked before packing.
@@ -163,7 +168,13 @@ The inherited profile allows at most 4096 history commits, 16384 parent edges,
 1 MiB per text merge input, 128 conflicts, 10000 generated/packed objects, and
 32 MiB of generated/packed expanded bytes. Source-read work shares the existing
 128 MiB cumulative byte ceiling. Native closure validation retains its separate
-object, edge and byte budgets. The CLI can lower history and output ceilings
+object, edge and byte budgets independently for candidate validation and
+changed-path frontier discovery. Both phases, planning and packing share the
+source-read ceiling above; generated objects retain their output-byte ceiling.
+Unchanged inherited payloads and old target ancestry are not charged as new
+candidate work. This does not remove limits on a very wide changed directory,
+a large borrowed subtree or the changed content itself. The CLI can lower
+history and output ceilings
 with `--max-commits`, `--max-edges`, and `--max-output-bytes`; invalid or excessive
 limits refuse rather than disabling checks.
 
