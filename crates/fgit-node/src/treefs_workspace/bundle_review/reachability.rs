@@ -4,7 +4,8 @@
 
 use super::{
     AcceptanceProfile, BTreeMap, BTreeSet, GitHashAlgorithm, GitOid, MergeObjectLimits,
-    MergeSourceError, ObjectType, ParseLimits, ParsedObject, git_object_id, parse_object_body,
+    MergeSourceError, ObjectType, ParseLimits, ParsedObject, PlannedMergeObject, git_object_id,
+    parse_object_body,
 };
 use fgit_git_object::ObjectError;
 use std::collections::VecDeque;
@@ -294,7 +295,9 @@ pub(super) fn native_edges(
             {
                 return Err(MergeSourceError::InvalidObject(id));
             }
-            let tree = oid(commit.tree_reference().ok_or(MergeSourceError::InvalidObject(id))?)?;
+            let tree = oid(commit
+                .tree_reference()
+                .ok_or(MergeSourceError::InvalidObject(id))?)?;
             root_tree = Some(tree);
             push(tree, Some(ObjectType::Tree))?;
             for parent in commit.parent_references() {
