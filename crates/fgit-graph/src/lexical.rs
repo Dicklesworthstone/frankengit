@@ -17,7 +17,8 @@ pub use stored::scoped;
 pub use stored::{
     IndexError, IndexedLexicalReport, LexicalIndexStore, LexicalOmission, LexicalOmissionReason,
     LexicalReadLimits, LexicalRefreshStats, LexicalReuse, LexicalSelection, LexicalSource,
-    PreparedLexicalIndex, RefreshDocument,
+    PreparedLexicalIndex, RANKED_PROFILE, RARITY_SCALE, RankedLexicalReport, RankedLexicalScore,
+    RefreshDocument,
 };
 #[cfg(test)]
 mod long_word_tests;

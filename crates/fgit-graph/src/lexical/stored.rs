@@ -5,7 +5,9 @@
 
 mod manifest;
 mod omissions;
+mod ranked;
 mod refresh;
+pub use ranked::{RANKED_PROFILE, RARITY_SCALE, RankedLexicalReport, RankedLexicalScore};
 pub mod scoped;
 pub use omissions::{LexicalOmission, LexicalOmissionReason};
 pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};

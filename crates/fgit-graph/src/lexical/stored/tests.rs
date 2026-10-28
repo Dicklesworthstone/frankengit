@@ -19,6 +19,8 @@ use std::sync::{
 };
 use std::task::{Context, Poll, Waker};
 
+mod ranked;
+
 struct Store {
     inner: MemoryAuthorityStore,
     missing: Mutex<Option<ImmutableKey>>,
