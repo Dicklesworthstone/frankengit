@@ -2,12 +2,13 @@
 // receipt selects expected bytes; it is not authenticated producer/check proof.
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { constants as F } from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { lstat } from 'node:fs/promises';
+import { lstat, open, link, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { outcomeEndpoint } from './transaction_outcome.mjs';
-import { absolute, directory, readPrivate, parseJson, writeNew } from './workflow_watch_io.mjs';
+import { absolute, directory, readPrivate, parseJson, syncDirectory } from './workflow_watch_io.mjs';
 
 const MAX = 64 * 1024 * 1024, JSON_MAX = 16 * 1024;
 const MANIFEST_MAX = 1024 * 1024;
@@ -19,7 +20,6 @@ const RECEIPT_MAX = MANIFEST_MAX + Buffer.byteLength(JSON.stringify({
 const TRUST = 'trusted-workflow-local-owner';
 const STEP_OUTCOMES = ['succeeded', 'failed', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'];
 const JOB_OUTCOMES = ['succeeded', 'failed', 'skipped', 'cancelled', 'timed_out', 'output_limit', 'refused'];
-const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export class ArtifactDownloadError extends Error {
   constructor(code) { super(code); this.name = 'ArtifactDownloadError'; this.code = code; }
 }
@@ -125,60 +125,126 @@ async function absent(path) {
   try { await lstat(path); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
   refuse('artifact_output_exists');
 }
-// Both GETs own their connection through close. No redirects, retries, cookies,
-// ambient proxy, arbitrary headers, idempotency key or local custody fallback.
-function get(url, token, maximum, expectedType, options, checkpoint, attachment) {
-  return new Promise((resolve, reject) => {
-    let request, response, timer, closed = false, settled = false, finished = false, failure, result;
-    const deliver = () => { if (!settled) { settled = true; failure ? reject(failure) : resolve(result); } };
-    const finish = (error, bytes) => {
-      if (finished) return; finished = true; failure = error; result = bytes;
-      clearTimeout(timer); options.signal?.removeEventListener('abort', abort);
-      response?.destroy(); request?.destroy(); if (!request || closed) deliver();
-    };
-    const abort = () => finish(new ArtifactDownloadError('artifact_download_cancelled'));
-    try {
-      const remaining = checkpoint();
-      request = (url.startsWith('https:') ? httpsRequest : httpRequest)(url, {
-        method: 'GET', agent: false, maxHeaderSize: JSON_MAX, rejectUnauthorized: true,
-        ...(options.ca ? { ca: options.ca } : {}), headers: { Authorization: `Bearer ${token}`,
-          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
-          Accept: expectedType, 'Accept-Encoding': 'identity', 'Cache-Control': 'no-store', Connection: 'close' },
-      });
-      request.once('close', () => { closed = true;
-        if (!finished) finish(new ArtifactDownloadError('artifact_response_incomplete')); else deliver(); });
-      request.on('error', () => finish(new ArtifactDownloadError('artifact_transport_unavailable')));
+// The consumer owns one chunk at a time. Pausing at yield propagates disk
+// backpressure to the socket; neither artifacts nor logs are buffered in full.
+// Both GETs still own their connection through close, including early return.
+// No redirects, retries, cookies, ambient proxy, or local custody fallback.
+async function* responseChunks(url, token, maximum, expectedType, options, checkpoint, attachment) {
+  let request, response, timer, closed, failure;
+  const stop = error => {
+    failure ??= error;
+    response?.destroy(failure); request?.destroy(failure);
+  };
+  const abort = () => stop(new ArtifactDownloadError('artifact_download_cancelled'));
+  try {
+    const remaining = checkpoint();
+    request = (url.startsWith('https:') ? httpsRequest : httpRequest)(url, {
+      method: 'GET', agent: false, maxHeaderSize: JSON_MAX, rejectUnauthorized: true,
+      ...(options.ca ? { ca: options.ca } : {}), headers: { Authorization: `Bearer ${token}`,
+        'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
+        Accept: expectedType, 'Accept-Encoding': 'identity', 'Cache-Control': 'no-store', Connection: 'close' },
+    });
+    let rejectHeaders;
+    const headers = new Promise((resolve, reject) => {
+      rejectHeaders = reject;
       request.once('response', incoming => {
         response = incoming;
-        if (incoming.statusCode !== 200) { finish(new ArtifactDownloadError('artifact_http_refused')); return; }
-        const names = incoming.rawHeaders.filter((_, i) => i % 2 === 0).map(k => k.toLowerCase())
-          .filter(k => ['content-type', 'content-length', 'content-encoding', 'content-disposition', 'transfer-encoding'].includes(k));
-        const length = incoming.headers['content-length'];
-        if (new Set(names).size !== names.length || incoming.headers['transfer-encoding'] !== undefined ||
-            typeof length !== 'string' || !/^(0|[1-9][0-9]*)$/.test(length) || BigInt(length) > BigInt(maximum) ||
-            incoming.headers['content-type']?.split(';')[0].trim().toLowerCase() !== expectedType ||
-            (incoming.headers['content-encoding'] ?? 'identity').toLowerCase() !== 'identity' ||
-            (attachment && incoming.headers['content-disposition'] !== attachment)) {
-          finish(new ArtifactDownloadError('artifact_response_framing')); return;
-        }
-        const chunks = []; let size = 0;
-        incoming.on('error', () => finish(new ArtifactDownloadError('artifact_response_incomplete')));
-        incoming.on('data', chunk => {
-          if (finished) return;
-          size += chunk.length;
-          if (size > maximum || chunks.length >= 65536) finish(new ArtifactDownloadError('artifact_response_limit'));
-          else chunks.push(chunk);
-        });
-        incoming.once('end', () => {
-          if (!incoming.complete || size !== Number(length)) finish(new ArtifactDownloadError('artifact_response_incomplete'));
-          else finish(null, Buffer.concat(chunks, size));
-        });
+        // Install before resolving: cancellation can race attaching the iterator.
+        incoming.on('error', () => { failure ??= new ArtifactDownloadError('artifact_response_incomplete'); });
+        resolve(incoming);
       });
-      options.signal?.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(() => finish(new ArtifactDownloadError('artifact_download_timeout')), remaining);
-      if (options.signal?.aborted) abort(); else request.end();
-    } catch (error) { finish(error instanceof ArtifactDownloadError ? error : new ArtifactDownloadError('artifact_transport_unavailable')); }
-  });
+      request.on('error', () => {
+        failure ??= new ArtifactDownloadError('artifact_transport_unavailable');
+        reject(failure);
+      });
+    });
+    closed = new Promise(resolve => request.once('close', () => {
+      if (!response) rejectHeaders(failure ?? new ArtifactDownloadError('artifact_response_incomplete'));
+      resolve();
+    }));
+    options.signal?.addEventListener('abort', abort, { once: true });
+    timer = setTimeout(() => stop(new ArtifactDownloadError('artifact_download_timeout')), remaining);
+    if (options.signal?.aborted) abort(); else request.end();
+    const incoming = await headers;
+    if (failure) throw failure;
+    if (incoming.statusCode !== 200) refuse('artifact_http_refused');
+    const names = incoming.rawHeaders.filter((_, i) => i % 2 === 0).map(k => k.toLowerCase())
+      .filter(k => ['content-type', 'content-length', 'content-encoding', 'content-disposition', 'transfer-encoding'].includes(k));
+    const length = incoming.headers['content-length'];
+    if (new Set(names).size !== names.length || incoming.headers['transfer-encoding'] !== undefined ||
+        typeof length !== 'string' || !/^(0|[1-9][0-9]*)$/.test(length) || BigInt(length) > BigInt(maximum) ||
+        incoming.headers['content-type']?.split(';')[0].trim().toLowerCase() !== expectedType ||
+        (incoming.headers['content-encoding'] ?? 'identity').toLowerCase() !== 'identity' ||
+        (attachment && incoming.headers['content-disposition'] !== attachment)) refuse('artifact_response_framing');
+    let size = 0, count = 0;
+    for await (const chunk of incoming) {
+      if (failure) throw failure;
+      checkpoint();
+      size += chunk.length;
+      if (size > maximum || count++ >= 65536) refuse('artifact_response_limit');
+      yield chunk;
+    }
+    if (failure) throw failure;
+    checkpoint();
+    if (!incoming.complete || size !== Number(length)) refuse('artifact_response_incomplete');
+  } catch (error) {
+    if (failure) throw failure;
+    throw error instanceof ArtifactDownloadError ? error : new ArtifactDownloadError('artifact_transport_unavailable');
+  } finally {
+    clearTimeout(timer); options.signal?.removeEventListener('abort', abort);
+    response?.destroy(); request?.destroy();
+    if (closed) await closed;
+  }
+}
+async function getMetadata(url, token, options, checkpoint) {
+  const chunks = [];
+  for await (const chunk of responseChunks(url, token, JSON_MAX, 'application/json', options, checkpoint)) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+// Private staging, exact length and digest, then create-only atomic visibility.
+// The source is pulled only after each disk write finishes. A fixed-size owned
+// block also prevents source buffer reuse from changing bytes between hash/write.
+// This is exported for filesystem/stream contract tests, not forge authority.
+export async function publishArtifactStream(destination, expected, source, checkpoint = () => {}) {
+  const size = expected?.payload_bytes, digest = expected?.payload_sha256;
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX ||
+      typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest) || typeof checkpoint !== 'function') {
+    refuse('artifact_output_invalid');
+  }
+  const parent = dirname(absolute(destination));
+  await directory(parent); checkpoint();
+  const temporary = `${destination}.writing-${randomBytes(16).toString('hex')}`;
+  const handle = await open(temporary, F.O_CREAT | F.O_EXCL | F.O_WRONLY | F.O_NOFOLLOW, 0o600);
+  let failure, failed = false, received = 0;
+  try {
+    checkpoint();
+    const hash = createHash('sha256'), block = Buffer.allocUnsafe(Math.min(size, 64 * 1024));
+    for await (const chunk of source) {
+      checkpoint();
+      if (!Buffer.isBuffer(chunk) || chunk.length > size - received) refuse('artifact_payload_mismatch');
+      for (let offset = 0; offset < chunk.length;) {
+        checkpoint();
+        const length = Math.min(block.length, chunk.length - offset);
+        chunk.copy(block, 0, offset, offset + length);
+        const owned = block.subarray(0, length);
+        await handle.writeFile(owned);
+        hash.update(owned); received += length; offset += length;
+      }
+    }
+    if (received !== size || hash.digest('hex') !== digest) refuse('artifact_payload_mismatch');
+    checkpoint(); await handle.sync(); checkpoint();
+    // Publication is the cancellation boundary. Never erase a visible result,
+    // even if cancellation or a cleanup/fsync error arrives after this point.
+    await link(temporary, destination);
+  } catch (error) { failure = error; failed = true; }
+  // Attempt every cleanup step, retaining the primary failure. In particular,
+  // a close error must not strand the staging name or skip directory fsync.
+  for (const cleanup of [() => handle.close(), () => unlink(temporary), () => syncDirectory(parent)]) {
+    try { await cleanup(); } catch (error) { if (!failed) { failure = error; failed = true; } }
+  }
+  if (failed) throw failure;
+  return received;
 }
 export async function downloadArtifact(input, receipt, token, destination, options = {}) {
   const selected = selectArtifact(input, receipt);
@@ -198,17 +264,13 @@ export async function downloadArtifact(input, receipt, token, destination, optio
   };
   absolute(destination); await directory(dirname(destination)); await absent(destination); checkpoint();
   const url = `${selected.endpoint}/api/v1/artifacts/${selected.output.artifact_id_sha256}`;
-  const raw = await get(url, token, JSON_MAX, 'application/json', transport, checkpoint);
+  const raw = await getMetadata(url, token, transport, checkpoint);
   metadata(parseJson(raw, JSON_MAX), selected);
-  const bytes = await get(url + '/content', token, selected.output.payload_bytes, 'application/octet-stream', transport,
+  const chunks = responseChunks(url + '/content', token, selected.output.payload_bytes, 'application/octet-stream', transport,
     checkpoint, `attachment; filename="artifact-${selected.output.artifact_id_sha256}"`);
-  if (bytes.length !== selected.output.payload_bytes || hash(bytes) !== selected.output.payload_sha256) refuse('artifact_payload_mismatch');
-  checkpoint();
-  // Verified body first, create-only root last. Once this publication begins,
-  // finish it: a late cancellation cannot erase an already visible file.
-  await writeNew(destination, bytes);
+  const received = await publishArtifactStream(destination, selected.output, chunks, checkpoint);
   return { type: 'workflow_artifact_download', schema_version: 1, artifact_id: selected.output.artifact_id_sha256,
-    payload_sha256: selected.output.payload_sha256, payload_bytes: bytes.length, output: destination,
+    payload_sha256: selected.output.payload_sha256, payload_bytes: received, output: destination,
     payload_sha256_verified: true, scope_matches_expected: true, artifact_identity_independently_verified: false,
     provenance_authenticated: false, canonical_repository_published: false, job_success_asserted: false,
     execution_performed: false, executable_mode_applied: false, retention_enforced: false,
