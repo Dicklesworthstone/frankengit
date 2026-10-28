@@ -163,7 +163,7 @@ fn publish_terminal_record(
         &lowered,
         &closure,
         sealed.tx_id(),
-        snapshot,
+        &snapshot,
     )
     .unwrap() else {
         panic!("legacy fold")

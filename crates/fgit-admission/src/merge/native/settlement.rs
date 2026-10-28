@@ -553,11 +553,13 @@ where
             &lowered,
             &closure,
             admission.tx_id(),
-            snapshot,
+            &snapshot,
         )? {
             PublicationPreparation::Commit(prepared) => prepared,
             PublicationPreparation::Refuse(code) => return Err(unavailable(code)),
         };
+        // The fold owns its result; release the snapshot before staging awaits.
+        drop(snapshot);
         let mut materialization = projection
             .materialize_commit_async(
                 store,

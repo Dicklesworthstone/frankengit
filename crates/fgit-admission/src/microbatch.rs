@@ -170,7 +170,7 @@ impl BatchAttempt {
             .ok_or(AdmissionError::MaterializationMismatch(
                 "microbatch snapshot",
             ))?;
-        prepare_publication_from_snapshot(context, request, closure, tx_id, snapshot.clone())
+        prepare_publication_from_snapshot(context, request, closure, tx_id, snapshot)
     }
 
     fn state(&self) -> Result<&BatchRefState, AdmissionError> {

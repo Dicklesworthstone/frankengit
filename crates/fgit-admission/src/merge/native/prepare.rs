@@ -163,11 +163,13 @@ pub fn prepare_native_merge(
         .collect();
     complete_snapshot.outbox = delivery_basis.outbox_bindings();
     let ref_partition = match crate::prepare_publication_from_snapshot(
-        context, &lowered, closure, tx_id, snapshot,
+        context, &lowered, closure, tx_id, &snapshot,
     )? {
         PublicationPreparation::Commit(prepared) => prepared,
         PublicationPreparation::Refuse(code) => return Err(ProjectionFailure::Refuse(code).into()),
     };
+    // The ref fold owns its result; release this duplicate before the complete fold.
+    drop(snapshot);
     let mut complete_request = ref_partition.request.clone();
     let label = aggregate_label(event.aggregate)?;
     let stream = ForgeStreamId::new(label);

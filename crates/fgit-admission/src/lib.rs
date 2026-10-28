@@ -2698,7 +2698,7 @@ where
         Ok(snapshot) => snapshot,
         Err(code) => return Ok(PublicationPreparation::Refuse(code)),
     };
-    prepare_publication_from_snapshot(context, lowered, closure, tx_id, snapshot)
+    prepare_publication_from_snapshot(context, lowered, closure, tx_id, &snapshot)
 }
 
 /// Whether any command in this request names a ref hidden from its principal.
@@ -2729,10 +2729,10 @@ fn prepare_publication_from_snapshot(
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
     tx_id: TxId,
-    snapshot: AdmissionSnapshot,
+    snapshot: &AdmissionSnapshot,
 ) -> Result<PublicationPreparation, AdmissionError> {
     let model_request = model_request(context, &lowered.semantic, tx_id, closure)?;
-    if hides_any_target(&snapshot, &lowered.semantic) {
+    if hides_any_target(snapshot, &lowered.semantic) {
         return Ok(PublicationPreparation::Refuse(
             RefusalCode::HiddenRefUnauthorized,
         ));
@@ -2809,7 +2809,7 @@ where
             RefusalCode::AuthorityReceiptStale,
         ));
     }
-    prepare_publication_from_snapshot(context, lowered, closure, tx_id, snapshot)
+    prepare_publication_from_snapshot(context, lowered, closure, tx_id, &snapshot)
 }
 
 /// Translate one projection materialization result into the shared publication
@@ -3941,7 +3941,10 @@ mod hidden_ref_disclosure_tests {
             &guard_lowered(b"refs/internal/secret"),
             &guard_closure(),
             guard_tx_id(),
-            guard_snapshot_from_stored_configuration(&[b"refs/internal", b"!refs/internal/public"]),
+            &guard_snapshot_from_stored_configuration(&[
+                b"refs/internal",
+                b"!refs/internal/public",
+            ]),
         )
         .expect("the guard produces a decision rather than an error");
 
@@ -3970,7 +3973,10 @@ mod hidden_ref_disclosure_tests {
             &guard_lowered(b"refs/internal/public"),
             &guard_closure(),
             guard_tx_id(),
-            guard_snapshot_from_stored_configuration(&[b"refs/internal", b"!refs/internal/public"]),
+            &guard_snapshot_from_stored_configuration(&[
+                b"refs/internal",
+                b"!refs/internal/public",
+            ]),
         )
         .expect("the guard produces a decision rather than an error");
 
@@ -3994,7 +4000,7 @@ mod hidden_ref_disclosure_tests {
             &guard_lowered(b"refs/internal/secret"),
             &guard_closure(),
             guard_tx_id(),
-            guard_snapshot_hiding(b"refs/internal"),
+            &guard_snapshot_hiding(b"refs/internal"),
         )
         .expect("the guard produces a decision rather than an error");
 
@@ -4017,7 +4023,7 @@ mod hidden_ref_disclosure_tests {
             &guard_lowered(b"refs/heads/main"),
             &guard_closure(),
             guard_tx_id(),
-            guard_snapshot_hiding(b"refs/internal"),
+            &guard_snapshot_hiding(b"refs/internal"),
         )
         .expect("the guard produces a decision rather than an error");
 

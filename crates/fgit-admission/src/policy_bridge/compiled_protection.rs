@@ -503,7 +503,7 @@ mod tests {
                     ..crate::AdmissionSnapshot::default()
                 };
                 let prepared = crate::prepare_publication_from_snapshot(
-                    &context, &lowered, &closure, tx_id, snapshot,
+                    &context, &lowered, &closure, tx_id, &snapshot,
                 )
                 .unwrap();
                 if protected {

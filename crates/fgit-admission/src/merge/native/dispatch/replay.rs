@@ -371,11 +371,13 @@ where
             .await
             .map_err(settlement::projection_error)?;
         let prepared = match crate::prepare_publication_from_snapshot(
-            context, &lowered, &closure, tx, snapshot,
+            context, &lowered, &closure, tx, &snapshot,
         )? {
             PublicationPreparation::Commit(p) => p,
             PublicationPreparation::Refuse(code) => return Err(unavailable(code)),
         };
+        // The fold owns its result; release the snapshot before staging awaits.
+        drop(snapshot);
         let mut materialization = projection
             .materialize_commit_async(
                 store,
