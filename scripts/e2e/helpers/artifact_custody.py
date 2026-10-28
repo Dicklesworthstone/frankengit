@@ -1,4 +1,4 @@
-import contextlib, hashlib, http.client, json, os, pathlib, secrets, shutil, signal, struct, subprocess, sys, time, urllib.parse, zlib
+import contextlib, hashlib, http.client, json, os, pathlib, secrets, shlex, shutil, signal, struct, subprocess, sys, time, urllib.parse, zlib
 
 fg, root = sys.argv[1], pathlib.Path(sys.argv[2])
 root.chmod(0o700)
@@ -376,6 +376,81 @@ def operator_download(label, url, inc, token, receipt, output, payload, expected
         assert not destination.exists(), 'refused operator download exposed a destination'
 
 
+def watch_workflow_logs(fmt, node, inc, parent, effects):
+    # Invoke the public watcher CLI against the real native executable, rather
+    # than the explicit schema peers used by the focused JavaScript tests.
+    config_path = root / (fmt + '-watch-config.json')
+    state = root / (fmt + '-watch-state')
+    state.mkdir(mode=0o700)
+    config = {
+        'schema': 'frankengit-workflow-watch-v1', 'fg': str(pathlib.Path(fg).resolve()),
+        'storage_root': str(node), 'tenant_id': tenant, 'repository_id': repository,
+        'repository_incarnation': inc, 'object_format': fmt,
+        'ref_hex': b'refs/heads/main'.hex(),
+        'workflow_directory_hex': b'.github/workflows'.hex(),
+        'input_prefixes_hex': [b'.github'.hex()], 'event': 'push',
+        'state_directory': str(state), 'run_parent': str(parent),
+        'max_runs': 16, 'trust': 'selected-branch-host-execution',
+        'artifacts': {'root': str(store), 'capture_logs': True,
+                      'maximum_file_mib': 16, 'total_payload_mib': 64,
+                      'selections': [{'workflow_path_hex': b'.github/workflows/watch.yml'.hex(),
+                                      'job_id': 'build', 'output_path_hex': b'dist/result'.hex()}]},
+    }
+    private_replace(config_path, json.dumps(config))
+
+    def watch(action, label, expected=0):
+        result = subprocess.run([node_bin, str(repo / 'scripts/fg_workflow_watch.mjs'), action,
+                                 '--config', str(config_path), '--trusted-local'],
+                                capture_output=True, timeout=180)
+        (root / (fmt + '-watch-' + label + '.out')).write_bytes(result.stdout)
+        (root / (fmt + '-watch-' + label + '.err')).write_bytes(result.stderr)
+        assert result.returncode == expected, (label, result.returncode, expected, result.stderr)
+        operator_calls.append({'label': fmt + '-watch-' + label, 'exit': result.returncode,
+                               'stdout_sha256': hashlib.sha256(result.stdout).hexdigest(),
+                               'stderr_sha256': hashlib.sha256(result.stderr).hexdigest()})
+        return json.loads(result.stdout if expected == 0 else result.stderr)
+
+    first = watch('once', 'initial')
+    assert first['outcome'] == 'observed_succeeded' and first['authoritative_check'] is False
+    report_path = pathlib.Path(first['native_directory']) / 'report.json'
+    original = report_path.read_bytes()
+    report = json.loads(original)
+    assert report['plan']['artifact_contract']['log_capture'] == {'schema_version': 1, 'streams': ['stdout', 'stderr']}
+    assert len(report['runs']) == 1
+    run = report['runs'][0]
+    assert run['succeeded'] and run['workspaces_closed']
+    assert len(run['artifacts']) == 1 and len(run['artifact_logs']) == 1
+    captured = run['artifacts'][0]
+    assert captured['job_id_hex'] == b'build'.hex() and len(captured['outputs']) == 1
+    output = captured['outputs'][0]
+    assert output['path_hex'] == b'dist/result'.hex() and output['payload_bytes'] == len(b'result')
+    assert output['payload_sha256'] == hashlib.sha256(b'result').hexdigest()
+    assert len(run['artifact_logs'][0]['logs']) == 4
+    steps = run['execution']['jobs'][0]['steps']
+    assert len(steps) == 2 and steps[0]['name'] == 'compile: λ 🦀'
+    assert bytes.fromhex(steps[0]['stdout_hex']) == b'BINARY\0\xff' and steps[0]['stderr_hex'] == ''
+    assert steps[1]['stdout_hex'] == '' and bytes.fromhex(steps[1]['stderr_hex']) == b'ERROR\0\xfe'
+    assert effects.read_bytes() == b'x'
+    assert watch('once', 'repeat')['reason'] == 'commit_already_observed'
+    config['artifacts']['capture_logs'] = False
+    private_replace(config_path, json.dumps(config))
+    refused = watch('once', 'changed-contract', 2)
+    assert refused['type'] == 'workflow_watch_error' and 'configuration changed' in refused['message']
+    assert refused['execution_retried'] is False
+    config['artifacts']['capture_logs'] = True
+    private_replace(config_path, json.dumps(config))
+    assert watch('once', 'restored-contract')['reason'] == 'commit_already_observed'
+    assert effects.read_bytes() == b'x' and report_path.read_bytes() == original
+    saved = watch('status', 'settled')
+    assert saved['owner_present'] is False and len(saved['records']) == 1
+    assert saved['records'][0]['state'] == 'observed_succeeded'
+    cases.append({'format': fmt, 'actual_watcher_retained_binary_and_empty_logs': True,
+                  'combined_output_and_log_capture': True, 'changed_capture_contract_refused': True,
+                  'restored_contract_deduplicated': True, 'single_native_effect': True,
+                  'original_report_unchanged': True, 'watch_owner_closed': True,
+                  'authoritative_check': False})
+
+
 def retrieve_workflow_artifacts(fmt, node, inc, report, directory, expected_payload):
     assert len(report['artifacts']) == 1
     captured = report['artifacts'][0]
@@ -563,7 +638,14 @@ for fmt in ['sha1', 'sha256']:
     expected_workflow_output = b'WORKFLOW-ARTIFACT\0\xff\n'
     workflow = b"name: archive evidence\non: workflow_dispatch\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: mkdir -p dist; printf 'WORKFLOW-ARTIFACT\\000\\377\\n' > dist/result; printf VERIFIED-NATIVE-EVIDENCE\n"
     failed_workflow = b"name: failed binary logs\non: workflow_dispatch\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - name: failure\n        run: printf 'FAILED-STDOUT\\000\\377'; printf 'FAILED-STDERR\\000\\376' >&2; exit 7\n      - if: failure()\n        name: diagnostic\n        run: printf 'DIAG\\n'\n      - if: always()\n        run: true\n  blocked:\n    runs-on: fgit-trusted-local\n    needs: build\n    steps:\n      - run: printf forbidden\n"
-    tree = native_tree(src, fmt, {'.github/workflows/archive.yml': workflow, '.github/workflows/failure.yml': failed_workflow})
+    effects = root / (fmt + '-watch-effects')
+    watch_workflow = ("name: watched logs\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n"
+                      "      - name: 'compile: λ 🦀'\n"
+                      "        run: mkdir -p dist; printf result > dist/result; printf x >> " + shlex.quote(str(effects)) +
+                      "; printf 'BINARY\\000\\377'\n      - run: printf 'ERROR\\000\\376' >&2\n").encode()
+    tree = native_tree(src, fmt, {'.github/workflows/archive.yml': workflow,
+                                '.github/workflows/failure.yml': failed_workflow,
+                                '.github/workflows/watch.yml': watch_workflow})
     tip = native_object(src, fmt, 'commit', f'tree {tree}\nauthor Fixture <f@example.invalid> 1 +0000\ncommitter Fixture <f@example.invalid> 1 +0000\n\nartifact source\n'.encode())
     (src / 'refs/heads').mkdir(parents=True); (src / 'refs/heads/main').write_text(tip + '\n'); (src / 'HEAD').write_text('ref: refs/heads/main\n')
     ns = [node, tenant, repository]
@@ -600,6 +682,7 @@ for fmt in ['sha1', 'sha256']:
                            {('build', 0, 'stdout'): b'FAILED-STDOUT\0\xff', ('build', 0, 'stderr'): b'FAILED-STDERR\0\xfe',
                             ('build', 1, 'stdout'): b'DIAG\n', ('build', 1, 'stderr'): b'',
                             ('build', 2, 'stdout'): b'', ('build', 2, 'stderr'): b''})
+    watch_workflow_logs(fmt, node, inc, parent, effects)
     assert run(fmt + '-refs-after', ['refs', *ns, '--trusted-local', '--object-format', fmt]) == before
     for path in [src, node, parent, evidence]: path.rename(path.with_name(path.name + '-offline'))
     validate(json.loads(run(fmt + '-offline-artifact-inspect', ['artifact', 'inspect', *scope(inc=inc), '--id', archive_id])), archive_id, payload, inc=inc)
@@ -607,5 +690,7 @@ for fmt in ['sha1', 'sha256']:
     validate(json.loads(run(fmt + '-offline-artifact-export', ['artifact', 'export', *scope(inc=inc), '--id', archive_id, '--output', restored])), archive_id, payload, inc=inc)
     assert restored.read_bytes() == payload
     cases.append({'format': fmt, 'native_workflow_evidence_archived': True, 'artifact_id': archive_id, 'original_node_run_and_source_not_used_for_recovery': True, 'refs_unchanged': True})
-(root / 'results.json').write_text(json.dumps({'native_commands': commands, 'operator_calls': operator_calls,
+(root / 'results.json').write_text(json.dumps({'native_commands': commands,
+                                             'native_commands_include_operator_children': False,
+                                             'operator_calls': operator_calls,
                                              'cases': cases, 'native_peers_are_fixtures': False}, indent=2) + '\n')
