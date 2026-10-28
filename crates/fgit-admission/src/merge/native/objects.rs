@@ -68,6 +68,10 @@ impl<'a> From<&'a BTreeSet<GitOid>> for ObjectFrontier<'a> {
 /// Independent object/work ceilings. A caller also supplies its live deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MergeObjectLimits {
+    /// Unique objects requiring bodies in the closure walk. Independently
+    /// admitted, header-verified frontier objects spend the edge budget instead.
+    /// A missing optional header still reserves one body before loading it.
+    /// Full walks and frontiers without a header provider retain their old cap.
     pub max_objects: usize,
     pub max_edges: usize,
     pub max_object_bytes: usize,
@@ -446,11 +450,19 @@ fn validate_candidate_objects(
     let mut pending = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut parents = BTreeMap::<GitOid, Vec<GitOid>>::new();
+    let mut object_work = ObjectWork {
+        candidate,
+        header_frontier: frontier
+            .filter(|selected| selected.headers.is_some())
+            .map(|selected| selected.objects),
+        bodies: 0,
+    };
     require_object(
         candidate,
         ObjectType::Commit,
         &mut required,
         &mut pending,
+        &mut object_work,
         limits,
     )?;
     if let AncestryRequirement::Squash { source, .. } = ancestry {
@@ -459,6 +471,7 @@ fn validate_candidate_objects(
             ObjectType::Commit,
             &mut required,
             &mut pending,
+            &mut object_work,
             limits,
         )?;
     }
@@ -488,6 +501,12 @@ fn validate_candidate_objects(
                     return Err(budget());
                 }
                 continue;
+            }
+            // A provider may decline a header for this particular object. Do
+            // not turn that fallback into an unmetered payload read. Objects
+            // without a provider were already reserved when enqueued.
+            if object_work.uses_header(id) {
+                object_work.reserve_body(limits)?;
             }
         }
         let object = source.load(&id).map_err(source_failure)?;
@@ -597,7 +616,14 @@ fn validate_candidate_objects(
         }
         for (target, kind) in outgoing {
             checkpoint(deadline)?;
-            require_object(target, kind, &mut required, &mut pending, limits)?;
+            require_object(
+                target,
+                kind,
+                &mut required,
+                &mut pending,
+                &mut object_work,
+                limits,
+            )?;
         }
     }
     if let Some(selected) = frontier {
@@ -668,11 +694,36 @@ fn push_edge(
     Ok(())
 }
 
+// The closure walk has at most two explicit roots. Every other unique ID is
+// introduced by an already-charged native edge, including inherited objects.
+// Keep worklist memory bounded by that edge budget while reserving new/body
+// work separately. No membership or object-kind check is skipped.
+struct ObjectWork<'a> {
+    candidate: GitOid,
+    header_frontier: Option<&'a BTreeSet<GitOid>>,
+    bodies: usize,
+}
+impl ObjectWork<'_> {
+    fn uses_header(&self, id: GitOid) -> bool {
+        id != self.candidate && self.header_frontier.is_some_and(|set| set.contains(&id))
+    }
+
+    fn reserve_body(&mut self, limits: MergeObjectLimits) -> Result<(), ProjectionFailure> {
+        self.bodies = self
+            .bodies
+            .checked_add(1)
+            .filter(|count| *count <= limits.max_objects)
+            .ok_or_else(budget)?;
+        Ok(())
+    }
+}
+
 fn require_object(
     id: GitOid,
     kind: ObjectType,
     required: &mut BTreeMap<GitOid, ObjectType>,
     pending: &mut BTreeSet<GitOid>,
+    object_work: &mut ObjectWork<'_>,
     limits: MergeObjectLimits,
 ) -> Result<(), ProjectionFailure> {
     if id.is_zero() {
@@ -684,10 +735,14 @@ fn require_object(
         }
         return Ok(());
     }
-    // Charge unique membership at enqueue, not after reading: shared edges
-    // cannot inflate the worklist and cycles cannot loop indefinitely.
-    if required.len() >= limits.max_objects {
+    // Reserve non-frontier work at enqueue, before reading or growing the
+    // worklist. Header-only dependencies remain bounded by native edge work;
+    // a wide inherited tree is not charged as newly introduced payloads.
+    if required.len() >= limits.max_edges.saturating_add(2) {
         return Err(budget());
+    }
+    if !object_work.uses_header(id) {
+        object_work.reserve_body(limits)?;
     }
     required.insert(id, kind);
     pending.insert(id);
