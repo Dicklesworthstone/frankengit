@@ -4,8 +4,8 @@
 
 use super::{
     AcceptanceProfile, BTreeMap, BTreeSet, BundleInspectionRefusal, GitHashAlgorithm, GitOid,
-    MergeObjectLimits, ObjectType, OriginalSource, PackError, PackLimits, ParseLimits,
-    PlannedMergeObject, git_object_id, invalid, reachability,
+    MergeObjectLimits, MergeSourceError, ObjectType, OriginalSource, PackError, PackLimits,
+    ParseLimits, PlannedMergeObject, git_object_id, invalid, reachability,
 };
 use fgit_pack::{
     CachedResolver, DeltaBase, ExternalBaseLookup, NativeChecksumVerifier, PackObject,

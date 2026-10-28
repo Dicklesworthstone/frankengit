@@ -1,6 +1,7 @@
 //! Real native bytes and the production proof; this source records graph reads.
 //! It is not a durable-node or pack-inflation substitute.
 use super::*;
+use std::cell::RefCell;
 
 #[derive(Default)]
 struct Objects {
