@@ -8671,15 +8671,16 @@ impl OneNode {
         // installation without making the cache an authority source.
         let catch_up = request.authority().create_child();
         let is_cancelled = || !is_live() || catch_up.checkpoint().is_err();
-        self.admission_materializer
-            .materialize_current_in(
-                &self.authority,
-                &catch_up,
-                &self.head_key,
-                self.repository_id,
-                &is_cancelled,
-            )
-            .await
+        // Pin the materializer's frame at its existing child-request boundary.
+        // The child context and liveness predicate stay borrowed to completion.
+        Box::pin(self.admission_materializer.materialize_current_in(
+            &self.authority,
+            &catch_up,
+            &self.head_key,
+            self.repository_id,
+            &is_cancelled,
+        ))
+        .await
     }
 
     /// Materializes canonical admission state with a fresh bounded context.

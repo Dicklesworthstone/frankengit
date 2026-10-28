@@ -212,7 +212,7 @@ impl SessionDescriptor {
             _ => Err(invalid()),
         }
     }
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         match self {
             Self::Legacy(descriptor) => descriptor.wire_order.len(),
             Self::Large(descriptor) => descriptor.len(),

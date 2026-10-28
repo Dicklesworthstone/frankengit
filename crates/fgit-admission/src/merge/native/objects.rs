@@ -1010,7 +1010,7 @@ const fn object_parse_failure(error: ObjectError) -> ProjectionFailure {
     }
 }
 
-fn native_parse_failure(error: PackError) -> ProjectionFailure {
+const fn native_parse_failure(error: PackError) -> ProjectionFailure {
     match error {
         PackError::ObjectParse(error) => object_parse_failure(error),
         _ => invalid(),
