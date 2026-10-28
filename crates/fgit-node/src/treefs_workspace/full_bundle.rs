@@ -171,7 +171,7 @@ impl OneNode {
         input: &[u8],
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
-        self.admit_full_git_bundle_in(request, session, input, None, None, limits)
+        self.admit_full_git_bundle_in(request, session, input, None, None, None, limits)
             .await
     }
 
@@ -194,7 +194,7 @@ impl OneNode {
         mappings: &[BundleRefMapping],
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
-        self.admit_full_git_bundle_in(request, session, input, Some(mappings), None, limits)
+        self.admit_full_git_bundle_in(request, session, input, Some(mappings), None, None, limits)
             .await
     }
 
@@ -209,8 +209,40 @@ impl OneNode {
         expectations: &[(fgit_types::RefName, Option<fgit_types::GitOid>)],
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
-        self.admit_full_git_bundle_in(request, session, input, None, Some(expectations), limits)
-            .await
+        self.admit_full_git_bundle_in(
+            request,
+            session,
+            input,
+            None,
+            Some(expectations),
+            None,
+            limits,
+        )
+        .await
+    }
+
+    /// Native callers may bind publication to the same authenticated PR/ref
+    /// selection that produced their candidate. Original terminal recovery
+    /// still precedes current-basis checks; no new intake uses a refreshed head.
+    pub(in crate::treefs_workspace) async fn import_incremental_git_bundle_at_head_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &[u8],
+        expectations: &[(fgit_types::RefName, Option<fgit_types::GitOid>)],
+        expected_head: RepositoryAuthorityHeadId,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.admit_full_git_bundle_in(
+            request,
+            session,
+            input,
+            None,
+            Some(expectations),
+            Some(expected_head),
+            limits,
+        )
+        .await
     }
 
     async fn admit_full_git_bundle_in(
@@ -220,6 +252,7 @@ impl OneNode {
         input: &[u8],
         mappings: Option<&[BundleRefMapping]>,
         expectations: Option<&[(fgit_types::RefName, Option<fgit_types::GitOid>)]>,
+        expected_head: Option<RepositoryAuthorityHeadId>,
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         let authenticated = session
@@ -359,6 +392,9 @@ impl OneNode {
             .materialize_admission_in(request)
             .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
+        if expected_head.is_some_and(|head| head != materialized.basis().id()) {
+            return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
+        }
         if (mappings.is_some() || expectations.is_some())
             && commands.iter().any(|command| {
                 materialized

@@ -25,14 +25,22 @@
     <section id="protection-policy" aria-label="Complete review protection policy"></section>
     <section aria-labelledby="protection-editor-title">
       <h2 id="protection-editor-title">Replace the complete native policy</h2>
-      <p>Inspect first. Existing administrators authorize the replacement; the proposed administrator set cannot authorize itself. These controls manage exact branches, eligible reviewers, and the number of approvals required. Existing workflow checks are preserved when a branch row is edited.</p>
+      <p>Inspect first. Existing administrators authorize the replacement; the proposed administrator set cannot authorize itself. These controls manage exact branches, eligible reviewers, approval counts, and required workflow checks. Every check must identify its protected branch and the exact CI source, publisher, workflow commitment, and job.</p>
       <form id="protection-edit">
         <label>Complete administrator set, one principal ID per line<textarea id="protection-administrators" rows="4" maxlength="2048" spellcheck="false" disabled></textarea></label>
         <label>Complete branch rules: reference hex, comma-separated eligible reviewer IDs, approval count or all<textarea id="protection-rules" rows="8" maxlength="262144" spellcheck="false" disabled></textarea></label>
-        <label><input id="protection-clear" type="checkbox" disabled>Explicitly clear every branch rule and the repository ref policy (rules field must be empty)</label>
+        <fieldset>
+          <legend>Complete required workflow check set</legend>
+          <p>Each selector requires a successful latest result for the exact proposed commit. Add or edit a selector below, or remove it explicitly. A check can protect a branch without requiring human reviewers.</p>
+          <div id="protection-checks"></div>
+          <button id="protection-add-check" type="button" disabled>Add required check</button>
+          <button id="protection-remove-checks" type="button" disabled>Remove all workflow checks</button>
+          <p class="hint">At most 32 checks per protected branch. Both branch names use exact lowercase hex bytes; publisher IDs use 32 hex digits and workflow commitments use 64. Job names are exact, case-sensitive text up to 1024 UTF-8 bytes; spaces and colons are preserved. The protected branch must also appear in the branch rules above.</p>
+        </fieldset>
+        <label><input id="protection-clear" type="checkbox" disabled>Explicitly clear every branch rule and the repository ref policy (branch rules and workflow checks must be empty)</label>
         <button id="protection-prepare" type="submit" disabled>Freeze full replacement without submitting</button>
       </form>
-      <p class="hint">One rule per line; at most 64 branches and 32 reviewers per branch. Use a count such as 2 for two approvals from the listed reviewers, or all to require every eligible reviewer. Separate the three fields with spaces. Use - for the reviewer list of an existing check-only branch. Removing a row removes all its requirements. Native reference bytes are hex so non-UTF-8 names survive editing. Resource refusals never truncate a policy. Every successful replacement advances the policy epoch and invalidates earlier candidate approvals.</p>
+      <p class="hint">One rule per line; at most 64 branches and 32 reviewers per branch. Use a count such as 2 for two approvals from the listed reviewers, or all to require every eligible reviewer. Separate the three fields with spaces. Use - for the reviewer list of a check-only branch and add at least one required check. Removing or renaming a branch rule requires explicitly removing or retargeting its check rows. A branch cannot retain an empty reviewer list after its last check is removed. Native reference bytes are hex so non-UTF-8 names survive editing. Resource refusals never truncate a policy. Every successful replacement advances the policy epoch and invalidates earlier candidate approvals.</p>
       <section id="protection-preview" aria-label="Frozen original policy replacement"></section>
       <label><input id="protection-confirm" type="checkbox" disabled>I reviewed this frozen full replacement and authorize this explicit submission.</label>
       <label><input id="protection-ownership-confirm" type="checkbox" disabled>I acknowledge that this replacement removes the submitting principal as a policy administrator.</label>

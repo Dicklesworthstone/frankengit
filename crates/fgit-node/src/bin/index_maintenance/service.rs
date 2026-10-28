@@ -122,6 +122,69 @@ impl MaintenanceConfig {
     }
 }
 
+/// One or both independently checkpointed index profiles owned by a service.
+///
+/// Each profile retains its own reference scope, finite attempt policy and
+/// private progress directory. Grouping only coordinates their lifetime; it
+/// does not merge their generation authorities or make a mixed-source query
+/// valid. Queries still require their normal exact-source generation join.
+#[derive(Clone, Debug)]
+pub struct MaintenanceGroup {
+    configs: Vec<MaintenanceConfig>,
+}
+
+impl MaintenanceGroup {
+    /// Validate a bounded group before acquiring any progress ownership.
+    /// Aliased filesystem directories are additionally refused by each native
+    /// progress owner's existing exclusive lock and namespace binding.
+    pub fn try_new(mut configs: Vec<MaintenanceConfig>) -> io::Result<Self> {
+        if configs.is_empty() || configs.len() > 2 {
+            return Err(invalid("Maintenance requires one or two index profiles."));
+        }
+        if configs.len() == 2 {
+            let left = &configs[0];
+            let right = &configs[1];
+            if left.kind == right.kind {
+                return Err(invalid("Maintenance profiles must be distinct."));
+            }
+            if left.directory == right.directory {
+                return Err(invalid(
+                    "Maintenance profiles require separate progress directories.",
+                ));
+            }
+            if left.format != right.format {
+                return Err(invalid(
+                    "Maintenance profiles must use the same Git object format.",
+                ));
+            }
+        }
+        configs.sort_by_key(|config| match config.kind {
+            IndexKind::Lexical => 0,
+            IndexKind::Symbols => 1,
+        });
+        Ok(Self { configs })
+    }
+
+    #[must_use]
+    pub fn configs(&self) -> &[MaintenanceConfig] {
+        &self.configs
+    }
+
+    /// Consume the group and return its configurations in profile order.
+    #[must_use]
+    pub fn into_configs(self) -> Vec<MaintenanceConfig> {
+        self.configs
+    }
+}
+
+impl From<MaintenanceConfig> for MaintenanceGroup {
+    fn from(config: MaintenanceConfig) -> Self {
+        Self {
+            configs: vec![config],
+        }
+    }
+}
+
 /// Irreversible cooperative stop shared with the service's owning parent.
 #[derive(Clone, Debug, Default)]
 pub struct MaintenanceControl {
@@ -321,6 +384,22 @@ pub fn run_service_with_ready(
     };
     stop.observe(&config.directory);
     if stop.requested {
+        // A service owner can stop while this child is still authenticating
+        // or acquiring progress. It has started no index work. Release its
+        // healthy ownership and retain any pending recovery debt in the
+        // drained receipt, without announcing readiness.
+        if control.is_stop_requested() && stop.error.is_none() {
+            let receipt = MaintenanceReceipt {
+                pending: progress
+                    .state
+                    .rows
+                    .values()
+                    .filter(|row| row.pending.is_some())
+                    .count(),
+                ..MaintenanceReceipt::default()
+            };
+            return finish(node, Some(progress), Ok(receipt), true);
+        }
         let error = invalid(
             stop.error
                 .unwrap_or_else(|| "Maintenance was stopped before readiness.".to_owned()),

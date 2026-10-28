@@ -55,7 +55,8 @@ function ui({ format = 'sha1', respond = () => null, cryptoImpl = webcrypto, dow
   const stage = async () => { await fire('editor', 'submit'); await fire('stage'); assert.ok(view.client.pending, node('status').textContent); };
   const send = async () => { node('confirm').checked = true; await fire('confirm', 'change'); await fire('send'); };
   const rows = () => node('branches').all('fieldset').map(group => ({ group, reference: group.all('input')[0],
-    reviewers: group.all('textarea')[0], approvals: group.all('input')[1], remove: group.all('button')[0] }));
+    reviewers: group.all('textarea')[0], approvals: group.all('input')[1], remove: group.all('button')[0],
+    addCheck: group.all('button').find(button => button.textContent === 'Add required workflow check') }));
   return { doc, calls, downloads, client: view.client, node, fire, connect, ready, stage, send, rows };
 }
 
@@ -294,4 +295,169 @@ test('quorum edits invalidate a preview and invalid counts never submit a replac
   h.rows()[0].approvals.value = ''; await h.rows()[0].approvals.emit('input'); await h.stage();
   assert.equal(Object.hasOwn(h.client.pending.intent.replacement.branches[0], 'required_approvals'), false);
   assert.equal(new URLSearchParams(h.client.pending.intent.body).has('required_approvals'), false);
+});
+
+
+function requiredCheck(extra = {}) {
+  return { source_ref_hex: hex('refs/heads/ci-main'), publisher: OTHER, graph_root: '7'.repeat(64), job: 'build', ...extra };
+}
+function checkRows(h, branch = h.rows()[0]) {
+  return branch.group.all('div').filter(node => node.attributes.get('data-required-check-row') === 'true').map(group => ({
+    group, fields: Object.fromEntries(group.all('input').map(input => [input.attributes.get('data-required-check-field'), input])),
+    remove: group.all('button')[0],
+  }));
+}
+async function appendCheck(h, selected = requiredCheck(), branch = h.rows()[0]) {
+  const count = checkRows(h, branch).length;
+  await branch.addCheck.emit('click');
+  const checks = checkRows(h, branch); assert.equal(checks.length, count + 1);
+  const check = checks.at(-1);
+  for (const [name, value] of Object.entries(selected)) {
+    check.fields[name].value = value; await check.fields[name].emit('input');
+  }
+  return check;
+}
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: PR editor creates and publishes a check-only policy with exact byte and Unicode selectors`, async () => {
+    const h = ui({ format }); await h.ready();
+    const branch = h.rows()[0]; branch.reviewers.value = ''; await branch.reviewers.emit('input');
+    const selector = requiredCheck({ source_ref_hex: `${hex('refs/heads/ci/')}ff`, job: '  build: β <script>  ' });
+    await appendCheck(h, selector);
+    assert.equal(h.calls.length, 1, 'editing must not publish');
+    await h.stage();
+    const replacement = h.client.pending.intent.replacement;
+    assert.deepEqual(replacement.branches, [{ reference_hex: hex('refs/heads/main'), required_reviewers: [], required_checks: [selector] }]);
+    assert.match(h.node('changes').textContent, /checks_added/);
+    const body = h.client.pending.intent.body, form = new URLSearchParams(body);
+    assert.deepEqual(form.getAll('required_reviewer'), []);
+    assert.deepEqual(form.getAll('required_approvals'), []);
+    assert.deepEqual(form.getAll('required_check'), [
+      `${hex('refs/heads/main')}:${selector.source_ref_hex}:${selector.publisher}:${selector.graph_root}:${hex(selector.job)}`,
+    ]);
+    assert.equal(h.calls.length, 1);
+    await h.send(); assert.equal(h.calls.length, 2); assert.equal(h.calls[1].body, body);
+    assert.match(h.node('status').textContent, /Canonical committed/);
+  });
+}
+test('editing one CI selector preserves unrelated rules, reviewers, quorum, administrators and the exact ref-policy frame', async () => {
+  const shared = requiredCheck(), compiled = refPolicy();
+  const selected = { administrators: [ADMIN, OTHER].sort(), branches: [
+    { reference_hex: hex('refs/heads/ci-only'), required_reviewers: [], required_checks: [shared] },
+    { reference_hex: hex('refs/heads/main'), required_reviewers: [REVIEWER, OTHER, 'd'.repeat(32)].sort(), required_approvals: 2,
+      required_checks: [shared] },
+    { reference_hex: hex('refs/heads/review-only'), required_reviewers: [REVIEWER] },
+    { reference_hex: hex('refs/heads/untouched'), required_reviewers: [OTHER], required_checks: [shared] },
+  ], ref_policy: compiled };
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha256', { policy: selected })) : null });
+  await h.ready();
+  const main = h.rows().find(row => row.reference.value === hex('refs/heads/main'));
+  const row = checkRows(h, main)[0]; row.fields.graph_root.value = '8'.repeat(64); await row.fields.graph_root.emit('input');
+  await h.stage();
+  const expected = structuredClone(selected); expected.branches[1].required_checks = [requiredCheck({ graph_root: '8'.repeat(64) })];
+  assert.deepEqual(h.client.pending.intent.replacement, expected);
+  assert.deepEqual(h.client.observed.policy, selected, 'editing must not mutate the authenticated source snapshot');
+  const form = new URLSearchParams(h.client.pending.intent.body);
+  assert.equal(form.get('ref_policy_frame_hex'), compiled.frame_hex);
+  assert.deepEqual(form.getAll('required_approvals'), [`${hex('refs/heads/main')}:2`]);
+  assert.equal(form.getAll('required_check').length, 3, 'same selector may be required by multiple target branches');
+  assert.equal(form.getAll('required_reviewer').length, 5);
+  assert.equal(h.calls.length, 1);
+});
+test('required-check edits invalidate previews even when a programmatic edit omits its input event', async () => {
+  const h = ui(); await h.ready(); const check = await appendCheck(h);
+  await h.fire('editor', 'submit'); assert.equal(h.node('stage').disabled, false);
+  check.fields.job.value = 'different exact job';
+  await h.fire('stage'); assert.equal(h.client.pending, null); assert.match(h.node('status').textContent, /Preview again/);
+  await h.fire('editor', 'submit');
+  check.fields.graph_root.value = '8'.repeat(64); await check.fields.graph_root.emit('input');
+  assert.equal(h.node('stage').disabled, true);
+  await h.stage();
+  assert.deepEqual(h.client.pending.intent.replacement.branches[0].required_checks,
+    [requiredCheck({ job: 'different exact job', graph_root: '8'.repeat(64) })]);
+  assert.equal(h.calls.length, 1);
+});
+test('removing workflow checks retains reviewer protection and its historical empty-check representation', async () => {
+  const selected = policy(); selected.branches[0].required_checks = [requiredCheck(), requiredCheck({ job: 'test' })];
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready(); assert.equal(checkRows(h).length, 2);
+  for (const check of checkRows(h)) await check.remove.emit('click');
+  assert.equal(checkRows(h).length, 0); await h.stage();
+  assert.deepEqual(h.client.pending.intent.replacement, policy());
+  assert.equal(new URLSearchParams(h.client.pending.intent.body).has('required_check'), false);
+  assert.match(h.node('changes').textContent, /checks_removed/); assert.equal(h.calls.length, 1);
+});
+test('removing the last check cannot silently erase a check-only branch', async () => {
+  const selected = { administrators: [ADMIN], branches: [{ reference_hex: hex('refs/heads/main'), required_reviewers: [], required_checks: [requiredCheck()] }] };
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready(); await checkRows(h)[0].remove.emit('click'); await h.fire('editor', 'submit');
+  assert.equal(h.client.pending, null); assert.equal(h.node('stage').disabled, true); assert.equal(h.rows().length, 1);
+  assert.equal(h.calls.length, 1);
+  await h.rows()[0].remove.emit('click'); h.node('clear').checked = true; await h.stage();
+  assert.deepEqual(h.client.pending.intent.replacement.branches, []);
+  assert.equal(new URLSearchParams(h.client.pending.intent.body).get('clear'), 'true');
+  assert.match(h.node('changes').textContent, /checks_removed/);
+});
+test('branch-local checks follow an explicit target rename without changing their CI source identity', async () => {
+  const selected = policy(); selected.branches[0].required_checks = [requiredCheck()];
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready(); const row = h.rows()[0];
+  row.reference.value = hex('refs/heads/new-target'); await row.reference.emit('input');
+  await h.stage();
+  assert.deepEqual(h.client.pending.intent.replacement.branches[0], {
+    reference_hex: hex('refs/heads/new-target'), required_reviewers: [REVIEWER], required_checks: [requiredCheck()],
+  });
+  assert.match(h.node('changes').textContent, /checks_added/); assert.match(h.node('changes').textContent, /checks_removed/);
+  const body = new URLSearchParams(h.client.pending.intent.body);
+  assert.equal(body.getAll('required_check')[0].split(':')[0], hex('refs/heads/new-target'));
+  assert.equal(body.getAll('required_check')[0].split(':')[1], requiredCheck().source_ref_hex);
+});
+test('selector validation refuses malformed identities, noncanonical job bytes and duplicate requirements before staging', async () => {
+  for (const extra of [
+    { source_ref_hex: hex('refs/tags/wrong') }, { source_ref_hex: 'aa' },
+    { publisher: 'F'.repeat(32) }, { graph_root: '7'.repeat(63) },
+    { job: '' }, { job: 'bad\u0000job' }, { job: '\ud800' }, { job: '🦀'.repeat(257) },
+  ]) {
+    const h = ui(); await h.ready(); await appendCheck(h, requiredCheck(extra)); await h.fire('editor', 'submit');
+    assert.equal(h.client.pending, null, JSON.stringify(extra)); assert.equal(h.node('stage').disabled, true);
+    assert.equal(h.calls.length, 1);
+  }
+  const h = ui(); await h.ready(); await appendCheck(h); const second = await appendCheck(h);
+  await h.fire('editor', 'submit'); assert.equal(h.client.pending, null); assert.match(h.node('status').textContent, /Duplicate required workflow check/);
+  second.fields.graph_root.value = '8'.repeat(64); await second.fields.graph_root.emit('input'); await h.stage();
+  assert.equal(h.client.pending.intent.replacement.branches[0].required_checks.length, 2);
+});
+test('the check editor enforces the native 32-per-branch limit even when a disabled button is invoked', async () => {
+  const selected = policy(); selected.branches[0].required_checks = Array.from({ length: 32 }, (_, n) => requiredCheck({ job: `job-${String(n).padStart(2, '0')}` }));
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready(); const row = h.rows()[0]; assert.equal(row.addCheck.disabled, true);
+  await row.addCheck.emit('click'); assert.equal(checkRows(h).length, 32); assert.match(h.node('status').textContent, /At most 32/);
+  await checkRows(h)[0].remove.emit('click'); assert.equal(row.addCheck.disabled, false);
+  await appendCheck(h, requiredCheck({ job: 'replacement' })); assert.equal(row.addCheck.disabled, true);
+  await h.stage(); assert.equal(h.client.pending.intent.replacement.branches[0].required_checks.length, 32);
+});
+test('new selector controls freeze while an ambiguous publication retries its original exact body and key', async () => {
+  let posts = 0;
+  const h = ui({ respond: call => {
+    if (call.method === 'POST' && !call.url.pathname.endsWith('/outcomes') && ++posts === 1) throw new TypeError('response lost');
+    return null;
+  } });
+  await h.ready(); const branch = h.rows()[0], check = await appendCheck(h);
+  await h.stage(); const { body, key } = h.client.pending.intent;
+  assert.equal(branch.addCheck.disabled, true); assert.equal(check.remove.disabled, true);
+  assert.ok(Object.values(check.fields).every(field => field.disabled));
+  check.fields.job.value = 'a later DOM edit'; await check.fields.job.emit('input');
+  await branch.addCheck.emit('click'); await check.remove.emit('click');
+  assert.equal(checkRows(h).length, 1); assert.equal(h.client.pending.intent.body, body); assert.equal(h.client.pending.intent.key, key);
+  await h.send(); assert.ok(h.client.pending?.sent); assert.match(h.node('status').textContent, /unknown/i);
+  assert.ok(Object.values(check.fields).every(field => field.disabled));
+  await h.send(); assert.equal(h.client.pending, null);
+  const sent = h.calls.filter(call => call.method === 'POST'); assert.equal(sent.length, 2);
+  assert.ok(sent.every(call => call.body === body && call.headers['Idempotency-Key'] === key));
+});
+test('disconnect and a fresh policy load discard editable check data and fence stale detached controls', async () => {
+  const h = ui(); await h.ready(); const old = h.rows()[0]; const stale = await appendCheck(h);
+  await h.fire('disconnect'); assert.equal(h.rows().length, 0); assert.equal(h.node('branches').textContent, '');
+  await h.ready(); assert.equal(checkRows(h).length, 0);
+  await old.addCheck.emit('click'); await stale.remove.emit('click');
+  assert.equal(h.rows().length, 1); assert.equal(checkRows(h).length, 0); assert.equal(h.client.pending, null);
 });

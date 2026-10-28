@@ -5,16 +5,18 @@ use super::{
     cancellation, commitment, hex, invalid, invalid_owned, reporting,
 };
 use fgit_forge::event::{ForgeEventPayload, pull_request::PullRequestAction};
+use fgit_types::PolicyEpoch;
 use fgit_wire::visibility::RefVisibility;
 
 #[derive(Debug)]
 pub(super) struct PullSelection {
-    number: u64,
-    version: u64,
-    target: RefName,
-    target_commit: GitOid,
-    recorded_source: GitOid,
-    recorded_target: GitOid,
+    pub(super) number: u64,
+    pub(super) version: u64,
+    pub(super) target: RefName,
+    pub(super) target_commit: GitOid,
+    pub(super) recorded_source: GitOid,
+    pub(super) recorded_target: GitOid,
+    pub(super) policy_epoch: PolicyEpoch,
 }
 impl PullSelection {
     pub(super) const fn path_comparison_base(&self) -> GitOid {
@@ -38,15 +40,21 @@ impl PullSelection {
             self.target_commit.as_bytes(),
         ])
     }
-    pub(super) fn to_json(&self) -> String {
+    pub(super) fn to_json(&self, synthetic_merge: bool) -> String {
         format!(
-            "{{\"number\":\"{}\",\"version\":\"{}\",\"target_ref_hex\":\"{}\",\"observed_target_commit\":\"{}\",\"recorded_source_commit\":\"{}\",\"recorded_target_commit\":\"{}\",\"execution_profile\":\"source-head-only\",\"synthetic_merge\":false}}",
+            "{{\"number\":\"{}\",\"version\":\"{}\",\"target_ref_hex\":\"{}\",\"observed_target_commit\":\"{}\",\"recorded_source_commit\":\"{}\",\"recorded_target_commit\":\"{}\",\"execution_profile\":\"{}\",\"synthetic_merge\":{}}}",
             self.number,
             self.version,
             hex(self.target.as_bytes()),
             self.target_commit,
             self.recorded_source,
-            self.recorded_target
+            self.recorded_target,
+            if synthetic_merge {
+                "exact-admitted-merge-candidate"
+            } else {
+                "source-head-only"
+            },
+            synthetic_merge,
         )
     }
 }
@@ -98,6 +106,7 @@ impl OneNode {
             limits,
             artifacts,
             Some(number),
+            None,
         )
         .await
     }
@@ -172,6 +181,7 @@ impl OneNode {
             target_commit,
             recorded_source: event.data.source_tip,
             recorded_target: event.data.target_tip,
+            policy_epoch: state.basis().body().policy_epoch,
         });
         Ok(Selection::Ready(selected))
     }

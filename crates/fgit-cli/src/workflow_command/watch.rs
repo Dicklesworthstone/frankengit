@@ -11,6 +11,10 @@ const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <reposi
   --trusted-local --workflow <repository-directory> --input <top-level-path> [--input ...]
   --run-parent <absolute-private-directory> [--object-format sha1|sha256]
   [--pull-request <positive-native-pr-number>]
+  [--merge-candidate-ref <separate-ci-branch> --merge-principal <id>
+   --merge-author <name-and-email> --merge-committer <name-and-email>
+   --merge-timestamp <positive-unix-seconds> --merge-message <text>
+   [--merge-profile path|exact-renames] [--merge-method merge-commit|squash]]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
   [--continuous --stop-file <initially-absent-path> [--attempt-timeout-secs <1..3600>]]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
@@ -48,7 +52,18 @@ No checks are published by default. Opt in with --publish-checks --principal-id
   event custody across restart/restore. No force reset or replacement keys exist.
 Optional --pull-request selects on: pull_request definitions only when the named
 native same-repository PR is open and its source branch matches the explicit branch.
-It executes the current SOURCE HEAD, not a synthetic merge or the recorded old tip.
+By default it executes the current SOURCE HEAD, not the recorded old tip.
+The explicit merge-candidate option group instead prepares the actual combined tree,
+publishes it on the selected CI branch through ordinary exact-old admission, and
+executes that exact candidate. It requires --pull-request and --expected-incarnation.
+The CI branch must differ from both PR branches; this operator configuration permits
+its create/rewrite, without modifying either PR branch. Use --merge-candidate-ref-hex
+instead of --merge-candidate-ref for exact raw branch bytes. All commit metadata is
+explicit and stable; no ambient identity or time is used. Conflicts execute nothing.
+Optional --publish-checks binds results to the CI branch and candidate, so existing
+exact-candidate protection can require that fixed CI branch. Source-head PR check
+views remain source-head views. The exact bundle is retained for review/publication.
+Retain the same merge configuration across restart; changed configuration refuses.
 PR metadata versions (including reopen), source decisions and observed target tips
 select distinct events; unrelated comments/checks do not. Closed/merged/missing
 PRs execute nothing. Old reporting can recover after closure without rerunning code.
@@ -65,6 +80,7 @@ struct WatchOptions {
     interval: Duration,
     publisher: Option<fgit_types::PrincipalId>,
     pull_request: Option<u64>,
+    merge_candidate: Option<crate::workflow_merge_watch::Options>,
     stop_file: Option<PathBuf>,
     attempt_timeout: Duration,
 }
@@ -94,6 +110,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let mut publish = false;
     let mut publisher = None;
     let mut pull_request = None;
+    let mut merge_fields = std::collections::BTreeMap::new();
     let mut continuous = false;
     let mut stop_file = None;
     let mut attempt_timeout = None;
@@ -101,7 +118,13 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     while i < args.len() {
         let flag = &args[i];
         i += 1;
-        if flag == "--continuous" {
+        if crate::workflow_merge_watch::is_option(flag) {
+            let value = args.get(i).ok_or_else(|| format!("missing {flag} value"))?;
+            i += 1;
+            if merge_fields.insert(flag.as_str(), value.as_str()).is_some() {
+                return Err(format!("duplicate {flag}"));
+            }
+        } else if flag == "--continuous" {
             if continuous {
                 return Err("duplicate --continuous".into());
             }
@@ -168,6 +191,14 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     if !execution.reference.as_bytes().starts_with(b"refs/heads/") {
         return Err("watch requires a branch ref".into());
     }
+    let merge_candidate = crate::workflow_merge_watch::parse(&merge_fields)?;
+    if let Some(merge) = &merge_candidate {
+        merge.validate_selection(
+            &execution.reference,
+            pull_request,
+            execution.incarnation.is_some(),
+        )?;
+    }
     if publish != publisher.is_some() {
         return Err("--publish-checks and --principal-id must be supplied together".into());
     }
@@ -186,6 +217,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     Ok(WatchOptions {
         publisher,
         pull_request,
+        merge_candidate,
         execution,
         polls: polls.unwrap_or(1),
         interval: Duration::from_millis(u64::from(interval.unwrap_or(1000))),
@@ -329,6 +361,11 @@ fn poll_once(
         summary.stopped = true;
         return Ok(());
     }
+    let merge = options
+        .merge_candidate
+        .as_ref()
+        .map(crate::workflow_merge_watch::Options::node_config)
+        .transpose()?;
     if let Some(publisher) = options.publisher {
         publish_pending(
             node,
@@ -336,6 +373,7 @@ fn poll_once(
             opt,
             publisher,
             options.pull_request,
+            merge.as_ref(),
             summary,
             output,
         )?;
@@ -347,8 +385,22 @@ fn poll_once(
     let poll = node
         .runtime()
         .block_on(async {
-            match options.pull_request {
-                Some(number) => {
+            match (options.pull_request, merge.as_ref()) {
+                (Some(number), Some(merge)) => {
+                    node.poll_trusted_pull_request_merge_workflows_in(
+                        request,
+                        &opt.reference,
+                        number,
+                        &opt.workflow,
+                        &opt.parent,
+                        &opt.inputs,
+                        Default::default(),
+                        config,
+                        merge,
+                    )
+                    .await
+                }
+                (Some(number), None) => {
                     node.poll_trusted_pull_request_workflows_in(
                         request,
                         &opt.reference,
@@ -361,7 +413,7 @@ fn poll_once(
                     )
                     .await
                 }
-                None => {
+                (None, _) => {
                     node.poll_trusted_ref_workflows_in(
                         request,
                         &opt.reference,
@@ -385,7 +437,7 @@ fn poll_once(
         .checked_add(1)
         .ok_or("watch poll counter exhausted")?;
     summary.dispatched += u64::from(poll.dispatch().is_some());
-    summary.non_green |= poll.dispatch().is_some_and(|d| !d.succeeded());
+    summary.non_green |= poll.non_green();
     summary.reconcile |= poll.requires_reconciliation();
     summary.stopped |= poll.stopped_before_reservation();
     writeln!(
@@ -411,6 +463,7 @@ fn poll_once(
             opt,
             publisher,
             options.pull_request,
+            merge.as_ref(),
             summary,
             output,
         )?;
@@ -427,6 +480,7 @@ fn publish_pending(
     options: &Options,
     publisher: fgit_types::PrincipalId,
     pull_number: Option<u64>,
+    merge: Option<&fgit_node::workflow_watch::PullRequestMergeWatchConfig>,
     summary: &mut Summary,
     output: &mut impl Write,
 ) -> Result<(), String> {
@@ -436,8 +490,21 @@ fn publish_pending(
             .map_err(|e| e.to_string())
     };
     let result = node.runtime().block_on(async {
-        match pull_number {
-            Some(number) => {
+        match (pull_number, merge) {
+            (Some(number), Some(merge)) => {
+                node.publish_trusted_pull_request_merge_workflow_checks_in(
+                    request,
+                    &options.reference,
+                    number,
+                    &options.workflow,
+                    &options.parent,
+                    publisher,
+                    merge,
+                    observe,
+                )
+                .await
+            }
+            (Some(number), None) => {
                 node.publish_trusted_pull_request_workflow_checks_in(
                     request,
                     &options.reference,
@@ -449,7 +516,7 @@ fn publish_pending(
                 )
                 .await
             }
-            None => {
+            (None, _) => {
                 node.publish_trusted_ref_workflow_checks_in(
                     request,
                     &options.reference,

@@ -194,6 +194,18 @@ RCR, and administrative replacement preserves historical outcomes. The
 [protection guide](docs/MANDATORY_REVIEW_PROTECTION.md) describes complete
 replacement, exact version/epoch requirements, inspection and examples.
 
+### Exact pull-request candidate CI
+
+The native watcher can opt into preparing and executing the actual merge or
+squash tree for an open PR. The operator chooses a separate fixed CI branch,
+publication principal and deterministic commit metadata. Candidate publication
+uses ordinary exact-old admission; optional check publication binds results to
+that exact admitted commit for the existing protected-merge gate. Conflicts and
+stale PR metadata execute nothing, and retained custody prevents automatic
+script replay after restart. See the
+[exact candidate CI guide](docs/NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md) for
+configuration, check selectors, recovery and focused verification entrypoints.
+
 ### Repository-side agent triage
 
 The checked-in `scripts/bv_compat.sh` launcher is an operational compatibility

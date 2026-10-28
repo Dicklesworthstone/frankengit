@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Duration;
 
 use super::{Controllers, NodeSmartHttpRefusal, io_error, lifetime::Acceptance};
-use crate::index_maintenance::MaintenanceConfig;
+use crate::index_maintenance::{MaintenanceConfig, MaintenanceGroup};
 use crate::workflow_watch::{
     WorkflowWatchConfig, WorkflowWatchControl, WorkflowWatchError, WorkflowWatchReceipt,
     run_service_with_ready,
@@ -127,8 +127,9 @@ impl Worker {
     pub(super) fn finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
     }
-    pub(super) fn request_stop(&self) {
+    pub(super) fn request_stop(&mut self) {
         self.control.request_stop();
+        drop(self.launch.take());
     }
 
     pub(super) fn activate(&mut self) -> Result<(), NodeSmartHttpRefusal> {
@@ -229,6 +230,43 @@ impl OneNode {
         on_ready: &dyn Fn() -> io::Result<()>,
         on_workflow_drained: &dyn Fn(&WorkflowWatchReceipt) -> io::Result<()>,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_repository_http_with_workflow_and_index_services_bounded(
+            listener,
+            limits,
+            credentials_file,
+            allow_receive,
+            allow_issues,
+            allow_outcomes,
+            allow_pulls,
+            allow_source,
+            idle_timeout,
+            workflow,
+            maintenance.map(MaintenanceGroup::from),
+            on_ready,
+            on_workflow_drained,
+        )
+    }
+
+    /// Serve a bounded HTTP lifetime with one workflow controller and an
+    /// optional group of independently checkpointed source-index profiles.
+    /// Every controller acquires custody before readiness; no work starts
+    /// until the readiness callback succeeds, and every sibling drains.
+    pub fn serve_repository_http_with_workflow_and_index_services_bounded(
+        &self,
+        listener: &TcpListener,
+        limits: GitDaemonServerLimits,
+        credentials_file: &Path,
+        allow_receive: bool,
+        allow_issues: bool,
+        allow_outcomes: bool,
+        allow_pulls: bool,
+        allow_source: bool,
+        idle_timeout: Duration,
+        workflow: WorkflowWatchConfig,
+        maintenance: Option<MaintenanceGroup>,
+        on_ready: &dyn Fn() -> io::Result<()>,
+        on_workflow_drained: &dyn Fn(&WorkflowWatchReceipt) -> io::Result<()>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_lifetime(
             listener,
             limits.max_in_flight(),
@@ -266,6 +304,42 @@ impl OneNode {
         allow_source: bool,
         workflow: WorkflowWatchConfig,
         maintenance: Option<MaintenanceConfig>,
+        should_stop: &dyn Fn() -> io::Result<bool>,
+        on_ready: &dyn Fn() -> io::Result<()>,
+        on_workflow_drained: &dyn Fn(&WorkflowWatchReceipt) -> io::Result<()>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_repository_http_with_workflow_and_index_services_until_stopped(
+            listener,
+            max_in_flight,
+            credentials_file,
+            allow_receive,
+            allow_issues,
+            allow_outcomes,
+            allow_pulls,
+            allow_source,
+            workflow,
+            maintenance.map(MaintenanceGroup::from),
+            should_stop,
+            on_ready,
+            on_workflow_drained,
+        )
+    }
+
+    /// Keep HTTP, workflow execution and both optional index profiles under
+    /// one explicit stop/drain owner. Index generations remain independent;
+    /// the existing source readers still enforce exact-source joins.
+    pub fn serve_repository_http_with_workflow_and_index_services_until_stopped(
+        &self,
+        listener: &TcpListener,
+        max_in_flight: usize,
+        credentials_file: &Path,
+        allow_receive: bool,
+        allow_issues: bool,
+        allow_outcomes: bool,
+        allow_pulls: bool,
+        allow_source: bool,
+        workflow: WorkflowWatchConfig,
+        maintenance: Option<MaintenanceGroup>,
         should_stop: &dyn Fn() -> io::Result<bool>,
         on_ready: &dyn Fn() -> io::Result<()>,
         on_workflow_drained: &dyn Fn(&WorkflowWatchReceipt) -> io::Result<()>,

@@ -22,8 +22,8 @@ use fgit_types::{
     RefName, RepositoryId, TenantId,
 };
 pub use service::{
-    MaintenanceConfig, MaintenanceControl, MaintenanceError, MaintenanceReceipt, run_service,
-    run_service_with_ready,
+    MaintenanceConfig, MaintenanceControl, MaintenanceError, MaintenanceGroup, MaintenanceReceipt,
+    run_service, run_service_with_ready,
 };
 use state::{Pin as IndexPin, ProgressFile, State, decimal, hex, unhex};
 use std::ffi::OsString;

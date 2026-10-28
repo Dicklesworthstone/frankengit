@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fgit_crypto::sha256_digest;
-use fgit_node::index_maintenance::{IndexKind, MaintenanceConfig};
+use fgit_node::index_maintenance::{IndexKind, MaintenanceConfig, MaintenanceGroup};
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonServerLimits, GitDaemonServerReceipt,
     GitDaemonSessionTimeout, HttpTrustedOrigin, NodeConfig, OneNode,
@@ -36,7 +36,8 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]
   [--trusted-origin <origin>]
   [--index-state-dir <private-directory> --index-state init|resume
-   --index-profile lexical|symbols --index-format sha1|sha256
+   --index-profile lexical|symbols|both --index-format sha1|sha256
+   [--index-symbol-state-dir <private-directory>]
    --index-ref <full-ref> [--index-ref <full-ref> ...]
    [--index-interval-secs <1..3600>] [--index-attempt-timeout-secs <1..3600>]]
   [--workflow-trusted-local --workflow-ref <refs/heads/...>
@@ -45,7 +46,12 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
-   [--workflow-pull-request <number>] [--workflow-artifact-logs]]
+   [--workflow-pull-request <number>] [--workflow-artifact-logs]
+   [--workflow-merge-candidate-ref <separate-ci-branch> --workflow-merge-principal <id>
+    --workflow-merge-author <name-and-email> --workflow-merge-committer <name-and-email>
+    --workflow-merge-timestamp <positive-unix-seconds> --workflow-merge-message <text>
+    [--workflow-merge-profile path|exact-renames]
+    [--workflow-merge-method merge-commit|squash]]]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an
 initially absent stop file in an existing operator-owned directory. Create that
@@ -56,13 +62,16 @@ entries cause a draining error, not silent continued service. Do not combine
 connection limits, credentials and quotas remain enforced.
 
 Optional index maintenance requires --allow-source and scoped credentials.
-Create its private state directory with mode 0700 before starting; select init
-once, then resume. Select 1-32 full refs and one lexical or Rust-symbol profile.
-The worker waits 5 seconds between passes by default, reconciles one attempt at
-a time with a 300-second ceiling, and preserves pending publication recovery
+Create each private state directory with mode 0700 before starting; select init
+once, then resume. Select 1-32 full refs and lexical, symbols or both profiles.
+The both profile requires --index-symbol-state-dir for separate symbol progress;
+--index-state-dir then holds lexical progress. Each worker waits 5 seconds
+between passes by default, reconciles one attempt at a time with a 300-second
+ceiling, and preserves its own pending publication recovery
 across restarts. --index-attempt-timeout-secs only narrows inherited budgets.
 The interval is a polling delay, not a catch-up deadline. Readiness follows
-authentication and exclusive progress ownership; a controller failure drains
+authentication and exclusive progress ownership for every configured profile;
+no index attempt starts before readiness succeeds. A controller failure drains
 the HTTP service. Stopping the listener also cancels and drains maintenance
 before node shutdown. Index work does not run inside requests and does not
 publish repository state.
@@ -77,6 +86,12 @@ by default. --workflow-publish-checks and --workflow-principal require an explic
 --expected-incarnation; --workflow-artifact-logs requires --artifact-root. Readiness
 follows exclusive workflow custody; execution begins after readiness is flushed.
 Stopping drains execution and reports workflow_service_drained before HTTP drain.
+The merge-candidate group requires --workflow-pull-request and --expected-incarnation.
+It authorizes ordinary exact-old create/rewrite of the selected CI branch, then
+executes the actual merge or squash candidate there. The CI branch must differ
+from both PR branches. Explicit stable commit metadata makes it reproducible;
+conflicts never run scripts. Canonical checks name that candidate and CI ref.
+Use --workflow-merge-candidate-ref-hex for raw branch bytes instead of text.
 No workflow option enables receive, source or another HTTP permission. See
 docs/NATIVE_HTTP_WORKFLOW_SERVICE.md for retained custody and recovery limits.
 
@@ -243,7 +258,7 @@ struct Options {
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
     stop_file: Option<PathBuf>,
-    index_maintenance: Option<MaintenanceConfig>,
+    index_maintenance: Option<MaintenanceGroup>,
     #[cfg(target_os = "linux")]
     workflow_service: Option<fgit_node::workflow_watch::WorkflowWatchConfig>,
 }
@@ -337,6 +352,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--pack-cache-mib"
                     | "--trusted-origin"
                     | "--index-state-dir"
+                    | "--index-symbol-state-dir"
                     | "--index-state"
                     | "--index-profile"
                     | "--index-format"
@@ -353,6 +369,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--workflow-principal"
                     | "--workflow-pull-request"
             )
+            && crate::workflow_merge_watch::server_option(name).is_none()
         {
             return Err("unknown serve-http option".into());
         }
@@ -363,7 +380,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 .get(index)
                 .ok_or_else(|| format!("missing value for {name}"))?;
             index += 1;
-            if value.is_empty() || value.starts_with("--") {
+            if value.is_empty() || (value.starts_with("--") && name != "--workflow-merge-message") {
                 return Err(format!("missing value for {name}"));
             }
             value.as_str()
@@ -486,11 +503,15 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 .copied()
                 .ok_or_else(|| format!("index maintenance requires {name}"))
         };
-        let kind = match required("--index-profile")? {
-            "lexical" => IndexKind::Lexical,
-            "symbols" => IndexKind::Symbols,
-            _ => return Err("--index-profile must be lexical or symbols".into()),
+        let profiles: &[IndexKind] = match required("--index-profile")? {
+            "lexical" => &[IndexKind::Lexical],
+            "symbols" => &[IndexKind::Symbols],
+            "both" => &[IndexKind::Lexical, IndexKind::Symbols],
+            _ => return Err("--index-profile must be lexical, symbols or both".into()),
         };
+        if profiles.len() == 1 && flags.contains_key("--index-symbol-state-dir") {
+            return Err("--index-symbol-state-dir requires --index-profile both".into());
+        }
         let format = match required("--index-format")? {
             "sha1" => GitHashAlgorithm::Sha1,
             "sha256" => GitHashAlgorithm::Sha256,
@@ -501,22 +522,29 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "resume" => false,
             _ => return Err("--index-state must be init or resume".into()),
         };
-        Some(
-            MaintenanceConfig::try_new(
+        let interval = Duration::from_secs(number(&flags, "--index-interval-secs", 5, 3600)?);
+        let timeout =
+            Duration::from_secs(number(&flags, "--index-attempt-timeout-secs", 300, 3600)?);
+        let mut configs = Vec::with_capacity(profiles.len());
+        for (ordinal, &kind) in profiles.iter().enumerate() {
+            let directory = required(if ordinal == 0 {
+                "--index-state-dir"
+            } else {
+                "--index-symbol-state-dir"
+            })?;
+            let config = MaintenanceConfig::try_new(
                 kind,
                 format,
-                PathBuf::from(required("--index-state-dir")?),
+                PathBuf::from(directory),
                 initialize,
-                Duration::from_secs(number(&flags, "--index-interval-secs", 5, 3600)?),
-                index_refs,
+                interval,
+                index_refs.clone(),
             )
-            .and_then(|config| {
-                let seconds = number(&flags, "--index-attempt-timeout-secs", 300, 3600)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-                config.with_attempt_timeout(Duration::from_secs(seconds))
-            })
-            .map_err(|error| error.to_string())?,
-        )
+            .and_then(|config| config.with_attempt_timeout(timeout))
+            .map_err(|error| error.to_string())?;
+            configs.push(config);
+        }
+        Some(MaintenanceGroup::try_new(configs).map_err(|error| error.to_string())?)
     } else {
         None
     };
@@ -765,7 +793,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     writeln!(output, "{}", receipt.to_json()).and_then(|()| output.flush())
                 };
             return node
-                .serve_repository_http_with_workflow_service_until_stopped(
+                .serve_repository_http_with_workflow_and_index_services_until_stopped(
                     &listener,
                     options.limits.max_in_flight(),
                     path,
@@ -1103,7 +1131,9 @@ mod tests {
     fn maintenance_requires_complete_explicit_scope_and_uses_bounded_defaults() {
         let args = maintenance_arguments();
         let options = parse(&args).unwrap();
-        let maintenance = options.index_maintenance.unwrap();
+        let group = options.index_maintenance.unwrap();
+        assert_eq!(group.configs().len(), 1);
+        let maintenance = &group.configs()[0];
         assert_eq!(maintenance.kind(), IndexKind::Lexical);
         assert_eq!(maintenance.format(), GitHashAlgorithm::Sha1);
         assert_eq!(maintenance.directory(), Path::new("maintenance"));
@@ -1152,7 +1182,9 @@ mod tests {
             .into_iter()
             .map(str::to_owned),
         );
-        let config = parse(&args).unwrap().index_maintenance.unwrap();
+        let group = parse(&args).unwrap().index_maintenance.unwrap();
+        assert_eq!(group.configs().len(), 1);
+        let config = &group.configs()[0];
         assert_eq!(config.kind(), IndexKind::Symbols);
         assert_eq!(config.format(), GitHashAlgorithm::Sha256);
         assert!(!config.initialize());
@@ -1166,6 +1198,101 @@ mod tests {
                 .collect::<Vec<_>>(),
             [b"refs/heads/develop".as_slice(), b"refs/heads/main"]
         );
+    }
+
+    #[test]
+    fn both_indexes_keep_separate_progress_with_the_same_explicit_scope() {
+        let mut args = maintenance_arguments();
+        for (flag, value) in [
+            ("--index-profile", "both"),
+            ("--index-format", "sha256"),
+            ("--index-state", "resume"),
+        ] {
+            let at = args.iter().position(|arg| arg == flag).unwrap();
+            args[at + 1] = value.into();
+        }
+        args.extend(
+            [
+                "--index-symbol-state-dir",
+                "symbol-maintenance",
+                "--index-ref",
+                "refs/heads/develop",
+                "--index-interval-secs",
+                "2",
+                "--index-attempt-timeout-secs",
+                "11",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        let options = parse(&args).unwrap();
+        let group = options.index_maintenance.unwrap();
+        let configs = group.configs();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].kind(), IndexKind::Lexical);
+        assert_eq!(configs[0].directory(), Path::new("maintenance"));
+        assert_eq!(configs[1].kind(), IndexKind::Symbols);
+        assert_eq!(configs[1].directory(), Path::new("symbol-maintenance"));
+        for config in configs {
+            assert_eq!(config.format(), GitHashAlgorithm::Sha256);
+            assert!(!config.initialize());
+            assert_eq!(config.interval(), Duration::from_secs(2));
+            assert_eq!(config.attempt_timeout(), Duration::from_secs(11));
+            assert_eq!(
+                config
+                    .refs()
+                    .iter()
+                    .map(RefName::as_bytes)
+                    .collect::<Vec<_>>(),
+                [b"refs/heads/develop".as_slice(), b"refs/heads/main"]
+            );
+        }
+        assert!(!options.allow_receive);
+        assert!(!options.allow_pulls);
+    }
+
+    #[test]
+    fn both_indexes_require_distinct_explicit_progress_without_ignored_options() {
+        let mut both = maintenance_arguments();
+        let at = both
+            .iter()
+            .position(|arg| arg == "--index-profile")
+            .unwrap();
+        both[at + 1] = "both".into();
+        assert!(
+            parse(&both)
+                .err()
+                .unwrap()
+                .contains("--index-symbol-state-dir")
+        );
+        both.extend(["--index-symbol-state-dir".into(), "maintenance".into()]);
+        assert!(
+            parse(&both).is_err(),
+            "one directory cannot hold both owners"
+        );
+        *both.last_mut().unwrap() = "symbols".into();
+        assert!(parse(&both).is_ok());
+        both.extend(["--index-symbol-state-dir".into(), "different".into()]);
+        assert!(
+            parse(&both).is_err(),
+            "a duplicate destination is ambiguous"
+        );
+        for profile in ["lexical", "symbols"] {
+            let mut single = maintenance_arguments();
+            let at = single
+                .iter()
+                .position(|arg| arg == "--index-profile")
+                .unwrap();
+            single[at + 1] = profile.into();
+            single.extend(["--index-symbol-state-dir".into(), "symbols".into()]);
+            assert!(
+                parse(&single)
+                    .err()
+                    .unwrap()
+                    .contains("requires --index-profile both"),
+                "the extra directory must not be silently ignored"
+            );
+        }
     }
 
     #[test]

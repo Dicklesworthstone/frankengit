@@ -3,9 +3,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
-import { ProtectionClient } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-actions.mjs';
+import { ProtectionClient, protectionPolicy } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-actions.mjs';
 import { protectionClientHref, editorPolicy, startProtection } from '../../crates/fgit-node/src/smart_http/server/browser/protection-view.mjs';
 import { harness, deferred, snapshot, actor, reviewer, token, hex } from './protection-standalone-fixture.mjs';
+import { refPolicy } from './protection-fixtures.mjs';
 const href = 'https://forge.example/tenant/repo.git/ui/protection/';
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 function nativeSnapshot() {
@@ -174,4 +175,200 @@ test('revocation during publication clears credentials but does not erase the or
   const h = nativeHarness({ send: () => response({}, 401) }); await h.connect(); await h.mounted.prepare(); confirm(h); await h.mounted.send();
   assert.equal(h.client.connected, false); assert.ok(h.client.pending); assert.equal(h.get('actor').value, '');
   assert.equal(h.get('preview').textContent, ''); assert.equal(h.get('export').disabled, false);
+});
+
+
+// These interactions exercise the production view and ProtectionClient, with
+// explicit HTTP/DOM peers. They do not claim native admission or browser passes.
+const workflowCheck = (patch = {}) => ({ source_ref_hex: hex('refs/heads/workflows') + 'ff', publisher: reviewer,
+  graph_root: '7'.repeat(64), job: '  build: α <script>  ', ...patch });
+function checkControls(h, index = 0) {
+  const row = h.get('checks').children[index];
+  assert.ok(row, `Missing required check row ${index}`);
+  const inputs = row.children.flatMap(child => child.children).filter(child => child.tagName === 'input');
+  return { ...Object.fromEntries(inputs.map(input => [input.name, input])), remove: row.children.at(-1) };
+}
+async function addCheck(h, selector, reference = hex('refs/heads/main')) {
+  const count = h.get('checks').children.length;
+  await h.get('add-check').fire('click');
+  assert.equal(h.get('checks').children.length, count + 1);
+  const controls = checkControls(h, count);
+  for (const [field, value] of Object.entries({ reference_hex: reference, ...selector })) controls[field].value = value;
+  return controls;
+}
+function checkedSnapshot({ reviewers = [reviewer], checks = [workflowCheck()], format = 'sha256' } = {}) {
+  const value = nativeSnapshot(); value.object_format = format;
+  value.policy.branches[0] = { reference_hex: hex('refs/heads/main'), required_reviewers: reviewers, required_checks: checks };
+  return value;
+}
+
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: standalone creates a check-only rule with exact CI identity and no automatic publication`, async () => {
+    const value = nativeSnapshot(); value.object_format = format;
+    const h = nativeHarness({ read: () => response(value) });
+    assert.equal(h.get('add-check').disabled, true); await h.connect(); assert.equal(h.get('add-check').disabled, false);
+    const reference = hex('refs/heads/main'), check = workflowCheck();
+    h.get('rules').value = `${reference} - 0`;
+    await addCheck(h, check); await h.mounted.prepare();
+    assert.equal(h.requests.length, 1);
+    const { intent } = h.client.pending;
+    assert.equal(intent.source.scope.format, format);
+    assert.deepEqual(intent.replacement.branches, [{ reference_hex: reference, required_reviewers: [], required_checks: [check] }]);
+    assert.ok(h.get('preview').textContent.includes(check.job));
+    assert.ok(h.get('preview').textContent.includes(check.source_ref_hex));
+    assert.ok(h.get('preview').textContent.includes(intent.key));
+    const command = new URLSearchParams(intent.body);
+    assert.deepEqual(command.getAll('required_check'), [`${reference}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(check.job)}`]);
+    assert.deepEqual(command.getAll('required_reviewer'), []);
+    assert.deepEqual(command.getAll('required_approvals'), []);
+    confirm(h); await h.mounted.send(); assert.equal(h.requests.length, 2);
+    assert.equal(h.requests[1].body, intent.body); assert.equal(h.requests[1].headers['Idempotency-Key'], intent.key);
+  });
+}
+
+test('standalone edits checks, reviewer quorum and byte-only targets in one complete replacement', async () => {
+  const value = checkedSnapshot(), original = structuredClone(value.policy);
+  value.policy.branches[0].reference_hex = hex('refs/heads/') + 'fe';
+  value.policy.branches[0].required_reviewers = [reviewer, '33'.repeat(16), '44'.repeat(16)];
+  value.policy.branches[0].required_approvals = 2;
+  const h = nativeHarness({ read: () => response(value) }); await h.connect();
+  const controls = checkControls(h);
+  assert.equal(controls.reference_hex.value, value.policy.branches[0].reference_hex);
+  assert.equal(controls.job.value, original.branches[0].required_checks[0].job);
+  const edited = workflowCheck({ source_ref_hex: hex('refs/heads/ci-next') + 'ff', publisher: '55'.repeat(16), graph_root: '9'.repeat(64), job: 'lint: β' });
+  for (const [name, text] of Object.entries(edited)) controls[name].value = text;
+  await h.mounted.prepare();
+  const branch = h.client.pending.intent.replacement.branches[0];
+  assert.deepEqual(branch.required_checks, [edited]); assert.equal(branch.required_approvals, 2);
+  assert.deepEqual(branch.required_reviewers, value.policy.branches[0].required_reviewers);
+  assert.deepEqual(h.client.observed.policy, value.policy);
+  assert.equal(h.requests.length, 1);
+});
+
+test('standalone removes one check and all checks explicitly, preserving the legacy review-only policy spelling', async () => {
+  const first = workflowCheck({ job: 'first' }), second = workflowCheck({ job: 'second' });
+  const h = nativeHarness({ read: () => response(checkedSnapshot({ checks: [first, second] })) }); await h.connect();
+  await checkControls(h).remove.fire('click'); await h.mounted.prepare();
+  assert.deepEqual(h.client.pending.intent.replacement.branches[0].required_checks, [second]);
+  assert.match(h.get('preview').textContent, /checks_removed/); assert.ok(h.get('preview').textContent.includes(first.job));
+  await h.get('discard').fire('click'); await h.get('remove-checks').fire('click'); await h.mounted.prepare();
+  assert.deepEqual(h.client.pending.intent.replacement, snapshot().policy);
+  assert.equal(Object.hasOwn(h.client.pending.intent.replacement.branches[0], 'required_checks'), false);
+  assert.equal(new URLSearchParams(h.client.pending.intent.body).has('required_check'), false);
+  assert.equal(h.requests.length, 1);
+});
+
+test('last-check removal refuses an empty check-only branch and keeps the draft available for correction', async () => {
+  const h = nativeHarness({ read: () => response(checkedSnapshot({ reviewers: [] })) }); await h.connect();
+  const rules = h.get('rules').value; await checkControls(h).remove.fire('click'); await h.mounted.prepare();
+  assert.equal(h.client.pending, null); assert.match(h.get('status').textContent, /reviewers or configured checks/);
+  assert.equal(h.get('rules').value, rules); assert.equal(h.get('administrators').value, actor);
+  assert.ok(h.get('snapshot').textContent.includes(snapshot().head));
+  await addCheck(h, workflowCheck({ job: 'replacement' })); await h.mounted.prepare();
+  assert.ok(h.client.pending); assert.equal(h.requests.length, 1);
+});
+
+test('branch deletion and rename require explicit removal or retargeting of its check rows', async () => {
+  const h = nativeHarness({ read: () => response(checkedSnapshot()) }); await h.connect();
+  h.get('rules').value = ''; h.get('clear').checked = true; await h.mounted.prepare();
+  assert.equal(h.client.pending, null); assert.match(h.get('status').textContent, /missing from the rule list/);
+  assert.equal(h.get('checks').children.length, 1);
+  const target = hex('refs/heads/renamed'); h.get('rules').value = `${target} ${reviewer}`; h.get('clear').checked = false;
+  await h.mounted.prepare(); assert.equal(h.client.pending, null); assert.match(h.get('status').textContent, /retarget/);
+  checkControls(h).reference_hex.value = target; await h.mounted.prepare();
+  assert.deepEqual(h.client.pending.intent.replacement.branches, [{ reference_hex: target, required_reviewers: [reviewer], required_checks: [workflowCheck()] }]);
+  assert.equal(h.requests.length, 1);
+});
+
+test('clear-all requires both the branch rules and required check set to be explicitly emptied', async () => {
+  const h = nativeHarness({ read: () => response(checkedSnapshot({ reviewers: [] })) }); await h.connect();
+  h.get('rules').value = ''; h.get('clear').checked = true; await h.get('remove-checks').fire('click'); await h.mounted.prepare();
+  assert.equal(h.client.pending.intent.clear, true); assert.deepEqual(h.client.pending.intent.replacement.branches, []);
+  assert.equal(h.requests.length, 1);
+});
+
+test('the same exact check can protect different branches but duplicates on one target are refused', async () => {
+  const h = nativeHarness(), main = hex('refs/heads/main'), topic = hex('refs/heads/topic'); await h.connect();
+  h.get('rules').value = `${main} ${reviewer}\n${topic} ${reviewer}`;
+  await addCheck(h, workflowCheck(), main); await addCheck(h, workflowCheck(), main);
+  await h.mounted.prepare(); assert.equal(h.client.pending, null); assert.match(h.get('status').textContent, /Duplicate required workflow check/);
+  checkControls(h, 1).reference_hex.value = topic; await h.mounted.prepare();
+  assert.ok(h.client.pending);
+  assert.deepEqual(h.client.pending.intent.replacement.branches.map(branch => branch.required_checks), [[workflowCheck()], [workflowCheck()]]);
+  assert.equal(h.requests.length, 1);
+});
+
+test('frozen check controls cannot replace the pending body or key, including uncertain unchanged retries', async () => {
+  let tries = 0;
+  const h = nativeHarness({ send: (_request, intent) => { if (++tries === 1) throw new Error('connection lost'); return response(publication(intent)); } });
+  await h.connect(); const controls = await addCheck(h, workflowCheck()); await h.mounted.prepare();
+  const original = h.client.pending.intent;
+  assert.equal(h.get('add-check').disabled, true); assert.equal(h.get('remove-checks').disabled, true);
+  for (const input of Object.values(controls)) assert.equal(input.disabled, true);
+  await h.get('add-check').fire('click'); await h.get('remove-checks').fire('click'); await controls.remove.fire('click');
+  assert.equal(h.get('checks').children.length, 1);
+  controls.job.value = 'changed after freeze'; h.get('rules').value = '';
+  confirm(h); await h.mounted.send(); assert.ok(h.client.pending.sent);
+  assert.equal(h.client.pending.intent.body, original.body); assert.equal(h.client.pending.intent.key, original.key);
+  confirm(h); await h.mounted.send(true);
+  assert.equal(h.requests.length, 3);
+  for (const request of h.requests.slice(1)) { assert.equal(request.body, original.body); assert.equal(request.headers['Idempotency-Key'], original.key); }
+});
+
+test('invalid selector fields and UTF-8 job limits fail locally without erasing the draft or publishing', async () => {
+  const h = nativeHarness(); await h.connect(); const controls = await addCheck(h, workflowCheck());
+  for (const [field, bad] of [['source_ref_hex', 'FF'], ['publisher', 'f'.repeat(31)], ['graph_root', 'g'.repeat(64)],
+    ['job', ''], ['job', 'a\u0000b'], ['job', '\ud800'], ['job', 'α'.repeat(513)]]) {
+    const before = controls[field].value; controls[field].value = bad; await h.mounted.prepare();
+    assert.equal(h.client.pending, null); assert.equal(h.requests.length, 1);
+    assert.equal(checkControls(h)[field].value, bad); assert.equal(h.get('rules').value, `${hex('refs/heads/main')} ${reviewer} all`);
+    controls[field].value = before;
+  }
+  controls.job.value = 'α'.repeat(512); await h.mounted.prepare();
+  assert.equal(h.client.pending.intent.replacement.branches[0].required_checks[0].job, 'α'.repeat(512));
+  assert.equal(h.requests.length, 1);
+});
+
+test('selector input is disabled for disconnected and recovery-only sessions', async () => {
+  const h = nativeHarness({ read: () => response(checkedSnapshot()) }); await h.connect(); await h.mounted.prepare();
+  h.mounted.disconnect(); assert.equal(h.get('checks').children.length, 0); assert.equal(h.get('add-check').disabled, true);
+  h.get('token').value = 'c2'.repeat(32); h.get('actor').value = actor; h.get('recovery-only').checked = true;
+  await h.get('connect').fire('submit'); assert.equal(h.client.recoveryOnly, true);
+  await h.get('add-check').fire('click'); assert.equal(h.get('checks').children.length, 0);
+  assert.equal(h.get('add-check').disabled, true); assert.equal(h.get('remove-checks').disabled, true);
+  assert.equal(h.requests.length, 1);
+});
+
+
+test('editing one check preserves the complete mixed policy, administrators, unrelated branches and exact ref-policy frame', async () => {
+  const value = nativeSnapshot(), policy = {
+    administrators: [actor, '66'.repeat(16)],
+    branches: [
+      { reference_hex: hex('refs/heads/main'), required_reviewers: [reviewer, '33'.repeat(16), '44'.repeat(16)],
+        required_approvals: 2, required_checks: [workflowCheck()] },
+      { reference_hex: hex('refs/heads/release'), required_reviewers: [], required_checks: [workflowCheck({ job: 'release' })] },
+      { reference_hex: hex('refs/heads/docs'), required_reviewers: [reviewer] },
+      { reference_hex: hex('refs/heads/') + 'ff', required_reviewers: ['55'.repeat(16)] },
+    ],
+    ref_policy: refPolicy('reference_actor_id_v1'),
+  };
+  value.policy = protectionPolicy(policy);
+  const h = nativeHarness({ read: () => response(value) }); await h.connect();
+  assert.equal(h.get('checks').children.length, 2);
+  const target = Array.from(h.get('checks').children).map((_, index) => checkControls(h, index))
+    .find(controls => controls.reference_hex.value === hex('refs/heads/main'));
+  assert.ok(target); target.job.value = '  changed: α  '; await h.mounted.prepare();
+  const expected = structuredClone(value.policy);
+  expected.branches.find(branch => branch.reference_hex === hex('refs/heads/main')).required_checks[0].job = target.job.value;
+  assert.deepEqual(h.client.pending.intent.replacement, expected);
+  assert.deepEqual(h.client.pending.intent.source.policy, value.policy);
+  const body = new URLSearchParams(h.client.pending.intent.body);
+  assert.deepEqual(body.getAll('administrator'), expected.administrators);
+  assert.deepEqual(body.getAll('required_approvals'), [`${hex('refs/heads/main')}:2`]);
+  assert.deepEqual(body.getAll('required_reviewer'), expected.branches.flatMap(branch => branch.required_reviewers.map(person => `${branch.reference_hex}:${person}`)));
+  assert.deepEqual(body.getAll('required_check'), expected.branches.flatMap(branch => (branch.required_checks ?? []).map(check =>
+    `${branch.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(check.job)}`)));
+  assert.equal(body.get('ref_policy_frame_hex'), policy.ref_policy.frame_hex);
+  assert.match(h.get('preview').textContent, /checks_added/); assert.match(h.get('preview').textContent, /checks_removed/);
+  assert.equal(h.requests.length, 1);
 });

@@ -15,7 +15,9 @@ use super::super::{
 };
 use fgit_crypto::sha256_digest;
 use fgit_forge::review::{ComparisonMode, SourcePathChanges};
-type PathBasis = (Option<GitOid>, ComparisonMode);
+// An admitted candidate executes its own tree while PR filters compare the
+// original incoming branch. The override is supplied only by native selection.
+type PathBasis = (Option<GitOid>, ComparisonMode, Option<GitOid>);
 use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS};
 
 const MAX_WORKFLOWS: usize = 32;
@@ -426,14 +428,16 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .any(|t| t.name == event && t.path_filter.is_some())
             && path_changes.is_none()
         {
-            let (before, mode) = path_basis.ok_or_else(|| invalid("path-filtered dispatch requires canonical event coordinates; use workflow watch"))?;
+            let (before, mode, after) = path_basis.ok_or_else(|| invalid("path-filtered dispatch requires canonical event coordinates; use workflow watch"))?;
             path_changes = Some(
                 crate::treefs_workspace::merge_prepare::changed_paths(
                     source,
                     before,
-                    inputs
-                        .merge()
-                        .map_or(source_commit, |merge| merge.source_tip),
+                    after.unwrap_or_else(|| {
+                        inputs
+                            .merge()
+                            .map_or(source_commit, |merge| merge.source_tip)
+                    }),
                     mode,
                 )
                 .map_err(|_| invalid("complete canonical changed-path comparison unavailable"))?,
@@ -582,8 +586,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
     }
     if let Some(changes) = &path_changes {
         let profile = match path_basis {
-            Some((_, ComparisonMode::Direct)) => "canonical-ref-difference-v1",
-            Some((_, ComparisonMode::MergeBase)) => "unique-merge-base-v1",
+            Some((_, ComparisonMode::Direct, _)) => "canonical-ref-difference-v1",
+            Some((_, ComparisonMode::MergeBase, _)) => "unique-merge-base-v1",
             None => return Err(invalid("changed paths have no comparison basis")),
         };
         let mut bytes = b"frankengit/workflow-changed-paths/v1\0".to_vec();

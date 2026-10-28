@@ -14,6 +14,7 @@ use std::os::unix::fs::MetadataExt;
 
 mod cancellation;
 mod pull_request;
+mod pull_request_merge;
 mod reporting;
 pub mod service;
 
@@ -44,6 +45,14 @@ impl TrustedRefWorkflowPoll {
     /// child processes alone do not establish this local recovery boundary.
     pub const fn execution_settled(&self) -> bool {
         self.execution_settled
+    }
+    /// A conflict or stale exact PR has no successful candidate execution.
+    pub fn non_green(&self) -> bool {
+        matches!(self.state, "merge_conflicted" | "pull_request_stale")
+            || self
+                .dispatch
+                .as_ref()
+                .is_some_and(|dispatch| !dispatch.succeeded())
     }
     pub fn requires_reconciliation(&self) -> bool {
         self.state == "blocked_unresolved"
@@ -126,6 +135,7 @@ impl OneNode {
             limits,
             artifacts,
             None,
+            None,
         )
         .await
     }
@@ -140,9 +150,17 @@ impl OneNode {
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         pull_number: Option<u64>,
+        merge_config: Option<&pull_request_merge::PullRequestMergeWatchConfig>,
     ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
         if pull_number == Some(0) {
             return Err(invalid("pull-request number must be positive"));
+        }
+        if merge_config
+            .is_some_and(|config| pull_number.is_none() || config.reference() == reference)
+        {
+            return Err(invalid(
+                "merge candidate requires a PR and a distinct CI branch",
+            ));
         }
         limits
             .validate()
@@ -176,13 +194,19 @@ impl OneNode {
                 });
             }
         };
-        let scope = match pull_number {
-            Some(number) => pull_request::scope(self, reference, directory, number),
-            None => reporting::scope(self, reference, directory),
+        let scope = match (pull_number, merge_config) {
+            (Some(number), Some(_)) => {
+                pull_request_merge::scope(self, reference, directory, number)
+            }
+            (Some(number), None) => pull_request::scope(self, reference, directory, number),
+            (None, _) => reporting::scope(self, reference, directory),
         };
         check_directory(parent)?;
         let root = parent.join(format!("watch-{}", hex(&scope)));
         let owner = Owner::open(&root)?;
+        if let Some(config) = merge_config {
+            config.bind(&root)?;
+        }
         let entries = reporting::event_entries(&root)?;
         for entry in &entries {
             if entry.file_name() == "owner.lock" {
@@ -239,7 +263,9 @@ impl OneNode {
         if run_id == [0; 16] {
             return Err(invalid("ref workflow execution identity refused"));
         }
-        let profile = if selected.pull.is_some() {
+        let profile = if merge_config.is_some() {
+            "latest-canonical-pull-request-merge-v1"
+        } else if selected.pull.is_some() {
             "latest-canonical-pull-request-head-v1"
         } else {
             "latest-canonical-ref-update-v1"
@@ -268,7 +294,10 @@ impl OneNode {
         );
         if let Some(pull) = &selected.pull {
             event.pop();
-            event.push_str(&format!(",\"pull_request\":{}}}", pull.to_json()));
+            event.push_str(&format!(
+                ",\"pull_request\":{}}}",
+                pull.to_json(merge_config.is_some())
+            ));
         } else {
             let before = selected
                 .previous_commit
@@ -278,6 +307,9 @@ impl OneNode {
         }
         match fs::symlink_metadata(&event_directory) {
             Ok(_) => {
+                if merge_config.is_some() {
+                    event = pull_request_merge::retained_event(&event_directory)?;
+                }
                 return Ok(TrustedRefWorkflowPoll {
                     state: "previously_settled",
                     event,
@@ -294,6 +326,34 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Ok(stopped_poll());
         }
+        let prepared = if let Some(config) = merge_config {
+            match self
+                .prepare_watched_merge_in(request, reference, &selected, config, event_id)
+                .await?
+            {
+                pull_request_merge::Preparation::Ready(prepared) => {
+                    event.pop();
+                    event.push_str(&format!(
+                        ",\"merge_candidate\":{}}}",
+                        prepared.to_json(config)
+                    ));
+                    Some(prepared)
+                }
+                pull_request_merge::Preparation::Idle(state) => {
+                    return Ok(TrustedRefWorkflowPoll {
+                        state,
+                        event,
+                        dispatch: None,
+                        execution_settled: false,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        if !workspace_request_live(request) {
+            return Ok(stopped_poll());
+        }
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&event_directory)
@@ -303,13 +363,30 @@ impl OneNode {
             detail: error,
         };
         write_new(&event_directory.join("event.json"), event.as_bytes())
+            .and_then(|()| {
+                if let Some(prepared) = &prepared {
+                    write_new(&event_directory.join("candidate.bundle"), &prepared.bundle)?;
+                }
+                Ok(())
+            })
             .and_then(|()| File::open(&event_directory)?.sync_all())
             .and_then(|()| File::open(&root)?.sync_all())
             .map_err(|e| retained(e.to_string()))?;
+        let (execution_ref, execution_head, execution_commit) = if let (
+            Some(config),
+            Some(prepared),
+        ) = (merge_config, &prepared)
+        {
+            let head = self.publish_watched_merge_in(request, prepared, config, &event_directory).await
+                .map_err(|error| retained(format!("{error}; original candidate and publication identity retained; never replay automatically")))?;
+            (config.reference(), head, prepared.commit)
+        } else {
+            (reference, selected.head, selected.commit)
+        };
         let dispatch = self
             .dispatch_trusted_workflows_with_trigger_branch_in(
                 request,
-                reference,
+                execution_ref,
                 directory,
                 if selected.pull.is_some() {
                     "pull_request"
@@ -319,7 +396,7 @@ impl OneNode {
                 run_id,
                 &event_directory,
                 read_prefixes,
-                (selected.head, selected.commit),
+                (execution_head, execution_commit),
                 limits,
                 artifacts,
                 selected.pull.as_ref().map(|pull| pull.target_reference()),
@@ -327,11 +404,13 @@ impl OneNode {
                     (
                         selected.previous_commit,
                         fgit_forge::review::ComparisonMode::Direct,
+                        None,
                     ),
                     |pull| {
                         (
                             Some(pull.path_comparison_base()),
                             fgit_forge::review::ComparisonMode::MergeBase,
+                            merge_config.map(|_| selected.commit),
                         )
                     },
                 )),
@@ -347,7 +426,7 @@ impl OneNode {
                 &event_directory,
                 scope,
                 event_id,
-                selected.commit,
+                execution_commit,
                 &dispatch,
                 request,
             )?;

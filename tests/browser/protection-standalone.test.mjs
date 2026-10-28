@@ -140,3 +140,18 @@ test('standalone editor displays N-of-M and preserves quorum while eligible revi
   }
   assert.throws(() => editorPolicy(actor, `${reference} ${reviewer}`, branches), /Approval count/);
 });
+
+
+test('explicit workflow drafts enforce canonical selector bounds without truncation or ignored fields', () => {
+  const reference = hex('refs/heads/main'), rule = `${reference} ${reviewer}`;
+  const row = { reference_hex: reference, source_ref_hex: hex('refs/heads/ci'), publisher: reviewer, graph_root: '7'.repeat(64), job: 'build' };
+  const parsed = rows => editorPolicy(actor, rule, [], null, rows);
+  assert.throws(() => parsed(Array.from({ length: 33 }, (_, index) => ({ ...row, job: `job-${index}` }))), /32 required workflow checks/);
+  assert.throws(() => parsed(Array.from({ length: 2049 }, () => row)), /Too many/);
+  for (const malformed of [null, { ...row, ignored: 'field' }, { source_ref_hex: row.source_ref_hex }, 'selector']) {
+    assert.throws(() => parsed([malformed]), /Each required check/);
+  }
+  const exact = parsed([{ ...row, job: '  β: build  ' }, { ...row, job: '  α: build  ' }]);
+  assert.deepEqual(exact.branches[0].required_checks.map(check => check.job), ['  α: build  ', '  β: build  ']);
+  assert.deepEqual(parsed([]), { administrators: [actor], branches: [{ reference_hex: reference, required_reviewers: [reviewer] }] });
+});

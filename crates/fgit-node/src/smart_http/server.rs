@@ -71,13 +71,40 @@ const FRAMING_ALLOWANCE: u64 = 4 * 1024 * 1024;
 /// Local owners are configured before serving and never from request data.
 #[derive(Default)]
 struct Controllers<'a> {
-    maintenance: Option<crate::index_maintenance::MaintenanceConfig>,
+    maintenance: Option<crate::index_maintenance::MaintenanceGroup>,
     on_ready: Option<&'a dyn Fn() -> io::Result<()>>,
     #[cfg(target_os = "linux")]
     workflow: Option<crate::workflow_watch::WorkflowWatchConfig>,
     #[cfg(target_os = "linux")]
     on_workflow_drained:
         Option<&'a dyn Fn(&crate::workflow_watch::WorkflowWatchReceipt) -> io::Result<()>>,
+}
+
+fn validate_controller_capacity(
+    available: usize,
+    controllers: usize,
+) -> Result<(), NodeSmartHttpRefusal> {
+    if controllers
+        .checked_add(1)
+        .is_none_or(|required| required > available)
+    {
+        return Err(invalid_configuration(
+            "HTTP blocking pool must fit every index/workflow controller and one request worker",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn controller_capacity_reserves_a_request_slot_and_rejects_exhaustion() {
+    assert!(validate_controller_capacity(0, 0).is_err());
+    assert!(validate_controller_capacity(1, 0).is_ok());
+    assert!(validate_controller_capacity(2, 1).is_ok());
+    assert!(validate_controller_capacity(2, 2).is_err());
+    assert!(validate_controller_capacity(3, 3).is_err());
+    assert!(validate_controller_capacity(4, 3).is_ok());
+    assert!(validate_controller_capacity(usize::MAX, usize::MAX).is_err());
 }
 
 #[derive(Clone)]
@@ -474,6 +501,16 @@ impl OneNode {
                 "invalid bounded Smart HTTP service limits",
             ));
         }
+        let controller_count = controllers
+            .maintenance
+            .as_ref()
+            .map_or(0, |group| group.configs().len());
+        #[cfg(target_os = "linux")]
+        let controller_count = controller_count + usize::from(controllers.workflow.is_some());
+        validate_controller_capacity(
+            self.runtime().identity().blocking_max_threads,
+            controller_count,
+        )?;
         #[cfg(target_os = "linux")]
         if controllers.workflow.is_some() && controllers.on_workflow_drained.is_none() {
             return Err(invalid_configuration(
@@ -549,28 +586,30 @@ impl OneNode {
             .set_nonblocking(true)
             .map_err(|source| io_error("configure HTTP listener", source))?;
         let mut failure = None;
-        let maintenance = match controllers
-            .maintenance
-            .map(|config| maintenance::Worker::start(self, config))
-            .transpose()
-        {
-            Ok(worker) => worker,
-            Err(error) => {
-                failure = Some(error);
-                None
-            }
+        let should_stop = match &acceptance {
+            lifetime::Acceptance::UntilStopped(stop) => Some(*stop),
+            lifetime::Acceptance::Bounded { .. } => None,
+        };
+        let (mut maintenance, maintenance_stopped) = match controllers.maintenance {
+            Some(config) => match maintenance::Worker::start(self, config, should_stop) {
+                Ok(worker) => {
+                    let stopped = worker.is_none();
+                    (worker, stopped)
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    (None, false)
+                }
+            },
+            None => (None, false),
         };
         #[cfg(target_os = "linux")]
         let on_workflow_drained = controllers.on_workflow_drained;
         #[cfg(target_os = "linux")]
-        let (mut workflow, startup_stopped) = if failure.is_none() {
+        let (mut workflow, mut startup_stopped) = if failure.is_none() && !maintenance_stopped {
             match (controllers.workflow, on_workflow_drained) {
                 (Some(config), Some(observe)) => {
-                    let stop = match &acceptance {
-                        lifetime::Acceptance::UntilStopped(stop) => Some(*stop),
-                        lifetime::Acceptance::Bounded { .. } => None,
-                    };
-                    match workflow::Worker::start(self, config, observe, stop) {
+                    match workflow::Worker::start(self, config, observe, should_stop) {
                         Ok(worker) => {
                             let stopped = worker.is_none();
                             (worker, stopped)
@@ -584,15 +623,21 @@ impl OneNode {
                 _ => (None, false),
             }
         } else {
-            (None, false)
+            (None, maintenance_stopped)
         };
         #[cfg(not(target_os = "linux"))]
-        let startup_stopped = false;
+        let mut startup_stopped = maintenance_stopped;
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<PendingSession> = Vec::new();
         let mut accepted = 0;
         let mut last_activity = Instant::now();
+        if failure.is_none() && !startup_stopped {
+            match maintenance::startup_stop(should_stop) {
+                Ok(stopped) => startup_stopped = stopped,
+                Err(error) => failure = Some(io_error("poll HTTP stop before readiness", error)),
+            }
+        }
         if failure.is_none() && !startup_stopped {
             failure = controllers.on_ready.and_then(|ready| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(ready))
@@ -600,6 +645,17 @@ impl OneNode {
                     .err()
                     .map(|error| io_error("report Smart HTTP readiness", error))
             });
+        }
+        if failure.is_none() && !startup_stopped {
+            match maintenance::startup_stop(should_stop) {
+                Ok(stopped) => startup_stopped = stopped,
+                Err(error) => failure = Some(io_error("poll HTTP stop before activation", error)),
+            }
+        }
+        if failure.is_none() && !startup_stopped {
+            if let Some(worker) = &mut maintenance {
+                failure = worker.activate().err();
+            }
         }
         #[cfg(target_os = "linux")]
         if failure.is_none() && !startup_stopped {
@@ -696,11 +752,11 @@ impl OneNode {
                 }
             }
         }
-        if let Some(worker) = &maintenance {
+        if let Some(worker) = &mut maintenance {
             worker.request_stop();
         }
         #[cfg(target_os = "linux")]
-        if let Some(worker) = &workflow {
+        if let Some(worker) = &mut workflow {
             worker.request_stop();
         }
         for child in pending {
