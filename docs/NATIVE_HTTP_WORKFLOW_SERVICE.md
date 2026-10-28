@@ -74,9 +74,61 @@ failed or skipped job observations are never promoted to success.
 
 Optional `--workflow-pull-request NUMBER` selects the native same-repository PR
 profile. The PR must be open and its source branch must match `--workflow-ref`.
-It executes the current source head, retains the existing separate PR custody,
-and does not construct a synthetic merge. See
-[native PR workflow selection](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md).
+By default it executes the current source head and retains separate PR custody.
+See [native PR workflow selection](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md).
+
+### Execute the actual merge or squash candidate
+
+Add the explicit merge-candidate option group to test the combined PR tree:
+
+```sh
+fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
+  --trusted-local --credentials-file /private/http-credentials \
+  --continuous --stop-file /private/control/http.stop \
+  --expected-incarnation INCARNATION \
+  --workflow-trusted-local --workflow-format sha256 \
+  --workflow-ref refs/heads/topic --workflow-pull-request 7 \
+  --workflow-dir ci --workflow-input ci --workflow-input src \
+  --workflow-run-parent /private/merge-runs \
+  --workflow-merge-candidate-ref refs/heads/ci-main \
+  --workflow-merge-principal CI_WRITER \
+  --workflow-merge-author 'CI <ci@example.test>' \
+  --workflow-merge-committer 'CI <ci@example.test>' \
+  --workflow-merge-timestamp 1700000000 \
+  --workflow-merge-message 'Test the exact candidate' \
+  --workflow-merge-method merge-commit --workflow-merge-profile path \
+  --workflow-publish-checks --workflow-principal CHECK_PUBLISHER
+```
+
+The CI branch, writer, author, committer, timestamp and message are mandatory
+when any merge option is supplied. The group also requires an explicit native
+PR and repository incarnation. `--workflow-merge-method` accepts `merge-commit`
+(default) or `squash`; `--workflow-merge-profile` accepts `path` (default) or
+`exact-renames`. Use `--workflow-merge-candidate-ref-hex` instead of the text
+reference flag for exact raw branch bytes. Literal merge messages beginning
+with `--` remain data and are preserved exactly.
+
+This configuration authorizes ordinary exact-old creation/replacement of a
+CI branch distinct from both PR branches. Candidate publication and script
+execution both wait for successful listener readiness. Failed readiness cannot
+publish a CI ref. The check publisher remains independently configured, and
+no HTTP endpoint is enabled by the merge group. The example enables no
+optional network endpoints.
+
+Definitions and source files come from the actual combined tree. PR branch/path
+filters retain the original target and incoming change. Optional results name
+the admitted CI commit and fixed CI branch, so existing exact-candidate protection
+can gate a later separately submitted merge. Ordinary PR check views retain
+their source-head coordinates.
+
+Retain identical deterministic metadata and merge configuration across restart.
+Conflicts and stale recorded PR tips produce non-green observations without
+candidate publication or scripts. A failure after reservation retains the
+original bundle/key/lease and stops later work. See
+[exact PR candidate CI](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md) for
+protected-merge setup, immutable configuration and recovery.
+
+### Retained logs
 
 Optional `--workflow-artifact-logs --artifact-root /private/artifacts` captures
 bounded raw stdout/stderr using existing immutable artifact custody. Defaults
@@ -123,3 +175,17 @@ later events and refuses service readiness on restart until reconciled.
 Source index maintenance can run alongside CI with its existing explicit flags.
 Both workers belong to the same listener's stop/drain path; enabling CI grants
 no source access and does not replace index progress ownership.
+
+## Focused candidate-service test entrypoints
+
+```sh
+cargo test --locked -p fgit-cli --bin fg smart_http_server::workflow
+cargo test --locked -p fgit-cli --test workflow_pull_request_merge -- --test-threads=1
+FG_BIN=/absolute/path/to/fg scripts/e2e/suites/workflow/pull_request_merge_service.sh
+```
+
+The actual-process campaign covers both Git object formats and both candidate
+styles, readiness-output failure before ref publication, independent HTTP grants,
+canonical candidate checks through HTTP, ordered shutdown and restart without
+reexecution. These are test definitions and entrypoints; they do not claim a
+native pass for a revision that has not executed them.

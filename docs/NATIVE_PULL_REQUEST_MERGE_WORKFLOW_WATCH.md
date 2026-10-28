@@ -133,13 +133,26 @@ Conflict and stale-metadata observations are non-green: a foreground watch exits
 exit-2 behavior. A clean idle or up-to-date poll is not proof of passing CI. The
 existing 1024-event custody bound and latest-state coalescing remain unchanged.
 
+## HTTP service ownership
+
+`fg serve-http` exposes the same candidate configuration with
+`--workflow-merge-*` flags, alongside `--workflow-pull-request` and the existing
+explicit trusted-local workflow service selection. Its controller prepares and
+publishes candidates only after successful listener readiness, then owns their
+execution and shutdown with the HTTP service. Restart uses the same immutable
+custody and original reporting identities. See
+[HTTP-owned candidate CI](NATIVE_HTTP_WORKFLOW_SERVICE.md#execute-the-actual-merge-or-squash-candidate)
+for the complete command and independent endpoint grants.
+
 ## Focused verification entrypoints
 
 ```sh
 cargo test --locked -p fgit-node --test trusted_pull_request_merge_watch -- --test-threads=1
 cargo test --locked -p fgit-cli --bin fg workflow_merge_watch
 cargo test --locked -p fgit-cli --bin fg workflow_command::watch
+cargo test --locked -p fgit-cli --test workflow_pull_request_merge -- --test-threads=1
 FG_BIN=/absolute/path/to/fg scripts/e2e/suites/workflow/pull_request_merge_watch.sh
+FG_BIN=/absolute/path/to/fg scripts/e2e/suites/workflow/pull_request_merge_service.sh
 ```
 
 The test definitions cover SHA-1 and SHA-256, both parent styles, actual combined

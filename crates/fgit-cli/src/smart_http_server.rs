@@ -45,7 +45,12 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
-   [--workflow-pull-request <number>] [--workflow-artifact-logs]]
+   [--workflow-pull-request <number>] [--workflow-artifact-logs]
+   [--workflow-merge-candidate-ref <separate-ci-branch> --workflow-merge-principal <id>
+    --workflow-merge-author <name-and-email> --workflow-merge-committer <name-and-email>
+    --workflow-merge-timestamp <positive-unix-seconds> --workflow-merge-message <text>
+    [--workflow-merge-profile path|exact-renames]
+    [--workflow-merge-method merge-commit|squash]]]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an
 initially absent stop file in an existing operator-owned directory. Create that
@@ -77,6 +82,12 @@ by default. --workflow-publish-checks and --workflow-principal require an explic
 --expected-incarnation; --workflow-artifact-logs requires --artifact-root. Readiness
 follows exclusive workflow custody; execution begins after readiness is flushed.
 Stopping drains execution and reports workflow_service_drained before HTTP drain.
+The merge-candidate group requires --workflow-pull-request and --expected-incarnation.
+It authorizes ordinary exact-old create/rewrite of the selected CI branch, then
+executes the actual merge or squash candidate there. The CI branch must differ
+from both PR branches. Explicit stable commit metadata makes it reproducible;
+conflicts never run scripts. Canonical checks name that candidate and CI ref.
+Use --workflow-merge-candidate-ref-hex for raw branch bytes instead of text.
 No workflow option enables receive, source or another HTTP permission. See
 docs/NATIVE_HTTP_WORKFLOW_SERVICE.md for retained custody and recovery limits.
 
@@ -353,6 +364,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--workflow-principal"
                     | "--workflow-pull-request"
             )
+            && crate::workflow_merge_watch::server_option(name).is_none()
         {
             return Err("unknown serve-http option".into());
         }
@@ -363,7 +375,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 .get(index)
                 .ok_or_else(|| format!("missing value for {name}"))?;
             index += 1;
-            if value.is_empty() || value.starts_with("--") {
+            if value.is_empty() || (value.starts_with("--") && name != "--workflow-merge-message") {
                 return Err(format!("missing value for {name}"));
             }
             value.as_str()

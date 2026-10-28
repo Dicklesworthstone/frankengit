@@ -68,6 +68,22 @@ pub(super) fn parse(
             .with_pull_request(number(flags, "--workflow-pull-request", 1, u64::MAX)?)
             .map_err(|error| error.to_string())?;
     }
+    let merge_fields: BTreeMap<_, _> = flags
+        .iter()
+        .filter_map(|(name, value)| {
+            crate::workflow_merge_watch::server_option(name).map(|name| (name, *value))
+        })
+        .collect();
+    if let Some(merge) = crate::workflow_merge_watch::parse(&merge_fields)? {
+        merge.validate_selection(
+            config.reference(),
+            config.pull_request(),
+            flags.contains_key("--expected-incarnation"),
+        )?;
+        config = config
+            .with_merge_candidate(merge.node_config()?)
+            .map_err(|error| error.to_string())?;
+    }
     if flags.contains_key("--workflow-artifact-logs") {
         let artifacts = fgit_node::TrustedWorkflowArtifactConfig::new_with_logs(
             PathBuf::from(required("--artifact-root")?),
@@ -118,6 +134,108 @@ mod tests {
         }
         arguments.extend(["--workflow-input".to_owned(), "ci".to_owned()]);
         arguments
+    }
+
+    fn merge_arguments() -> Vec<String> {
+        let mut arguments = server_arguments();
+        arguments.extend(
+            [
+                "--expected-incarnation",
+                "44444444444444444444444444444444",
+                "--workflow-pull-request",
+                "7",
+                "--workflow-merge-candidate-ref",
+                "refs/heads/ci/pr-7",
+                "--workflow-merge-principal",
+                "33333333333333333333333333333333",
+                "--workflow-merge-author",
+                "CI <ci@example.test>",
+                "--workflow-merge-committer",
+                "CI <ci@example.test>",
+                "--workflow-merge-timestamp",
+                "1700000000",
+                "--workflow-merge-message",
+                "Check the merged tree",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        arguments
+    }
+
+    #[test]
+    fn merge_service_keeps_publication_and_network_authorities_explicit() {
+        let options = parse_server(&merge_arguments()).unwrap();
+        assert!(!options.allow_receive);
+        assert!(!options.allow_source);
+        assert!(!options.allow_pulls);
+        assert!(!options.allow_protection);
+        let service = options.workflow_service.unwrap();
+        assert_eq!(service.pull_request(), Some(7));
+        assert!(service.publisher().is_none());
+        let merge = service.merge_candidate().unwrap();
+        assert_eq!(merge.reference().as_bytes(), b"refs/heads/ci/pr-7");
+        assert_eq!(merge.metadata().timestamp, 1_700_000_000);
+        assert_eq!(merge.metadata().message, b"Check the merged tree");
+
+        let mut literal = merge_arguments();
+        let at = literal
+            .iter()
+            .position(|value| value == "--workflow-merge-message")
+            .unwrap();
+        literal[at + 1] = "--merge-method".into();
+        let service = parse_server(&literal).unwrap().workflow_service.unwrap();
+        assert_eq!(
+            service.merge_candidate().unwrap().metadata().message,
+            b"--merge-method"
+        );
+
+        let mut arguments = merge_arguments();
+        arguments.extend([
+            "--workflow-publish-checks".into(),
+            "--workflow-principal".into(),
+            "55".repeat(16),
+            "--workflow-merge-method".into(),
+            "squash".into(),
+        ]);
+        let service = parse_server(&arguments).unwrap().workflow_service.unwrap();
+        assert_ne!(
+            service.publisher().unwrap(),
+            service.merge_candidate().unwrap().principal()
+        );
+        assert_eq!(
+            service.merge_candidate().unwrap().style(),
+            fgit_forge::preparation::MergeCommitStyle::Squash
+        );
+    }
+
+    #[test]
+    fn merge_service_refuses_partial_scope_or_implicit_identity() {
+        for flag in [
+            "--expected-incarnation",
+            "--workflow-pull-request",
+            "--workflow-merge-candidate-ref",
+            "--workflow-merge-principal",
+            "--workflow-merge-author",
+            "--workflow-merge-committer",
+            "--workflow-merge-timestamp",
+            "--workflow-merge-message",
+        ] {
+            let mut arguments = merge_arguments();
+            let at = arguments.iter().position(|value| value == flag).unwrap();
+            arguments.drain(at..at + 2);
+            assert!(parse_server(&arguments).is_err(), "{flag}");
+        }
+        let mut arguments = merge_arguments();
+        let at = arguments
+            .iter()
+            .position(|value| value == "--workflow-merge-candidate-ref")
+            .unwrap();
+        arguments[at + 1] = "refs/heads/main".into();
+        assert!(parse_server(&arguments).is_err());
+        let mut arguments = merge_arguments();
+        arguments.extend(["--workflow-merge-method".into(), "rebase".into()]);
+        assert!(parse_server(&arguments).is_err());
     }
 
     #[test]
