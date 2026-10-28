@@ -613,7 +613,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
   if (!parent || doc.getElementById('protection-panel')) fail('Protection needs one PR shell and may only be mounted once.');
   const client = new ProtectionClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   const panel = element(doc, 'details'); panel.id = 'protection-panel';
-  item(doc, panel, 'summary', 'Repository review protection — administrator');
+  item(doc, panel, 'summary', 'Repository review and CI protection — administrator');
   item(doc, panel, 'p', 'Inspect the complete native policy, then propose a complete replacement. Omitted branches lose protection; omitted administrators lose policy administration. The node checks current authority. First installation is trusted-local only.');
   const nodes = {}, rows = [];
   let operation = false, generation = 0, rowNumber = 0, preview = null;
@@ -677,7 +677,11 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       : 'Ordinary protection connection. Connecting locally does not establish an authenticated role or grant.';
     nodes.load.disabled = !ordinary || busy || Boolean(pending);
     for (const input of [administrators, clear, nodes['add-branch'], nodes.preview]) input.disabled = !editable;
-    for (const row of rows) for (const input of [row.reference, row.reviewers, row.approvals, row.remove]) input.disabled = !editable;
+    for (const row of rows) {
+      for (const input of [row.reference, row.reviewers, row.approvals, row.remove, row.addCheck]) input.disabled = !editable;
+      row.addCheck.disabled ||= row.checks.length >= 32;
+      for (const check of row.checks) for (const input of [...Object.values(check.fields), check.remove]) input.disabled = !editable;
+    }
     nodes['add-branch'].disabled ||= rows.length >= 64;
     nodes.stage.disabled = !editable || !preview;
     confirm.disabled = !ordinary || busy || !pending;
@@ -719,10 +723,44 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     };
     describeQuorum();
     const remove = item(doc, group, 'button', 'Remove this branch rule'); remove.type = 'button';
-    const required_checks = data.required_checks ?? [];
-    if (required_checks.length) item(doc, group, 'pre',
-      `Required workflow checks (preserved by this editor; configure through the protection CLI or API):\n${JSON.stringify(required_checks, null, 2)}`);
-    const row = { reference, reviewers, approvals, remove, required_checks }; rows.push(row);
+    item(doc, group, 'h4', 'Required workflow checks');
+    item(doc, group, 'p', 'Every listed check must succeed for the exact candidate commit. Choose the source branch, publisher, workflow graph and job to require. Review requirements continue to apply alongside these checks.');
+    const checks = item(doc, group, 'div');
+    const addCheck = item(doc, group, 'button', 'Add required workflow check'); addCheck.type = 'button';
+    const row = { reference, reviewers, approvals, remove, checks: [], addCheck }; rows.push(row);
+    let checkNumber = 0;
+    function appendCheck(selected = { source_ref_hex: '', publisher: '', graph_root: '', job: '' }) {
+      if (row.checks.length >= 32) fail('At most 32 workflow checks can be required per branch.');
+      const holder = item(doc, checks, 'div'); holder.setAttribute('data-required-check-row', 'true');
+      item(doc, holder, 'h5', `Required check ${++checkNumber}`);
+      const fields = {};
+      for (const [name, label, maximum] of [
+        ['source_ref_hex', 'Exact CI source branch bytes, lowercase hexadecimal (including refs/heads/)', 2048],
+        ['publisher', 'Trusted check publisher principal ID', 32],
+        ['graph_root', 'Exact workflow graph hash, 64 lowercase hexadecimal characters', 64],
+        ['job', 'Exact job name, including any spaces or Unicode (at most 1024 UTF-8 bytes)', 1024],
+      ]) {
+        const labelNode = item(doc, holder, 'label', label), input = item(doc, labelNode, 'input');
+        input.type = 'text'; input.autocomplete = 'off'; input.spellcheck = false; input.maxLength = maximum;
+        input.setAttribute('data-required-check-field', name); input.value = selected[name];
+        input.addEventListener('input', changed); fields[name] = input;
+      }
+      const removeCheck = item(doc, holder, 'button', 'Remove this required check'); removeCheck.type = 'button';
+      const check = { fields, remove: removeCheck }; row.checks.push(check);
+      removeCheck.addEventListener('click', event => {
+        event.preventDefault();
+        if (operation || client.busy || !rows.includes(row) || !row.checks.includes(check)) return;
+        try { requireDraftAccess(); row.checks.splice(row.checks.indexOf(check), 1); holder.remove(); changed(); }
+        catch (error) { status(error.message); }
+      });
+    }
+    for (const check of data.required_checks ?? []) appendCheck(check);
+    addCheck.addEventListener('click', event => {
+      event.preventDefault();
+      if (operation || client.busy || !rows.includes(row)) return;
+      try { requireDraftAccess(); appendCheck(); changed(); }
+      catch (error) { status(error.message); }
+    });
     reference.addEventListener('input', () => {
       readable.textContent = 'Edited exact branch bytes; inspect the complete replacement in the preview.'; changed();
     });
@@ -731,6 +769,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     remove.addEventListener('click', event => {
       event.preventDefault();
       if (operation || client.busy || client.pending || !client.connected || client.recoveryOnly || !client.observed?.policy) return;
+      if (!rows.includes(row)) return;
       rows.splice(rows.indexOf(row), 1); group.remove(); changed();
     });
   }
@@ -749,7 +788,8 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     if (rows.some(row => row.reference.value.length > 2048)) fail('A branch byte string exceeds its editing limit.');
     return { replacement: protectionPolicy({ administrators: people(administrators),
       branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers),
-        ...(row.required_checks.length ? { required_checks: row.required_checks } : {}),
+        ...(row.checks.length ? { required_checks: row.checks.map(check => Object.fromEntries(
+          Object.entries(check.fields).map(([name, input]) => [name, input.value]))) } : {}),
         ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}) })),
       ...(!clear.checked && client.observed?.policy?.ref_policy ? { ref_policy: client.observed.policy.ref_policy } : {}) }), clear: clear.checked };
   }
@@ -824,7 +864,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       `Clear ALL branch protection and ref policy: ${proposed.clear}\n` +
       `All changes:\n${JSON.stringify(protectionChanges(source.policy, proposed.replacement), null, 2)}\n` +
       `Complete replacement:\n${JSON.stringify(proposed.replacement, null, 2)}`);
-    status('Review every administrator and branch/reviewer addition and removal. Omitted entries are deleted, not preserved. Prepare explicitly to save this exact preview.');
+    status('Review every administrator, branch, reviewer and required-check addition and removal. Omitted entries are deleted, not preserved. Prepare explicitly to save this exact preview.');
   }));
   on('stage', 'click', () => run(async guard => {
     requireDraftAccess();

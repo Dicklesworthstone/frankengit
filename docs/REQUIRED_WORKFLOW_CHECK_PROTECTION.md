@@ -124,13 +124,26 @@ when empty, so an older client cannot silently discard configured checks while
 editing a complete policy. Each element contains `source_ref_hex`, `publisher`,
 `graph_root` and `job`. Policy reads return all selectors.
 
-The browser protection editors preserve selectors when changing administrators
-or reviewers, display retained checks and expose check additions/removals in
-the prepared change. The standalone editor uses `-` for the reviewer column of
-an existing check-only branch. Changing check selectors is available through
-the CLI, HTTP/MCP APIs and the complete JSON policy file accepted by the
-[remote operator](REMOTE_REVIEW_PROTECTION.md). Removing a branch intentionally
-removes all of its requirements.
+The PR page's protection panel can add, edit and remove required workflow
+checks directly. Each branch rule has structured fields for the exact CI source
+reference hex, publisher, graph commitment and job name. Leave its reviewer list
+empty to create a check-only rule, or combine checks with a reviewer quorum.
+The complete-policy preview enumerates check additions and removals before an
+explicit freeze and submission. Editing a protected target carries that row's
+checks to the renamed target while retaining their exact CI source identity.
+Removing the branch rule intentionally removes all of its requirements.
+
+The standalone protection editor still preserves existing selectors when
+editing reviewer rows and uses `-` for the reviewer column of a check-only
+branch. The CLI, HTTP/MCP APIs and complete JSON policy file accepted by the
+[remote operator](REMOTE_REVIEW_PROTECTION.md) also support selector changes.
+
+An empty check list retains the historical review-only representation. Removing
+the last check from a branch with no reviewers is refused; explicitly remove
+the branch rule to remove its protection. Both clients use the native selector
+bounds without truncation or normalization of job text. The PR panel freezes
+all selector controls with the original request; uncertain retries retain the
+original body and idempotency key.
 
 ## Canonical encoding and bounds
 
