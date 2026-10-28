@@ -1,5 +1,14 @@
 //! Bounded native source files, refs, and source-kind validation.
-use super::*;
+#[cfg(test)]
+use super::Read;
+use super::{
+    BTreeMap, GitHashAlgorithm, GitOid, ImportControl, InflateLimits, LooseGitImportRefusal,
+    MAX_IMPORT_COMPRESSED_OBJECT_BYTES, MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE,
+    MAX_IMPORT_DIRECTORY_ENTRIES, MAX_IMPORT_OBJECTS, MAX_IMPORT_PACKED_REFS_HEADER_BYTES,
+    MAX_IMPORT_REF_DEPTH, MAX_REF_NAME_LEN, MIN_IMPORT_PACK_INPUT_BYTES, OsStr, PackError,
+    PackLimits, PackedObjectSources, ParseLimits, Path, PathBuf, ReadFailure, RefName, control, fs,
+    io,
+};
 
 pub(super) fn resolve_git_directory(
     source: &Path,

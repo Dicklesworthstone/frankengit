@@ -127,7 +127,7 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.is_mutation(),
         }
     }
-    fn route(&self) -> &str {
+    const fn route(&self) -> &str {
         match &self.0 {
             RequestKind::Read(request) => request.repository_route,
             RequestKind::Regex(request) => request.repository_route,
@@ -192,7 +192,10 @@ pub(super) struct HttpReadGrant {
     principal: fgit_types::PrincipalId,
 }
 impl HttpReadGrant {
-    fn context(&self, node: &OneNode) -> crate::source_retrieval::authorization::SourceReadContext {
+    const fn context(
+        &self,
+        node: &OneNode,
+    ) -> crate::source_retrieval::authorization::SourceReadContext {
         crate::source_retrieval::authorization::SourceReadContext::http_credential(
             node,
             self.principal,

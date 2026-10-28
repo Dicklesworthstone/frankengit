@@ -314,7 +314,7 @@ pub(super) fn execute(
     })
 }
 
-fn failure(
+const fn failure(
     snapshot_moved: bool,
     unavailable: bool,
     unpinned: bool,

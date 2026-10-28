@@ -1,6 +1,11 @@
 //! Explicit current-source reads retain the index's original provenance.
 //! This is a trusted-local read boundary, not a new remote grant or a rebuild.
-use super::*;
+use super::{
+    Digest, Failure, GenerationActivation, GitOid, NodeRequestContext, OneNode, RefName,
+    RepositoryAuthorityHeadId, SearchLimits, SymbolQuery, data, live,
+};
+#[cfg(test)]
+use super::{Format, SchemaFamily, SchemaId};
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseContent, SourceBrowseQuery};
 use fgit_types::RepositoryCommitId;
 

@@ -1,6 +1,9 @@
 //! Partial-clone selection over the same native-verified disclosure proof.
 //! Filtering never changes canonical retention and never supplies permission.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, GitOid, NodePackMaterializationRefusal, ObjectType, PackError, PackLimits,
+    PackRequest, PackWriteError, RefusalCode, disclosure_refusal,
+};
 use fgit_wire::ObjectFilter;
 
 /// The upstream configuration name (`uploadpackfilter.<name>.allow`) of the
@@ -50,7 +53,7 @@ impl<F: FnMut() -> bool> Work<'_, F> {
             .ok_or_else(|| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
         Ok(())
     }
-    fn count(&self, count: usize) -> Result<(), NodePackMaterializationRefusal> {
+    const fn count(&self, count: usize) -> Result<(), NodePackMaterializationRefusal> {
         if count > self.maximum {
             Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded))
         } else {

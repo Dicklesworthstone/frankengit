@@ -3,7 +3,13 @@
 //! This adapter does not spawn a thread. Its caller owns the blocking service
 //! lane, requests stop and joins the returned result before shutting down its
 //! parent. Every native attempt retains one original finite request context.
-use super::*;
+use super::{
+    CANONICAL_CODEC_VERSION, Duration, GitHashAlgorithm, IdentityDomain, IndexKind, NodeConfig,
+    OneNode, Options, Path, PathBuf, ProgressFile, ProgressOutput, RefName, State, Stop,
+    internal_algorithm_id, invalid, io, run_controlled, state, wait,
+};
+#[cfg(test)]
+use super::{NodeWorkspaceRefusal, RepositoryId, TICK, TenantId, drive};
 use fgit_runtime::BudgetClass;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};

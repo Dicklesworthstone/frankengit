@@ -2,7 +2,11 @@
 //! trusted local build entrypoint writes; queries and recovery never build.
 mod inventory;
 mod scoped;
-use super::*;
+use super::{
+    ClosureSelectionSource, Format, GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode,
+    ReadMode, RefName, RepositoryAuthorityHeadId, SearchError, SearchLimits, Sha1, Sha256,
+    SourceQuery, admits_read, search_error, workspace_request_live,
+};
 use fgit_forge::source_search::SearchCase;
 use fgit_graph::lexical::{
     IndexError, IndexedLexicalReport, LexicalError, LexicalIndexStore, LexicalNamespace,

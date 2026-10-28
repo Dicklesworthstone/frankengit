@@ -4301,7 +4301,9 @@ fn reachable_within_permitted_closure_bounded(
 /// one have, and it needs a full-history, unfiltered fetch. Only there does a
 /// have prove that the client holds that object's whole closure, which is
 /// what makes a client-held object a sound delta base (frankengit-pazc).
-pub(crate) fn selected_fetch_write_profile(request: &fgit_wire::PackRequest) -> PackWriteProfile {
+pub(crate) const fn selected_fetch_write_profile(
+    request: &fgit_wire::PackRequest,
+) -> PackWriteProfile {
     let options = request.options;
     if !options.ofs_delta() {
         return PackWriteProfile::COMPRESSED_NO_DELTA_V1;
@@ -5571,7 +5573,7 @@ impl GitDaemonReceiveProcessingDeadline {
         self.work.expired()
     }
 
-    fn deadline(&self) -> &GitDaemonSessionDeadline {
+    const fn deadline(&self) -> &GitDaemonSessionDeadline {
         &self.work
     }
 }
@@ -7629,7 +7631,7 @@ impl NodeConfig {
     /// Existing configurations keep their original profiles and 32 MiB limit.
     /// Receive/import object limits and the total pack envelope are separate.
     #[must_use]
-    pub fn with_selected_pack_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
+    pub const fn with_selected_pack_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
         self.selected_pack_limits.max_object_bytes = maximum_blob_bytes;
         self.selected_pack_blob_limit = Some(maximum_blob_bytes);
         self
@@ -8671,15 +8673,16 @@ impl OneNode {
         // installation without making the cache an authority source.
         let catch_up = request.authority().create_child();
         let is_cancelled = || !is_live() || catch_up.checkpoint().is_err();
-        self.admission_materializer
-            .materialize_current_in(
-                &self.authority,
-                &catch_up,
-                &self.head_key,
-                self.repository_id,
-                &is_cancelled,
-            )
-            .await
+        // Pin the materializer's frame at its existing child-request boundary.
+        // The child context and liveness predicate stay borrowed to completion.
+        Box::pin(self.admission_materializer.materialize_current_in(
+            &self.authority,
+            &catch_up,
+            &self.head_key,
+            self.repository_id,
+            &is_cancelled,
+        ))
+        .await
     }
 
     /// Materializes canonical admission state with a fresh bounded context.
@@ -8864,14 +8867,14 @@ impl OneNode {
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
         let projection = self.durable_admission_projection(context)?;
-        admit_validated_receive_async(
+        Box::pin(admit_validated_receive_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -8944,14 +8947,14 @@ impl OneNode {
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
         let projection = self.durable_admission_projection(context)?;
-        admit_basis_bound_validated_receive_async(
+        Box::pin(admit_basis_bound_validated_receive_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -9158,14 +9161,14 @@ impl OneNode {
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
         let projection = self.durable_admission_projection(context)?;
-        admit_validated_source_import_async(
+        Box::pin(admit_validated_source_import_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 

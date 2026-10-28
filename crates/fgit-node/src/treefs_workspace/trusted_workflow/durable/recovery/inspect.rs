@@ -1,6 +1,10 @@
 //! Offline, non-consuming node recovery reads. No execution or acknowledgement.
 //! The CLI uses this composition rather than bypassing the original node marker.
-use super::*;
+use super::{
+    CheckJournalPin, CheckJournalScope, Commitment, OneNode, Path, TrustedWorkflowFailure,
+};
+#[cfg(test)]
+use super::{FileCheckJournal, JOURNAL_FILE, fs};
 use fgit_crypto::{Digest, DigestAlgorithm};
 use fgit_runner::coordinator::delivery::journal::history::{
     CheckHistoryEntry, MAX_HISTORY_BATCHES, MAX_HISTORY_BYTES,

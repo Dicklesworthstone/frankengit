@@ -29,7 +29,7 @@ struct InFlight {
 }
 
 impl<'a> Placements<'a> {
-    pub(super) fn new(node: &'a OneNode) -> Self {
+    pub(super) const fn new(node: &'a OneNode) -> Self {
         Self {
             node,
             objects: Vec::new(),

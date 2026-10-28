@@ -60,7 +60,7 @@ impl SelectedForgeDelivery {
     }
 
     #[must_use]
-    pub fn entry(&self) -> &CanonicalOutboxStateEntry {
+    pub const fn entry(&self) -> &CanonicalOutboxStateEntry {
         &self.entry
     }
 
@@ -74,7 +74,7 @@ impl SelectedForgeDelivery {
     /// Preserve every original outbox parameter, including its destination and
     /// payload commitment. A transport must not retarget the selected request.
     #[must_use]
-    pub fn as_request(&self) -> DeliveryRequest<'_> {
+    pub const fn as_request(&self) -> DeliveryRequest<'_> {
         DeliveryRequest {
             key: self.entry.delivery_key(),
             destination: self.entry.destination(),

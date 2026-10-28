@@ -102,10 +102,10 @@ impl ApiError {
     const fn new(status: Status, code: &'static str) -> Self {
         Self { status, code }
     }
-    fn bad(code: &'static str) -> Self {
+    const fn bad(code: &'static str) -> Self {
         Self::new(Status::BadRequest, code)
     }
-    pub(super) fn from_status(status: Status) -> Self {
+    pub(super) const fn from_status(status: Status) -> Self {
         let code = match status {
             Status::Unauthorized => "unauthorized",
             Status::Forbidden => "forbidden",

@@ -1,7 +1,19 @@
 //! Packed-source decoding with immutable disk custody, not retained body maps.
 //! Every pack is checksum/index/native-identity verified before its cache becomes
 //! usable. Per-pack decoder/cache bounds and operation-wide work remain distinct.
-use super::*;
+#[cfg(test)]
+use super::graph;
+use super::{
+    AcceptanceProfile, BTreeMap, BoundedInputClass, GitHashAlgorithm, GitOid, IdxV2, ImportControl,
+    LooseGitImportRefusal, MAX_IMPORT_INDEX_FILE_BYTES, MAX_IMPORT_OBJECTS, MAX_IMPORT_PACKS,
+    MAX_IMPORT_TOTAL_INDEX_BYTES, NativeChecksumVerifier, OsStr, OsString, PackError, PackLimits,
+    ParseLimits, ParsedDeltaBase, Path, PathBuf, ResolutionBudget, StreamPackEntry,
+    StreamPackError, apply_delta_to_charged_base_with_budget, bounded_directory_entries, fs,
+    import_pack_limits, io_refusal, is_ignored_pack_accelerator, object_type_from_base_entry,
+    open_regular_bounded, pack_input_limit, pack_refusal, parse_limits, parse_pack_header,
+    path_metadata, profile, read_regular_bounded, read_streamed_pack, spool,
+    validate_idx_pack_count, verify_native_object,
+};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::control::IO_CHUNK_BYTES;
@@ -429,7 +441,7 @@ impl StreamedPack<'_> {
         pack_refusal(self.pack_path.to_path_buf(), error)
     }
 
-    fn invariant() -> LooseGitImportRefusal {
+    const fn invariant() -> LooseGitImportRefusal {
         super::control::interrupted(fgit_types::RefusalCode::InternalInvariantBreach)
     }
 

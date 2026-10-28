@@ -376,7 +376,7 @@ fn decode(bytes: &[u8], maximum: usize) -> Result<String, ApiError> {
     }
     String::from_utf8(out).map_err(|_| ApiError::bad("invalid_utf8"))
 }
-fn digit(byte: u8) -> Result<u8, ApiError> {
+const fn digit(byte: u8) -> Result<u8, ApiError> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),

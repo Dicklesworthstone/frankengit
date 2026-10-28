@@ -144,7 +144,7 @@ impl VerifiedGitBundle {
         self.advertised_head
     }
     #[must_use]
-    pub fn references(&self) -> &BTreeMap<RefName, GitOid> {
+    pub const fn references(&self) -> &BTreeMap<RefName, GitOid> {
         &self.references
     }
     #[must_use]

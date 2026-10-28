@@ -3,7 +3,10 @@
 //! Membership and refs are materialized once, not copied or replayed per page.
 //! Every page still authenticates current authority before and after native reads.
 
-use super::*;
+use super::{
+    GraphAuditRefusal, Instant, MaterializedAdmission, NodeRequestContext, OneNode, ReadMode,
+    ScrubQuery, ScrubRefusal, SelectedObjectScrub, admits_read, checkpoint, fmt, revalidate_head,
+};
 
 /// A bounded, read-only cursor tied to the originating node and request.
 ///

@@ -59,6 +59,7 @@ pub struct WebhookDeliveryDestination {
 }
 
 impl WebhookDeliveryDestination {
+    #[must_use]
     pub fn new(
         destination_slug: AsciiSlug,
         registration: WebhookRegistration,

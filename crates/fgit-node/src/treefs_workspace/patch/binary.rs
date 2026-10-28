@@ -33,7 +33,7 @@ fn identities(
 ) -> Result<(Option<GitOid>, Option<GitOid>), PatchError> {
     Ok((identity(&index.old, format)?, identity(&index.new, format)?))
 }
-fn refusal(error: BinaryPatchError) -> PatchError {
+const fn refusal(error: BinaryPatchError) -> PatchError {
     match error {
         BinaryPatchError::Cancelled => PatchError::Cancelled,
         BinaryPatchError::InvalidLimits => PatchError::InvalidLimits,

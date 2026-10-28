@@ -641,6 +641,47 @@ fn http_stop_control_failure_still_drains_and_releases_maintenance() {
     let path = root.0.join("credentials");
     credentials(&node, &path);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ready = AtomicBool::new(false);
+    let error = node
+        .serve_repository_http_with_index_maintenance_until_stopped(
+            &listener,
+            1,
+            &path,
+            false,
+            false,
+            false,
+            false,
+            maintenance(IndexKind::Lexical, format, &directory, true),
+            &|| {
+                if ready.load(Ordering::Acquire) {
+                    Err(io::Error::other("operator stop unavailable"))
+                } else {
+                    Ok(false)
+                }
+            },
+            &|| {
+                ready.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert!(ready.load(Ordering::Acquire));
+    assert!(error.to_string().contains("operator stop unavailable"));
+    assert!(!directory.join("run.lock").exists());
+    assert!(directory.join("checkpoint").is_file());
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn http_stop_control_failure_before_maintenance_start_leaves_progress_unclaimed() {
+    let root = Scratch::new();
+    let format = GitHashAlgorithm::Sha256;
+    let (node, _) = fixture(&root, format);
+    let directory = progress(&root);
+    let path = root.0.join("credentials");
+    credentials(&node, &path);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ready = AtomicBool::new(false);
     let error = node
         .serve_repository_http_with_index_maintenance_until_stopped(
             &listener,
@@ -652,11 +693,15 @@ fn http_stop_control_failure_still_drains_and_releases_maintenance() {
             false,
             maintenance(IndexKind::Lexical, format, &directory, true),
             &|| Err(io::Error::other("operator stop unavailable")),
-            &|| Ok(()),
+            &|| {
+                ready.store(true, Ordering::Release);
+                Ok(())
+            },
         )
         .unwrap_err();
     assert!(error.to_string().contains("operator stop unavailable"));
+    assert!(!ready.load(Ordering::Acquire));
     assert!(!directory.join("run.lock").exists());
-    assert!(directory.join("checkpoint").is_file());
+    assert!(!directory.join("checkpoint").exists());
     node.shutdown().unwrap();
 }

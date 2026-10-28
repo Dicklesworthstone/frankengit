@@ -248,9 +248,9 @@ impl OneNode {
         let expected_old = state.snapshot().refs.get(&config.reference).copied();
         let subject = ReviewSubject {
             pull_request: PullRequestNumber::try_new(pull.number)
-                .map_err(|_| invalid("invalid PR number"))?,
+                .ok_or_else(|| invalid("invalid PR number"))?,
             pull_request_version: AggregateVersion::try_new(pull.version)
-                .map_err(|_| invalid("invalid PR version"))?,
+                .ok_or_else(|| invalid("invalid PR version"))?,
             source_ref: reference.clone(),
             target_ref: pull.target.clone(),
             source_tip: selected.commit,

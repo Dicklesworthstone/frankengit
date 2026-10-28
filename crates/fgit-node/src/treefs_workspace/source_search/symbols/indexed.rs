@@ -1,6 +1,11 @@
 //! Native persistent symbols. Only explicit trusted-local builds publish a
 //! derived generation; search validates canonical visibility before disclosure.
-use super::*;
+use super::{
+    BaseView, ClosureSelectionSource, Digest, Format, GitHashAlgorithm, GitOid, LocalSearch,
+    NodeRequestContext, NodeWorkspaceRefusal, ObjectSource, OneNode, ReadMode, RefName,
+    RepositoryAuthorityHeadId, SearchError, SearchLimits, Sha1, Sha256, SourceQuery,
+    SourceSearchReport, SymbolQuery, TreeCapability, admits_read, workspace_request_live,
+};
 use fgit_authority::{AsyncAuthorityStore, HeadKey, ImmutableKey, ImmutableRead, PutOutcome};
 use fgit_forge::source_search::SearchCase;
 use fgit_forge::source_symbols::index as data;

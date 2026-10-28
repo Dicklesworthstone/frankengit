@@ -2,7 +2,10 @@
 //! Membership in the cumulative admitted set is necessary, but never sufficient:
 //! each permitted object has a chain of verified native edges from these roots.
 
-use super::*;
+use super::{
+    AcceptanceProfile, BTreeMap, BTreeSet, GitHashAlgorithm, GitOid, MergeObjectLimits,
+    MergeSourceError, ObjectType, ParseLimits, ParsedObject, git_object_id, parse_object_body,
+};
 use fgit_git_object::ObjectError;
 use std::collections::VecDeque;
 

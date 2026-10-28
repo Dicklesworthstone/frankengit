@@ -2,7 +2,17 @@
 //! Stored bytes and provenance do not grant a BuildInputCapsule cache hit or a
 //! canonical check. The producing attempt must still close and publish normally.
 
-use super::*;
+use super::{
+    BTreeSet, DirBuilderExt, File, GitHashAlgorithm, MAX_REPLICATED_BYTES, MAX_REPLICATED_ENTRIES,
+    OneNode, OpenOptions, OpenOptionsExt, OsStrExt, Path, PathBuf, SOURCE_LIMITS, SparseWorkspace,
+    SparseWorkspacePlan, TreePath, TrustedWorkflowFailure, TrustedWorkflowRun, WorkerFailure,
+    WorkflowJob, WorkflowPlan, Write, fs, hex,
+};
+#[cfg(test)]
+use super::{
+    GitOid, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId,
+    StepObservation, TenantId, WorkflowLimits, WorkflowReport,
+};
 use fgit_crypto::{DigestAlgorithm, sha256_digest};
 use fgit_object_fabric::artifact::storage::{ArtifactOperation, ArtifactScope, LocalArtifactStore};
 use fgit_object_fabric::artifact::{
@@ -63,12 +73,15 @@ impl TrustedWorkflowArtifactSelection {
             output,
         })
     }
+    #[must_use]
     pub fn workflow_path(&self) -> &[u8] {
         self.workflow.as_bytes()
     }
+    #[must_use]
     pub fn job_id(&self) -> &str {
         &self.job
     }
+    #[must_use]
     pub fn output_path(&self) -> &[u8] {
         self.output.as_bytes()
     }
@@ -148,18 +161,23 @@ impl TrustedWorkflowArtifactConfig {
             input_total_bytes: DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES,
         })
     }
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
+    #[must_use]
     pub fn selections(&self) -> &[TrustedWorkflowArtifactSelection] {
         &self.selections
     }
+    #[must_use]
     pub const fn maximum_bytes(&self) -> usize {
         self.maximum_bytes
     }
+    #[must_use]
     pub const fn total_bytes(&self) -> usize {
         self.total_bytes
     }
+    #[must_use]
     pub const fn capture_logs(&self) -> bool {
         self.capture_logs
     }

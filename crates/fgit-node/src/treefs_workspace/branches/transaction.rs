@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 //! Multi-branch transactions reuse the ordinary receive admission and exact
 //! terminal identity, never a loop of independently published branch writes.
-use super::*;
+use super::{
+    AdmissionLimits, AdmissionResult, LoopbackReceiveSession, NodeReceiveTransportRefusal,
+    NodeRequestContext, NodeWorkspaceRefusal, OneNode, RefCommand, branch_commands_request,
+    invalid, receive_error,
+};
 
 impl OneNode {
     /// Hard limit for a single local branch transaction before cloning commands.

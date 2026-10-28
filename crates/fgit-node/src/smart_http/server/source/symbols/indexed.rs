@@ -1,6 +1,14 @@
 //! Authenticated persisted declaration reads. Shared envelope/query parsing and
 //! row validation remain owned by the declaration service, not copied here.
-use super::*;
+use super::{
+    ApiError, BodyFraming, Command, GitDaemonSessionDeadline, GitDaemonSessionWorkScaling,
+    GitHashAlgorithm, HttpLimits, JsonReply, LoopbackReceiveSession, NodeWorkspaceRefusal, OneNode,
+    PROFILE, Read, SearchLimits, Selection, Status, SymbolMatchMode, SymbolQuery, append, check,
+    command_fields, drive_request_while, hex, parse_decimal, parse_form, quote, read_error,
+    read_form, ref_fields, row_json_labeled, unhex,
+};
+#[cfg(test)]
+use super::{Request, command};
 mod current;
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_forge::source_symbols::index::{self as data, AccessError, TableError};

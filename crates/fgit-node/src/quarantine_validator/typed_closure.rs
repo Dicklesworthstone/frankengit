@@ -4,7 +4,19 @@
 //! requested uploaded closure is selected here; every native edge must resolve
 //! to its required kind, including edges ending in the authenticated frontier.
 //! Transport-only delta bases retain their existing closure responsibility.
-use super::*;
+#[cfg(test)]
+use super::{
+    AuthoritySelectedClosure, GitHashAlgorithm, OneNode, PackLimits, ParseLimits,
+    ProductionReceiveQuarantineHandoff, ReceiveError,
+};
+use super::{
+    BTreeMap, BTreeSet, Deadline, ExternalBases, GitOid, ObjectType, ParsedObject,
+    PermittedObjectClosure, ProductionQuarantineValidator, QuarantineReceipt, QuarantinedPack,
+    ReceiveRequest, RefusalCode, ValidatedClosure, VerifiedObject, checkpoint,
+    permitted_object_closure_root, reused_targets,
+};
+#[cfg(test)]
+use super::{QuarantineValidator, ReceiveQuarantineHandoff};
 
 // Bounds on additional verification state, independent of uploaded entry count.
 // A single new tree may legitimately reference many already-selected objects.

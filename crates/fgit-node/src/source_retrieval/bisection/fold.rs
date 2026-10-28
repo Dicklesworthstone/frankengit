@@ -1,5 +1,8 @@
 //! Fold one queried native state; never create a mutable product database.
-use super::*;
+use super::{
+    BisectionRange, DecisionSequence, Error, GitOid, IssueState, MAX_EVENTS, PolicyEpoch,
+    Predicate, PullState, Query, RepositoryAuthorityHeadBody, RepositoryAuthorityHeadId,
+};
 use fgit_forge::aggregate::{AggregateId, AggregateVersion};
 use fgit_forge::bisection::PredicateOutcome;
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload};

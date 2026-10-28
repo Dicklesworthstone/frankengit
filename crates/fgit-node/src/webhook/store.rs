@@ -317,6 +317,7 @@ pub struct DeadLetterQueue {
 }
 
 impl DeadLetterQueue {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -334,6 +335,7 @@ impl DeadLetterQueue {
 
     /// Compatibility surface. Check `persistence_error`, or use the checked
     /// constructor: an unreadable file produces a permanently non-writable handle.
+    #[must_use]
     pub fn with_persist_path(path: PathBuf) -> Self {
         match Self::try_with_persist_path(path.clone()) {
             Ok(queue) => queue,
@@ -348,6 +350,7 @@ impl DeadLetterQueue {
         }
     }
 
+    #[must_use]
     pub fn persistence_error(&self) -> Option<String> {
         match self.state.lock() {
             Ok(state) => state.last_error.clone(),
@@ -489,6 +492,7 @@ impl DeadLetterQueue {
         })
     }
 
+    #[must_use]
     pub fn remove(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
         self.try_remove(delivery_id).ok().flatten()
     }
@@ -618,6 +622,7 @@ impl WebhookStore {
         self.dead_letters.try_remove(delivery_id)
     }
 
+    #[must_use]
     pub fn replay_dead_letter(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
         self.dead_letters.remove(delivery_id)
     }

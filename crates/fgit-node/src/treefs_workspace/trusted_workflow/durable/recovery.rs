@@ -1,5 +1,10 @@
 //! Reopen saved node job evidence without reading source or executing a plan.
-use super::*;
+#[cfg(test)]
+use super::OWNER_FILE;
+use super::{
+    CheckJournalScope, Commitment, FileCheckJournal, JOURNAL_FILE, Path, TrustedWorkflowFailure,
+    TrustedWorkflowRun, scope,
+};
 use crate::OneNode;
 use fgit_runner::coordinator::delivery::journal::CheckJournalPin;
 use std::fs::{self, File};
@@ -15,6 +20,7 @@ impl TrustedWorkflowRun {
     /// Retain this exact local custody scope independently of the run directory
     /// for later reopening. It identifies the immutable attempt marker; it is
     /// neither a canonical check receipt nor authorization to execute again.
+    #[must_use]
     pub fn check_journal_scope(&self) -> CheckJournalScope {
         scope(self)
     }

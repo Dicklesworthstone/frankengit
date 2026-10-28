@@ -1,5 +1,10 @@
 //! Annotated-tag projections derived only from the verified visible graph.
-use super::*;
+use super::{
+    AdvertisedRef, AnyGitOid, BTreeMap, BTreeSet, GitHashAlgorithm, GitOid,
+    NodePackMaterializationRefusal, PackError, PackLimits, PackRequest, PackWriteError,
+    RefusalCode, UploadPackRepository, WireError, WireLimits, disclosure_refusal,
+    entry_limit_error,
+};
 
 pub struct TagProjection {
     pub(super) peels: BTreeMap<GitOid, GitOid>,

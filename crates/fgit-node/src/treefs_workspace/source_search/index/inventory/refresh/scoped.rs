@@ -1,7 +1,13 @@
 //! Refresh the exact scoped generation from authenticated native TreeFS.
 //! Reuse, discovery and payload publication stay on their existing paths;
 //! coverage is never inferred from query hits or promoted to whole-tree truth.
-use super::*;
+use super::{
+    Format, GenerationActivation, GenerationAuthorityError, GitOid, GraphGenerationId,
+    LexicalError, LexicalReadLimits, LexicalRefreshStats, LexicalSource, NodeRequestContext,
+    NodeWorkspaceRefusal, OneNode, ReadMode, RefName, RefreshDocument, RepositoryAuthorityHeadId,
+    Request, Reuse, SearchCase, SearchLimits, Sha1, Sha256, SourceBrowseError, SourceQuery,
+    admits_read, admits_staging_intake, index_error, live, search_error, workspace_request_live,
+};
 use fgit_graph::lexical::scoped::{LexicalScope, ScopedLexicalIndexStore};
 
 impl OneNode {

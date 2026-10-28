@@ -2,9 +2,16 @@
 //! never causes a direct read: only parent edges from the selected tip do.
 //! This is a bounded local-owner profile, not an agent capability expansion.
 
+#[cfg(test)]
+use super::{RepositoryAuthorityHeadId, SourceBrowseAction};
 use std::collections::{BTreeSet, VecDeque};
 
-use super::*;
+use super::{
+    AcceptanceProfile, Format, GitObjectKind, NodeRequestContext, NodeTreeSource,
+    NodeWorkspaceRefusal, ObjectType, Oid, OneNode, ParseLimits, ParsedObject, RefName, Sha1,
+    Sha256, SourceBrowseError, SourceBrowseQuery, SourceBrowseReport, VerifiedFabricPackSource,
+    error, live, parse_object_body, read_refused,
+};
 
 const MAX_COMMITS: usize = 4096;
 const MAX_EDGES: usize = 16_384;

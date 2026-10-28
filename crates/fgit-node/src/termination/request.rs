@@ -31,6 +31,7 @@ impl NodeRequestContext {
     /// Observe cooperative request liveness, charging the existing runtime
     /// checkpoint budget. A false result stops NEW work; callers still own
     /// non-cancellable drain/finalization and cannot infer transaction rollback.
+    #[must_use]
     pub fn checkpoint_is_live(&self) -> bool {
         matches!(
             crate::checkpoint_pack_context(self.authority()),

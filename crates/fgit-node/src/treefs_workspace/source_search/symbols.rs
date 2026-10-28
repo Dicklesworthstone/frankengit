@@ -1,7 +1,13 @@
 //! Rust declaration retrieval shares the existing single native source
 //! selection. Neither an error nor the language profile mints a read grant.
 mod indexed;
-use super::*;
+use super::{
+    BaseView, ClosureSelectionSource, Digest, Format, GitHashAlgorithm, GitOid, LocalSearch,
+    NodeRequestContext, NodeWorkspaceRefusal, ObjectSource, OneNode, ReadMode, RefName,
+    RefVisibility, RepositoryAuthorityHeadId, SearchError, SearchLimits, Sha1, Sha256, SourceQuery,
+    SourceSearchReport, TreeCapability, admits_read, bounded_source, search_error,
+    workspace_request_live,
+};
 use fgit_forge::source_symbols::{
     SymbolQuery, SymbolReadError, SymbolSearchReport, search_source_symbols,
 };

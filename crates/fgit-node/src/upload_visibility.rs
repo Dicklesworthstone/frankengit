@@ -4,7 +4,30 @@
 //! Derive one complete visible native graph before negotiation, then use that
 //! same private proof for wants, ACKs, and pack selection. Never narrow or
 //! rewrite the canonical per-decision closure or the trusted local exporter.
-use super::*;
+use super::{
+    AcceptanceProfile, AdmissionUploadPackRepository, AdvertisedRef, AnyGitOid, Arc, BTreeMap,
+    BTreeSet, BudgetClass, Cell, GitDaemonSessionDeadline, GitHashAlgorithm, GitOid,
+    MaterializedAdmission, NodeAdmissionViewRefusal, NodeGitDaemonServeRefusal,
+    NodePackMaterializationRefusal, NodeRequestContext, ObjectType, OneNode, PackError, PackLimits,
+    PackRequest, PackWriteError, ParseLimits, PermittedClosureTraversalSource,
+    PermittedObjectClosure, PublicationBasis, RefusalCode, UploadPackRepository,
+    VerifiedFabricPackSource, WireError, WireLimits, entry_limit_error, parse_object_body,
+};
+#[cfg(test)]
+use super::{
+    AdmissionContext, AdmissionLimits, AdmissionSnapshot, AtomicBool, AtomicU64, Capabilities,
+    CeiledFabricSource, Duration, FsqliteCx, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
+    GitDaemonSessionWorkScaling, GitObjectKind, HeadGeneration, IdempotencyKey,
+    LoopbackReceiveSession, NodeConfig, NodeSmartHttpRefusal, Ordering, PackPlanner,
+    PackWriteProfile, PackWriter, Packet, PathBuf, PrincipalId, ReceiveContext, ReceiveLimits,
+    RefName, RefVisibility, RepositoryId, SegmentLimits, Shutdown, SignedPushProfile,
+    SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, TcpListener, TcpStream, TenantId,
+    UploadPackVersion, V2UploadPack, ValidatedClosure, VerifiedFabricBlobReader,
+    crypto_object_kind, encode_packets, git_object_id, permitted_object_closure_root,
+    selected_pack_ids_and_held, validate_source_import,
+};
+#[cfg(test)]
+use super::{CanonicalBlobReader, PackPayloadSource};
 mod partial_clone;
 pub(crate) use partial_clone::unserved_filter_name;
 pub mod shallow;

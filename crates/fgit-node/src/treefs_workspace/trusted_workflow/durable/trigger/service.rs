@@ -99,7 +99,7 @@ impl WorkflowWatchConfig {
     /// The caller must be authorized to publish as this principal. The first
     /// native publication binds it permanently to the existing custody scope.
     #[must_use]
-    pub fn with_publisher(mut self, publisher: PrincipalId) -> Self {
+    pub const fn with_publisher(mut self, publisher: PrincipalId) -> Self {
         self.publisher = Some(publisher);
         self
     }
@@ -144,7 +144,7 @@ impl WorkflowWatchConfig {
         self.format
     }
     #[must_use]
-    pub fn reference(&self) -> &RefName {
+    pub const fn reference(&self) -> &RefName {
         &self.reference
     }
     #[must_use]
@@ -215,6 +215,7 @@ pub struct WorkflowWatchReceipt {
 }
 
 impl WorkflowWatchReceipt {
+    #[must_use]
     pub fn to_json(&self) -> String {
         format!(
             concat!(
@@ -259,7 +260,8 @@ pub enum WorkflowWatchError {
 impl WorkflowWatchError {
     /// Retain observed counts even when later execution, output or shutdown
     /// fails. Failure never erases an earlier canonical publication observation.
-    pub fn receipt(&self) -> Option<&WorkflowWatchReceipt> {
+    #[must_use]
+    pub const fn receipt(&self) -> Option<&WorkflowWatchReceipt> {
         match self {
             Self::WithReceipt { receipt, .. } => Some(receipt),
             _ => None,
@@ -268,6 +270,7 @@ impl WorkflowWatchError {
 
     /// A typed owner-requested startup stop, with native shutdown completed.
     /// Independent custody, publication and shutdown errors never match it.
+    #[must_use]
     pub fn stopped_before_readiness(&self) -> bool {
         match self {
             Self::StoppedBeforeReadiness => true,

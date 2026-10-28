@@ -1,6 +1,12 @@
 //! Exact-predecessor refresh. Current visibility precedes predecessor reads;
 //! reused blobs never carry an old path or source stamp into the new manifest.
-use super::*;
+use super::{
+    Build, ClosureSelectionSource, Failure, Format, GenerationActivation, GenerationAuthority,
+    GenerationAuthorityError, GenerationReadLimits, GitOid, GraphGenerationId, NodeRequestContext,
+    NodeWorkspaceRefusal, OneNode, ReadMode, RefName, RepositoryAuthorityHeadId, SearchCase,
+    SearchLimits, Sha1, Sha256, SourceQuery, admits_read, admits_staging_intake, data, live,
+    symbol_manifest_root, view, workspace_request_live,
+};
 
 mod reconcile;
 

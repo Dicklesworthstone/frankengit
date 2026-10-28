@@ -5,7 +5,11 @@ mod scoped;
 
 use super::super::super::{search_error, workspace_request_live};
 use super::super::{index_error, live};
-use super::*;
+use super::{
+    BTreeMap, BaseView, Discovery, Format, GitHashAlgorithm, GitObjectKind, GitOid, LocalSearch,
+    ObjectSource, SearchCompletion, SearchError, SearchLimits, SourceQuery, SourceSearchReport,
+    TreeCapability, check, discover, discover_selected, native,
+};
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_crypto::{Sha1, Sha256};
 use fgit_forge::source_browse::SourceBrowseError;

@@ -2,7 +2,13 @@
 //! remain unchanged; these methods require explicit immutable coverage and
 //! use separately identified generation heads. Caller must already have
 //! trusted-local repository authority. Coverage never grants source access.
-use super::*;
+use super::{
+    ClosureSelectionSource, Format, GenerationActivation, GenerationReadLimits, GenerationRecovery,
+    GitOid, GraphGenerationId, InventoryRequest, LexicalError, LexicalQuery, LexicalQueryLimits,
+    LexicalReadLimits, LexicalSource, NodeRequestContext, NodeWorkspaceRefusal, OneNode, ReadMode,
+    RefName, RepositoryAuthorityHeadId, SearchCase, SearchLimits, Sha1, Sha256, SourceQuery,
+    admits_read, index_error, live, search_error, segments, workspace_request_live,
+};
 use fgit_graph::lexical::scoped::{
     LexicalScope, PreparedScopedLexicalIndex, ScopedLexicalIndexStore, ScopedLexicalReport,
 };

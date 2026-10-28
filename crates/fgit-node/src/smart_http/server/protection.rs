@@ -452,7 +452,7 @@ fn reference(text: &str) -> Result<RefName, ApiError> {
     Ok(reference)
 }
 
-fn hex_digit(byte: u8) -> Result<u8, ApiError> {
+const fn hex_digit(byte: u8) -> Result<u8, ApiError> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),

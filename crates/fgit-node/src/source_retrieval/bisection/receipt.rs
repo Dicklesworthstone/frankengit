@@ -1,10 +1,14 @@
 //! Versioned diagnostic JSON. SHA-256 binds the complete JSON payload before
 //! adding receipt_sha256, including predicate, incarnation, observed authority,
 //! full native identity domains, limits, publication domain and every probe.
-use super::*;
+use super::{
+    BisectionTermination, GitHashAlgorithm, IssueState, PROFILE, Predicate, PullState, Report,
+    RepositoryAuthorityHeadId, fold,
+};
 use fgit_forge::bisection::{BisectionRefusal, PredicateOutcome};
 use std::fmt::Write;
 
+#[must_use]
 pub fn head_token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id();
     format!(
@@ -33,7 +37,7 @@ fn quote(value: &str) -> String {
     out.push('"');
     out
 }
-fn state(state: PullState) -> &'static str {
+const fn state(state: PullState) -> &'static str {
     match state {
         PullState::Open => "open",
         PullState::Closed => "closed",
@@ -86,7 +90,7 @@ pub(super) fn positions_digest(points: &[fold::Point]) -> String {
     }
     hex(&fgit_crypto::sha256_digest(&bytes))
 }
-fn refusal(error: &BisectionRefusal) -> &'static str {
+const fn refusal(error: &BisectionRefusal) -> &'static str {
     match error {
         BisectionRefusal::BudgetExhausted { .. } => "probe_budget_exhausted",
         BisectionRefusal::Cancelled { .. } => "request_stopped",

@@ -1,6 +1,17 @@
 //! Closed, versioned generation layouts. A selected directory is mandatory
 //! backing, never an optional cache that can silently fall back after damage.
-use super::*;
+#[cfg(test)]
+use super::{
+    AsyncAuthorityStore, Build, Format, GenerationActivation, GenerationAuthority, GitOid,
+    PutOutcome, RefName, SearchCase, Sha1, Sha256, SourceQuery, SymbolQuery,
+};
+use super::{
+    BuilderProfileId, Digest, Failure, GraphAuthorityClass, GraphGenerationBody, GraphGenerationId,
+    GraphSourceStamp, NodeRequestContext, OneNode, SchemaFamily, SchemaId, data, live, view,
+    workspace_request_live,
+};
+#[cfg(test)]
+use fgit_crypto::GitObjectKind;
 
 pub(super) const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("source-symbol-index"), 1, 0)

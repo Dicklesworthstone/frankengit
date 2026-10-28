@@ -1,5 +1,8 @@
 //! Resolve relative depth inside the same verified graph and work ledger.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, FilterObject, GitOid, NodePackMaterializationRefusal, ObjectType,
+    PackRequest, RefusalCode, Work, budget, disclosure_refusal, enqueue, object,
+};
 
 pub(super) const INFINITE_DEPTH: u32 = 2_147_483_647;
 

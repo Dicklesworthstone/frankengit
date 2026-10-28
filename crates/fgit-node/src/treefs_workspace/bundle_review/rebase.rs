@@ -1,7 +1,14 @@
 //! Stage-free inspection of every actual commit in a linear rebase bundle.
 //! The old source lease selects the comparison, not external pack bases.
 
-use super::*;
+use super::{
+    BTreeSet, BundleInspectionRefusal, CandidateEnvelope, Cell, ComparisonMode, GitOid,
+    InspectionSource, MAX_BUNDLE_BYTES, MAX_CANDIDATE_BYTES, MAX_EXPANDED_BYTES,
+    MAX_INSPECTION_OBJECTS, MergeObjectLimits, MergeObjectSource, NodeRequestContext,
+    ObjectFrontier, ObjectType, OneNode, OriginalSource, PackLimits, ParseLimits, ReadBudget,
+    ReadMode, RefName, RefVisibility, RepositoryAuthorityHeadId, ReviewOptions,
+    VerifiedFabricPackSource, admits_read, invalid, pack, sha256_digest,
+};
 use crate::treefs_workspace::candidate_inspection::{
     InspectedBundle, InspectedRebaseCommit, RebaseBundleInspection,
 };

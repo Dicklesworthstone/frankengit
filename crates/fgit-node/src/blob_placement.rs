@@ -1,6 +1,10 @@
 //! File-backed blob custody for native backup and recovery.
 
-use super::*;
+use super::{
+    GitOid, LeakDisposition, LocalBlobStream, NodeRefusal, OBJECT_CODEC_NAMESPACE, ObjectEnvelope,
+    ObjectKind, ObligationLedger, OneNode, PlacementAdmission, PutIfAbsent, Read, RegionId,
+    StoreRefusal, StoredObject, placement_resources,
+};
 use fgit_object_fabric::local::StoredObjectHeader;
 
 impl OneNode {

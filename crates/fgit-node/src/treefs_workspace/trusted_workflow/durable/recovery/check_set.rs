@@ -44,7 +44,7 @@ pub struct TrustedWorkflowCheckSet {
     nonterminal_facts: usize,
 }
 impl TrustedWorkflowCheckSet {
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.checks.len()
     }
     pub(crate) fn evidence_bytes(&self) -> usize {
@@ -58,10 +58,10 @@ impl TrustedWorkflowCheckSet {
             .iter()
             .all(|c| c.observation.record.source_commit == commit)
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.checks.is_empty()
     }
-    pub fn identity(&self) -> [u8; 32] {
+    pub const fn identity(&self) -> [u8; 32] {
         self.identity
     }
     /// This manifest excludes evidence bodies and cannot be submitted as a check.
@@ -456,7 +456,7 @@ fn quote(text: &str) -> String {
     out.push('"');
     out
 }
-fn conclusion(value: WorkflowCheckConclusion) -> &'static str {
+const fn conclusion(value: WorkflowCheckConclusion) -> &'static str {
     match value {
         WorkflowCheckConclusion::Success => "success",
         WorkflowCheckConclusion::ActionRequired => "action_required",

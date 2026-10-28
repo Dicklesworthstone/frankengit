@@ -1,5 +1,9 @@
 //! Canonical same-repository PR-head selection. This is not a synthetic merge.
-use super::*;
+use super::{
+    GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode, Path, RefName, Selected, Selection,
+    TrustedRefWorkflowPoll, TrustedWorkflowArtifactConfig, TrustedWorkflowFailure, WorkflowLimits,
+    cancellation, commitment, hex, invalid, invalid_owned, reporting,
+};
 use fgit_forge::event::{ForgeEventPayload, pull_request::PullRequestAction};
 use fgit_types::PolicyEpoch;
 use fgit_wire::visibility::RefVisibility;
@@ -15,11 +19,11 @@ pub(super) struct PullSelection {
     pub(super) policy_epoch: PolicyEpoch,
 }
 impl PullSelection {
-    pub(super) fn path_comparison_base(&self) -> GitOid {
+    pub(super) const fn path_comparison_base(&self) -> GitOid {
         self.target_commit
     }
 
-    pub(super) fn target_reference(&self) -> &RefName {
+    pub(super) const fn target_reference(&self) -> &RefName {
         &self.target
     }
 

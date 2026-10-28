@@ -1,5 +1,7 @@
 //! Reuse the selected native object owner, never a second snapshot or Git parser.
-use super::*;
+use super::{
+    Cell, GitOid, MergeObjectSource, ParseLimits, SelectedSource, VerifiedFabricPackSource,
+};
 use fgit_forge::review::{ComparisonMode, SourcePathChanges, compare_source_paths};
 
 pub(in crate::treefs_workspace) fn changed_paths(
