@@ -75,6 +75,7 @@ impl ContextChannel {
             Self::Content | Self::Symbol => "source-blob-bytes",
         }
     }
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Content => "content",
@@ -95,9 +96,11 @@ pub struct ContextExcerpt {
     bytes: Vec<u8>,
 }
 impl ContextExcerpt {
+    #[must_use]
     pub const fn offset(&self) -> usize {
         self.offset
     }
+    #[must_use]
     pub fn untrusted_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -115,18 +118,23 @@ pub struct ContextFile {
     lineage_commitment: [u8; 32],
 }
 impl ContextFile {
+    #[must_use]
     pub fn path(&self) -> &[u8] {
         &self.path
     }
+    #[must_use]
     pub const fn blob(&self) -> GitOid {
         self.blob
     }
+    #[must_use]
     pub const fn source_bytes(&self) -> usize {
         self.source_bytes
     }
+    #[must_use]
     pub fn anchors(&self) -> &[ContextAnchor] {
         &self.anchors
     }
+    #[must_use]
     pub fn excerpts(&self) -> &[ContextExcerpt] {
         &self.excerpts
     }
@@ -323,27 +331,35 @@ pub struct InitialContext {
     lineage_metadata_bytes: usize,
 }
 impl InitialContext {
+    #[must_use]
     pub const fn retrieval(&self) -> &InitialReport {
         &self.retrieval
     }
+    #[must_use]
     pub fn files(&self) -> &[ContextFile] {
         &self.files
     }
+    #[must_use]
     pub const fn candidate_files(&self) -> usize {
         self.candidate_files
     }
-    pub fn omitted_files(&self) -> usize {
+    #[must_use]
+    pub const fn omitted_files(&self) -> usize {
         self.candidate_files - self.files.len()
     }
-    pub fn source_blobs_read(&self) -> usize {
+    #[must_use]
+    pub const fn source_blobs_read(&self) -> usize {
         self.files.len()
     }
+    #[must_use]
     pub const fn source_bytes_read(&self) -> usize {
         self.source_bytes_read
     }
+    #[must_use]
     pub const fn excerpt_bytes(&self) -> usize {
         self.excerpt_bytes
     }
+    #[must_use]
     pub const fn source_file_limit(&self) -> usize {
         self.source_file_limit
     }
@@ -355,6 +371,7 @@ impl InitialContext {
     }
     /// All returned matches were hydrated AND retrieval itself had full
     /// coverage. This does not assert that excerpts contain whole source files.
+    #[must_use]
     pub fn complete(&self) -> bool {
         self.omitted_files() == 0 && self.retrieval.complete()
     }
@@ -668,7 +685,7 @@ impl PlannedFile {
         Ok(())
     }
 }
-fn word(byte: u8) -> bool {
+const fn word(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 fn verify(witness: &Witness, source: &[u8]) -> Result<Range<usize>, RetrievalError> {
