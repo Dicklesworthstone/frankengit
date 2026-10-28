@@ -34,7 +34,7 @@ fn head() -> RepositoryAuthorityHeadId {
     ))
     .unwrap()
 }
-fn pinned() -> Vec<String> {
+pub(super) fn pinned() -> Vec<String> {
     let mut a = args();
     a.extend([
         "--expected-head".into(),

@@ -24,6 +24,15 @@ struct Options {
 }
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
+    if arguments.first().is_some_and(|arg| arg == "--ranked") {
+        if arguments
+            .get(1)
+            .is_some_and(|arg| arg == "--indexed-current")
+        {
+            return indexed::ranked::run(&arguments[2..]);
+        }
+        return Err("ranked search requires --ranked --indexed-current; see fg search --ranked --indexed-current --help".into());
+    }
     if arguments.first().is_some_and(|arg| arg == "--regex") {
         return regex::run(&arguments[1..]);
     }
@@ -31,6 +40,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         .first()
         .is_some_and(|arg| arg == "--indexed-current")
     {
+        if arguments.get(1).is_some_and(|arg| arg == "--ranked") {
+            return indexed::ranked::run(&arguments[2..]);
+        }
         return indexed::run(&arguments[1..]);
     }
     if arguments.first().is_some_and(|arg| arg == "--symbols") {
@@ -44,7 +56,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     }
     if arguments == ["--help"] {
         println!(
-            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor Rust declarations: fg search --symbols --help\nFor byte regex: fg search --regex --help\nFor joined retrieval or context packets: fg search --initial --help"
+            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor ranked any-term search: fg search --ranked --indexed-current --help\nFor Rust declarations: fg search --symbols --help\nFor byte regex: fg search --regex --help\nFor joined retrieval or context packets: fg search --initial --help"
         );
         return Ok(0);
     }

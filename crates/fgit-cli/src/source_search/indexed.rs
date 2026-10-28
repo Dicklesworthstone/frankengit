@@ -1,13 +1,14 @@
 //! Explicit persisted-index reads; never an implicit fallback from literal search.
 mod options;
+pub(super) mod ranked;
 #[cfg(test)]
 mod tests;
 
 use super::{hex, quote, write_report};
 use fgit_node::source_retrieval::current_index::{
     GenerationActivation, IndexedLexicalReport, LexicalChannel, LexicalQuery, LexicalQueryLimits,
-    LexicalReadLimits, LexicalSource, OMISSION_PROFILE, PROFILE, RevalidatedIndexReport,
-    RevalidatedIndexRequest,
+    LexicalReadLimits, LexicalSource, OMISSION_PROFILE, PROFILE, RANKED_PROFILE, RARITY_SCALE,
+    RankedLexicalReport, RevalidatedIndexReport, RevalidatedIndexRequest,
 };
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{
@@ -161,6 +162,14 @@ fn byte_list(values: &[Vec<u8>]) -> String {
 // Production receives both arguments only from the node's private-constructor
 // receipt. This pure renderer does not authenticate caller-supplied snapshots.
 fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<String, String> {
+    render_profile(current, index, None)
+}
+
+fn render_profile(
+    current: &LexicalSource,
+    index: &IndexedLexicalReport,
+    ranking: Option<&RankedLexicalReport>,
+) -> Result<String, String> {
     let omitted_bytes = index
         .validate_coverage()
         .map_err(|error| error.to_string())?;
@@ -174,17 +183,26 @@ fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<Strin
         .map_or_else(|| "null".into(), |id| quote(&id.to_string()));
     let mut out = format!(
         concat!(
-            "{{\"type\":\"source_index_search\",\"schema_version\":{},\"profile\":{},",
+            "{{\"type\":{},\"schema_version\":{},\"profile\":{},",
             "\"current_source\":{},\"indexed_source\":{},\"distinct_index_provenance\":{},",
             "\"generation\":{},\"selected_generation_head\":{},\"channel\":{},",
             "\"terms_hex\":[{}],\"path_prefixes_hex\":[{}],\"complete\":{},\"next_after\":{},",
             "\"indexed_documents\":{},\"indexed_source_bytes\":{},\"non_regular_entries\":{},",
             "\"segments_read\":{},\"payload_bytes_read\":{},\"generation_bytes_read\":{},",
             "\"work_units\":{},\"node_closed\":true,\"repository_changed\":false,",
-            "\"index_changed\":false,\"hits\":["
+            "\"index_changed\":false,{}\"hits\":["
         ),
+        quote(if ranking.is_some() {
+            "source_ranked_index_search"
+        } else {
+            "source_index_search"
+        }),
         if index.coverage_complete { 1 } else { 2 },
-        quote(PROFILE),
+        quote(if ranking.is_some() {
+            RANKED_PROFILE
+        } else {
+            PROFILE
+        }),
         source_json(current),
         source_json(&index.source),
         current != &index.source,
@@ -202,6 +220,10 @@ fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<Strin
         index.payload_bytes_read,
         index.generation_bytes_read,
         index.results.work_units,
+        ranking
+            .map(ranked::metadata)
+            .transpose()?
+            .unwrap_or_default(),
     );
     for (ordinal, hit) in index.results.hits.iter().enumerate() {
         if ordinal != 0 {
@@ -219,9 +241,13 @@ fn render(current: &LexicalSource, index: &IndexedLexicalReport) -> Result<Strin
             .collect::<Vec<_>>()
             .join(",");
         out.push_str(&format!(
-            "{{\"document_id\":{},\"path_hex\":{},\"blob\":{},\"content_bytes\":{},\"spans\":[{}]}}",
+            "{{\"document_id\":{},\"path_hex\":{},\"blob\":{},\"content_bytes\":{},{}\"spans\":[{}]}}",
             quote(&hit.document_id.to_string()), quote(&hex(&hit.path)),
-            quote(&hit.blob.to_string()), hit.content_bytes, spans,
+            quote(&hit.blob.to_string()), hit.content_bytes,
+            ranking.map(|report| {
+                let score = report.scores[ordinal];
+                format!("\"matched_terms\":{},\"rarity_q16\":{},", score.matched_terms, quote(&score.rarity_q16.to_string()))
+            }).unwrap_or_default(), spans,
         ));
         if out.len() > MAX_OUTPUT_BYTES {
             return Err("indexed search JSON exceeds its output budget".into());

@@ -398,3 +398,85 @@ fn continuation_requires_all_pins_and_rejects_wrong_native_domain() {
     ));
     node.shutdown().unwrap();
 }
+
+#[test]
+fn ranked_search_joins_current_authority_to_the_original_generation_and_refuses_changed_code() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, commit) = fixture(&root, format);
+        let activation = build(&node, None);
+        let reference = reference();
+        let query = LexicalQuery::new(
+            LexicalChannel::Content,
+            &[b"needle".to_vec(), b"nested".to_vec(), b"absent".to_vec()],
+            &[],
+        )
+        .unwrap();
+        let mut options = RevalidatedIndexRequest::new(&reference, &query);
+        options.query_limits.max_results = 1;
+        let before = node
+            .runtime()
+            .block_on(node.search_source_index_ranked_revalidated_local_in(
+                &node.request_context(),
+                options.clone(),
+            ))
+            .unwrap();
+        assert_eq!(
+            before.ranking().index.results.hits[0].path,
+            b"dir/nested.txt"
+        );
+        assert_eq!(before.ranking().scores[0].matched_terms, 2);
+        assert_eq!(before.ranking().scores[0].rarity_q16, 275251);
+        assert_eq!(before.ranking().term_document_frequencies, [0, 4, 1]);
+        assert_eq!(before.ranking().scoped_documents, 5);
+        assert_eq!(before.ranking().matched_documents, 4);
+        assert!(!before.ranking().index.results.complete);
+        assert_eq!(before.ranking().index.results.next_after, None);
+        let node = issue_write(node, &root);
+        let authority_before = generation(&node);
+        let after = node
+            .runtime()
+            .block_on(node.search_source_index_ranked_revalidated_local_in(
+                &node.request_context(),
+                options.clone(),
+            ))
+            .unwrap();
+        assert_eq!(after.ranking().index.generation, activation);
+        assert_eq!(after.ranking().index.source, before.ranking().index.source);
+        assert_ne!(
+            after.current_source().source_head,
+            before.current_source().source_head
+        );
+        assert_eq!(
+            after.ranking().index.results,
+            before.ranking().index.results
+        );
+        assert_eq!(after.ranking().scores, before.ranking().scores);
+        assert_eq!(generation(&node), authority_before);
+        let mut cursor = options.clone();
+        cursor.after = Some(1);
+        assert!(
+            matches!(node.runtime().block_on(node.search_source_index_ranked_revalidated_local_in(
+            &node.request_context(), cursor,
+        )), Err(NodeWorkspaceRefusal::SourceIndex(error)) if matches!(*error, IndexError::Lexical(LexicalError::Invalid(_))))
+        );
+        let mut bounded = options.clone();
+        bounded.query_limits.max_work = 1;
+        assert!(
+            matches!(node.runtime().block_on(node.search_source_index_ranked_revalidated_local_in(
+            &node.request_context(), bounded,
+        )), Err(NodeWorkspaceRefusal::SourceIndex(error)) if matches!(*error, IndexError::Lexical(LexicalError::Limit("query work"))))
+        );
+        advance_commit(&root, &node, commit, after.current_source().tree);
+        assert!(matches!(
+            node.runtime().block_on(
+                node.search_source_index_ranked_revalidated_local_in(
+                    &node.request_context(),
+                    options,
+                )
+            ),
+            Err(NodeWorkspaceRefusal::SourceIndexStale)
+        ));
+        node.shutdown().unwrap();
+    }
+}

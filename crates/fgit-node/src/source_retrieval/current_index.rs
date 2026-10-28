@@ -13,16 +13,22 @@ use crate::{
 };
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseError, SourceBrowseQuery};
 pub use fgit_graph::GenerationActivation;
-use fgit_graph::lexical::{IndexError, LexicalError, LexicalIndexStore, LexicalNamespace};
+use fgit_graph::lexical::{
+    IndexError, LexicalError, LexicalIndexStore, LexicalNamespace, LexicalSelection,
+};
 // Re-export the owned graph types used by this public node boundary.
 pub use fgit_graph::lexical::{
     IndexedLexicalReport, LexicalChannel, LexicalOmission, LexicalOmissionReason, LexicalQuery,
-    LexicalQueryLimits, LexicalReadLimits, LexicalSource, OMISSION_PROFILE,
+    LexicalQueryLimits, LexicalReadLimits, LexicalSource, OMISSION_PROFILE, RANKED_PROFILE,
+    RARITY_SCALE, RankedLexicalReport, RankedLexicalScore,
 };
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};
 
 pub const PROFILE: &str = "source-lexical-revalidated-v1";
+
+mod ranked;
+pub use ranked::RevalidatedRankedIndexReport;
 
 /// Read permission must already cover the whole repository. Terms, path
 /// prefixes, source pins and generation checkpoints never grant permission.
@@ -145,6 +151,42 @@ impl OneNode {
         request: &NodeRequestContext,
         query: RevalidatedIndexRequest<'_>,
     ) -> Result<RevalidatedIndexReport, NodeWorkspaceRefusal> {
+        let (current_source, selected_index) = self
+            .select_current_lexical_index_in(request, &query)
+            .await?;
+        let store = LexicalIndexStore::new(
+            &self.authority,
+            current_source.namespace,
+            query.reference.clone(),
+        )
+        .map_err(index_error)?;
+        let mut request_live = || live(request).is_ok();
+        let index = store
+            .search_async(
+                request.authority(),
+                &selected_index,
+                query.query,
+                query.after,
+                query.read_limits,
+                query.query_limits,
+                &mut request_live,
+            )
+            .await
+            .map_err(index_error)?;
+        live(request)?;
+        Ok(RevalidatedIndexReport {
+            current_source,
+            index,
+        })
+    }
+
+    // Both lexical profiles share exactly the same current authority,
+    // visibility, native identity, generation and checkpoint admission.
+    async fn select_current_lexical_index_in(
+        &self,
+        request: &NodeRequestContext,
+        query: &RevalidatedIndexRequest<'_>,
+    ) -> Result<(LexicalSource, LexicalSelection), NodeWorkspaceRefusal> {
         live(request)?;
         query.query_limits.validate().map_err(index_error)?;
         if query.after.is_some()
@@ -261,23 +303,8 @@ impl OneNode {
             .await
             .map_err(index_error)?;
         same_native_source(selected_index.source(), &current_source)?;
-        let index = store
-            .search_async(
-                request.authority(),
-                &selected_index,
-                query.query,
-                query.after,
-                query.read_limits,
-                query.query_limits,
-                &mut request_live,
-            )
-            .await
-            .map_err(index_error)?;
         live(request)?;
-        Ok(RevalidatedIndexReport {
-            current_source,
-            index,
-        })
+        Ok((current_source, selected_index))
     }
 }
 

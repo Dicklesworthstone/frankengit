@@ -38,6 +38,57 @@ of truncation. A continuation keeps the exact generation, normalized query and
 last returned ID. A caller changing those parameters is issuing another query,
 not continuing the same result. The library does not mint an HTTP cursor token.
 
+## Ranked exploratory queries
+
+`fg search --ranked --indexed-current` adds the explicit
+`source-lexical-coverage-rarity-v1` query profile over the same persisted index.
+It matches **any** normalized query term and ranks the complete matching
+population before selecting the requested result count. This helps exploratory
+queries whose terms occur across several files, and prevents an early raw-path
+prefix from hiding a later file that matches more of the query.
+
+```bash
+fg search --ranked --indexed-current "$STORE" "$TENANT" "$REPOSITORY" refs/heads/main \
+  --trusted-local --term admission --term retry --term budget \
+  --path crates --max-results 20
+```
+
+The complete ordering is descending distinct matched-term count, descending
+inverse-frequency weight, then ascending raw path. The weight is the integer
+sum `floor((N + 1) * 65536 / (df + 1))` over matched terms. `N` counts all indexed
+documents inside the requested path scope, including documents with no matching
+terms; each `df` counts scoped documents containing that normalized term.
+Repeated occurrences do not amplify the score. This profile does not claim
+BM25, logarithmic IDF, embeddings or semantic dependency analysis: the existing
+postings retain first spans rather than token frequencies.
+
+The JSON response names the profile, normalized terms, scoped corpus size,
+matching-document count and per-term document frequencies. Each selected hit
+includes its matched-term count, decimal-string `rarity_q16` and exact original
+byte spans. The native current-source reader authenticates current visibility
+and verifies the indexed commit/tree before using the index. Original index
+provenance and the current authority basis remain distinct when forge-only
+metadata changes. The existing generation pins and independent minimum
+checkpoints remain available.
+
+Every selected segment is authenticated before ranking succeeds, including
+segments visited after a likely top result was found. Complete scoped candidate
+metadata is bounded to 32 MiB; the selection heap retains at most the requested
+result count. Work, payload and final 2 MiB result allowances remain cumulative.
+Late corruption, missing payloads, cancellation and resource refusal return no
+successful prefix. The scoring stage operates on one immutable generation and
+coherent corpus statistics, following the same separation used by FrankenGraphDB's
+Beacon index, without adding that database or a runtime dependency.
+
+`candidate_scan_complete:true` means the selected indexed corpus was scanned;
+the unchanged omission inventory separately reports incomplete source coverage.
+Exit 3 identifies top-k truncation or omitted files. Ranked queries have no
+document-ID continuation: `--after` refuses. Request more results with a larger
+`--max-results`, retaining source and generation pins to repeat the same query.
+Ordinary `--indexed-current` AND matching and pagination remain unchanged.
+The ranked entry point is currently the trusted-local CLI and native node API;
+it does not extend the HTTP/MCP search grammar.
+
 ## Explicit omissions and source coverage
 
 Native builders enumerate every selected regular file and verify its native

@@ -310,3 +310,45 @@ fn fg_binary_never_falls_back_or_builds_an_index_for_a_refused_read() {
     assert_eq!(body(&result).matches("\"document_id\":").count(), 1);
     assert!(body(&result).contains("\"path_hex\":\"656d707479\""));
 }
+
+#[test]
+fn fg_ranked_any_term_search_reports_real_scores_and_preserves_source_provenance() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, _) = fixture(&root, format);
+        let (indexed, activation) = build(&node);
+        let before = generation(&node);
+        node.shutdown().unwrap();
+        let mut args = arguments(&root, format);
+        args.insert(1, "--ranked".into());
+        args.extend(["--term", "nested", "--term", "absent"].map(str::to_owned));
+        let all = invoke(&args, 0);
+        assert!(body(&all).starts_with("{\"type\":\"source_ranked_index_search\""));
+        assert!(body(&all).contains("\"profile\":\"source-lexical-coverage-rarity-v1\""));
+        assert!(body(&all).contains("\"query_mode\":\"any\",\"candidate_scan_complete\":true"));
+        assert!(body(&all).contains("\"scoped_documents\":5,\"matched_documents\":4"));
+        assert!(body(&all).contains("\"term_document_frequencies\":[0,4,1]"));
+        assert_eq!(body(&all).matches("\"document_id\":").count(), 4);
+        let mut top = args.clone();
+        top.extend(["--max-results", "1"].map(str::to_owned));
+        let result = invoke(&top, 3);
+        assert!(body(&result).contains("\"complete\":false,\"next_after\":null"));
+        assert!(body(&result).contains(&format!("\"path_hex\":\"{}\"", hex(b"dir/nested.txt"))));
+        assert!(body(&result).contains("\"matched_terms\":2,\"rarity_q16\":\"275251\""));
+        assert_eq!(body(&result).matches("\"document_id\":").count(), 1);
+        let node = reopen(&root.config(format));
+        assert_eq!(generation(&node), before);
+        node.shutdown().unwrap();
+        open_issue(&root, format);
+        let reused = invoke(&top, 3);
+        assert!(body(&reused).contains("\"distinct_index_provenance\":true"));
+        assert!(body(&reused).contains(&generation_token(&activation)));
+        assert!(body(&reused).contains(&head_token(indexed.source_head)));
+        let mut limited = args.clone();
+        limited.extend(["--max-work", "1"].map(str::to_owned));
+        assert!(invoke(&limited, 2).stdout.is_empty());
+        let mut untrusted = args;
+        untrusted.retain(|arg| arg != "--trusted-local");
+        assert!(invoke(&untrusted, 2).stdout.is_empty());
+    }
+}
