@@ -285,7 +285,7 @@ fn every_intermediate_rebase_tree_is_complete_and_only_target_is_a_prerequisite(
 }
 
 #[test]
-fn repeated_cached_directory_comparisons_consume_the_edge_budget() {
+fn cached_flat_directory_entries_are_charged_once_per_native_tree() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut source = Source::new(format);
         let keep = source.put(ObjectType::Blob, b"keep\n".to_vec());
@@ -307,8 +307,10 @@ fn repeated_cached_directory_comparisons_consume_the_edge_budget() {
             ]);
             candidate = source.commit(tree, &[candidate], number);
         }
+        // Four unique trees of four entries plus seven commit edges. Cached
+        // flat trees have no directory comparisons or payload copies to charge.
         let limits = MergeObjectLimits {
-            max_edges: 30,
+            max_edges: 22,
             ..MergeObjectLimits::default()
         };
         assert!(matches!(
@@ -318,7 +320,7 @@ fn repeated_cached_directory_comparisons_consume_the_edge_budget() {
             ))
         ));
         let limits = MergeObjectLimits {
-            max_edges: 32,
+            max_edges: 23,
             ..limits
         };
         assert_eq!(
@@ -402,5 +404,117 @@ fn cancelled_corrupt_or_exhausted_frontiers_never_return_a_partial_pack() {
             ),
             Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
         ));
+    }
+}
+
+#[test]
+fn cached_tree_payloads_are_shared_but_caching_never_grants_target_membership() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = Source::new(format);
+        let blob = source.put(ObjectType::Blob, b"shared payload\n".to_vec());
+        let names: Vec<_> = (0..1024).map(|i| format!("file-{i:04}")).collect();
+        let entries: Vec<_> = names.iter().map(|name| (name.as_str(), 0o100644, blob)).collect();
+        let id = source.tree(&entries);
+        let mut live = || true;
+        let mut walk = Walk {
+            source: &source,
+            limits: MergeObjectLimits::default(),
+            deadline: &mut live,
+            objects: 0,
+            bytes: 0,
+            edges: 0,
+            trees: BTreeMap::new(),
+            expanded: BTreeSet::new(),
+            frontier: BTreeMap::new(),
+        };
+        let first = walk.tree(id).unwrap();
+        let again = walk.tree(id).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert_eq!(walk.objects, 1);
+        assert_eq!(walk.edges, 1024);
+        assert!(first.directories.is_empty());
+        assert!(matches!(walk.prove_tree(id), Err(ProjectionFailure::Refuse(
+            RefusalCode::EvidenceInvalid
+        ))));
+        assert!(walk.frontier.is_empty());
+        assert!(walk.expanded.is_empty());
+        // Simulate the independently read target edge; a cached parsed tree
+        // alone did not supply this proof or authorize any inherited omission.
+        walk.remember(id, ObjectType::Tree).unwrap();
+        assert!(Arc::ptr_eq(&first, &walk.prove_tree(id).unwrap()));
+        assert_eq!(walk.frontier.len(), 2);
+        assert_eq!(walk.expanded.len(), 1);
+        assert!(Arc::ptr_eq(&first, &walk.prove_tree(id).unwrap()));
+        assert_eq!(walk.edges, 1024);
+        assert_eq!(source.reads.borrow().as_slice(), &[id]);
+    }
+}
+
+#[test]
+fn repeated_directory_pair_lookups_still_have_an_inclusive_work_bound() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = Source::new(format);
+        let left = source.put(ObjectType::Blob, b"left\n".to_vec());
+        let right = source.put(ObjectType::Blob, b"right\n".to_vec());
+        let new_blob = source.put(ObjectType::Blob, b"replacement\n".to_vec());
+        let old_left = source.tree(&[("file", 0o100644, left)]);
+        let old_right = source.tree(&[("file", 0o100644, right)]);
+        let old = source.tree(&[("a", 0o040000, old_left), ("b", 0o040000, old_right)]);
+        let target = source.commit(old, &[], 0);
+        let shared = source.tree(&[("file", 0o100644, new_blob)]);
+        let new = source.tree(&[("a", 0o040000, shared), ("b", 0o040000, shared)]);
+        let candidate = source.commit(new, &[target], 1);
+        let limits = MergeObjectLimits { max_edges: 12, ..MergeObjectLimits::default() };
+        // Three commit edges, seven unique tree entries, two directory lookups.
+        let needed = objects_above_target(&source, target, candidate, 1, limits, &mut || true).unwrap();
+        assert_eq!(needed, BTreeSet::from([candidate, new, shared, new_blob]));
+        // One parse during frontier discovery and one independent validation,
+        // despite pairing the same new subtree with two different old trees.
+        assert_eq!(source.reads.borrow().iter().filter(|id| **id == shared).count(), 2);
+        assert!(matches!(objects_above_target(
+            &source, target, candidate, 1,
+            MergeObjectLimits { max_edges: 11, ..limits }, &mut || true,
+        ), Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))));
+    }
+}
+
+#[test]
+fn eight_step_flat_rebase_reuses_target_inventory_without_losing_intermediate_objects() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = Source::new(format);
+        let keep = source.put(ObjectType::Blob, b"keep\n".to_vec());
+        let names: Vec<_> = (0..64).map(|i| format!("file-{i:02}")).collect();
+        let mut entries: Vec<_> = names.iter().map(|name| (name.as_str(), 0o100644, keep)).collect();
+        let old = source.tree(&entries);
+        let target = source.commit(old, &[], 0);
+        let mut candidate = target;
+        for number in 1..=8 {
+            let value = source.put(ObjectType::Blob, format!("step {number}\n").into_bytes());
+            entries.last_mut().unwrap().2 = value;
+            let tree = source.tree(&entries);
+            candidate = source.commit(tree, &[candidate], number);
+        }
+        let before = source.full(target);
+        let after = source.full(candidate);
+        let expected: BTreeSet<_> = after.difference(&before).copied().collect();
+        assert_eq!(expected.len(), 24);
+        source.reads.borrow_mut().clear();
+        source.forbidden.insert(keep);
+        // Nine unique 64-entry trees and seventeen commit edges. Repeatedly
+        // cloning/scanning the old root would consume 1041 units instead.
+        let limits = MergeObjectLimits {
+            max_objects: 24,
+            max_edges: 593,
+            ..MergeObjectLimits::default()
+        };
+        assert_eq!(objects_above_target(
+            &source, target, candidate, 8, limits, &mut || true,
+        ).unwrap(), expected);
+        assert_eq!(source.reads.borrow().iter().filter(|id| **id == old).count(), 1);
+        assert!(!source.reads.borrow().contains(&keep));
+        assert!(matches!(objects_above_target(
+            &source, target, candidate, 8,
+            MergeObjectLimits { max_edges: 592, ..limits }, &mut || true,
+        ), Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))));
     }
 }

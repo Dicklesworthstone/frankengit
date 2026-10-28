@@ -6,6 +6,7 @@
 //! bounded transport cost, never permission to omit an unproved dependency.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::{
@@ -15,13 +16,17 @@ use fgit_git_object::{AcceptanceProfile, ObjectError, ObjectType, ParseLimits, P
 use fgit_pack::{CanonicalObjectSource, Deadline, PackError, PackWriteError, verify_native_object};
 use fgit_types::{GitOid, RefusalCode};
 
-#[derive(Clone)]
 struct TreeEntry {
     kind: ObjectType,
     id: GitOid,
 }
 
-type Tree = BTreeMap<Vec<u8>, TreeEntry>;
+// No Clone implementation: cached directory payloads are shared, not copied.
+// The directory index avoids scanning every regular-file entry on each pair.
+struct Tree {
+    entries: BTreeMap<Vec<u8>, TreeEntry>,
+    directories: BTreeMap<Vec<u8>, GitOid>,
+}
 
 /// Verify the entire single-parent candidate chain to `target`, then collect
 /// every dependency not proved reachable from its current tree. `target` must
@@ -62,6 +67,7 @@ pub(super) fn objects_above_target(
         bytes: 0,
         edges: 0,
         trees: BTreeMap::new(),
+        expanded: BTreeSet::new(),
         frontier: BTreeMap::new(),
     };
     let (target_tree, _) = walk.commit(target, false)?;
@@ -103,27 +109,31 @@ pub(super) fn objects_above_target(
         if paired.len() > limits.max_objects {
             return Err(budget());
         }
-        let old_entries = walk.tree(old)?;
-        for entry in old_entries.values() {
-            walk.checkpoint()?;
-            walk.remember(entry.id, entry.kind)?;
-        }
+        let old_entries = walk.prove_tree(old)?;
         let new_entries = walk.tree(new)?;
-        for (name, entry) in &new_entries {
+        for (name, child) in &new_entries.directories {
             walk.checkpoint()?;
-            if entry.kind != ObjectType::Tree || walk.frontier.contains_key(&entry.id) {
+            // A cached tree can be paired with several inherited directories.
+            // Charge each comparison, but never rescan its regular-file leaves.
+            walk.charge_edges(1)?;
+            if walk.frontier.contains_key(child) {
                 continue;
             }
-            if let Some(before) = old_entries.get(name).filter(|e| e.kind == ObjectType::Tree) {
+            if let Some(before) = old_entries.directories.get(name) {
                 if pending.len() >= limits.max_edges {
                     return Err(budget());
                 }
-                pending.insert((entry.id, before.id));
+                pending.insert((*child, *before));
             }
         }
     }
     walk.checkpoint()?;
-    let frontier: BTreeSet<_> = walk.frontier.keys().copied().collect();
+    let frontier: BTreeSet<_> = std::mem::take(&mut walk.frontier).into_keys().collect();
+    // Discovery and independent validation have different ownership. Do not
+    // retain the parsed directory inventory while the validator reads payloads.
+    walk.trees.clear();
+    walk.expanded.clear();
+    walk.checkpoint()?;
     // This validator independently hashes all new/borrowed bytes and checks
     // every reused edge's actual native kind. No target-history membership
     // claim is taken from a planner's object list or the repository-wide set.
@@ -144,7 +154,9 @@ struct Walk<'a, S, D> {
     objects: usize,
     bytes: usize,
     edges: usize,
-    trees: BTreeMap<GitOid, (usize, Tree)>,
+    trees: BTreeMap<GitOid, Arc<Tree>>,
+    // A verified cached candidate tree is not proof of target reachability.
+    expanded: BTreeSet<GitOid>,
     frontier: BTreeMap<GitOid, ObjectType>,
 }
 
@@ -246,20 +258,20 @@ impl<S: CanonicalObjectSource, D: Deadline> Walk<'_, S, D> {
         Ok((tree, parents))
     }
 
-    fn tree(&mut self, id: GitOid) -> Result<Tree, ProjectionFailure> {
+    fn tree(&mut self, id: GitOid) -> Result<Arc<Tree>, ProjectionFailure> {
         self.checkpoint()?;
-        if let Some((edges, _)) = self.trees.get(&id) {
-            // Reusing parsed bytes still clones and compares every entry. Charge
-            // that work before cloning, including Gitlinks omitted from Tree.
-            self.charge_edges(*edges)?;
-            return Ok(self.trees[&id].1.clone());
+        if let Some(tree) = self.trees.get(&id) {
+            return Ok(Arc::clone(tree));
         }
         let ParsedObject::Tree(entries) = self.read(id, ObjectType::Tree, false)? else {
             return Err(invalid());
         };
-        let edge_count = entries.len();
-        self.charge_edges(edge_count)?;
+        // Charge every native entry, including gitlinks, before constructing
+        // either index. This pays for parsing and at most one proof expansion;
+        // repeated directory-pair comparisons are charged separately above.
+        self.charge_edges(entries.len())?;
         let mut tree = BTreeMap::new();
+        let mut directories = BTreeMap::new();
         for entry in entries {
             self.checkpoint()?;
             let mode = std::str::from_utf8(&entry.mode)
@@ -278,6 +290,9 @@ impl<S: CanonicalObjectSource, D: Deadline> Walk<'_, S, D> {
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
             let child = GitOid::from_hex(id.algorithm(), &hex).map_err(|_| invalid())?;
+            if kind == ObjectType::Tree {
+                directories.insert(entry.name.clone(), child);
+            }
             if child.is_zero()
                 || tree
                     .insert(entry.name, TreeEntry { kind, id: child })
@@ -286,7 +301,25 @@ impl<S: CanonicalObjectSource, D: Deadline> Walk<'_, S, D> {
                 return Err(invalid());
             }
         }
-        self.trees.insert(id, (edge_count, tree.clone()));
+        let tree = Arc::new(Tree { entries: tree, directories });
+        self.trees.insert(id, Arc::clone(&tree));
+        Ok(tree)
+    }
+
+    // Only a tree reached from a selected target edge may extend the omitted
+    // object frontier. Parsing/caching a source-only tree never grants this.
+    fn prove_tree(&mut self, id: GitOid) -> Result<Arc<Tree>, ProjectionFailure> {
+        self.checkpoint()?;
+        if self.frontier.get(&id) != Some(&ObjectType::Tree) {
+            return Err(invalid());
+        }
+        let tree = self.tree(id)?;
+        if self.expanded.insert(id) {
+            for entry in tree.entries.values() {
+                self.checkpoint()?;
+                self.remember(entry.id, entry.kind)?;
+            }
+        }
         Ok(tree)
     }
 
