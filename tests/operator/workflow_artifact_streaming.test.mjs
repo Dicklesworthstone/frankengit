@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once, getEventListeners } from 'node:events';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, open, writeFile, readFile, readdir, stat, rm, symlink, chmod } from 'node:fs/promises';
+import { mkdtemp, realpath, mkdir, open, writeFile, readFile, readdir, stat, rm, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -18,7 +18,7 @@ const token = 'ab'.repeat(32), id = 'cd'.repeat(32);
 const scope = { tenant_id: '11'.repeat(16), repository_id: '22'.repeat(16),
   repository_incarnation_id: '33'.repeat(16), trust_domain: 'trusted-workflow-local-owner' };
 async function directory(t) {
-  const dir = await mkdtemp(join(tmpdir(), 'fg-artifact-stream-'));
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'fg-artifact-stream-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -209,6 +209,22 @@ for (const target of ['regular', 'symlink']) {
     assert.deepEqual((await readdir(dir)).sort(), ['other', 'output']);
   });
 }
+
+test('a symlinked custody parent refuses before consumption beside its canonical permitted twin', async t => {
+  const dir = await directory(t), parent = join(dir, 'private'), alias = join(dir, 'alias');
+  await mkdir(parent, { mode: 0o700 });
+  await symlink(parent, alias, 'dir');
+  const bytes = Buffer.from('canonical fixture custody'), output = join(parent, 'output');
+  let consumed = 0;
+  async function* source() { consumed++; yield bytes; }
+  await assert.rejects(publishArtifactStream(join(alias, 'output'), expected(bytes), source()),
+    /Custody directories must be owner-private/);
+  assert.equal(consumed, 0);
+  assert.deepEqual(await readdir(parent), []);
+  await publishArtifactStream(output, expected(bytes), source());
+  assert.equal(consumed, 1);
+  assert.deepEqual(await readFile(output), bytes);
+});
 
 test('unsafe parent directories and oversized receipts refuse before consuming bytes', async t => {
   const dir = await directory(t); let pulled = false;
