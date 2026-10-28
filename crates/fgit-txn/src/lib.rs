@@ -4,10 +4,11 @@
 //! A client submits [`fgit_reference::intent::TransactionRequest`] values: typed
 //! intents and their asserted preconditions, never caller-computed effects or
 //! resulting roots. [`IntentEvaluator`] evaluates those intents in source order
-//! against one pinned basis. [`IntentEvaluator`] deliberately delegates the
-//! read-your-own-writes evaluation and target-disjoint [`NetEffects`] normal
-//! form to `fgit-reference`'s single source of truth; this crate owns the
-//! stable application-facing facade plus canonical normal-form bytes.
+//! against one pinned basis. [`IntentEvaluator`] selects the basis entries
+//! addressed by those intents when that reduces copying, then delegates evaluation
+//! and target-disjoint [`NetEffects`] normal form to `fgit-reference`'s single
+//! source of truth. The fold's working copy therefore follows the request
+//! footprint instead of including every unrelated ref, stream and delivery.
 //!
 //! ## Mismatch and refusal vocabulary
 //!
@@ -28,12 +29,14 @@
 //! intent, including intents after the triggering one, to
 //! [`IntentDisposition::TransactionAborted`].
 //!
-//! This is intentionally not an independent evaluator or differential claim.
-//! A later optimized folder must be separately implemented and tested against
-//! the reference folder before it may replace this delegation.
+//! The sparse projection is differentially checked against folding the full
+//! basis, including complete source-intent dispositions and canonical bytes.
+//! It does not replace the reference folder's evaluation rules or narrow any
+//! admission policy, authorization, namespace or object-closure checks.
 
 pub mod combiner;
 pub mod lanes;
+mod sparse;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -163,11 +166,21 @@ impl IntentEvaluator {
     }
 
     /// Folds a request against its pinned root projection through the reference
-    /// folder. Keeping this call explicit prevents this facade from silently
-    /// becoming a second evaluator with diverging normal-form semantics.
+    /// folder, bounding copied basis state by the request's intent count.
+    ///
+    /// When the whole basis is already that small, fold it directly. Otherwise
+    /// select only exact addressed targets. Every current intent reads its own
+    /// target, so this preserves source order, read-your-own-writes, first
+    /// refusal and the total source map without scanning unrelated repository
+    /// state. Callers retain their request-size and cancellation boundaries.
     #[must_use]
     pub fn evaluate(&self, basis: FoldBasis<'_>, request: &TransactionRequest) -> FoldReport {
-        ReferenceFolder.fold(basis, request)
+        if sparse::full_basis_fits_request(basis, request) {
+            ReferenceFolder.fold(basis, request)
+        } else {
+            let selected = sparse::SparseBasis::select(basis, request);
+            ReferenceFolder.fold(selected.as_basis(), request)
+        }
     }
 
     /// Folds against the current authority-head roots of the reference-model

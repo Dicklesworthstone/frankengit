@@ -49,8 +49,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_reference::effect::{
-    AbsorptionReason, EffectTarget, FoldBasis, FoldOutcome, IntentDisposition, NetEffects,
-    RefEffect,
+    AbsorptionReason, EffectTarget, FoldBasis, FoldOutcome, IntentDisposition, NetEffectFolder,
+    NetEffects, RefEffect, ReferenceFolder,
 };
 use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
 use fgit_reference::intent::{
@@ -58,7 +58,7 @@ use fgit_reference::intent::{
     Intent, OutboxDeliveryKey, OutboxIntent, RefIntent, TransactionRequest,
 };
 use fgit_reference::refs::ExpectedRefState;
-use fgit_txn::{IntentEvaluator, Workspace, apply_net_effects};
+use fgit_txn::{IntentEvaluator, Workspace, apply_net_effects, canonical_fold_bytes};
 use fgit_types::label::{SchemaFamily, SchemaId};
 use fgit_types::native::{GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
@@ -771,6 +771,22 @@ fn disagreement(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest)
         },
         request,
     );
+    let full_basis = ReferenceFolder.fold(
+        FoldBasis {
+            refs: basis,
+            forge_positions: &forge_positions,
+            retention: &retention,
+            outbox: &outbox,
+        },
+        request,
+    );
+    if report != full_basis
+        || canonical_fold_bytes(request, &report) != canonical_fold_bytes(request, &full_basis)
+    {
+        return Some(
+            "sparse projection differs from the full-basis reference report/bytes".to_owned(),
+        );
+    }
     let oracle = oracle_fold(basis, request);
 
     match &report.outcome {
