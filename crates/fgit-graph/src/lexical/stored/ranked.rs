@@ -8,9 +8,11 @@
 //! successful prefix. Corpus statistics are derived, never authorization.
 
 use super::*;
-use crate::lexical::{LexicalSpan, lower_bound, under};
+use crate::lexical::{LexicalSpan, under};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+
+mod cursor;
 
 pub const RANKED_PROFILE: &str = "source-lexical-coverage-rarity-v1";
 pub const RARITY_SCALE: u64 = 65_536;
@@ -96,6 +98,11 @@ impl RankedScan {
                 bytes: term.clone(),
             }));
         }
+        // Decoding verified increasing document IDs and posting columns. Keep
+        // one monotone cursor per term in this segment, never across queries or
+        // generations. Sparse scopes use metered gallops rather than scanning
+        // excluded posting prefixes; no skipped document contributes frequency.
+        let mut cursors = vec![cursor::Cursor::default(); lists.len()];
         for document in segment.documents() {
             self.scan.budget.charge(1, live)?;
             let mut included = query.prefixes.is_empty();
@@ -114,12 +121,16 @@ impl RankedScan {
             for (query_index, list) in lists.iter().enumerate() {
                 self.scan.budget.charge(1, live)?;
                 let Some(list) = list else { continue };
-                let at = lower_bound(&list.documents, document.id, &mut self.scan.budget, live)?;
-                if list.documents.get(at) == Some(&document.id) {
+                if let Some(byte_offset) = cursors[query_index].offset(
+                    list,
+                    document.id,
+                    &mut self.scan.budget,
+                    live,
+                )? {
                     self.frequencies[query_index] += 1;
                     spans.push(LexicalSpan {
                         query_index,
-                        byte_offset: list.offsets[at],
+                        byte_offset,
                         byte_length: query.terms[query_index].len() as u16,
                     });
                 }
