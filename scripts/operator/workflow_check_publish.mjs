@@ -7,6 +7,7 @@ import { absolute, contains, directory, executable, fail, lock, names, parseJson
 import { encode, sha256, hex, record, keys, integer, text, digest, principal, oid, pin,
   conclusion, journalConclusion, historyPage, jobKey, validateJob, publication, validateTerminal } from './workflow_check_protocol.mjs';
 import { verifyPlannedConclusions } from './workflow_check_submission.mjs';
+import { markerMatches } from './workflow_attempt_report.mjs';
 import { lookupOutcome, outcomeEndpoint } from './transaction_outcome.mjs';
 import { recoveryScope, recoveryRecord, validateRecoveryRecord, recoveredTerminal, matchPublication } from './workflow_check_outcome.mjs';
 
@@ -131,20 +132,6 @@ async function native(config, args, cx, reading) {
     error.containment_unknown = value.forced; error.native_stderr_hex = hex(value.stderr); throw error;
   }
   return value;
-}
-function markerMatches(marker, run) {
-  if (marker.type !== 'trusted_workflow_attempt' || marker.state !== 'started') fail('Original workflow marker is unavailable.');
-  for (const [name, value] of Object.entries(run)) {
-    // Custody observations arrive after execution. The configured contract is
-    // part of the immutable marker; these resulting arrays are not.
-    if (['type', 'succeeded', 'workspaces_closed', 'request_interrupted', 'execution', 'artifacts', 'artifact_inputs'].includes(name)) continue;
-    if (JSON.stringify(marker[name]) !== JSON.stringify(value)) fail('Original workflow marker changed the selected executed input.');
-  }
-  record(marker.execution_plan);
-  for (const [name, value] of Object.entries(run.execution)) {
-    const expected = name === 'jobs' ? [] : name === 'succeeded' ? false : value;
-    if (JSON.stringify(marker.execution_plan[name]) !== JSON.stringify(expected)) fail('Original workflow marker changed its compiled plan.');
-  }
 }
 async function completedJobs(config, intent, report, cx) {
   const watch = config.watch, jobs = [], budget = { bytes: 0, pages: 0, batches: 0 };

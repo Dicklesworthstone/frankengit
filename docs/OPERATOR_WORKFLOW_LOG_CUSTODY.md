@@ -58,19 +58,43 @@ No receipt grants check publication, cache reuse or repository authority. Logs
 remain unredacted binary data and may include secrets printed by trusted scripts.
 The host-execution trust boundary and artifact-read authorization are unchanged.
 
+## Check-publication preparation and recovery
+
+Publication preparation first runs the complete dispatch/receipt validation, then
+compares each child with its original `attempt.json`. `artifact_logs`, like output
+and delivery receipts, is a post-execution field: it is not expected in a marker
+written before the job ran. The immutable `artifact_contract.log_capture`, source,
+workflow, attempt identity and compiled execution plan still have to match.
+
+The original marker bytes remain unchanged and select the same journal digest.
+This change does not regenerate publication keys, rewrite retained plans, retry
+an uncertain submission, or turn logs into successful check evidence. The native
+journal, existing check-conclusion rules and canonical admission still decide
+whether a check can be published.
+
+A watcher that saved a complete native report but lost its reply can reconcile
+that report without the source repository, artifact root or native executable.
+Incomplete or altered log evidence leaves the original attempt unresolved and
+blocks automatic redispatch. Failed/stopped outcomes remain non-green, and a
+second reconciliation leaves the settled result and original marker unchanged.
+
 ## Focused regression command
 
 ```sh
 node --test tests/operator/workflow_artifact_logs.test.mjs \
-  tests/operator/workflow_artifact_report.test.mjs
+  tests/operator/workflow_artifact_report.test.mjs \
+  tests/operator/workflow_attempt_report.test.mjs \
+  tests/operator/workflow_watch_logs.test.mjs
 ```
 
-These tests run the production JavaScript configuration, contract and receipt
-gates against explicit native-schema fixtures. They cover legacy byte stability,
+These tests run the production JavaScript configuration, report, receipt,
+original-marker and watcher paths against explicit native-schema fixtures. They cover legacy byte stability,
 binary/empty streams, failed/stopped jobs, contract and receipt substitutions,
-combined file/input/log custody, and exact cumulative budget boundaries. They do
-not execute native Rust, prove process containment or physical power-loss
-behavior, or close the broader CI product-loop acceptance.
+combined file/input/log custody, exact cumulative budget boundaries, actual
+subprocess argument delivery, retained file recovery, and duplicate polling.
+The subprocess is a Node fixture, **not `fg`**. These are not native Rust, full
+canonical check-publication, process-containment, or physical power-loss tests,
+and they do not close the broader CI product-loop acceptance.
 
 The underlying native custody semantics and inspect/export interfaces are in
 [`TRUSTED_WORKFLOW_ARTIFACTS.md`](TRUSTED_WORKFLOW_ARTIFACTS.md).
