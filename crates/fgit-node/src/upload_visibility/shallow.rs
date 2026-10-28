@@ -67,7 +67,7 @@ impl<'a, F: FnMut() -> bool> Work<'a, F> {
         Ok(())
     }
 
-    fn count(&self, count: usize) -> Result<(), NodePackMaterializationRefusal> {
+    const fn count(&self, count: usize) -> Result<(), NodePackMaterializationRefusal> {
         if count > self.maximum {
             Err(budget())
         } else {

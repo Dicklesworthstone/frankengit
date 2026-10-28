@@ -8867,14 +8867,14 @@ impl OneNode {
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
         let projection = self.durable_admission_projection(context)?;
-        admit_validated_receive_async(
+        Box::pin(admit_validated_receive_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -8947,14 +8947,14 @@ impl OneNode {
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
         let projection = self.durable_admission_projection(context)?;
-        admit_basis_bound_validated_receive_async(
+        Box::pin(admit_basis_bound_validated_receive_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -9161,14 +9161,14 @@ impl OneNode {
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
         let projection = self.durable_admission_projection(context)?;
-        admit_validated_source_import_async(
+        Box::pin(admit_validated_source_import_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 

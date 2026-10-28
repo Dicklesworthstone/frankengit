@@ -140,7 +140,7 @@ impl Report {
         )
     }
     #[must_use]
-    pub fn matched(&self) -> bool {
+    pub const fn matched(&self) -> bool {
         self.complete() && self.search.transition_found.is_some()
     }
     #[must_use]

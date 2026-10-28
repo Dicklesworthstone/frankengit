@@ -49,22 +49,22 @@ impl SourceReadContext {
     /// Explicit whole-repository read authority supplied by a trusted local
     /// embedding. This is an operator attestation, not authentication.
     #[must_use]
-    pub fn trusted_local_native(node: &OneNode) -> Self {
+    pub const fn trusted_local_native(node: &OneNode) -> Self {
         Self::new(node, Host::TrustedLocalNative)
     }
     /// Call only after this invocation's explicit trusted-local CLI opt-in.
     #[must_use]
-    pub fn trusted_local_cli(node: &OneNode) -> Self {
+    pub const fn trusted_local_cli(node: &OneNode) -> Self {
         Self::new(node, Host::TrustedLocalCli)
     }
     /// Call only after this launch's trusted-local MCP source-tool grant.
     #[must_use]
-    pub fn trusted_local_mcp(node: &OneNode) -> Self {
+    pub const fn trusted_local_mcp(node: &OneNode) -> Self {
         Self::new(node, Host::TrustedLocalMcp)
     }
     // The source gateway retains this only after route/credential/UploadPack
     // and allow_source checks. An authenticated mutation session is insufficient.
-    pub(crate) fn http_credential(node: &OneNode, principal: PrincipalId) -> Self {
+    pub(crate) const fn http_credential(node: &OneNode, principal: PrincipalId) -> Self {
         Self::new(node, Host::HttpCredential(principal))
     }
     pub(crate) fn check_node(&self, node: &OneNode) -> Result<(), RetrievalError> {

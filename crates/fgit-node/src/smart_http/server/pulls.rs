@@ -103,7 +103,7 @@ impl<'a> Request<'a> {
     }
     /// Preparation, inspection and diff spend bounded work on a POST body,
     /// but acquire neither transaction responsibility nor a retry-key binding.
-    pub(super) fn accepts_body(&self) -> bool {
+    pub(super) const fn accepts_body(&self) -> bool {
         self.is_mutation()
             || matches!(
                 self,
