@@ -190,7 +190,23 @@ pub(super) fn unpack(
 ) -> Result<Unpacked, BundleInspectionRefusal> {
     let mut live = || original.live().is_ok();
     let parsed = read_verified_pack(input, format, limits, &mut live, &NativeChecksumVerifier)?;
-    reconstruct(parsed, format, limits, original, &mut live)
+    let unpacked = reconstruct(parsed, format, limits, original, &mut live)?;
+    // Native uploaded trees guide proof discovery before the validator asks
+    // for omitted dependencies. They never become an original-object grant.
+    // The same hook covers workspace, merge and every intermediate rebase tree.
+    if let Some(frontier) = &original.frontier {
+        let guided = frontier.borrow_mut().guide_uploaded(
+            &unpacked.objects,
+            |id| original.read_selected(id),
+            || original.live(),
+        );
+        if matches!(guided, Err(MergeSourceError::BudgetExceeded)) {
+            original.budget.exhausted.set(true);
+        }
+        guided.map_err(BundleInspectionRefusal::Source)?;
+    }
+    original.live().map_err(BundleInspectionRefusal::Source)?;
+    Ok(unpacked)
 }
 
 #[derive(Default)]

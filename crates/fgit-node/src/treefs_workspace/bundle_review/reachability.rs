@@ -6,12 +6,21 @@ use super::*;
 use fgit_git_object::ObjectError;
 use std::collections::VecDeque;
 
+#[path = "reachability/path_frontier.rs"]
+mod path_frontier;
+
 pub(super) struct ParentReachability {
     format: GitHashAlgorithm,
+    roots: Vec<GitOid>,
     required: BTreeMap<GitOid, ObjectType>,
     pending: VecDeque<GitOid>,
     expanded: BTreeSet<GitOid>,
+    // Only graph shape is cached, never original blob payloads. These maps are
+    // populated exclusively by observe's authenticated, typed native edges.
+    commit_trees: BTreeMap<GitOid, GitOid>,
+    directories: BTreeMap<GitOid, BTreeMap<Vec<u8>, GitOid>>,
     edges: usize,
+    hint_objects: usize,
     bytes: usize,
     limits: MergeObjectLimits,
 }
@@ -38,10 +47,14 @@ impl ParentReachability {
         }
         let mut result = Self {
             format,
+            roots: roots.to_vec(),
             required: BTreeMap::new(),
             pending: VecDeque::new(),
             expanded: BTreeSet::new(),
+            commit_trees: BTreeMap::new(),
+            directories: BTreeMap::new(),
             edges: 0,
+            hint_objects: 0,
             bytes: 0,
             limits,
         };
@@ -49,6 +62,19 @@ impl ParentReachability {
             result.require(*root, ObjectType::Commit)?;
         }
         Ok(result)
+    }
+
+    /// Uploaded paths only guide which already-authorized native trees to open.
+    /// They never add membership; historical/moved dependencies retain ensure's
+    /// bounded graph fallback. All hints and proof work share this instance's
+    /// existing object, edge and byte allowances.
+    pub(super) fn guide_uploaded(
+        &mut self,
+        objects: &BTreeMap<GitOid, PlannedMergeObject>,
+        mut load: impl FnMut(GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError>,
+        mut live: impl FnMut() -> Result<(), MergeSourceError>,
+    ) -> Result<(), MergeSourceError> {
+        path_frontier::guide(self, objects, &mut load, &mut live)
     }
 
     pub(super) fn ensure(
@@ -69,7 +95,7 @@ impl ParentReachability {
             if self.expanded.contains(&id) {
                 continue;
             }
-            if self.expanded.len() >= self.limits.max_objects {
+            if self.expanded.len().saturating_add(self.hint_objects) >= self.limits.max_objects {
                 return Err(MergeSourceError::BudgetExceeded);
             }
             let (kind, bytes) = load(id)?;
@@ -122,7 +148,7 @@ impl ParentReachability {
         if kind == ObjectType::Blob || self.expanded.contains(&id) {
             return Ok(());
         }
-        if self.expanded.len() >= self.limits.max_objects {
+        if self.expanded.len().saturating_add(self.hint_objects) >= self.limits.max_objects {
             return Err(MergeSourceError::BudgetExceeded);
         }
         let edges = native_edges(id, kind, bytes, self.limits, live)?;
@@ -134,6 +160,12 @@ impl ParentReachability {
         for (child, required) in edges.objects {
             live()?;
             self.require(child, required)?;
+        }
+        if let Some(tree) = edges.root_tree {
+            self.commit_trees.insert(id, tree);
+        }
+        if kind == ObjectType::Tree {
+            self.directories.insert(id, edges.directories);
         }
         self.edges = total;
         self.expanded.insert(id);
@@ -171,6 +203,8 @@ impl ParentReachability {
 pub(super) struct NativeEdges {
     pub objects: Vec<(GitOid, ObjectType)>,
     pub work: usize,
+    root_tree: Option<GitOid>,
+    directories: BTreeMap<Vec<u8>, GitOid>,
 }
 
 /// Parse native edges, including their required kinds. Gitlinks consume work
@@ -191,6 +225,8 @@ pub(super) fn native_edges(
         return Ok(NativeEdges {
             objects: Vec::new(),
             work: 0,
+            root_tree: None,
+            directories: BTreeMap::new(),
         });
     }
     let parsed = parse_object_body(
@@ -220,7 +256,11 @@ pub(super) fn native_edges(
     let mut result = NativeEdges {
         objects: Vec::new(),
         work: 0,
+        root_tree: None,
+        directories: BTreeMap::new(),
     };
+    let mut root_tree = None;
+    let mut directories = BTreeMap::new();
     let mut push = |child, expected| {
         live()?;
         result.work = result
@@ -251,12 +291,9 @@ pub(super) fn native_edges(
             {
                 return Err(MergeSourceError::InvalidObject(id));
             }
-            push(
-                oid(commit
-                    .tree_reference()
-                    .ok_or(MergeSourceError::InvalidObject(id))?)?,
-                Some(ObjectType::Tree),
-            )?;
+            let tree = oid(commit.tree_reference().ok_or(MergeSourceError::InvalidObject(id))?)?;
+            root_tree = Some(tree);
+            push(tree, Some(ObjectType::Tree))?;
             for parent in commit.parent_references() {
                 push(oid(parent)?, Some(ObjectType::Commit))?;
             }
@@ -278,12 +315,18 @@ pub(super) fn native_edges(
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect();
-                push(oid(hex.as_bytes())?, expected)?;
+                let child = oid(hex.as_bytes())?;
+                if expected == Some(ObjectType::Tree) {
+                    directories.insert(entry.name, child);
+                }
+                push(child, expected)?;
             }
         }
         ParsedObject::Blob(_) => {}
         ParsedObject::Tag(_) => return Err(MergeSourceError::InvalidObject(id)),
     }
     live()?;
+    result.root_tree = root_tree;
+    result.directories = directories;
     Ok(result)
 }
