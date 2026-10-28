@@ -29,10 +29,11 @@ function order(keys) {
 }
 
 export function artifactConfiguration(value, validatePath, workflowDirectory) {
-  fields(value, ['root', 'selections'], ['maximum_file_mib', 'total_payload_mib', 'inputs', 'total_delivery_mib']);
+  fields(value, ['root', 'selections'], ['maximum_file_mib', 'total_payload_mib', 'inputs', 'total_delivery_mib', 'capture_logs']);
   absolute(value.root);
-  if (!Array.isArray(value.selections) || !value.selections.length || value.selections.length > 64) {
-    fail('Artifact capture requires 1..64 explicit selections.');
+  if (Object.hasOwn(value, 'capture_logs') && typeof value.capture_logs !== 'boolean') fail('Log capture requires an explicit boolean.');
+  if (!Array.isArray(value.selections) || (!value.selections.length && value.capture_logs !== true) || value.selections.length > 64) {
+    fail('Artifact capture requires 1..64 explicit selections or opt-in log capture.');
   }
   const path = (text, maximum = 4096, supplemental = false) => {
     validatePath(text);
@@ -91,7 +92,9 @@ export function artifactConfiguration(value, validatePath, workflowDirectory) {
   const result = { root: value.root,
     maximum_file_mib: budget(Object.hasOwn(value, 'maximum_file_mib') ? value.maximum_file_mib : 16, 64),
     total_payload_mib: budget(Object.hasOwn(value, 'total_payload_mib') ? value.total_payload_mib : 64, 512), selections: Object.freeze(selections),
-    ...(inputs.length ? { inputs: Object.freeze(inputs), total_delivery_mib: budget(Object.hasOwn(value, 'total_delivery_mib') ? value.total_delivery_mib : 64, 512) } : {}) };
+    ...(inputs.length ? { inputs: Object.freeze(inputs), total_delivery_mib: budget(Object.hasOwn(value, 'total_delivery_mib') ? value.total_delivery_mib : 64, 512) } : {}),
+    // Disabled capture keeps the historical serialized configuration and keys.
+    ...(value.capture_logs === true ? { capture_logs: true } : {}) };
   if (artifactArguments(result).some(argument => Buffer.byteLength(argument) > 8192)) fail('Artifact selector exceeds the native argument envelope.');
   return Object.freeze(result);
 }
@@ -100,6 +103,7 @@ export function artifactArguments(value) {
   if (!value) return [];
   const args = ['--artifact-root', value.root, '--max-artifact-mib', String(value.maximum_file_mib),
     '--max-artifact-total-mib', String(value.total_payload_mib)];
+  if (value.capture_logs === true) args.push('--artifact-logs');
   for (const row of value.selections) args.push('--artifact-hex', `${row.workflow_path_hex}:${row.job_id}:${row.output_path_hex}`);
   for (const row of value.inputs ?? []) {
     args.push('--artifact-input-hex', `${row.workflow_path_hex}:${row.consumer_job_id}:${row.producer_job_id}:${row.output_path_hex}:${row.destination_hex}`);
@@ -116,7 +120,8 @@ function nativeContract(value) {
     ...(value.inputs?.length ? { input_delivery: { schema_version: 1, namespace_hex: hex('.fgit-artifacts'),
       total_delivery_bytes: value.total_delivery_mib * MIB,
       selections: value.inputs.map(row => ({ workflow_path_hex: row.workflow_path_hex, consumer_job_id_hex: hex(row.consumer_job_id),
-        producer_job_id_hex: hex(row.producer_job_id), output_path_hex: row.output_path_hex, destination_hex: row.destination_hex })) } } : {}) };
+        producer_job_id_hex: hex(row.producer_job_id), output_path_hex: row.output_path_hex, destination_hex: row.destination_hex })) } } : {}),
+    ...(value.capture_logs === true ? { log_capture: { schema_version: 1, streams: ['stdout', 'stderr'] } } : {}) };
 }
 
 export function verifyArtifactContract(value, record) {

@@ -2,6 +2,7 @@
 // check-publication planning. Payload verification stays in Rust; these records
 // neither attest script execution nor authorize cross-attempt cache reuse.
 import { fail } from './workflow_watch_io.mjs';
+import { verifyArtifactLogs } from './workflow_artifact_logs.mjs';
 
 const MIB = 1024 * 1024;
 const NAMESPACE = Buffer.from('.fgit-artifacts/').toString('hex');
@@ -45,7 +46,7 @@ function byJob(rows, field) {
 // totals is owned by one dispatch, not reset between workflow children.
 export function verifyArtifactReceipts(config, run, totals) {
   if (!config) {
-    if (Object.hasOwn(run, 'artifacts') || Object.hasOwn(run, 'artifact_inputs')) {
+    if (Object.hasOwn(run, 'artifacts') || Object.hasOwn(run, 'artifact_inputs') || Object.hasOwn(run, 'artifact_logs')) {
       fail('Native execution introduced unrequested artifact observations.');
     }
     return;
@@ -80,6 +81,7 @@ export function verifyArtifactReceipts(config, run, totals) {
       fail('Successful native producer is missing its selected artifact capture.');
     }
   }
+  verifyArtifactLogs(config, run, totals);
   if (!config.inputs?.length) {
     if (Object.hasOwn(run, 'artifact_inputs')) fail('Native execution introduced unrequested artifact deliveries.');
     return;
