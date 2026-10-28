@@ -505,8 +505,24 @@ fn continuous_global_budget_rotates_before_retrying_the_first_route() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha1);
     let first = Receiver::new(vec![Some(503)]);
     let second = Receiver::new(vec![Some(204)]);
-    fixture.register(7, &first.url);
-    fixture.register(8, &second.url);
+    assert_continuous_global_budget_progress(
+        &fixture,
+        &first.url,
+        &second.url,
+        Duration::from_secs(120),
+    );
+    assert_eq!(first.finish().len(), 1);
+    assert_eq!(second.finish().len(), 1);
+}
+
+fn assert_continuous_global_budget_progress(
+    fixture: &Fixture,
+    first_url: &str,
+    second_url: &str,
+    bound: Duration,
+) {
+    fixture.register(7, first_url);
+    fixture.register(8, second_url);
     let first_journal = journal_path(&fixture.route(7));
     let second_journal = journal_path(&fixture.route(8));
     // Both progress conditions need a delivery attempt to reach a journal. If
@@ -514,12 +530,11 @@ fn continuous_global_budget_rotates_before_retrying_the_first_route() {
     // test once ran for over two hours and held its whole binary
     // (frankengit-e0eg). The wall-clock bound turns that into a failure.
     let started = std::time::Instant::now();
-    let bound = std::time::Duration::from_secs(120);
     let stopped = || {
         let first = fs::read_to_string(&first_journal).unwrap_or_default();
         let second = fs::read_to_string(&second_journal).unwrap_or_default();
-        // The second condition also bounds the failure case: a scheduling
-        // regression cannot keep this test's continuous controller running.
+        // Only the wall clock bounds a run that reaches neither progress
+        // condition, including unanswered deliveries on both routes.
         Ok(second.contains("accepted")
             || first.matches("in-flight").count() > 1
             || started.elapsed() > bound)
@@ -547,6 +562,44 @@ fn continuous_global_budget_rotates_before_retrying_the_first_route() {
             .unwrap()
             .contains("accepted")
     );
-    assert_eq!(first.finish().len(), 1);
-    assert_eq!(second.finish().len(), 1);
+}
+
+#[test]
+fn unanswered_receivers_fail_the_fairness_harness_within_its_deadline() {
+    let fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    // Capture each real POST, then close without an HTTP response. Neither
+    // route can produce the accepted observation required by the pass case.
+    let first = Receiver::new(vec![None]);
+    let second = Receiver::new(vec![None]);
+    let first_url = first.url.as_str();
+    let second_url = second.url.as_str();
+    let started = Instant::now();
+    let failure = std::panic::catch_unwind(|| {
+        assert_continuous_global_budget_progress(
+            &fixture,
+            first_url,
+            second_url,
+            Duration::from_secs(5),
+        );
+    })
+    .expect_err("unanswered deliveries must fail the unchanged progress assertions");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("the watchdog failure must retain its diagnostic");
+    assert!(
+        message.starts_with("the continuous dispatcher made no delivery progress within"),
+        "unexpected failure instead of the no-progress deadline: {message}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(120),
+        "the planted no-progress run exceeded the original harness bound"
+    );
+    // Joining both receivers proves the planted case reached real transport;
+    // setup failure or cancellation before either POST cannot pass this test.
+    for captured in [first.finish(), second.finish()] {
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].headers["x-frankengit-attempt"], "1");
+    }
 }
