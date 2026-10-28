@@ -10,6 +10,8 @@
 //! authority head's conditional replacement.
 
 #[cfg(test)]
+use source_io::read_through_first_excess_byte;
+#[cfg(test)]
 mod cancellation_tests;
 mod control;
 pub mod graph;
@@ -19,7 +21,12 @@ mod placement;
 mod refusal;
 mod source_io;
 pub use refusal::LooseGitImportRefusal;
-use source_io::*;
+use source_io::{
+    BoundedInputClass, bounded_directory_entries, import_pack_limits, io_refusal,
+    is_ignored_pack_accelerator, open_regular_bounded, pack_input_limit, pack_refusal,
+    parse_limits, path_metadata, read_direct_refs, read_head_target, read_local_object,
+    read_regular_bounded, reject_object_alternates, resolve_git_directory,
+};
 mod profile;
 use packed_sources::PackedObjectSources;
 mod spool;

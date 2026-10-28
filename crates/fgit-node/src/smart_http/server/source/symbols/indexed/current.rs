@@ -1,6 +1,12 @@
 //! A distinct wire receipt for current-source revalidation. The nested result
 //! retains its original exact-source profile; consumers must not relabel it.
-use super::*;
+#[cfg(test)]
+use super::super::{MAX_SYMBOL_WORK, RefName, SymbolKind};
+use super::{ApiError, Command, OneNode, Selection, append, check, data, quote, ref_fields, token};
+#[cfg(test)]
+use super::{
+    GitHashAlgorithm, SearchLimits, SymbolMatchMode, SymbolQuery, command, indexed_command,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SourceMode {

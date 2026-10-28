@@ -1,7 +1,7 @@
 //! Reuse the public source-diff serializer for an already verified candidate
 //! comparison. This adapter reads no objects and grants no authority.
 
-use super::*;
+use super::{ApiError, Command, ComparisonMode, OneNode, ReviewOptions, ReviewSelection, output};
 use fgit_forge::review::SourceReview;
 
 pub(in crate::smart_http::server::source) fn render(

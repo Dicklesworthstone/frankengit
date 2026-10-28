@@ -2,7 +2,10 @@
 //! Logs use the artifact owner's existing namespace, permissions and retention.
 //! A receipt records bytes and observed outcomes; it does not publish a check.
 
-use super::*;
+use super::{
+    ArtifactOperation, ArtifactPayloadKind, Collector, Digest, Duration, File, MAX_MANIFEST_BYTES,
+    Path, PathBuf, WorkerFailure, digest_hex, fs, hex, remove_stage, stage_bytes,
+};
 use fgit_runner::Commitment;
 use fgit_runner::workflow::{JobOutcome, JobReport, StepOutcome};
 

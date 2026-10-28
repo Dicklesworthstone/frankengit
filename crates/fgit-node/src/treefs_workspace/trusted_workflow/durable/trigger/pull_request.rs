@@ -1,5 +1,9 @@
 //! Canonical same-repository PR-head selection. This is not a synthetic merge.
-use super::*;
+use super::{
+    GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode, Path, RefName, Selected, Selection,
+    TrustedRefWorkflowPoll, TrustedWorkflowArtifactConfig, TrustedWorkflowFailure, WorkflowLimits,
+    cancellation, commitment, hex, invalid, invalid_owned, reporting,
+};
 use fgit_forge::event::{ForgeEventPayload, pull_request::PullRequestAction};
 use fgit_wire::visibility::RefVisibility;
 

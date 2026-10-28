@@ -1,7 +1,14 @@
 //! Candidate execution enters the same preflight, journal and job driver as
 //! canonical source. Only input provenance and the host plan constructor differ.
 mod merge;
-use super::*;
+use super::{
+    Arc, ByteCount, FETCH_BYTES, FETCH_OBJECTS, Format, GitHashAlgorithm, GitOid, HostRefusal,
+    Instant, NativeObjectIdentity, NodeRequestContext, OneNode, Path, RefName,
+    RepositoryAuthorityHeadId, RepositoryCommitId, SOURCE_LIMITS, Sha1, Sha256, SparseManifest,
+    SparseWorkspacePlan, TreeCapability, TreePath, TrustedWorkflowArtifactConfig,
+    TrustedWorkflowCandidate, TrustedWorkflowFailure, TrustedWorkflowRun, WorkflowLimits,
+    WorkspaceId, artifacts, hex, run_inputs, validate_inputs, workspace_request_live,
+};
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::MergeCommitStyle;
 use fgit_treefs::{SparseCandidateManifest, SparseEntry};

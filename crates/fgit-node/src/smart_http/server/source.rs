@@ -192,7 +192,10 @@ pub(super) struct HttpReadGrant {
     principal: fgit_types::PrincipalId,
 }
 impl HttpReadGrant {
-    fn context(&self, node: &OneNode) -> crate::source_retrieval::authorization::SourceReadContext {
+    const fn context(
+        &self,
+        node: &OneNode,
+    ) -> crate::source_retrieval::authorization::SourceReadContext {
         crate::source_retrieval::authorization::SourceReadContext::http_credential(
             node,
             self.principal,

@@ -5,7 +5,19 @@
 //! this validator. The per-call reader shares its original-input ledger and
 //! verified-kind cache with ordinary uploaded-graph frontier checks.
 
-use super::*;
+#[cfg(test)]
+use super::QuarantineValidator;
+use super::{
+    AcceptanceProfile, BTreeMap, BTreeSet, Deadline, ExternalBases, GitOid, ObjectType,
+    ParsedDeltaBase, ProductionQuarantineValidator, QuarantinedPack, RefusalCode, StoreRefusal,
+    checkpoint,
+};
+#[cfg(test)]
+use super::{
+    AuthoritySelectedClosure, BasisBoundValidatedReceive, GitHashAlgorithm, OneNode, PackLimits,
+    ParseLimits, PermittedObjectClosure, ProductionReceiveQuarantineHandoff, QuarantineReceipt,
+    ReceiveRequest, ValidatedClosure, permitted_object_closure_root, validate_receive_at_basis,
+};
 
 pub(super) const MAX_ORIGINAL_OBJECTS: usize = 1_000_000;
 

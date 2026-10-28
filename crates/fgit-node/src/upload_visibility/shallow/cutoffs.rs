@@ -1,6 +1,11 @@
 //! Time/ref history cuts on the connection-owned verified graph.
 //! Dates select traversal, not trust; ref exclusions never authorize reads.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, FilterObject, GitOid, History, NodePackMaterializationRefusal, ObjectType,
+    PackRequest, RefusalCode, ShallowUpdate, Work, budget, disclosure_refusal, object,
+};
+#[cfg(test)]
+use super::{GitHashAlgorithm, PackLimits, UploadPackVersion, boundary_update, select};
 use fgit_git_object::ParsedObject;
 
 pub(super) const fn requested(request: &PackRequest) -> bool {

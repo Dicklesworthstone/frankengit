@@ -1,6 +1,11 @@
 //! Regex dispatch shares the single authority selection used by literal/batch
 //! search. Changing a matcher never grants a path or selects another snapshot.
-use super::*;
+use super::{
+    BaseView, Format, GitHashAlgorithm, GitOid, LocalSearch, NodeRequestContext,
+    NodeWorkspaceRefusal, ObjectSource, OneNode, RefName, RefVisibility, RepositoryAuthorityHeadId,
+    SearchError, SearchLimits, Sha1, Sha256, SourceQuery, SourceSearchReport, TreeCapability,
+    bounded_source, search_error, workspace_request_live,
+};
 use fgit_forge::source_search::regex::{RegexQuery, RegexSearchReport, search_source_regex};
 
 impl LocalSearch for RegexQuery {

@@ -1,5 +1,8 @@
 //! Typed source-import refusals, shared by loose and packed validation.
-use super::*;
+use super::{
+    Display, Error, Formatter, GitOid, LooseObjectDecodeError, NodeRefusal, ObjectError, PackError,
+    PathBuf, TypeRefusal, fmt, io,
+};
 
 /// Refusal while reading a bounded ordinary local Git directory.
 #[derive(Debug)]

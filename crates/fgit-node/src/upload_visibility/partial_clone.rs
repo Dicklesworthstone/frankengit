@@ -1,6 +1,9 @@
 //! Partial-clone selection over the same native-verified disclosure proof.
 //! Filtering never changes canonical retention and never supplies permission.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, GitOid, NodePackMaterializationRefusal, ObjectType, PackError, PackLimits,
+    PackRequest, PackWriteError, RefusalCode, disclosure_refusal,
+};
 use fgit_wire::ObjectFilter;
 
 /// The upstream configuration name (`uploadpackfilter.<name>.allow`) of the

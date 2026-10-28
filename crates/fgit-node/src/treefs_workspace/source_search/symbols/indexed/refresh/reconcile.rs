@@ -1,6 +1,12 @@
 //! Explicit maintenance, never a query fallback. Select one canonical source
 //! and one authenticated index predecessor; do not retry on a changed basis.
-use super::*;
+use super::{
+    ClosureSelectionSource, Failure, GenerationActivation, GenerationAuthority,
+    GenerationAuthorityError, GenerationReadLimits, GraphGenerationId, NodeRequestContext,
+    NodeWorkspaceRefusal, OneNode, ReadMode, RefName, RepositoryAuthorityHeadId, SearchLimits,
+    admits_read, admits_staging_intake, data, live, symbol_manifest_root, view,
+    workspace_request_live,
+};
 
 impl OneNode {
     /// Observe a current symbol index, build a genuinely uninitialized index,

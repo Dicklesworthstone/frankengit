@@ -2,7 +2,14 @@
 //! Single-parent and explicit merge candidates share source selection, bounded
 //! unpacking, native closure verification and capability-scoped discovery.
 
-use super::*;
+use super::{
+    BundleInspectionRefusal, CandidateEnvelope, Cell, GitOid, InspectionSource, MAX_BUNDLE_BYTES,
+    MAX_CANDIDATE_BYTES, MAX_EXPANDED_BYTES, MAX_INSPECTION_OBJECTS, MergeObjectLimits,
+    MergeObjectSource, NativeMerge, NodeRequestContext, ObjectFrontier, ObjectType, OneNode,
+    OriginalSource, PackLimits, ParseLimits, ReadBudget, ReadMode, RefName, RefVisibility,
+    RepositoryAuthorityHeadId, VerifiedFabricPackSource, admits_read, invalid, pack, sha256_digest,
+    validate_merge_objects_above, validate_squash_objects_above, validate_workspace_objects_above,
+};
 use crate::ClosureSelectionSource;
 use fgit_crypto::{GitHashAlgorithm as Hash, NativeObjectIdentity};
 use fgit_forge::preparation::MergeCommitStyle;

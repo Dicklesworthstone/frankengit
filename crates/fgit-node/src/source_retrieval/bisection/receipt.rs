@@ -1,7 +1,10 @@
 //! Versioned diagnostic JSON. SHA-256 binds the complete JSON payload before
 //! adding receipt_sha256, including predicate, incarnation, observed authority,
 //! full native identity domains, limits, publication domain and every probe.
-use super::*;
+use super::{
+    BisectionTermination, GitHashAlgorithm, IssueState, PROFILE, Predicate, PullState, Report,
+    RepositoryAuthorityHeadId, fold,
+};
 use fgit_forge::bisection::{BisectionRefusal, PredicateOutcome};
 use std::fmt::Write;
 

@@ -2,7 +2,11 @@
 //! Native identities are discovered in bounded passes, allowing forward REF
 //! bases without trusting an uploaded index or widening original-object scope.
 
-use super::*;
+use super::{
+    AcceptanceProfile, BTreeMap, BTreeSet, BundleInspectionRefusal, GitHashAlgorithm, GitOid,
+    MergeObjectLimits, ObjectType, OriginalSource, PackError, PackLimits, ParseLimits,
+    PlannedMergeObject, git_object_id, invalid, reachability,
+};
 use fgit_pack::{
     CachedResolver, DeltaBase, ExternalBaseLookup, NativeChecksumVerifier, PackObject,
     QuarantinedPack, ResolutionBudget, read_verified_pack, verify_native_object,

@@ -6,7 +6,14 @@
 //! and histories which do not reach the prefix retain the bounded genesis
 //! walk; this cache is neither durable checkpointing nor a second authority.
 
-use super::*;
+use super::{
+    ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, Arc, AsyncAuthorityStore,
+    AuthenticatedHead, AuthoritySelectedClosure, BTreeSet, CachePermit, CanonicalRefState,
+    ClosureSelectionSource, Digest, GitOid, ImmutableRead, MaterializedAdmissionState,
+    PermittedObjectClosure, PublicationBasis, RefusalCode, RepositoryCommitId, RepositoryId,
+    RwLock, admission_immutable_key, capsule_history, decode_body,
+    ensure_materializer_catch_up_live, permitted_object_closure_root, repository_commit_id,
+};
 
 /// One disposable verified prefix shared by independently opened service
 /// children. Their complete admission snapshots remain private to each child.

@@ -1,6 +1,10 @@
 //! Hydrate only retrieval-selected exact paths under ONE current native source
 //! selection. The private TreeFS source prevents object-ID read substitution.
-use super::*;
+use super::{
+    BaseView, Format, GitHashAlgorithm, GitObjectKind, GitOid, LocalSearch, NodeRequestContext,
+    ObjectSource, OneNode, SearchError, SearchLimits, Sha1, Sha256, SourceQuery,
+    SourceSearchReport, TreeCapability, TreePath, search_error, workspace_request_live,
+};
 use crate::source_retrieval::authorization::SourceReadContext;
 use crate::source_retrieval::context::ranked::RankedContext;
 use crate::source_retrieval::context::{Assembly, ContextLimits, InitialContext, Plan};

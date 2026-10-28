@@ -2,7 +2,14 @@
 //! Current normalized producer outcomes select eligible custody; local stored
 //! objects never authorize execution by their existence alone.
 
-use super::*;
+use super::{
+    ArtifactIdentity, ArtifactOperation, ArtifactPayloadKind, BTreeSet, Collector, Digest,
+    DirBuilderExt, Duration, File, FileMode, GitHashAlgorithm, MAX_ARTIFACT_TOTAL_BYTES,
+    MAX_MANIFEST_BYTES, MAX_SELECTIONS, MediaType, Path, RetentionProfile, SOURCE_LIMITS,
+    SparseWorkspacePlan, TreePath, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactOutput,
+    TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, WorkerFailure, WorkflowJob,
+    WorkflowPlan, digest_hex, fs, hex, stage_bytes,
+};
 use fgit_runner::Commitment;
 use fgit_runner::sparse_workspace::JobInput;
 use fgit_runner::workflow::{JobOutcome, JobReport};

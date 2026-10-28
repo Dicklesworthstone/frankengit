@@ -1,6 +1,11 @@
 //! Closed maintenance profiles sharing one progress/ownership/drain protocol.
 //! Index-specific authority and recovery stay in their native owners.
-use super::*;
+use super::{
+    GenerationActivation, GenerationAuthorityError, GenerationRecovery, GraphGenerationId,
+    NodeRequestContext, NodeWorkspaceRefusal, OneNode, RefName,
+};
+#[cfg(test)]
+use super::{OsString, State, generation, parse};
 use fgit_forge::source_symbols::index as symbols;
 use fgit_types::{GitOid, RepositoryAuthorityHeadId};
 

@@ -1,7 +1,13 @@
 //! Shallow history over the private, complete, native-verified disclosure graph.
 //! Client shallow markers constrain ancestry; they never grant object access.
 use super::partial_clone::FilterObject;
-use super::*;
+use super::{
+    Arc, BTreeMap, BTreeSet, GitDaemonSessionDeadline, GitOid, NodePackMaterializationRefusal,
+    ObjectType, PackError, PackLimits, PackRequest, PackWriteError, RefusalCode, WireError,
+    disclosure_refusal,
+};
+#[cfg(test)]
+use super::{GitHashAlgorithm, UploadPackVersion};
 use fgit_wire::closure::ShallowUpdate;
 pub(crate) mod cutoffs;
 mod relative;

@@ -3,7 +3,16 @@
 
 mod merge_candidate;
 
-use super::super::*;
+use super::super::{
+    Arc, BTreeSet, ByteCount, DirBuilderExt, FETCH_BYTES, FETCH_OBJECTS, File, Format,
+    GitHashAlgorithm, GitOid, Instant, MAX_REPLICATED_BYTES, MAX_REPLICATED_ENTRIES, Mutex,
+    NativeObjectIdentity, NodeRequestContext, NodeWorkspaceRefusal, OneNode, OsStrExt, Path,
+    PathBuf, PermissionsExt, RefName, RepositoryAuthorityHeadId, SOURCE_LIMITS, Sha1, Sha256,
+    SparseEntryKind, SparseManifest, TreeCapability, TreePath, TrustedWorkflowArtifactConfig,
+    TrustedWorkflowFailure, TrustedWorkflowRun, WorkflowInputs, WorkflowLimits, WorkflowPlan,
+    WorkspaceId, artifacts, candidate, fs, hex, publish_report, run_inputs, validate_inputs,
+    workspace_request_live, write_new,
+};
 use fgit_crypto::sha256_digest;
 use fgit_forge::review::{ComparisonMode, SourcePathChanges};
 type PathBasis = (Option<GitOid>, ComparisonMode);

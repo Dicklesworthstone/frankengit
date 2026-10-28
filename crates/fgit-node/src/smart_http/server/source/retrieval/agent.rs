@@ -1,7 +1,11 @@
 //! Agent Protocol documents through the existing authenticated source gateway.
 //! Form fields select data and finite bounds; they cannot choose a principal,
 //! grant, run identity, durable state or publication capability.
-use super::*;
+use super::{
+    ApiError, BTreeMap, BodyFraming, GitDaemonSessionDeadline, GitDaemonSessionWorkScaling,
+    GitHashAlgorithm, HttpLimits, JsonReply, OneNode, Read, SourceReadContext, Status, context,
+    drive_request_while, parse_form, positive, read_form,
+};
 use crate::source_retrieval::agent_context::AgentContextReadError;
 use crate::source_retrieval::agent_context::document::{
     AgentContextDocumentError, AgentContextRequest, MAX_LIFETIME, MAX_OUTPUT_BYTES,

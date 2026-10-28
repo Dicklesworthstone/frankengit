@@ -2,7 +2,17 @@
 //! Stored bytes and provenance do not grant a BuildInputCapsule cache hit or a
 //! canonical check. The producing attempt must still close and publish normally.
 
-use super::*;
+use super::{
+    BTreeSet, DirBuilderExt, File, GitHashAlgorithm, MAX_REPLICATED_BYTES, MAX_REPLICATED_ENTRIES,
+    OneNode, OpenOptions, OpenOptionsExt, OsStrExt, Path, PathBuf, SOURCE_LIMITS, SparseWorkspace,
+    SparseWorkspacePlan, TreePath, TrustedWorkflowFailure, TrustedWorkflowRun, WorkerFailure,
+    WorkflowJob, WorkflowPlan, Write, fs, hex,
+};
+#[cfg(test)]
+use super::{
+    GitOid, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId,
+    StepObservation, TenantId, WorkflowLimits, WorkflowReport,
+};
 use fgit_crypto::{DigestAlgorithm, sha256_digest};
 use fgit_object_fabric::artifact::storage::{ArtifactOperation, ArtifactScope, LocalArtifactStore};
 use fgit_object_fabric::artifact::{
