@@ -20,6 +20,7 @@ pub mod rebase;
 pub mod renames;
 pub mod replay;
 pub mod resolution;
+mod tree_entries;
 
 /// Explicit preparation semantics; the legacy entry point remains PathMergeV1.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -526,9 +527,10 @@ struct Planner<'a, S> {
     content_merges: usize,
     output_bytes: usize,
     objects: BTreeMap<GitOid, PlannedMergeObject>,
-    // Parsed metadata for our own generated trees; bounded by generation and
-    // tree-entry budgets. Never used as authority for original object reads.
-    trees: BTreeMap<GitOid, Vec<MergeEntry>>,
+    // Request-owned, validated immutable maps. Generated trees stay available
+    // to subsequent replay steps; original-source retention has separate caps.
+    // Neither kind is authority for a new source read or another preparation.
+    trees: BTreeMap<GitOid, tree_entries::Tree>,
     conflicts: Vec<MergeConflict>,
     resolutions: BTreeMap<Vec<u8>, resolution::BoundResolution>,
 }
@@ -582,50 +584,65 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         Ok(id)
     }
 
-    fn entries(
-        &mut self,
-        id: Option<GitOid>,
-    ) -> Result<BTreeMap<Vec<u8>, MergeEntry>, PreparationError> {
-        let Some(id) = id else {
-            return Ok(BTreeMap::new());
-        };
+    fn entries(&mut self, id: Option<GitOid>) -> Result<tree_entries::Tree, PreparationError> {
         self.source.checkpoint()?;
+        let Some(id) = id else {
+            return Ok(std::sync::Arc::new(BTreeMap::new()));
+        };
         if id.is_zero() || id.algorithm() != self.format {
             return Err(PreparationError::ObjectFormat);
         }
-        let entries = match self.trees.get(&id) {
-            Some(entries) => entries.clone(),
-            None => self.source.tree(id)?,
-        };
+        if let Some(entries) = self.trees.get(&id) {
+            // Caching avoids I/O, parsing and map copies, never the logical
+            // entry visits or current invocation's cancellation checkpoint.
+            self.entries = self
+                .entries
+                .checked_add(entries.len())
+                .filter(|count| *count <= self.limits.max_tree_entries)
+                .ok_or(PreparationError::Budget("tree entries"))?;
+            self.source.checkpoint()?;
+            return Ok(std::sync::Arc::clone(entries));
+        }
+        let entries = self.source.tree(id)?;
         self.entries = self
             .entries
             .checked_add(entries.len())
             .filter(|count| *count <= self.limits.max_tree_entries)
             .ok_or(PreparationError::Budget("tree entries"))?;
-        let mut map = BTreeMap::new();
-        for entry in entries {
-            self.source.checkpoint()?;
-            if entry.name.is_empty()
-                || entry.name.len() > self.limits.max_path_bytes
-                || entry.name.contains(&0)
-                || entry.name.contains(&b'/')
-                || entry.name == b"."
-                || entry.name == b".."
-                || entry.name.eq_ignore_ascii_case(b".git")
-                || !matches!(
-                    entry.mode,
-                    0o040000 | 0o100644 | 0o100755 | 0o120000 | 0o160000
-                )
-                || entry.oid.is_zero()
-                || entry.oid.algorithm() != self.format
-            {
-                return Err(PreparationError::InvalidTree);
-            }
-            if map.insert(entry.name.clone(), entry).is_some() {
-                return Err(PreparationError::InvalidTree);
-            }
+        let (entries, name_bytes) = tree_entries::checked(
+            entries,
+            self.format,
+            self.limits.max_path_bytes,
+            || self.source.checkpoint(),
+        )?;
+        if self.trees.len() < tree_entries::MAX_CACHED_SOURCE_TREES
+            && entries.len() <= tree_entries::MAX_CACHED_SOURCE_ENTRIES
+            && name_bytes <= tree_entries::MAX_CACHED_SOURCE_NAME_BYTES
+        {
+            self.trees.insert(id, std::sync::Arc::clone(&entries));
         }
-        Ok(map)
+        Ok(entries)
+    }
+
+    fn remember_tree(
+        &mut self,
+        id: GitOid,
+        entries: Vec<MergeEntry>,
+    ) -> Result<(), PreparationError> {
+        let (entries, _) = tree_entries::checked(
+            entries,
+            self.format,
+            self.limits.max_path_bytes,
+            || self.source.checkpoint(),
+        )?;
+        if let Some(previous) = self.trees.get(&id) {
+            if previous != &entries {
+                return Err(PreparationError::InvalidTree);
+            }
+        } else {
+            self.trees.insert(id, entries);
+        }
+        Ok(())
     }
 
     fn directory(
@@ -654,10 +671,9 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
             || [&b, &o, &t]
                 .iter()
                 .any(|tree| tree.contains_key(b".gitattributes".as_slice()));
-        let names: BTreeSet<_> = b.keys().chain(o.keys()).chain(t.keys()).cloned().collect();
         let before = self.conflicts.len();
         let mut result = Vec::new();
-        for name in names {
+        for (name, [base, ours, theirs]) in tree_entries::Join::new(&b, &o, &t) {
             self.source.checkpoint()?;
             let length = path
                 .len()
@@ -665,15 +681,20 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
                 .and_then(|bytes| bytes.checked_add(name.len()))
                 .filter(|bytes| *bytes <= self.limits.max_path_bytes)
                 .ok_or(PreparationError::Budget("path bytes"))?;
+            // Most paths in a large directory are unchanged or one-sided.
+            // Check their full path bound, but allocate no temporary full path.
+            if let Some(entry) = tree_entries::trivial(base, ours, theirs) {
+                if let Some(entry) = entry {
+                    result.push(entry.clone());
+                }
+                continue;
+            }
             let mut child = Vec::with_capacity(length);
             child.extend_from_slice(path);
             if !path.is_empty() {
                 child.push(b'/');
             }
-            child.extend_from_slice(&name);
-            let base = b.get(&name);
-            let ours = o.get(&name);
-            let theirs = t.get(&name);
+            child.extend_from_slice(name);
             if let Some(entry) = self.entry(base, ours, theirs, &child, depth, attributes)? {
                 result.push(entry);
             }
@@ -710,7 +731,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
             return Ok(Some(id));
         }
         let id = self.emit(GitObjectKind::Tree, body)?;
-        self.trees.insert(id, result);
+        self.remember_tree(id, result)?;
         Ok(Some(id))
     }
 
@@ -756,11 +777,8 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         depth: usize,
         attributes: bool,
     ) -> Result<Option<MergeEntry>, PreparationError> {
-        if ours == theirs || base == theirs {
-            return Ok(ours.cloned());
-        }
-        if base == ours {
-            return Ok(theirs.cloned());
+        if let Some(entry) = tree_entries::trivial(base, ours, theirs) {
+            return Ok(entry.cloned());
         }
         let (Some(o), Some(t)) = (ours, theirs) else {
             return self.conflict(path, ConflictKind::ModifyDelete, base, ours, theirs);
@@ -881,6 +899,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
 #[cfg(test)]
 mod tests {
     mod ancestry;
+    mod shared_trees;
     mod squash;
 
     use super::*;

@@ -175,7 +175,7 @@ fn flatten<S: MergeObjectSource>(
     }
     let entries = planner.entries(Some(root))?;
     originals.insert(root);
-    for entry in entries.into_values() {
+    for entry in entries.values() {
         planner.source.checkpoint()?;
         let count = prefix
             .len()
@@ -203,7 +203,7 @@ fn flatten<S: MergeObjectSource>(
                 budget,
             )?;
         }
-        if flat.insert(path, entry).is_some() {
+        if flat.insert(path, entry.clone()).is_some() {
             return Err(PreparationError::InvalidTree);
         }
     }
@@ -502,7 +502,7 @@ fn rebuild<S: MergeObjectSource>(
         let id = git_object_id(planner.format, GitObjectKind::Tree, &body);
         if !originals.contains(&id) {
             planner.emit(GitObjectKind::Tree, body)?;
-            planner.trees.insert(id, entries);
+            planner.remember_tree(id, entries)?;
         }
         if path.is_empty() {
             return Ok(id);
@@ -543,7 +543,7 @@ fn retain_candidate_objects<S: MergeObjectSource>(
                 .checked_add(entries.len())
                 .filter(|count| *count <= planner.limits.max_tree_entries)
                 .ok_or(PreparationError::Budget("tree entries"))?;
-            for entry in entries {
+            for entry in entries.values() {
                 planner.source.checkpoint()?;
                 pending.push(entry.oid);
             }
