@@ -164,7 +164,9 @@ impl MaintenanceGroup {
         &self.configs
     }
 
-    pub(crate) fn into_configs(self) -> Vec<MaintenanceConfig> {
+    /// Consume the group and return its configurations in profile order.
+    #[must_use]
+    pub fn into_configs(self) -> Vec<MaintenanceConfig> {
         self.configs
     }
 }

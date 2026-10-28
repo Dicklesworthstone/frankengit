@@ -44,9 +44,9 @@ SIGKILL/default OS termination is not this drain protocol.
 
 ## Maintain indexes while serving HTTP
 
-The HTTP server can own this same controller throughout its serving lifetime.
-Enable one explicit lexical or Rust-symbol profile and a fixed set of refs.
-The server opens a separate node-owned database/request lane against the same
+The HTTP server can own lexical and Rust-symbol controllers throughout its
+serving lifetime. Enable one profile or both, with a fixed set of refs. Each
+controller opens a separate node-owned database/request lane against the same
 existing repository, using the listener's exact repository incarnation and
 inherited runtime policy.
 
@@ -68,6 +68,61 @@ required. This configuration does not grant remote index writes. Use
 format and exact ref set. Do not reuse one progress directory for another
 profile or run a second live maintenance owner against it.
 
+### Keep combined lexical and symbol queries current
+
+Select `--index-profile both` to maintain both channels in the same HTTP
+service. Supply a separate existing private directory for each profile:
+
+```bash
+mkdir -m 700 "$LEXICAL_PROGRESS_DIR" "$SYMBOL_PROGRESS_DIR"
+fg serve-http "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" 127.0.0.1:8080 \
+  --trusted-local --credentials-file "$CREDENTIALS_FILE" \
+  --allow-source --allow-receive --continuous --stop-file "$HTTP_STOP_FILE" \
+  --index-profile both --index-format sha1 --index-state init \
+  --index-state-dir "$LEXICAL_PROGRESS_DIR" \
+  --index-symbol-state-dir "$SYMBOL_PROGRESS_DIR" \
+  --index-ref refs/heads/main --index-interval-secs 5
+```
+
+`--index-state-dir` owns lexical progress in this mode, and
+`--index-symbol-state-dir` owns symbol progress. The extra symbol directory is
+required for `both` and rejected for a single profile. Neither directory is
+created, cleared or repurposed by the server. The two controllers share the
+explicit ref set, object format, init/resume choice, interval and attempt timeout;
+their generation floors, pending candidates and ownership locks remain separate.
+Resume uses the same two directories and the same scope.
+
+To add symbols to an existing lexical deployment, stop the server, retain its
+lexical progress and create the new private symbol directory. Initialize only
+that missing profile with the finite worker, using the same object format and
+complete ref set (this example has one SHA-1 ref):
+
+```bash
+fg-index-maintain --symbols "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
+  "$SYMBOL_PROGRESS_DIR" init 1 0 refs/heads/main
+```
+
+Then start HTTP with `--index-profile both --index-state resume`. If group
+startup created one checkpoint before another profile refused, keep the existing
+checkpoint, correct the refusal and initialize only the profile whose checkpoint
+is missing. Omit `--symbols` when that missing profile is lexical. Existing
+checkpoints, generation floors and pending candidates remain intact; `init`
+continues to refuse an existing checkpoint.
+
+Both controllers must authenticate and acquire their progress ownership before
+the HTTP readiness callback runs. A launch barrier holds every controller until
+that callback succeeds. Invalid second-profile progress or a readiness-output
+failure therefore cannot start an index build in the first profile. Startup
+failure, stop and runtime failure signal all owned controllers before joining
+them, and cleanup errors remain visible alongside the original failure.
+
+The generations still publish independently. During catch-up, a required-symbol
+Initial query can refuse until both indexes match its selected source. The
+service does not combine mismatched generations or turn readiness into a
+freshness promise. Once both have caught up, combined search and agent-context
+reads use the existing exact-source query contracts. A later source change
+requires another pass.
+
 The first pass starts after successful service readiness. The configured delay
 follows a completed pass; `--index-interval-secs` accepts whole seconds from
 1 through 3600 and defaults to 5. Each pass visits at most 32 references in
@@ -84,13 +139,17 @@ Existing poll, cost, priority, root and other-class limits remain unchanged.
 Native checkpoints and drain observe the same original request context. A later
 retry receives a new context only after the previous owner has returned.
 
-One runtime-owned blocking child opens and runs the service. HTTP readiness is
-announced only after repository authentication, profile/ref binding, exclusive
-progress ownership and checkpoint loading succeed. A missing or foreign resume
+One runtime-owned blocking child opens and runs each configured profile, with
+at most two maintenance children. HTTP readiness is announced only after
+repository authentication, profile/ref binding, exclusive progress ownership
+and checkpoint loading succeed for every child. A missing or foreign resume
 checkpoint, legacy unresolved attempt or existing stop marker prevents readiness;
-it cannot silently disable the requested worker. Ordinary bounded reconcile
+it cannot silently disable a requested worker. Ordinary bounded reconcile
 refusals are observations that permit a later independent pass. Fatal progress,
 controller or shutdown errors retire acceptance and are returned to the owner.
+The runtime must have capacity for every long-lived controller plus at least
+one HTTP request lane; insufficient capacity refuses before starting workers.
+The existing blocking-pool ceiling is never increased implicitly.
 
 HTTP stop requests signal the controller, cancel its original active context
 and continue polling the same future until its owner returns. The server joins
@@ -109,6 +168,13 @@ any index attempt. It must not wait for this same lane to perform work.
 `MaintenanceReceipt` counts started passes, attempts, current observations,
 recoveries and refusals, plus references still pending at clean stop. These
 observations are not a durable history or a promise of current source at return.
+For HTTP, `MaintenanceGroup::try_new` accepts one or two configurations with
+distinct profiles, separate progress directories and one object format. Existing
+single-profile HTTP entrypoints accept a `MaintenanceConfig` or a group. The
+`serve_repository_http_with_workflow_and_index_services_bounded` and
+`serve_repository_http_with_workflow_and_index_services_until_stopped` methods
+also compose a group with the native workflow controller; the original
+single-profile workflow methods retain their signatures.
 
 ## Candidate recording BEFORE publication
 
@@ -204,13 +270,17 @@ preparation, legacy refusal and pending-without-publication behavior. The latter
 reuse real node/TreeFS/Fsqlite and progress-file implementations; lost replies
 are explicit simulations, not a power-loss or hostile-filesystem campaign.
 
-The in-process service adds two focused scope/budget tests and four native
-lifecycle tests: exact profile/format readiness, bad or foreign resume refusal,
-effect-free startup failure, and cancellation that keeps polling the original
-owner. Timeout coverage checks inherited shorter, longer and absent time limits
-without replacing other budget dimensions or classes. The HTTP integration lane
-exercises catch-up after native writes across both Git formats and both index
-profiles, resume without generation churn, startup refusal and error-path drain.
+The in-process service has scope, budget and lifecycle cases for exact
+profile/format readiness, bad or foreign resume refusal, effect-free startup
+failure, and cancellation that keeps polling the original owner. Group cases
+cover conflicting owners, blocking-pool capacity and startup stop with pending
+recovery preserved. Timeout coverage checks inherited shorter, longer and absent
+time limits without replacing other budget dimensions or classes. The HTTP
+integration lane exercises both profiles simultaneously through required-symbol
+Initial queries in both Git formats, native source changes, resume without
+generation churn, a live second owner and global readiness-output failure before
+either index can publish. CLI cases cover explicit dual-profile scope and reject
+missing, duplicate, conflicting or ignored progress options.
 
 The original standalone-worker implementation recorded no local native build
 or execution. Native compilation, runtime drain, durable-backend, Clippy and
@@ -224,6 +294,7 @@ cargo test --locked -p fgit-node --test source_index_checkpoint --test source_in
 cargo test --locked -p fgit-node --bin fg-index-maintain
 cargo test --locked -p fgit-node --lib index_maintenance::service
 cargo test --locked -p fgit-node --test source_index_service_http
+cargo test --locked -p fgit-cli --bin fg smart_http_server::tests
 cargo test --locked -p fgit-node --test source_index_reconcile --test source_index_worker
 cargo check --locked -p fgit-node --all-targets
 ```
