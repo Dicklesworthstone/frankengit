@@ -856,3 +856,40 @@ fn import_refuses_a_directory_file_refname_conflict_and_admits_its_twin() {
         node.shutdown().expect("node drains");
     }
 }
+
+/// A node that cannot write the staged bodies refuses the import as its own
+/// storage failure, never as a verdict on the source objects; with storage
+/// restored the same source stages (frankengit-vp29). staging/ is replaced by
+/// a regular file, so the writes fail with an OS error for any user.
+#[test]
+fn loose_import_reports_a_staging_storage_failure_as_storage_not_evidence() {
+    let scratch = ScratchDirectory::new();
+    let source = scratch.0.join("source.git");
+    fs::create_dir_all(&source).expect("source directory creates");
+    let oid = write_loose_commit_repository(&source);
+    let root = scratch.0.join("node");
+    let node = node(root.clone());
+    let staging = root.join("staging");
+    fs::rename(&staging, root.join("staging-moved")).expect("staging moves aside");
+    fs::write(&staging, b"not a directory").expect("a file takes the staging name");
+
+    let refusal = node
+        .stage_loose_git_import(&source)
+        .expect_err("bodies cannot be staged");
+    assert!(
+        matches!(&refusal, LooseGitImportRefusal::Node(error)
+            if matches!(error.as_ref(), crate::NodeRefusal::Fabric(store)
+                if matches!(store.as_ref(), fgit_object_fabric::fabric::StoreRefusal::StorageIo { .. }))),
+        "{refusal:?}"
+    );
+    assert!(node.read_git_object(oid).is_err());
+
+    fs::rename(&staging, root.join("staging-file")).expect("the file moves aside");
+    fs::rename(root.join("staging-moved"), &staging).expect("staging returns");
+    let staged = node
+        .stage_loose_git_import(&source)
+        .expect("with storage restored the same source stages");
+    assert_eq!(staged.object_count(), 3);
+    assert!(node.read_git_object(oid).is_ok());
+    node.shutdown().expect("node drains");
+}
