@@ -1069,3 +1069,92 @@ fn delta_chain_over_the_selected_budget_is_refused_before_any_fabric_placement()
 }
 
 mod external_budget;
+
+#[test]
+fn a_storage_failure_while_staging_is_a_durability_refusal_not_an_evidence_verdict() {
+    // frankengit-vp29: when this node cannot write the verified objects (a full
+    // disk, a descriptor or quota limit, an I/O error) the receive is refused
+    // as DurabilityProfileUnavailable, never as a verdict on the evidence.
+    // staging/ is replaced by a regular file, so every staged write fails with
+    // an OS error whoever runs the test; restored, the same receive stages.
+    let scratch = ScratchDirectory::new();
+    let node = test_node(scratch.path().to_path_buf());
+    let mut objects = BTreeMap::new();
+    let mut tree_body = Vec::new();
+    for n in 0..3 {
+        let body = format!("stored blob {n}\n").into_bytes();
+        let id = fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &body);
+        tree_body.extend_from_slice(format!("100644 f{n}\0").as_bytes());
+        tree_body.extend_from_slice(id.as_bytes());
+        objects.insert(
+            id,
+            CanonicalPackObject::new(id, ObjectType::Blob, body, Vec::new(), 0, 0),
+        );
+    }
+    let tree_id =
+        fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, &tree_body);
+    objects.insert(
+        tree_id,
+        CanonicalPackObject::new(tree_id, ObjectType::Tree, tree_body, Vec::new(), 0, 0),
+    );
+    let ids: Vec<ObjectId> = objects.keys().copied().collect();
+    let source = SelectedObjectsSource { objects };
+    let limits = PackLimits::default();
+    let mut live = || true;
+    let plan = PackPlanner::new(
+        GitHashAlgorithm::Sha1,
+        PackWriteProfile::STORED_V1,
+        limits.clone(),
+    )
+    .plan_selected(&source, &ids, &mut live)
+    .expect("the fixed graph plans into a native pack");
+    let (pack_bytes, receipt) = PackWriter::new(limits.clone())
+        .write(&plan, &mut live)
+        .expect("fixed pack writes");
+    let pack = read_verified_pack(
+        &pack_bytes,
+        GitHashAlgorithm::Sha1,
+        &limits,
+        &mut live,
+        &NativeChecksumVerifier,
+    )
+    .expect("writer output returns through the verified quarantine reader");
+    let request = create_request(tree_id);
+    let quarantine = QuarantineReceipt {
+        object_format: GitObjectFormat::Sha1,
+        object_count: receipt.object_count,
+        pack_bytes: pack_bytes.len(),
+        delete_only: false,
+    };
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .expect("the initialized head materializes before receive validation");
+    let validator = node
+        .production_quarantine_validator(&materialized, limits, ParseLimits::default())
+        .expect("the exact authenticated materialization supplies a validator");
+    let staging = scratch.path().join("staging");
+    let moved = scratch.path().join("staging-moved");
+    fs::rename(&staging, &moved).expect("staging directory moves aside");
+    fs::write(&staging, b"not a directory").expect("a file takes the staging name");
+    assert_eq!(
+        validator.validate(&request, Some(&pack), &quarantine, &mut live),
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    );
+    for id in &ids {
+        assert!(node.read_git_object(*id).is_err(), "{id} was not placed");
+    }
+    fs::rename(&staging, scratch.path().join("staging-file")).expect("the file moves aside");
+    fs::rename(&moved, &staging).expect("the staging directory returns");
+    let closure = validator
+        .validate(&request, Some(&pack), &quarantine, &mut live)
+        .expect("with storage restored the same receive validates and stages");
+    assert_eq!(closure.objects.len(), 4);
+    for id in &ids {
+        assert!(
+            node.read_git_object(*id).is_ok(),
+            "{id} is placed and readable"
+        );
+    }
+    node.shutdown().expect("node shuts down after test");
+}

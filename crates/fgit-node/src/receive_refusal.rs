@@ -7,14 +7,18 @@
 //! cause; a client, a CI job or a person can only act on it if it reaches them.
 //! This module names a CLOSED set of causes that are safe to describe to the
 //! peer that sent the request: they describe the request itself, a bound the
-//! operator chose, or the cell's service state. Everything else (storage, I/O,
-//! internal invariants, anything reached after admission started) maps to
-//! `None`, and the transport keeps its generic line, so no internal state
-//! leaks. Client bytes are never echoed except a ref name the request already
-//! carried, bounded and lossily decoded. The command-count bound keeps its own
+//! operator chose, the cell's service state, or the one class "this node could
+//! not durably store the verified objects" (frankengit-vp29), which names no
+//! path or OS error. Everything else (other I/O, internal invariants, anything
+//! reached after admission started) maps to `None`, and the transport keeps its
+//! generic line, so no internal state leaks. Client bytes are never echoed
+//! except a ref name the request already carried, bounded and lossily
+//! decoded. The command-count bound keeps its own
 //! operator text, written by `smart_http::command_limit` (frankengit-p9b5), and
 //! is deliberately absent here so each cause has one text.
 
+use fgit_admission::AdmissionError;
+use fgit_types::RefusalCode;
 use fgit_wire::WireError;
 use fgit_wire::receive::ReceiveError;
 use fgit_wire::smart_http::rpc::RpcError;
@@ -52,8 +56,10 @@ pub fn client_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
 /// receive-pack body, as git-http-backend delivers a fatal error: a
 /// well-formed request that a server bound or policy refuses, which a stock
 /// client can send and must be told about, while a 4xx/5xx body is discarded
-/// by the client. A request the grammar rejects keeps its 400 (no stock client
-/// sends one, and Bad Request is the honest status for it), and the
+/// by the client. A node that could not durably store the verified objects
+/// is told the same way (frankengit-vp29). A request the grammar rejects keeps
+/// its 400 (no stock client sends one, and Bad Request is the honest status
+/// for it), and the
 /// transport-state causes keep their status, which clients act on: 401
 /// (credentials), 429 (quota) and 503 (a cell not taking receive work).
 pub fn request_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
@@ -64,6 +70,16 @@ pub fn request_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
         NodeSmartHttpRefusal::Receive(error) => error.as_ref(),
         NodeSmartHttpRefusal::Rpc(rpc) => match rpc.as_ref() {
             RpcError::Receive(error) => error,
+            _ => return None,
+        },
+        // A 5xx body is discarded and the client reports a hang-up followed by
+        // "Everything up-to-date"; a storage failure is told in the 200 body,
+        // as git-http-backend reports a receive-pack write failure.
+        NodeSmartHttpRefusal::ReceiveTransport(transport) => match transport.as_ref() {
+            NodeReceiveTransportRefusal::Admission(admission) => match admission.as_ref() {
+                AdmissionError::Receive(error) => return storage_cause(error),
+                _ => return None,
+            },
             _ => return None,
         },
         _ => return None,
@@ -81,7 +97,7 @@ pub fn request_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
     if bound_or_policy {
         client_cause(error)
     } else {
-        None
+        storage_cause(receive)
     }
 }
 
@@ -96,8 +112,28 @@ fn transport_cause(error: &NodeReceiveTransportRefusal) -> Option<String> {
         NodeReceiveTransportRefusal::CellState(refusal) => {
             Some(format!("this server is not accepting pushes: {refusal}"))
         }
+        NodeReceiveTransportRefusal::Admission(error) => match error.as_ref() {
+            AdmissionError::Receive(error) => storage_cause(error),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// Verified objects that this node could not write or sync (a full disk, a
+/// descriptor or quota limit, an I/O error) are its own durability failure.
+/// The pusher is told so rather than that its objects failed validation; the
+/// failure names no path (frankengit-vp29).
+fn storage_cause(error: &ReceiveError) -> Option<String> {
+    matches!(
+        error,
+        ReceiveError::AuthoritativeRefusal(RefusalCode::DurabilityProfileUnavailable)
+    )
+    .then(|| {
+        "this server could not durably store the pushed objects \
+         (DurabilityProfileUnavailable); retry later"
+            .to_owned()
+    })
 }
 
 fn receive_cause(error: &ReceiveError) -> Option<String> {
@@ -147,7 +183,7 @@ fn receive_cause(error: &ReceiveError) -> Option<String> {
         | ReceiveError::CertificateTruncated
         | ReceiveError::CertificateNonceMismatch => "malformed push certificate".to_owned(),
         ReceiveError::Wire(error) => wire_cause(error),
-        _ => return None,
+        error => return storage_cause(error),
     })
 }
 
@@ -218,6 +254,34 @@ mod tests {
             client_cause(&cell)
                 .is_some_and(|text| text.starts_with("this server is not accepting pushes: "))
         );
+    }
+
+    /// A node that could not durably store verified objects says so on every
+    /// transport, including the 200 body of smart HTTP; an authoritative
+    /// verdict on the evidence itself keeps the generic line (frankengit-vp29).
+    #[test]
+    fn a_storage_failure_is_named_and_an_evidence_verdict_is_not() {
+        let storage = ReceiveError::AuthoritativeRefusal(RefusalCode::DurabilityProfileUnavailable);
+        let expected = "this server could not durably store the pushed objects \
+                        (DurabilityProfileUnavailable); retry later";
+        let admission = |error: ReceiveError| {
+            NodeSmartHttpRefusal::ReceiveTransport(Box::new(
+                NodeReceiveTransportRefusal::Admission(Box::new(AdmissionError::Receive(error))),
+            ))
+        };
+        for error in [receive(storage.clone()), admission(storage)] {
+            assert_eq!(client_cause(&error).as_deref(), Some(expected), "{error:?}");
+            assert_eq!(
+                request_cause(&error).as_deref(),
+                Some(expected),
+                "{error:?}"
+            );
+        }
+        let verdict = ReceiveError::AuthoritativeRefusal(RefusalCode::EvidenceInvalid);
+        for error in [receive(verdict.clone()), admission(verdict)] {
+            assert_eq!(client_cause(&error), None, "{error:?}");
+            assert_eq!(request_cause(&error), None, "{error:?}");
+        }
     }
 
     #[test]

@@ -782,6 +782,13 @@ fn staging_refusal(error: NodeRefusal) -> RefusalCode {
         NodeRefusal::ObjectTooLarge { .. }
         | NodeRefusal::ObjectLengthOverflow
         | NodeRefusal::Resource(_) => RefusalCode::ResourceBudgetExceeded,
+        // The server could not write or sync objects that already verified: a
+        // full disk, a descriptor or quota limit, an I/O error. That is a
+        // durability failure of this node, not a verdict on the pushed
+        // evidence (frankengit-vp29).
+        NodeRefusal::Fabric(refusal) if matches!(*refusal, StoreRefusal::StorageIo { .. }) => {
+            RefusalCode::DurabilityProfileUnavailable
+        }
         _ => RefusalCode::EvidenceInvalid,
     }
 }
