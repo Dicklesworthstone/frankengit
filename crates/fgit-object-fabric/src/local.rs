@@ -7,7 +7,7 @@
 
 #[path = "local_batch.rs"]
 mod batch;
-pub use batch::StagedBatch;
+pub use batch::{StagedBatch, SyncedBatch};
 
 #[path = "local_bounded_read.rs"]
 mod bounded_read;
@@ -603,6 +603,38 @@ impl LocalFilesystemFabric {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let stored = self.load_object(object.identity())?;
                 if stored != *object {
+                    return Err(StoreRefusal::StoredObjectIdentityCollision);
+                }
+                Ok(ImmutableWrite::AlreadyPresent)
+            }
+            Err(error) => Err(storage_error(StorageOperation::PublishImmutableBody, error)),
+        }
+    }
+
+    /// [`Self::link_object_stage`] for a synced stage whose payload is no
+    /// longer held: a name that already exists must hold exactly the staged
+    /// bytes, which the deterministic envelope encoding makes equivalent to
+    /// object equality (frankengit-tz5z).
+    fn link_synced_stage(
+        &self,
+        stage: &StageFile,
+        identity: GitOid,
+    ) -> Result<ImmutableWrite, StoreRefusal> {
+        self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
+        let final_path = self.object_path(identity);
+        match fs::hard_link(stage.path(), &final_path) {
+            Ok(()) => {
+                self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
+                Ok(ImmutableWrite::Created)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let staged = fs::read(stage.path()).map_err(|error| {
+                    storage_error(StorageOperation::PublishImmutableBody, error)
+                })?;
+                let stored = fs::read(&final_path).map_err(|error| {
+                    storage_error(StorageOperation::PublishImmutableBody, error)
+                })?;
+                if staged != stored {
                     return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
                 Ok(ImmutableWrite::AlreadyPresent)

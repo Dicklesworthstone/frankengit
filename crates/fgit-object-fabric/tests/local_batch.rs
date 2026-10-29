@@ -5,7 +5,7 @@ use fgit_object_fabric::fabric::{
     ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
 };
 use fgit_object_fabric::local::{
-    LocalCrashPoint, LocalFilesystemConfig, LocalFilesystemFabric, StagedBatch,
+    LocalCrashPoint, LocalFilesystemConfig, LocalFilesystemFabric, StagedBatch, SyncedBatch,
 };
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_resource::{
@@ -680,4 +680,171 @@ fn open_staged_files(staging: &std::path::Path) -> usize {
             target.starts_with(staging) && target.extension().is_some_and(|e| e == "stage")
         })
         .count()
+}
+
+fn stage_synced(
+    store: &LocalFilesystemFabric,
+    objects: &[VerifiedObject],
+    ledger: &ObligationLedger,
+    amount: ResourceVector,
+) -> SyncedBatch {
+    let budget = ledger.grant(amount).unwrap();
+    store
+        .stage_synced_batch_if_absent(
+            objects,
+            PlacementAdmission::new(ledger, budget),
+            &mut || true,
+        )
+        .unwrap()
+}
+
+fn staged_count(root: &Root) -> usize {
+    fs::read_dir(root.0.join("staging")).unwrap().count()
+}
+
+/// A synced batch links no name and holds no descriptor: every staged file is
+/// on disk and closed. Publishing it stores exactly what one blocking batch
+/// stores, with the same receipts, in both hash domains (frankengit-tz5z).
+#[test]
+fn a_synced_batch_links_nothing_holds_no_descriptor_and_publishes_like_a_blocking_batch() {
+    for (format, count) in [
+        (GitHashAlgorithm::Sha1, 700),
+        (GitHashAlgorithm::Sha256, 1024),
+    ] {
+        let input = objects(format, count);
+        let (blocking_root, synced_root) = (Root::new(), Root::new());
+        let (blocking, synced) = (blocking_root.fabric(None), synced_root.fabric(None));
+        let expected = run(&blocking, &input, &mut || true).unwrap();
+        let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+        let batch = stage_synced(&synced, &input, &ledger, amount);
+        assert_eq!(batch.identities().len(), count);
+        assert_eq!(staged_count(&synced_root), count);
+        #[cfg(target_os = "linux")]
+        assert_eq!(open_staged_files(&synced_root.0.join("staging")), 0);
+        for object in &input {
+            assert!(matches!(
+                synced.read_whole(object.identity()),
+                Err(StoreRefusal::ObjectAbsent)
+            ));
+        }
+        let published = synced.publish_synced_batch(batch, &mut || true).unwrap();
+        assert!(ledger.close().is_quiescent());
+        assert_eq!(published, expected);
+        assert_eq!(stored_files(&synced_root), stored_files(&blocking_root));
+        synced_root.clean();
+        blocking_root.clean();
+    }
+}
+
+/// Abandoning a synced batch removes every staged file, links nothing and
+/// settles every reservation; dropping one unsettled still removes its files
+/// but reports the reservations as leaked.
+#[test]
+fn abandoning_or_dropping_a_synced_batch_removes_its_staged_files_and_links_nothing() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha1, 300);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage_synced(&store, &input, &ledger, amount);
+    assert_eq!(staged_count(&root), 300);
+    batch.abandon().unwrap();
+    assert!(ledger.close().is_quiescent());
+    root.clean();
+    assert!(stored_files(&root).is_empty());
+
+    let (leaky, amount) = ledger_for(&input, LeakDisposition::RecordAndContinue);
+    drop(stage_synced(&store, &input, &leaky, amount));
+    root.clean();
+    assert!(stored_files(&root).is_empty());
+    assert!(
+        !leaky.close().is_quiescent(),
+        "unsettled reservations are leaks"
+    );
+
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage_synced(&store, &input, &ledger, amount);
+    assert_eq!(
+        store
+            .publish_synced_batch(batch, &mut || true)
+            .unwrap()
+            .len(),
+        300
+    );
+    assert!(ledger.close().is_quiescent());
+    assert_eq!(stored_files(&root).len(), 300);
+    root.clean();
+}
+
+/// Another writer may place the same object between staging and publication.
+/// Equal bytes make the name AlreadyPresent; different bytes under the name
+/// are a collision, refused before any later name is linked.
+#[test]
+fn publishing_a_synced_batch_accepts_an_equal_racing_object_and_refuses_a_collision() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha1, 8);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage_synced(&store, &input, &ledger, amount);
+    assert_eq!(run(&store, &input[..1], &mut || true).unwrap().len(), 1);
+    let published = store.publish_synced_batch(batch, &mut || true).unwrap();
+    assert!(ledger.close().is_quiescent());
+    assert!(matches!(published[0], PutIfAbsent::AlreadyPresent { .. }));
+    assert!(
+        published[1..]
+            .iter()
+            .all(|row| matches!(row, PutIfAbsent::Created { .. }))
+    );
+    root.clean();
+
+    let collided = Root::new();
+    let store = collided.fabric(None);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage_synced(&store, &input, &ledger, amount);
+    let first = collided.path(&input[0]);
+    fs::create_dir_all(first.parent().unwrap()).unwrap();
+    fs::write(&first, b"not the staged object").unwrap();
+    assert_eq!(
+        store.publish_synced_batch(batch, &mut || true),
+        Err(StoreRefusal::StoredObjectIdentityCollision)
+    );
+    assert!(ledger.close().is_quiescent());
+    collided.clean();
+    for object in &input[1..] {
+        assert!(!collided.path(object).exists(), "no later name was linked");
+    }
+}
+
+/// Cancellation at any publication checkpoint settles every reservation and
+/// leaves no staged file; the staged objects can be staged and published again.
+#[test]
+fn a_cancelled_synced_publication_settles_and_can_be_retried() {
+    let input = objects(GitHashAlgorithm::Sha256, 4);
+    for stop_at in 0..8 {
+        let root = Root::new();
+        let store = root.fabric(None);
+        let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+        let batch = stage_synced(&store, &input, &ledger, amount);
+        let mut polls = 0;
+        let result = store.publish_synced_batch(batch, &mut || {
+            let live = polls != stop_at;
+            polls += 1;
+            live
+        });
+        assert!(ledger.close().is_quiescent());
+        root.clean();
+        if result.is_err() {
+            assert_eq!(result, Err(StoreRefusal::RuntimeCheckpointRejected));
+            let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+            let batch = stage_synced(&store, &input, &ledger, amount);
+            assert_eq!(
+                store
+                    .publish_synced_batch(batch, &mut || true)
+                    .unwrap()
+                    .len(),
+                4
+            );
+            assert!(ledger.close().is_quiescent());
+        }
+        assert_eq!(stored_files(&root).len(), 4);
+    }
 }

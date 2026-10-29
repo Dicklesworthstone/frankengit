@@ -114,6 +114,70 @@ impl LocalFilesystemFabric {
         settle(pending.entries, staged)
     }
 
+    /// Stages up to 1,024 objects exactly as [`Self::put_batch_if_absent`]
+    /// does, every staged file synced in groups, but links no immutable name
+    /// (frankengit-tz5z). The returned batch holds only staged paths and
+    /// reservations: no payload, descriptor or sync thread. A receive can
+    /// therefore keep many across admission and publish them only when its
+    /// decision commits. Settle it with [`Self::publish_synced_batch`] or
+    /// [`SyncedBatch::abandon`]. On a refusal every reservation is settled.
+    pub fn stage_synced_batch_if_absent(
+        &self,
+        objects: &[VerifiedObject],
+        admission: PlacementAdmission<'_>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<SyncedBatch, StoreRefusal> {
+        let (ledger, mut budget) = admission.into_parts();
+        let mut pending = Pending::default();
+        let staged = self
+            .stage_pending(objects, ledger, &mut budget, &mut pending, live, true)
+            .and_then(|()| SyncFence::start(&mut pending.entries).wait());
+        let _released = budget.release();
+        if let Err(error) = staged {
+            return Err(abort_all(pending.entries).err().unwrap_or(error));
+        }
+        Ok(SyncedBatch {
+            identities: objects.iter().map(VerifiedObject::identity).collect(),
+            pending,
+        })
+    }
+
+    /// Links every synced staged file of `batch`, syncs each object directory
+    /// once and settles, as the second half of [`Self::put_batch_if_absent`]
+    /// does. A name that already exists must hold exactly the staged bytes.
+    /// A refusal links nothing further and settles every reservation.
+    pub fn publish_synced_batch(
+        &self,
+        mut batch: SyncedBatch,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<PutIfAbsent>, StoreRefusal> {
+        let linked = self.link_synced(&batch.identities, &mut batch.pending, live);
+        settle(std::mem::take(&mut batch.pending.entries), linked)
+    }
+
+    fn link_synced(
+        &self,
+        identities: &[GitOid],
+        pending: &mut Pending,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), StoreRefusal> {
+        if pending.entries.is_empty() {
+            return Ok(());
+        }
+        self.crash_if(LocalCrashPoint::AfterStageSync)?;
+        for (entry, identity) in pending.entries.iter_mut().zip(identities) {
+            batch_checkpoint(live)?;
+            entry.link_synced(self, *identity)?;
+        }
+        for directory in &pending.directories {
+            batch_checkpoint(live)?;
+            sync_directory(directory)?;
+        }
+        self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
+        self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
+        batch_checkpoint(live)
+    }
+
     /// Preflights the whole batch, then reserves and writes each staged file.
     /// Objects already stored are reverified, not staged. With `group_syncs`
     /// each full group of [`SYNC_GROUP_FILES`] written files is synced and
@@ -410,6 +474,41 @@ impl StagedBatch {
     }
 }
 
+/// A batch staged by [`LocalFilesystemFabric::stage_synced_batch_if_absent`]:
+/// every staged file is written, synced and closed, its sync threads have
+/// finished, and no immutable name is linked. It holds only staged paths and
+/// reservations (frankengit-tz5z). Settle it with
+/// [`LocalFilesystemFabric::publish_synced_batch`] or [`Self::abandon`].
+/// Dropping it unsettled still removes its staged files, but its reservations
+/// then count as leaks in their ledger.
+#[must_use = "a synced batch holds reservations until it is published or abandoned"]
+pub struct SyncedBatch {
+    identities: Vec<GitOid>,
+    pending: Pending,
+}
+
+impl std::fmt::Debug for SyncedBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncedBatch")
+            .field("objects", &self.identities.len())
+            .field("directories", &self.pending.directories.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SyncedBatch {
+    /// The batch's object identities, in its canonical order.
+    #[must_use]
+    pub fn identities(&self) -> &[GitOid] {
+        &self.identities
+    }
+
+    /// Aborts every reservation and removes every staged file. Links nothing.
+    pub fn abandon(mut self) -> Result<(), StoreRefusal> {
+        abort_all(std::mem::take(&mut self.pending.entries))
+    }
+}
+
 /// Background syncs of one batch's staged files, on up to
 /// [`MAX_SYNC_THREADS`] threads. Each worker shares ownership of its files
 /// and they close once synced. Dropping the fence joins every worker, so no
@@ -519,6 +618,21 @@ impl PendingPlacement {
             stage.close();
             *created = Some(matches!(
                 fabric.link_object_stage(stage, object)?,
+                ImmutableWrite::Created
+            ));
+        }
+        Ok(())
+    }
+
+    fn link_synced(
+        &mut self,
+        fabric: &LocalFilesystemFabric,
+        identity: GitOid,
+    ) -> Result<(), StoreRefusal> {
+        if let Self::Written { stage, created, .. } = self {
+            stage.close();
+            *created = Some(matches!(
+                fabric.link_synced_stage(stage, identity)?,
                 ImmutableWrite::Created
             ));
         }
