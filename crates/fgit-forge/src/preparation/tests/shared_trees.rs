@@ -31,6 +31,43 @@ impl MergeObjectSource for Counted<'_> {
 }
 
 #[test]
+fn trivial_merge_preserves_deletion_identity_and_full_merge_decisions() {
+    // Rows select base, then ours, then theirs. A missing entry is index 0;
+    // index 4 requires the full merge path rather than silently deleting it.
+    let expected = [
+        [[0, 1, 2, 3], [1, 1, 4, 4], [2, 4, 2, 4], [3, 4, 4, 3]],
+        [[0, 0, 4, 4], [0, 1, 2, 3], [4, 2, 2, 4], [4, 3, 4, 3]],
+        [[0, 4, 0, 4], [4, 1, 1, 4], [0, 1, 2, 3], [4, 4, 3, 3]],
+        [[0, 4, 4, 0], [4, 1, 4, 1], [4, 4, 2, 2], [0, 1, 2, 3]],
+    ];
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = Source::new(format);
+        let a = source.file(b"file", b"a", 0o100644);
+        let b = source.file(b"file", b"b", 0o100644);
+        let executable_a = source.file(b"file", b"a", 0o100755);
+        let entries = [None, Some(&a), Some(&b), Some(&executable_a)];
+        for (base_index, &base) in entries.iter().enumerate() {
+            for (ours_index, &ours) in entries.iter().enumerate() {
+                for (theirs_index, &theirs) in entries.iter().enumerate() {
+                    let actual = match tree_entries::trivial(base, ours, theirs) {
+                        tree_entries::Trivial::Delete => 0,
+                        tree_entries::Trivial::Entry(entry) => entries
+                            .iter()
+                            .position(|candidate| *candidate == Some(entry))
+                            .unwrap(),
+                        tree_entries::Trivial::Nontrivial => 4,
+                    };
+                    assert_eq!(
+                        actual, expected[base_index][ours_index][theirs_index],
+                        "base {base_index}, ours {ours_index}, theirs {theirs_index}, {format:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn borrowed_join_matches_the_old_sorted_union_for_every_small_membership_pattern() {
     let names = [b"a".as_slice(), b"a.c", b"a0", b"\xff"];
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
