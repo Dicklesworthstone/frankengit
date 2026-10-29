@@ -96,11 +96,7 @@ mod tests {
     #[test]
     fn dense_and_sparse_monotone_seeks_match_an_independent_scalar_oracle() {
         for mask in 0u64..4096 {
-            let p = postings(
-                (1..=12)
-                    .filter(|id| mask & (1 << (id - 1)) != 0)
-                    .collect(),
-            );
+            let p = postings((1..=12).filter(|id| mask & (1 << (id - 1)) != 0).collect());
             for probes in [(1..=13).collect::<Vec<_>>(), vec![1, 4, 9, 12, 13]] {
                 let mut cursor = Cursor::default();
                 let mut work = budget(4096);
@@ -153,7 +149,9 @@ mod tests {
         );
         assert!(work.work <= 24);
         assert_eq!(
-            cursor.offset(&p, u64::MAX, &mut work, &mut || true).unwrap(),
+            cursor
+                .offset(&p, u64::MAX, &mut work, &mut || true)
+                .unwrap(),
             None
         );
     }

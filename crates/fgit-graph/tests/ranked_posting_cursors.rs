@@ -3,17 +3,17 @@
 //! coordinates. These tests do not establish node authorization or durability.
 use fgit_authority::{MemoryAuthorityStore, StoreInstanceId};
 use fgit_crypto::{
-    GitObjectKind, IdentityDomain, git_object_id, internal_algorithm_id,
-    internal_digest_value, internal_object_id,
+    GitObjectKind, IdentityDomain, git_object_id, internal_algorithm_id, internal_digest_value,
+    internal_object_id,
 };
 use fgit_graph::lexical::{
-    IndexError, LexicalChannel, LexicalError, LexicalHit, LexicalIndexStore,
-    LexicalNamespace, LexicalQuery, LexicalQueryLimits, LexicalSegment, LexicalSource,
-    LexicalSpan, PreparedLexicalIndex, RARITY_SCALE, RankedLexicalScore, SourceDocument,
+    IndexError, LexicalChannel, LexicalError, LexicalHit, LexicalIndexStore, LexicalNamespace,
+    LexicalQuery, LexicalQueryLimits, LexicalSegment, LexicalSource, LexicalSpan,
+    PreparedLexicalIndex, RARITY_SCALE, RankedLexicalScore, SourceDocument,
 };
 use fgit_types::{
-    CodecVersion, Digest, GitHashAlgorithm, RefName, RepositoryAuthorityHeadId,
-    RepositoryCommitId, RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId, TenantId,
+    CodecVersion, Digest, GitHashAlgorithm, RefName, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId, TenantId,
 };
 
 fn source(format: GitHashAlgorithm) -> LexicalSource {
@@ -234,7 +234,11 @@ fn both_channels_and_sparse_path_scopes_match_an_independent_full_corpus_oracle(
                         continue;
                     }
                     corpus += 1;
-                    let bytes = if channel == LexicalChannel::Path { path } else { body };
+                    let bytes = if channel == LexicalChannel::Path {
+                        path
+                    } else {
+                        body
+                    };
                     let spans: Vec<_> = query
                         .terms()
                         .iter()
@@ -301,7 +305,11 @@ fn both_channels_and_sparse_path_scopes_match_an_independent_full_corpus_oracle(
                 assert_eq!(report.index.segments_read, 6);
                 assert_eq!(
                     report.index.results.hits,
-                    expected.iter().take(7).map(|x| x.0.clone()).collect::<Vec<_>>()
+                    expected
+                        .iter()
+                        .take(7)
+                        .map(|x| x.0.clone())
+                        .collect::<Vec<_>>()
                 );
                 assert_eq!(
                     report.scores,

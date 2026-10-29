@@ -102,8 +102,7 @@ fn borrowed_join_matches_the_old_sorted_union_for_every_small_membership_pattern
                     )
                 })
                 .collect();
-            let joined: Vec<_> =
-                tree_entries::Join::new(&trees[0], &trees[1], &trees[2]).collect();
+            let joined: Vec<_> = tree_entries::Join::new(&trees[0], &trees[1], &trees[2]).collect();
             assert_eq!(joined, expected, "pattern {pattern}, format {format:?}");
         }
     }
@@ -196,7 +195,10 @@ fn source_name_storage_and_slot_ceilings_do_not_evict_generated_trees() {
     let second = planner.entries(Some(generated)).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(counted.reads.get(), reads);
-    assert_eq!(planner.trees.len(), tree_entries::MAX_CACHED_SOURCE_TREES + 1);
+    assert_eq!(
+        planner.trees.len(),
+        tree_entries::MAX_CACHED_SOURCE_TREES + 1
+    );
 }
 
 #[test]
@@ -257,16 +259,23 @@ fn repeated_conflict_discovery_reuses_source_maps_without_changing_conflict_orde
         let counted = Counted::new(&source);
         let mut planner = Planner::new(&counted, format, PreparationLimits::default());
         assert_eq!(
-            planner.directory(Some(roots[0]), roots[1], roots[2], &[], 0, false).unwrap(),
+            planner
+                .directory(Some(roots[0]), roots[1], roots[2], &[], 0, false)
+                .unwrap(),
             None
         );
         let conflicts = std::mem::take(&mut planner.conflicts);
         assert_eq!(
-            conflicts.iter().map(|c| c.path.as_slice()).collect::<Vec<_>>(),
+            conflicts
+                .iter()
+                .map(|c| c.path.as_slice())
+                .collect::<Vec<_>>(),
             [b"a".as_slice(), b"z", b"\xff"]
         );
         assert_eq!(
-            planner.directory(Some(roots[0]), roots[1], roots[2], &[], 0, false).unwrap(),
+            planner
+                .directory(Some(roots[0]), roots[1], roots[2], &[], 0, false)
+                .unwrap(),
             None
         );
         assert_eq!(planner.conflicts, conflicts);
@@ -291,8 +300,14 @@ fn clean_wide_directory_produces_the_exact_expected_native_tree_and_mode() {
         let expected = source.store_tree(expected);
         let (ours, theirs) = branch_pair(&mut source, base, ours, theirs);
         let result = prepare_merge(
-            &source, format, ours, theirs, &metadata(), PreparationLimits::default(),
-        ).unwrap();
+            &source,
+            format,
+            ours,
+            theirs,
+            &metadata(),
+            PreparationLimits::default(),
+        )
+        .unwrap();
         let MergePreparation::Clean(plan) = result else {
             panic!("clean merge required");
         };
@@ -329,7 +344,10 @@ fn trivial_entries_do_not_bypass_full_path_limits() {
 }
 
 impl rebase::RebaseObjectSource for Counted<'_> {
-    fn rebase_metadata(&self, id: GitOid) -> Result<rebase::RebaseCommitMetadata, MergeSourceError> {
+    fn rebase_metadata(
+        &self,
+        id: GitOid,
+    ) -> Result<rebase::RebaseCommitMetadata, MergeSourceError> {
         self.source.commit(id)?;
         Ok(rebase::RebaseCommitMetadata {
             author: b"T <t@x> 1 +0000".to_vec(),
@@ -380,14 +398,17 @@ fn eight_step_rebase_shares_original_and_generated_trees_without_refunding_work(
             max_tree_entries: 8 * 3 * 4096,
             ..PreparationLimits::default()
         };
-        let result =
-            rebase::prepare_rebase(&counted, format, request, &committer, limits).unwrap();
+        let result = rebase::prepare_rebase(&counted, format, request, &committer, limits).unwrap();
         let rebase::RebasePreparation::Clean(plan) = result else {
             panic!("complete rebase required");
         };
         assert_eq!(plan.tree, expected);
         assert_eq!(plan.steps.len(), 8);
-        assert_eq!(counted.reads.get(), 10, "nine original trees plus onto, each read once");
+        assert_eq!(
+            counted.reads.get(),
+            10,
+            "nine original trees plus onto, each read once"
+        );
         for object in &plan.objects {
             assert_eq!(object.id, git_object_id(format, object.kind, &object.body));
         }
@@ -397,7 +418,9 @@ fn eight_step_rebase_shares_original_and_generated_trees_without_refunding_work(
         };
         assert!(matches!(
             rebase::prepare_rebase(&counted, format, request, &committer, narrowed),
-            Err(rebase::RebaseError::Preparation(PreparationError::Budget("tree entries")))
+            Err(rebase::RebaseError::Preparation(PreparationError::Budget(
+                "tree entries"
+            )))
         ));
     }
 }

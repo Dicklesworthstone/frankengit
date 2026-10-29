@@ -609,12 +609,10 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
             .checked_add(entries.len())
             .filter(|count| *count <= self.limits.max_tree_entries)
             .ok_or(PreparationError::Budget("tree entries"))?;
-        let (entries, name_bytes) = tree_entries::checked(
-            entries,
-            self.format,
-            self.limits.max_path_bytes,
-            || self.source.checkpoint(),
-        )?;
+        let (entries, name_bytes) =
+            tree_entries::checked(entries, self.format, self.limits.max_path_bytes, || {
+                self.source.checkpoint()
+            })?;
         if self.trees.len() < tree_entries::MAX_CACHED_SOURCE_TREES
             && entries.len() <= tree_entries::MAX_CACHED_SOURCE_ENTRIES
             && name_bytes <= tree_entries::MAX_CACHED_SOURCE_NAME_BYTES
@@ -629,12 +627,10 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         id: GitOid,
         entries: Vec<MergeEntry>,
     ) -> Result<(), PreparationError> {
-        let (entries, _) = tree_entries::checked(
-            entries,
-            self.format,
-            self.limits.max_path_bytes,
-            || self.source.checkpoint(),
-        )?;
+        let (entries, _) =
+            tree_entries::checked(entries, self.format, self.limits.max_path_bytes, || {
+                self.source.checkpoint()
+            })?;
         if let Some(previous) = self.trees.get(&id) {
             if previous != &entries {
                 return Err(PreparationError::InvalidTree);

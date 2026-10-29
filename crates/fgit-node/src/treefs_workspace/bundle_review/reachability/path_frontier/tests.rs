@@ -32,15 +32,31 @@ impl Objects {
     }
     fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {
         self.reads.borrow_mut().push(id);
-        let (kind, body) = self.bodies.get(&id).ok_or(MergeSourceError::Unavailable(id))?;
-        assert_ne!(*kind, ObjectType::Blob, "proof discovery must not read blobs");
+        let (kind, body) = self
+            .bodies
+            .get(&id)
+            .ok_or(MergeSourceError::Unavailable(id))?;
+        assert_ne!(
+            *kind,
+            ObjectType::Blob,
+            "proof discovery must not read blobs"
+        );
         Ok((*kind, body.clone()))
     }
     fn upload(&self, ids: &[GitOid]) -> BTreeMap<GitOid, PlannedMergeObject> {
-        ids.iter().map(|id| {
-            let (kind, body) = &self.bodies[id];
-            (*id, PlannedMergeObject { id: *id, kind: *kind, body: body.clone() })
-        }).collect()
+        ids.iter()
+            .map(|id| {
+                let (kind, body) = &self.bodies[id];
+                (
+                    *id,
+                    PlannedMergeObject {
+                        id: *id,
+                        kind: *kind,
+                        body: body.clone(),
+                    },
+                )
+            })
+            .collect()
     }
 }
 struct Fixture {
@@ -62,14 +78,31 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
     // breadth-first search before reaching z/deep therefore fails this fixture.
     let sibling = git_object_id(format, ObjectType::Tree, b"unopened sibling");
     let ancestor = git_object_id(format, ObjectType::Commit, b"unopened ancestry");
-    let old_tree = objects.tree(format, &[("a", 0o040000, sibling), ("z", 0o040000, old_dir)]);
+    let old_tree = objects.tree(
+        format,
+        &[("a", 0o040000, sibling), ("z", 0o040000, old_dir)],
+    );
     let root = objects.commit(old_tree, &[ancestor], "approved");
-    let new_deep = objects.tree(format, &[("added", 0o100644, added), ("keep", 0o100644, inherited)]);
+    let new_deep = objects.tree(
+        format,
+        &[("added", 0o100644, added), ("keep", 0o100644, inherited)],
+    );
     let new_dir = objects.tree(format, &[("deep", 0o040000, new_deep)]);
-    let new_tree = objects.tree(format, &[("a", 0o040000, sibling), ("z", 0o040000, new_dir)]);
+    let new_tree = objects.tree(
+        format,
+        &[("a", 0o040000, sibling), ("z", 0o040000, new_dir)],
+    );
     let candidate = objects.commit(new_tree, &[root], "candidate");
     let uploaded = objects.upload(&[new_deep, new_dir, new_tree, candidate]);
-    Fixture { objects, uploaded, root, old_tree, old_dir, old_deep, inherited }
+    Fixture {
+        objects,
+        uploaded,
+        root,
+        old_tree,
+        old_dir,
+        old_deep,
+        inherited,
+    }
 }
 fn run(f: &Fixture, limits: MergeObjectLimits) -> Result<ParentReachability, MergeSourceError> {
     let mut proof = ParentReachability::new(f.root.algorithm(), &[f.root], limits)?;
@@ -82,11 +115,20 @@ fn nested_sparse_candidates_do_not_open_siblings_history_or_blob_payloads() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let f = fixture(format);
         let mut proof = run(&f, MergeObjectLimits::default()).unwrap();
-        assert_eq!(*f.objects.reads.borrow(), [f.root, f.old_tree, f.old_dir, f.old_deep]);
+        assert_eq!(
+            *f.objects.reads.borrow(),
+            [f.root, f.old_tree, f.old_dir, f.old_deep]
+        );
         assert_eq!(proof.require_kind(f.inherited, ObjectType::Blob), Ok(()));
-        assert_eq!(proof.ensure(f.inherited, |_| panic!("already proved"), || Ok(())), Ok(true));
+        assert_eq!(
+            proof.ensure(f.inherited, |_| panic!("already proved"), || Ok(())),
+            Ok(true)
+        );
         for id in f.uploaded.keys() {
-            assert!(!proof.required.contains_key(id), "hints must not authorize uploaded identities");
+            assert!(
+                !proof.required.contains_key(id),
+                "hints must not authorize uploaded identities"
+            );
         }
     }
 }
@@ -95,12 +137,15 @@ fn nested_sparse_candidates_do_not_open_siblings_history_or_blob_payloads() {
 fn already_observed_parent_graph_is_not_read_again_for_guidance() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let f = fixture(format);
-        let mut proof = ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+        let mut proof =
+            ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
         for id in [f.root, f.old_tree, f.old_dir, f.old_deep] {
             let (kind, body) = &f.objects.bodies[&id];
             proof.observe(id, *kind, body, &mut || Ok(())).unwrap();
         }
-        proof.guide_uploaded(&f.uploaded, |_| panic!("cached proof shape"), || Ok(())).unwrap();
+        proof
+            .guide_uploaded(&f.uploaded, |_| panic!("cached proof shape"), || Ok(()))
+            .unwrap();
         assert_eq!(proof.require_kind(f.inherited, ObjectType::Blob), Ok(()));
     }
 }
@@ -116,10 +161,19 @@ fn hidden_uploaded_graphs_and_claimed_parents_never_grant_original_membership() 
         let hidden = objects.commit(hidden_tree, &[], "hidden original");
         let malicious = objects.commit(hidden_tree, &[hidden], "claimed hidden parent");
         let uploaded = objects.upload(&[hidden_tree, malicious]);
-        let mut proof = ParentReachability::new(format, &[root], MergeObjectLimits::default()).unwrap();
-        proof.guide_uploaded(&uploaded, |id| objects.load(id), || Ok(())).unwrap();
-        assert_eq!(proof.ensure(secret, |id| objects.load(id), || Ok(())), Ok(false));
-        assert_eq!(proof.ensure(hidden, |id| objects.load(id), || Ok(())), Ok(false));
+        let mut proof =
+            ParentReachability::new(format, &[root], MergeObjectLimits::default()).unwrap();
+        proof
+            .guide_uploaded(&uploaded, |id| objects.load(id), || Ok(()))
+            .unwrap();
+        assert_eq!(
+            proof.ensure(secret, |id| objects.load(id), || Ok(())),
+            Ok(false)
+        );
+        assert_eq!(
+            proof.ensure(hidden, |id| objects.load(id), || Ok(())),
+            Ok(false)
+        );
         assert_eq!(*objects.reads.borrow(), [root, empty]);
     }
 }
@@ -136,11 +190,17 @@ fn historical_and_moved_objects_keep_the_existing_authorized_fallback() {
         let result = objects.tree(format, &[("moved", 0o100644, leaf)]);
         let candidate = objects.commit(result, &[root], "candidate");
         let uploaded = objects.upload(&[result, candidate]);
-        let mut proof = ParentReachability::new(format, &[root], MergeObjectLimits::default()).unwrap();
-        proof.guide_uploaded(&uploaded, |id| objects.load(id), || Ok(())).unwrap();
+        let mut proof =
+            ParentReachability::new(format, &[root], MergeObjectLimits::default()).unwrap();
+        proof
+            .guide_uploaded(&uploaded, |id| objects.load(id), || Ok(()))
+            .unwrap();
         assert!(!objects.reads.borrow().contains(&ancestor));
         assert!(!proof.required.contains_key(&leaf));
-        assert_eq!(proof.ensure(leaf, |id| objects.load(id), || Ok(())), Ok(true));
+        assert_eq!(
+            proof.ensure(leaf, |id| objects.load(id), || Ok(())),
+            Ok(true)
+        );
         assert!(objects.reads.borrow().contains(&ancestor));
         assert!(objects.reads.borrow().contains(&old));
     }
@@ -166,12 +226,31 @@ fn both_selected_parents_and_intermediate_rebase_trees_supply_path_hints() {
         let final_tree = objects.tree(format, &[("two", 0o040000, two)]);
         let final_commit = objects.commit(final_tree, &[mid], "final");
         let uploaded = objects.upload(&[one, two, mid_tree, mid, final_tree, final_commit]);
-        let mut proof = ParentReachability::new(format, &[first, second], MergeObjectLimits::default()).unwrap();
-        proof.guide_uploaded(&uploaded, |id| objects.load(id), || Ok(())).unwrap();
+        let mut proof =
+            ParentReachability::new(format, &[first, second], MergeObjectLimits::default())
+                .unwrap();
+        proof
+            .guide_uploaded(&uploaded, |id| objects.load(id), || Ok(()))
+            .unwrap();
         assert_eq!(proof.require_kind(a, ObjectType::Blob), Ok(()));
         assert_eq!(proof.require_kind(b, ObjectType::Blob), Ok(()));
-        let expected = BTreeSet::from([first, second, first_tree, second_tree, first_dir, second_dir]);
-        assert_eq!(objects.reads.borrow().iter().copied().collect::<BTreeSet<_>>(), expected);
+        let expected = BTreeSet::from([
+            first,
+            second,
+            first_tree,
+            second_tree,
+            first_dir,
+            second_dir,
+        ]);
+        assert_eq!(
+            objects
+                .reads
+                .borrow()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
         assert_eq!(objects.reads.borrow().len(), expected.len());
     }
 }
@@ -188,17 +267,38 @@ fn all_work_limits_are_cumulative_inclusive_and_do_not_reset_before_fallback() {
             ..MergeObjectLimits::default()
         };
         let mut proof = run(&f, exact).unwrap();
-        assert_eq!(proof.ensure(f.inherited, |_| panic!("known identity"), || Ok(())), Ok(true));
+        assert_eq!(
+            proof.ensure(f.inherited, |_| panic!("known identity"), || Ok(())),
+            Ok(true)
+        );
         for limits in [
-            MergeObjectLimits { max_objects: exact.max_objects - 1, ..exact },
-            MergeObjectLimits { max_edges: exact.max_edges - 1, ..exact },
-            MergeObjectLimits { max_total_bytes: exact.max_total_bytes - 1, ..exact },
+            MergeObjectLimits {
+                max_objects: exact.max_objects - 1,
+                ..exact
+            },
+            MergeObjectLimits {
+                max_edges: exact.max_edges - 1,
+                ..exact
+            },
+            MergeObjectLimits {
+                max_total_bytes: exact.max_total_bytes - 1,
+                ..exact
+            },
         ] {
-            assert!(matches!(run(&f, limits), Err(MergeSourceError::BudgetExceeded)));
+            assert!(matches!(
+                run(&f, limits),
+                Err(MergeSourceError::BudgetExceeded)
+            ));
         }
         let absent = git_object_id(format, ObjectType::Blob, b"absent");
-        assert_eq!(proof.ensure(absent, |_| panic!("no remaining object-read budget"), || Ok(())),
-            Err(MergeSourceError::BudgetExceeded));
+        assert_eq!(
+            proof.ensure(
+                absent,
+                |_| panic!("no remaining object-read budget"),
+                || Ok(())
+            ),
+            Err(MergeSourceError::BudgetExceeded)
+        );
     }
 }
 
@@ -207,24 +307,50 @@ fn cancellation_and_corrupt_hint_or_original_bytes_never_complete_the_guide() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut f = fixture(format);
         let mut calls = 0usize;
-        let mut proof = ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
-        proof.guide_uploaded(&f.uploaded, |id| f.objects.load(id), || { calls += 1; Ok(()) }).unwrap();
+        let mut proof =
+            ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+        proof
+            .guide_uploaded(
+                &f.uploaded,
+                |id| f.objects.load(id),
+                || {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
         for stop in 0..calls {
             let mut seen = 0;
-            let mut proof = ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
-            assert_eq!(proof.guide_uploaded(&f.uploaded, |id| f.objects.load(id), || {
-                let cancelled = seen == stop;
-                seen += 1;
-                if cancelled { Err(MergeSourceError::Cancelled) } else { Ok(()) }
-            }), Err(MergeSourceError::Cancelled));
+            let mut proof =
+                ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+            assert_eq!(
+                proof.guide_uploaded(
+                    &f.uploaded,
+                    |id| f.objects.load(id),
+                    || {
+                        let cancelled = seen == stop;
+                        seen += 1;
+                        if cancelled {
+                            Err(MergeSourceError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                ),
+                Err(MergeSourceError::Cancelled)
+            );
         }
         let id = *f.uploaded.keys().next().unwrap();
         f.uploaded.get_mut(&id).unwrap().body.push(b'!');
         f.objects.reads.borrow_mut().clear();
-        assert!(matches!(run(&f, MergeObjectLimits::default()), Err(MergeSourceError::InvalidObject(bad)) if bad == id));
+        assert!(
+            matches!(run(&f, MergeObjectLimits::default()), Err(MergeSourceError::InvalidObject(bad)) if bad == id)
+        );
         assert!(f.objects.reads.borrow().is_empty());
         f.uploaded.get_mut(&id).unwrap().body.pop();
         f.objects.bodies.get_mut(&f.old_deep).unwrap().1.push(b'!');
-        assert!(matches!(run(&f, MergeObjectLimits::default()), Err(MergeSourceError::InvalidObject(bad)) if bad == f.old_deep));
+        assert!(
+            matches!(run(&f, MergeObjectLimits::default()), Err(MergeSourceError::InvalidObject(bad)) if bad == f.old_deep)
+        );
     }
 }

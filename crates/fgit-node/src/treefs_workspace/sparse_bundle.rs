@@ -301,7 +301,10 @@ impl<S: CanonicalObjectSource, D: Deadline> Walk<'_, S, D> {
                 return Err(invalid());
             }
         }
-        let tree = Arc::new(Tree { entries: tree, directories });
+        let tree = Arc::new(Tree {
+            entries: tree,
+            directories,
+        });
         self.trees.insert(id, Arc::clone(&tree));
         Ok(tree)
     }

@@ -37,13 +37,17 @@ pub(super) fn checked(
             || entry.name == b"."
             || entry.name == b".."
             || entry.name.eq_ignore_ascii_case(b".git")
-            || !matches!(entry.mode, 0o040000 | 0o100644 | 0o100755 | 0o120000 | 0o160000)
+            || !matches!(
+                entry.mode,
+                0o040000 | 0o100644 | 0o100755 | 0o120000 | 0o160000
+            )
             || entry.oid.is_zero()
             || entry.oid.algorithm() != format
         {
             return Err(PreparationError::InvalidTree);
         }
-        names = names.checked_add(entry.name.len())
+        names = names
+            .checked_add(entry.name.len())
             .ok_or(PreparationError::Budget("tree name bytes"))?;
         if map.insert(entry.name.clone(), entry).is_some() {
             return Err(PreparationError::InvalidTree);
@@ -93,7 +97,13 @@ impl<'a> Join<'a> {
         ours: &'a BTreeMap<Vec<u8>, MergeEntry>,
         theirs: &'a BTreeMap<Vec<u8>, MergeEntry>,
     ) -> Self {
-        Self { inputs: [base.values().peekable(), ours.values().peekable(), theirs.values().peekable()] }
+        Self {
+            inputs: [
+                base.values().peekable(),
+                ours.values().peekable(),
+                theirs.values().peekable(),
+            ],
+        }
     }
 }
 impl<'a> Iterator for Join<'a> {
@@ -105,7 +115,11 @@ impl<'a> Iterator for Join<'a> {
             self.inputs[1].peek().copied(),
             self.inputs[2].peek().copied(),
         ];
-        let name: &'a [u8] = heads.into_iter().flatten().map(|entry| entry.name.as_slice()).min()?;
+        let name: &'a [u8] = heads
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.name.as_slice())
+            .min()?;
         let mut values = [None; 3];
         for (index, head) in heads.iter().enumerate() {
             if head.is_some_and(|entry| entry.name.as_slice() == name) {

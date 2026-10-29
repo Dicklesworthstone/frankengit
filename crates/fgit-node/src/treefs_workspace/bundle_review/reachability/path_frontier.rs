@@ -14,7 +14,10 @@ pub(super) fn guide(
     live()?;
     // Packs without commits (including zero-object rebase results) need no
     // additional proof. Thin external delta bases retain their original gate.
-    if !uploaded.values().any(|object| object.kind == ObjectType::Commit) {
+    if !uploaded
+        .values()
+        .any(|object| object.kind == ObjectType::Commit)
+    {
         return live();
     }
     let mut trees = BTreeMap::new();
@@ -30,10 +33,14 @@ pub(super) fn guide(
             return Err(MergeSourceError::BudgetExceeded);
         }
         proof.hint_objects += 1;
-        proof.bytes = proof.bytes.checked_add(object.body.len())
+        proof.bytes = proof
+            .bytes
+            .checked_add(object.body.len())
             .filter(|bytes| *bytes <= proof.limits.max_total_bytes)
             .ok_or(MergeSourceError::BudgetExceeded)?;
-        if *id != object.id || id.is_zero() || id.algorithm() != proof.format
+        if *id != object.id
+            || id.is_zero()
+            || id.algorithm() != proof.format
             || git_object_id(proof.format, object.kind, &object.body) != *id
         {
             return Err(MergeSourceError::InvalidObject(*id));
@@ -53,7 +60,9 @@ pub(super) fn guide(
     let mut pending = BTreeSet::new();
     for root in proof.roots.clone() {
         expand(proof, root, ObjectType::Commit, load, live)?;
-        let old = *proof.commit_trees.get(&root)
+        let old = *proof
+            .commit_trees
+            .get(&root)
             .ok_or(MergeSourceError::InvalidObject(root))?;
         for new in &roots {
             live()?;
@@ -71,15 +80,20 @@ pub(super) fn guide(
             continue;
         }
         expand(proof, old, ObjectType::Tree, load, live)?;
-        let next = trees.get(&new).ok_or(MergeSourceError::InvalidObject(new))?;
+        let next = trees
+            .get(&new)
+            .ok_or(MergeSourceError::InvalidObject(new))?;
         // Cached comparisons are work too. Charge before scanning, including
         // names, rather than giving each rewritten tree a new allowance.
         let work = next.keys().try_fold(1usize, |sum, name| {
-            sum.checked_add(name.len()).and_then(|n| n.checked_add(1))
+            sum.checked_add(name.len())
+                .and_then(|n| n.checked_add(1))
                 .ok_or(MergeSourceError::BudgetExceeded)
         })?;
         charge(proof, work)?;
-        let before = proof.directories.get(&old)
+        let before = proof
+            .directories
+            .get(&old)
             .ok_or(MergeSourceError::InvalidObject(old))?;
         for (name, child) in next {
             live()?;
@@ -97,7 +111,9 @@ pub(super) fn guide(
 }
 
 fn charge(proof: &mut ParentReachability, work: usize) -> Result<(), MergeSourceError> {
-    proof.edges = proof.edges.checked_add(work)
+    proof.edges = proof
+        .edges
+        .checked_add(work)
         .filter(|edges| *edges <= proof.limits.max_edges)
         .ok_or(MergeSourceError::BudgetExceeded)?;
     Ok(())

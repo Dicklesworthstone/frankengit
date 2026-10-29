@@ -413,7 +413,10 @@ fn cached_tree_payloads_are_shared_but_caching_never_grants_target_membership() 
         let mut source = Source::new(format);
         let blob = source.put(ObjectType::Blob, b"shared payload\n".to_vec());
         let names: Vec<_> = (0..1024).map(|i| format!("file-{i:04}")).collect();
-        let entries: Vec<_> = names.iter().map(|name| (name.as_str(), 0o100644, blob)).collect();
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), 0o100644, blob))
+            .collect();
         let id = source.tree(&entries);
         let mut live = || true;
         let mut walk = Walk {
@@ -433,9 +436,10 @@ fn cached_tree_payloads_are_shared_but_caching_never_grants_target_membership() 
         assert_eq!(walk.objects, 1);
         assert_eq!(walk.edges, 1024);
         assert!(first.directories.is_empty());
-        assert!(matches!(walk.prove_tree(id), Err(ProjectionFailure::Refuse(
-            RefusalCode::EvidenceInvalid
-        ))));
+        assert!(matches!(
+            walk.prove_tree(id),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
+        ));
         assert!(walk.frontier.is_empty());
         assert!(walk.expanded.is_empty());
         // Simulate the independently read target edge; a cached parsed tree
@@ -464,17 +468,41 @@ fn repeated_directory_pair_lookups_still_have_an_inclusive_work_bound() {
         let shared = source.tree(&[("file", 0o100644, new_blob)]);
         let new = source.tree(&[("a", 0o040000, shared), ("b", 0o040000, shared)]);
         let candidate = source.commit(new, &[target], 1);
-        let limits = MergeObjectLimits { max_edges: 12, ..MergeObjectLimits::default() };
+        let limits = MergeObjectLimits {
+            max_edges: 12,
+            ..MergeObjectLimits::default()
+        };
         // Three commit edges, seven unique tree entries, two directory lookups.
-        let needed = objects_above_target(&source, target, candidate, 1, limits, &mut || true).unwrap();
+        let needed =
+            objects_above_target(&source, target, candidate, 1, limits, &mut || true).unwrap();
         assert_eq!(needed, BTreeSet::from([candidate, new, shared, new_blob]));
         // One parse during frontier discovery and one independent validation,
         // despite pairing the same new subtree with two different old trees.
-        assert_eq!(source.reads.borrow().iter().filter(|id| **id == shared).count(), 2);
-        assert!(matches!(objects_above_target(
-            &source, target, candidate, 1,
-            MergeObjectLimits { max_edges: 11, ..limits }, &mut || true,
-        ), Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))));
+        assert_eq!(
+            source
+                .reads
+                .borrow()
+                .iter()
+                .filter(|id| **id == shared)
+                .count(),
+            2
+        );
+        assert!(matches!(
+            objects_above_target(
+                &source,
+                target,
+                candidate,
+                1,
+                MergeObjectLimits {
+                    max_edges: 11,
+                    ..limits
+                },
+                &mut || true,
+            ),
+            Err(ProjectionFailure::Unavailable(
+                RefusalCode::ResourceBudgetExceeded
+            ))
+        ));
     }
 }
 
@@ -484,7 +512,10 @@ fn eight_step_flat_rebase_reuses_target_inventory_without_losing_intermediate_ob
         let mut source = Source::new(format);
         let keep = source.put(ObjectType::Blob, b"keep\n".to_vec());
         let names: Vec<_> = (0..64).map(|i| format!("file-{i:02}")).collect();
-        let mut entries: Vec<_> = names.iter().map(|name| (name.as_str(), 0o100644, keep)).collect();
+        let mut entries: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), 0o100644, keep))
+            .collect();
         let old = source.tree(&entries);
         let target = source.commit(old, &[], 0);
         let mut candidate = target;
@@ -507,14 +538,35 @@ fn eight_step_flat_rebase_reuses_target_inventory_without_losing_intermediate_ob
             max_edges: 593,
             ..MergeObjectLimits::default()
         };
-        assert_eq!(objects_above_target(
-            &source, target, candidate, 8, limits, &mut || true,
-        ).unwrap(), expected);
-        assert_eq!(source.reads.borrow().iter().filter(|id| **id == old).count(), 1);
+        assert_eq!(
+            objects_above_target(&source, target, candidate, 8, limits, &mut || true,).unwrap(),
+            expected
+        );
+        assert_eq!(
+            source
+                .reads
+                .borrow()
+                .iter()
+                .filter(|id| **id == old)
+                .count(),
+            1
+        );
         assert!(!source.reads.borrow().contains(&keep));
-        assert!(matches!(objects_above_target(
-            &source, target, candidate, 8,
-            MergeObjectLimits { max_edges: 592, ..limits }, &mut || true,
-        ), Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded))));
+        assert!(matches!(
+            objects_above_target(
+                &source,
+                target,
+                candidate,
+                8,
+                MergeObjectLimits {
+                    max_edges: 592,
+                    ..limits
+                },
+                &mut || true,
+            ),
+            Err(ProjectionFailure::Unavailable(
+                RefusalCode::ResourceBudgetExceeded
+            ))
+        ));
     }
 }

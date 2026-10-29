@@ -70,9 +70,18 @@ impl Source {
 impl CanonicalObjectSource for Source {
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         self.bodies.borrow_mut().push(*id);
-        let (kind, body) = self.objects.get(id)
+        let (kind, body) = self
+            .objects
+            .get(id)
             .ok_or(PackWriteError::MissingCanonicalObject(*id))?;
-        Ok(CanonicalPackObject::new(*id, *kind, body.clone(), Vec::new(), 0, 0))
+        Ok(CanonicalPackObject::new(
+            *id,
+            *kind,
+            body.clone(),
+            Vec::new(),
+            0,
+            0,
+        ))
     }
 }
 impl FrontierObjectHeaders for Source {
@@ -81,7 +90,9 @@ impl FrontierObjectHeaders for Source {
         if self.fallback.contains(id) {
             return Ok(None);
         }
-        let (kind, body) = self.objects.get(id)
+        let (kind, body) = self
+            .objects
+            .get(id)
             .ok_or(PackWriteError::MissingCanonicalObject(*id))?;
         Ok(Some(CanonicalObjectHeader {
             id: if self.wrong_identity.get() == Some(*id) {
@@ -130,31 +141,46 @@ impl Fixture {
         let tree = source.tree(&entries);
         let candidate = source.commit(tree, Some(parent), "candidate");
         Self {
-            source, frontier, parent, candidate,
+            source,
+            frontier,
+            parent,
+            candidate,
             added: BTreeSet::from([candidate, tree, new_blob]),
-            inherited, entries,
+            inherited,
+            entries,
         }
     }
 
     fn read(&self, limits: MergeObjectLimits) -> Result<ValidatedClosure, ProjectionFailure> {
         validate_commit_closure_above(
-            &self.source, self.candidate,
+            &self.source,
+            self.candidate,
             ObjectFrontier::with_headers(&self.frontier, &self.source),
-            limits, &mut || true,
+            limits,
+            &mut || true,
         )
     }
 
     fn body_bytes(&self) -> usize {
-        self.added.iter().map(|id| self.source.objects[id].1.len()).sum()
+        self.added
+            .iter()
+            .map(|id| self.source.objects[id].1.len())
+            .sum()
     }
 }
 fn three() -> MergeObjectLimits {
-    MergeObjectLimits { max_objects: 3, ..MergeObjectLimits::default() }
+    MergeObjectLimits {
+        max_objects: 3,
+        ..MergeObjectLimits::default()
+    }
 }
 fn resource_refusal(result: Result<ValidatedClosure, ProjectionFailure>) {
-    assert!(matches!(result, Err(ProjectionFailure::Unavailable(
-        RefusalCode::ResourceBudgetExceeded
-    ))));
+    assert!(matches!(
+        result,
+        Err(ProjectionFailure::Unavailable(
+            RefusalCode::ResourceBudgetExceeded
+        ))
+    ));
 }
 
 #[test]
@@ -164,20 +190,42 @@ fn inherited_width_does_not_spend_the_new_body_allowance_in_either_native_format
         assert_eq!(f.read(three()).unwrap().objects, f.added);
         assert_eq!(f.source.bodies.borrow().len(), 3);
         assert_eq!(f.source.headers.borrow().len(), 258);
-        assert!(f.source.bodies.borrow().iter().all(|id| f.added.contains(id)));
+        assert!(
+            f.source
+                .bodies
+                .borrow()
+                .iter()
+                .all(|id| f.added.contains(id))
+        );
         let workspace = validate_workspace_objects_above(
-            &f.source, f.candidate, f.parent,
+            &f.source,
+            f.candidate,
+            f.parent,
             ObjectFrontier::with_headers(&f.frontier, &f.source),
-            three(), &mut || true,
-        ).unwrap();
+            three(),
+            &mut || true,
+        )
+        .unwrap();
         let mut expected = f.added.clone();
         expected.insert(f.parent);
         assert_eq!(workspace.objects, expected);
-        resource_refusal(validate_commit_closure(&f.source, f.candidate, three(), &mut || true));
-        resource_refusal(validate_commit_closure_above(
-            &f.source, f.candidate, &f.frontier, three(), &mut || true,
+        resource_refusal(validate_commit_closure(
+            &f.source,
+            f.candidate,
+            three(),
+            &mut || true,
         ));
-        resource_refusal(f.read(MergeObjectLimits { max_objects: 2, ..three() }));
+        resource_refusal(validate_commit_closure_above(
+            &f.source,
+            f.candidate,
+            &f.frontier,
+            three(),
+            &mut || true,
+        ));
+        resource_refusal(f.read(MergeObjectLimits {
+            max_objects: 2,
+            ..three()
+        }));
     }
 }
 
@@ -185,7 +233,10 @@ fn inherited_width_does_not_spend_the_new_body_allowance_in_either_native_format
 fn default_frontier_supports_more_than_one_hundred_thousand_inherited_files() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let f = Fixture::new(format, 100_001, false);
-        assert_eq!(f.read(MergeObjectLimits::default()).unwrap().objects, f.added);
+        assert_eq!(
+            f.read(MergeObjectLimits::default()).unwrap().objects,
+            f.added
+        );
         assert_eq!(f.source.bodies.borrow().len(), 3);
         assert_eq!(f.source.headers.borrow().len(), 100_002);
     }
@@ -195,14 +246,24 @@ fn default_frontier_supports_more_than_one_hundred_thousand_inherited_files() {
 fn shared_inherited_objects_are_checked_once_but_every_tree_edge_is_charged() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let f = Fixture::new(format, 32, true);
-        let limits = MergeObjectLimits { max_edges: 35, ..three() };
+        let limits = MergeObjectLimits {
+            max_edges: 35,
+            ..three()
+        };
         assert_eq!(f.read(limits).unwrap().objects, f.added);
         assert_eq!(f.source.headers.borrow().len(), 2);
-        resource_refusal(f.read(MergeObjectLimits { max_edges: 34, ..limits }));
-        let exact = MergeObjectLimits { max_total_bytes: f.body_bytes(), ..limits };
+        resource_refusal(f.read(MergeObjectLimits {
+            max_edges: 34,
+            ..limits
+        }));
+        let exact = MergeObjectLimits {
+            max_total_bytes: f.body_bytes(),
+            ..limits
+        };
         assert_eq!(f.read(exact).unwrap().objects, f.added);
         resource_refusal(f.read(MergeObjectLimits {
-            max_total_bytes: exact.max_total_bytes - 1, ..exact
+            max_total_bytes: exact.max_total_bytes - 1,
+            ..exact
         }));
     }
 }
@@ -215,12 +276,16 @@ fn declined_optional_headers_reserve_body_work_and_bytes_before_loading() {
         resource_refusal(f.read(three()));
         assert!(f.source.bodies.borrow().len() <= 3);
         f.source.reset_reads();
-        let limits = MergeObjectLimits { max_objects: 4, ..three() };
+        let limits = MergeObjectLimits {
+            max_objects: 4,
+            ..three()
+        };
         assert_eq!(f.read(limits).unwrap().objects, f.added);
         assert_eq!(f.source.bodies.borrow().len(), 4);
         assert!(f.source.bodies.borrow().contains(&f.inherited));
         resource_refusal(f.read(MergeObjectLimits {
-            max_total_bytes: f.body_bytes(), ..limits
+            max_total_bytes: f.body_bytes(),
+            ..limits
         }));
         f.source.fallback.extend(f.frontier.iter().copied());
         f.source.reset_reads();
@@ -235,9 +300,10 @@ fn inherited_header_identity_kind_size_and_availability_remain_mandatory() {
         let mut f = Fixture::new(format, 8, false);
         for fault in [&f.source.wrong_kind, &f.source.wrong_identity] {
             fault.set(Some(f.inherited));
-            assert!(matches!(f.read(three()), Err(ProjectionFailure::Refuse(
-                RefusalCode::EvidenceInvalid
-            ))));
+            assert!(matches!(
+                f.read(three()),
+                Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
+            ));
             fault.set(None);
             assert_eq!(f.read(three()).unwrap().objects, f.added);
         }
@@ -245,9 +311,10 @@ fn inherited_header_identity_kind_size_and_availability_remain_mandatory() {
         resource_refusal(f.read(three()));
         f.source.oversized.set(None);
         f.source.objects.remove(&f.inherited);
-        assert!(matches!(f.read(three()), Err(ProjectionFailure::Unavailable(
-            RefusalCode::EvidenceMissing
-        ))));
+        assert!(matches!(
+            f.read(three()),
+            Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))
+        ));
     }
 }
 
@@ -259,16 +326,19 @@ fn frontier_membership_cannot_bypass_candidate_hashing_or_conflicting_edge_kinds
         assert_eq!(f.read(three()).unwrap().objects, f.added);
         assert!(!f.source.headers.borrow().contains(&f.candidate));
         f.source.objects.get_mut(&f.candidate).unwrap().1.push(b'!');
-        assert!(matches!(f.read(three()), Err(ProjectionFailure::Refuse(
-            RefusalCode::EvidenceInvalid
-        ))));
+        assert!(matches!(
+            f.read(three()),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
+        ));
         let mut f = Fixture::new(format, 8, false);
-        f.entries.push(("zz-directory".into(), 0o040000, f.inherited));
+        f.entries
+            .push(("zz-directory".into(), 0o040000, f.inherited));
         let tree = f.source.tree(&f.entries);
         f.candidate = f.source.commit(tree, Some(f.parent), "conflicting kinds");
-        assert!(matches!(f.read(three()), Err(ProjectionFailure::Refuse(
-            RefusalCode::EvidenceInvalid
-        ))));
+        assert!(matches!(
+            f.read(three()),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
+        ));
     }
 }
 
@@ -277,19 +347,34 @@ fn cancellation_at_each_checkpoint_discards_the_entire_wide_candidate() {
     let f = Fixture::new(GitHashAlgorithm::Sha256, 8, false);
     let mut checkpoints = 0;
     validate_commit_closure_above(
-        &f.source, f.candidate,
-        ObjectFrontier::with_headers(&f.frontier, &f.source), three(),
-        &mut || { checkpoints += 1; true },
-    ).unwrap();
+        &f.source,
+        f.candidate,
+        ObjectFrontier::with_headers(&f.frontier, &f.source),
+        three(),
+        &mut || {
+            checkpoints += 1;
+            true
+        },
+    )
+    .unwrap();
     for stop in 0..checkpoints {
         let mut calls = 0;
         let result = validate_commit_closure_above(
-            &f.source, f.candidate,
-            ObjectFrontier::with_headers(&f.frontier, &f.source), three(),
-            &mut || { let live = calls < stop; calls += 1; live },
+            &f.source,
+            f.candidate,
+            ObjectFrontier::with_headers(&f.frontier, &f.source),
+            three(),
+            &mut || {
+                let live = calls < stop;
+                calls += 1;
+                live
+            },
         );
-        assert!(matches!(result, Err(ProjectionFailure::Unavailable(
-            RefusalCode::CancellationInProgress
-        ))));
+        assert!(matches!(
+            result,
+            Err(ProjectionFailure::Unavailable(
+                RefusalCode::CancellationInProgress
+            ))
+        ));
     }
 }

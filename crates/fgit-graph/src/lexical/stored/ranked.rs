@@ -121,12 +121,9 @@ impl RankedScan {
             for (query_index, list) in lists.iter().enumerate() {
                 self.scan.budget.charge(1, live)?;
                 let Some(list) = list else { continue };
-                if let Some(byte_offset) = cursors[query_index].offset(
-                    list,
-                    document.id,
-                    &mut self.scan.budget,
-                    live,
-                )? {
+                if let Some(byte_offset) =
+                    cursors[query_index].offset(list, document.id, &mut self.scan.budget, live)?
+                {
                     self.frequencies[query_index] += 1;
                     spans.push(LexicalSpan {
                         query_index,
