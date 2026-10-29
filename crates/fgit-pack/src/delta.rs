@@ -529,6 +529,62 @@ struct TypedResolution {
     bytes: Vec<u8>,
 }
 
+/// Where a [`CachedResolver`] keeps cached entries past its resident budget
+/// (frankengit-88fk). Which entries are cached, the order they are cached in,
+/// and every expanded and work charge are unchanged; only where an entry's
+/// bytes live differs.
+pub trait CacheSpill {
+    /// Retains a copy of `bytes` and returns the handle that reads it back.
+    ///
+    /// # Errors
+    ///
+    /// A spill that cannot retain the bytes.
+    fn spill(&mut self, bytes: &[u8]) -> Result<SpillHandle, PackError>;
+
+    /// Returns exactly the bytes [`Self::spill`] retained for `handle`.
+    ///
+    /// # Errors
+    ///
+    /// A spill that cannot read them back.
+    fn read(&mut self, handle: SpillHandle) -> Result<Vec<u8>, PackError>;
+}
+
+impl<T: CacheSpill + ?Sized> CacheSpill for &mut T {
+    fn spill(&mut self, bytes: &[u8]) -> Result<SpillHandle, PackError> {
+        (**self).spill(bytes)
+    }
+
+    fn read(&mut self, handle: SpillHandle) -> Result<Vec<u8>, PackError> {
+        (**self).read(handle)
+    }
+}
+
+/// The location of one spilled cache entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpillHandle {
+    pub offset: u64,
+    pub length: usize,
+}
+
+/// The default spill: every cached entry stays resident and nothing is ever
+/// spilled.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResidentCache;
+
+impl CacheSpill for ResidentCache {
+    fn spill(&mut self, bytes: &[u8]) -> Result<SpillHandle, PackError> {
+        Err(PackError::AllocationFailed {
+            requested: bytes.len(),
+        })
+    }
+
+    fn read(&mut self, handle: SpillHandle) -> Result<Vec<u8>, PackError> {
+        Err(PackError::AllocationFailed {
+            requested: handle.length,
+        })
+    }
+}
+
 /// A bounded cache over the scalar resolver.
 ///
 /// Each unique pack object's expanded bytes are charged to the aggregate
@@ -554,7 +610,7 @@ struct TypedResolution {
 /// Charging the copy also bounds a hot base: a base shared by many deltas is
 /// copied once per delta, and each copy counts, where the old model charged a
 /// base's hit nothing.
-pub struct CachedResolver<'objects, 'lookup, L> {
+pub struct CachedResolver<'objects, 'lookup, L, S = ResidentCache> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
     /// By offset. Only ever probed by key, never iterated, so the hash order
     /// is unobservable. A sorted Vec shifted half its entries per insert when
@@ -562,11 +618,29 @@ pub struct CachedResolver<'objects, 'lookup, L> {
     /// quadratic in the pack (frankengit-eq4h).
     entries: HashMap<u64, CacheEntry>,
     cached_bytes: usize,
+    /// Cached bytes kept in memory; later entries go to `spill`.
+    resident_budget: usize,
+    resident_bytes: usize,
+    spill: S,
 }
 
 struct CacheEntry {
-    bytes: Vec<u8>,
+    stored: StoredBytes,
     object_type: Option<ObjectType>,
+}
+
+enum StoredBytes {
+    Resident(Vec<u8>),
+    Spilled(SpillHandle),
+}
+
+impl StoredBytes {
+    const fn len(&self) -> usize {
+        match self {
+            Self::Resident(bytes) => bytes.len(),
+            Self::Spilled(handle) => handle.length,
+        }
+    }
 }
 
 impl<'objects, 'lookup, L> CachedResolver<'objects, 'lookup, L>
@@ -581,10 +655,40 @@ where
         limits: &'objects PackLimits,
         deadline: &mut impl Deadline,
     ) -> Result<Self, PackError> {
+        Self::with_spill(
+            objects,
+            external_bases,
+            limits,
+            ResidentCache,
+            usize::MAX,
+            deadline,
+        )
+    }
+}
+
+impl<'objects, 'lookup, L, S> CachedResolver<'objects, 'lookup, L, S>
+where
+    L: ExternalBaseLookup,
+    S: CacheSpill,
+{
+    /// [`CachedResolver::new`] that keeps at most `resident_budget` cached
+    /// bytes in memory and the rest in `spill` (frankengit-88fk). Outputs,
+    /// which entries are cached and every charge are identical to `new`'s.
+    pub fn with_spill(
+        objects: &'objects [PackObject],
+        external_bases: &'lookup L,
+        limits: &'objects PackLimits,
+        spill: S,
+        resident_budget: usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, PackError> {
         Ok(Self {
             scalar: ScalarResolver::new(objects, external_bases, limits, deadline)?,
             entries: HashMap::new(),
             cached_bytes: 0,
+            resident_budget,
+            resident_bytes: 0,
+            spill,
         })
     }
 
@@ -682,12 +786,12 @@ where
         deadline: &mut impl Deadline,
     ) -> Result<Vec<u8>, PackError> {
         checkpoint(deadline)?;
-        if let Some(cached) = self.cached(object.offset()) {
+        if let Some((length, _)) = self.cached(object.offset()) {
             // Expanded bytes were charged when this offset was first resolved
             // (frankengit-rpqx); the hit charges only the copy it performs
             // (frankengit-z6rb).
-            accounting.add_work(cached.bytes.len(), self.scalar.limits)?;
-            return copy_bytes(&cached.bytes, deadline);
+            accounting.add_work(length, self.scalar.limits)?;
+            return self.cached_copy(object.offset(), deadline);
         }
         if stack.contains(&object.offset()) {
             return Err(PackError::DeltaCycle);
@@ -745,15 +849,13 @@ where
         deadline: &mut impl Deadline,
     ) -> Result<TypedResolution, PackError> {
         checkpoint(deadline)?;
-        if let Some(cached) = self.cached(object.offset())
-            && let Some(object_type) = cached.object_type
-        {
+        if let Some((length, Some(object_type))) = self.cached(object.offset()) {
             // Expanded bytes are charged once, at first resolution
             // (frankengit-rpqx); the hit charges only its copy (frankengit-z6rb).
-            accounting.add_work(cached.bytes.len(), self.scalar.limits)?;
+            accounting.add_work(length, self.scalar.limits)?;
             return Ok(TypedResolution {
                 object_type,
-                bytes: copy_bytes(&cached.bytes, deadline)?,
+                bytes: self.cached_copy(object.offset(), deadline)?,
             });
         }
         if stack.contains(&object.offset()) {
@@ -898,8 +1000,32 @@ where
         }
     }
 
-    fn cached(&self, offset: u64) -> Option<&CacheEntry> {
-        self.entries.get(&offset)
+    /// The length and root type of one cached entry, wherever it lives.
+    fn cached(&self, offset: u64) -> Option<(usize, Option<ObjectType>)> {
+        self.entries
+            .get(&offset)
+            .map(|entry| (entry.stored.len(), entry.object_type))
+    }
+
+    /// A copy of one cached entry's bytes, from memory or from the spill.
+    fn cached_copy(
+        &mut self,
+        offset: u64,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<u8>, PackError> {
+        let handle = match self.entries.get(&offset).map(|entry| &entry.stored) {
+            Some(StoredBytes::Resident(bytes)) => return copy_bytes(bytes, deadline),
+            Some(StoredBytes::Spilled(handle)) => *handle,
+            None => return Err(PackError::MissingDeltaBase),
+        };
+        checkpoint(deadline)?;
+        let bytes = self.spill.read(handle)?;
+        if bytes.len() != handle.length {
+            return Err(PackError::AllocationFailed {
+                requested: handle.length,
+            });
+        }
+        Ok(bytes)
     }
 
     fn cache(
@@ -928,11 +1054,21 @@ where
         self.entries
             .try_reserve(1)
             .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
-        let copy = copy_bytes(bytes, deadline)?;
+        let resident = self
+            .resident_bytes
+            .checked_add(bytes.len())
+            .filter(|resident| *resident <= self.resident_budget);
+        let stored = if let Some(resident) = resident {
+            let copy = copy_bytes(bytes, deadline)?;
+            self.resident_bytes = resident;
+            StoredBytes::Resident(copy)
+        } else {
+            StoredBytes::Spilled(self.spill.spill(bytes)?)
+        };
         self.entries.insert(
             offset,
             CacheEntry {
-                bytes: copy,
+                stored,
                 object_type,
             },
         );
@@ -1529,6 +1665,144 @@ mod tests {
         assert!(matches!(
             resolver.resolve_offset(2, &mut always),
             Err(PackError::DeltaFanoutLimit { .. })
+        ));
+    }
+
+    /// A spill holding every cached entry in a Vec, counting its traffic.
+    #[derive(Default)]
+    struct CountingSpill {
+        entries: Vec<Vec<u8>>,
+        reads: usize,
+    }
+
+    impl CacheSpill for CountingSpill {
+        fn spill(&mut self, bytes: &[u8]) -> Result<SpillHandle, PackError> {
+            self.entries.push(bytes.to_vec());
+            Ok(SpillHandle {
+                offset: u64::try_from(self.entries.len() - 1).expect("small fixture"),
+                length: bytes.len(),
+            })
+        }
+
+        fn read(&mut self, handle: SpillHandle) -> Result<Vec<u8>, PackError> {
+            self.reads += 1;
+            Ok(self.entries[usize::try_from(handle.offset).expect("small fixture")].clone())
+        }
+    }
+
+    /// A chain over one base, resolved twice: the second pass is all cache hits.
+    fn chained_typed_objects(seed: u8) -> (Vec<PackObject>, Vec<(u64, Vec<u8>)>) {
+        let length = usize::from(seed % 61 + 3);
+        let base = (0..length)
+            .map(|index| seed.wrapping_add(u8::try_from(index).expect("small fixture")))
+            .collect::<Vec<_>>();
+        let mut objects = vec![PackObject::TypedBase {
+            offset: 12,
+            id: None,
+            kind: EntryKind::Blob,
+            data: base.clone(),
+        }];
+        let mut expected = vec![(12, base.clone())];
+        let mut previous = base;
+        for step in 1..=u8::try_from(seed % 7 + 2).expect("small fixture") {
+            let offset = 12 + 12 * u64::from(step);
+            let byte = seed.wrapping_mul(step);
+            let next = {
+                let mut next = previous.clone();
+                next.push(byte);
+                next
+            };
+            objects.push(PackObject::Delta(DeltaObject {
+                offset,
+                id: None,
+                base: DeltaBase::Ofs(offset - 12),
+                program: copy_then_insert(&previous, byte),
+            }));
+            expected.push((offset, next.clone()));
+            previous = next;
+        }
+        (objects, expected)
+    }
+
+    /// Spilling cached entries changes where their bytes live and nothing else:
+    /// every typed resolution returns the resident resolver's bytes and type,
+    /// and the shared budget is charged the same expanded bytes and work, with
+    /// everything spilled or only part of it (frankengit-88fk).
+    #[test]
+    fn a_spilled_cache_resolves_and_charges_exactly_as_a_resident_cache() {
+        for seed in 1_u8..=48 {
+            let (objects, expected) = chained_typed_objects(seed);
+            let limits = unlimited();
+            for resident_budget in [0, usize::from(seed % 61 + 4), usize::MAX] {
+                let mut resident = CachedResolver::new(&objects, &(), &limits, &mut always)
+                    .expect("generated resident graph");
+                let mut spill = CountingSpill::default();
+                let mut spilled = CachedResolver::with_spill(
+                    &objects,
+                    &(),
+                    &limits,
+                    &mut spill,
+                    resident_budget,
+                    &mut always,
+                )
+                .expect("generated spilled graph");
+                let mut resident_budget_charges = ResolutionBudget::new();
+                let mut spilled_budget_charges = ResolutionBudget::new();
+                for _pass in 0..2 {
+                    for (offset, bytes) in &expected {
+                        let left = resident
+                            .resolve_offset_typed_with_budget(
+                                *offset,
+                                &mut resident_budget_charges,
+                                &mut always,
+                            )
+                            .expect("resident resolves");
+                        let right = spilled
+                            .resolve_offset_typed_with_budget(
+                                *offset,
+                                &mut spilled_budget_charges,
+                                &mut always,
+                            )
+                            .expect("spilled resolves");
+                        assert_eq!(left, (ObjectType::Blob, bytes.clone()));
+                        assert_eq!(right, left);
+                    }
+                }
+                assert_eq!(
+                    spilled_budget_charges.accounting.expanded,
+                    resident_budget_charges.accounting.expanded
+                );
+                assert_eq!(
+                    spilled_budget_charges.accounting.work,
+                    resident_budget_charges.accounting.work
+                );
+                drop(spilled);
+                if resident_budget == 0 {
+                    assert_eq!(spill.entries.len(), expected.len(), "everything spilled");
+                    assert!(
+                        spill.reads >= expected.len(),
+                        "hits were served from the spill"
+                    );
+                }
+                if resident_budget == usize::MAX {
+                    assert!(spill.entries.is_empty(), "nothing spilled within budget");
+                }
+            }
+        }
+    }
+
+    /// A spill that cannot retain an entry refuses typed; it never panics or
+    /// returns other bytes (frankengit-88fk).
+    #[test]
+    fn a_spill_that_cannot_retain_an_entry_refuses_typed() {
+        let (objects, expected) = chained_typed_objects(9);
+        let limits = unlimited();
+        let mut resolver =
+            CachedResolver::with_spill(&objects, &(), &limits, ResidentCache, 0, &mut always)
+                .expect("generated graph");
+        assert!(matches!(
+            resolver.resolve_offset_typed(expected[0].0, &mut always),
+            Err(PackError::AllocationFailed { .. })
         ));
     }
 
