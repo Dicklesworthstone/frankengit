@@ -901,3 +901,43 @@ files open.
 
 **Revisit when** a batch becomes one durable unit (one file per batch), so
 there is one descriptor per batch rather than one per object.
+
+### NEG-040 — a single writer permit held over validation and staging serializes concurrent pushes (frankengit-root-doctrine-x2mv.4.9)
+
+**Hypothesis (the x2mv.4.27 end state).** One writer per process
+(`MAX_CONCURRENT_WRITERS = 1`), taken after ingress and structural quarantine,
+makes concurrent writers deterministic at an acceptable cost. Under the permit
+the node selects its basis, validates and stages the pack, then admits it.
+
+**Disposition: REFUTED as an end state for concurrent pushes; the
+determinism it bought is kept.** Release-perf fg of db023d86 (A), git:// with
+stock git 2.56. N clients each push a new branch with 1,000 unique files on a
+shared root, all started together (`fg serve --continuous --max-in-flight 16`).
+Three runs per N:
+- N=1: 0.4-0.5 s.
+- N=4: total 1.2-1.3 s; the last push 1.2-1.3 s.
+- N=16: total 4.9-6.1 s; per-push latencies step by about 0.3 s, p50
+  2.4-2.7 s, slowest 4.9-6.1 s.
+
+About 0.3 s of a 0.5 s push is serialized. For one 24,000-file push,
+/proc/<pid>/io sampling puts staging (staged-file writes, grouped fsyncs,
+links) at about 80% of the 7.4-8.0 s, all under the permit.
+
+**Replacement.** A receive that finds the permit busy pre-stages while it
+waits: it runs the production validator against the basis current then, over
+a borrowed quarantine (`ReceiveQuarantine::speculate`), and discards every
+result. The authoritative handoff under the permit still selects its basis
+after admission and decides exactly as before; it finds the objects placed and
+re-verifies them instead of writing and syncing them. A receive that finds a
+free permit runs exactly as before. Alternated three times against A (B):
+- N=1: 0.4-0.5 s, unchanged.
+- N=4: total 0.9-1.0 s.
+- N=16: total 2.6-3.4 s (mean 5.4 s to 2.9 s); slowest push 2.6-3.4 s;
+  about 0.11-0.15 s serialized per push.
+- The N=16 nodes stored byte-identical objects (16,130 files, namespace
+  normalized), and every ref landed in every run.
+- Load rose to 114 from other processes during the last rounds.
+
+**Revisit when** the remaining in-permit work (re-verifying placed objects
+and the head CAS) dominates contended pushes, or when a flat combiner is wired
+into cross-session admission. Measure it against this baseline.

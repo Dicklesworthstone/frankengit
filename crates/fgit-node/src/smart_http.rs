@@ -420,6 +420,44 @@ fn drive_request_while<F: Future>(
     }))
 }
 
+/// Places a waiting receive's verified objects while another writer holds
+/// the node's writer capacity (frankengit-root-doctrine-x2mv.4.9).
+///
+/// Staging is most of a large push's service time, and it is
+/// content-addressed: a placed object carries no canonical visibility, so it
+/// needs no writer. This runs the production validator against the basis
+/// current now over a borrowed quarantine
+/// ([`fgit_wire::receive::ReceiveQuarantine::speculate`]) and discards every
+/// result, refusals included. The authoritative handoff under the permit still
+/// selects its own basis after admission and decides exactly as before; it
+/// finds the objects placed and re-verifies them instead of writing and
+/// syncing them. An expired `live` ends this early and changes nothing else.
+pub(super) fn prestage_receive(
+    node: &OneNode,
+    request: &super::NodeRequestContext,
+    quarantine: &fgit_wire::receive::ReceiveQuarantine,
+    pack_limits: fgit_pack::PackLimits,
+    live: &mut impl FnMut() -> bool,
+) {
+    let Ok(selected) =
+        drive_request_while(node, request, node.materialize_admission_in(request), live)
+    else {
+        return;
+    };
+    let Ok(validator) = node.production_quarantine_validator(
+        &selected,
+        pack_limits,
+        fgit_git_object::ParseLimits {
+            tree_reference_bytes: node.object_format.digest_len(),
+            ..fgit_git_object::ParseLimits::default()
+        },
+    ) else {
+        return;
+    };
+    let mut handoff = ProductionReceiveQuarantineHandoff::new(validator, selected.basis().clone());
+    let _advisory = quarantine.speculate(&mut handoff, live);
+}
+
 impl OneNode {
     fn smart_http_route_matches(&self, request: &RequestHead<'_>) -> bool {
         request.repository_route.as_bytes() == self.git_daemon_repository_path.as_bytes()
@@ -1065,7 +1103,18 @@ impl OneNode {
         {
             return Err(NodeSmartHttpRefusal::RefWriteScopeDenied);
         }
-        let writer_permit = super::admit_writer(writers, &deadline)?;
+        let writer_permit = super::admit_writer_prestaging(writers, &deadline, || {
+            let prestage = super::NodeRequestContext {
+                authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
+            };
+            prestage_receive(
+                self,
+                &prestage,
+                &quarantine,
+                receive_limits.pack.clone(),
+                &mut live,
+            );
+        })?;
         let node_request = super::NodeRequestContext {
             authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
         };

@@ -5634,6 +5634,18 @@ impl WriterGate {
         *active += 1;
         Some(WriterPermit(self))
     }
+
+    /// Takes a slot only if one is free now, without waiting.
+    pub(crate) fn try_acquire(&self) -> Option<WriterPermit<'_>> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (*active < self.limit).then(|| {
+            *active += 1;
+            WriterPermit(self)
+        })
+    }
 }
 
 /// Takes one of `writers`' admissions for a receive whose ingress is
@@ -5653,6 +5665,26 @@ pub(crate) fn admit_writer<'gate>(
                 })
         })
         .transpose()
+}
+
+/// [`admit_writer`], but a receive that finds writer capacity busy runs
+/// `prestage` before it waits: the basis-independent placement of its
+/// verified objects, so the authoritative validation under the permit finds
+/// them in place (frankengit-root-doctrine-x2mv.4.9). A receive that finds a
+/// free slot takes it at once and runs exactly as before.
+pub(crate) fn admit_writer_prestaging<'gate>(
+    writers: Option<&'gate WriterGate>,
+    deadline: &GitDaemonSessionDeadline,
+    prestage: impl FnOnce(),
+) -> Result<Option<WriterPermit<'gate>>, NodeReceiveTransportRefusal> {
+    let Some(gate) = writers else {
+        return Ok(None);
+    };
+    if let Some(permit) = gate.try_acquire() {
+        return Ok(Some(permit));
+    }
+    prestage();
+    admit_writer(writers, deadline)
 }
 
 impl Drop for WriterPermit<'_> {

@@ -478,7 +478,25 @@ impl OneNode {
             // bounded quarantine and can run alongside other writers. Select
             // the authoritative validation basis only after writer admission.
             let quarantine = machine.into_quarantine(&mut live)?;
-            let writer_permit = crate::admit_writer(writers, processing.deadline())?;
+            // A receive that must wait for another writer places its verified
+            // objects meanwhile; the handoff below still decides alone
+            // (frankengit-root-doctrine-x2mv.4.9).
+            let writer_permit =
+                crate::admit_writer_prestaging(writers, processing.deadline(), || {
+                    let prestage = NodeRequestContext {
+                        authority: self.receive_admission_authority_context(
+                            input_bytes,
+                            processing.deadline(),
+                        ),
+                    };
+                    super::super::prestage_receive(
+                        self,
+                        &prestage,
+                        &quarantine,
+                        receive_limits.pack.clone(),
+                        &mut live,
+                    );
+                })?;
             let request = NodeRequestContext {
                 authority: self
                     .receive_admission_authority_context(input_bytes, processing.deadline()),

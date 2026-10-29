@@ -352,3 +352,47 @@ fn http_must_finish_its_entire_envelope_before_transferring_native_quarantine() 
         }
     }
 }
+
+/// An advisory speculation sees exactly the input the one consuming handoff
+/// later sees and keeps custody. A cancelled speculation never calls the
+/// handoff, and a speculative refusal decides nothing: the consuming handoff
+/// still runs and returns its own result (frankengit-root-doctrine-x2mv.4.9).
+#[test]
+fn speculation_sees_the_same_input_and_leaves_the_one_consuming_handoff() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let (id, body, pack) = blob_pack(format);
+        for delete in [false, true] {
+            let bytes = wire(format, id, (!delete).then_some(pack.as_slice()));
+            let expected_body = (!delete).then_some(body.as_slice());
+            let mut immediate = Observe::new(expected_body);
+            let expected = machine(format, &bytes, ReceiveLimits::default())
+                .finish_with_handoff(&mut immediate, &mut || true)
+                .unwrap();
+            let quarantine = machine(format, &bytes, ReceiveLimits::default())
+                .into_quarantine(&mut || true)
+                .unwrap();
+            let mut cancelled = Observe::new(expected_body);
+            assert_eq!(
+                quarantine.speculate(&mut cancelled, &mut || false),
+                Err(ReceiveError::Cancelled)
+            );
+            assert_eq!(cancelled.calls, 0);
+            let mut speculative = Observe::new(expected_body);
+            speculative.refusal = Some(RefusalCode::EvidenceInvalid);
+            assert_eq!(
+                quarantine.speculate(&mut speculative, &mut || true),
+                Err(ReceiveError::AuthoritativeRefusal(
+                    RefusalCode::EvidenceInvalid
+                ))
+            );
+            assert_eq!(speculative.calls, 1);
+            assert_eq!(quarantine.request(), &expected.request);
+            let mut authoritative = Observe::new(expected_body);
+            let observed = quarantine
+                .handoff(&mut authoritative, &mut || true)
+                .unwrap();
+            assert_eq!(observed, expected);
+            assert_eq!(authoritative.calls, 1);
+        }
+    }
+}

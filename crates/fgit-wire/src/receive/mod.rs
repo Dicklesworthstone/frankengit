@@ -333,8 +333,9 @@ pub struct QuarantineReceipt {
 ///
 /// Constructed only by the native parser after the complete bounded request,
 /// pack framing, DEFLATE streams and native trailer have been checked. Raw
-/// input bytes are already discarded; decoded entries stay private until the
-/// consuming [`Self::handoff`]. This owner is deliberately neither cloneable
+/// input bytes are already discarded; decoded entries are seen only by a
+/// handoff: the one consuming [`Self::handoff`], or an advisory
+/// [`Self::speculate`] that decides nothing. This owner is deliberately neither cloneable
 /// nor an admission proof: expected-old, visibility, native object identities,
 /// connectivity and policy remain the authoritative handoff's responsibility.
 ///
@@ -392,6 +393,36 @@ impl ReceiveQuarantine {
             request: self.request,
             quarantine: self.receipt,
         })
+    }
+
+    /// Runs `handoff` over this request without transferring custody.
+    ///
+    /// A host waiting for writer capacity may use the wait for the expensive,
+    /// basis-independent half of validation: placing verified, content-
+    /// addressed objects, which carries no canonical visibility. The result is
+    /// advisory and never an admission proof. The caller still makes exactly
+    /// one consuming [`Self::handoff`] against an authority basis selected
+    /// after admission, and decides from that alone
+    /// (frankengit-root-doctrine-x2mv.4.9).
+    pub fn speculate<Handoff, Cancellation>(
+        &self,
+        handoff: &mut Handoff,
+        cancellation: &mut Cancellation,
+    ) -> Result<(), ReceiveError>
+    where
+        Handoff: ReceiveQuarantineHandoff,
+        Cancellation: ReceiveCancellation,
+    {
+        if !cancellation.checkpoint() {
+            return Err(ReceiveError::Cancelled);
+        }
+        let mut deadline = PackDeadline { cancellation };
+        handoff.handoff_with_deadline(
+            &self.request,
+            self.pack.as_ref(),
+            &self.receipt,
+            &mut deadline,
+        )
     }
 }
 

@@ -333,3 +333,235 @@ fn authority_is_selected_after_waiting_for_a_writer_and_observes_a_new_ref() {
     );
     node.shutdown().unwrap();
 }
+
+/// Starts `child` on a receive of `bytes` through HTTP or the raw/SSH guarded
+/// session, behind `gate`, on a scoped worker that shuts `child` down.
+fn gated_receive<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    child: OneNode,
+    http: bool,
+    bytes: Vec<u8>,
+    key: &'static [u8],
+    gate: &'scope WriterGate,
+) -> std::thread::ScopedJoinHandle<'scope, Result<AdmissionResult, NodeSmartHttpRefusal>> {
+    scope.spawn(move || {
+        let result = if http {
+            http_receive(&child, &bytes, &session(key), Some(gate))
+        } else {
+            let route = child.git_daemon_repository_path().as_bytes().to_vec();
+            child
+                .serve_guarded_receive_session(
+                    &mut Cursor::new(&bytes),
+                    &mut Output::default(),
+                    Some(PRINCIPAL),
+                    None,
+                    &deadline(Duration::from_secs(30)),
+                    None,
+                    Some(gate),
+                    &WireLimits::default(),
+                    |_| Ok(route),
+                    |request, selected, validated, live| {
+                        child.admit_guarded_receive(request, selected, validated, live)
+                    },
+                )
+                .map(|result| result.expect("a nonempty receive has an outcome"))
+        };
+        child.shutdown().unwrap();
+        result
+    })
+}
+
+fn second_service(node: &OneNode) -> OneNode {
+    let (mut child, _) = OneNode::init(node.service_config.clone()).unwrap();
+    let authenticated = child
+        .runtime()
+        .block_on(child.authenticate_authority_head())
+        .unwrap();
+    child
+        .bring_into_service(authenticated.receipt().generation())
+        .unwrap();
+    child
+}
+
+/// Waits (bounded) until `id` is readable from the store, while `held` keeps
+/// the only writer permit, so a waiting receive must have placed it.
+fn wait_until_placed(node: &OneNode, id: ObjectId) {
+    let waited = std::time::Instant::now();
+    while node.read_git_object(id).is_err() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(30),
+            "the waiting receive never placed its object"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// A receive that finds the writer busy places its verified objects while it
+/// waits, publishes nothing before it holds the writer, and is then decided
+/// once, on raw/SSH and HTTP alike (frankengit-root-doctrine-x2mv.4.9).
+#[test]
+fn a_waiting_receive_places_its_objects_before_it_holds_the_writer() {
+    for http in [true, false] {
+        let format = GitHashAlgorithm::Sha1;
+        let (node, _scratch) = node(format);
+        let child = second_service(&node);
+        let name = "refs/tags/placed-while-waiting";
+        let (id, bytes) = blob_push(format, name);
+        let gate = WriterGate::new(1);
+        let held = gate.acquire(&deadline(Duration::from_secs(30))).unwrap();
+        let before = generation(&node);
+        let result = std::thread::scope(|scope| {
+            let worker = gated_receive(scope, child, http, bytes, b"placed-while-waiting", &gate);
+            wait_until_placed(&node, id);
+            assert_eq!(
+                generation(&node),
+                before,
+                "nothing publishes before the writer"
+            );
+            assert!(
+                node.runtime()
+                    .block_on(node.materialize_admission())
+                    .unwrap()
+                    .snapshot()
+                    .refs
+                    .is_empty()
+            );
+            drop(held);
+            worker.join().unwrap()
+        });
+        let result = result.unwrap();
+        assert!(matches!(
+            result.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        assert_eq!(generation(&node), before + 1);
+        let refs = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap()
+            .snapshot()
+            .refs
+            .clone();
+        assert_eq!(
+            refs.get(&fgit_types::RefName::try_new(name.as_bytes()).unwrap()),
+            Some(&id)
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+/// Objects placed at an older basis do not decide a receive. Another writer
+/// creates the same ref while this one waits, so the waiting create is
+/// refused at the basis selected after its wait, as serial admission refuses
+/// it (frankengit-root-doctrine-x2mv.4.9).
+#[test]
+fn a_prestaged_receive_is_decided_at_the_basis_selected_after_its_wait() {
+    for http in [true, false] {
+        let format = GitHashAlgorithm::Sha1;
+        let (node, _scratch) = node(format);
+        let child = second_service(&node);
+        let name = "refs/tags/contested-while-waiting";
+        let (id, bytes) = blob_push(format, name);
+        let gate = WriterGate::new(1);
+        let held = gate.acquire(&deadline(Duration::from_secs(30))).unwrap();
+        let result = std::thread::scope(|scope| {
+            let worker = gated_receive(
+                scope,
+                child,
+                http,
+                bytes.clone(),
+                b"contested-waiting",
+                &gate,
+            );
+            wait_until_placed(&node, id);
+            // This caller owns the sole permit; this real publication creates
+            // the ref the waiting request expects to be absent.
+            let first = http_receive(&node, &bytes, &session(b"contested-first"), None).unwrap();
+            assert!(matches!(
+                first.commands[0].terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ));
+            drop(held);
+            worker.join().unwrap()
+        });
+        let result = result.unwrap();
+        assert!(
+            matches!(
+                result.commands[0].terminal.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::ExpectedOldRefMismatch,
+                    ..
+                }
+            ),
+            "{:?}",
+            result.commands[0].terminal.outcome
+        );
+        let refs = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap()
+            .snapshot()
+            .refs
+            .clone();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs.get(&fgit_types::RefName::try_new(name.as_bytes()).unwrap()),
+            Some(&id)
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+/// A receive that placed its objects and then ran out of server time while
+/// waiting is contained as writer capacity, like any receive that waited: no
+/// decision is observable and an identical retry publishes once
+/// (frankengit-root-doctrine-x2mv.4.9).
+#[test]
+fn a_prestaged_receive_whose_wait_expires_is_contained_and_its_retry_publishes_once() {
+    let format = GitHashAlgorithm::Sha1;
+    let (mut node, _scratch) = node(format);
+    set_timeouts(&mut node, Duration::from_millis(500));
+    let gate = WriterGate::new(1);
+    let held = gate.acquire(&deadline(Duration::from_secs(30))).unwrap();
+    let (_, bytes) = blob_push(format, "refs/tags/expired-while-waiting");
+    let selected = session(b"prestaged-expiry");
+    let before = generation(&node);
+    assert!(matches!(
+        http_receive(&node, &bytes, &selected, Some(&gate)),
+        Err(NodeSmartHttpRefusal::ReceiveTransport(error))
+            if matches!(*error, NodeReceiveTransportRefusal::QuotaContained { code: "writer_capacity", .. })
+    ));
+    assert_eq!(generation(&node), before);
+    assert!(matches!(
+        node.runtime()
+            .block_on(node.recover_receive_session_in(&node.request_context(), &selected))
+            .unwrap(),
+        SessionRecovery::NotObserved
+    ));
+    drop(held);
+    set_timeouts(&mut node, Duration::from_secs(30));
+    let committed = http_receive(&node, &bytes, &selected, Some(&gate)).unwrap();
+    assert!(matches!(
+        committed.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    assert_eq!(generation(&node), before + 1);
+    let retry = http_receive(&node, &bytes, &selected, Some(&gate)).unwrap();
+    assert_eq!(retry.commands, committed.commands);
+    assert_eq!(generation(&node), before + 1);
+    node.shutdown().unwrap();
+}
+
+/// A free slot is taken without waiting; a busy gate is not waited on, and
+/// a dropped permit frees its slot (frankengit-root-doctrine-x2mv.4.9).
+#[test]
+fn try_acquire_takes_only_a_free_slot_and_its_drop_frees_it() {
+    let gate = WriterGate::new(1);
+    let first = gate.try_acquire().expect("a free slot is taken");
+    assert!(gate.try_acquire().is_none(), "a busy gate is not waited on");
+    drop(first);
+    let second = gate
+        .try_acquire()
+        .expect("the dropped permit freed its slot");
+    drop(second);
+}
