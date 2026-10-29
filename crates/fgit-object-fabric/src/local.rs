@@ -22,7 +22,9 @@ mod blob_write;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::runtime::JoinError;
 use asupersync::{Cx, Outcome};
@@ -47,6 +49,22 @@ use crate::{ENVELOPE_SCHEMA, ObjectEnvelope, ObjectKind, SegmentLimits};
 const OBJECT_MAGIC: &[u8; 4] = b"FGOB";
 const MAX_STAGE_ATTEMPTS: u64 = 1_024;
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(1);
+static STAGE_PREFIX: OnceLock<String> = OnceLock::new();
+
+/// This process's stage-name prefix: its pid and start time.
+///
+/// The sequence restarts with every process and a crash's residue is never
+/// reclaimed, so bare sequence names collide with a dead predecessor's files;
+/// [`MAX_STAGE_ATTEMPTS`] of them in a row refused every placement of the
+/// next process (frankengit-tz5z).
+fn stage_prefix() -> &'static str {
+    STAGE_PREFIX.get_or_init(|| {
+        let started = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        format!("{:08x}-{started:032x}", std::process::id())
+    })
+}
 
 /// One locally-owned staging file, removed whenever its placement returns.
 ///
@@ -480,7 +498,7 @@ impl LocalFilesystemFabric {
         let directory = self.staging_dir();
         for _ in 0..MAX_STAGE_ATTEMPTS {
             let sequence = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
-            let path = directory.join(format!("{sequence:016x}.stage"));
+            let path = directory.join(format!("{}-{sequence:016x}.stage", stage_prefix()));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(file) => return Ok(StageFile::new(path, file)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1646,6 +1664,41 @@ mod tests {
 
     fn assert_quiescent(ledger: ObligationLedger) {
         assert!(matches!(ledger.close(), RegionCloseOutcome::Quiescent(_)));
+    }
+
+    /// A crashed process's stage files never refuse the next process's
+    /// placements. The sequence restarts with every process and residue is
+    /// never reclaimed; with bare sequence names, a predecessor that died with
+    /// `MAX_STAGE_ATTEMPTS` or more files staged refused every placement after
+    /// a restart (frankengit-tz5z). The residue here is what such a process
+    /// left, under the sequences this process's counter hands out next.
+    #[test]
+    fn a_dead_process_staging_residue_does_not_refuse_placement() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        fabric.create_directory(&fabric.staging_dir()).unwrap();
+        let residue = 2 * MAX_STAGE_ATTEMPTS;
+        let next = NEXT_STAGE.load(Ordering::Relaxed);
+        for sequence in next..next + residue {
+            fs::write(
+                fabric.staging_dir().join(format!("{sequence:016x}.stage")),
+                b"residue",
+            )
+            .unwrap();
+        }
+        let object = object(b"placed after a crash");
+        let ledger = ledger();
+        let outcome = fabric
+            .put_if_absent(object.clone(), admission(&ledger, &object))
+            .unwrap();
+        assert!(matches!(outcome, PutIfAbsent::Created { .. }));
+        assert_quiescent(ledger);
+        assert_eq!(fabric.read_whole(object.identity()).unwrap().object, object);
+        // The residue stays: nothing here proves its writer is gone.
+        assert_eq!(
+            fs::read_dir(fabric.staging_dir()).unwrap().count(),
+            usize::try_from(residue).unwrap()
+        );
     }
 
     #[test]
