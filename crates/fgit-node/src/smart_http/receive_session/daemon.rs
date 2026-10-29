@@ -230,8 +230,8 @@ impl OneNode {
             ingress,
             shared_quota,
             writers,
-            |request, session, validated, live| {
-                self.admit_guarded_receive(request, session, validated, live)
+            |request, session, validated, staging, live| {
+                self.admit_guarded_receive(request, session, validated, staging, live)
             },
         )
     }
@@ -252,6 +252,7 @@ impl OneNode {
             &NodeRequestContext,
             &LoopbackReceiveSession,
             &BasisBoundValidatedReceive,
+            Option<&crate::receive_staging::ReceiveStaging>,
             &mut dyn FnMut() -> bool,
         ) -> Result<AdmissionResult, NodeSmartHttpRefusal>,
     {
@@ -337,6 +338,7 @@ impl OneNode {
             &NodeRequestContext,
             &LoopbackReceiveSession,
             &BasisBoundValidatedReceive,
+            Option<&crate::receive_staging::ReceiveStaging>,
             &mut dyn FnMut() -> bool,
         ) -> Result<AdmissionResult, NodeSmartHttpRefusal>,
     {
@@ -478,7 +480,11 @@ impl OneNode {
             // bounded quarantine and can run alongside other writers. Select
             // the authoritative validation basis only after writer admission.
             let quarantine = machine.into_quarantine(&mut live)?;
-            // A receive that must wait for another writer places its verified
+            // Verified objects are staged and synced, and published only when
+            // admission commits; a receive that ends otherwise abandons them
+            // (frankengit-tz5z). Declared first so it outlives every user.
+            let staging = crate::receive_staging::ReceiveStaging::default();
+            // A receive that must wait for another writer stages its verified
             // objects meanwhile; the handoff below still decides alone
             // (frankengit-root-doctrine-x2mv.4.9).
             let writer_permit =
@@ -494,6 +500,7 @@ impl OneNode {
                         &prestage,
                         &quarantine,
                         receive_limits.pack.clone(),
+                        &staging,
                         &mut live,
                     );
                 })?;
@@ -517,7 +524,8 @@ impl OneNode {
                         ..ParseLimits::default()
                     },
                 )
-                .map_err(ReceiveError::AuthoritativeRefusal)?;
+                .map_err(ReceiveError::AuthoritativeRefusal)?
+                .with_receive_staging(&staging);
             let mut handoff =
                 ProductionReceiveQuarantineHandoff::new(validator, selected.basis().clone());
             let completion = match quarantine.handoff(&mut handoff, &mut live) {
@@ -541,7 +549,7 @@ impl OneNode {
             };
             let validated = handoff.into_validated_receive()?;
             admission_started = true;
-            let outcome = admit(&request, &session, &validated, &mut live)?;
+            let outcome = admit(&request, &session, &validated, Some(&staging), &mut live)?;
             // Publication and outcome resolution are complete. A stalled
             // receiver may delay its own response, never another writer.
             drop(writer_permit);
@@ -604,17 +612,19 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         validated: &BasisBoundValidatedReceive,
+        staging: Option<&crate::receive_staging::ReceiveStaging>,
         live: &mut dyn FnMut() -> bool,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
         let mut checkpoint = || live();
         drive_request_while(
             self,
             request,
-            self.admit_receive_session_durable_in(
+            self.admit_receive_session_publishing_in(
                 request,
                 session,
                 validated,
                 AdmissionLimits::default(),
+                staging,
             ),
             &mut checkpoint,
         )

@@ -31,6 +31,7 @@ use fgit_wire::receive::{
     QuarantineReceipt, ReceiveError, ReceiveQuarantineHandoff, ReceiveRequest,
 };
 
+use crate::receive_staging::ReceiveStaging;
 use crate::{
     AuthoritySelectedClosure, MaterializedAdmission, NodeReceiveTransportRefusal, NodeRefusal,
     OneNode, crypto_object_kind,
@@ -171,6 +172,9 @@ pub struct ProductionQuarantineValidator<'node> {
     // Only the reviewed-candidate owner opts into immutable blob-edge reuse.
     // Ordinary receive and complete-prerequisite validation remain full-body.
     reuse_admitted_blobs: bool,
+    /// A receive's holder for staged, unpublished objects (frankengit-tz5z).
+    /// `None` links each verified object during validation.
+    staging: Option<&'node ReceiveStaging>,
 }
 
 /// The visible ref roots of one materialized basis: every canonical ref the
@@ -230,6 +234,33 @@ impl<'node> ProductionQuarantineValidator<'node> {
             parse_limits,
             authority: None,
             reuse_admitted_blobs: false,
+            staging: None,
+        }
+    }
+}
+
+impl<'node> ProductionQuarantineValidator<'node> {
+    /// Stages this validator's verified objects into `staging`, synced but
+    /// not linked, instead of placing them; the receive publishes them only
+    /// when it commits (frankengit-tz5z). An object `staging` already holds
+    /// (from a waiting pre-stage) is not staged again.
+    #[must_use]
+    pub(crate) fn with_receive_staging<'staging>(
+        self,
+        staging: &'staging ReceiveStaging,
+    ) -> ProductionQuarantineValidator<'staging>
+    where
+        'node: 'staging,
+    {
+        ProductionQuarantineValidator {
+            node: self.node,
+            selected_closure: self.selected_closure,
+            visible_roots: self.visible_roots,
+            pack_limits: self.pack_limits,
+            parse_limits: self.parse_limits,
+            authority: self.authority,
+            reuse_admitted_blobs: self.reuse_admitted_blobs,
+            staging: Some(staging),
         }
     }
 }
@@ -505,6 +536,18 @@ impl ProductionQuarantineValidator<'_> {
         deadline: &mut impl Deadline,
     ) -> Result<(), RefusalCode> {
         checkpoint(deadline)?;
+        if let Some(staging) = self.staging {
+            let placed = self
+                .node
+                .verified_git_object(object_type, body)
+                .map_err(staging_refusal)?;
+            if placed.identity() != id {
+                return Err(RefusalCode::NativeObjectIdMismatch);
+            }
+            return staging
+                .stage(self.node, &[placed], &mut || deadline.checkpoint())
+                .map_err(placement_refusal);
+        }
         let stored = self
             .node
             .put_git_object(object_type, body)
@@ -532,6 +575,10 @@ impl ProductionQuarantineValidator<'_> {
         for id in closure {
             checkpoint(deadline)?;
             if let Some(object) = verified.remove(id) {
+                if self.staging.is_some_and(|staging| staging.contains(*id)) {
+                    // A waiting pre-stage already staged and synced it.
+                    continue;
+                }
                 if object.body.len() > STAGING_BATCH_BYTES {
                     // Alone, as import places a large object. The batch stays
                     // identity-sorted because nothing is inserted into it.
@@ -569,19 +616,17 @@ impl ProductionQuarantineValidator<'_> {
         deadline: &mut impl Deadline,
     ) -> Result<(), RefusalCode> {
         checkpoint(deadline)?;
-        let placed = self
-            .node
-            .put_verified_git_objects(&batch.objects, &mut || deadline.checkpoint());
+        let placed = match self.staging {
+            Some(staging) => {
+                staging.stage(self.node, &batch.objects, &mut || deadline.checkpoint())
+            }
+            None => self
+                .node
+                .put_verified_git_objects(&batch.objects, &mut || deadline.checkpoint()),
+        };
         batch.objects.clear();
         batch.bytes = 0;
-        placed.map_err(|error| match error {
-            NodeRefusal::Fabric(refusal)
-                if matches!(*refusal, StoreRefusal::RuntimeCheckpointRejected) =>
-            {
-                RefusalCode::CancellationInProgress
-            }
-            other => staging_refusal(other),
-        })
+        placed.map_err(placement_refusal)
     }
 
     /// Maps each reconstructed in-pack object to the verified pack-local
@@ -679,6 +724,7 @@ impl OneNode {
             parse_limits,
             authority: Some(receive_validation_authority(materialized)),
             reuse_admitted_blobs: false,
+            staging: None,
         })
     }
 }
@@ -777,6 +823,19 @@ struct StagingBatch {
 }
 
 /// One placement refusal vocabulary for single and batched staging.
+/// The refusal for a failed batch placement or staging: an observed
+/// cancellation stays one, anything else is classified by [`staging_refusal`].
+fn placement_refusal(error: NodeRefusal) -> RefusalCode {
+    match error {
+        NodeRefusal::Fabric(refusal)
+            if matches!(*refusal, StoreRefusal::RuntimeCheckpointRejected) =>
+        {
+            RefusalCode::CancellationInProgress
+        }
+        other => staging_refusal(other),
+    }
+}
+
 fn staging_refusal(error: NodeRefusal) -> RefusalCode {
     match error {
         NodeRefusal::ObjectTooLarge { .. }

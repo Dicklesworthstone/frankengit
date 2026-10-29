@@ -437,6 +437,7 @@ fn prestage_receive(
     request: &super::NodeRequestContext,
     quarantine: &fgit_wire::receive::ReceiveQuarantine,
     pack_limits: fgit_pack::PackLimits,
+    staging: &super::receive_staging::ReceiveStaging,
     live: &mut impl FnMut() -> bool,
 ) {
     let Ok(selected) =
@@ -454,6 +455,7 @@ fn prestage_receive(
     ) else {
         return;
     };
+    let validator = validator.with_receive_staging(staging);
     let mut handoff = ProductionReceiveQuarantineHandoff::new(validator, selected.basis().clone());
     let _advisory = quarantine.speculate(&mut handoff, live);
 }
@@ -1103,6 +1105,9 @@ impl OneNode {
         {
             return Err(NodeSmartHttpRefusal::RefWriteScopeDenied);
         }
+        // Staged objects are published only when admission commits; any other
+        // end abandons them (frankengit-tz5z). Declared before every user.
+        let staging = super::receive_staging::ReceiveStaging::default();
         let writer_permit = super::admit_writer_prestaging(writers, &deadline, || {
             let prestage = super::NodeRequestContext {
                 authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
@@ -1112,6 +1117,7 @@ impl OneNode {
                 &prestage,
                 &quarantine,
                 receive_limits.pack.clone(),
+                &staging,
                 &mut live,
             );
         })?;
@@ -1138,7 +1144,8 @@ impl OneNode {
                     ..fgit_git_object::ParseLimits::default()
                 },
             )
-            .map_err(ReceiveError::AuthoritativeRefusal)?;
+            .map_err(ReceiveError::AuthoritativeRefusal)?
+            .with_receive_staging(&staging);
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         let received = quarantine.request().clone();
@@ -1181,6 +1188,7 @@ impl OneNode {
                 session,
                 &validated,
                 admission_limits,
+                Some(&staging),
             ),
             &mut live,
         ) {

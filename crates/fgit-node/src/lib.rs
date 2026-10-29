@@ -182,6 +182,7 @@ pub use smart_http::{
 pub use termination::TerminationSignals;
 mod quarantine_validator;
 mod receive_refusal;
+mod receive_staging;
 mod ssh;
 mod upload_visibility;
 mod verified_reads;
@@ -2466,6 +2467,16 @@ pub struct DurableAsyncAdmissionProjection<'materializer> {
     materializer: &'materializer DurableAdmissionMaterializer,
     context: AdmissionContext,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
+    /// A receive's staged objects, published before its first commit's
+    /// frames (frankengit-tz5z).
+    publication: Option<StagedPublication<'materializer>>,
+}
+
+/// A receive's staged, unpublished objects and the fabric that links them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StagedPublication<'staging> {
+    staging: &'staging receive_staging::ReceiveStaging,
+    fabric: &'staging LocalFilesystemFabric,
 }
 
 impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
@@ -2479,7 +2490,19 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             materializer,
             context,
             prepared: Mutex::new(None),
+            publication: None,
         }
+    }
+
+    /// Publishes `staging`'s objects when a commit is staged, before its
+    /// frames and its head CAS; a refusal publishes nothing (frankengit-tz5z).
+    #[must_use]
+    pub(crate) const fn with_staged_publication(
+        mut self,
+        publication: Option<StagedPublication<'materializer>>,
+    ) -> Self {
+        self.publication = publication;
+        self
     }
     /// Stages a ref-only decision against an authenticated head and its
     /// driver-owned ref overlay. Both single-command and microbatch entrypoints
@@ -2529,6 +2552,19 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             evidence,
         )
         .map_err(AsyncProjectionFailure::Refuse)?;
+        // The last refusal exit is behind us: this attempt stages a commit.
+        // Its objects become durable names before any frame or head names
+        // them; a replan finds them published (frankengit-tz5z). Publication
+        // is bounded synchronous link work (hard links and directory syncs;
+        // every staged file was synced during validation), not a runtime bridge.
+        if let Some(publication) = self.publication {
+            publication
+                .staging
+                .publish(publication.fabric, &mut || {
+                    stage_context.checkpoint().is_ok()
+                })
+                .map_err(|error| AsyncProjectionFailure::Unavailable(publication_refusal(error)))?;
+        }
         let ref_root = self
             .materializer
             .stage_ref_state_for_layout_in(
@@ -2790,6 +2826,20 @@ fn async_projection_unavailable(
         | AdmissionMaterializationRefusal::CachePoisoned => RefusalCode::EvidenceMissing,
     };
     AsyncProjectionFailure::Unavailable(code)
+}
+
+/// The pre-CAS refusal for a receive whose staged objects could not be
+/// published (frankengit-tz5z). Nothing is decided: an observed cancellation
+/// stays one, a storage failure is this node's durability, not the evidence.
+fn publication_refusal(error: NodeRefusal) -> RefusalCode {
+    match error {
+        NodeRefusal::Fabric(refusal) => match *refusal {
+            StoreRefusal::RuntimeCheckpointRejected => RefusalCode::CancellationInProgress,
+            _ => RefusalCode::DurabilityProfileUnavailable,
+        },
+        NodeRefusal::ResourceContainment => RefusalCode::ResourceBudgetExceeded,
+        _ => RefusalCode::DurabilityProfileUnavailable,
+    }
 }
 
 impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
@@ -8863,6 +8913,21 @@ impl OneNode {
         }
         history.reverse();
         Ok(history)
+    }
+
+    /// [`Self::durable_admission_projection`] that publishes a receive's
+    /// staged objects before its first commit (frankengit-tz5z).
+    fn durable_admission_projection_publishing<'node>(
+        &'node self,
+        context: &AdmissionContext,
+        staging: Option<&'node receive_staging::ReceiveStaging>,
+    ) -> Result<DurableAsyncAdmissionProjection<'node>, AdmissionError> {
+        Ok(self
+            .durable_admission_projection(context)?
+            .with_staged_publication(staging.map(|staging| StagedPublication {
+                staging,
+                fabric: &self.fabric,
+            })))
     }
 
     fn durable_admission_projection(

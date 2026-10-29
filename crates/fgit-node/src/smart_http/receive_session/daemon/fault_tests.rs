@@ -159,7 +159,7 @@ fn interrupted_raw_push_reports_unknown_and_recovers_its_committed_prefix_after_
                 deadline,
                 None,
                 None,
-                |request, session, validated, live| {
+                |request, session, validated, staging, live| {
                     node.receive_publication_admitted()?;
                     let identity = session.authenticated_session().unwrap();
                     let context = AdmissionContext {
@@ -171,7 +171,9 @@ fn interrupted_raw_push_reports_unknown_and_recovers_its_committed_prefix_after_
                         idempotency_key: identity.client_idempotency_key().clone(),
                     };
                     let probe = FailSecond {
-                        inner: node.durable_admission_projection(&context).unwrap(),
+                        inner: node
+                            .durable_admission_projection_publishing(&context, staging)
+                            .unwrap(),
                         snapshots: AtomicUsize::new(0),
                     };
                     let mut checkpoint = || live();
@@ -348,14 +350,14 @@ fn timed_push(
             ingress,
             None,
             None,
-            |request, session, validated, live| {
+            |request, session, validated, staging, live| {
                 reached = true;
                 if let Some(delay) = delay {
                     let start = Instant::now();
                     std::thread::sleep(delay);
                     assert!(start.elapsed() > node.git_daemon_session_timeout.duration());
                 }
-                node.admit_guarded_receive(request, session, validated, live)
+                node.admit_guarded_receive(request, session, validated, staging, live)
             },
         );
         assert!(

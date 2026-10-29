@@ -302,7 +302,10 @@ impl LocalFilesystemFabric {
             bytes = bytes
                 .checked_add(payload)
                 .ok_or(StoreRefusal::LengthOverflow)?;
-            if bytes > MAX_BATCH_PAYLOAD_BYTES {
+            // One object alone is bounded only by the stored-object limit
+            // above, as a single placement is: a receive stages a large
+            // object in a batch of its own (frankengit-tz5z).
+            if bytes > MAX_BATCH_PAYLOAD_BYTES && objects.len() > 1 {
                 return Err(StoreRefusal::StreamingBudgetExceeded {
                     offered: bytes,
                     maximum: MAX_BATCH_PAYLOAD_BYTES,

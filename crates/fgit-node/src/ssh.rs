@@ -974,8 +974,8 @@ impl OneNode {
             Some(writers),
             &WireLimits::default(),
             |_| Ok(route),
-            |request, session, validated, live| {
-                self.admit_guarded_receive(request, session, validated, live)
+            |request, session, validated, staging, live| {
+                self.admit_guarded_receive(request, session, validated, staging, live)
             },
         )
     }

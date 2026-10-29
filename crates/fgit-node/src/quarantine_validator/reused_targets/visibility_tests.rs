@@ -197,6 +197,7 @@ fn fixture_validator<'a>(
         },
         authority: None,
         reuse_admitted_blobs: false,
+        staging: None,
     }
 }
 fn put(node: &OneNode, objects: &[Raw]) {

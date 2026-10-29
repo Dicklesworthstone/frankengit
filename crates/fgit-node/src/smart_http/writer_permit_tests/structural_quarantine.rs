@@ -130,7 +130,7 @@ fn corrupt_packs_are_refused_while_another_writer_holds_the_only_permit() {
             Some(&gate),
             &WireLimits::default(),
             |_| Ok(route),
-            |_, _, _, _| panic!("structural corruption cannot reach admission"),
+            |_, _, _, _, _| panic!("structural corruption cannot reach admission"),
         );
         assert!(matches!(
             result,
@@ -360,8 +360,8 @@ fn gated_receive<'scope>(
                     Some(gate),
                     &WireLimits::default(),
                     |_| Ok(route),
-                    |request, selected, validated, live| {
-                        child.admit_guarded_receive(request, selected, validated, live)
+                    |request, selected, validated, staging, live| {
+                        child.admit_guarded_receive(request, selected, validated, staging, live)
                     },
                 )
                 .map(|result| result.expect("a nonempty receive has an outcome"))
@@ -383,27 +383,35 @@ fn second_service(node: &OneNode) -> OneNode {
     child
 }
 
-/// Waits (bounded) until `id` is readable from the store, while `held` keeps
-/// the only writer permit, so a waiting receive must have placed it.
-fn wait_until_placed(node: &OneNode, id: ObjectId) {
+/// Waits (bounded) until waiting receives have staged and synced `count`
+/// objects under `root`'s `staging/` while `held` keeps the only writer
+/// permit; none of `ids` is linked yet (frankengit-tz5z).
+fn wait_until_staged(node: &OneNode, root: &std::path::Path, count: usize, ids: &[ObjectId]) {
+    let staging = root.join("staging");
     let waited = std::time::Instant::now();
-    while node.read_git_object(id).is_err() {
+    while std::fs::read_dir(&staging).map_or(0, Iterator::count) < count {
         assert!(
             waited.elapsed() < Duration::from_secs(30),
-            "the waiting receive never placed its object"
+            "the waiting receives never staged their objects"
         );
         std::thread::sleep(Duration::from_millis(2));
     }
+    for id in ids {
+        assert!(
+            node.read_git_object(*id).is_err(),
+            "{id} is staged, not published, before its receive commits"
+        );
+    }
 }
 
-/// A receive that finds the writer busy places its verified objects while it
+/// A receive that finds the writer busy stages its verified objects while it
 /// waits, publishes nothing before it holds the writer, and is then decided
 /// once, on raw/SSH and HTTP alike (frankengit-root-doctrine-x2mv.4.9).
 #[test]
-fn a_waiting_receive_places_its_objects_before_it_holds_the_writer() {
+fn a_waiting_receive_stages_its_objects_before_it_holds_the_writer() {
     for http in [true, false] {
         let format = GitHashAlgorithm::Sha1;
-        let (node, _scratch) = node(format);
+        let (node, scratch) = node(format);
         let child = second_service(&node);
         let name = "refs/tags/placed-while-waiting";
         let (id, bytes) = blob_push(format, name);
@@ -419,7 +427,7 @@ fn a_waiting_receive_places_its_objects_before_it_holds_the_writer() {
                 b"placed-while-waiting".to_vec(),
                 &gate,
             );
-            wait_until_placed(&node, id);
+            wait_until_staged(&node, &scratch.0, 1, &[id]);
             assert_eq!(
                 generation(&node),
                 before,
@@ -453,6 +461,14 @@ fn a_waiting_receive_places_its_objects_before_it_holds_the_writer() {
             refs.get(&fgit_types::RefName::try_new(name.as_bytes()).unwrap()),
             Some(&id)
         );
+        // The commit published the staged object and left no staged file.
+        assert!(node.read_git_object(id).is_ok());
+        assert_eq!(
+            std::fs::read_dir(scratch.0.join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
         node.shutdown().unwrap();
     }
 }
@@ -465,7 +481,7 @@ fn a_waiting_receive_places_its_objects_before_it_holds_the_writer() {
 fn a_prestaged_receive_is_decided_at_the_basis_selected_after_its_wait() {
     for http in [true, false] {
         let format = GitHashAlgorithm::Sha1;
-        let (node, _scratch) = node(format);
+        let (node, scratch) = node(format);
         let child = second_service(&node);
         let name = "refs/tags/contested-while-waiting";
         let (id, bytes) = blob_push(format, name);
@@ -480,7 +496,7 @@ fn a_prestaged_receive_is_decided_at_the_basis_selected_after_its_wait() {
                 b"contested-waiting".to_vec(),
                 &gate,
             );
-            wait_until_placed(&node, id);
+            wait_until_staged(&node, &scratch.0, 1, &[id]);
             // This caller owns the sole permit; this real publication creates
             // the ref the waiting request expects to be absent.
             let first = http_receive(&node, &bytes, &session(b"contested-first"), None).unwrap();
@@ -610,7 +626,7 @@ fn seeded_concurrent_creates_decide_as_serial_admission_does() {
     const REFS: u64 = 3;
     for seed in [1_u64, 7, 42] {
         let format = GitHashAlgorithm::Sha1;
-        let (node, _scratch) = node(format);
+        let (node, scratch) = node(format);
         let mut state = seed;
         let mut next = || {
             state = state
@@ -639,9 +655,8 @@ fn seeded_concurrent_creates_decide_as_serial_admission_does() {
                 })
                 .collect();
             // Every waiting receive pre-stages before it is admitted.
-            for (_, id, _) in &pushes {
-                wait_until_placed(&node, *id);
-            }
+            let ids: Vec<ObjectId> = pushes.iter().map(|push| push.1).collect();
+            wait_until_staged(&node, &scratch.0, CLIENTS, &ids);
             drop(held);
             workers
                 .into_iter()
@@ -684,6 +699,12 @@ fn seeded_concurrent_creates_decide_as_serial_admission_does() {
                 "seed {seed}: {name} is the winner's"
             );
             for loser in contenders.iter().filter(|c| **c != winners[0]) {
+                // A refused create publishes nothing: its distinct blob never
+                // reaches the object store (frankengit-tz5z).
+                assert!(
+                    node.read_git_object(pushes[*loser].1).is_err(),
+                    "seed {seed}: client {loser}'s refused object was published"
+                );
                 assert!(
                     matches!(
                         results[*loser].commands[0].terminal.outcome,
@@ -703,6 +724,80 @@ fn seeded_concurrent_creates_decide_as_serial_admission_does() {
                 .filter(|t| pushes.iter().any(|p| p.0 == format!("refs/tags/r{t}")))
                 .count() as u64
         );
+        // Winners published, losers abandoned: no staged file remains.
+        assert_eq!(
+            std::fs::read_dir(scratch.0.join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+/// A receive refused by admission publishes none of its verified objects, on
+/// raw/SSH and HTTP alike, without any writer contention; its permitted twin
+/// publishes its object. Refused pushes used to leave their whole pack in the
+/// object store (frankengit-tz5z, frankengit-root-doctrine-x2mv.4.10).
+#[test]
+fn a_refused_receive_publishes_none_of_its_objects_and_its_permitted_twin_does() {
+    for http in [true, false] {
+        let format = GitHashAlgorithm::Sha1;
+        let (node, scratch) = node(format);
+        // Lane services open before the first commit, as a serving process does.
+        let children = [second_service(&node), second_service(&node)];
+        let (_, existing) =
+            distinct_blob_push(format, "refs/tags/conflict", b"the existing tag\n".to_vec());
+        let created = http_receive(&node, &existing, &session(b"existing-tag"), None).unwrap();
+        assert!(matches!(
+            created.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let gate = WriterGate::new(1);
+        let outcome = |child: OneNode, name: &str, body: &[u8], key: &[u8]| {
+            let (id, bytes) = distinct_blob_push(format, name, body.to_vec());
+            let result = std::thread::scope(|scope| {
+                gated_receive(scope, child, http, bytes, key.to_vec(), &gate)
+                    .join()
+                    .unwrap()
+            });
+            (id, result.unwrap().commands[0].terminal.outcome)
+        };
+        let [first, second] = children;
+        let (refused, decision) = outcome(
+            first,
+            "refs/tags/conflict/child",
+            b"a refused object\n",
+            b"refused-conflict",
+        );
+        assert!(
+            matches!(
+                decision,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::RefNameConflict,
+                    ..
+                }
+            ),
+            "{decision:?}"
+        );
+        assert!(
+            node.read_git_object(refused).is_err(),
+            "the refused receive published its object"
+        );
+        assert_eq!(
+            std::fs::read_dir(scratch.0.join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let (permitted, decision) = outcome(
+            second,
+            "refs/tags/permitted",
+            b"a permitted object\n",
+            b"permitted-twin",
+        );
+        assert!(matches!(decision, DecisionOutcome::Committed { .. }));
+        assert!(node.read_git_object(permitted).is_ok());
         node.shutdown().unwrap();
     }
 }

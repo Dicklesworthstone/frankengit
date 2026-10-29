@@ -238,9 +238,9 @@ fn raw_and_ssh_shared_receive_releases_the_writer_before_success_or_lost_respons
                 Some(&writers),
                 &WireLimits::default(),
                 |_| Ok(route.clone()),
-                |request, selected_session, validated, live| {
+                |request, selected_session, validated, staging, live| {
                     session = Some(selected_session.clone());
-                    node.admit_guarded_receive(request, selected_session, validated, live)
+                    node.admit_guarded_receive(request, selected_session, validated, staging, live)
                 },
             );
             let expected = terminal(
@@ -403,7 +403,7 @@ fn quarantine_verdicts_release_the_writer_before_raw_and_http_delivery() {
                 Some(&writers),
                 &WireLimits::default(),
                 |_| Ok(route),
-                |_, _, _, _| panic!("a quarantine refusal must not reach admission"),
+                |_, _, _, _, _| panic!("a quarantine refusal must not reach admission"),
             )
             .map(|result| result.expect("a nonempty receive has an outcome"))
         };

@@ -50,7 +50,8 @@ impl OneNode {
     /// This boundary accepts only the private, basis-bound quarantine proof.
     /// The transport authenticates the principal and owns intake/quota checks;
     /// this method independently checks publication eligibility. StagingOnly
-    /// may retain objects but cannot publish them here.
+    /// cannot publish here; a receive whose objects are only staged
+    /// (frankengit-tz5z) abandons them when it ends without a commit.
     ///
     /// Non-atomic sessions bind their complete request and all child retry keys
     /// before the first decision. Each command retains its validation witness;
@@ -64,6 +65,21 @@ impl OneNode {
         session: &LoopbackReceiveSession,
         validated: &BasisBoundValidatedReceive,
         limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
+        self.admit_receive_session_publishing_in(request, session, validated, limits, None)
+            .await
+    }
+
+    /// [`Self::admit_receive_session_durable_in`] for a receive whose
+    /// verified objects are staged but not yet published: they are published
+    /// when admission stages a commit, before its head CAS (frankengit-tz5z).
+    pub(crate) async fn admit_receive_session_publishing_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        validated: &BasisBoundValidatedReceive,
+        limits: AdmissionLimits,
+        staging: Option<&crate::receive_staging::ReceiveStaging>,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
         let authenticated = session
             .authenticated_session()
@@ -89,7 +105,7 @@ impl OneNode {
             object_format: self.object_format,
         };
         let projection = self
-            .durable_admission_projection(&context)
+            .durable_admission_projection_publishing(&context, staging)
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
         let checkpoint = || match checkpoint_pack_context(request.authority()) {
             PackContextCheckpoint::Live => Ok(()),
@@ -222,8 +238,9 @@ impl OneNode {
         session: &LoopbackReceiveSession,
         validated: &BasisBoundValidatedReceive,
         limits: AdmissionLimits,
+        staging: Option<&crate::receive_staging::ReceiveStaging>,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
-        self.admit_receive_session_durable_in(request, session, validated, limits)
+        self.admit_receive_session_publishing_in(request, session, validated, limits, staging)
             .await
     }
 }
