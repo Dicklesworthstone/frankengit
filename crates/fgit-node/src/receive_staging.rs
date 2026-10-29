@@ -16,9 +16,13 @@
 //! same staging and skips only the link, so a hidden-ref refusal and a
 //! stale-info refusal stay indistinguishable in latency as well as in bytes.
 //!
-//! Residue that remains: a commit planned, published and then lost at the
-//! head CAS to another process, whose replan refuses, leaves its objects
-//! linked and unreferenced, as every refusal did before.
+//! Every raw receive entry (git://, SSH, smart HTTP, the loopback and native
+//! session APIs) owns one. Residue that remains: a commit planned, published
+//! and then lost at the head CAS to another process, whose replan refuses,
+//! leaves its objects linked and unreferenced, as every refusal did before;
+//! in a non-atomic session the first commit publishes the objects of its
+//! refused siblings too; and workspace publications (branches, full bundles,
+//! TreeFS publication) and `fg import` still place objects before admission.
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -32,7 +36,7 @@ use crate::{NodeRefusal, OneNode};
 
 /// One receive's staged, synced and unpublished verified objects.
 #[derive(Default)]
-pub(crate) struct ReceiveStaging {
+pub struct ReceiveStaging {
     state: Mutex<State>,
 }
 
@@ -128,10 +132,10 @@ impl ReceiveStaging {
         let mut batches = std::mem::take(&mut state.batches).into_iter();
         while let Some((ledger, batch)) = batches.next() {
             let outcome = fabric.publish_synced_batch(batch, live);
-            let failure = if !ledger.close().is_quiescent() {
-                Some(Failure::Containment)
-            } else {
+            let failure = if ledger.close().is_quiescent() {
                 outcome.err().map(Failure::Store)
+            } else {
+                Some(Failure::Containment)
             };
             if let Some(failure) = failure {
                 for remaining in batches {

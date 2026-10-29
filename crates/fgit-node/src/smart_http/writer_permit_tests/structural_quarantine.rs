@@ -44,6 +44,16 @@ fn http_receive(
     session: &LoopbackReceiveSession,
     gate: Option<&WriterGate>,
 ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
+    http_receive_to(node, bytes, session, gate, &mut Output::default())
+}
+
+fn http_receive_to(
+    node: &OneNode,
+    bytes: &[u8],
+    session: &LoopbackReceiveSession,
+    gate: Option<&WriterGate>,
+    output: &mut Output,
+) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
     let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
     let header = format!(
         "POST {route}/git-receive-pack HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\n\r\n",
@@ -60,8 +70,41 @@ fn http_receive(
         AdmissionLimits::default(),
         gate,
         &mut || true,
-        &mut Output::default(),
+        output,
     )
+}
+
+/// One receive of `bytes` through HTTP or the raw/SSH guarded session, and
+/// the bytes the client was sent.
+fn receive(
+    node: &OneNode,
+    http: bool,
+    bytes: &[u8],
+    key: &[u8],
+    gate: Option<&WriterGate>,
+) -> (Result<AdmissionResult, NodeSmartHttpRefusal>, Vec<u8>) {
+    let mut output = Output::default();
+    let result = if http {
+        http_receive_to(node, bytes, &session(key), gate, &mut output)
+    } else {
+        let route = node.git_daemon_repository_path().as_bytes().to_vec();
+        node.serve_guarded_receive_session(
+            &mut Cursor::new(bytes),
+            &mut output,
+            Some(PRINCIPAL),
+            None,
+            &deadline(Duration::from_secs(30)),
+            None,
+            gate,
+            &WireLimits::default(),
+            |_| Ok(route),
+            |request, selected, validated, staging, live| {
+                node.admit_guarded_receive(request, selected, validated, staging, live)
+            },
+        )
+        .map(|result| result.expect("a nonempty receive has an outcome"))
+    };
+    (result, output.0)
 }
 
 fn session(key: &[u8]) -> LoopbackReceiveSession {
@@ -345,27 +388,7 @@ fn gated_receive<'scope>(
     gate: &'scope WriterGate,
 ) -> std::thread::ScopedJoinHandle<'scope, Result<AdmissionResult, NodeSmartHttpRefusal>> {
     scope.spawn(move || {
-        let result = if http {
-            http_receive(&child, &bytes, &session(&key), Some(gate))
-        } else {
-            let route = child.git_daemon_repository_path().as_bytes().to_vec();
-            child
-                .serve_guarded_receive_session(
-                    &mut Cursor::new(&bytes),
-                    &mut Output::default(),
-                    Some(PRINCIPAL),
-                    None,
-                    &deadline(Duration::from_secs(30)),
-                    None,
-                    Some(gate),
-                    &WireLimits::default(),
-                    |_| Ok(route),
-                    |request, selected, validated, staging, live| {
-                        child.admit_guarded_receive(request, selected, validated, staging, live)
-                    },
-                )
-                .map(|result| result.expect("a nonempty receive has an outcome"))
-        };
+        let (result, _) = receive(&child, http, &bytes, &key, Some(gate));
         child.shutdown().unwrap();
         result
     })
@@ -735,71 +758,128 @@ fn seeded_concurrent_creates_decide_as_serial_admission_does() {
     }
 }
 
-/// A receive refused by admission publishes none of its verified objects, on
-/// raw/SSH and HTTP alike, without any writer contention; its permitted twin
-/// publishes its object. Refused pushes used to leave their whole pack in the
-/// object store (frankengit-tz5z, frankengit-root-doctrine-x2mv.4.10).
+/// A refused command, whether for a stale old value, a refname conflict or a
+/// ref policy, leaves none of its receive's objects in the store and nothing
+/// staged, on raw/SSH and HTTP alike, while its canonical decision is
+/// unchanged: the client is sent the same report-status bytes and an identical
+/// retry replays the same refused terminal. The permitted twin publishes
+/// (frankengit-tz5z acceptance 1 and 2).
 #[test]
 fn a_refused_receive_publishes_none_of_its_objects_and_its_permitted_twin_does() {
     for http in [true, false] {
         let format = GitHashAlgorithm::Sha1;
         let (node, scratch) = node(format);
-        // Lane services open before the first commit, as a serving process does.
-        let children = [second_service(&node), second_service(&node)];
-        let (_, existing) =
-            distinct_blob_push(format, "refs/tags/conflict", b"the existing tag\n".to_vec());
-        let created = http_receive(&node, &existing, &session(b"existing-tag"), None).unwrap();
-        assert!(matches!(
-            created.commands[0].terminal.outcome,
-            DecisionOutcome::Committed { .. }
-        ));
-        let gate = WriterGate::new(1);
-        let outcome = |child: OneNode, name: &str, body: &[u8], key: &[u8]| {
-            let (id, bytes) = distinct_blob_push(format, name, body.to_vec());
-            let result = std::thread::scope(|scope| {
-                gated_receive(scope, child, http, bytes, key.to_vec(), &gate)
-                    .join()
-                    .unwrap()
-            });
-            (id, result.unwrap().commands[0].terminal.outcome)
-        };
-        let [first, second] = children;
-        let (refused, decision) = outcome(
-            first,
-            "refs/tags/conflict/child",
-            b"a refused object\n",
-            b"refused-conflict",
-        );
-        assert!(
-            matches!(
-                decision,
-                DecisionOutcome::Refused {
-                    code: RefusalCode::RefNameConflict,
-                    ..
-                }
-            ),
-            "{decision:?}"
-        );
-        assert!(
-            node.read_git_object(refused).is_err(),
-            "the refused receive published its object"
-        );
-        assert_eq!(
+        let staged = || {
             std::fs::read_dir(scratch.0.join("staging"))
                 .unwrap()
-                .count(),
-            0
-        );
-        let (permitted, decision) = outcome(
-            second,
+                .count()
+        };
+        let (_, existing) =
+            distinct_blob_push(format, "refs/tags/conflict", b"the existing tag\n".to_vec());
+        let (created, _) = receive(&node, http, &existing, b"existing-tag", None);
+        assert!(matches!(
+            created.unwrap().commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        freeze_tags(&node);
+        for (name, body, key, code, report) in [
+            (
+                "refs/tags/conflict/child",
+                &b"a conflicting object\n"[..],
+                &b"refused-conflict"[..],
+                RefusalCode::RefNameConflict,
+                &b"ng refs/tags/conflict/child refname conflict\n"[..],
+            ),
+            (
+                "refs/tags/conflict",
+                b"a stale object\n",
+                b"refused-stale",
+                RefusalCode::ExpectedOldRefMismatch,
+                b"ng refs/tags/conflict stale info\n",
+            ),
+            (
+                "refs/tags/frozen/release",
+                b"a denied object\n",
+                b"refused-policy",
+                RefusalCode::ProtectedRefTransitionDenied,
+                b"ng refs/tags/frozen/release protected ref denied\n",
+            ),
+        ] {
+            let (id, bytes) = distinct_blob_push(format, name, body.to_vec());
+            let (result, sent) = receive(&node, http, &bytes, key, None);
+            let terminal = result.unwrap().commands[0].terminal;
+            assert!(
+                matches!(terminal.outcome, DecisionOutcome::Refused { code: refused, .. } if refused == code),
+                "{name}: {terminal:?}"
+            );
+            assert!(
+                sent.windows(report.len()).any(|window| window == report),
+                "{name}: {}",
+                String::from_utf8_lossy(&sent)
+            );
+            assert!(
+                node.read_git_object(id).is_err(),
+                "{name}: the refused receive published its object"
+            );
+            assert_eq!(staged(), 0, "{name}: the refused receive left staged files");
+            // The refusal is a recorded decision: an identical retry replays
+            // its terminal without a new decision, and still publishes nothing.
+            let before = generation(&node);
+            let (retried, _) = receive(&node, http, &bytes, key, None);
+            assert_eq!(retried.unwrap().commands[0].terminal, terminal, "{name}");
+            assert_eq!(generation(&node), before, "{name}: the retry decided again");
+            assert!(node.read_git_object(id).is_err(), "{name}");
+            assert_eq!(staged(), 0, "{name}");
+        }
+        let (permitted, bytes) = distinct_blob_push(
+            format,
             "refs/tags/permitted",
-            b"a permitted object\n",
-            b"permitted-twin",
+            b"a permitted object\n".to_vec(),
         );
-        assert!(matches!(decision, DecisionOutcome::Committed { .. }));
+        let (result, _) = receive(&node, http, &bytes, b"permitted-twin", None);
+        assert!(matches!(
+            result.unwrap().commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
         assert!(node.read_git_object(permitted).is_ok());
+        assert_eq!(staged(), 0);
         node.shutdown().unwrap();
     }
+}
+
+/// Installs a ref policy that denies every update beneath `refs/tags/frozen/`.
+fn freeze_tags(node: &OneNode) {
+    use fgit_forge::ExpectedVersion;
+    use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, compile_ref_policy};
+
+    let request = node.request_context();
+    let before = node
+        .runtime()
+        .block_on(node.read_review_protection_in(&request))
+        .unwrap();
+    let source = "policy freeze_tags { rule freeze { when ref.name matches \"refs/tags/frozen/**\" then deny \"frozen\" } default allow }";
+    let command = ProtectionCommand {
+        expected_version: ExpectedVersion::NewStream,
+        expected_epoch: before.policy_epoch,
+        protection: ReviewProtection {
+            administrators: vec![PRINCIPAL],
+            branches: Vec::new(),
+            ref_policy: Some(compile_ref_policy(source).unwrap()),
+        },
+    };
+    let (_, terminal) = node
+        .runtime()
+        .block_on(node.admit_review_protection_durable_in(
+            &request,
+            &session(b"install-freeze-tags"),
+            &command,
+            AdmissionLimits::default(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
 }
 
 /// git's postBuffer probe, a lone flush packet, is answered 200 with an empty

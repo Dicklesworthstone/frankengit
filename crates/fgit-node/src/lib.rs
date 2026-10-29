@@ -9043,7 +9043,25 @@ impl OneNode {
         validated: &BasisBoundValidatedReceive,
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
-        let projection = self.durable_admission_projection(context)?;
+        Box::pin(self.admit_basis_bound_validated_receive_publishing_in(
+            request, context, validated, limits, None,
+        ))
+        .await
+    }
+
+    /// [`Self::admit_basis_bound_validated_receive_durable_in`] for a receive
+    /// whose verified objects are staged but not yet published: they are
+    /// published when admission stages a commit, before its head CAS
+    /// (frankengit-tz5z).
+    async fn admit_basis_bound_validated_receive_publishing_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        validated: &BasisBoundValidatedReceive,
+        limits: AdmissionLimits,
+        staging: Option<&receive_staging::ReceiveStaging>,
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self.durable_admission_projection_publishing(context, staging)?;
         Box::pin(admit_basis_bound_validated_receive_async(
             &self.authority,
             request.authority(),
@@ -9108,6 +9126,22 @@ impl OneNode {
         validated: &BasisBoundValidatedReceive,
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeReceiveTransportRefusal> {
+        Box::pin(self.admit_basis_bound_loopback_receive_publishing_in(
+            request, session, validated, limits, None,
+        ))
+        .await
+    }
+
+    /// [`Self::admit_basis_bound_loopback_receive_durable_in`] for a receive
+    /// whose verified objects `staging` holds unpublished (frankengit-tz5z).
+    async fn admit_basis_bound_loopback_receive_publishing_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        validated: &BasisBoundValidatedReceive,
+        limits: AdmissionLimits,
+        staging: Option<&receive_staging::ReceiveStaging>,
+    ) -> Result<AdmissionResult, NodeReceiveTransportRefusal> {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
@@ -9123,9 +9157,11 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_basis_bound_validated_receive_durable_in(request, &context, validated, limits)
-            .await
-            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
+        Box::pin(self.admit_basis_bound_validated_receive_publishing_in(
+            request, &context, validated, limits, staging,
+        ))
+        .await
+        .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
 
     /// Receives one contiguous raw receive-pack request and admits it through
@@ -9201,11 +9237,16 @@ impl OneNode {
             ));
         }
         let pack_limits = receive_context.limits.pack.clone();
+        // Validation stages and syncs the verified objects here; admission
+        // publishes them only when it stages a commit. Every other exit drops
+        // `staging`, which removes them (frankengit-tz5z).
+        let staging = receive_staging::ReceiveStaging::default();
         let validator = self
             .production_quarantine_validator(materialized, pack_limits, parse_limits)
             .map_err(|code| {
                 NodeReceiveTransportRefusal::from(ReceiveError::AuthoritativeRefusal(code))
-            })?;
+            })?
+            .with_receive_staging(&staging);
         let wire_limits = receive_context.limits.wire.clone();
         let mut receive =
             ReceivePack::new(receive_context).map_err(NodeReceiveTransportRefusal::from)?;
@@ -9227,18 +9268,21 @@ impl OneNode {
         // make it canonical. Refusing HERE rather than at intake is the whole
         // point of §22.6's middle response — the pack is not rejected, it is
         // held — and §5.4's staged/visible split is what keeps "held" from
-        // silently becoming "published".
+        // silently becoming "published". The staged objects are never linked:
+        // dropping `staging` removes them, and the sender re-offers the push
+        // once the cell serves (frankengit-tz5z).
         let state = self.cell_state();
         if state == CellState::StagingOnly {
             return Err(NodeReceiveTransportRefusal::StagedWithoutPublication { state });
         }
 
-        self.admit_basis_bound_loopback_receive_durable_in(
+        Box::pin(self.admit_basis_bound_loopback_receive_publishing_in(
             request,
             session,
             &validated,
             admission_limits,
-        )
+            Some(&staging),
+        ))
         .await
     }
 

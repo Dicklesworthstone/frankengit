@@ -467,7 +467,7 @@ impl ReceiveRpc {
     /// reads no command and answers with an empty result, so the host answers
     /// it without quarantine, admission or any binding (frankengit-wh86).
     #[must_use]
-    pub fn is_probe(&self) -> bool {
+    pub const fn is_probe(&self) -> bool {
         self.probe && self.body.is_complete()
     }
 

@@ -961,7 +961,13 @@ fn a_stored_policy_refuses_a_push_beneath_the_hidden_prefix_and_admits_its_twin(
     // Note the receive path re-materializes through the node's own projection
     // rather than trusting the `MaterializedAdmission` a caller hands it, so the
     // policy consulted here is the repository's at the moment of the push.
-    let (_scratch, node) = open_repository(Some(&[HIDE_RULE]));
+    let (scratch, node) = open_repository(Some(&[HIDE_RULE]));
+    let staged = || {
+        std::fs::read_dir(scratch.0.join("staging"))
+            .expect("the node's staging directory exists")
+            .count()
+    };
+    let blob = |body: &[u8]| git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, body);
 
     let refused = push(
         &node,
@@ -981,6 +987,31 @@ fn a_stored_policy_refuses_a_push_beneath_the_hidden_prefix_and_admits_its_twin(
          hidden-ref-unauthorized, got {:?}",
         refused[0]
     );
+    // Neither the hidden-ref refusal nor a stale-info refusal of a pack of the
+    // same size publishes or keeps an object: both stage alike and skip only
+    // the link, so the refusal discloses nothing by what it stores
+    // (frankengit-tz5z).
+    assert!(node.read_git_object(blob(REFUSED_BLOB)).is_err());
+    assert_eq!(staged(), 0);
+    let stale_blob = b"hidden-ref policy end-to-end: the stale push blob..\n";
+    assert_eq!(stale_blob.len(), REFUSED_BLOB.len());
+    let stale = push(
+        &node,
+        &[(VISIBLE_REF, stale_blob)],
+        b"hidden-ref-policy-end-to-end-stale",
+    );
+    assert!(
+        matches!(
+            stale[..],
+            [DecisionOutcome::Refused {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                ..
+            }]
+        ),
+        "recreating an existing visible ref must be refused as stale, got {stale:?}"
+    );
+    assert!(node.read_git_object(blob(stale_blob)).is_err());
+    assert_eq!(staged(), 0);
 
     // The permitted twin, in the SAME repository under the SAME stored policy,
     // differing only in the ref name. Without it the refusal above is equally
@@ -998,6 +1029,8 @@ fn a_stored_policy_refuses_a_push_beneath_the_hidden_prefix_and_admits_its_twin(
         "a push to a ref no stored rule names must still commit, got {:?}",
         admitted[0]
     );
+    assert!(node.read_git_object(blob(ADMITTED_BLOB)).is_ok());
+    assert_eq!(staged(), 0);
 
     node.shutdown().expect("the node quiesces");
 }

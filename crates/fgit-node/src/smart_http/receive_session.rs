@@ -66,8 +66,10 @@ impl OneNode {
         validated: &BasisBoundValidatedReceive,
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
-        self.admit_receive_session_publishing_in(request, session, validated, limits, None)
-            .await
+        Box::pin(
+            self.admit_receive_session_publishing_in(request, session, validated, limits, None),
+        )
+        .await
     }
 
     /// [`Self::admit_receive_session_durable_in`] for a receive whose
@@ -196,13 +198,17 @@ impl OneNode {
                 ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress).into(),
             );
         }
+        // Verified objects are published only if admission commits
+        // (frankengit-tz5z); every other exit drops `staging`, removing them.
+        let staging = crate::receive_staging::ReceiveStaging::default();
         let validator = self
             .production_quarantine_validator(
                 materialized,
                 receive_context.limits.pack.clone(),
                 parse_limits,
             )
-            .map_err(ReceiveError::AuthoritativeRefusal)?;
+            .map_err(ReceiveError::AuthoritativeRefusal)?
+            .with_receive_staging(&staging);
         let wire_limits = receive_context.limits.wire.clone();
         let mut receive = ReceivePack::new(receive_context)?;
         bounded_intake::push(&mut receive, input, &wire_limits, &mut live)?;
@@ -216,11 +222,12 @@ impl OneNode {
                 ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress).into(),
             );
         }
-        let mut admission = pin!(self.admit_receive_session_durable_in(
+        let mut admission = pin!(self.admit_receive_session_publishing_in(
             request,
             session,
             &validated,
             admission_limits,
+            Some(&staging),
         ));
         poll_fn(|cx| {
             // Never return early here: the underlying future may already own
@@ -240,8 +247,10 @@ impl OneNode {
         limits: AdmissionLimits,
         staging: Option<&crate::receive_staging::ReceiveStaging>,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
-        self.admit_receive_session_publishing_in(request, session, validated, limits, staging)
-            .await
+        Box::pin(
+            self.admit_receive_session_publishing_in(request, session, validated, limits, staging),
+        )
+        .await
     }
 }
 
