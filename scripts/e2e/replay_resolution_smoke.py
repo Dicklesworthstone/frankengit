@@ -136,6 +136,38 @@ def unpack(data, f):
     return result
 
 
+def inverse_fixture(f):
+    ids = f['ids']
+    body = tree([(b'gone',0o100644,ids['gone']),(b'keep',0o100644,ids['keep']),
+                 (b'target',0o100644,ids['target']),(b'text',0o100644,ids['old'])])
+    root = oid(f['algorithm'], 'tree', body)
+    commit_body = commit(root, [f['candidate']], MESSAGE, 2)
+    candidate = oid(f['algorithm'], 'commit', commit_body)
+    # Current-tree frontier discovery does not walk old target history.
+    # The restored blobs must therefore travel with this exact native result.
+    packed = {root: ('tree', body), candidate: ('commit', commit_body),
+              ids['gone']: f['objects'][ids['gone']], ids['old']: f['objects'][ids['old']]}
+    row = dict(conflict=dict(path_hex=b'text'.hex(),kind='Binary',
+        base=dict(mode=0o100644,oid=ids['theirs']),
+        ours=f['row']['result'],theirs=dict(mode=0o100644,oid=ids['old'])),
+        choice='theirs',result=dict(mode=0o100644,oid=ids['old']))
+    return dict(f, target=f['candidate'], candidate=candidate, tree=root, packed=packed, row=row)
+
+
+def target_only_fixture(root, f):
+    (root / 'refs/heads').mkdir(parents=True)
+    (root / 'HEAD').write_text(f'ref: {TARGET}\n')
+    (root / 'config').write_text('[core]\nbare=true\nrepositoryformatversion=' +
+        ('1\n[extensions]\nobjectformat=sha256\n' if f['algorithm'] == 'sha256' else '0\n'))
+    objects = f['parent_objects'] | f['packed']
+    require(f['selected'] not in objects and f['source'] not in objects,
+            'target fixture must not contain selected or later source commits')
+    for identity, (kind, body) in objects.items():
+        require(write_object(root, f['algorithm'], kind, body) == identity,
+                'target-only fixture native identity')
+    (root / TARGET).write_text(f['candidate'] + '\n')
+
+
 def report(f, data):
     return dict(type='commit_replay_resolution',schema_version=1,profile='path-v1',operation='cherry-pick',outcome='prepared',
         tenant_id=TENANT,repository_id=REPOSITORY,object_format=f['algorithm'],expected_target=f['target'],expected_source=f['source'],
@@ -149,6 +181,18 @@ def validate(actual, data, f):
     for key, value in report(f,data).items():
         require(key in actual,f'missing {key}'); same(actual[key],value,key)
     require(unpack(data,f) == f['packed'],'exact candidate object bytes and source-only closure')
+
+
+def inverse_report(f, data):
+    return dict(report(f, data), operation='revert', generated_objects=2, borrowed_objects=2)
+
+
+def validate_inverse(actual, data, f):
+    for key, value in inverse_report(f, data).items():
+        require(key in actual, f'missing inverse {key}')
+        same(actual[key], value, f'inverse.{key}')
+    require(unpack(data, f) == f['packed'],
+            'exact inverse object bytes and restored historical dependencies')
 
 
 def invoke(binary, args, code=0, env=None):
@@ -193,17 +237,47 @@ def run(binary, algorithm):
         require(not invoke(binary,stale,2).stdout and not stale[6].exists(),'stale target admitted')
         inverse=noop[:-2].copy(); inverse[0]='revert'; inverse[6]=root/'inverse.bundle'; inverse+=['--theirs','text']
         reverted=json.loads(invoke(binary,inverse).stdout)
-        ids=f['ids']; inverse_tree=tree([(b'gone',0o100644,ids['gone']),(b'keep',0o100644,ids['keep']),
-            (b'target',0o100644,ids['target']),(b'text',0o100644,ids['old'])])
-        inverse_tree_id=oid(algorithm,'tree',inverse_tree); inverse_body=commit(inverse_tree_id,[f['candidate']],MESSAGE,2)
-        inverse_id=oid(algorithm,'commit',inverse_body)
-        require(reverted['candidate_commit']==inverse_id and reverted['root_tree']==inverse_tree_id,'revert side semantics')
+        ids=f['ids']; fi=inverse_fixture(f); inverse_id=fi['candidate']
+        require(reverted['candidate_commit']==inverse_id and reverted['root_tree']==fi['tree'],'revert side semantics')
         require(reverted['resolutions'][0]['choice']=='theirs' and reverted['resolutions'][0]['result']==dict(mode=0o100644,oid=ids['old']),'revert parent side')
-        fi=dict(f,target=f['candidate'],candidate=inverse_id)
-        require(unpack(inverse[6].read_bytes(),fi)=={inverse_tree_id:('tree',inverse_tree),inverse_id:('commit',inverse_body)},'complete inverse bundle')
+        validate_inverse(reverted,inverse[6].read_bytes(),fi)
         publish_inverse=publish.copy(); publish_inverse[6]=inverse[6]
         for flag,value in (('--idempotency-key','resolved-inverse'),('--expected-base',f['candidate']),('--expected-commit',inverse_id)):
             publish_inverse[publish_inverse.index(flag)+1]=value
+        # Prove completeness on an independent node with only target history,
+        # after making its import source unavailable. A missing new tree must
+        # refuse before the near-identical complete bundle can publish.
+        target_source=root/'target-only-source'; target_only_fixture(target_source,f)
+        target_node=root/'target-only-node'
+        invoke(binary,['init',target_node,TENANT,REPOSITORY,algorithm])
+        invoke(binary,['import',target_node,TENANT,REPOSITORY,PRINCIPAL,'target-only-fixture',target_source])
+        target_source.rename(root/'target-only-source-offline')
+        target_state=['at',target_node,TENANT,REPOSITORY,'latest']; target_before=invoke(binary,target_state).stdout
+        missing=root/'missing-inverse-tree.bundle'
+        incomplete=dict(fi,packed={identity: value for identity,value in fi['packed'].items() if identity!=fi['tree']})
+        missing.write_bytes(bundle_bytes(incomplete))
+        target_inspect=inspect.copy(); target_inspect[2]=target_node; target_inspect[6]=missing
+        for flag,value in (('--expected-base',fi['target']),('--expected-commit',inverse_id)):
+            target_inspect[target_inspect.index(flag)+1]=value
+        require(not invoke(binary,target_inspect,2).stdout,'missing inverse tree was accepted')
+        require(invoke(binary,target_state).stdout==target_before,'incomplete inverse mutated target authority')
+        complete_control=root/'complete-inverse-control.bundle'
+        complete_control.write_bytes(bundle_bytes(fi)); target_inspect[6]=complete_control
+        require(json.loads(invoke(binary,target_inspect).stdout)['parents']==[fi['target']],
+                'complete paired inverse control')
+        require(invoke(binary,target_state).stdout==target_before,'complete control mutated target authority')
+        target_inspect[6]=inverse[6]
+        target_review=json.loads(invoke(binary,target_inspect).stdout)
+        require(target_review['parents']==[fi['target']] and target_review['prerequisites']==[fi['target']],
+                'target-only inverse inspection')
+        require(invoke(binary,target_state).stdout==target_before,'inverse inspection mutated target authority')
+        target_apply=publish_inverse.copy(); target_apply[2]=target_node
+        target_apply[target_apply.index('--idempotency-key')+1]='target-only-inverse'
+        require(json.loads(invoke(binary,target_apply).stdout)['outcome']=='committed','target-only inverse publication')
+        target_refs=json.loads(invoke(binary,['branch','list',target_node,TENANT,REPOSITORY,
+            '--trusted-local','--object-format',algorithm]).stdout)['branches']
+        require([(row['reference_hex'],row['tip']) for row in target_refs]==[(TARGET.encode().hex(),inverse_id)],
+                'target-only destination exact published branch')
         require(json.loads(invoke(binary,publish_inverse).stdout)['outcome']=='committed','inverse publication')
         after=invoke(binary,state).stdout; retry=json.loads(invoke(binary,publish).stdout)
         require(retry['tx_id']==first['tx_id'] and retry['outcome']=='committed','historical retry')
@@ -235,6 +309,29 @@ def self_test():
                 try: validate(wrong,damaged,f)
                 except (AssertionError,ValueError,IndexError,zlib.error): rejected+=1
                 else: raise AssertionError('checker accepted corrupt bundle')
+            fi=inverse_fixture(f); inverse_data=bundle_bytes(fi); expected_inverse=inverse_report(fi,inverse_data)
+            validate_inverse(expected_inverse,inverse_data,fi)
+            for key,value in [('operation','cherry-pick'),('expected_target',f['target']),('candidate_commit',f['candidate']),
+                              ('root_tree',f['tree']),('generated_objects',3),('borrowed_objects',0),('node_closed',False)]:
+                wrong=copy.deepcopy(expected_inverse); wrong[key]=value
+                try: validate_inverse(wrong,inverse_data,fi)
+                except AssertionError: rejected+=1
+                else: raise AssertionError('checker accepted a corrupted inverse receipt')
+            wrong=copy.deepcopy(expected_inverse); wrong['resolutions'][0]['conflict']['kind']='Content'
+            try: validate_inverse(wrong,inverse_data,fi)
+            except AssertionError: rejected+=1
+            else: raise AssertionError('checker accepted a non-binary inverse conflict')
+            changes=[]
+            changes.extend({identity:value for identity,value in fi['packed'].items() if identity!=removed}
+                           for removed in [fi['tree'],f['ids']['gone'],f['ids']['old']])
+            changes.append(fi['packed'] | {f['ids']['later']: f['objects'][f['ids']['later']]})
+            changes.append(fi['packed'] | {f['ids']['old']: ('blob',b'wrong restored bytes')})
+            changes.append(fi['packed'] | {f['ids']['gone']: ('tree',b'')})
+            for packed in changes:
+                damaged=bundle_bytes(dict(fi,packed=packed))
+                try: validate_inverse(inverse_report(fi,damaged),damaged,fi)
+                except (AssertionError,ValueError,IndexError,zlib.error): rejected+=1
+                else: raise AssertionError('checker accepted missing, unrelated or corrupt inverse objects')
     print(json.dumps(dict(type='replay_resolution_checker_selftest',negative_cases=rejected,rust_executed=False,passed=True)))
 
 

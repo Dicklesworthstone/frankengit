@@ -69,8 +69,12 @@ independent native-closure validator remain in force. Limits may be narrowed,
 not disabled. When resolving all conflicts to the target leaves no net change,
 the result is `no_change` with resolution receipts and no empty commit or bundle.
 
-The node packs the candidate closure minus target history, including any
-source-only blob or subtree selected by a resolution. The source commit is not
+The node follows the
+[complete target-only bundle contract](NATIVE_COMMIT_REPLAY.md#complete-target-only-bundles),
+including source-only blobs and subtrees selected by a resolution. Dependencies
+outside the proved current-target-tree frontier are packed even when they are
+also reachable through older target history; a minimum pack is not promised.
+The source commit is not
 a parent or a hidden bundle prerequisite. Only the exact target-before commit
 is the bundle prerequisite and sole parent.
 
