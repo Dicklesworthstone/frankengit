@@ -53,20 +53,30 @@ pub(super) fn checked(
     Ok((Arc::new(map), names))
 }
 
-/// Resolve identity/equal-side cases without creating a full path. `Some(None)`
-/// means a clean deletion, while `None` requires the actual merge/conflict path.
+/// A clean retained entry or deletion, or a request for the full merge path.
+pub(super) enum Trivial<'a> {
+    Entry(&'a MergeEntry),
+    Delete,
+    Nontrivial,
+}
+
+/// Resolve identity/equal-side cases without creating a full path.
 /// Callers must still validate the full path length before taking this shortcut.
 pub(super) fn trivial<'a>(
     base: Option<&'a MergeEntry>,
     ours: Option<&'a MergeEntry>,
     theirs: Option<&'a MergeEntry>,
-) -> Option<Option<&'a MergeEntry>> {
-    if ours == theirs || base == theirs {
-        Some(ours)
+) -> Trivial<'a> {
+    let entry = if ours == theirs || base == theirs {
+        ours
     } else if base == ours {
-        Some(theirs)
+        theirs
     } else {
-        None
+        return Trivial::Nontrivial;
+    };
+    match entry {
+        Some(entry) => Trivial::Entry(entry),
+        None => Trivial::Delete,
     }
 }
 

@@ -683,11 +683,13 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
                 .ok_or(PreparationError::Budget("path bytes"))?;
             // Most paths in a large directory are unchanged or one-sided.
             // Check their full path bound, but allocate no temporary full path.
-            if let Some(entry) = tree_entries::trivial(base, ours, theirs) {
-                if let Some(entry) = entry {
+            match tree_entries::trivial(base, ours, theirs) {
+                tree_entries::Trivial::Entry(entry) => {
                     result.push(entry.clone());
+                    continue;
                 }
-                continue;
+                tree_entries::Trivial::Delete => continue,
+                tree_entries::Trivial::Nontrivial => {}
             }
             let mut child = Vec::with_capacity(length);
             child.extend_from_slice(path);
@@ -777,8 +779,10 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         depth: usize,
         attributes: bool,
     ) -> Result<Option<MergeEntry>, PreparationError> {
-        if let Some(entry) = tree_entries::trivial(base, ours, theirs) {
-            return Ok(entry.cloned());
+        match tree_entries::trivial(base, ours, theirs) {
+            tree_entries::Trivial::Entry(entry) => return Ok(Some(entry.clone())),
+            tree_entries::Trivial::Delete => return Ok(None),
+            tree_entries::Trivial::Nontrivial => {}
         }
         let (Some(o), Some(t)) = (ours, theirs) else {
             return self.conflict(path, ConflictKind::ModifyDelete, base, ours, theirs);
