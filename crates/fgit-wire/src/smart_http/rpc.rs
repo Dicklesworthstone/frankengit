@@ -423,7 +423,16 @@ pub struct ReceiveRpc {
     /// refused the fully received request (frankengit-87c7).
     request: Option<Box<ReceiveRequest>>,
     refused: bool,
+    /// Decoded body bytes fed to the receive machine so far.
+    fed: usize,
+    /// The body so far is exactly one flush packet, held back from the
+    /// machine: git's postBuffer probe (frankengit-wh86).
+    probe: bool,
 }
+
+/// The whole body of git's `probe_rpc`: one flush packet.
+const PROBE_BODY: &[u8] = b"0000";
+
 impl ReceiveRpc {
     pub fn new(
         request: &RequestHead<'_>,
@@ -447,8 +456,21 @@ impl ReceiveRpc {
             chunk_bytes,
             request: None,
             refused: false,
+            fed: 0,
+            probe: false,
         })
     }
+
+    /// Whether the complete body was exactly one flush packet: git's
+    /// remote-curl sends it alone before any request larger than
+    /// http.postBuffer and requires HTTP 200. git-http-backend's receive-pack
+    /// reads no command and answers with an empty result, so the host answers
+    /// it without quarantine, admission or any binding (frankengit-wh86).
+    #[must_use]
+    pub fn is_probe(&self) -> bool {
+        self.probe && self.body.is_complete()
+    }
+
     pub fn push<C: ReceiveCancellation>(
         &mut self,
         input: &[u8],
@@ -474,6 +496,17 @@ impl ReceiveRpc {
             consumed += step.consumed;
             for fragment in step.data.chunks(self.chunk_bytes) {
                 checkpoint(cancellation)?;
+                if self.fed == 0 && fragment == PROBE_BODY {
+                    self.probe = true;
+                    self.fed = PROBE_BODY.len();
+                    continue;
+                }
+                if std::mem::take(&mut self.probe) {
+                    // Bytes after the flush: an ordinary request with no
+                    // commands, refused exactly as before.
+                    machine.push_bytes(PROBE_BODY)?;
+                }
+                self.fed = self.fed.saturating_add(fragment.len());
                 // The parsed request stays private until HTTP and pack
                 // validation, and is disclosed only to report a refusal.
                 for event in machine.push_bytes(fragment)?.events {
@@ -501,6 +534,10 @@ impl ReceiveRpc {
         let mut machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
         checkpoint(cancellation)?;
         self.body.finish()?;
+        if std::mem::take(&mut self.probe) {
+            // A caller that does not answer probes refuses one as before.
+            machine.push_bytes(PROBE_BODY)?;
+        }
         checkpoint(cancellation)?;
         let finished = machine.finish_with_handoff(handoff, cancellation);
         self.refused = matches!(finished, Err(ReceiveError::AuthoritativeRefusal(_)));
@@ -518,9 +555,13 @@ impl ReceiveRpc {
         mut self,
         cancellation: &mut C,
     ) -> Result<ReceiveQuarantine, RpcError> {
-        let machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
+        let mut machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
         checkpoint(cancellation)?;
         self.body.finish()?;
+        if std::mem::take(&mut self.probe) {
+            // A caller that does not answer probes refuses one as before.
+            machine.push_bytes(PROBE_BODY)?;
+        }
         checkpoint(cancellation)?;
         Ok(machine.into_quarantine(cancellation)?)
     }

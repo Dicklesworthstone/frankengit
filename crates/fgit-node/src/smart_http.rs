@@ -1081,6 +1081,26 @@ impl OneNode {
                     return Err(error);
                 }
             };
+        if rpc.is_probe() {
+            // git's remote-curl sends a lone flush packet before any request
+            // larger than http.postBuffer and sends nothing more unless it is
+            // answered 200; git-http-backend's receive-pack reads no command
+            // and writes an empty result. Nothing is admitted, bound or
+            // recorded (frankengit-wh86).
+            let head = success_head(request, Some(0));
+            write_response_part(writer, head.as_bytes(), "write smart HTTP probe head")?;
+            writer.flush().map_err(|source| NodeSmartHttpRefusal::Io {
+                operation: "flush smart HTTP probe answer",
+                source,
+            })?;
+            return Ok(AdmissionResult {
+                session: fgit_admission::SessionMapping {
+                    atomic: false,
+                    tx_ids: Vec::new(),
+                },
+                commands: Vec::new(),
+            });
+        }
 
         // Ingress is complete. These independent, finite server-work clocks
         // cannot be exhausted by time the peer spent uploading its body.

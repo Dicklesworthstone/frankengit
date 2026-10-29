@@ -230,6 +230,23 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> None:
                 redact(f"credential-helper push failed ({pushed.returncode}): {pushed.stderr[-4000:]}"))
         require(f"{tip}\trefs/heads/helper-auth" in commands.remote_git(token, 2, "ls-remote", url).splitlines(),
                 "credential-helper push did not publish its branch")
+        # A request larger than http.postBuffer (1 MiB by default) makes Git
+        # send its probe RPC, a lone flush packet, and stream the pack only
+        # after a 200 answer (frankengit-wh86). Incompressible, deterministic.
+        commands.local_git("-C", str(source), "checkout", "-q", "-b", "large", "HEAD")
+        (source / "large.bin").write_bytes(b"".join(
+            hashlib.sha256(index.to_bytes(8, "big")).digest() for index in range(3 * 32 * 1024)))
+        commands.local_git("-C", str(source), "add", "large.bin")
+        commands.local_git("-C", str(source), "-c", "commit.gpgsign=false", "commit", "-qm", "large")
+        large_tip = commands.local_git("-C", str(source), "rev-parse", "HEAD")
+        commands.remote_git(token, 2, "-C", str(source), "push", url, "HEAD:refs/heads/large")
+        require(f"{large_tip}\trefs/heads/large" in commands.remote_git(token, 2, "ls-remote", url).splitlines(),
+                "a push larger than http.postBuffer did not publish")
+        large_clone = root / "large-clone"
+        commands.remote_git(token, 2, "clone", "-q", "--branch", "large", url, str(large_clone))
+        require((large_clone / "large.bin").read_bytes() == (source / "large.bin").read_bytes(),
+                "the large pushed blob cloned with different bytes")
+        commands.local_git("-C", str(source), "checkout", "-q", "main")
     with server(fg, commands, root, token_file, receive=False) as url:
         headers = {"Authorization": f"Bearer {token}"}
         require(http_status(url + "/info/refs?service=git-receive-pack", headers) == 403,

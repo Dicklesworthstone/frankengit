@@ -801,3 +801,57 @@ fn a_refused_receive_publishes_none_of_its_objects_and_its_permitted_twin_does()
         node.shutdown().unwrap();
     }
 }
+
+/// git's postBuffer probe, a lone flush packet, is answered 200 with an empty
+/// receive-pack result and admits, binds and records nothing. The real
+/// request that follows on the same session then commits once
+/// (frankengit-wh86).
+#[test]
+fn the_post_buffer_probe_is_answered_200_and_the_following_request_commits() {
+    let format = GitHashAlgorithm::Sha1;
+    let (node, _scratch) = node(format);
+    let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
+    let selected = session(b"probe-then-push");
+    let before = generation(&node);
+    let header = format!(
+        "POST {route}/git-receive-pack HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\n\r\n"
+    );
+    let request = parse_head(header.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let mut response = Output::default();
+    let gate = WriterGate::new(1);
+    let probed = node
+        .smart_http_receive_stream_gated_in(
+            &request,
+            &selected,
+            &mut Cursor::new(b"0000".to_vec()),
+            HttpLimits::default(),
+            AdmissionLimits::default(),
+            Some(&gate),
+            &mut || true,
+            &mut response,
+        )
+        .unwrap();
+    assert!(probed.commands.is_empty() && probed.session.tx_ids.is_empty());
+    let text = String::from_utf8(response.0).unwrap();
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("Content-Length: 0\r\n"), "{text}");
+    assert!(text.ends_with("\r\n\r\n"), "an empty body: {text}");
+    assert_eq!(generation(&node), before, "a probe decides nothing");
+    assert!(matches!(
+        node.runtime()
+            .block_on(node.recover_receive_session_in(&node.request_context(), &selected))
+            .unwrap(),
+        SessionRecovery::NotObserved
+    ));
+    let (id, bytes) = blob_push(format, "refs/tags/after-probe");
+    let pushed = http_receive(&node, &bytes, &selected, Some(&gate)).unwrap();
+    assert!(matches!(
+        pushed.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    assert_eq!(generation(&node), before + 1);
+    assert!(node.read_git_object(id).is_ok());
+    node.shutdown().unwrap();
+}

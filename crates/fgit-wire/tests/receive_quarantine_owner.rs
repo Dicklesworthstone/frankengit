@@ -396,3 +396,42 @@ fn speculation_sees_the_same_input_and_leaves_the_one_consuming_handoff() {
         }
     }
 }
+
+/// git's remote-curl sends a lone flush packet before any request larger
+/// than http.postBuffer and requires 200. That complete body is a probe in
+/// either framing. A flush followed by more bytes is an ordinary request
+/// with no commands, refused as before, and a caller that does not answer
+/// probes still refuses one (frankengit-wh86).
+#[test]
+fn a_lone_flush_body_is_a_probe_and_anything_more_is_still_refused() {
+    let format = GitObjectFormat::Sha1;
+    for chunked in [false, true] {
+        let probe = http_rpc(format, b"0000", chunked, true);
+        assert!(probe.is_probe(), "chunked={chunked}");
+        assert!(matches!(
+            probe.into_quarantine(&mut || true),
+            Err(RpcError::Receive(ReceiveError::MissingCommands))
+        ));
+        assert!(
+            !http_rpc(format, b"0000", chunked, false).is_probe(),
+            "an incomplete body is not yet a probe"
+        );
+    }
+    let head = "POST /repo.git/git-receive-pack HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-git-receive-pack-request\r\nContent-Length: 8\r\n\r\n";
+    let request = parse_head(head.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let mut rpc = ReceiveRpc::new(
+        &request,
+        ProtocolVersion::V0,
+        context(format, ReceiveLimits::default()),
+        HttpLimits::default(),
+    )
+    .unwrap();
+    rpc.push(b"0000", &mut || true).unwrap();
+    assert!(!rpc.is_probe(), "the body is not complete");
+    assert!(matches!(
+        rpc.push(b"0000", &mut || true),
+        Err(RpcError::Receive(ReceiveError::MissingCommands))
+    ));
+}
