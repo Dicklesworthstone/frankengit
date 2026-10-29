@@ -272,20 +272,24 @@ fn invalid_number_and_cancelled_selection_create_no_execution_claim() {
     let n = f.node();
     let request = n.command_request_context(None);
     request.cancel();
-    assert!(
-        n.runtime()
-            .block_on(n.poll_trusted_pull_request_workflows_in(
-                &request,
-                &reference(),
-                7,
-                b"ci",
-                &f.parent(),
-                &[b"ci".to_vec()],
-                Default::default(),
-                None
-            ))
-            .is_err()
-    );
+    // A cancellation observed before event reservation is a typed stop, not a
+    // failure (74e832cc); it still creates no execution claim.
+    let stopped = n
+        .runtime()
+        .block_on(n.poll_trusted_pull_request_workflows_in(
+            &request,
+            &reference(),
+            7,
+            b"ci",
+            &f.parent(),
+            &[b"ci".to_vec()],
+            Default::default(),
+            None,
+        ))
+        .unwrap();
+    assert!(stopped.stopped_before_reservation());
+    assert!(!stopped.execution_settled());
+    assert!(stopped.dispatch().is_none());
     assert_eq!(fs::read_dir(f.parent()).unwrap().count(), 0);
     assert_eq!(f.count(), "");
     assert!(pr_poll!(f, 7).unwrap().dispatch().unwrap().succeeded());

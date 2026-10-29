@@ -10,8 +10,8 @@ struct Source {
     trees: BTreeMap<GitOid, Vec<MergeEntry>>,
     blobs: BTreeMap<GitOid, Vec<u8>>,
     reads: RefCell<Vec<GitOid>>,
-    tree_reads: Cell<usize>,
-    stop_after_trees: Cell<Option<usize>>,
+    checkpoints: Cell<usize>,
+    cancel_after_checkpoints: Cell<Option<usize>>,
 }
 impl Source {
     fn new(format: GitHashAlgorithm) -> Self {
@@ -21,8 +21,8 @@ impl Source {
             trees: BTreeMap::new(),
             blobs: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
-            tree_reads: Cell::new(0),
-            stop_after_trees: Cell::new(None),
+            checkpoints: Cell::new(0),
+            cancel_after_checkpoints: Cell::new(None),
         }
     }
     fn file(&mut self, name: &[u8], bytes: &[u8], mode: u32) -> MergeEntry {
@@ -73,10 +73,11 @@ impl Source {
 }
 impl MergeObjectSource for Source {
     fn checkpoint(&self) -> Result<(), MergeSourceError> {
+        self.checkpoints.set(self.checkpoints.get() + 1);
         if self
-            .stop_after_trees
+            .cancel_after_checkpoints
             .get()
-            .is_some_and(|limit| self.tree_reads.get() >= limit)
+            .is_some_and(|limit| self.checkpoints.get() > limit)
         {
             Err(MergeSourceError::Cancelled)
         } else {
@@ -91,7 +92,6 @@ impl MergeObjectSource for Source {
             .ok_or(MergeSourceError::Unavailable(id))
     }
     fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError> {
-        self.tree_reads.set(self.tree_reads.get() + 1);
         self.trees
             .get(&id)
             .cloned()
@@ -350,8 +350,38 @@ fn discovery_and_reconstruction_share_the_tree_budget_and_cancellation() {
         matches!(prepare_resolved_replay(&s, s.format, input, &[choice(b"file", ResolutionChoice::Theirs)], &metadata(), limits),
         Err(ReplayError::Resolution(error)) if matches!(*error, ResolutionError::Preparation(PreparationError::Budget("tree entries"))))
     );
-    s.tree_reads.set(0);
-    s.stop_after_trees.set(Some(4));
+    // Discovery and reconstruction share one parsed-tree cache (951580e5), so
+    // reconstruction reads no tree of its own and a tree-read count can no
+    // longer place a cancellation inside it. Cancel at the first source
+    // checkpoint after a complete discovery instead: discovery alone still
+    // finishes, and reconstruction must observe the same cancellation.
+    s.checkpoints.set(0);
+    assert!(matches!(
+        prepare_replay(
+            &s,
+            s.format,
+            input,
+            &metadata(),
+            PreparationLimits::default()
+        )
+        .unwrap(),
+        ReplayPreparation::Conflicted { .. }
+    ));
+    let discovery = s.checkpoints.get();
+    s.cancel_after_checkpoints.set(Some(discovery));
+    s.checkpoints.set(0);
+    assert!(matches!(
+        prepare_replay(
+            &s,
+            s.format,
+            input,
+            &metadata(),
+            PreparationLimits::default()
+        )
+        .unwrap(),
+        ReplayPreparation::Conflicted { .. }
+    ));
+    s.checkpoints.set(0);
     assert!(
         matches!(prepare_resolved_replay(&s, s.format, input, &[choice(b"file", ResolutionChoice::Theirs)],
         &metadata(), PreparationLimits::default()), Err(ReplayError::Resolution(error))
