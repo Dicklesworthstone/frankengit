@@ -1376,6 +1376,21 @@ mod tests {
         assert!(!widened.contains("max_total_expanded_bytes: 4294967296"));
     }
 
+    /// frankengit-88fk: the receive delta-work bound follows the receive
+    /// expanded envelope (2 x expanded + one unit per pack entry) instead of
+    /// staying at the fixed 256 MiB default that no flag could raise.
+    #[test]
+    fn the_receive_delta_work_bound_follows_the_expanded_envelope() {
+        let debug = |args: &[String]| format!("{:?}", parse(args).unwrap().config);
+        let default = debug(&arguments());
+        assert!(default.contains("max_delta_work: 269435456"), "{default}");
+        let mut args = arguments();
+        args.extend(["--receive-max-expanded-mib".into(), "1024".into()]);
+        let widened = debug(&args);
+        assert!(widened.contains("max_delta_work: 2148483648"), "{widened}");
+        assert!(!widened.contains("max_delta_work: 269435456"), "{widened}");
+    }
+
     #[test]
     fn selected_blob_limit_has_the_same_explicit_opt_in_as_other_transports() {
         assert_eq!(

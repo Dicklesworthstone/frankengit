@@ -4910,6 +4910,17 @@ impl std::fmt::Debug for PushQuota {
 /// once, here. Non-atomic sessions bind their complete semantics through the
 /// versioned receive-session carrier. Atomic requests still fit one seal and
 /// are refused at their narrower count before their PACK body is retained.
+/// Delta-reconstruction work one receive may spend under an expanded
+/// envelope of `expanded_bytes` (frankengit-88fk): twice the expanded content,
+/// which bounds every base and result a delta is charged, plus one unit per
+/// pack entry. At the 128 MiB default envelope this is just above the
+/// wire-crate default of 256 MiB.
+const fn receive_delta_work_limit(expanded_bytes: usize, max_entries: u32) -> usize {
+    expanded_bytes
+        .saturating_mul(2)
+        .saturating_add(max_entries as usize)
+}
+
 fn sealable_receive_limits(mut limits: ReceiveLimits) -> ReceiveLimits {
     limits.max_commands = limits
         .max_commands
@@ -7671,6 +7682,13 @@ impl NodeConfig {
     /// delta-resolver cache bound tracks the expanded ceiling, exactly as the
     /// wire-crate default profile couples them; a `None` component keeps the
     /// documented default.
+    ///
+    /// The delta-reconstruction work bound follows the expanded ceiling too,
+    /// as the import profile's does (frankengit-kxew): a delta is charged its
+    /// base length and its result bytes, both resolved content the expanded
+    /// ceiling already bounds, plus one unit per pack entry. It once stayed at
+    /// the fixed 256 MiB default, so a push whose deltas needed more work was
+    /// refused under every operator setting (frankengit-88fk).
     #[must_use]
     pub const fn with_git_daemon_receive_byte_envelope(
         mut self,
@@ -7684,6 +7702,10 @@ impl NodeConfig {
         if let Some(bytes) = max_expanded_bytes {
             self.git_daemon_receive_limits.pack.max_total_expanded_bytes = bytes;
             self.git_daemon_receive_limits.pack.max_cached_bytes = bytes;
+            self.git_daemon_receive_limits.pack.max_delta_work = receive_delta_work_limit(
+                bytes,
+                self.git_daemon_receive_limits.pack.max_entries,
+            );
         }
         self
     }

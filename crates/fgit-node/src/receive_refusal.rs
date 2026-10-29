@@ -18,13 +18,14 @@
 //! is deliberately absent here so each cause has one text.
 
 use fgit_admission::AdmissionError;
+use fgit_pack::PackError;
 use fgit_types::RefusalCode;
 use fgit_wire::WireError;
 use fgit_wire::receive::ReceiveError;
 use fgit_wire::smart_http::rpc::RpcError;
 
-use crate::NodeReceiveTransportRefusal;
 use crate::smart_http::NodeSmartHttpRefusal;
+use crate::{GitDaemonTransportRefusal, NodeGitDaemonServeRefusal, NodeReceiveTransportRefusal};
 
 /// Longest echoed client-supplied ref name, in bytes.
 const MAX_ECHOED_REF_BYTES: usize = 256;
@@ -48,6 +49,15 @@ pub fn client_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
         NodeSmartHttpRefusal::RefWriteScopeDenied => {
             Some("push refused: credential does not permit writing every requested reference in this attempt; any prior outcome remains recoverable using the original key".to_owned())
         }
+        // git:// and SSH find the pack's end with a bounded scan before the
+        // receive machine sees it; its bound refusals are the same envelope.
+        NodeSmartHttpRefusal::Serve(serve) => match serve.as_ref() {
+            NodeGitDaemonServeRefusal::Transport(transport) => match transport.as_ref() {
+                GitDaemonTransportRefusal::ReceivePackFraming(error) => pack_cause(error),
+                _ => None,
+            },
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -93,7 +103,10 @@ pub fn request_cause(error: &NodeSmartHttpRefusal) -> Option<String> {
             | ReceiveError::SignedPushUnsupported
             | ReceiveError::SignedPushCapabilityMissing
             | ReceiveError::ObjectFormatMismatch { .. }
-    );
+            | ReceiveError::AuthoritativeRefusal(
+                RefusalCode::ResourceBudgetExceeded | RefusalCode::DeltaBudgetExceeded
+            )
+    ) || matches!(receive, ReceiveError::Pack(error) if pack_cause(error).is_some());
     if bound_or_policy {
         client_cause(error)
     } else {
@@ -183,7 +196,53 @@ fn receive_cause(error: &ReceiveError) -> Option<String> {
         | ReceiveError::CertificateTruncated
         | ReceiveError::CertificateNonceMismatch => "malformed push certificate".to_owned(),
         ReceiveError::Wire(error) => wire_cause(error),
+        ReceiveError::Pack(error) => return pack_cause(error),
+        ReceiveError::AuthoritativeRefusal(RefusalCode::ResourceBudgetExceeded) => {
+            "push exceeds a receive resource limit of this server (pack size, expanded \
+             content, object count or work; fg serve --receive-max-input-mib, \
+             --receive-max-expanded-mib)"
+                .to_owned()
+        }
+        ReceiveError::AuthoritativeRefusal(RefusalCode::DeltaBudgetExceeded) => {
+            "push deltas exceed this server's receive delta limits (depth, fanout or \
+             reconstruction work; fg serve --receive-max-expanded-mib raises the work \
+             limit) or are malformed"
+                .to_owned()
+        }
         error => return storage_cause(error),
+    })
+}
+
+/// A pack that exceeds a receive bound this server's operator chose, named
+/// with the flag that raises it (frankengit-88fk). A malformed pack keeps the
+/// generic line.
+fn pack_cause(error: &PackError) -> Option<String> {
+    Some(match error {
+        PackError::InputLimit { limit, .. } => format!(
+            "push pack exceeds this server's receive limit of {limit} bytes \
+             (fg serve --receive-max-input-mib)"
+        ),
+        PackError::TotalExpandedLimit { limit, .. } => format!(
+            "push expands to more than this server's receive limit of {limit} bytes \
+             (fg serve --receive-max-expanded-mib)"
+        ),
+        PackError::DeltaWorkLimit { limit, .. } => format!(
+            "push deltas need more reconstruction work than this server's receive limit \
+             of {limit} (fg serve --receive-max-expanded-mib)"
+        ),
+        PackError::EntryCountLimit { limit, .. } => {
+            format!("push carries more than {limit} objects, this server's receive limit")
+        }
+        PackError::ObjectSizeLimit { limit, .. } => format!(
+            "push carries an object larger than this server's receive limit of {limit} bytes"
+        ),
+        PackError::DeltaDepthLimit { limit, .. } => {
+            format!("push carries a delta chain deeper than this server's limit of {limit}")
+        }
+        PackError::DeltaFanoutLimit { limit, .. } => {
+            format!("push carries a delta base with more than {limit} deltas, this server's limit")
+        }
+        _ => return None,
     })
 }
 
@@ -281,6 +340,60 @@ mod tests {
         for error in [receive(verdict.clone()), admission(verdict)] {
             assert_eq!(client_cause(&error), None, "{error:?}");
             assert_eq!(request_cause(&error), None, "{error:?}");
+        }
+    }
+
+    /// Every receive envelope bound is named with its operator flag on git://
+    /// and SSH (the framing scan) and on smart HTTP's 200 body; a malformed
+    /// pack keeps the generic line (frankengit-88fk).
+    #[test]
+    fn receive_envelope_bounds_name_their_flag_and_a_malformed_pack_does_not() {
+        let framing = |error: PackError| {
+            NodeSmartHttpRefusal::Serve(Box::new(NodeGitDaemonServeRefusal::Transport(Box::new(
+                GitDaemonTransportRefusal::ReceivePackFraming(error),
+            ))))
+        };
+        let expanded = PackError::TotalExpandedLimit {
+            actual: 139_288_771,
+            limit: 134_217_728,
+        };
+        let text = "push expands to more than this server's receive limit of 134217728 bytes \
+                    (fg serve --receive-max-expanded-mib)";
+        assert_eq!(
+            client_cause(&framing(expanded.clone())).as_deref(),
+            Some(text)
+        );
+        let http = receive(ReceiveError::Pack(expanded));
+        assert_eq!(client_cause(&http).as_deref(), Some(text));
+        assert_eq!(request_cause(&http).as_deref(), Some(text));
+        let input = receive(ReceiveError::Pack(PackError::InputLimit {
+            actual: 2,
+            limit: 1,
+        }));
+        assert!(
+            request_cause(&input)
+                .is_some_and(|text| text.ends_with("(fg serve --receive-max-input-mib)"))
+        );
+        let work = receive(ReceiveError::Pack(PackError::DeltaWorkLimit {
+            attempted: 2,
+            limit: 1,
+        }));
+        assert!(
+            request_cause(&work).is_some_and(|text| text.contains("--receive-max-expanded-mib"))
+        );
+        for code in [
+            RefusalCode::ResourceBudgetExceeded,
+            RefusalCode::DeltaBudgetExceeded,
+        ] {
+            let handoff = receive(ReceiveError::AuthoritativeRefusal(code));
+            assert!(
+                request_cause(&handoff)
+                    .is_some_and(|text| text.contains("--receive-max-expanded-mib"))
+            );
+        }
+        for malformed in [PackError::DeltaCycle, PackError::TrailerChecksumMismatch] {
+            assert_eq!(client_cause(&framing(malformed.clone())), None);
+            assert_eq!(request_cause(&receive(ReceiveError::Pack(malformed))), None);
         }
     }
 
