@@ -847,6 +847,110 @@ fn a_refused_receive_publishes_none_of_its_objects_and_its_permitted_twin_does()
     }
 }
 
+struct Blobs(Vec<CanonicalPackObject>);
+
+impl CanonicalObjectSource for Blobs {
+    fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
+        Ok(self
+            .0
+            .iter()
+            .find(|object| object.id() == *id)
+            .expect("the plan names only this source's objects")
+            .clone())
+    }
+}
+
+/// A non-atomic two-command HTTP push whose commands are both refused (a
+/// stale old value and a ref-policy deny) publishes neither object, and its
+/// original key recovers the complete session with both refused terminals
+/// (frankengit-tz5z acceptance 2).
+#[test]
+fn a_refused_two_command_session_recovers_both_refusals_and_publishes_nothing() {
+    let format = GitHashAlgorithm::Sha1;
+    let (node, scratch) = node(format);
+    let (_, existing) =
+        distinct_blob_push(format, "refs/tags/conflict", b"the existing tag\n".to_vec());
+    let (created, _) = receive(&node, true, &existing, b"existing-tag", None);
+    assert!(matches!(
+        created.unwrap().commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    freeze_tags(&node);
+    let objects: Vec<CanonicalPackObject> = [&b"a stale object\n"[..], b"a denied object\n"]
+        .iter()
+        .map(|body| {
+            let id = fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Blob, body);
+            CanonicalPackObject::new(id, ObjectType::Blob, body.to_vec(), Vec::new(), 0, 0)
+        })
+        .collect();
+    let ids: Vec<ObjectId> = objects.iter().map(CanonicalPackObject::id).collect();
+    let plan = PackPlanner::new(format, PackWriteProfile::STORED_V1, PackLimits::default())
+        .plan(&Blobs(objects), &ids, &mut || true)
+        .unwrap();
+    let (pack, _) = PackWriter::new(PackLimits::default())
+        .write(&plan, &mut || true)
+        .unwrap();
+    let zero = "00".repeat(format.digest_len());
+    let mut bytes = encode_packets(
+        &[
+            Packet::Data(
+                format!(
+                    "{zero} {} refs/tags/conflict\0report-status delete-refs object-format={}",
+                    ids[0],
+                    format.as_str()
+                )
+                .into_bytes(),
+            ),
+            Packet::Data(format!("{zero} {} refs/tags/frozen/release", ids[1]).into_bytes()),
+            Packet::Flush,
+        ],
+        &WireLimits::default(),
+    )
+    .unwrap();
+    bytes.extend_from_slice(&pack);
+    let key = b"refused-two-command-session";
+    let (result, _) = receive(&node, true, &bytes, key, None);
+    let result = result.unwrap();
+    assert!(!result.session.atomic);
+    let codes: Vec<_> = result
+        .commands
+        .iter()
+        .map(|command| match command.terminal.outcome {
+            DecisionOutcome::Refused { code, .. } => code,
+            outcome => panic!("both commands must be refused, got {outcome:?}"),
+        })
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            RefusalCode::ExpectedOldRefMismatch,
+            RefusalCode::ProtectedRefTransitionDenied
+        ]
+    );
+    for id in &ids {
+        assert!(node.read_git_object(*id).is_err(), "{id} was published");
+    }
+    assert_eq!(
+        std::fs::read_dir(scratch.0.join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let SessionRecovery::Recovered(recovered) = node
+        .runtime()
+        .block_on(node.recover_receive_session_in(&node.request_context(), &session(key)))
+        .unwrap()
+    else {
+        panic!("the refused session must be recoverable by its original key");
+    };
+    assert!(recovered.all_terminal());
+    assert_eq!(recovered.commands().len(), 2);
+    for (command, expected) in recovered.commands().iter().zip(&result.commands) {
+        assert_eq!(command.recovery().terminal(), Some(expected.terminal));
+    }
+    node.shutdown().unwrap();
+}
+
 /// Installs a ref policy that denies every update beneath `refs/tags/frozen/`.
 fn freeze_tags(node: &OneNode) {
     use fgit_forge::ExpectedVersion;
