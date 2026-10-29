@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, readFile, rm, stat, readdir } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile, readFile, rm, stat, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -16,7 +16,7 @@ const scope = { tenant_id: '11'.repeat(16), repository_id: '22'.repeat(16),
   repository_incarnation_id: '33'.repeat(16), trust_domain: 'trusted-workflow-local-owner' };
 const cli = new URL('../../scripts/fg_workflow_watch.mjs', import.meta.url);
 async function fixture(t, options = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'fg-artifact-download-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'fg-artifact-download-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const bytes = options.bytes ?? Buffer.from([0, 255, 13, 10, 38, 0x1b, 0xc3, 0xa9]), output = join(dir, 'output');
   const file = { path_hex: path, artifact_id_sha256: id, payload_sha256: hash(bytes), payload_bytes: bytes.length, executable: true };
   let receipt = { type: 'trusted_workflow_artifact_receipt', manifest_id_sha256: '56'.repeat(32),
@@ -183,7 +183,7 @@ test('noncanonical endpoint, unsupported scope and pre-cancellation refuse befor
   await assert.rejects(f.send({ rejectUnauthorized: false })); assert.equal(f.calls.length, 0);
 });
 test('HTTPS verifies explicit private CA and hostname; untrusted or wrong-name peers cannot disclose', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'fg-artifact-tls-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'fg-artifact-tls-')); t.after(() => rm(dir, { recursive: true, force: true }));
   async function tls(name, alt) {
     const key = join(dir, name + '.key'), cert = join(dir, name + '.cert');
     // OpenSSL creates test credentials only; it is not an artifact verifier.
