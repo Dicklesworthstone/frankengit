@@ -1158,3 +1158,153 @@ fn a_storage_failure_while_staging_is_a_durability_refusal_not_an_evidence_verdi
     }
     node.shutdown().expect("node shuts down after test");
 }
+
+/// A file grown over twelve commits, so its versions delta against each
+/// other, plus one unreachable upload: (pack, object count, tip, junk blob).
+fn delta_history_pack() -> (Vec<u8>, u32, GitOid, GitOid) {
+    let mut objects = BTreeMap::new();
+    let mut parent: Option<GitOid> = None;
+    let mut text = String::new();
+    for line in 0..400 {
+        text.push_str(&format!("line {line}: the same history, revised again\n"));
+    }
+    for version in 0..12 {
+        text.push_str(&format!("revision {version} appends this line\n"));
+        let blob_body = text.clone().into_bytes();
+        let blob_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &blob_body);
+        let mut tree_body = b"100644 history.txt\0".to_vec();
+        tree_body.extend_from_slice(blob_id.as_bytes());
+        let tree_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, &tree_body);
+        let parent_line = parent.map_or(String::new(), |parent| format!("parent {parent}\n"));
+        let commit_body = format!(
+            "tree {tree_id}\n{parent_line}author A <a@example.com> {version} +0000\ncommitter C <c@example.com> {version} +0000\n\nrevision {version}\n"
+        )
+        .into_bytes();
+        let commit_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Commit, &commit_body);
+        for (id, kind, body) in [
+            (blob_id, ObjectType::Blob, blob_body),
+            (tree_id, ObjectType::Tree, tree_body),
+            (commit_id, ObjectType::Commit, commit_body),
+        ] {
+            objects.insert(
+                id,
+                CanonicalPackObject::new(id, kind, body, Vec::new(), 0, 0),
+            );
+        }
+        parent = Some(commit_id);
+    }
+    // Unrelated bytes, so the planner never makes it a delta base of the history.
+    let junk_body: Vec<u8> = (0_u32..4096)
+        .map(|at| u8::try_from(at.wrapping_mul(2_654_435_761) >> 24).expect("a byte"))
+        .collect();
+    let junk_id =
+        fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &junk_body);
+    objects.insert(
+        junk_id,
+        CanonicalPackObject::new(junk_id, ObjectType::Blob, junk_body, Vec::new(), 0, 0),
+    );
+    let ids: Vec<ObjectId> = objects.keys().copied().collect();
+    let source = SelectedObjectsSource { objects };
+    let limits = PackLimits::default();
+    let mut live = || true;
+    let plan = PackPlanner::new(
+        GitHashAlgorithm::Sha1,
+        PackWriteProfile::COMPRESSED_V5,
+        limits.clone(),
+    )
+    .plan_selected(&source, &ids, &mut live)
+    .expect("the history plans into a delta-compressed pack");
+    let (pack_bytes, receipt) = PackWriter::new(limits)
+        .write(&plan, &mut live)
+        .expect("the history pack writes");
+    (
+        pack_bytes,
+        receipt.object_count,
+        parent.expect("twelve commits"),
+        junk_id,
+    )
+}
+
+/// A receive that spills every verified blob and every delta-resolver cache
+/// entry to its object spool validates a delta-compressed history exactly as
+/// one that keeps them in memory: the same closure and closure root, the same
+/// staged bytes, and the unreachable upload left out (frankengit-88fk).
+#[test]
+fn a_spilling_receive_validates_and_stages_exactly_as_a_resident_one() {
+    let (pack_bytes, object_count, tip, junk_id) = delta_history_pack();
+    let mut results = Vec::new();
+    for spill_everything in [false, true] {
+        let scratch = ScratchDirectory::new();
+        let node = test_node(scratch.path().to_path_buf());
+        let limits = PackLimits::default();
+        let mut live = || true;
+        let pack = read_verified_pack(
+            &pack_bytes,
+            GitHashAlgorithm::Sha1,
+            &limits,
+            &mut live,
+            &NativeChecksumVerifier,
+        )
+        .expect("the history pack enters receive quarantine");
+        assert!(
+            pack.entries()
+                .iter()
+                .filter(|entry| entry.delta_base.is_some())
+                .count()
+                > 5,
+            "the fixture must exercise delta resolution"
+        );
+        let mut validator = ProductionQuarantineValidator::new(
+            &node,
+            empty_selected_closure(),
+            limits,
+            ParseLimits::default(),
+        );
+        if spill_everything {
+            validator = validator.with_resident_budgets(0, 0);
+        }
+        let bases = validator
+            .external_bases(&pack, &mut live)
+            .expect("no external bases");
+        let (verified, _, _) = validator
+            .verified_pack_objects(&pack, &bases, &mut live)
+            .expect("the history verifies");
+        let blobs = verified
+            .values()
+            .filter(|object| object.object_type == ObjectType::Blob)
+            .count();
+        let spooled = verified
+            .values()
+            .filter(|object| matches!(object.body, ObjectBody::Spooled(_)))
+            .count();
+        assert_eq!(blobs, 13);
+        assert_eq!(spooled, if spill_everything { blobs } else { 0 });
+        let quarantine = QuarantineReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count,
+            pack_bytes: pack_bytes.len(),
+            delete_only: false,
+        };
+        let closure = validator
+            .validate(&create_request(tip), Some(&pack), &quarantine, &mut live)
+            .expect("the history validates and stages");
+        let staged: BTreeMap<GitOid, Vec<u8>> = closure
+            .objects
+            .iter()
+            .map(|id| {
+                let object = node
+                    .read_git_object(*id)
+                    .expect("every closure member is staged");
+                (*id, object.payload().to_vec())
+            })
+            .collect();
+        assert!(node.read_git_object(junk_id).is_err());
+        results.push((closure.objects, closure.object_closure_root, staged));
+        node.shutdown().expect("node shuts down after test");
+    }
+    assert_eq!(results[0].0.len(), 36);
+    assert_eq!(results[0], results[1]);
+}

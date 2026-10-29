@@ -223,6 +223,81 @@ impl SpooledPack {
     }
 }
 
+/// Resolved objects a receive keeps out of memory (frankengit-88fk): its
+/// delta resolver's cache past a resident budget, and verified blob bodies
+/// until they are staged. Scratch like a spooled pack: one exclusive file
+/// under the storage root, unlinked on Unix as soon as it exists, created on
+/// the first append, appended to and read back by handle, and gone on drop.
+#[derive(Debug)]
+pub(crate) struct ObjectSpool {
+    root: PathBuf,
+    scratch: Option<ScratchFile>,
+    len: u64,
+}
+
+impl ObjectSpool {
+    pub(crate) fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            scratch: None,
+            len: 0,
+        }
+    }
+
+    /// Appends `bytes` and returns where they live.
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> io::Result<fgit_pack::SpillHandle> {
+        if self.scratch.is_none() {
+            self.scratch = Some(ScratchFile::create(&self.root)?);
+        }
+        let scratch = self
+            .scratch
+            .as_mut()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let offset = self.len;
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        scratch.file.seek(SeekFrom::Start(offset))?;
+        scratch.file.write_all(bytes)?;
+        self.len = end;
+        Ok(fgit_pack::SpillHandle {
+            offset,
+            length: bytes.len(),
+        })
+    }
+
+    /// Exactly the bytes [`Self::append`] wrote for `handle`.
+    pub(crate) fn read(&mut self, handle: fgit_pack::SpillHandle) -> io::Result<Vec<u8>> {
+        let scratch = self
+            .scratch
+            .as_mut()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(handle.length)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        bytes.resize(handle.length, 0);
+        scratch.file.seek(SeekFrom::Start(handle.offset))?;
+        scratch.file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl fgit_pack::CacheSpill for ObjectSpool {
+    fn spill(&mut self, bytes: &[u8]) -> Result<fgit_pack::SpillHandle, fgit_pack::PackError> {
+        self.append(bytes)
+            .map_err(|_| fgit_pack::PackError::AllocationFailed {
+                requested: bytes.len(),
+            })
+    }
+
+    fn read(&mut self, handle: fgit_pack::SpillHandle) -> Result<Vec<u8>, fgit_pack::PackError> {
+        Self::read(self, handle).map_err(|_| fgit_pack::PackError::AllocationFailed {
+            requested: handle.length,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +361,37 @@ mod tests {
         }
         assert_eq!(read, expected);
         assert_eq!(pack.into_bytes().unwrap(), expected);
+        assert_eq!(root.names(), 0);
+    }
+
+    /// An object spool creates no file until its first append, reads every
+    /// handle back exactly in any order, and leaves no name behind on Unix
+    /// (frankengit-88fk).
+    #[test]
+    fn an_object_spool_reads_each_handle_back_exactly_and_leaves_no_name() {
+        let root = Root::new();
+        let mut spool = ObjectSpool::new(&root.0);
+        assert_eq!(root.names(), 0, "an unused spool creates nothing");
+        let pieces: Vec<Vec<u8>> = [0_usize, 1, 4096, 3 * SPOOL_BUFFER_BYTES + 7, 13]
+            .into_iter()
+            .enumerate()
+            .map(|(index, size)| (0..size).map(|at| (at * 17 + index) as u8).collect())
+            .collect();
+        let handles: Vec<_> = pieces
+            .iter()
+            .map(|piece| spool.append(piece).unwrap())
+            .collect();
+        if cfg!(unix) {
+            assert_eq!(root.names(), 0, "the scratch name is unlinked at once");
+        }
+        for (handle, piece) in handles.iter().zip(&pieces).rev() {
+            assert_eq!(&spool.read(*handle).unwrap(), piece);
+        }
+        // Reads move the file position; a later append still lands at the end.
+        let late = spool.append(b"after reads").unwrap();
+        assert_eq!(spool.read(late).unwrap(), b"after reads");
+        assert_eq!(spool.read(handles[3]).unwrap(), pieces[3]);
+        drop(spool);
         assert_eq!(root.names(), 0);
     }
 

@@ -31,6 +31,7 @@ use fgit_wire::receive::{
     QuarantineReceipt, ReceiveError, ReceiveQuarantineHandoff, ReceiveRequest,
 };
 
+use crate::pack_spool::ObjectSpool;
 use crate::receive_staging::ReceiveStaging;
 use crate::{
     AuthoritySelectedClosure, MaterializedAdmission, NodeReceiveTransportRefusal, NodeRefusal,
@@ -175,6 +176,8 @@ pub struct ProductionQuarantineValidator<'node> {
     /// A receive's holder for staged, unpublished objects (frankengit-tz5z).
     /// `None` links each verified object during validation.
     staging: Option<&'node ReceiveStaging>,
+    /// Bytes kept in memory before spilling to the object spool.
+    resident: ResidentBudgets,
 }
 
 /// The visible ref roots of one materialized basis: every canonical ref the
@@ -207,11 +210,48 @@ pub(crate) fn receive_validation_authority(
 #[derive(Debug)]
 struct VerifiedObject {
     object_type: ObjectType,
-    body: Vec<u8>,
-    parsed: ParsedObject,
+    body: ObjectBody,
+    /// Commit, tree and tag structure. A blob's parse is a second copy of its
+    /// bytes that nothing reads, so it is not retained (frankengit-88fk).
+    parsed: Option<ParsedObject>,
 }
 
-type VerifiedPackObjects = (BTreeMap<GitOid, VerifiedObject>, BTreeMap<u64, GitOid>);
+/// A verified object's bytes. Commits, trees and tags stay in memory for the
+/// closure walk. Blobs stay in memory until [`VERIFIED_RESIDENT_BLOB_BYTES`],
+/// then wait on disk in the receive's object spool until they are staged, so
+/// a receive's memory no longer grows with its expanded content: a push of
+/// 5.4 GB of content held every body in memory (frankengit-88fk).
+#[derive(Debug)]
+enum ObjectBody {
+    Resident(Vec<u8>),
+    Spooled(fgit_pack::SpillHandle),
+}
+
+/// Verified blob bytes one receive keeps in memory before spooling the rest.
+const VERIFIED_RESIDENT_BLOB_BYTES: usize = 64 * 1024 * 1024;
+/// Delta-resolver cache bytes one resolution pass keeps in memory; later
+/// entries are spilled with every charge unchanged (frankengit-88fk).
+const RESOLVER_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
+
+/// What one receive keeps in memory before it spills (frankengit-88fk).
+#[derive(Clone, Copy, Debug)]
+struct ResidentBudgets {
+    verified_blobs: usize,
+    resolver: usize,
+}
+
+impl ResidentBudgets {
+    const DEFAULT: Self = Self {
+        verified_blobs: VERIFIED_RESIDENT_BLOB_BYTES,
+        resolver: RESOLVER_RESIDENT_BYTES,
+    };
+}
+
+type VerifiedPackObjects = (
+    BTreeMap<GitOid, VerifiedObject>,
+    BTreeMap<u64, GitOid>,
+    ObjectSpool,
+);
 
 #[cfg(test)]
 impl<'node> ProductionQuarantineValidator<'node> {
@@ -235,7 +275,22 @@ impl<'node> ProductionQuarantineValidator<'node> {
             authority: None,
             reuse_admitted_blobs: false,
             staging: None,
+            resident: ResidentBudgets::DEFAULT,
         }
+    }
+
+    /// Spill thresholds for tests that must exercise the spool paths.
+    #[must_use]
+    pub(crate) const fn with_resident_budgets(
+        mut self,
+        verified_blobs: usize,
+        resolver: usize,
+    ) -> Self {
+        self.resident = ResidentBudgets {
+            verified_blobs,
+            resolver,
+        };
+        self
     }
 }
 
@@ -261,6 +316,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
             authority: self.authority,
             reuse_admitted_blobs: self.reuse_admitted_blobs,
             staging: Some(staging),
+            resident: self.resident,
         }
     }
 }
@@ -423,11 +479,12 @@ impl ProductionQuarantineValidator<'_> {
             &self.parse_limits,
         )
         .map_err(map_pack_error)?;
+        let parsed = (!matches!(parsed, ParsedObject::Blob(_))).then_some(parsed);
         Ok((
             id,
             VerifiedObject {
                 object_type,
-                body,
+                body: ObjectBody::Resident(body),
                 parsed,
             },
         ))
@@ -453,9 +510,12 @@ impl ProductionQuarantineValidator<'_> {
         // An empty, checksum-verified pack is real wire evidence. It is not a
         // missing pack or an unresolved thin delta. Root reuse is established
         // separately from the exact authenticated visible-ref graph below.
+        let mut spool = ObjectSpool::new(self.node.storage_root());
         if pack.entries().is_empty() {
-            return Ok((BTreeMap::new(), BTreeMap::new()));
+            return Ok((BTreeMap::new(), BTreeMap::new(), spool));
         }
+        let mut cache_spool = ObjectSpool::new(self.node.storage_root());
+        let mut resident_blob_bytes = 0_usize;
         let mut objects = pack
             .clone()
             .into_scalar_objects(|_| None)
@@ -477,9 +537,15 @@ impl ProductionQuarantineValidator<'_> {
             checkpoint(deadline)?;
             let mut newly_resolved = Vec::new();
             {
-                let mut pack_resolver =
-                    CachedResolver::new(&objects, bases, &self.pack_limits, deadline)
-                        .map_err(map_pack_error)?;
+                let mut pack_resolver = CachedResolver::with_spill(
+                    &objects,
+                    bases,
+                    &self.pack_limits,
+                    &mut cache_spool,
+                    self.resident.resolver,
+                    deadline,
+                )
+                .map_err(map_pack_error)?;
                 for entry in pack.entries() {
                     checkpoint(deadline)?;
                     if ids_at_offset.contains_key(&entry.offset) {
@@ -491,7 +557,17 @@ impl ProductionQuarantineValidator<'_> {
                         deadline,
                     ) {
                         Ok((object_type, body)) => {
-                            newly_resolved.push((entry.offset, object_type, body));
+                            // Verified as resolved, so a pass never holds every
+                            // body it resolved (frankengit-88fk).
+                            let (id, object) = self.verify_resolved_object(object_type, body)?;
+                            let object = spool_blob(
+                                object,
+                                &mut spool,
+                                &mut resident_blob_bytes,
+                                self.resident.verified_blobs,
+                                deadline,
+                            )?;
+                            newly_resolved.push((entry.offset, id, object));
                         }
                         // The base may be a pack-local entry whose native ID
                         // is established in this or a later bounded pass.
@@ -504,8 +580,7 @@ impl ProductionQuarantineValidator<'_> {
             if newly_resolved.is_empty() {
                 break;
             }
-            for (offset, object_type, body) in newly_resolved {
-                let (id, object) = self.verify_resolved_object(object_type, body)?;
+            for (offset, id, object) in newly_resolved {
                 if verified.insert(id, object).is_some()
                     || ids_at_offset.insert(offset, id).is_some()
                 {
@@ -518,7 +593,7 @@ impl ProductionQuarantineValidator<'_> {
                 set_pack_object_id(pack_object, id);
             }
             if verified.len() == pack.entries().len() {
-                return Ok((verified, ids_at_offset));
+                return Ok((verified, ids_at_offset, spool));
             }
         }
 
@@ -569,6 +644,7 @@ impl ProductionQuarantineValidator<'_> {
         &self,
         closure: &BTreeSet<GitOid>,
         verified: &mut BTreeMap<GitOid, VerifiedObject>,
+        spool: &mut ObjectSpool,
         deadline: &mut impl Deadline,
     ) -> Result<(), RefusalCode> {
         let mut batch = StagingBatch::default();
@@ -579,20 +655,31 @@ impl ProductionQuarantineValidator<'_> {
                     // A waiting pre-stage already staged and synced it.
                     continue;
                 }
-                if object.body.len() > STAGING_BATCH_BYTES {
+                let body = match object.body {
+                    ObjectBody::Resident(body) => body,
+                    // Placement re-identifies the bytes below, so a damaged
+                    // read refuses as a native identity mismatch.
+                    ObjectBody::Spooled(handle) => {
+                        checkpoint(deadline)?;
+                        spool
+                            .read(handle)
+                            .map_err(|_| RefusalCode::DurabilityProfileUnavailable)?
+                    }
+                };
+                if body.len() > STAGING_BATCH_BYTES {
                     // Alone, as import places a large object. The batch stays
                     // identity-sorted because nothing is inserted into it.
-                    self.stage(*id, object.object_type, object.body, deadline)?;
+                    self.stage(*id, object.object_type, body, deadline)?;
                     continue;
                 }
                 if batch.objects.len() == STAGING_BATCH_OBJECTS
-                    || object.body.len() > STAGING_BATCH_BYTES - batch.bytes
+                    || body.len() > STAGING_BATCH_BYTES - batch.bytes
                 {
                     self.flush_staging(&mut batch, deadline)?;
                 }
                 let placed = self
                     .node
-                    .verified_git_object(object.object_type, object.body)
+                    .verified_git_object(object.object_type, body)
                     .map_err(staging_refusal)?;
                 if placed.identity() != *id {
                     return Err(RefusalCode::NativeObjectIdMismatch);
@@ -725,6 +812,7 @@ impl OneNode {
             authority: Some(receive_validation_authority(materialized)),
             reuse_admitted_blobs: false,
             staging: None,
+            resident: ResidentBudgets::DEFAULT,
         })
     }
 }
@@ -783,7 +871,8 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         if bases.read_bytes > self.external_read_limit() {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
-        let (mut verified, ids_at_offset) = self.verified_pack_objects(pack, &bases, deadline)?;
+        let (mut verified, ids_at_offset, mut spool) =
+            self.verified_pack_objects(pack, &bases, deadline)?;
         let in_pack_delta_bases = Self::in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
         let independent = reused_targets::independent_uploads(pack, &ids_at_offset, deadline)?;
         let closure = self.reachable_uploaded_closure(
@@ -798,7 +887,7 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         // reachable objects in fabric.  Immutable placement remains
         // non-authority, but only the fully validated exact closure may
         // acquire that responsibility.
-        self.stage_closure(&closure, &mut verified, deadline)?;
+        self.stage_closure(&closure, &mut verified, &mut spool, deadline)?;
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
                 closure.clone(),
@@ -897,6 +986,38 @@ fn copy_bytes(bytes: &[u8], deadline: &mut impl Deadline) -> Result<Vec<u8>, Ref
         copied.extend_from_slice(chunk);
     }
     Ok(copied)
+}
+
+/// Keeps a verified blob in memory while the receive's resident blob budget
+/// lasts, and spools it to disk after that (frankengit-88fk).
+fn spool_blob(
+    object: VerifiedObject,
+    spool: &mut ObjectSpool,
+    resident_blob_bytes: &mut usize,
+    budget: usize,
+    deadline: &mut impl Deadline,
+) -> Result<VerifiedObject, RefusalCode> {
+    let ObjectBody::Resident(bytes) = &object.body else {
+        return Ok(object);
+    };
+    if object.object_type != ObjectType::Blob {
+        return Ok(object);
+    }
+    if let Some(resident) = resident_blob_bytes
+        .checked_add(bytes.len())
+        .filter(|resident| *resident <= budget)
+    {
+        *resident_blob_bytes = resident;
+        return Ok(object);
+    }
+    checkpoint(deadline)?;
+    let handle = spool
+        .append(bytes)
+        .map_err(|_| RefusalCode::DurabilityProfileUnavailable)?;
+    Ok(VerifiedObject {
+        body: ObjectBody::Spooled(handle),
+        ..object
+    })
 }
 
 const fn map_pack_error(error: PackError) -> RefusalCode {

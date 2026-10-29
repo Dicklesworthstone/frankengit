@@ -198,6 +198,7 @@ fn fixture_validator<'a>(
         authority: None,
         reuse_admitted_blobs: false,
         staging: None,
+        resident: super::super::ResidentBudgets::DEFAULT,
     }
 }
 fn put(node: &OneNode, objects: &[Raw]) {
@@ -287,7 +288,7 @@ fn copying_a_hidden_delta_base_including_its_exact_oid_does_not_prove_upload_own
             );
             let (pack, _) = packed(format, &[ref_copy(&secret, suffix)]);
             let bases = v.external_bases(&pack, &mut || true).unwrap();
-            let (_, ids) = v
+            let (_, ids, _) = v
                 .verified_pack_objects(&pack, &bases, &mut || true)
                 .unwrap();
             assert!(

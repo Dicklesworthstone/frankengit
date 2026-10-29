@@ -257,6 +257,7 @@ impl ProductionQuarantineValidator<'_> {
                 authority: self.authority,
                 reuse_admitted_blobs: self.reuse_admitted_blobs,
                 staging: self.staging,
+                resident: self.resident,
             });
         }
         let validator = restricted.as_ref().unwrap_or(self);
@@ -275,7 +276,8 @@ impl ProductionQuarantineValidator<'_> {
                 read_bytes: 0,
             }
         };
-        let (mut verified, offsets) = validator.verified_pack_objects(pack, &bases, deadline)?;
+        let (mut verified, offsets, mut spool) =
+            validator.verified_pack_objects(pack, &bases, deadline)?;
         let delta_bases = Self::in_pack_delta_bases(pack, &offsets, deadline)?;
         let independent = reused_targets::independent_uploads(pack, &offsets, deadline)?;
         let profile = if prerequisites.is_some() {
@@ -302,7 +304,7 @@ impl ProductionQuarantineValidator<'_> {
                 deadline,
             )?;
         }
-        validator.stage_closure(&closure, &mut verified, deadline)?;
+        validator.stage_closure(&closure, &mut verified, &mut spool, deadline)?;
         checkpoint(deadline)?;
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
@@ -318,12 +320,21 @@ impl ProductionQuarantineValidator<'_> {
         edges_left: &mut usize,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<(GitOid, ObjectType)>, RefusalCode> {
+        // A blob names no object; its parse is not retained (frankengit-88fk).
+        let Some(parsed) = &object.parsed else {
+            checkpoint(deadline)?;
+            return Ok(Vec::new());
+        };
+        // Only blobs are spooled, and a blob has no parse.
+        let super::ObjectBody::Resident(body) = &object.body else {
+            return Err(RefusalCode::EvidenceInvalid);
+        };
         // Source selection and graph traversal remain distinct. Only native
         // edge interpretation is shared with complete local-source imports.
         crate::loose_import::graph::references(
             self.node.object_format,
-            &object.parsed,
-            &object.body,
+            parsed,
+            body,
             &self.parse_limits,
             edges_left,
             deadline,
@@ -371,7 +382,7 @@ fn require_fetch_fast_forwards(
             let object = verified
                 .get(&id)
                 .ok_or(RefusalCode::ObjectClosureIncomplete)?;
-            let ParsedObject::Commit(commit) = &object.parsed else {
+            let Some(ParsedObject::Commit(commit)) = &object.parsed else {
                 return Err(RefusalCode::EvidenceInvalid);
             };
             if id == command.old {
