@@ -341,12 +341,12 @@ fn gated_receive<'scope>(
     child: OneNode,
     http: bool,
     bytes: Vec<u8>,
-    key: &'static [u8],
+    key: Vec<u8>,
     gate: &'scope WriterGate,
 ) -> std::thread::ScopedJoinHandle<'scope, Result<AdmissionResult, NodeSmartHttpRefusal>> {
     scope.spawn(move || {
         let result = if http {
-            http_receive(&child, &bytes, &session(key), Some(gate))
+            http_receive(&child, &bytes, &session(&key), Some(gate))
         } else {
             let route = child.git_daemon_repository_path().as_bytes().to_vec();
             child
@@ -411,7 +411,14 @@ fn a_waiting_receive_places_its_objects_before_it_holds_the_writer() {
         let held = gate.acquire(&deadline(Duration::from_secs(30))).unwrap();
         let before = generation(&node);
         let result = std::thread::scope(|scope| {
-            let worker = gated_receive(scope, child, http, bytes, b"placed-while-waiting", &gate);
+            let worker = gated_receive(
+                scope,
+                child,
+                http,
+                bytes,
+                b"placed-while-waiting".to_vec(),
+                &gate,
+            );
             wait_until_placed(&node, id);
             assert_eq!(
                 generation(&node),
@@ -470,7 +477,7 @@ fn a_prestaged_receive_is_decided_at_the_basis_selected_after_its_wait() {
                 child,
                 http,
                 bytes.clone(),
-                b"contested-waiting",
+                b"contested-waiting".to_vec(),
                 &gate,
             );
             wait_until_placed(&node, id);
@@ -564,4 +571,138 @@ fn try_acquire_takes_only_a_free_slot_and_its_drop_frees_it() {
         .try_acquire()
         .expect("the dropped permit freed its slot");
     drop(second);
+}
+
+fn distinct_blob_push(format: GitHashAlgorithm, name: &str, body: Vec<u8>) -> (ObjectId, Vec<u8>) {
+    let id = fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Blob, &body);
+    let source = Blob(CanonicalPackObject::new(
+        id,
+        ObjectType::Blob,
+        body,
+        Vec::new(),
+        0,
+        0,
+    ));
+    let plan = PackPlanner::new(format, PackWriteProfile::STORED_V1, PackLimits::default())
+        .plan(&source, &[id], &mut || true)
+        .unwrap();
+    let (pack, _) = PackWriter::new(PackLimits::default())
+        .write(&plan, &mut || true)
+        .unwrap();
+    let mut bytes = command(
+        &"00".repeat(format.digest_len()),
+        &id.to_string(),
+        format,
+        name,
+    );
+    bytes.extend_from_slice(&pack);
+    (id, bytes)
+}
+
+/// Seeded concurrent creates through one writer gate, where every waiting
+/// receive pre-stages, decide exactly as serial single-decision admission:
+/// per targeted ref one committed create holds the ref, every other create of
+/// it is refused ExpectedOldRefMismatch, no outcome is unknown, and untouched
+/// refs stay absent (frankengit-root-doctrine-x2mv.4.9 acceptance 1).
+#[test]
+fn seeded_concurrent_creates_decide_as_serial_admission_does() {
+    const CLIENTS: usize = 6;
+    const REFS: u64 = 3;
+    for seed in [1_u64, 7, 42] {
+        let format = GitHashAlgorithm::Sha1;
+        let (node, _scratch) = node(format);
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let pushes: Vec<(String, ObjectId, Vec<u8>)> = (0..CLIENTS)
+            .map(|client| {
+                let name = format!("refs/tags/r{}", next() % REFS);
+                let body = format!("seed {seed} client {client}\n").into_bytes();
+                let (id, bytes) = distinct_blob_push(format, &name, body);
+                (name, id, bytes)
+            })
+            .collect();
+        let gate = WriterGate::new(1);
+        let held = gate.acquire(&deadline(Duration::from_secs(30))).unwrap();
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = pushes
+                .iter()
+                .enumerate()
+                .map(|(client, (_, _, bytes))| {
+                    let child = second_service(&node);
+                    let key = format!("seeded-{seed}-{client}").into_bytes();
+                    gated_receive(scope, child, client % 2 == 0, bytes.clone(), key, &gate)
+                })
+                .collect();
+            // Every waiting receive pre-stages before it is admitted.
+            for (_, id, _) in &pushes {
+                wait_until_placed(&node, *id);
+            }
+            drop(held);
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let refs = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap()
+            .snapshot()
+            .refs
+            .clone();
+        for target in 0..REFS {
+            let name = format!("refs/tags/r{target}");
+            let contenders: Vec<usize> = (0..CLIENTS).filter(|c| pushes[*c].0 == name).collect();
+            let winners: Vec<usize> = contenders
+                .iter()
+                .copied()
+                .filter(|c| {
+                    matches!(
+                        results[*c].commands[0].terminal.outcome,
+                        DecisionOutcome::Committed { .. }
+                    )
+                })
+                .collect();
+            let held_value = refs.get(&fgit_types::RefName::try_new(name.as_bytes()).unwrap());
+            if contenders.is_empty() {
+                assert_eq!(held_value, None, "seed {seed}: {name} was never pushed");
+                continue;
+            }
+            assert_eq!(
+                winners.len(),
+                1,
+                "seed {seed}: one create of {name} commits"
+            );
+            assert_eq!(
+                held_value,
+                Some(&pushes[winners[0]].1),
+                "seed {seed}: {name} is the winner's"
+            );
+            for loser in contenders.iter().filter(|c| **c != winners[0]) {
+                assert!(
+                    matches!(
+                        results[*loser].commands[0].terminal.outcome,
+                        DecisionOutcome::Refused {
+                            code: RefusalCode::ExpectedOldRefMismatch,
+                            ..
+                        }
+                    ),
+                    "seed {seed}: client {loser} {:?}",
+                    results[*loser].commands[0].terminal.outcome
+                );
+            }
+        }
+        assert_eq!(
+            refs.len() as u64,
+            (0..REFS)
+                .filter(|t| pushes.iter().any(|p| p.0 == format!("refs/tags/r{t}")))
+                .count() as u64
+        );
+        node.shutdown().unwrap();
+    }
 }

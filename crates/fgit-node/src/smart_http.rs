@@ -432,7 +432,7 @@ fn drive_request_while<F: Future>(
 /// selects its own basis after admission and decides exactly as before; it
 /// finds the objects placed and re-verifies them instead of writing and
 /// syncing them. An expired `live` ends this early and changes nothing else.
-pub(super) fn prestage_receive(
+fn prestage_receive(
     node: &OneNode,
     request: &super::NodeRequestContext,
     quarantine: &fgit_wire::receive::ReceiveQuarantine,
