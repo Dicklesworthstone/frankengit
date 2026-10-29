@@ -864,3 +864,40 @@ stored bytes, alternating three times against A: the corpus 3.60-3.81 s to
 example once a batch becomes one durable unit (frankengit-pc9g). The tmpfs
 control shows hashing is then on the critical path for repositories of large
 objects again.
+
+### NEG-039 — one fsync fence over a whole 1,024-object batch needs 1,024 descriptors (frankengit-pc9g)
+
+**Hypothesis.** A push spends much of its wall time on per-batch durability
+fences: each 256-object placement batch syncs its staged files, links them
+and syncs about three directories (roughly 7 ms each). Raising the batch to
+1,024 objects, with every staged file of the batch synced concurrently as one
+fence, shortens a large push with identical stored bytes.
+
+**Disposition: REFUTED as built; the time saving holds, the descriptor cost
+does not.** Release-perf builds of ed8bbf62 (A) and A with 1,024-object
+batches and 1,024 sync threads (B), alternated three times on this host
+(soft `RLIMIT_NOFILE` 65,535):
+- A stock push of one 24,000-file commit over git://: A 7.8-8.2 s, B 6.0-6.2 s.
+- A 1,200-commit import (4,800 objects): A 1.52-1.62 s, B 1.27-1.53 s.
+- Stored objects were byte-identical and the receipts matched.
+
+But B kept every staged file of a batch open until its fence. Under the
+common 1,024 soft limit (`ulimit -Sn 1024`), B refused the same push as
+`[remote rejected] (object graph failed validation (EvidenceInvalid))` after
+1.4 s, while A admitted it in 8.3 s. The import's overlapped form
+(frankengit-ai60) holds one batch open while the next is staged, so it would
+need twice as many.
+
+**Replacement.** The blocking placement batch is 1,024 objects (receive
+stages up to 1,024 objects and 32 MiB), but staged files are written and
+synced in groups of 256 and closed before the next group, so a batch never
+holds more than 256 staged descriptors. Linking and the directory syncs stay
+once per 1,024 objects. The overlapped import form keeps its 256-object cap.
+Alternated four times against A at load 3-8: the 24,000-file push 8.8-9.9 s to
+7.6-8.0 s (mean 9.2 s to 7.8 s), the import unchanged, stored bytes identical.
+The push also succeeds under `ulimit -Sn 1024`. A fabric test reads
+`/proc/self/fd` and asserts that a full batch never holds more than 256 staged
+files open.
+
+**Revisit when** a batch becomes one durable unit (one file per batch), so
+there is one descriptor per batch rather than one per object.

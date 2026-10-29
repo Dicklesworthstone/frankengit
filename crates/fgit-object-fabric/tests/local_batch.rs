@@ -112,12 +112,16 @@ fn run(
 
 #[test]
 fn both_domains_round_trip_reopen_and_repeat_without_replacing_bytes() {
-    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+    // 1,000 ends in a partial sync group; 1,024 is four full groups.
+    for (format, count) in [
+        (GitHashAlgorithm::Sha1, 1000),
+        (GitHashAlgorithm::Sha256, 1024),
+    ] {
         let root = Root::new();
         let store = root.fabric(None);
-        let objects = objects(format, 256);
+        let objects = objects(format, count);
         let result = run(&store, &objects, &mut || true).unwrap();
-        assert_eq!(result.len(), 256);
+        assert_eq!(result.len(), count);
         for row in result {
             match row {
                 PutIfAbsent::Created { epochs, .. } => {
@@ -189,7 +193,7 @@ fn preflight_refuses_invalid_order_duplicate_namespace_count_and_budget_before_w
         Err(StoreRefusal::DuplicateObjectIdentity)
     );
     assert_eq!(
-        run(&store, &objects(GitHashAlgorithm::Sha1, 257), &mut || true),
+        run(&store, &objects(GitHashAlgorithm::Sha1, 1025), &mut || true),
         Err(StoreRefusal::TooManyEntries)
     );
     assert_eq!(
@@ -620,4 +624,60 @@ fn an_unsettled_staged_batch_is_reported_as_leaked_and_leaves_no_staged_file() {
             Err(StoreRefusal::ObjectAbsent)
         ));
     }
+}
+
+/// The overlapped form keeps every staged file open until publication, so it
+/// takes at most one sync group (256 objects) and refuses more before any
+/// write; a refused batch settles under a fail-fast ledger (frankengit-pc9g).
+#[test]
+fn the_overlapped_form_takes_at_most_one_sync_group() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha1, 257);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let budget = ledger.grant(amount).unwrap();
+    assert!(matches!(
+        store.stage_batch_if_absent(
+            input.clone(),
+            PlacementAdmission::new(&ledger, budget),
+            &mut || true,
+        ),
+        Err(StoreRefusal::TooManyEntries)
+    ));
+    assert!(ledger.close().is_quiescent());
+    root.clean();
+    assert!(stored_files(&root).is_empty());
+    assert_eq!(run_split(&store, &input[..256]).unwrap().len(), 256);
+    root.clean();
+}
+
+/// A full blocking batch holds at most one sync group of staged files open.
+/// With all 1,024 open at once, a large push was refused under the common
+/// 1,024 soft `RLIMIT_NOFILE` (frankengit-pc9g).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_blocking_batch_holds_at_most_one_sync_group_of_staged_files_open() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let staging = root.0.join("staging");
+    let input = objects(GitHashAlgorithm::Sha1, 1024);
+    let mut most = 0;
+    let result = run(&store, &input, &mut || {
+        most = most.max(open_staged_files(&staging));
+        true
+    });
+    assert_eq!(result.unwrap().len(), 1024);
+    assert_eq!(most, 256, "staged files open at once");
+    root.clean();
+}
+
+#[cfg(target_os = "linux")]
+fn open_staged_files(staging: &std::path::Path) -> usize {
+    fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+        .filter(|target| {
+            target.starts_with(staging) && target.extension().is_some_and(|e| e == "stage")
+        })
+        .count()
 }

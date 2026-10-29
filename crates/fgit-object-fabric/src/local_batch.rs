@@ -16,24 +16,33 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-const MAX_BATCH_OBJECTS: usize = 256;
+const MAX_BATCH_OBJECTS: usize = 1024;
 const MAX_BATCH_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
-/// Upper bound on the threads that sync one batch's staged files: one per
-/// file. Every fsync of a batch is then in flight at once, so the journal
-/// commits it waits for are shared by the whole batch. With 32 threads, each
+/// Staged files held open at once, and so the descriptors a batch needs. The
+/// blocking form syncs and closes each group of this many before writing the
+/// next, so a 1,024-object batch shares one link pass and one directory sync
+/// per object directory without needing 1,024 descriptors: under the common
+/// 1,024 soft `RLIMIT_NOFILE` that refused the whole push. The overlapped
+/// form keeps its files open until publication and so takes at most one group.
+const SYNC_GROUP_FILES: usize = 256;
+/// Upper bound on the threads that sync one group of staged files: one per
+/// file. Every fsync of a group is then in flight at once, so the journal
+/// commits it waits for are shared by the whole group. With 32 threads, each
 /// thread of a full batch ran eight fsyncs in sequence (frankengit-pc9g).
-const MAX_SYNC_THREADS: usize = MAX_BATCH_OBJECTS;
+const MAX_SYNC_THREADS: usize = SYNC_GROUP_FILES;
 /// A sync thread only calls `fsync`; it needs a small stack, not the default.
 const SYNC_THREAD_STACK_BYTES: usize = 64 * 1024;
 
 impl LocalFilesystemFabric {
-    /// Place up to 256 identity-sorted objects and 64 MiB of payloads with one
-    /// final directory sync per native hash domain, rather than per object.
-    /// Each file is still synced before its immutable name is linked: every
-    /// staged file is written first, then all are synced concurrently, then
-    /// the names are linked. One fsync at a time paid a journal commit per
-    /// file (about 6 ms each on ext4/NVMe); concurrent fsyncs share commits
-    /// (frankengit-pc9g). The caller must keep the storage root and ancestors
+    /// Place up to 1,024 identity-sorted objects and 64 MiB of payloads with
+    /// one final directory sync per native hash domain, rather than per
+    /// object. Each file is still synced before its immutable name is linked:
+    /// staged files are written and synced concurrently in groups of 256,
+    /// then the names are linked. One fsync at a time paid a journal commit
+    /// per file (about 6 ms each on ext4/NVMe); concurrent fsyncs share
+    /// commits, and the three directory syncs of a batch are paid once per
+    /// 1,024 objects rather than per 256 (frankengit-pc9g). The caller must
+    /// keep the storage root and ancestors
     /// stable during the call. A failed batch links no name it staged after
     /// the failure point and may have linked none at all.
     ///
@@ -52,7 +61,7 @@ impl LocalFilesystemFabric {
         let (ledger, mut budget) = admission.into_parts();
         let mut pending = Pending::default();
         let staged = self
-            .stage_pending(objects, ledger, &mut budget, &mut pending, live)
+            .stage_pending(objects, ledger, &mut budget, &mut pending, live, true)
             .and_then(|()| SyncFence::start(&mut pending.entries).wait())
             .and_then(|()| self.link_pending(objects, &mut pending, live));
         let _released = budget.release();
@@ -73,7 +82,7 @@ impl LocalFilesystemFabric {
     ) -> Result<StagedBatch, StoreRefusal> {
         let (ledger, mut budget) = admission.into_parts();
         let mut pending = Pending::default();
-        let staged = self.stage_pending(&objects, ledger, &mut budget, &mut pending, live);
+        let staged = self.stage_pending(&objects, ledger, &mut budget, &mut pending, live, false);
         let _released = budget.release();
         if let Err(error) = staged {
             return Err(abort_all(pending.entries).err().unwrap_or(error));
@@ -105,8 +114,11 @@ impl LocalFilesystemFabric {
         settle(pending.entries, staged)
     }
 
-    /// Preflights the whole batch, then reserves and writes each staged file
-    /// without syncing it. Objects already stored are reverified, not staged.
+    /// Preflights the whole batch, then reserves and writes each staged file.
+    /// Objects already stored are reverified, not staged. With `group_syncs`
+    /// each full group of [`SYNC_GROUP_FILES`] written files is synced and
+    /// closed before the next is written; the caller syncs the rest. Without
+    /// it no file is synced here, and the batch may hold at most one group.
     fn stage_pending(
         &self,
         objects: &[VerifiedObject],
@@ -114,8 +126,12 @@ impl LocalFilesystemFabric {
         budget: &mut BudgetGrant,
         pending: &mut Pending,
         live: &mut impl FnMut() -> bool,
+        group_syncs: bool,
     ) -> Result<(), StoreRefusal> {
         let required = self.preflight_batch(objects, live)?;
+        if !group_syncs && objects.len() > SYNC_GROUP_FILES {
+            return Err(StoreRefusal::TooManyEntries);
+        }
         if let Some(error) = budget.amount().first_deficit(&required) {
             return Err(StoreRefusal::Resource(error));
         }
@@ -128,6 +144,7 @@ impl LocalFilesystemFabric {
         // after linking. A directory created here is made durable through
         // the store root, as by create_directory.
         self.create_directory_for_batch(&self.staging_dir())?;
+        let mut open_files = 0;
         for object in objects {
             batch_checkpoint(live)?;
             let path = self.object_path(object.identity());
@@ -137,9 +154,16 @@ impl LocalFilesystemFabric {
             }
             let amount = batch_resources((object.payload().len() as u64).max(1), 1);
             let grant = budget.split_off(&amount).map_err(StoreRefusal::Resource)?;
-            pending
-                .entries
-                .push(self.stage_batch_object(object, ledger, grant)?);
+            let entry = self.stage_batch_object(object, ledger, grant)?;
+            if matches!(entry, PendingPlacement::Written { .. }) {
+                open_files += 1;
+            }
+            pending.entries.push(entry);
+            if group_syncs && open_files == SYNC_GROUP_FILES {
+                batch_checkpoint(live)?;
+                SyncFence::start(&mut pending.entries).wait()?;
+                open_files = 0;
+            }
         }
         batch_checkpoint(live)
     }

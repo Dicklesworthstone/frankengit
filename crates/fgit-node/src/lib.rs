@@ -10654,7 +10654,7 @@ impl OneNode {
     /// Places identity-sorted verified objects under one durability fence:
     /// each file is synced before its name is linked, and each object
     /// directory once per batch rather than once per object
-    /// (frankengit-pc9g). At most 256 objects and 64 MiB per call. Nothing is
+    /// (frankengit-pc9g). At most 1,024 objects and 64 MiB per call. Nothing is
     /// returned until every object is placed and settled; a refusal may leave
     /// verified unreferenced objects, never canonical visibility.
     pub(crate) fn put_verified_git_objects(

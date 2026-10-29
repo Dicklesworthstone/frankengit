@@ -411,17 +411,18 @@ fn object_bearing_pack_is_verified_staged_and_reported_as_its_exact_closure() {
 
 #[test]
 fn a_closure_larger_than_one_placement_batch_is_staged_completely() {
-    // 600 blobs under one tree: 601 objects, so staging crosses the 256-object
-    // batch boundary twice (frankengit-pc9g). Every member must be placed and
-    // readable, and the reported closure must be exactly the uploaded graph.
+    // 2,100 blobs under one tree: 2,101 objects, so staging crosses the
+    // 1,024-object batch boundary twice (frankengit-pc9g). Every member must
+    // be placed and readable, and the reported closure must be exactly the
+    // uploaded graph.
     let scratch = ScratchDirectory::new();
     let node = test_node(scratch.path().to_path_buf());
     let mut objects = BTreeMap::new();
     let mut tree_body = Vec::new();
-    for n in 0..600 {
+    for n in 0..2100 {
         let body = format!("batched blob {n}\n").into_bytes();
         let id = fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &body);
-        tree_body.extend_from_slice(format!("100644 f{n:03}\0").as_bytes());
+        tree_body.extend_from_slice(format!("100644 f{n:04}\0").as_bytes());
         tree_body.extend_from_slice(id.as_bytes());
         objects.insert(
             id,
@@ -472,8 +473,8 @@ fn a_closure_larger_than_one_placement_batch_is_staged_completely() {
         .expect("the exact authenticated materialization supplies a validator");
     let closure = validator
         .validate(&request, Some(&pack), &quarantine, &mut live)
-        .expect("a 601-object closure is validated and staged");
-    assert_eq!(closure.objects.len(), 601);
+        .expect("a 2101-object closure is validated and staged");
+    assert_eq!(closure.objects.len(), 2101);
     assert_eq!(
         closure.objects,
         ids.iter().copied().collect::<BTreeSet<_>>()

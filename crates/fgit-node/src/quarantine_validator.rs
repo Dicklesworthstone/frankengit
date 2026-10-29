@@ -762,9 +762,13 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
     }
 }
 
-/// At most 256 objects and 8 MiB per placement batch, as import places them.
-const STAGING_BATCH_OBJECTS: usize = 256;
-const STAGING_BATCH_BYTES: usize = 8 * 1024 * 1024;
+/// At most 1,024 objects and 32 MiB per placement batch. The fabric syncs
+/// staged files in groups of 256, so the descriptors held stay bounded, and
+/// each batch's directory syncs are paid once per 1,024 objects
+/// (frankengit-pc9g: a 24,000-file push 9.2 s -> 7.8 s, mean of four
+/// interleaved pairs).
+const STAGING_BATCH_OBJECTS: usize = 1024;
+const STAGING_BATCH_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 struct StagingBatch {
