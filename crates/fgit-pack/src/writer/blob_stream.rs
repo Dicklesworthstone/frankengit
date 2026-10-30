@@ -44,6 +44,13 @@ impl<'a> CanonicalBlobStream<'a> {
         self.length
     }
 
+    /// Change only derived ordering hints after the adapter checks identity
+    /// and native type. The original length and owned reader stay untouched.
+    pub(super) const fn set_ordering_metadata(&mut self, recency: u64, path_hash: u64) {
+        self.key.recency = recency;
+        self.key.path_hash = path_hash;
+    }
+
     pub(super) fn from_buffered(object: CanonicalPackObject) -> Self {
         Self::new(
             PackOrderKey {

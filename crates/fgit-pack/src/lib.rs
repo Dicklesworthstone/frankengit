@@ -80,8 +80,9 @@ pub use writer::{
     CanonicalBlobReader, CanonicalBlobStream, CanonicalObjectSource, CanonicalPackObject,
     DeltaWorkBudget, DeterministicPackEncoder, MAX_THIN_BASES_PER_TARGET, MaterializedPack,
     MemoizedPackEncoder, PackArtifactSink, PackCacheStats, PackComputationCache, PackEntryEncoder,
-    PackOrderKey, PackPlan, PackPlanEntry, PackPlanner, PackWriteError, PackWriteProfile,
-    PackWriteReceipt, PackWriter, PlannedDelta, PlannedDeltaBase, ThinBase,
+    PackOrderKey, PackOrderingSource, PackPlan, PackPlanEntry, PackPlanner, PackWriteError,
+    PackWriteProfile, PackWriteReceipt, PackWriter, PlannedDelta, PlannedDeltaBase, ThinBase,
+    basename_path_hash,
 };
 
 use std::error::Error;

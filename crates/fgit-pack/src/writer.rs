@@ -23,6 +23,8 @@ mod cache;
 pub use cache::{MemoizedPackEncoder, PackCacheStats, PackComputationCache};
 mod blob_stream;
 pub use blob_stream::{CanonicalBlobReader, CanonicalBlobStream};
+mod ordering;
+pub use ordering::{PackOrderingSource, basename_path_hash};
 
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
 use fgit_deflate::{
