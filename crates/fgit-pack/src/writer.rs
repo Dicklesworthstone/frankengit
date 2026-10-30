@@ -25,6 +25,8 @@ mod blob_stream;
 pub use blob_stream::{CanonicalBlobReader, CanonicalBlobStream};
 mod ordering;
 pub use ordering::{PackOrderingSource, basename_path_hash};
+mod prefix_suffix;
+use prefix_suffix::{PrefixSuffixDelta, common_prefix};
 
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
 use fgit_deflate::{
@@ -2603,11 +2605,11 @@ fn make_delta_program_with(
     bound: usize,
     deadline: &mut impl Deadline,
 ) -> Result<Option<Vec<u8>>, PackWriteError> {
-    let prefix_suffix = make_prefix_suffix_delta_program(base, target)?;
-    let chosen = match (search, index) {
-        // The indexed program is emitted only when strictly shorter than the
-        // prefix/suffix one, and only matters under `bound`.
-        (DeltaSearch::IndexedBlocks, Some(index)) => scan_indexed_delta_program(
+    let prefix_suffix = PrefixSuffixDelta::new(base, target)?;
+    // The indexed program is emitted only when strictly shorter than the
+    // prefix/suffix one, and only matters under `bound`.
+    if let (DeltaSearch::IndexedBlocks, Some(index)) = (search, index)
+        && let Some(program) = scan_indexed_delta_program(
             index,
             base,
             target,
@@ -2615,44 +2617,23 @@ fn make_delta_program_with(
             live,
             deadline,
         )?
-        .unwrap_or(prefix_suffix),
-        _ => prefix_suffix,
-    };
-    Ok((chosen.len() < bound).then_some(chosen))
+    {
+        return Ok(Some(program));
+    }
+    // Large losing candidates previously copied their unmatched target into
+    // an eager fallback before checking the best length (frankengit-1tl9).
+    // Sizing it is exact, so only a fallback that will be emitted is allocated.
+    if prefix_suffix.len() < bound {
+        prefix_suffix.encode().map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 /// Encodes the target as copy-prefix, insert-middle, copy-suffix.
+#[cfg(test)]
 fn make_prefix_suffix_delta_program(base: &[u8], target: &[u8]) -> Result<Vec<u8>, PackWriteError> {
-    let prefix = common_prefix(base, target);
-    let suffix = common_suffix(base, target, prefix);
-    let target_middle_start = prefix;
-    let target_middle_end = target
-        .len()
-        .checked_sub(suffix)
-        .ok_or(PackError::IntegerOverflow {
-            context: "delta target middle boundary",
-        })?;
-    let base_suffix_start = base
-        .len()
-        .checked_sub(suffix)
-        .ok_or(PackError::IntegerOverflow {
-            context: "delta base suffix boundary",
-        })?;
-    let mut program = Vec::new();
-    program
-        .try_reserve(target.len().saturating_add(16))
-        .map_err(|_| PackError::AllocationFailed {
-            requested: target.len().saturating_add(16),
-        })?;
-    encode_delta_varint(base.len(), &mut program)?;
-    encode_delta_varint(target.len(), &mut program)?;
-    emit_copy_run(0, prefix, &mut program)?;
-    emit_insert_run(
-        &target[target_middle_start..target_middle_end],
-        &mut program,
-    )?;
-    emit_copy_run(base_suffix_start, suffix, &mut program)?;
-    Ok(program)
+    PrefixSuffixDelta::new(base, target)?.encode()
 }
 
 /// Bounded hashed index over one candidate delta base.
@@ -3061,22 +3042,6 @@ fn scan_indexed_delta_program(
 /// opcode per chunk of at most 127, plus the bytes themselves.
 const fn insert_run_cost(length: usize) -> usize {
     length + length.div_ceil(127)
-}
-
-fn common_prefix(left: &[u8], right: &[u8]) -> usize {
-    left.iter()
-        .zip(right)
-        .take_while(|(left_byte, right_byte)| left_byte == right_byte)
-        .count()
-}
-
-fn common_suffix(base: &[u8], target: &[u8], prefix: usize) -> usize {
-    base[prefix..]
-        .iter()
-        .rev()
-        .zip(target[prefix..].iter().rev())
-        .take_while(|(base_byte, target_byte)| base_byte == target_byte)
-        .count()
 }
 
 fn encode_delta_varint(value: usize, output: &mut Vec<u8>) -> Result<(), PackWriteError> {
@@ -3647,7 +3612,7 @@ mod tests {
             index: Option<&BaseDeltaIndex>,
             deadline: &mut impl Deadline,
         ) -> Result<Option<Vec<u8>>, PackWriteError> {
-            let prefix_suffix = make_prefix_suffix_delta_program(base, target)?;
+            let prefix_suffix = prefix_suffix::scalar_program(base, target)?;
             let chosen = match (search, index) {
                 (DeltaSearch::IndexedBlocks, Some(index)) => {
                     let indexed = make_indexed_delta_program(index, base, target, deadline)?;
@@ -3681,7 +3646,7 @@ mod tests {
                     examined += 1;
                     let slot = candidate as usize;
                     let offset = self.offsets[slot] as usize;
-                    let length = common_prefix(&base[offset..], &target[position..]);
+                    let length = prefix_suffix::scalar_prefix(&base[offset..], &target[position..]);
                     if length >= DELTA_INDEX_BLOCK_BYTES
                         && best.is_none_or(|(best_offset, best_length)| {
                             length > best_length || (length == best_length && offset < best_offset)
