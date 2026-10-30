@@ -957,3 +957,90 @@ free permit runs exactly as before. Alternated three times against A (B):
 **Revisit when** the remaining in-permit work (re-verifying placed objects
 and the head CAS) dominates contended pushes, or when a flat combiner is wired
 into cross-session admission. Measure it against this baseline.
+
+### NEG-041 — retained u32 back-distance links regress small-member compression (frankengit-1tl9 / frankengit-g4a9)
+
+**Hypothesis.** Retaining a DEFLATE matcher's heads and a compact ring of
+`u32` back-distance links across blocks removes enough allocation and history
+rehashing to improve compression with identical match decisions and work.
+
+**Disposition: REFUTED for the first implementation.** The unpublished first
+rolling-index variant used per-position range validation and back-distance
+conversion. It passed member-byte/scalar conformance but regressed a 4,096-byte
+text member repeated 2,000 times: pooled A1/A2 median elapsed **33.2965945 ms**
+versus B **41.839618 ms** (**+25.66%**), process CPU **35.7905 ms** versus
+**48.0620 ms** (**+34.29%**). A/A wall median spread was **4.04%**. B's fastest
+sample, **38.341471 ms**, was slower than the slowest baseline, **37.640037 ms**;
+all five B trials lost to both paired controls. All samples had 9,984 KiB peak
+RSS, so there was no observed process-memory benefit on this workload.
+
+**Source and scope.** A1/A2 use the native deflater at immutable baseline
+`d98eb110a9fce6306627302f7561f3c3986294c1`; B is that deflater plus the unpublished
+`u32`-distance rolling-index attempt, not any later absolute-`usize` or pruned
+variant. Host: AMD EPYC 9V74, x86_64 Linux 6.18.55; pinned
+`nightly-2026-08-31`. Both rlibs and the identical public probe were built
+directly with `rustc --edition=2024 -C opt-level=3 -C debuginfo=0`, default
+codegen settings and no LTO. These are not Cargo release/LTO measurements.
+
+The probe repeats the bytes `the quick bounded repository object\n` to 4,096
+bytes before starting its timer. Each timed iteration constructs a fresh
+`Deflater` with `GIT_OBJECT` limits and `FIXED_OR_STORED`, pushes the input,
+finishes and drains output through `black_box`. Five trials each use fresh
+processes in A1/A2/B order on even trials and B/A2/A1 on odd trials. CPU below
+is process user + system time; peak RSS also covers the whole process, including
+setup and reporting outside the codec timer. Every sample reports cumulative
+output length 156,000 bytes and work 16,422,000 units. Those timed fields and
+passing member-byte oracles are distinct from a raw cross-process byte comparison.
+
+| Trial | Arm | Codec elapsed, ms | Process CPU, ms | Peak RSS, KiB |
+| --- | --- | ---: | ---: | ---: |
+| 0 | A1 | 28.852220 | 34.366 | 9984 |
+| 0 | A2 | 34.925417 | 36.733 | 9984 |
+| 0 | B | 41.839618 | 48.062 | 9984 |
+| 1 | A1 | 36.819244 | 37.759 | 9984 |
+| 1 | A2 | 33.041166 | 35.839 | 9984 |
+| 1 | B | 50.020799 | 46.277 | 9984 |
+| 2 | A1 | 32.205265 | 35.742 | 9984 |
+| 2 | A2 | 32.217046 | 29.844 | 9984 |
+| 2 | B | 46.863188 | 50.417 | 9984 |
+| 3 | A1 | 31.309624 | 46.952 | 9984 |
+| 3 | A2 | 33.552023 | 31.298 | 9984 |
+| 3 | B | 38.341471 | 45.974 | 9984 |
+| 4 | A1 | 37.640037 | 46.762 | 9984 |
+| 4 | A2 | 36.749523 | 34.719 | 9984 |
+| 4 | B | 40.545683 | 51.868 | 9984 |
+
+**Follow-up: the final pruned-usize variant was also rejected and unshipped.**
+It replaced back-distances with absolute predecessors, checked recording runs
+once, added a literal fast path and exact first-final allocation, and pruned
+expired heads/history links at each block boundary. Its unpublished source
+SHA-256 was `76226eb40ec770991fe53f0ffef2f749c14f1b8cd21f7e131b5964764267a239`.
+The public pack control was `6aff7387e91c277e76b658aee6a4bfb0406f097b`, which
+retained the original deflater. Five A1/A2/B trials of seven cases (105 samples),
+using Cargo release opt3, fat LTO, one codegen unit, panic abort and stripping,
+gave these pooled-baseline versus candidate observations:
+
+- Twelve unrelated 1 MiB objects: 563.245 to 704.536 ms (**+25.09%**), process
+  CPU 619.840 to 766.709 ms (**+23.69%**), A/A wall spread 1.74%.
+- Two unrelated 8 MiB objects: 883.450 to 996.877 ms (**+12.84%**), process
+  CPU 986.396 to 1086.391 ms (**+10.14%**), A/A wall spread 1.97%.
+- Two 8 MiB text objects did improve 20.45% in wall time. A separate fat-LTO
+  codec probe on 1 MiB repetitive text improved 37.57% in wall time and 37.11%
+  in CPU. Neither compensated for the public writer's unrelated-data losses.
+
+Every timed pack case preserved its length, checksum and delta count. All
+codec output lengths/work totals matched. The prototype passed 64 deflate tests
+with 0 failures and 1 ignored, plus strict all-target deflate Clippy; those
+tests were part of the rejected prototype, not shipped test coverage. The
+[experiment record](ROLLING_DEFLATE_MATCH_INDEX.md) retains all 105 pack and
+45 final LTO codec elapsed samples, process CPU/RSS scope, compiler/source/
+binary identities and equivalence limits. This follow-up does not erase the
+first u32 failure or combine measurements from the different implementations.
+
+**Revisit when** a changed mechanism removes the complete writer's regressions
+and demonstrates small-member behavior and public pack construction together,
+with baseline, candidate and A/A controls. A repetitive-text codec improvement
+alone is insufficient. The original deflater was retained; after restoration,
+the shipped pack/deflate suites at `6aff7387` passed 341 tests with 0 failures
+and 10 ignored across 40 targets. No full-node, transport or real-repository
+clone improvement, or completion of `frankengit-1tl9`, follows from this work.
