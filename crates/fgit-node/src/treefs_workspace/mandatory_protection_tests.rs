@@ -609,6 +609,22 @@ fn direct_native_merge_preserves_refusal_after_policy_clear_but_new_request_can_
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let mut f = fixture(&scratch, format);
+        let candidate = f.command.candidate.commit;
+        let assert_unplaced = |node: &OneNode| {
+            assert!(
+                matches!(node.read_git_object(candidate),
+                    Err(crate::NodeRefusal::Fabric(error))
+                        if matches!(*error,
+                            fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)),
+                "a refused bundle must not retain its private candidate"
+            );
+            assert_eq!(
+                fs::read_dir(node.storage_root().join("staging"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        };
         committed(
             change_policy(
                 &f,
@@ -625,6 +641,7 @@ fn direct_native_merge_preserves_refusal_after_policy_clear_but_new_request_can_
         let key = b"direct-recovery-refused";
         let refused = plain_merge(&f, key).unwrap();
         denied(&refused.1);
+        assert_unplaced(&f.node);
         let intent = recovery_intent(&f);
         assert_eq!(
             intent
@@ -651,21 +668,56 @@ fn direct_native_merge_preserves_refusal_after_policy_clear_but_new_request_can_
         let before = snapshot(&f.node);
         f.node.shutdown().unwrap();
         f.node = OneNode::open_existing(scratch.config(format)).unwrap();
+        assert_unplaced(&f.node);
         assert_eq!(
             direct_native_recovery(&f, 2, key, &intent, MergeObjectLimits::default()).unwrap(),
             refused.1
         );
         assert_eq!(snapshot(&f.node).basis(), before.basis());
         f.node.bring_into_service(HeadGeneration::FIRST).unwrap();
-        let fresh = direct_native_recovery(
-            &f,
-            2,
-            b"direct-new-permitted",
-            &intent,
-            MergeObjectLimits::default(),
-        )
-        .unwrap();
-        assert!(matches!(fresh.outcome, DecisionOutcome::Committed { .. }));
+        let fresh_key = b"direct-new-permitted";
+        let fresh_tx = intent
+            .seal_attempt(&protection_context(&f, 2, fresh_key))
+            .unwrap()
+            .derive()
+            .unwrap()
+            .0;
+        // A new intent cannot recover bytes discarded with the refused bundle.
+        // EvidenceMissing is unavailable, so it must leave the same fresh key
+        // retryable when the caller resupplies the actual candidate artifact.
+        let unavailable =
+            direct_native_recovery(&f, 2, fresh_key, &intent, MergeObjectLimits::default());
+        assert!(
+            matches!(&unavailable, Err(NodeReceiveTransportRefusal::Admission(error))
+                if matches!(error.as_ref(),
+                    fgit_admission::AdmissionError::AsyncProjectionUnavailable(
+                        RefusalCode::EvidenceMissing))),
+            "{unavailable:?}"
+        );
+        assert_eq!(snapshot(&f.node).basis(), before.basis());
+        assert_unplaced(&f.node);
+        let request = f.node.request_context();
+        assert_eq!(
+            f.node
+                .runtime()
+                .block_on(fgit_authority::resolve_outcome_async(
+                    &f.node.authority,
+                    request.authority(),
+                    &f.node.head_key,
+                    f.node.tenant_id,
+                    f.node.repository_id,
+                    fresh_tx,
+                ))
+                .unwrap(),
+            fgit_authority::OutcomeLookup::Undecided
+        );
+        let fresh = committed(plain_merge(&f, fresh_key).unwrap());
+        assert_eq!(fresh.0, fresh_tx);
+        assert_eq!(
+            direct_native_recovery(&f, 2, fresh_key, &intent, MergeObjectLimits::default())
+                .unwrap(),
+            fresh.1
+        );
         assert_eq!(
             snapshot(&f.node).snapshot().refs[&target()],
             f.command.candidate.commit

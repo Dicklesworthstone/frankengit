@@ -292,6 +292,12 @@ impl OneNode {
     /// actual target ancestry, and enforce the same mandatory review protection.
     /// They never synthesize a commit or fall back to a different merge method.
     ///
+    /// A fresh undecided request requires candidate bytes already available in
+    /// the immutable object fabric: this entry receives no bundle or private
+    /// staging owner. Use [`Self::apply_merge_bundle_with_method_durable_in`] to
+    /// resupply a candidate discarded after refusal. An exact decided retry
+    /// recovers its historical outcome without requiring those bytes.
+    ///
     /// Candidate objects are re-read, hashed and traversed before publication.
     /// Source, target and base must be authority-selected; for MergeCommit,
     /// ordered parents must be target-before and source. All preparation and
