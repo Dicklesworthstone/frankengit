@@ -2,9 +2,11 @@
 
 The node retains the authentication method established by its existing ingress
 verifiers and exposes that bounded fact to canonically activated ref policies.
-It supports ordinary Git receive, native HTTP branch commands, bundle import,
-workspace publication, rebases, and native merge publication, including reviewed merges and fast-forward PR
-publication. The same fact reaches committed and refused admission evidence.
+It supports ordinary Git receive, native HTTP branch commands, buffered and
+file-backed bundle import, workspace publication, rebases, and native merge
+publication, including reviewed merges and fast-forward PR publication. HTTP
+issue, pull request, protection, and conversation writes retain the same fact
+in committed and refused admission evidence.
 
 | Entry boundary | Recorded method | Policy strength |
 | --- | --- | --- |
@@ -69,17 +71,29 @@ transport, or current policy cannot replace that outcome or reinterpret the
 original authentication receipt. A fresh request evaluates the current policy
 and the provenance established for that request.
 
+The session-bound sealed-merge preparation API derives the exact offered
+evidence from the same verified session used for publication. The existing
+context-only preparation API remains an explicit operator assertion. Offering
+evidence prepared under a different authentication method cannot substitute a
+different principal receipt into a new decision.
+
+Metadata-only commands retain their existing authorization and validation
+rules. Their evidence binds the authenticated principal to the exact metadata
+request and effects; it does not fabricate a ref-policy evaluation for a
+command that changes no references.
+
 ## Scope and verification
 
 The receipt contains no credential secret or individual credential handle. It
 does not establish an issuer, expiry, sponsor chain, principal kind, membership,
 capability root, MFA, or hardware binding. This is the current transport-method
-integration, not completion of the full identity model or every metadata-only
-write surface in `frankengit-root-doctrine-x2mv.4.13`.
+integration, not completion of the full identity model in
+`frankengit-root-doctrine-x2mv.4.13`.
 
 Focused tests cover restricted policy evaluation, canonical event/evidence
 versions, provenance and trace substitution, refusal evidence, historical
-readback, real HTTP branch/merge publication, raw Git versus the authorized SSH
+readback, real HTTP branch/merge and metadata publication, native file-backed
+bundle import, sealed workspace offers, raw Git versus the authorized SSH
 command binding, restart, and exact-key recovery. The SSH command-binding test
 does not replace the existing SSH cryptographic-handshake suite. Test execution
 status is reported separately from this coverage inventory.

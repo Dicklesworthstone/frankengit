@@ -142,6 +142,8 @@ impl OneNode {
     /// A later publication independently checks the same evidence; a policy or
     /// ref change can make it stale. The optional digest selects the existing
     /// workspace-bound seal profile; it does not claim workspace ownership.
+    /// This context-only API retains operator-asserted authentication. Use the
+    /// session-bound variant when a transport verified the caller's credential.
     pub async fn prepare_sealed_merge_evidence_in(
         &self,
         request: &NodeRequestContext,
@@ -152,9 +154,72 @@ impl OneNode {
         fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
         AdmissionError,
     > {
+        self.prepare_sealed_merge_evidence_with_authentication_in(
+            request,
+            context,
+            sealed,
+            workspace_snapshot,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    /// Prepare exact offered evidence using the identity, retry key, and
+    /// authentication method retained by the publication session. The caller
+    /// supplies the same session and workspace digest to later admission;
+    /// credential provenance is never inferred from a principal ID.
+    ///
+    /// Like the context-only variant, this neither seals nor publishes a
+    /// request and does not claim ownership of the optional workspace digest.
+    /// Admission revalidates the offer against its actual publication basis.
+    pub async fn prepare_sealed_merge_evidence_for_session_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        sealed: &SealedMerge<'_>,
+        workspace_snapshot: Option<[u8; 32]>,
+    ) -> Result<
+        fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
+        NodeWorkspaceRefusal,
+    > {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: authenticated.principal_id(),
+            idempotency_key: authenticated.client_idempotency_key().clone(),
+            object_format: self.object_format,
+        };
+        self.prepare_sealed_merge_evidence_with_authentication_in(
+            request,
+            &context,
+            sealed,
+            workspace_snapshot,
+            authenticated.authentication(),
+        )
+        .await
+        .map_err(|error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error))))
+    }
+
+    async fn prepare_sealed_merge_evidence_with_authentication_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        sealed: &SealedMerge<'_>,
+        workspace_snapshot: Option<[u8; 32]>,
+        authentication: AdmissionAuthentication,
+    ) -> Result<
+        fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
+        AdmissionError,
+    > {
         let projection = NodeNativeMergeProjection {
             node: self,
-            inner: self.durable_admission_projection(context)?,
+            inner: self
+                .durable_admission_projection(context)?
+                .with_authentication(authentication),
             object_limits: MergeObjectLimits {
                 max_reused_blob_bytes: self.reused_merge_blob_limit(),
                 ..MergeObjectLimits::default()

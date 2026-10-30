@@ -161,7 +161,7 @@ pub(super) fn authenticate(
     };
     let key =
         IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
-    Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
+    Ok(grant.session(key))
 }
 
 /// The complete HTTP body precedes admission. Once native admission starts,

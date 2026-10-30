@@ -44,6 +44,169 @@ fn committed(result: Result<AdmissionResult, StreamBundleImportRefusal>) -> Admi
     result
 }
 
+fn authenticated_file_import(
+    node: &OneNode,
+    path: &Path,
+    key: &str,
+    authentication: fgit_admission::evidence::AdmissionAuthentication,
+) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+    let request = node.import_request_context(None);
+    let session = LoopbackReceiveSession::Authenticated(
+        crate::AuthenticatedReceiveSession::new(
+            principal(),
+            IdempotencyKey::new(key.as_bytes().to_vec()).unwrap(),
+        )
+        .with_authentication(authentication),
+    );
+    let mut input = fs::File::open(path).unwrap();
+    node.runtime()
+        .block_on(node.import_full_git_bundle_reader_durable_in(
+            &request,
+            &session,
+            &mut input,
+            Default::default(),
+            AdmissionLimits::default(),
+        ))
+}
+
+#[test]
+fn file_import_authentication_survives_policy_evaluation_transport_retry_and_reopen() {
+    use fgit_admission::evidence::{AdmissionAuthentication, PolicyDecisionRecord};
+    use fgit_forge::ExpectedVersion;
+    use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, compile_ref_policy};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let source_root = Scratch::new();
+        let (source, _, child, _) = fixture(&source_root, format);
+        let path = source_root.0.join("authenticated.bundle");
+        let bytes = write_export(&source, &path);
+        let target = Scratch::new();
+        let destination = empty_node(&target, format);
+        let request = destination.request_context();
+        let protection = destination
+            .runtime()
+            .block_on(destination.read_review_protection_in(&request))
+            .unwrap();
+        let command = ProtectionCommand {
+            expected_version: protection
+                .version()
+                .map_or(ExpectedVersion::NewStream, ExpectedVersion::Exactly),
+            expected_epoch: protection.policy_epoch,
+            protection: ReviewProtection {
+                administrators: vec![principal()],
+                branches: Vec::new(),
+                ref_policy: Some(compile_ref_policy(
+                    "policy authentication { rule credential { when actor.authentication >= single_factor then allow } default deny \"verified credential required\" }",
+                ).unwrap()),
+            },
+        };
+        let installed = destination
+            .runtime()
+            .block_on(destination.admit_review_protection_durable_in(
+                &request,
+                &session("file-authentication-policy"),
+                &command,
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            installed.1.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+
+        let refused =
+            file_import(&destination, &path, "operator-file", Default::default()).unwrap();
+        assert!(refused.commands.iter().all(|command| matches!(
+            command.terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ProtectedRefTransitionDenied,
+                ..
+            }
+        )));
+        assert_missing(&destination, child);
+        assert_staging_empty(&destination);
+        assert_eq!(
+            authenticated_file_import(
+                &destination,
+                &path,
+                "operator-file",
+                AdmissionAuthentication::HttpToken,
+            )
+            .unwrap(),
+            refused,
+            "a stronger retry must retain the original refusal"
+        );
+
+        let result = committed(authenticated_file_import(
+            &destination,
+            &path,
+            "verified-file",
+            AdmissionAuthentication::HttpToken,
+        ));
+        assert_native_transfer(&source, &destination, child);
+        assert_staging_empty(&destination);
+        let tx_id = result.session.tx_ids[0];
+        let history = destination
+            .runtime()
+            .block_on(destination.snapshot_history_in(&request))
+            .unwrap();
+        let record = history
+            .iter()
+            .flat_map(|batch| &batch.batch.committed_rcrs)
+            .find(|record| record.tx_id == tx_id)
+            .unwrap()
+            .clone();
+        // Buffered and file-backed import share the exact sealed command identity.
+        assert_eq!(
+            import(&destination, &bytes, "verified-file").unwrap(),
+            result
+        );
+        destination.shutdown().unwrap();
+
+        let reopened = OneNode::open_existing(target.config(format)).unwrap();
+        let request = reopened.request_context();
+        assert_eq!(
+            file_import(&reopened, &path, "verified-file", Default::default()).unwrap(),
+            result,
+        );
+        let identity = record.principal_snapshot_id.as_internal_object_id();
+        let principal_receipt = reopened
+            .runtime()
+            .block_on(crate::read_principal_snapshot_in(
+                &reopened.authority,
+                request.authority(),
+                reopened.repository_id,
+                fgit_types::Digest::new(identity.algorithm(), *identity.digest()),
+                &|| false,
+            ))
+            .unwrap();
+        assert_eq!(
+            principal_receipt.authentication(),
+            Some(AdmissionAuthentication::HttpToken)
+        );
+        let policy = reopened
+            .runtime()
+            .block_on(crate::read_policy_decision_in(
+                &reopened.authority,
+                request.authority(),
+                reopened.repository_id,
+                record.policy_decision_root,
+                &|| false,
+            ))
+            .unwrap();
+        assert!(matches!(
+            policy,
+            PolicyDecisionRecord::AuthenticationActivated(_)
+        ));
+        assert_eq!(
+            policy.authentication(),
+            Some(AdmissionAuthentication::HttpToken)
+        );
+        reopened.shutdown().unwrap();
+        source.shutdown().unwrap();
+    }
+}
+
 fn write_export(node: &OneNode, path: &Path) -> Vec<u8> {
     let bytes = export(node, &RefVisibility::new()).into_bytes();
     fs::write(path, &bytes).unwrap();

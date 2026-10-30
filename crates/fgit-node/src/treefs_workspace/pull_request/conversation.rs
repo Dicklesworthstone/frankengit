@@ -119,7 +119,10 @@ impl OneNode {
         self.push_quota.evaluate(&authenticated.principal_id())?;
         let projection = NodeNativeMergeProjection {
             node: self,
-            inner: self.durable_admission_projection(&context).map_err(map)?,
+            inner: self
+                .durable_admission_projection(&context)
+                .map_err(map)?
+                .with_authentication(authenticated.authentication()),
             object_limits: MergeObjectLimits::default(),
             staging: None,
             workspace: None,

@@ -10,6 +10,6 @@ cargo check --locked -p fgit-node -p fgit-admission -p fgit-object-fabric --all-
 cargo test --locked -p fgit-policy --all-targets
 cargo test --locked -p fgit-object-fabric --lib --test local_batch --test local_immutable_durability
 cargo test --locked -p fgit-forge --lib
-cargo test --locked -p fgit-admission --lib
-cargo test --locked -p fgit-node --lib ssh_authentication_and_raw_operator_provenance
-cargo test --locked -p fgit-node --test branch_http --test review_merge_http --test source_change_http --test source_rebase_http
+cargo test --locked -p fgit-admission --lib --test native_merge_delivery_faults
+cargo test --locked -p fgit-node --lib authentication
+cargo test --locked -p fgit-node --test branch_http --test review_merge_http --test source_change_http --test source_rebase_http --test sealed_merge_publication --test sealed_native_merge_publication

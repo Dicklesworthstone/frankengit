@@ -652,6 +652,272 @@ fn original_sealed_api_prepares_activated_policy_evidence_without_changing_autho
     }
 }
 
+#[test]
+fn session_bound_preparation_preserves_authentication_through_workspace_publication() {
+    use fgit_admission::evidence::PolicyDecisionRecord;
+    use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, compile_ref_policy};
+    use fgit_treefs::{ExportLimits, TreeCapability, TreePath, WorkspaceId};
+    use fgit_wire::visibility::RefVisibility;
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = new_node(&scratch, format);
+        let fixture = fixture(&node, &scratch, true);
+        let key = b"session-prepared-workspace";
+        let operator = session(key);
+        let verified = |authentication| {
+            LoopbackReceiveSession::Authenticated(
+                crate::AuthenticatedReceiveSession::new(
+                    principal(),
+                    IdempotencyKey::new(key.to_vec()).unwrap(),
+                )
+                .with_authentication(authentication),
+            )
+        };
+        let http = verified(AdmissionAuthentication::HttpToken);
+        let ssh = verified(AdmissionAuthentication::SshDeployKey);
+        let request = node.request_context();
+        let path = TreePath::parse_default(b"keep.txt").unwrap();
+        let capability = TreeCapability::new(
+            WorkspaceId::from_bytes([0xc1; 16]),
+            node.repository_id,
+            vec![path.clone()],
+            vec![path],
+        )
+        .with_fetch_budget(
+            fgit_types::ByteCount::try_new("workspace fetch", 1_000_000, 1_000_000).unwrap(),
+        )
+        .with_file_budget(100);
+        let workspace = node
+            .runtime()
+            .block_on(node.open_merge_workspace_in(
+                &request,
+                &http,
+                &target_ref(),
+                &RefVisibility::new(),
+                capability,
+                0,
+                ExportLimits {
+                    max_objects: 100,
+                    max_total_bytes: 1_000_000,
+                    max_tree_entries: 100,
+                },
+            ))
+            .unwrap();
+        let workspace = node
+            .runtime()
+            .block_on(node.edit_merge_workspace_in(
+                &request,
+                &http,
+                &workspace,
+                &fgit_treefs::IntentLog::new(),
+                0,
+            ))
+            .unwrap();
+        assert_eq!(workspace.tree(), fixture.tree);
+        let epoch = workspace.epochs().staged().get();
+        let mut offer = unprepared_offer(&node, &fixture, 1, epoch, key);
+        let sealed = offer.sealed(WorkspaceEpoch::from_u64(epoch));
+        let before = snapshot(&node).basis().clone();
+        let prepare = |session: &LoopbackReceiveSession| {
+            node.runtime()
+                .block_on(node.prepare_sealed_merge_evidence_for_session_in(
+                    &request,
+                    session,
+                    &sealed,
+                    Some(workspace.snapshot_digest()),
+                ))
+        };
+        assert!(matches!(
+            prepare(&LoopbackReceiveSession::anonymous()),
+            Err(NodeWorkspaceRefusal::WorkspacePublication(error))
+                if matches!(*error, NodeReceiveTransportRefusal::Unauthenticated)
+        ));
+        let context_prepared = node
+            .runtime()
+            .block_on(node.prepare_sealed_merge_evidence_in(
+                &request,
+                &context(&node, key),
+                &sealed,
+                Some(workspace.snapshot_digest()),
+            ))
+            .unwrap();
+        let operator_prepared = prepare(&operator).unwrap();
+        let http_prepared = prepare(&http).unwrap();
+        let ssh_prepared = prepare(&ssh).unwrap();
+        assert_eq!(context_prepared, operator_prepared);
+        for prepared in [operator_prepared, http_prepared, ssh_prepared] {
+            assert_eq!(prepared.tx_id, operator_prepared.tx_id);
+            assert_eq!(prepared.basis, before.id());
+            assert_eq!(prepared.policy_epoch, before.body().policy_epoch);
+            assert_eq!(
+                prepared.evidence.forge_event_batch_root,
+                operator_prepared.evidence.forge_event_batch_root
+            );
+        }
+        for (first, second) in [
+            (operator_prepared, http_prepared),
+            (operator_prepared, ssh_prepared),
+            (http_prepared, ssh_prepared),
+        ] {
+            assert_ne!(
+                first.evidence.principal_snapshot_id,
+                second.evidence.principal_snapshot_id
+            );
+            assert_ne!(
+                first.evidence.policy_decision_root,
+                second.evidence.policy_decision_root
+            );
+        }
+        assert_eq!(snapshot(&node).basis(), &before);
+        assert_eq!(
+            node.runtime()
+                .block_on(node.resolve_outcome_in(&request, http_prepared.tx_id))
+                .unwrap(),
+            OutcomeLookup::Undecided,
+            "preparation does not publish a terminal outcome"
+        );
+
+        let command = ProtectionCommand {
+            expected_version: ExpectedVersion::NewStream,
+            expected_epoch: before.body().policy_epoch,
+            protection: ReviewProtection {
+                administrators: vec![principal()],
+                branches: Vec::new(),
+                ref_policy: Some(compile_ref_policy(
+                    "policy authenticated { rule credential { when actor.authentication >= single_factor then allow } default deny \"credential required\" }",
+                ).unwrap()),
+            },
+        };
+        committed(
+            node.runtime()
+                .block_on(node.admit_review_protection_durable_in(
+                    &request,
+                    &session(b"workspace-authentication-policy"),
+                    &command,
+                    AdmissionLimits::default(),
+                ))
+                .unwrap()
+                .1,
+        );
+        assert!(matches!(
+            prepare(&operator),
+            Err(NodeWorkspaceRefusal::WorkspacePublication(error))
+                if matches!(error.as_ref(), NodeReceiveTransportRefusal::Admission(error)
+                    if matches!(error.as_ref(), AdmissionError::AsyncProjectionUnavailable(
+                        RefusalCode::ProtectedRefTransitionDenied
+                    )))
+        ));
+        let authenticated = prepare(&http).unwrap();
+        assert_eq!(authenticated.tx_id, http_prepared.tx_id);
+        offer.evidence = authenticated.evidence;
+        let outcome = committed(
+            node.runtime()
+                .block_on(node.admit_workspace_merge_durable_in(
+                    &request,
+                    &http,
+                    &workspace,
+                    &offer.sealed(WorkspaceEpoch::from_u64(epoch)),
+                    AdmissionLimits::default(),
+                    MergeObjectLimits::default(),
+                ))
+                .unwrap(),
+        );
+        assert_eq!(
+            snapshot(&node).snapshot().refs[&target_ref()],
+            fixture.candidate
+        );
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&request))
+            .unwrap();
+        let record = history
+            .iter()
+            .flat_map(|batch| &batch.batch.committed_rcrs)
+            .find(|record| record.tx_id == authenticated.tx_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            record.principal_snapshot_id,
+            authenticated.evidence.principal_snapshot_id
+        );
+        assert_eq!(
+            record.policy_decision_root,
+            authenticated.evidence.policy_decision_root
+        );
+        let identity = record.principal_snapshot_id.as_internal_object_id();
+        let principal_snapshot = node
+            .runtime()
+            .block_on(crate::read_principal_snapshot_in(
+                &node.authority,
+                request.authority(),
+                node.repository_id,
+                Digest::new(identity.algorithm(), *identity.digest()),
+                &|| false,
+            ))
+            .unwrap();
+        assert_eq!(
+            principal_snapshot.authentication(),
+            Some(AdmissionAuthentication::HttpToken)
+        );
+        let policy = node
+            .runtime()
+            .block_on(crate::read_policy_decision_in(
+                &node.authority,
+                request.authority(),
+                node.repository_id,
+                record.policy_decision_root,
+                &|| false,
+            ))
+            .unwrap();
+        assert!(matches!(
+            policy,
+            PolicyDecisionRecord::AuthenticationActivated(_)
+        ));
+        assert_eq!(
+            policy.authentication(),
+            Some(AdmissionAuthentication::HttpToken)
+        );
+        assert_eq!(
+            node.runtime()
+                .block_on(node.admit_workspace_merge_durable_in(
+                    &request,
+                    &operator,
+                    &workspace,
+                    &offer.sealed(WorkspaceEpoch::from_u64(epoch)),
+                    AdmissionLimits::default(),
+                    MergeObjectLimits::default(),
+                ))
+                .unwrap(),
+            outcome,
+            "terminal recovery retains the original authenticated decision"
+        );
+        node.runtime()
+            .block_on(node.close_merge_workspace_in(&request, &operator, &workspace))
+            .unwrap();
+        node.shutdown().unwrap();
+
+        let reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        let request = reopened.request_context();
+        let recovered = reopened
+            .runtime()
+            .block_on(reopened.recover_transaction_in(&request, &operator))
+            .unwrap();
+        assert_eq!(recovered.terminal(), Some(outcome));
+        let history = reopened
+            .runtime()
+            .block_on(reopened.snapshot_history_in(&request))
+            .unwrap();
+        assert!(
+            history
+                .iter()
+                .flat_map(|batch| &batch.batch.committed_rcrs)
+                .any(|stored| stored == &record)
+        );
+        reopened.shutdown().unwrap();
+    }
+}
+
 fn expected_entry(
     node: &OneNode,
     before: &MaterializedAdmission,

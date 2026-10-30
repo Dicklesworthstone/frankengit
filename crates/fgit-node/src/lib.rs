@@ -9747,7 +9747,29 @@ impl OneNode {
         limits: AdmissionLimits,
         staging: Option<&receive_staging::ReceiveStaging>,
     ) -> Result<AdmissionResult, AdmissionError> {
-        let projection = self.durable_admission_projection_publishing(context, staging)?;
+        self.admit_validated_source_import_with_authentication_publishing_in(
+            request,
+            context,
+            validated,
+            limits,
+            staging,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    async fn admit_validated_source_import_with_authentication_publishing_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        validated: &ValidatedSourceImport,
+        limits: AdmissionLimits,
+        staging: Option<&receive_staging::ReceiveStaging>,
+        authentication: AdmissionAuthentication,
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self
+            .durable_admission_projection_publishing(context, staging)?
+            .with_authentication(authentication);
         Box::pin(admit_validated_source_import_async(
             &self.authority,
             request.authority(),

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use asupersync::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::merge::SealedMerge;
 use fgit_admission::merge::native::{
     admit_workspace_sealed_native_merge_async, objects::MergeObjectLimits,
@@ -490,6 +491,7 @@ impl OneNode {
                     expected,
                     sealed,
                     &context,
+                    authenticated.authentication(),
                     limits,
                     object_limits,
                 )
@@ -503,6 +505,7 @@ impl OneNode {
                     expected,
                     sealed,
                     &context,
+                    authenticated.authentication(),
                     limits,
                     object_limits,
                 )
@@ -519,6 +522,7 @@ impl OneNode {
         expected: &MergeWorkspaceReceipt,
         sealed: &SealedMerge<'_>,
         context: &AdmissionContext,
+        authentication: AdmissionAuthentication,
         limits: AdmissionLimits,
         object_limits: MergeObjectLimits,
     ) -> Result<TerminalOutcome, NodeWorkspaceRefusal> {
@@ -564,7 +568,8 @@ impl OneNode {
             node: self,
             inner: self
                 .durable_admission_projection(context)
-                .map_err(admission_error)?,
+                .map_err(admission_error)?
+                .with_authentication(authentication),
             object_limits,
             workspace: Some((
                 observed,

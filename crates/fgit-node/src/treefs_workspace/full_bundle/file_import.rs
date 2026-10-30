@@ -440,12 +440,13 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_validated_source_import_publishing_in(
+        self.admit_validated_source_import_with_authentication_publishing_in(
             request,
             &context,
             &validated,
             limits,
             Some(&staging),
+            authenticated.authentication(),
         )
         .await
         .map_err(admission_error)
