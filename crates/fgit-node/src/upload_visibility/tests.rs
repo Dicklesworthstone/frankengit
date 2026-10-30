@@ -2,6 +2,7 @@ use super::*;
 use std::cell::RefCell;
 mod basename_ordering;
 mod projection_cache;
+mod received_pack_reuse;
 mod selection_preflight;
 mod shallow_transport;
 use std::io::{Read, Write};

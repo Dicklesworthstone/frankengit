@@ -30,7 +30,7 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--max-in-flight <1..16>]
   [--continuous --stop-file <absent-path>]
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
-  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]
+  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]
 
 Deploy-key files retain the three-column legacy format. To limit native ref writes,
 start the file with frankengit-ssh-deploy-keys-v2 and give every row a fourth field:
@@ -441,22 +441,50 @@ mod tests {
                 Some(bytes)
             );
         }
-        assert_eq!(
-            parse(&arguments(&[]))
-                .unwrap()
-                .configuration
-                .pack_cache_bytes(),
-            64 << 20
-        );
-        for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
+        for (flag, default, capacity) in [
+            (
+                "--pack-cache-mib",
+                64 << 20,
+                NodeConfig::pack_cache_bytes as fn(&NodeConfig) -> usize,
+            ),
+            (
+                "--received-pack-cache-mib",
+                128 << 20,
+                NodeConfig::received_pack_cache_bytes as fn(&NodeConfig) -> usize,
+            ),
+        ] {
             assert_eq!(
-                parse(&arguments(&["--pack-cache-mib", value]))
-                    .unwrap()
-                    .configuration
-                    .pack_cache_bytes(),
-                bytes,
+                capacity(&parse(&arguments(&[])).unwrap().configuration),
+                default,
             );
+            for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
+                assert_eq!(
+                    capacity(&parse(&arguments(&[flag, value])).unwrap().configuration),
+                    bytes,
+                );
+            }
+            for flags in [
+                vec![flag, "65537"],
+                vec![flag, "18446744073709551615"],
+                vec![flag, "-1"],
+                vec![flag, "+1"],
+                vec![flag, "1.5"],
+                vec![flag, "0", flag, "1"],
+                vec![flag],
+            ] {
+                assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+            }
         }
+        let independent = parse(&arguments(&[
+            "--pack-cache-mib",
+            "1",
+            "--received-pack-cache-mib",
+            "0",
+        ]))
+        .unwrap()
+        .configuration;
+        assert_eq!(independent.pack_cache_bytes(), 1 << 20);
+        assert_eq!(independent.received_pack_cache_bytes(), 0);
         let continuous = parse(&arguments(&[
             "--continuous",
             "--stop-file",
@@ -499,13 +527,6 @@ mod tests {
             vec!["--pack-max-blob-mib", "1.5"],
             vec!["--pack-max-blob-mib", "32", "--pack-max-blob-mib", "96"],
             vec!["--pack-max-blob-mib"],
-            vec!["--pack-cache-mib", "65537"],
-            vec!["--pack-cache-mib", "18446744073709551615"],
-            vec!["--pack-cache-mib", "-1"],
-            vec!["--pack-cache-mib", "+1"],
-            vec!["--pack-cache-mib", "1.5"],
-            vec!["--pack-cache-mib", "0", "--pack-cache-mib", "1"],
-            vec!["--pack-cache-mib"],
             vec![
                 "--pack-max-expanded-mib",
                 "1",

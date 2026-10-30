@@ -62,7 +62,7 @@ previously kept the wider node package gate red was fixed in `7ccaf8b`
 locally at that revision. `doctor` authenticates the head and can re-verify
 one explicitly named native object; it is not yet a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` writes an authority-selected pack
-to a previously absent path. Served and exported packs stream through
+to a previously absent path. Newly constructed served and exported packs stream through
 private scratch custody (frankengit-8xyq): the write-side envelope
 (`--pack-max-expanded-mib`, 4096 MiB of objects by default) bounds work and
 scratch disk, and the delta window (`git-pack-compressed-v5`: at most 32
@@ -76,6 +76,15 @@ zero disables retention). Independently reopened request children reuse it,
 while each request still authenticates and selects its permitted objects. This
 retained-entry budget is additional to the delta window and is not a total RSS
 limit; the measurements above predate the cache.
+The three serving commands also retain fully verified received packs under
+`--received-pack-cache-mib <0..65536>` (128 MiB by default, zero disables).
+When a later fetch's freshly authorized object set matches a self-contained
+received pack exactly, the first clone can reuse its compressed bytes without
+re-reading blob bodies or recomputing deltas. Reuse begins only after immutable
+object publication, honors client capabilities and current limits, and carries
+its own representation receipt. This bounded process-local capability is
+described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);
+restarting the service discards it.
 Network packs also group related versions using verified raw tree-entry
 basenames, improving access to delta candidates within that same bounded
 window. The [ordering contract](docs/UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs)

@@ -285,7 +285,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -1014,6 +1014,8 @@ struct ServeEnvelope {
     pack_max_blob_bytes: Option<usize>,
     /// Shared, process-local pack computation cache; zero disables retention.
     pack_cache_bytes: Option<usize>,
+    /// Shared received-pack representations, independent of computation cache.
+    received_pack_cache_bytes: Option<usize>,
 }
 
 impl ServeEnvelope {
@@ -1071,6 +1073,9 @@ impl ServeEnvelope {
         if let Some(bytes) = self.pack_cache_bytes {
             configuration = configuration.with_pack_cache_bytes(bytes);
         }
+        if let Some(bytes) = self.received_pack_cache_bytes {
+            configuration = configuration.with_received_pack_cache_bytes(bytes);
+        }
         self.apply_pack_envelope(configuration)
     }
 
@@ -1127,8 +1132,27 @@ pub fn parse_pack_blob_mib(value: &str) -> Result<usize, CliRefusal> {
 /// fits the target platform. Zero disables retention. This limit configures
 /// disposable memory only; it does not widen any request or publication bound.
 pub fn parse_pack_cache_mib(value: &str) -> Result<usize, CliRefusal> {
+    parse_memory_cache_mib(value, "--pack-cache-mib")
+}
+
+/// Parses the independent received-pack cache flag for every serving transport.
+///
+/// Canonical decimal MiB from 0 through 65536 must fit the target platform.
+/// Zero disables received-pack capture and reuse. This changes no receive,
+/// upload, or publication envelope and leaves computation memoization alone.
+pub fn parse_received_pack_cache_mib(value: &str) -> Result<usize, CliRefusal> {
+    if value.len() > 1 && value.starts_with('0') {
+        return Err(CliRefusal::InvalidServeLimit {
+            field: "--received-pack-cache-mib",
+            value: value.to_owned(),
+        });
+    }
+    parse_memory_cache_mib(value, "--received-pack-cache-mib")
+}
+
+fn parse_memory_cache_mib(value: &str, field: &'static str) -> Result<usize, CliRefusal> {
     let refusal = || CliRefusal::InvalidServeLimit {
-        field: "--pack-cache-mib",
+        field,
         value: value.to_owned(),
     };
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -1173,6 +1197,15 @@ fn extract_serve_envelope(
             }
             let value = arguments.get(index + 1).ok_or(CliRefusal::Usage)?;
             envelope.pack_cache_bytes = Some(parse_pack_cache_mib(value)?);
+            index += 2;
+            continue;
+        }
+        if is_serve && argument == "--received-pack-cache-mib" {
+            if envelope.received_pack_cache_bytes.is_some() {
+                return Err(CliRefusal::Usage);
+            }
+            let value = arguments.get(index + 1).ok_or(CliRefusal::Usage)?;
+            envelope.received_pack_cache_bytes = Some(parse_received_pack_cache_mib(value)?);
             index += 2;
             continue;
         }
@@ -2361,6 +2394,79 @@ mod tests {
             "serving cache flag is not silently accepted by export"
         );
         assert!(envelope.pack_cache_bytes.is_none());
+    }
+
+    #[test]
+    fn received_pack_cache_is_independent_canonical_and_serving_only() {
+        let configuration = || {
+            fgit_node::NodeConfig::new(
+                PathBuf::from("not-opened"),
+                fgit_types::TenantId::from_bytes([0x11; 16]),
+                fgit_types::RepositoryId::from_bytes([0x22; 16]),
+            )
+        };
+        assert_eq!(configuration().received_pack_cache_bytes(), 128 << 20);
+        for (value, bytes) in [("0", 0), ("1", 1 << 20), ("256", 256 << 20)] {
+            assert_eq!(super::parse_received_pack_cache_mib(value).unwrap(), bytes);
+            let (retained, envelope) = super::extract_serve_envelope(&serve_argv(&[
+                "--received-pack-cache-mib",
+                value,
+                "--pack-cache-mib",
+                "64",
+            ]))
+            .unwrap();
+            assert_eq!(retained.len(), 5);
+            let configured = envelope.apply(configuration()).unwrap();
+            assert_eq!(configured.received_pack_cache_bytes(), bytes);
+            assert_eq!(configured.pack_cache_bytes(), 64 << 20);
+            assert_eq!(configured.clone().received_pack_cache_bytes(), bytes);
+        }
+        let upper = super::parse_received_pack_cache_mib("65536");
+        match usize::try_from(65_536_u64 * 1_048_576) {
+            Ok(bytes) => assert_eq!(upper.unwrap(), bytes),
+            Err(_) => assert!(upper.is_err()),
+        }
+        for value in [
+            "",
+            "00",
+            "01",
+            "-1",
+            "+1",
+            "1.5",
+            " 1",
+            "1 ",
+            "65537",
+            "18446744073709551615",
+        ] {
+            assert!(matches!(
+                super::parse_received_pack_cache_mib(value),
+                Err(CliRefusal::InvalidServeLimit {
+                    field: "--received-pack-cache-mib",
+                    ..
+                })
+            ));
+        }
+        // The established computation-cache parser's grammar remains intact.
+        assert_eq!(super::parse_pack_cache_mib("01").unwrap(), 1 << 20);
+        for flags in [
+            vec!["--received-pack-cache-mib"],
+            vec![
+                "--received-pack-cache-mib",
+                "0",
+                "--received-pack-cache-mib",
+                "1",
+            ],
+        ] {
+            assert!(matches!(
+                super::extract_serve_envelope(&serve_argv(&flags)),
+                Err(CliRefusal::Usage)
+            ));
+        }
+        let mut export = serve_argv(&["--received-pack-cache-mib", "0"]);
+        export[0] = "export".into();
+        let (retained, envelope) = super::extract_serve_envelope(&export).unwrap();
+        assert_eq!(retained, export);
+        assert!(envelope.received_pack_cache_bytes.is_none());
     }
 
     #[test]

@@ -33,7 +33,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
-  [--receive-max-expanded-mib <1..65536>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]
+  [--receive-max-expanded-mib <1..65536>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]
   [--trusted-origin <origin>]
   [--index-state-dir <private-directory> --index-state init|resume
    --index-profile lexical|symbols|both --index-format sha1|sha256
@@ -351,6 +351,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--pack-max-expanded-mib"
                     | "--pack-max-blob-mib"
                     | "--pack-cache-mib"
+                    | "--received-pack-cache-mib"
                     | "--trusted-origin"
                     | "--index-state-dir"
                     | "--index-symbol-state-dir"
@@ -603,6 +604,11 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if let Some(value) = flags.get("--pack-cache-mib") {
         config = config.with_pack_cache_bytes(
             fgit_cli::parse_pack_cache_mib(value).map_err(|error| error.to_string())?,
+        );
+    }
+    if let Some(value) = flags.get("--received-pack-cache-mib") {
+        config = config.with_received_pack_cache_bytes(
+            fgit_cli::parse_received_pack_cache_mib(value).map_err(|error| error.to_string())?,
         );
     }
     if allow_protection {
@@ -1456,26 +1462,41 @@ mod tests {
 
     #[test]
     fn pack_cache_capacity_has_the_shared_default_and_zero_disables_it() {
-        assert_eq!(
-            parse(&arguments()).unwrap().config.pack_cache_bytes(),
-            64 << 20
-        );
-        for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
-            let mut args = arguments();
-            args.extend(["--pack-cache-mib".into(), value.into()]);
-            assert_eq!(parse(&args).unwrap().config.pack_cache_bytes(), bytes);
+        for (flag, default, capacity) in [
+            (
+                "--pack-cache-mib",
+                64 << 20,
+                NodeConfig::pack_cache_bytes as fn(&NodeConfig) -> usize,
+            ),
+            (
+                "--received-pack-cache-mib",
+                128 << 20,
+                NodeConfig::received_pack_cache_bytes as fn(&NodeConfig) -> usize,
+            ),
+        ] {
+            assert_eq!(capacity(&parse(&arguments()).unwrap().config), default);
+            for (value, bytes) in [("0", 0), ("1", 1 << 20), ("128", 128 << 20)] {
+                let mut args = arguments();
+                args.extend([flag.into(), value.into()]);
+                assert_eq!(capacity(&parse(&args).unwrap().config), bytes);
+            }
+            for value in ["65537", "18446744073709551615", "-1", "+1", "1.5"] {
+                let mut args = arguments();
+                args.extend([flag.into(), value.into()]);
+                assert!(parse(&args).is_err(), "{flag}: {value}");
+            }
+            let mut duplicate = arguments();
+            duplicate.extend([flag, "0", flag, "1"].map(str::to_owned));
+            assert!(parse(&duplicate).is_err());
+            let mut missing = arguments();
+            missing.push(flag.into());
+            assert!(parse(&missing).is_err());
         }
-        for value in ["65537", "18446744073709551615", "-1", "+1", "1.5"] {
-            let mut args = arguments();
-            args.extend(["--pack-cache-mib".into(), value.into()]);
-            assert!(parse(&args).is_err(), "{value}");
-        }
-        let mut duplicate = arguments();
-        duplicate.extend(["--pack-cache-mib", "0", "--pack-cache-mib", "1"].map(str::to_owned));
-        assert!(parse(&duplicate).is_err());
-        let mut missing = arguments();
-        missing.push("--pack-cache-mib".into());
-        assert!(parse(&missing).is_err());
+        let mut args = arguments();
+        args.extend(["--pack-cache-mib", "1", "--received-pack-cache-mib", "0"].map(str::to_owned));
+        let independent = parse(&args).unwrap().config;
+        assert_eq!(independent.pack_cache_bytes(), 1 << 20);
+        assert_eq!(independent.received_pack_cache_bytes(), 0);
     }
 
     /// frankengit-root-doctrine-x2mv.4.31: the one trusted browser origin
