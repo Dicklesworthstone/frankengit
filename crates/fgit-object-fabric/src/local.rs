@@ -22,6 +22,10 @@ pub use blob_stream::{LocalBlobStream, VerifiedObjectIntegrity};
 #[path = "local_blob_write.rs"]
 mod blob_write;
 
+#[path = "local_synced_blob.rs"]
+mod synced_blob;
+pub use synced_blob::SyncedBlob;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};

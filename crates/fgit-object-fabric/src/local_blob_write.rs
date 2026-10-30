@@ -7,15 +7,22 @@ use super::{
     DigestBytes, ENVELOPE_SCHEMA, File, Grade, ImmutableWrite, LocalCrashPoint,
     LocalFilesystemFabric, OBJECT_MAGIC, ObjectAdmission, ObjectAdmissionPermit, ObjectClass,
     ObjectEnvelope, ObjectEnvelopeId, ObjectKind, PlacementAdmission, PlacementAttemptError,
-    PublicationState, PutIfAbsent, ResourceVector, StageFile, StorageOperation, StoreRefusal,
-    StructureVerdict, Write, blob_stream, fs, settle_admission_abort, storage_error,
+    PlacementReceipt, PublicationState, PutIfAbsent, ResourceVector, StageFile, StorageOperation,
+    StoreRefusal, StructureVerdict, Write, blob_stream, fs, settle_admission_abort, storage_error,
     sync_directory,
 };
 use std::io::{Read, Seek, SeekFrom};
 
 use fgit_crypto::DigestHasher;
 
-const CHUNK_BYTES: usize = 64 * 1024;
+pub(super) const CHUNK_BYTES: usize = 64 * 1024;
+
+pub(super) struct PreparedBlob {
+    pub(super) encoded: Vec<u8>,
+    pub(super) staging: ObjectEnvelopeId,
+    pub(super) placement: PlacementReceipt,
+    pub(super) strong: Digest,
+}
 
 impl LocalFilesystemFabric {
     /// Authenticate and immutably place a blob without buffering its payload.
@@ -38,60 +45,13 @@ impl LocalFilesystemFabric {
         live: &mut impl FnMut() -> bool,
     ) -> Result<PutIfAbsent, StoreRefusal> {
         let (ledger, budget) = admission.into_parts();
-        let prepared = (|| {
-            checkpoint(live)?;
-            if envelope.namespace() != self.namespace {
-                return Err(StoreRefusal::NamespaceMismatch);
-            }
-            if envelope.object_kind() != ObjectKind::Blob {
-                return Err(StoreRefusal::NativeObjectIdentityMismatch);
-            }
-            if maximum_payload_bytes == 0 {
-                return Err(StoreRefusal::InvalidStreamingBudget);
-            }
-            let length = envelope.declared_length();
-            if length > maximum_payload_bytes {
-                return Err(StoreRefusal::StreamingBudgetExceeded {
-                    offered: length,
-                    maximum: maximum_payload_bytes,
-                });
-            }
-            // Inspect the encoded length before allocating: the envelope may
-            // have been constructed under a much larger foreign profile.
-            if envelope.encoded_len()? > self.envelope_limits.max_envelope_bytes {
-                return Err(StoreRefusal::Fabric(crate::FabricError::EnvelopeTooLarge));
-            }
-            let encoded = envelope.encode()?;
-            // Envelopes can be constructed under another caller's limits.
-            // Reapply this backend's envelope profile before any payload I/O.
-            ObjectEnvelope::decode(&encoded, &self.envelope_limits)?;
-            let stored = 8_u64
-                .checked_add(encoded.len() as u64)
-                .and_then(|n| n.checked_add(length))
-                .ok_or(StoreRefusal::LengthOverflow)?;
-            if stored > self.max_stored_object_bytes {
-                return Err(StoreRefusal::StoredObjectTooLarge {
-                    offered: stored,
-                    maximum: self.max_stored_object_bytes,
-                });
-            }
-            let id = fgit_crypto::internal_object_id(
-                fgit_crypto::IdentityDomain::ObjectEnvelope,
-                ENVELOPE_SCHEMA,
-                CANONICAL_CODEC_VERSION,
-                &encoded,
-            );
-            let id = ObjectEnvelopeId::from_internal_object_id(id)?;
-            let placement = self.placement_for(id)?;
-            let algorithm = fgit_crypto::IdentityDomain::GitPayloadCommitment.algorithm();
-            let strong = Digest::new_checked(
-                algorithm.id(),
-                DigestBytes::try_new(&envelope.payload_commitment())?,
-                algorithm.digest_len(),
-            )?;
-            Ok((encoded, id, placement, strong))
-        })();
-        let (encoded, staging, placement, strong) = match prepared {
+        let prepared = self.prepare_blob_stream(&envelope, maximum_payload_bytes, live);
+        let PreparedBlob {
+            encoded,
+            staging,
+            placement,
+            strong,
+        } = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 let _released = budget.release();
@@ -185,6 +145,70 @@ impl LocalFilesystemFabric {
         }
     }
 
+    pub(super) fn prepare_blob_stream(
+        &self,
+        envelope: &ObjectEnvelope,
+        maximum_payload_bytes: u64,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedBlob, StoreRefusal> {
+        checkpoint(live)?;
+        if envelope.namespace() != self.namespace {
+            return Err(StoreRefusal::NamespaceMismatch);
+        }
+        if envelope.object_kind() != ObjectKind::Blob {
+            return Err(StoreRefusal::NativeObjectIdentityMismatch);
+        }
+        if maximum_payload_bytes == 0 {
+            return Err(StoreRefusal::InvalidStreamingBudget);
+        }
+        let length = envelope.declared_length();
+        if length > maximum_payload_bytes {
+            return Err(StoreRefusal::StreamingBudgetExceeded {
+                offered: length,
+                maximum: maximum_payload_bytes,
+            });
+        }
+        // Inspect the encoded length before allocating: the envelope may
+        // have been constructed under a much larger foreign profile.
+        if envelope.encoded_len()? > self.envelope_limits.max_envelope_bytes {
+            return Err(StoreRefusal::Fabric(crate::FabricError::EnvelopeTooLarge));
+        }
+        let encoded = envelope.encode()?;
+        // Envelopes can be constructed under another caller's limits.
+        // Reapply this backend's envelope profile before any payload I/O.
+        ObjectEnvelope::decode(&encoded, &self.envelope_limits)?;
+        let stored = 8_u64
+            .checked_add(encoded.len() as u64)
+            .and_then(|n| n.checked_add(length))
+            .ok_or(StoreRefusal::LengthOverflow)?;
+        if stored > self.max_stored_object_bytes {
+            return Err(StoreRefusal::StoredObjectTooLarge {
+                offered: stored,
+                maximum: self.max_stored_object_bytes,
+            });
+        }
+        let id = fgit_crypto::internal_object_id(
+            fgit_crypto::IdentityDomain::ObjectEnvelope,
+            ENVELOPE_SCHEMA,
+            CANONICAL_CODEC_VERSION,
+            &encoded,
+        );
+        let id = ObjectEnvelopeId::from_internal_object_id(id)?;
+        let placement = self.placement_for(id)?;
+        let algorithm = fgit_crypto::IdentityDomain::GitPayloadCommitment.algorithm();
+        let strong = Digest::new_checked(
+            algorithm.id(),
+            DigestBytes::try_new(&envelope.payload_commitment())?,
+            algorithm.digest_len(),
+        )?;
+        Ok(PreparedBlob {
+            encoded,
+            staging: id,
+            placement,
+            strong,
+        })
+    }
+
     fn write_blob_stage(
         &self,
         envelope: &ObjectEnvelope,
@@ -192,9 +216,26 @@ impl LocalFilesystemFabric {
         input: &mut dyn Read,
         live: &mut impl FnMut() -> bool,
     ) -> Result<StageFile, PlacementAttemptError> {
+        let mut stage = checkpoint(live)
+            .and_then(|()| self.fresh_stage())
+            .map_err(|refusal| PlacementAttemptError {
+                refusal,
+                body_write_started: false,
+            })?;
+        self.write_blob_stage_contents(&mut stage, envelope, encoded, input, live)?;
+        Ok(stage)
+    }
+
+    pub(super) fn write_blob_stage_contents(
+        &self,
+        stage: &mut StageFile,
+        envelope: &ObjectEnvelope,
+        encoded: &[u8],
+        input: &mut dyn Read,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), PlacementAttemptError> {
         let mut started = false;
         let result = (|| {
-            checkpoint(live)?;
             let mut native = blob_stream::NativeHash::new(
                 envelope.object_identity(),
                 envelope.declared_length(),
@@ -202,13 +243,12 @@ impl LocalFilesystemFabric {
             let mut strong = blob_stream::strong_hasher(envelope.declared_length())?;
             let encoded_length =
                 u32::try_from(encoded.len()).map_err(|_| StoreRefusal::LengthOverflow)?;
-            let mut stage = self.fresh_stage()?;
             self.crash_if(LocalCrashPoint::BeforeStageWrite)?;
             checkpoint(live)?;
             started = true;
-            write_stage(&mut stage, OBJECT_MAGIC, live)?;
-            write_stage(&mut stage, &encoded_length.to_be_bytes(), live)?;
-            write_stage(&mut stage, encoded, live)?;
+            write_stage(stage, OBJECT_MAGIC, live)?;
+            write_stage(stage, &encoded_length.to_be_bytes(), live)?;
+            write_stage(stage, encoded, live)?;
             let mut remaining = envelope.declared_length();
             let mut buffer = chunk_buffer(StorageOperation::WriteStage)?;
             while remaining != 0 {
@@ -220,7 +260,7 @@ impl LocalFilesystemFabric {
                 native.update(&buffer[..count])?;
                 strong.update(&buffer[..count]);
                 checkpoint(live)?;
-                write_stage(&mut stage, &buffer[..count], live)?;
+                write_stage(stage, &buffer[..count], live)?;
                 checkpoint(live)?;
                 remaining -= count as u64;
             }
@@ -243,7 +283,7 @@ impl LocalFilesystemFabric {
             checkpoint(live)?;
             self.crash_if(LocalCrashPoint::AfterStageSync)?;
             stage.close();
-            Ok(stage)
+            Ok(())
         })();
         result.map_err(|refusal| PlacementAttemptError {
             refusal,
@@ -285,7 +325,7 @@ impl LocalFilesystemFabric {
         Ok(result)
     }
 
-    fn compare_blob_stage(
+    pub(super) fn compare_blob_stage(
         &self,
         stage: &StageFile,
         envelope: &ObjectEnvelope,
@@ -339,7 +379,7 @@ impl LocalFilesystemFabric {
     }
 }
 
-fn chunk_buffer(operation: StorageOperation) -> Result<Vec<u8>, StoreRefusal> {
+pub(super) fn chunk_buffer(operation: StorageOperation) -> Result<Vec<u8>, StoreRefusal> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(CHUNK_BYTES)
@@ -351,7 +391,7 @@ fn chunk_buffer(operation: StorageOperation) -> Result<Vec<u8>, StoreRefusal> {
     Ok(buffer)
 }
 
-fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), StoreRefusal> {
+pub(super) fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), StoreRefusal> {
     if live() {
         Ok(())
     } else {
@@ -389,7 +429,7 @@ fn write_stage(
     Ok(())
 }
 
-fn read_some(
+pub(super) fn read_some(
     input: &mut dyn Read,
     output: &mut [u8],
     live: &mut impl FnMut() -> bool,
