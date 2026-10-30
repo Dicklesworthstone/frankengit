@@ -5,7 +5,7 @@
 
 use super::NodeSmartHttpRefusal;
 use crate::{GitDaemonTransportRefusal, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal};
-use fgit_pack::{PackError, writer::PackWriteError};
+use fgit_pack::{PackError, PackWriteError};
 
 pub(super) fn line(refusal: &NodeSmartHttpRefusal) -> Option<Vec<u8>> {
     let message = match refusal {
