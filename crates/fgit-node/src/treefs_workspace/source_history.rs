@@ -1,6 +1,7 @@
 //! Authenticated commit history and line provenance over the same private
 //! native object owner as source review and merge preparation. Read-only.
 
+#[path = "source_history/first_parent.rs"]
 mod first_parent;
 
 use super::{
