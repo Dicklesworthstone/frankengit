@@ -76,6 +76,18 @@ const MAX_IMPORT_PACKED_REFS_HEADER_BYTES: usize = 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;
 const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 
+/// The shared source-import metadata preflight, before candidate object staging.
+pub(crate) fn preflight_import_metadata(
+    format: GitHashAlgorithm,
+    object_count: usize,
+    refs: &CanonicalRefState,
+    authority_bytes: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), LooseGitImportRefusal> {
+    let control = ImportControl::new(live);
+    metadata::preflight(format, object_count, refs, authority_bytes, &control)
+}
+
 /// Verified, non-canonical state staged from a local Git directory.
 ///
 /// This type has no public constructor.  Its refs and closure can only be

@@ -452,10 +452,19 @@ pub enum SourceImportOrigin {
     /// source would overstate the evidence in exactly the way a forged
     /// quarantine receipt would.
     LocalGitDirectory,
+    /// A self-contained native Git bundle whose complete pack, native objects,
+    /// typed graph and selected closure were verified in private file custody.
+    /// This is distinct from receive-pack quarantine and borrows no destination
+    /// object. The retained identities come from the completed native reader.
+    FullGitBundle {
+        pack_checksum: fgit_types::GitOid,
+        pack_sha256: [u8; 32],
+        pack_bytes: u64,
+    },
 }
 
 /// Evidence that an import path established a source's object closure by its
-/// own means, with no pack to quarantine.
+/// own means, independently of the receive-pack quarantine handoff.
 ///
 /// The deliberate sibling of [`QuarantineReceipt`], and deliberately **not**
 /// convertible into one. Both record what an admission's closure evidence

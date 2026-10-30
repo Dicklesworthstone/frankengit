@@ -16,6 +16,7 @@ pub use file::{
     FileBundleVerification, FileGitBundleRecovery, prepare_git_bundle_recovery_reader,
     verify_git_bundle_reader,
 };
+pub(crate) use file::{FullBundleImportPlan, prepare_full_bundle_import_reader};
 pub use recovery::{BundleRecoveryError, GitBundleRecovery, prepare_git_bundle_recovery};
 
 use std::collections::{BTreeMap, BTreeSet};

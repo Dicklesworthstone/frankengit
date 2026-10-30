@@ -34,8 +34,10 @@ use fgit_wire::receive::{
 use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
+mod file_import;
 mod incremental;
 mod streaming;
+pub use file_import::{StreamBundleImportQuery, StreamBundleImportRefusal};
 pub use streaming::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
 };

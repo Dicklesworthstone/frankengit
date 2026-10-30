@@ -146,6 +146,10 @@ pub(super) struct SpanReader<'a, W> {
     verified: bool,
 }
 impl<W: Read> SpanReader<'_, W> {
+    pub(super) const fn is_verified(&self) -> bool {
+        self.verified
+    }
+
     pub(super) fn read(
         &mut self,
         output: &mut [u8],
@@ -188,6 +192,23 @@ pub(super) struct Scratch<'a, W> {
     maximum: u64,
 }
 impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
+    /// Reborrow scratch whose length and per-span commitments were retained
+    /// by a completed verifier. This is not a constructor for caller offsets.
+    pub(super) fn reopen(
+        file: &'a mut W,
+        end: u64,
+        limits: &BundleVerifyLimits,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Self, BundleVerifyError> {
+        let maximum = (limits.pack.max_total_expanded_bytes as u64)
+            .checked_add(limits.graph.max_payload_bytes)
+            .ok_or(BundleVerifyError::ScratchChanged)?;
+        if end > maximum || seek(file, SeekFrom::End(0), "recheck scratch length", live)? != end {
+            return Err(BundleVerifyError::ScratchChanged);
+        }
+        Ok(Self { file, end, maximum })
+    }
+
     pub(super) fn new(
         file: &'a mut W,
         limits: &BundleVerifyLimits,
@@ -360,6 +381,18 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
             hash: Sha256Hasher::new(),
             verified: false,
         })
+    }
+
+    /// Transfer a temporary scratch borrow into an exact-span reader. The
+    /// returned reader borrows the original descriptor, not this wrapper.
+    pub(super) fn into_reader(
+        mut self,
+        span: Span,
+        maximum: usize,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<SpanReader<'a, W>, BundleVerifyError> {
+        self.flush(live)?;
+        open_span_reader(self.file, self.end, span, maximum, live)
     }
 
     pub(super) fn read(
@@ -543,4 +576,35 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         }
         checkpoint(live)
     }
+}
+
+fn open_span_reader<'a, W: Read + Seek>(
+    file: &'a mut W,
+    end: u64,
+    span: Span,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<SpanReader<'a, W>, BundleVerifyError> {
+    checkpoint(live)?;
+    if span.length > maximum
+        || span
+            .offset
+            .checked_add(span.length as u64)
+            .is_none_or(|limit| limit > end)
+    {
+        return Err(BundleVerifyError::ScratchChanged);
+    }
+    seek(
+        file,
+        SeekFrom::Start(span.offset),
+        "seek scratch input",
+        live,
+    )?;
+    Ok(SpanReader {
+        file,
+        remaining: span.length,
+        expected: span.sha256,
+        hash: Sha256Hasher::new(),
+        verified: false,
+    })
 }

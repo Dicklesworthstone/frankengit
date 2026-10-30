@@ -1,8 +1,11 @@
 //! File-backed native verification. Object bodies live in caller-owned scratch;
 //! the in-memory inventory and graph remain explicitly count/edge bounded.
 
+mod import;
 mod resolve;
 mod storage;
+
+pub(crate) use import::{FullBundleImportPlan, prepare_full_bundle_import_reader};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,10 +13,11 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
 use fgit_pack::{
-    StreamPackError, StreamPackIndexEntry, build_streamed_pack_index_v2, read_streamed_pack_chunks,
+    StreamPackError, StreamPackIndexEntry, StreamPackReceipt, build_streamed_pack_index_v2,
+    read_streamed_pack_chunks,
 };
 use fgit_treefs::integrity::{BlobGraphError, ObjectKind};
-use fgit_types::RefName;
+use fgit_types::{GitHashAlgorithm, RefName};
 
 use super::recovery::{RecoveryMetadata, prepare_metadata};
 use super::{
@@ -194,6 +198,26 @@ fn verify_reader_inner<R: Read + Seek, W: Read + Write + Seek>(
     expectations: Option<&BundleExpectations>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<FileBundleVerification, BundleVerifyError> {
+    verify_reader_inventory(input, workspace, limits, expectations, None, live)
+        .map(|verified| verified.file)
+}
+
+/// Kept private: only complete native verification can produce a retained
+/// inventory, and its span commitments never come from a caller.
+struct VerifiedReaderInventory {
+    file: FileBundleVerification,
+    inventory: Inventory,
+    receipt: StreamPackReceipt,
+}
+
+fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
+    input: &mut R,
+    workspace: &mut W,
+    limits: &BundleVerifyLimits,
+    expectations: Option<&BundleExpectations>,
+    expected_format: Option<GitHashAlgorithm>,
+    live: &mut impl FnMut() -> bool,
+) -> Result<VerifiedReaderInventory, BundleVerifyError> {
     checkpoint(live)?;
     if let Some(expected) = expectations {
         expected
@@ -215,6 +239,14 @@ fn verify_reader_inner<R: Read + Seek, W: Read + Write + Seek>(
         checkpoint(live)?;
         result.map_err(header_error)?
     };
+    if let Some(expected) = expected_format.filter(|expected| *expected != first.format()) {
+        return Err(BundleVerifyError::Pack(
+            fgit_pack::PackError::ObjectFormatMismatch {
+                expected,
+                actual: first.format(),
+            },
+        ));
+    }
     if first.references().len() > limits.graph.max_references {
         return Err(BundleVerifyError::Graph(super::GraphRefusal::Limit(
             "references",
@@ -368,13 +400,17 @@ fn verify_reader_inner<R: Read + Seek, W: Read + Write + Seek>(
         resolution_passes,
     };
     checkpoint(live)?;
-    Ok(FileBundleVerification {
-        verified,
-        pack_offset,
-        pack_len: pack_length,
-        pack_sha256: receipt.pack_sha256(),
-        index,
-        scratch_bytes: scratch.bytes(),
+    Ok(VerifiedReaderInventory {
+        file: FileBundleVerification {
+            verified,
+            pack_offset,
+            pack_len: pack_length,
+            pack_sha256: receipt.pack_sha256(),
+            index,
+            scratch_bytes: scratch.bytes(),
+        },
+        inventory,
+        receipt,
     })
 }
 

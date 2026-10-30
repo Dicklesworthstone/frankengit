@@ -92,6 +92,7 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+    StreamBundleImportQuery, StreamBundleImportRefusal,
 };
 
 use fgit_authority::{
@@ -7457,8 +7458,10 @@ pub struct NodeConfig {
     /// explicitly.
     selected_pack_limits: PackLimits,
     /// An explicit selected-blob ceiling, separate from the eager import and
-    /// metadata ceiling. Only this opt-in widens the fabric's stored-file cap.
+    /// metadata ceiling. Explicit blob allowances widen the fabric's stored-file cap.
     selected_pack_blob_limit: Option<usize>,
+    /// Explicit blob allowance for the private file-backed full-bundle importer.
+    bundle_import_blob_limit: Option<usize>,
     /// Disposable deterministic pack computations, shared by this service's
     /// independently reopened children. This cache never selects objects or
     /// grants disclosure; each request authenticates its own selected closure.
@@ -7561,6 +7564,7 @@ impl NodeConfig {
             segment_limits: SegmentLimits::default(),
             selected_pack_limits: default_selected_pack_limits(),
             selected_pack_blob_limit: None,
+            bundle_import_blob_limit: None,
             pack_computation_cache: Arc::new(PackComputationCache::new(DEFAULT_PACK_CACHE_BYTES)),
             received_pack_cache: Arc::new(received_pack::ReceivedPackCache::new(
                 DEFAULT_RECEIVED_PACK_CACHE_BYTES,
@@ -7931,8 +7935,28 @@ impl NodeConfig {
         self.selected_pack_blob_limit
     }
 
+    /// Selects the independent blob allowance for file-backed full-bundle
+    /// import. Buffered metadata, ordinary receive/directory imports, serving
+    /// limits and aggregate import budgets retain their own bounds.
+    #[must_use]
+    pub const fn with_bundle_import_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
+        self.bundle_import_blob_limit = Some(maximum_blob_bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn bundle_import_blob_limit(&self) -> Option<usize> {
+        self.bundle_import_blob_limit
+    }
+
     fn fabric_stored_object_limit(&self) -> u64 {
-        let Some(maximum_blob_bytes) = self.selected_pack_blob_limit else {
+        let maximum_blob_bytes =
+            match (self.selected_pack_blob_limit, self.bundle_import_blob_limit) {
+                (Some(selected), Some(import)) => Some(selected.max(import)),
+                (Some(limit), None) | (None, Some(limit)) => Some(limit),
+                (None, None) => None,
+            };
+        let Some(maximum_blob_bytes) = maximum_blob_bytes else {
             return self.max_object_bytes;
         };
         let stored = u64::try_from(maximum_blob_bytes)
@@ -15966,6 +15990,36 @@ mod selected_pack_envelope_tests {
         let restricted = selected.with_max_object_bytes(4096);
         assert_eq!(restricted.max_object_bytes, 4096);
         assert!(restricted.fabric_stored_object_limit() > 96 * mib as u64);
+    }
+
+    #[test]
+    fn a_bundle_import_blob_allowance_preserves_serving_and_buffered_limits() {
+        let mib = 1024 * 1024;
+        let base = NodeConfig::new(
+            PathBuf::from("/nonexistent"),
+            TenantId::from_bytes([0x41; 16]),
+            RepositoryId::from_bytes([0x42; 16]),
+        );
+        let imported = base.clone().with_bundle_import_blob_limit(96 * mib);
+        assert_eq!(imported.bundle_import_blob_limit(), Some(96 * mib));
+        assert_eq!(imported.max_object_bytes, base.max_object_bytes);
+        assert_eq!(imported.selected_pack_limits, base.selected_pack_limits);
+        assert_eq!(imported.selected_pack_blob_limit(), None);
+        assert_eq!(
+            imported.git_daemon_receive_limits,
+            base.git_daemon_receive_limits
+        );
+        assert_eq!(
+            imported.fabric_stored_object_limit(),
+            (96 * mib + imported.segment_limits.max_envelope_bytes + 8) as u64
+        );
+        let both = imported.with_selected_pack_blob_limit(128 * mib);
+        assert_eq!(both.bundle_import_blob_limit(), Some(96 * mib));
+        assert_eq!(both.selected_pack_blob_limit(), Some(128 * mib));
+        assert_eq!(
+            both.fabric_stored_object_limit(),
+            (128 * mib + both.segment_limits.max_envelope_bytes + 8) as u64
+        );
     }
 
     fn pack_request(sideband: bool) -> PackRequest {

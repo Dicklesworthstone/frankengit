@@ -7,6 +7,35 @@ use fgit_crypto::{git_object_id, lowercase_hex, sha1_digest, sha256_digest};
 use fgit_types::{GitHashAlgorithm, GitOid};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
+#[cfg(unix)]
+#[path = "import_tests.rs"]
+mod import_tests;
+
+#[cfg(not(unix))]
+#[test]
+fn retained_import_refuses_before_reading_or_creating_on_unsupported_platforms() {
+    let scratch = std::env::temp_dir().join(format!(
+        "fgit-bundle-import-unsupported-{}",
+        std::process::id()
+    ));
+    let mut input = Cursor::new(b"must remain unread".to_vec());
+    assert!(matches!(
+        prepare_full_bundle_import_reader(
+            &mut input,
+            GitHashAlgorithm::Sha1,
+            &scratch,
+            &BundleVerifyLimits::default(),
+            &mut || true,
+        ),
+        Err(BundleVerifyError::Io {
+            kind: io::ErrorKind::Unsupported,
+            ..
+        })
+    ));
+    assert_eq!(input.position(), 0);
+    assert!(!scratch.exists());
+}
+
 fn decode(hex: &str) -> Vec<u8> {
     hex.trim()
         .as_bytes()

@@ -6,6 +6,7 @@ pub mod candidate_inspection;
 mod full_bundle;
 pub use full_bundle::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+    StreamBundleImportQuery, StreamBundleImportRefusal,
 };
 mod initial_commit;
 mod merge_prepare;
