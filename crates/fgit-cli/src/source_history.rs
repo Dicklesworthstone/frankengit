@@ -1,6 +1,10 @@
 //! Native log/blame commands. Input is bounded before repository opening;
 //! complete, snapshot-bound results are rendered only after explicit shutdown.
+#[path = "source_history_first_parent.rs"]
+mod first_parent;
+
 use super::publication_support::quote;
+use fgit_forge::history::first_parent::{FirstParentOptions, FirstParentPage};
 use fgit_forge::history::path::PathLogOptions;
 use fgit_forge::history::{
     BlameOptions, BlameResult, HistoryCommit, HistoryLimits, HistoryPage, LogOptions,
@@ -18,6 +22,8 @@ const USAGE: &str = "\
 usage: fg log <storage-root> <tenant-id> <repository-id> <ref> --trusted-local
   [--path <raw-path> | --path-hex <hex>]
   [--limit <1..100>] [--after <offset> --expected-head <snapshot-token>]
+usage: fg log <storage-root> <tenant-id> <repository-id> <ref> --trusted-local
+  --first-parent [--limit <1..100>] [--cursor <first-parent-cursor>]
 usage: fg blame <storage-root> <tenant-id> <repository-id> <ref> --trusted-local
   (--path <raw-path> | --path-hex <hex>) [--line-start <n>] [--line-end <n>]
 
@@ -29,6 +35,10 @@ Blame: [--max-blob-bytes <1..1048576>] [--max-lines <1..20000>]
 Log is child-before-parent, with native-ID ties, NOT timestamp order. With a
 path it lists only commits whose exact path entry differs from a parent (or a
 root containing it): unsimplified, all parents kept, no rename inference.
+First-parent is explicit: only the prefix through the requested page is read,
+with no total-history count. Cursor binds head/ref/tip; every call revalidates
+from the visible tip. Skipped prefix plus page consume the unchanged limits, so
+later pages can exhaust their budget. It cannot combine with --path or --after.
 Blame traces exact same-path lines through ALL parents; the first stored parent
 with a matching line wins. No rename/copy guessing or whitespace normalization.
 Line intervals are zero-based and half-open. Raw bytes and commit bodies remain
@@ -50,11 +60,13 @@ struct Options {
 #[derive(Debug)]
 enum Query {
     Log(LogOptions),
+    FirstParent(FirstParentOptions),
     PathLog(PathLogOptions),
     Blame(BlameOptions),
 }
 enum Answer {
     Log(HistoryPage),
+    FirstParent(FirstParentPage),
     Blame(BlameResult),
 }
 
@@ -73,6 +85,17 @@ pub fn run(arguments: &[String], is_blame: bool) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let request = fgit_cli::command_request_context(&node);
         match &options.query {
+            Query::FirstParent(query) => node
+                .runtime()
+                .block_on(node.read_first_parent_history_in(
+                    &request,
+                    &options.reference,
+                    &Default::default(),
+                    options.head,
+                    query,
+                ))
+                .map(|(head, result)| (head, Answer::FirstParent(result)))
+                .map_err(|e| e.to_string()),
             Query::Log(query) => node
                 .runtime()
                 .block_on(node.read_commit_history_in(
@@ -119,6 +142,7 @@ pub fn run(arguments: &[String], is_blame: bool) -> Result<(), String> {
     };
     let rendered = match answer {
         Answer::Log(page) => render_log(&options, head, &page)?,
+        Answer::FirstParent(page) => first_parent::render(&options, head, &page)?,
         Answer::Blame(result) => render_blame(&options, head, &result)?,
     };
     emit(&mut std::io::stdout().lock(), &rendered)
@@ -148,7 +172,8 @@ fn parse(args: &[String], is_blame: bool) -> Result<Options, String> {
     while at < args.len() {
         let flag = args[at].as_str();
         at += 1;
-        let switch = matches!(flag, "--trusted-local" | "--ref-hex");
+        let switch = matches!(flag, "--trusted-local" | "--ref-hex")
+            || (!is_blame && flag == "--first-parent");
         let allowed = switch
             || matches!(
                 flag,
@@ -167,7 +192,10 @@ fn parse(args: &[String], is_blame: bool) -> Result<Options, String> {
                         | "--max-diff-work"
                 )
             } else {
-                matches!(flag, "--after" | "--limit" | "--path" | "--path-hex")
+                matches!(
+                    flag,
+                    "--after" | "--limit" | "--path" | "--path-hex" | "--cursor"
+                )
             };
         if !allowed {
             return Err(format!("unknown or inapplicable history option {flag:?}"));
@@ -227,7 +255,19 @@ fn parse(args: &[String], is_blame: bool) -> Result<Options, String> {
         };
         query.validate().map_err(|e| e.to_string())?;
         Query::Blame(query)
+    } else if flags.contains_key("--first-parent") {
+        first_parent::parse(
+            &flags,
+            &reference,
+            format,
+            head,
+            limits,
+            number("--limit", 50)?,
+        )?
     } else {
+        if flags.contains_key("--cursor") {
+            return Err("--cursor requires --first-parent".into());
+        }
         let query = LogOptions {
             after: number("--after", 0)?,
             limit: number("--limit", 50)?,
@@ -409,7 +449,7 @@ fn render_log(
     let (query, path) = match &options.query {
         Query::Log(query) => (query, None),
         Query::PathLog(query) => (&query.log, Some(query.path.as_slice())),
-        Query::Blame(_) => return Err("history operation mismatch".into()),
+        Query::Blame(_) | Query::FirstParent(_) => return Err("history operation mismatch".into()),
     };
     let end = page
         .after

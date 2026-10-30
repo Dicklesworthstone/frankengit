@@ -34,6 +34,52 @@ precondition, not an authentication credential or a self-contained cursor.
 Each invocation traverses the bounded DAG before slicing its page; pagination
 does not pretend to make an otherwise over-budget history complete.
 
+### Recent first-parent history on larger repositories
+
+```bash
+fg log "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --first-parent --limit 50
+```
+
+The explicit `first-parent-prefix-v1` profile reads the selected tip and follows
+only the first parent recorded in each commit until the requested page is full
+or a root is reached. A repository can have more than 4,096 ancestors and still
+return its recent first-parent history. Side-parent bodies, trees and blobs are
+not read by this traversal. Original parent headers remain in each returned
+record, and all of those headers count against the existing edge budget.
+
+The report includes `root_reached`, `visited_commits`, `visited_parent_edges`,
+the logical visited `metadata_bytes`, and `next_cursor`. It deliberately has no
+`total_commits`: older ancestry has not been traversed. `complete: true` means
+the requested page completed, not that the entire history was read or that a
+later page is guaranteed to succeed. Missing or corrupt objects encountered
+on the visited chain still refuse instead of truncating the page.
+
+```bash
+fg log "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --first-parent --limit 50 --cursor "$NEXT_CURSOR"
+```
+
+The cursor binds the original authority head, exact raw reference, native tip
+and numeric offset. It is a selection precondition, not an authentication
+credential. Every continuation rechecks current visibility and the exact head,
+then walks again from the authenticated visible tip. A cursor cannot directly
+select another branch's object. A changed head, even after a forge-only write,
+requires explicitly restarting the read; no automatic refresh mixes pages.
+
+Skipped prefix and returned page share the unchanged per-call limits: at most
+4,096 visited commits, 16,384 parent headers and 4 MiB of logical commit bodies,
+with at most 64 KiB per commit enforced before the node's body allocation. A
+deeper continuation can therefore exhaust its budget. This profile provides
+bounded recent-history access, not constant-cost arbitrary-depth pagination.
+`--max-commits` and `--max-edges` can still select narrower bounds. Metadata byte
+accounting describes visited native bodies, not total physical I/O.
+
+`--first-parent` cannot be combined with a path filter or `--after`; use its
+returned cursor. Default log, path history, blame, HTTP and MCP behavior retain
+their existing profiles. Both native hash formats and raw reference bytes are
+supported.
+
 ### History of one exact path
 
 ```bash
