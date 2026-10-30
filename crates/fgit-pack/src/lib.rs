@@ -66,7 +66,10 @@ pub use pack::{
     decode_entry_header, decode_ofs_delta_base, parse_delta_base, parse_pack_header,
     split_pack_trailer, validate_object_count, validate_pack_trailer,
 };
-pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
+pub use reader::{
+    QuarantinedEntry, QuarantinedPack, RetainedPackBytes, parse_quarantined_pack,
+    read_verified_pack, read_verified_pack_owned,
+};
 pub use scan::{PackBoundaryScanner, ScanStatus};
 pub use stream::{
     STREAM_PACK_CHUNK_BYTES, StreamPackEntry, StreamPackEntryEnd, StreamPackEntryStart,

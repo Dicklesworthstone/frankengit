@@ -461,6 +461,16 @@ impl ReceiveRpc {
         })
     }
 
+    /// Applies the native receive parser's optional bounded raw-pack custody
+    /// policy. HTTP framing must still finish before any handoff sees it.
+    #[must_use]
+    pub fn with_pack_retention(mut self, max_bytes: usize) -> Self {
+        self.machine = self
+            .machine
+            .map(|machine| machine.with_pack_retention(max_bytes));
+        self
+    }
+
     /// Whether the complete body was exactly one flush packet: git's
     /// remote-curl sends it alone before any request larger than
     /// http.postBuffer and requires HTTP 200. git-http-backend's receive-pack

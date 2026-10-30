@@ -7,7 +7,7 @@ use std::cell::Cell;
 use fgit_git_object::{ObjectType, Sha1, Sha256, native_object_oid};
 use fgit_pack::{
     CanonicalObjectSource, CanonicalPackObject, Deadline, ObjectId, PackError, PackLimits,
-    PackPlanner, PackWriteError, PackWriteProfile, PackWriter, QuarantinedPack,
+    PackPlanner, PackWriteError, PackWriteProfile, PackWriter, QuarantinedPack, RetainedPackBytes,
 };
 use fgit_types::RefusalCode;
 use fgit_wire::receive::{
@@ -434,4 +434,160 @@ fn a_lone_flush_body_is_a_probe_and_anything_more_is_still_refused() {
         rpc.push(b"0000", &mut || true),
         Err(RpcError::Receive(ReceiveError::MissingCommands))
     ));
+}
+
+#[derive(Default)]
+struct ObserveRetention {
+    calls: usize,
+    retained: Option<RetainedPackBytes>,
+    body: Option<Vec<u8>>,
+}
+
+impl ReceiveQuarantineHandoff for ObserveRetention {
+    fn handoff(
+        &mut self,
+        _: &ReceiveRequest,
+        pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt,
+    ) -> Result<(), ReceiveError> {
+        self.calls += 1;
+        if let Some(pack) = pack {
+            assert_eq!(pack.header.object_count, receipt.object_count);
+            self.body = Some(pack.entries()[0].inflated.clone());
+            if let Some(retained) = pack.retained_bytes() {
+                assert_eq!(retained.object_count(), receipt.object_count);
+                assert_eq!(retained.format(), receipt.object_format);
+                assert_eq!(retained.checksum(), pack.trailer);
+                assert_eq!(retained.bytes().len(), receipt.pack_bytes);
+                self.retained = Some(retained.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn retention_is_explicit_bounded_and_changes_neither_handoff_nor_completion() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let (id, body, pack) = blob_pack(format);
+        let bytes = wire(format, id, Some(&pack));
+        let mut expected = None;
+        // The fragmented ingress allocation may exceed its length. The large
+        // explicit cap admits that capacity; undersized caps preserve parsing.
+        for cap in [None, Some(0), Some(pack.len() - 1), Some(128 * 1024)] {
+            for delayed in [false, true] {
+                let mut machine = machine(format, &bytes, ReceiveLimits::default());
+                if let Some(cap) = cap {
+                    machine = machine.with_pack_retention(cap);
+                }
+                let mut handoff = ObserveRetention::default();
+                let completion = if delayed {
+                    machine
+                        .into_quarantine(&mut || true)
+                        .unwrap()
+                        .handoff(&mut handoff, &mut || true)
+                } else {
+                    machine.finish_with_handoff(&mut handoff, &mut || true)
+                }
+                .unwrap();
+                assert_eq!(handoff.calls, 1);
+                assert_eq!(handoff.body.as_deref(), Some(body.as_slice()));
+                if cap == Some(128 * 1024) {
+                    let retained = handoff.retained.unwrap();
+                    assert_eq!(retained.bytes(), pack);
+                    assert!(retained.retained_capacity() <= cap.unwrap());
+                } else {
+                    assert!(handoff.retained.is_none());
+                }
+                if let Some(expected) = &expected {
+                    assert_eq!(&completion, expected);
+                } else {
+                    expected = Some(completion);
+                }
+            }
+        }
+        let mut delete = ObserveRetention::default();
+        machine(format, &wire(format, id, None), ReceiveLimits::default())
+            .with_pack_retention(128 * 1024)
+            .finish_with_handoff(&mut delete, &mut || true)
+            .unwrap();
+        assert_eq!(delete.calls, 1);
+        assert!(delete.body.is_none());
+        assert!(delete.retained.is_none());
+    }
+}
+
+#[test]
+fn retained_receive_still_refuses_corruption_and_cancellation_before_handoff() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let (id, _, pack) = blob_pack(format);
+        for cap in [0, 128 * 1024] {
+            let mut corrupted = pack.clone();
+            *corrupted.last_mut().unwrap() ^= 1;
+            let mut handoff = ObserveRetention::default();
+            let mut corrupt = machine(
+                format,
+                &wire(format, id, Some(&corrupted)),
+                ReceiveLimits::default(),
+            )
+            .with_pack_retention(cap);
+            assert_eq!(
+                corrupt.finish_with_handoff(&mut handoff, &mut || true),
+                Err(ReceiveError::Pack(PackError::TrailerChecksumMismatch))
+            );
+            assert_eq!(corrupt.quarantine_len(), 0);
+            let bytes = wire(format, id, Some(&pack));
+            let mut cancelled =
+                machine(format, &bytes, ReceiveLimits::default()).with_pack_retention(cap);
+            assert_eq!(
+                cancelled.finish_with_handoff(&mut handoff, &mut || false),
+                Err(ReceiveError::Cancelled)
+            );
+            assert_eq!(cancelled.quarantine_len(), 0);
+            let owned = machine(format, &bytes, ReceiveLimits::default())
+                .with_pack_retention(cap)
+                .into_quarantine(&mut || true)
+                .unwrap();
+            assert_eq!(
+                owned.handoff(&mut handoff, &mut || false),
+                Err(ReceiveError::Cancelled)
+            );
+            assert_eq!(handoff.calls, 0);
+            assert!(handoff.retained.is_none());
+            machine(format, &bytes, ReceiveLimits::default())
+                .with_pack_retention(cap)
+                .finish_with_handoff(&mut handoff, &mut || true)
+                .unwrap();
+            assert_eq!(handoff.calls, 1, "a fresh valid receive still succeeds");
+        }
+    }
+}
+
+#[test]
+fn http_retention_still_requires_complete_content_length_or_chunked_framing() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let (id, _, pack) = blob_pack(format);
+        let bytes = wire(format, id, Some(&pack));
+        for chunked in [false, true] {
+            for cap in [0, 128 * 1024] {
+                let incomplete = http_rpc(format, &bytes, chunked, false).with_pack_retention(cap);
+                assert!(matches!(
+                    incomplete.into_quarantine(&mut || true),
+                    Err(RpcError::Http(_))
+                ));
+                let quarantine = http_rpc(format, &bytes, chunked, true)
+                    .with_pack_retention(cap)
+                    .into_quarantine(&mut || true)
+                    .unwrap();
+                let mut handoff = ObserveRetention::default();
+                quarantine.handoff(&mut handoff, &mut || true).unwrap();
+                assert_eq!(handoff.calls, 1);
+                if cap == 0 {
+                    assert!(handoff.retained.is_none());
+                } else {
+                    assert_eq!(handoff.retained.unwrap().bytes(), pack);
+                }
+            }
+        }
+    }
 }

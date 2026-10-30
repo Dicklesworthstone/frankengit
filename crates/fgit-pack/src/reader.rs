@@ -1,4 +1,5 @@
 use fgit_deflate::{CancellationProbe, InflateLimits, Inflater, StreamProgress};
+use std::{fmt, sync::Arc};
 
 use crate::{
     Deadline, DeltaBase, DeltaObject, EntryKind, ObjectFormat, ObjectId, PackEntryHeader,
@@ -27,12 +28,22 @@ pub struct QuarantinedPack {
     pub format: ObjectFormat,
     pub trailer: ObjectId,
     entries: Vec<QuarantinedEntry>,
+    retained: Option<RetainedPackBytes>,
 }
 
 impl QuarantinedPack {
     #[must_use]
     pub fn entries(&self) -> &[QuarantinedEntry] {
         &self.entries
+    }
+
+    /// Original bytes retained by the bounded owned reader, when requested.
+    /// They have passed the same framing, inflation, and trailer checks as
+    /// these entries. They remain quarantine data, not native-object or
+    /// disclosure proof.
+    #[must_use]
+    pub const fn retained_bytes(&self) -> Option<&RetainedPackBytes> {
+        self.retained.as_ref()
     }
 
     /// Converts quarantined entry payloads to the scalar delta resolver
@@ -73,6 +84,66 @@ impl QuarantinedPack {
             objects.push(object);
         }
         Ok(objects)
+    }
+}
+
+/// Immutable custody of the original allocation of one structurally checked
+/// pack. Only [`read_verified_pack_owned`] constructs this value, after the
+/// complete pack passes the supplied trailer verifier and ordinary parser.
+///
+/// Clones share the same allocation. Retention grants no native-object,
+/// reachability, admission, or disclosure authority; those checks still
+/// belong to the caller's object-verification layer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RetainedPackBytes {
+    bytes: Arc<Vec<u8>>,
+    format: ObjectFormat,
+    checksum: ObjectId,
+    object_count: u32,
+}
+
+impl fmt::Debug for RetainedPackBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RetainedPackBytes")
+            .field("format", &self.format)
+            .field("checksum", &self.checksum)
+            .field("object_count", &self.object_count)
+            .field("length", &self.bytes.len())
+            .field("capacity", &self.bytes.capacity())
+            .finish()
+    }
+}
+
+impl RetainedPackBytes {
+    /// Exact original pack bytes, including the native trailer.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    /// Original allocation capacity, for accounting while any clone lives.
+    #[must_use]
+    pub fn retained_capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+
+    /// Native hash domain used for this pack's trailer verification.
+    #[must_use]
+    pub const fn format(&self) -> ObjectFormat {
+        self.format
+    }
+
+    /// Native trailer accepted by the verifier for these exact bytes.
+    #[must_use]
+    pub const fn checksum(&self) -> ObjectId {
+        self.checksum
+    }
+
+    /// Original framed entry count, independent of public quarantine metadata.
+    #[must_use]
+    pub const fn object_count(&self) -> u32 {
+        self.object_count
     }
 }
 
@@ -186,6 +257,7 @@ pub fn parse_quarantined_pack(
         format,
         trailer,
         entries,
+        retained: None,
     })
 }
 
@@ -202,6 +274,34 @@ pub fn read_verified_pack(
 ) -> Result<QuarantinedPack, PackError> {
     validate_pack_trailer(input, format, limits, verifier)?;
     parse_quarantined_pack(input, format, limits, deadline)
+}
+
+/// Parses through [`read_verified_pack`] and optionally retains the original
+/// owned allocation without copying its bytes.
+///
+/// Retention is an optional accelerator: both the input length and allocation
+/// capacity must fit `retention_limit`, or the checked result retains no raw
+/// bytes. A zero limit disables it. Exceeding this retention cap does not alter
+/// parsing success, refusal, work, or cancellation behavior. The ordinary pack
+/// limits remain authoritative even when the retention cap is larger.
+pub fn read_verified_pack_owned(
+    input: Vec<u8>,
+    format: ObjectFormat,
+    limits: &PackLimits,
+    deadline: &mut impl Deadline,
+    verifier: &impl PackTrailerVerifier,
+    retention_limit: usize,
+) -> Result<QuarantinedPack, PackError> {
+    let mut pack = read_verified_pack(&input, format, limits, deadline, verifier)?;
+    if input.len() <= retention_limit && input.capacity() <= retention_limit {
+        pack.retained = Some(RetainedPackBytes {
+            bytes: Arc::new(input),
+            format,
+            checksum: pack.trailer,
+            object_count: pack.header.object_count,
+        });
+    }
+    Ok(pack)
 }
 
 const fn delta_base_len(base: &ParsedDeltaBase) -> usize {
@@ -314,6 +414,10 @@ where
         !self.0.checkpoint()
     }
 }
+
+#[cfg(test)]
+#[path = "reader/retention_tests.rs"]
+mod retention_tests;
 
 #[cfg(test)]
 mod tests {

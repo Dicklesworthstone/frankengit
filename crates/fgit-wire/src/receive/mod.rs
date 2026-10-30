@@ -14,7 +14,9 @@
 //! decisions. [`ReceiveQuarantine`] can own the structurally checked request
 //! between parsing and that handoff, so a serving process need not hold its
 //! publication permit while inflating untrusted input. Its consuming handoff
-//! drops the [`fgit_pack::QuarantinedPack`] on every result. Neither a structural
+//! drops the [`fgit_pack::QuarantinedPack`] on every result. An explicitly
+//! bounded retention policy may let that handoff keep shared custody of the
+//! original pack bytes for later native validation. Neither a structural
 //! receipt nor possession of that quarantine grants publication authority.
 
 use std::{
@@ -24,7 +26,8 @@ use std::{
 };
 
 use fgit_pack::{
-    Deadline, NativeChecksumVerifier, PackError, PackLimits, QuarantinedPack, read_verified_pack,
+    Deadline, NativeChecksumVerifier, PackError, PackLimits, QuarantinedPack,
+    read_verified_pack_owned,
 };
 use fgit_types::{RefName, RefusalCode};
 
@@ -333,7 +336,8 @@ pub struct QuarantineReceipt {
 ///
 /// Constructed only by the native parser after the complete bounded request,
 /// pack framing, DEFLATE streams and native trailer have been checked. Raw
-/// input bytes are already discarded; decoded entries are seen only by a
+/// input bytes are discarded unless the parser's explicit retention cap admits
+/// their allocation. Retained bytes and decoded entries are seen only by a
 /// handoff: the one consuming [`Self::handoff`], or an advisory
 /// [`Self::speculate`] that decides nothing. This owner is deliberately neither cloneable
 /// nor an admission proof: expected-old, visibility, native object identities,
@@ -522,6 +526,7 @@ pub struct ReceivePack {
     certificate: Option<PushCertificate>,
     certificate_builder: Option<CertificateBuilder>,
     quarantine: Vec<u8>,
+    pack_retention_bytes: usize,
 }
 
 impl ReceivePack {
@@ -540,7 +545,20 @@ impl ReceivePack {
             certificate: None,
             certificate_builder: None,
             quarantine: Vec::new(),
+            pack_retention_bytes: 0,
         })
+    }
+
+    /// Retains the original structurally checked pack for the authoritative
+    /// handoff when its allocation fits `max_bytes`. Disabled by default.
+    ///
+    /// This optional custody does not change the quarantine envelope, parser
+    /// checks, or admission authority. The handoff must still verify native
+    /// object identities and scope before using the bytes as a representation.
+    #[must_use]
+    pub const fn with_pack_retention(mut self, max_bytes: usize) -> Self {
+        self.pack_retention_bytes = max_bytes;
+        self
     }
 
     /// Returns the current receive state.
@@ -916,12 +934,13 @@ impl ReceivePack {
                 pack: None,
             });
         }
-        let pack = read_verified_pack(
-            &raw_pack,
+        let pack = read_verified_pack_owned(
+            raw_pack,
             self.context.object_format,
             &self.context.limits.pack,
             &mut deadline,
             &NativeChecksumVerifier,
+            self.pack_retention_bytes,
         )
         .map_err(ReceiveError::Pack)?;
         let receipt = QuarantineReceipt {
