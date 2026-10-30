@@ -1,5 +1,5 @@
-//! A receive's verified objects, staged and synced but published only when
-//! the receive commits (frankengit-tz5z).
+//! A receive's verified objects, staged and synced but placed only when
+//! admission prepares a commit (frankengit-tz5z).
 //!
 //! A refused push used to leave its whole pack in the object store: the
 //! quarantine validator linked every verified object before admission
@@ -10,24 +10,25 @@
 //! synced batches, which hold only paths and reservations. Admission
 //! publishes them (links the names, syncs their directories) once, when it
 //! stages the receive's first commit and before any head CAS, so a committed
-//! head never names an object that is not durable. A receive that ends without
-//! a commit drops its holder, which abandons every batch: the staged files
+//! head never names an object that is not durable. A receive rejected before
+//! commit preparation drops its holder and abandons every batch: the staged files
 //! are removed and nothing reaches the object store. Every refusal pays the
 //! same staging and skips only the link, so a hidden-ref refusal and a
 //! stale-info refusal stay indistinguishable in latency as well as in bytes.
 //!
 //! Every raw receive entry (git://, SSH, smart HTTP, the loopback and native
 //! session APIs), durable local directory imports, bundle import/fetch and
-//! reviewed workspace/rebase paths own one. Candidate validators can read
+//! reviewed workspace, rebase, merge and squash paths own one. Candidate validators can read
 //! verified private custody without linking objects. Directory imports preserve
 //! their overlapped batch syncing and transfer payload-free custody here before
-//! ordinary admission.
+//! ordinary admission. Native merge admission releases custody only after its
+//! complete policy, review and record-linkage preparation succeeds.
 //! Residue that remains: a commit planned, published
 //! and then lost at the head CAS to another process, whose replan refuses,
 //! leaves its objects linked and unreferenced, as every refusal did before;
 //! in a non-atomic session the first commit publishes the objects of its
-//! refused siblings too; and reviewed merge candidates still place objects
-//! before their additional native validation and admission.
+//! refused siblings too. A failure or cancellation after placement starts can
+//! also leave linked objects. Authenticated reclamation remains separate.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};

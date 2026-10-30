@@ -4,6 +4,7 @@ use super::super::issues::snapshots;
 use super::super::native_merge::NodeNativeMergeProjection;
 use super::super::publication::receive_error;
 use super::super::{NodeWorkspaceRefusal, workspace_request_live};
+use crate::receive_staging::ReceiveStaging;
 use crate::{
     LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode,
     VerifiedFabricPackSource, async_projection_unavailable,
@@ -98,6 +99,7 @@ impl OneNode {
                 workspace: None,
                 workspace_capability: None,
                 workspace_clock_floor: 0,
+                staging: None,
             },
             request,
             bundle,
@@ -290,6 +292,7 @@ impl OneNode {
         self.push_quota
             .evaluate(&principal)
             .map_err(receive_error)?;
+        let staging = ReceiveStaging::default();
         let (quarantine, _) = self
             .quarantine_reviewed_bundle_in(
                 request,
@@ -298,6 +301,7 @@ impl OneNode {
                 merge.merge_commit,
                 input,
                 std::slice::from_ref(&merge.source_ref),
+                Some(&staging),
             )
             .await?;
         // Stage native bytes through production quarantine; NEVER admit its
@@ -315,6 +319,7 @@ impl OneNode {
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
+            staging: Some(&staging),
         };
         let terminal = gate::admit_reviewed_merge_async(
             &self.authority,
@@ -403,6 +408,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
     }
     fn merge_publication_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         self.inner.merge_publication_checkpoint(cx)
+    }
+    fn publish_merge_objects(&self, cx: &Cx) -> Result<(), RefusalCode> {
+        self.inner.publish_merge_objects(cx)
     }
     fn resolve_merge_basis_async<'a>(
         &'a self,

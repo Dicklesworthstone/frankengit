@@ -377,7 +377,10 @@ impl OneNode {
         }))
     }
 
-    /// Stage verified bundle objects WITHOUT admitting its source request.
+    /// Quarantine verified bundle objects WITHOUT admitting its source request.
+    /// Production bundle publishers retain private custody in `staging` until
+    /// native admission has prepared every coupled effect. `None` is reserved
+    /// for existing-object adapters that explicitly own earlier placement.
     /// Callers enforce authentication, intake policy and quota before entering.
     /// Every prerequisite (up to 64) must be an authority-selected commit, and
     /// the reviewed target-before commit must be among them. Ordinary Git merge
@@ -394,6 +397,7 @@ impl OneNode {
         expected_candidate: GitOid,
         input: &[u8],
         additional_visible_refs: &[RefName],
+        staging: Option<&ReceiveStaging>,
     ) -> Result<(BasisBoundValidatedReceive, ParseLimits), NodeWorkspaceRefusal> {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
@@ -411,7 +415,7 @@ impl OneNode {
             expected_base,
             &envelope,
             additional_visible_refs,
-            None,
+            staging,
         )
         .await
     }

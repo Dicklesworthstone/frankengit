@@ -403,6 +403,15 @@ fn later_approval_cannot_rewrite_an_earlier_canonical_refusal() {
         }
     ));
     code_unchanged(&before, &snapshot(&f.node));
+    assert!(matches!(f.node.read_git_object(f.command.candidate.commit),
+        Err(crate::NodeRefusal::Fabric(error))
+            if matches!(*error, fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)));
+    assert_eq!(
+        fs::read_dir(f.node.storage_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
     committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "approve-later").unwrap());
     let after_vote = snapshot(&f.node);
     assert_eq!(
@@ -419,6 +428,13 @@ fn later_approval_cannot_rewrite_an_earlier_canonical_refusal() {
             "new-merge-attempt",
         )
         .unwrap(),
+    );
+    f.node.read_git_object(f.command.candidate.commit).unwrap();
+    assert_eq!(
+        fs::read_dir(f.node.storage_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
     );
     f.node.shutdown().unwrap();
 }

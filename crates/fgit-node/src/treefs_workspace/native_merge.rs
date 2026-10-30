@@ -30,6 +30,7 @@ use fsqlite_types::cx::Cx;
 
 use super::publication::receive_error;
 use super::{NodeWorkspaceRefusal, workspace_request_live};
+use crate::receive_staging::ReceiveStaging;
 use crate::{
     DurableAsyncAdmissionProjection, LoopbackReceiveSession, NodeReceiveTransportRefusal,
     NodeRequestContext, OneNode, PackContextCheckpoint, VerifiedFabricPackSource,
@@ -87,6 +88,7 @@ impl OneNode {
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
+            staging: None,
         };
         fgit_admission::merge::native::policy_preparation::prepare_sealed_native_merge_evidence_async(
             &self.authority, request.authority(), context, sealed, workspace_snapshot, &projection,
@@ -114,6 +116,7 @@ impl OneNode {
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
+            staging: None,
         };
         admit_sealed_native_merge_async(
             &self.authority,
@@ -141,7 +144,8 @@ impl OneNode {
     /// of NewStream records a merge receipt, not fabricated PR opening/approval.
     /// The reviewed tree is not recomputed or silently changed by this method.
     ///
-    /// Production quarantine only stages verified native objects. Its ref-only
+    /// Production quarantine retains verified native objects in private synced
+    /// custody until native admission prepares a commit. Its ref-only
     /// proof is NEVER admitted: the native merge driver independently validates
     /// ordered parents, common ancestry and closure against its current basis,
     /// then publishes ref, forge position and outbox together. A race between
@@ -238,6 +242,7 @@ impl OneNode {
         self.push_quota
             .evaluate(&principal)
             .map_err(receive_error)?;
+        let staging = ReceiveStaging::default();
         let (quarantined, _) = self
             .quarantine_reviewed_bundle_in(
                 request,
@@ -246,6 +251,7 @@ impl OneNode {
                 merge.merge_commit,
                 input,
                 std::slice::from_ref(&merge.source_ref),
+                Some(&staging),
             )
             .await?;
         // A received ref command is not a merge decision. The native driver
@@ -264,6 +270,7 @@ impl OneNode {
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
+            staging: Some(&staging),
         };
         let terminal = admit_native_merge_async(
             &self.authority,
@@ -358,6 +365,7 @@ impl OneNode {
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
+            staging: None,
         };
         admit_native_merge_async(
             &self.authority,
@@ -382,6 +390,8 @@ pub(super) struct NodeNativeMergeProjection<'node> {
     pub(super) workspace: Option<([u8; 32], fgit_types::GitOid, fgit_types::GitOid)>,
     pub(super) workspace_capability: Option<fgit_treefs::TreeCapability>,
     pub(super) workspace_clock_floor: u64,
+    /// Private candidate objects owned by this bundle operation, if any.
+    pub(super) staging: Option<&'node ReceiveStaging>,
 }
 
 impl NodeNativeMergeProjection<'_> {
@@ -501,6 +511,20 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         self.workspace_live()
     }
 
+    fn publish_merge_objects(&self, cx: &Cx) -> Result<(), RefusalCode> {
+        if let Some(staging) = self.staging {
+            self.merge_publication_checkpoint(cx)?;
+            let result = staging.publish(&self.node.fabric, &mut || {
+                self.merge_publication_checkpoint(cx).is_ok()
+            });
+            // Preserve cancellation, resource exhaustion and workspace expiry
+            // after synchronous storage work, including when storage refused.
+            self.merge_publication_checkpoint(cx)?;
+            result.map_err(crate::publication_refusal)?;
+        }
+        Ok(())
+    }
+
     async fn resolve_merge_basis_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -603,6 +627,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
             };
+            let parse_limits = source.parse_limits();
+            let existing_only = ReceiveStaging::default();
+            let source = source.with_staging(self.staging.unwrap_or(&existing_only));
             let mut live = || match checkpoint_pack_context(cx) {
                 PackContextCheckpoint::Live => true,
                 PackContextCheckpoint::Stopped { budget_exhaustion } => {
@@ -675,7 +702,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     ObjectType::Commit,
                     &body,
                     AcceptanceProfile::GitCompatibleImport,
-                    &source.parse_limits(),
+                    &parse_limits,
                 )
                 .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
                 else {

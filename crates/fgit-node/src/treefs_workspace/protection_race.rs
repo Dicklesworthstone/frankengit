@@ -38,6 +38,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ActivateDuringMerge<'_>
 }
 impl NativeMergeProjection<FsqliteAuthorityStore> for ActivateDuringMerge<'_> {
     fn merge_checkpoint(&self, cx: &Cx) -> Result<(),RefusalCode> { self.inner.merge_checkpoint(cx) }
+    fn publish_merge_objects(&self, cx: &Cx) -> Result<(),RefusalCode> { self.inner.publish_merge_objects(cx) }
     async fn validate_merge_async<'a>(&'a self, authority: &'a FsqliteAuthorityStore, cx: &'a Cx,
         basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead, intent: &'a NativeMergeIntent,
     ) -> Result<ValidatedClosure,ProjectionFailure> {
@@ -60,7 +61,7 @@ fn repository_protection_activation_wins_a_real_head_race_and_the_merge_revalida
             let merge=f.command.candidate.merge(&f.command.review.subject);
             let proof=f.node.runtime().block_on(f.node.quarantine_reviewed_bundle_in(&request,
                 &merge.target_ref,merge.target_tip_before,merge.merge_commit,&f.bundle,
-                std::slice::from_ref(&merge.source_ref))).unwrap();
+                std::slice::from_ref(&merge.source_ref),None)).unwrap();
             drop(proof);
             let context=AdmissionContext { head_key:f.node.head_key.clone(),tenant_id:f.node.tenant_id,
                 repository_id:f.node.repository_id,principal_id:actor(2),
@@ -71,7 +72,7 @@ fn repository_protection_activation_wins_a_real_head_race_and_the_merge_revalida
             let projection=ActivateDuringMerge {
                 inner:NodeNativeMergeProjection { node:&f.node,
                     inner:f.node.durable_admission_projection(&context).unwrap(),object_limits:Default::default(),
-                    workspace:None,workspace_capability:None,workspace_clock_floor:0 },
+                    staging:None,workspace:None,workspace_capability:None,workspace_clock_floor:0 },
                 request:&policy_request,command:policy(&f.node,0,if protected { &[3] } else { &[] }),
                 validations:AtomicUsize::new(0),
             };

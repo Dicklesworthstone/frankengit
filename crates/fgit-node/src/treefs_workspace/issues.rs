@@ -115,6 +115,7 @@ impl OneNode {
             node: self,
             inner: self.durable_admission_projection(&context).map_err(error)?,
             object_limits: MergeObjectLimits::default(),
+            staging: None,
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,

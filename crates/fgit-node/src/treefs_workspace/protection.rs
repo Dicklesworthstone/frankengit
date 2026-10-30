@@ -63,6 +63,7 @@ impl OneNode {
                 .durable_admission_projection(&context)
                 .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e)))?,
             object_limits: MergeObjectLimits::default(),
+            staging: None,
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,

@@ -187,6 +187,9 @@ where
     fn merge_publication_checkpoint(&self, cx: &S::Context) -> Result<(), RefusalCode> {
         self.inner.merge_publication_checkpoint(cx)
     }
+    fn publish_merge_objects(&self, cx: &S::Context) -> Result<(), RefusalCode> {
+        self.inner.publish_merge_objects(cx)
+    }
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
         self.inner.workspace_snapshot_digest()
     }

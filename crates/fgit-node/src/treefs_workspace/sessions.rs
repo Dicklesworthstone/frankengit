@@ -573,6 +573,7 @@ impl OneNode {
             )),
             workspace_capability: Some(state.capability().clone()),
             workspace_clock_floor: entry.clock_floor.load(Ordering::Relaxed),
+            staging: None,
         };
         state.begin_publication(attempt).map_err(state_error)?;
         let outcome = admit_workspace_sealed_native_merge_async(

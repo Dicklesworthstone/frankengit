@@ -6,6 +6,8 @@
 
 #[path = "native_merge_delivery_faults/issue_append.rs"]
 mod issue_append;
+#[path = "native_merge_delivery_faults/object_publication.rs"]
+mod object_publication;
 #[path = "native_merge_delivery_faults/pull_request.rs"]
 mod pull_request;
 #[path = "native_merge_delivery_faults/workspace.rs"]

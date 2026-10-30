@@ -232,6 +232,7 @@ struct Candidate {
     bytes: Vec<u8>,
     tree: GitOid,
     tree_body: Vec<u8>,
+    blob: GitOid,
 }
 fn candidate(
     format: GitHashAlgorithm,
@@ -271,8 +272,26 @@ fn candidate(
         bytes: envelope(format, old, tip, &target(), &packed),
         tree,
         tree_body,
+        blob: blob_id,
     }
 }
+fn assert_discarded(node: &OneNode, candidate: &Candidate) {
+    for id in [candidate.merge.merge_commit, candidate.tree, candidate.blob] {
+        assert!(
+            matches!(node.read_git_object(id),
+            Err(fgit_node::NodeRefusal::Fabric(error))
+                if matches!(*error, fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)),
+            "refused merge object {id} must remain unplaced"
+        );
+    }
+    assert_eq!(
+        fs::read_dir(node.storage_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
 fn snapshot(node: &OneNode) -> MaterializedAdmission {
     let request = node.request_context();
     node.runtime()
@@ -455,6 +474,7 @@ fn competing_artifacts_and_changed_review_semantics_cannot_alias_a_winner() {
     ));
     let before = snapshot(&node);
     assert!(apply(&node, &loser, 1, ExpectedVersion::NewStream, b"winner").is_err());
+    assert_discarded(&node, &loser);
     assert!(apply(&node, &winner, 2, ExpectedVersion::NewStream, b"winner").is_err());
     assert_eq!(snapshot(&node).basis(), before.basis());
     let refusal = apply(&node, &loser, 2, ExpectedVersion::NewStream, b"loser").unwrap();
@@ -472,6 +492,7 @@ fn competing_artifacts_and_changed_review_semantics_cannot_alias_a_winner() {
         refusal
     );
     assert_eq!(snapshot(&node).basis(), after.basis());
+    assert_discarded(&node, &loser);
     node.shutdown().unwrap();
 }
 
@@ -497,6 +518,7 @@ fn wrong_parent_shapes_and_wrong_aggregate_version_refuse_without_partial_merge(
             }
         ));
         unchanged_effects(&before, &snapshot(&node));
+        assert_discarded(&node, &bad);
         let good = candidate(format, &h, h.target, &[h.target, h.source], "valid merge");
         let before = snapshot(&node);
         let version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
@@ -509,6 +531,7 @@ fn wrong_parent_shapes_and_wrong_aggregate_version_refuse_without_partial_merge(
             }
         ));
         unchanged_effects(&before, &snapshot(&node));
+        assert_discarded(&node, &good);
         assert!(matches!(
             apply(&node, &good, 1, ExpectedVersion::NewStream, b"valid")
                 .unwrap()
@@ -516,6 +539,15 @@ fn wrong_parent_shapes_and_wrong_aggregate_version_refuse_without_partial_merge(
                 .outcome,
             DecisionOutcome::Committed { .. }
         ));
+        for id in [good.merge.merge_commit, good.tree, good.blob] {
+            node.read_git_object(id).unwrap();
+        }
+        assert_eq!(
+            fs::read_dir(node.storage_root().join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
         node.shutdown().unwrap();
     }
 }
@@ -569,6 +601,7 @@ fn corrupt_or_misbound_artifacts_do_not_publish_and_the_valid_twin_commits() {
             .is_err()
         );
         assert_eq!(snapshot(&node).basis(), before.basis());
+        assert_discarded(&node, &good);
     }
     good.bytes = valid;
     assert!(matches!(
@@ -609,6 +642,7 @@ fn workspace_apply_cannot_publish_the_merge_as_a_source_only_update() {
         Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(_))
     ));
     assert_eq!(snapshot(&node).basis(), before.basis());
+    assert_discarded(&node, &merge);
     assert!(matches!(
         apply(
             &node,

@@ -13,7 +13,11 @@ use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber
 use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, NativeMerge};
 use fgit_types::{AsciiSlug, GitOid, RefName, RefusalCode};
 
-use super::{NativeMergeBasis, SealedMerge, prepare::prepare_event, staging::stage_prepared};
+use super::{
+    NativeMergeBasis, SealedMerge,
+    prepare::prepare_event,
+    staging::{stage_prepared, validate_prepared},
+};
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AsyncAdmissionProjection, CommitEvidence,
     ProjectionFailure, ValidatedClosure,
@@ -269,6 +273,18 @@ where
     fn merge_publication_checkpoint(&self, cx: &S::Context) -> Result<(), RefusalCode> {
         self.merge_checkpoint(cx)
     }
+    /// Make this request's verified candidate objects durable before staging
+    /// the committed record that names them. The driver calls this only after
+    /// complete preparation and effect-time liveness succeed, never on refusal
+    /// or terminal replay. A failure preserves an undecided request.
+    ///
+    /// Implementations must tolerate a later head-CAS retry. Object placement
+    /// alone does not authorize repository state. Projections whose objects
+    /// are already durable need no additional action.
+    fn publish_merge_objects(&self, _cx: &S::Context) -> Result<(), RefusalCode> {
+        Ok(())
+    }
+
     /// Observe the actual snapshot held by the workspace owner through the
     /// complete publication attempt. A caller-supplied digest is not an owner.
     /// The driver compares this observation with the sealed precondition.
@@ -685,6 +701,13 @@ where
         };
         // The record is constructed from the complete fold, never repaired by
         // substituting roots into a record whose evidence described fewer effects.
+        // Check every prepared body/record link before releasing private object
+        // custody. stage_prepared independently keeps its own defensive check.
+        validate_prepared(&prepared)?;
+        projection
+            .merge_publication_checkpoint(cx)
+            .map_err(unavailable)?;
+        projection.publish_merge_objects(cx).map_err(unavailable)?;
         stage_prepared(store, cx, &prepared).await?;
         projection.merge_checkpoint(cx).map_err(unavailable)?;
         projection

@@ -295,6 +295,27 @@ struct Candidate {
     commit_body: Vec<u8>,
 }
 
+fn assert_discarded(fixture: &Fixture, candidate: &Candidate) {
+    for id in [
+        candidate.merge.merge_commit,
+        fixture.expected_tree,
+        fixture.expected_blob,
+    ] {
+        assert!(
+            matches!(fixture.node.read_git_object(id),
+            Err(fgit_node::NodeRefusal::Fabric(error))
+                if matches!(*error, fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)),
+            "refused squash object {id} must remain unplaced"
+        );
+    }
+    assert_eq!(
+        fs::read_dir(fixture.node.storage_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
 fn prepare(node: &OneNode, style: MergeCommitStyle, message: &[u8]) -> Candidate {
     let before = snapshot(node);
     let metadata = MergeMetadata {
@@ -561,6 +582,7 @@ fn native_squash_keeps_method_version_and_request_identity_disjoint() {
     .unwrap();
     refused(&rejected.1, RefusalCode::EvidenceInvalid);
     unchanged_effects(&before, &snapshot(&f.node));
+    assert_discarded(&f, &squash);
     assert!(
         apply(
             &f.node,
@@ -580,6 +602,7 @@ fn native_squash_keeps_method_version_and_request_identity_disjoint() {
     )
     .unwrap();
     refused(&rejected.1, RefusalCode::EvidenceInvalid);
+    assert_discarded(&f, &ordinary);
     let stale_version = ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap());
     let rejected = apply(
         &f.node,
@@ -590,6 +613,7 @@ fn native_squash_keeps_method_version_and_request_identity_disjoint() {
     )
     .unwrap();
     refused(&rejected.1, RefusalCode::EvidenceStale);
+    assert_discarded(&f, &squash);
     assert!(
         apply(
             &f.node,
@@ -699,6 +723,7 @@ fn source_or_target_movement_refuses_stale_squash_without_ref_or_forge_effects()
             rejected
         );
         assert_eq!(snapshot(&f.node).basis(), after.basis());
+        assert_discarded(&f, &candidate);
         f.node.shutdown().unwrap();
     }
 }
@@ -766,6 +791,7 @@ fn protected_squash_requires_its_exact_candidate_vote_and_honors_withdrawal_afte
         )
         .unwrap();
         refused(&missing.1, RefusalCode::EvidenceMissing);
+        assert_discarded(&f, &squash);
         let mut approval = review_command(&f, &ordinary, epoch);
         committed(
             &vote(
@@ -786,6 +812,7 @@ fn protected_squash_requires_its_exact_candidate_vote_and_honors_withdrawal_afte
         )
         .unwrap();
         refused(&rejected.1, RefusalCode::EvidenceStale);
+        assert_discarded(&f, &squash);
         approval = review_command(&f, &squash, epoch);
         approval.review.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
         committed(
@@ -812,6 +839,7 @@ fn protected_squash_requires_its_exact_candidate_vote_and_honors_withdrawal_afte
         )
         .unwrap();
         refused(&rejected.1, RefusalCode::ProtectedRefTransitionDenied);
+        assert_discarded(&f, &squash);
         approval.review.expected_version =
             ExpectedVersion::Exactly(AggregateVersion::try_new(3).unwrap());
         committed(
@@ -867,6 +895,15 @@ fn protected_squash_requires_its_exact_candidate_vote_and_honors_withdrawal_afte
             after.snapshot().outbox.len(),
             before.snapshot().outbox.len() + 1
         );
+        for id in [squash.merge.merge_commit, f.expected_tree, f.expected_blob] {
+            reopened.read_git_object(id).unwrap();
+        }
+        assert_eq!(
+            fs::read_dir(reopened.storage_root().join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
         reopened.shutdown().unwrap();
     }
 }
@@ -899,6 +936,7 @@ fn cancellation_before_squash_admission_leaves_the_exact_request_retryable() {
             .is_err()
     );
     unchanged_effects(&before, &snapshot(&f.node));
+    assert_discarded(&f, &candidate);
     let accepted = apply(
         &f.node,
         &candidate,
