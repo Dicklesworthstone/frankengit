@@ -269,7 +269,11 @@ The source snapshot may cease to be the current head while the export runs.
 The receipt identifies what was selected; it does not promise completion-time
 freshness. Its whole-file SHA-256 is an artifact fingerprint and does not itself
 authenticate an issuer. The resulting file is consumable by the native
-file-backed `fg bundle verify` and `fg bundle recover` commands. This transfers
+file-backed `fg bundle verify`, `fg bundle recover`, and
+[`fg bundle import --file-backed`](NATIVE_GIT_BUNDLE_FILE_IMPORT.md) commands.
+The import profile publishes the complete native source into an initialized
+node through ordinary atomic admission, with independent input, expanded-byte,
+metadata and blob allowances. This transfers
 Git objects, direct refs and HEAD; it does not restore forge metadata, authority
 policy, credentials, or a complete signed repository capsule.
 
@@ -299,7 +303,10 @@ uses a real 33 MiB blob in each hash domain. It checks default refusal, full and
 incremental export with a 1 MiB metadata limit and a 40 MiB blob allowance,
 independent aggregate and blob refusals, unchanged source refs, deterministic
 bytes, exact native inventories and trailers, and file-backed full-bundle
-verification and recovery. Its source objects enter through the public durable
+verification and recovery. It also imports the full bundle into an initialized
+node with a 1 MiB metadata cap, checks the exact selected closure and streamed
+33 MiB body, and compares exact terminal receipts across file-backed and
+buffered retries. Its source objects enter through the public durable
 loose-object importer. The codec's `bundle_stream_blobs` target also checks short
 reads, exact EOF, source identity, cancellation, and buffered/streamed byte
 compatibility in both bundle profiles.

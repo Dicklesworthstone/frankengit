@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 #![cfg(unix)]
-//! Real commands cross the old 32 MiB per-object export ceiling in both native
-//! hash domains. The source is admitted through the public durable loose import,
-//! not a fabricated closure proof. No foreign executable is available to fg.
+//! Real commands cross the old 32 MiB per-object export/import ceiling in both
+//! native hash domains. The source enters through durable native loose import;
+//! the destination receives the actual exported bundle through file custody.
+//! No foreign executable is available to fg.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -16,10 +17,13 @@ use fgit_crypto::{GitObjectKind, git_object_id, lowercase_hex, sha256_digest};
 use fgit_node::{NodeConfig, OneNode};
 use fgit_pack::full_bundle::{FullBundleHeader, FullBundleLimits};
 use fgit_pack::{PackLimits, object_type_from_base_entry, read_streamed_pack};
-use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RepositoryId, TenantId};
+use fgit_types::{
+    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryId, TenantId,
+};
 
 const TENANT: &str = "11111111111111111111111111111111";
 const REPOSITORY: &str = "22222222222222222222222222222222";
+const PRINCIPAL: &str = "33333333333333333333333333333333";
 const MIB: usize = 1024 * 1024;
 const BLOB_BYTES: usize = 33 * MIB;
 const BLOB_BYTE: u8 = b'q';
@@ -139,15 +143,166 @@ impl Fixture {
     }
 
     fn refs(&self) -> String {
+        self.refs_at("node")
+    }
+
+    fn refs_at(&self, storage: &str) -> String {
         success(self.run(&args(&[
             "refs",
-            "node",
+            storage,
             TENANT,
             REPOSITORY,
             "--trusted-local",
             "--object-format",
             self.format.as_str(),
         ])))
+    }
+
+    fn import(&self, bundle: &str, file_backed: bool, extra: &[&str]) -> Output {
+        let mut values = args(&[
+            "bundle",
+            "import",
+            "receiver",
+            TENANT,
+            REPOSITORY,
+            bundle,
+            "--trusted-local",
+            "--object-format",
+            self.format.as_str(),
+            "--principal",
+            PRINCIPAL,
+            "--idempotency-key",
+            "native-file-blob-transfer",
+        ]);
+        if file_backed {
+            values.push("--file-backed".to_owned());
+        }
+        values.extend(args(extra));
+        self.run(&values)
+    }
+
+    fn assert_receiver_staging_empty(&self) {
+        assert_eq!(
+            fs::read_dir(self.root.join("receiver/staging"))
+                .unwrap()
+                .count(),
+            0,
+            "file import must settle private payload and scratch custody"
+        );
+    }
+
+    fn assert_full_import(&self, bundle: &str) {
+        success(self.run(&args(&[
+            "init",
+            "receiver",
+            TENANT,
+            REPOSITORY,
+            self.format.as_str(),
+        ])));
+        let empty = self.refs_at("receiver");
+        refused(self.import(bundle, true, &[]));
+        assert_eq!(self.refs_at("receiver"), empty);
+        self.assert_receiver_staging_empty();
+        self.assert_clean();
+
+        let accepted = success(self.import(
+            bundle,
+            true,
+            &[
+                "--max-object-mib",
+                "1",
+                "--max-blob-mib",
+                "40",
+                "--timeout-secs",
+                "600",
+            ],
+        ));
+        for required in [
+            "\"type\":\"git_bundle_import\"",
+            "\"outcome\":\"committed\"",
+            "\"command_committed\":true",
+            "\"atomic\":true",
+            "\"reference_count\":1",
+            "\"node_closed\":true",
+            "\"cleanup_error\":null",
+        ] {
+            assert!(accepted.contains(required), "{accepted}");
+        }
+        self.assert_receiver_staging_empty();
+        self.assert_received_native_objects();
+        let committed = self.refs_at("receiver");
+        assert_ne!(committed, empty);
+        let reference = format!(
+            "{{\"reference_hex\":\"{}\",\"tip\":\"{}\"}}",
+            lowercase_hex(b"refs/heads/main"),
+            self.tip
+        );
+        assert!(committed.contains(&reference), "{committed}");
+        assert_eq!(committed.matches("\"reference_hex\":").count(), 1);
+
+        // The same exact mutation/key recovers its terminal outcome even with
+        // today's smaller default blob allowance or the buffered intake profile.
+        assert_eq!(success(self.import(bundle, true, &[])), accepted);
+        assert_eq!(success(self.import(bundle, false, &[])), accepted);
+        assert_eq!(self.refs_at("receiver"), committed);
+        self.assert_receiver_staging_empty();
+        self.assert_clean();
+    }
+
+    fn assert_received_native_objects(&self) {
+        let node = OneNode::open_existing(
+            NodeConfig::new(
+                self.root.join("receiver"),
+                TenantId::from_bytes([0x11; 16]),
+                RepositoryId::from_bytes([0x22; 16]),
+            )
+            .with_object_format(self.format)
+            .with_max_object_bytes(MIB as u64)
+            .with_bundle_import_blob_limit(40 * MIB)
+            .with_worker_threads(2),
+        )
+        .unwrap();
+        let request = node.import_request_context(None);
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(
+            materialized
+                .snapshot()
+                .refs
+                .get(&RefName::try_new(b"refs/heads/main").unwrap()),
+            Some(&self.tip)
+        );
+        assert_eq!(
+            materialized.selected_closure().closure().objects(),
+            &self.full.keys().copied().collect::<BTreeSet<_>>()
+        );
+        for (identity, expected) in &self.full {
+            if let Some(body) = expected {
+                let object = node.read_git_object(*identity).unwrap();
+                assert_eq!(object.identity(), *identity);
+                assert_eq!(object.payload(), body);
+            }
+        }
+        assert!(node.read_git_object(self.blob).is_err());
+        let mut blob = node
+            .open_git_blob_stream(self.blob, BLOB_BYTES as u64)
+            .unwrap();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut received = 0;
+        loop {
+            let count = blob.read_tentative(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            assert!(buffer[..count].iter().all(|byte| *byte == BLOB_BYTE));
+            received += count;
+        }
+        assert_eq!(received, BLOB_BYTES);
+        assert!(blob.is_verified());
+        drop(blob);
+        node.shutdown().unwrap();
     }
 
     fn export(&self, name: &str, incremental: bool, extra: &[&str]) -> Output {
@@ -416,6 +571,7 @@ fn both_domains_export_a_33_mib_blob_without_widening_metadata_and_recover_exact
             if incremental {
                 continue;
             }
+            fixture.assert_full_import(name);
             let pins = args(&[
                 "--file-backed",
                 "--scratch-dir",

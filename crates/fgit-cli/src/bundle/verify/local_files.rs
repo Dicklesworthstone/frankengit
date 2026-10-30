@@ -6,6 +6,7 @@
 //! against a hostile process running with the same filesystem authority.
 
 use std::fs::{File, Metadata, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -164,6 +165,23 @@ impl StableInput {
             return Err("bundle input changed during file-backed verification".into());
         }
         checkpoint(live)
+    }
+}
+
+// A mutating file-backed consumer receives the same descriptor checks at each
+// authenticated source EOF, before it can hand private verified data to admission.
+impl Read for StableInput {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let count = self.file.read(output)?;
+        if count == 0 && !output.is_empty() {
+            self.recheck(&mut || true).map_err(io::Error::other)?;
+        }
+        Ok(count)
+    }
+}
+impl Seek for StableInput {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.file.seek(position)
     }
 }
 
