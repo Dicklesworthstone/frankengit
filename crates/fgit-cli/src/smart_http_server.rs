@@ -33,7 +33,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
-  [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]
+  [--receive-max-expanded-mib <1..65536>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>]
   [--trusted-origin <origin>]
   [--index-state-dir <private-directory> --index-state init|resume
    --index-profile lexical|symbols|both --index-format sha1|sha256
@@ -227,8 +227,9 @@ INDEX is canonical decimal within the native receive command limit.
 Forwarded identity headers never authenticate. This is an operator credential
 profile, not organization/team IAM, per-ref/per-item ACLs, account lifecycle or
 TLS. Use an authenticated external TLS terminator for nonlocal access.
-Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB receive
-envelopes and a 4096 MiB upload pack envelope (packs stream; memory is the delta window);
+Default bounds: 1024 requests, 4 in flight, 300-second phases, a 128 MiB receive
+input and 4096 MiB receive expanded envelope (resolved objects spill to scratch),
+and a 4096 MiB upload pack envelope (packs stream; memory is the delta window);
 metadata forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
 Outcome replies have a separate per-principal quota; single-transaction replies
 are capped at 16 KiB and whole-session replies at 16 MiB. Source reads have another
@@ -572,16 +573,18 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         3600,
     )?))
     .map_err(|e| e.to_string())?;
-    let bytes = |name| -> Result<usize, String> {
-        usize::try_from(number(&flags, name, 128, 1024)? * 1024 * 1024)
+    let bytes = |name, default, maximum| -> Result<usize, String> {
+        usize::try_from(number(&flags, name, default, maximum)? * 1024 * 1024)
             .map_err(|_| "byte envelope is not supported on this platform".into())
     };
     let mut config = NodeConfig::new(arguments[0].clone().into(), tenant, repository)
         .with_git_daemon_session_timeout(timeout)
         .with_git_daemon_receive_processing_timeout(processing)
         .with_git_daemon_receive_byte_envelope(
-            Some(bytes("--receive-max-input-mib")?),
-            Some(bytes("--receive-max-expanded-mib")?),
+            // The pushed pack itself is still held in memory; its expanded
+            // content spills to scratch (frankengit-88fk).
+            Some(bytes("--receive-max-input-mib", 128, 1024)?),
+            Some(bytes("--receive-max-expanded-mib", 4096, 65536)?),
         );
     // Served packs stream through scratch custody (frankengit-8xyq), so the
     // node's default upload envelope stands unless the operator names one.
@@ -1360,7 +1363,17 @@ mod tests {
     /// 1 GiB ceiling.
     #[test]
     fn the_pack_envelope_keeps_the_node_default_unless_named() {
-        let debug = |args: &[String]| format!("{:?}", parse(args).unwrap().config);
+        // Only the upload limits: the receive envelope also defaults to 4 GiB
+        // (frankengit-88fk), so a search of the whole config cannot tell them
+        // apart.
+        let debug = |args: &[String]| {
+            let config = format!("{:?}", parse(args).unwrap().config);
+            let start = config
+                .find("selected_pack_limits: PackLimits {")
+                .expect("the upload limits are printed");
+            let end = start + config[start..].find('}').expect("the limits close");
+            config[start..end].to_owned()
+        };
         let default = debug(&arguments());
         assert!(
             default.contains("max_total_expanded_bytes: 4294967296"),
@@ -1382,13 +1395,27 @@ mod tests {
     #[test]
     fn the_receive_delta_work_bound_follows_the_expanded_envelope() {
         let debug = |args: &[String]| format!("{:?}", parse(args).unwrap().config);
+        // The 4096 MiB default (owner decision on frankengit-88fk, 2026-10-30).
         let default = debug(&arguments());
-        assert!(default.contains("max_delta_work: 269435456"), "{default}");
+        assert!(default.contains("max_delta_work: 8590934592"), "{default}");
         let mut args = arguments();
         args.extend(["--receive-max-expanded-mib".into(), "1024".into()]);
-        let widened = debug(&args);
-        assert!(widened.contains("max_delta_work: 2148483648"), "{widened}");
-        assert!(!widened.contains("max_delta_work: 269435456"), "{widened}");
+        let narrowed = debug(&args);
+        assert!(
+            narrowed.contains("max_delta_work: 2148483648"),
+            "{narrowed}"
+        );
+        assert!(
+            !narrowed.contains("max_delta_work: 8590934592"),
+            "{narrowed}"
+        );
+        // Above the old 1024 MiB ceiling, as large histories need.
+        let mut args = arguments();
+        args.extend(["--receive-max-expanded-mib".into(), "8192".into()]);
+        assert!(debug(&args).contains("max_delta_work: 17180869184"));
+        let mut args = arguments();
+        args.extend(["--receive-max-expanded-mib".into(), "65537".into()]);
+        assert!(parse(&args).is_err());
     }
 
     #[test]

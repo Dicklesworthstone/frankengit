@@ -537,7 +537,11 @@ These are two corpora, not a general performance claim.
 
 `fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
 `--session-secs-per-mib`, `--session-max-extension-secs`, `--processing-timeout-secs`,
-`--receive-max-input-mib`, `--receive-max-expanded-mib`; `fg serve` and
+`--receive-max-input-mib`, `--receive-max-expanded-mib` (by default 64 MiB of
+pack input on `fg serve` and `fg serve-ssh`, 128 MiB on `fg serve-http`, which
+accepts 1..1024, and 4096 MiB of expanded content, which `fg serve-http` accepts
+up to 65536; a receive's resolved objects spill to scratch, so its memory does
+not grow with the expanded envelope); `fg serve` and
 `fg export` select the write-side envelope with `--pack-max-expanded-mib`
 (4096 MiB by default; `fg serve-http` accepts 1..65536).
 

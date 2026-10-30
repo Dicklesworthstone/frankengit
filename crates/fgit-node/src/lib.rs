@@ -7484,7 +7484,7 @@ impl NodeConfig {
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
-            git_daemon_receive_limits: ReceiveLimits::default(),
+            git_daemon_receive_limits: default_receive_limits(),
             git_daemon_receive_principal: None,
             http_trusted_origin: None,
             http_protection_admin: false,
@@ -7797,10 +7797,7 @@ impl NodeConfig {
             self.git_daemon_receive_limits.max_quarantine_bytes = bytes;
         }
         if let Some(bytes) = max_expanded_bytes {
-            self.git_daemon_receive_limits.pack.max_total_expanded_bytes = bytes;
-            self.git_daemon_receive_limits.pack.max_cached_bytes = bytes;
-            self.git_daemon_receive_limits.pack.max_delta_work =
-                receive_delta_work_limit(bytes, self.git_daemon_receive_limits.pack.max_entries);
+            set_receive_expanded_envelope(&mut self.git_daemon_receive_limits, bytes);
         }
         self
     }
@@ -7892,6 +7889,33 @@ const SELECTED_PACK_WINDOW_BYTES: usize = match PackWriteProfile::COMPRESSED_V5.
     Some(bytes) => bytes,
     None => 0,
 };
+
+/// Unique expanded content one receive may resolve by default: the upload
+/// envelope's 4 GiB. A receive's memory no longer grows with it (resolved
+/// objects and blob bodies spill to scratch, frankengit-88fk), so it bounds
+/// resolution work and scratch disk. Owner decision on frankengit-88fk,
+/// 2026-10-30; the previous default, 128 MiB, refused ordinary projects.
+const DEFAULT_RECEIVE_EXPANDED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The receive envelope a node starts with: the wire profile with the default
+/// expanded envelope applied exactly as `--receive-max-expanded-mib` applies
+/// one.
+fn default_receive_limits() -> ReceiveLimits {
+    let mut limits = ReceiveLimits::default();
+    set_receive_expanded_envelope(
+        &mut limits,
+        usize::try_from(DEFAULT_RECEIVE_EXPANDED_BYTES).unwrap_or(usize::MAX),
+    );
+    limits
+}
+
+/// Sets a receive's expanded-content envelope with the bounds that follow it:
+/// the resolver cache cap and the delta-work bound (frankengit-88fk).
+const fn set_receive_expanded_envelope(limits: &mut ReceiveLimits, bytes: usize) {
+    limits.pack.max_total_expanded_bytes = bytes;
+    limits.pack.max_cached_bytes = bytes;
+    limits.pack.max_delta_work = receive_delta_work_limit(bytes, limits.pack.max_entries);
+}
 
 fn default_selected_pack_limits() -> PackLimits {
     selected_pack_envelope(
