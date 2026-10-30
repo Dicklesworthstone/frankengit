@@ -10,6 +10,7 @@ mod ingress;
 mod receive_session;
 mod server;
 pub use server::{source_agent_context_json, source_retrieval_json};
+mod upload_refusal;
 mod verdict;
 
 #[cfg(test)]
@@ -706,78 +707,104 @@ impl OneNode {
         // Construct the whole selected pack before writing HTTP success. The
         // current pack writer has its own explicit memory envelope; this HTTP
         // adapter does not introduce another pack-sized buffer.
-        let mut pack = if let Some(pack_request) = reply.pack_request() {
-            let pack_context = self.session_pack_materialization_context(&deadline);
-            let database_exhaustion = Cell::new(None);
-            let mut stopped = false;
-            let session_deadline_expired = Cell::new(false);
-            let mut transfer_exhaustion = None;
-            let pack = {
-                let session_is_live = || {
-                    if deadline.expired() {
-                        session_deadline_expired.set(true);
-                        false
-                    } else {
-                        true
-                    }
-                };
-                let mut is_live = || {
-                    if stopped {
-                        return false;
-                    }
-                    if !cancellation.checkpoint() || !session_is_live() {
-                        stopped = true;
-                        return false;
-                    }
-                    match checkpoint_pack_context(&pack_context) {
-                        PackContextCheckpoint::Live => true,
-                        PackContextCheckpoint::Stopped { budget_exhaustion } => {
-                            stopped = true;
-                            transfer_exhaustion = budget_exhaustion;
+        let pack_result = (|| -> Result<_, NodeSmartHttpRefusal> {
+            let pack = if let Some(pack_request) = reply.pack_request() {
+                let pack_context = self.session_pack_materialization_context(&deadline);
+                let database_exhaustion = Cell::new(None);
+                let mut stopped = false;
+                let session_deadline_expired = Cell::new(false);
+                let mut transfer_exhaustion = None;
+                let pack = {
+                    let session_is_live = || {
+                        if deadline.expired() {
+                            session_deadline_expired.set(true);
                             false
+                        } else {
+                            true
                         }
-                    }
+                    };
+                    let mut is_live = || {
+                        if stopped {
+                            return false;
+                        }
+                        if !cancellation.checkpoint() || !session_is_live() {
+                            stopped = true;
+                            return false;
+                        }
+                        match checkpoint_pack_context(&pack_context) {
+                            PackContextCheckpoint::Live => true,
+                            PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                                stopped = true;
+                                transfer_exhaustion = budget_exhaustion;
+                                false
+                            }
+                        }
+                    };
+                    self.materialize_selected_pack_in_scope(
+                        &materialized,
+                        disclosure.closure_for(&materialized)?,
+                        Some((&disclosure, pack_request)),
+                        Some(&pack_request.wants),
+                        &pack_request.haves,
+                        selected_fetch_write_profile(pack_request),
+                        node_request.authority(),
+                        &database_exhaustion,
+                        Some(&session_is_live),
+                        &mut is_live,
+                    )
                 };
-                self.materialize_selected_pack_in_scope(
-                    &materialized,
-                    disclosure.closure_for(&materialized)?,
-                    Some((&disclosure, pack_request)),
-                    Some(&pack_request.wants),
-                    &pack_request.haves,
-                    selected_fetch_write_profile(pack_request),
-                    node_request.authority(),
-                    &database_exhaustion,
-                    Some(&session_is_live),
-                    &mut is_live,
-                )
-            };
-            if deadline.expired() || session_deadline_expired.get() {
-                return Err(NodeGitDaemonServeRefusal::from(
-                    GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                if deadline.expired() || session_deadline_expired.get() {
+                    return Err(NodeGitDaemonServeRefusal::from(
+                        GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                            operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                        },
+                    )
+                    .into());
+                }
+                if let Some(dimension) = database_exhaustion.get() {
+                    return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+                        class: BudgetClass::Database,
+                        dimension,
                         operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
-                    },
-                )
-                .into());
-            }
-            if let Some(dimension) = database_exhaustion.get() {
-                return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
-                    class: BudgetClass::Database,
-                    dimension,
-                    operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                    }
+                    .into());
                 }
-                .into());
-            }
-            if let Some(dimension) = transfer_exhaustion {
-                return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
-                    class: SELECTED_PACK_BUDGET_CLASS,
-                    dimension,
-                    operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                if let Some(dimension) = transfer_exhaustion {
+                    return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+                        class: SELECTED_PACK_BUDGET_CLASS,
+                        dimension,
+                        operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                    }
+                    .into());
                 }
-                .into());
+                Some(pack?)
+            } else {
+                None
+            };
+            Ok(pack)
+        })();
+        let mut pack = match pack_result {
+            Ok(pack) => pack,
+            Err(refusal) => {
+                // A Git client discards an ordinary HTTP failure body. Report
+                // bounded operator-actionable pack refusals in Git framing,
+                // before any negotiation prefix or successful pack response.
+                // The host's ResponseWriter starts its independent finite
+                // output phase here; an expired work budget cannot suppress
+                // this last diagnostic or be revived by attempting it.
+                if let Some(line) = upload_refusal::line(&refusal)
+                    && cancellation.checkpoint()
+                {
+                    let _ = write_upload_rpc_error(
+                        writer,
+                        request,
+                        line,
+                        &wire_limits,
+                        maximum_response_bytes,
+                    );
+                }
+                return Err(refusal);
             }
-            Some(pack?)
-        } else {
-            None
         };
 
         let head = success_head(request, None);

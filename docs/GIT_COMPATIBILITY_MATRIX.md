@@ -397,6 +397,17 @@ naming the limit (diagnosable, not an unexplained early EOF); without
 sideband the connection ends as in upstream mid-service failure. `fg export`
 prints the typed refusal directly.
 
+Smart HTTP selected-pack resource refusals use a bounded Git ERR packet inside
+HTTP 200, before any negotiation or pack bytes, so v0/v2 and quiet clients can
+read the cause. Only public size/output/window limits, named runtime exhaustion
+and the selected-pack session timeout are reported this way. Other failures
+retain their existing status mapping. The native TCP regressions in
+`fgit-node/tests/smart_http_server/upload_limits.rs` cover an accepted push,
+quiet refused clones, an unchanged authority head, and successful native pack
+verification after raising only the upload envelope in both object formats.
+These are authored integration regressions, not a new stock-client performance
+or compatibility measurement.
+
 The per-object body ceiling does not reject unselected blobs reached through
 verified tree or tag edges during the pre-advertisement metadata walk. Their
 bounded envelope reads still check identity, namespace, kind and exact file

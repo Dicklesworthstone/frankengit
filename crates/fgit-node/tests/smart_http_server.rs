@@ -22,6 +22,8 @@ use fgit_wire::{Packet, PktLineDecoder, WireLimits, encode_packets};
 
 #[path = "smart_http_server/pack_cache.rs"]
 mod pack_cache;
+#[path = "smart_http_server/upload_limits.rs"]
+mod upload_limits;
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -221,7 +223,12 @@ fn stored_zlib(body: &[u8]) -> Vec<u8> {
     out
 }
 fn commit_pack(format: GitHashAlgorithm) -> (GitOid, Vec<u8>, BTreeSet<Vec<u8>>) {
-    let blob = b"native HTTP round trip\n".to_vec();
+    commit_pack_with_blob(format, b"native HTTP round trip\n".to_vec())
+}
+fn commit_pack_with_blob(
+    format: GitHashAlgorithm,
+    blob: Vec<u8>,
+) -> (GitOid, Vec<u8>, BTreeSet<Vec<u8>>) {
     let blob_id = git_object_id(format, GitObjectKind::Blob, &blob);
     let mut tree = b"100644 README\0".to_vec();
     tree.extend_from_slice(blob_id.as_bytes());

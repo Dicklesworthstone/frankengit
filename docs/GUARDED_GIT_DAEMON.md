@@ -136,6 +136,18 @@ fatal: early EOF
 The first figure is where the writer crossed the limit, not the full pack
 size.
 
+For selected-pack failures after negotiation, Smart HTTP sends one bounded Git
+ERR packet in an HTTP 200 upload-pack response. This covers the selected-object,
+pack-output and delta-window limits, named Database/Transfer exhaustion, and the
+pack-work session timeout. Quiet clients can display the cause without requesting
+progress output. An aggregate size refusal names the upload-envelope option; a session
+timeout names the session and work-scaling options. No negotiation prefix or pack
+byte precedes this error. The original typed refusal remains the server result
+even if the peer has gone away or the bounded response write fails.
+Storage errors, object identifiers and authority details do not cross this
+diagnostic boundary. Cancellation and the configured response-size limit still
+apply.
+
 A repository whose commit, tree and tag bytes alone exceed the envelope is
 refused before any advertisement, with one `ERR` packet such as, under
 `--pack-max-expanded-mib 128`,
