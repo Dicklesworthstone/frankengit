@@ -16,6 +16,7 @@
 
 extern crate self as fgit_node;
 
+mod admission_authentication;
 pub mod agent_journal;
 
 /// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
@@ -35,10 +36,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use admission_authentication::{read_principal_snapshot_in, stage_principal_snapshot_in};
 use fgit_admission::evidence::{
-    DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies,
+    AdmissionAuthentication, DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies,
     ForgeEventBatch as AdmissionForgeEventEvidence, InvariantEvidence, OutboxEffectBatch,
-    PolicyDecisionRecord, PrincipalSnapshot, RefusalEvidenceBodies, RetentionDelta, evidence_root,
+    PolicyDecisionRecord, RefusalEvidenceBodies, RetentionDelta, evidence_root,
     principal_snapshot_id,
 };
 pub use fgit_admission::merge::native::NativeMergeMethod;
@@ -1590,25 +1592,23 @@ impl DurableAdmissionMaterializer {
             ));
         }
         ensure_materializer_catch_up_live(is_cancelled)?;
-        let principal_snapshot =
-            read_evidence_body_in::<Authority, PrincipalSnapshot, IsCancelled>(
-                authority,
-                cx,
-                context.repository_id,
-                ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-                Digest::new(
-                    evidence
-                        .principal_snapshot_id
-                        .as_internal_object_id()
-                        .algorithm(),
-                    *evidence
-                        .principal_snapshot_id
-                        .as_internal_object_id()
-                        .digest(),
-                ),
-                is_cancelled,
-            )
-            .await?;
+        let principal_snapshot = read_principal_snapshot_in(
+            authority,
+            cx,
+            context.repository_id,
+            Digest::new(
+                evidence
+                    .principal_snapshot_id
+                    .as_internal_object_id()
+                    .algorithm(),
+                *evidence
+                    .principal_snapshot_id
+                    .as_internal_object_id()
+                    .digest(),
+            ),
+            is_cancelled,
+        )
+        .await?;
         let policy_decision = read_policy_decision_in(
             authority,
             cx,
@@ -1760,11 +1760,10 @@ impl DurableAdmissionMaterializer {
         IsCancelled: Fn() -> bool + Sync,
     {
         let repository_id = bodies.principal_snapshot().repository_id();
-        stage_evidence_body_in(
+        stage_principal_snapshot_in(
             authority,
             cx,
             repository_id,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
             bodies.principal_snapshot(),
             is_cancelled,
         )
@@ -1827,11 +1826,10 @@ impl DurableAdmissionMaterializer {
         IsCancelled: Fn() -> bool + Sync,
     {
         let repository_id = bodies.principal_snapshot().repository_id();
-        stage_evidence_body_in(
+        stage_principal_snapshot_in(
             authority,
             cx,
             repository_id,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
             bodies.principal_snapshot(),
             is_cancelled,
         )
@@ -2539,6 +2537,7 @@ struct AsyncMaterializedBasis {
 pub struct DurableAsyncAdmissionProjection<'materializer> {
     materializer: &'materializer DurableAdmissionMaterializer,
     context: AdmissionContext,
+    authentication: Option<AdmissionAuthentication>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
     /// A receive's staged objects, published before its first commit's
     /// frames (frankengit-tz5z).
@@ -2562,9 +2561,20 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         Self {
             materializer,
             context,
+            authentication: None,
             prepared: Mutex::new(None),
             publication: None,
         }
+    }
+
+    /// Record only provenance selected by a node authentication boundary.
+    #[must_use]
+    pub(crate) const fn with_authentication(
+        mut self,
+        authentication: AdmissionAuthentication,
+    ) -> Self {
+        self.authentication = Some(authentication);
+        self
     }
 
     /// Publishes `staging`'s objects when a commit is staged, before its
@@ -2591,7 +2601,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
     ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
-        let bodies = fgit_admission::merge::native::protection::direct_decision_evidence_at(
+        let bodies = admission_authentication::direct_decision_evidence_in(
             authority,
             cx,
             &self.context,
@@ -2600,6 +2610,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             root_layout,
             request,
             fold,
+            self.authentication,
             &|| cx.checkpoint().is_err(),
         )
         .await?;
@@ -2817,13 +2828,14 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
         let stage_context = cx.create_child();
         let is_cancelled = || stage_context.checkpoint().is_err();
         self.materializer
-            .stage_refusal_evidence_in(
+            .stage_refusal_evidence_with_authentication_in(
                 authority,
                 &stage_context,
                 &self.context,
                 basis,
                 tx_id,
                 code,
+                self.authentication,
                 &is_cancelled,
             )
             .await
@@ -2973,7 +2985,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
         }
         // Legacy digest packages carry no authenticated exact-candidate votes.
         // They cannot bypass a protected target through a different materializer.
-        fgit_admission::merge::native::protection::attach_prepared_policy_at(
+        admission_authentication::attach_prepared_policy_in(
             authority,
             cx,
             context,
@@ -2981,6 +2993,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             &resolved,
             &mut prepared,
             fgit_admission::evidence::RefPolicyPublication::Direct,
+            self.authentication,
             &is_cancelled,
         )
         .await?;
@@ -4873,18 +4886,37 @@ mod ref_write_scope;
 pub struct AuthenticatedReceiveSession {
     principal_id: PrincipalId,
     client_idempotency_key: IdempotencyKey,
+    authentication: AdmissionAuthentication,
     ref_write_scope: Option<Arc<ref_write_scope::RefWriteScope>>,
 }
 
 impl AuthenticatedReceiveSession {
-    /// Forms an authenticated receive session from authority-bound identity.
+    /// Forms an operator-asserted session. Supplying a principal alone does not
+    /// establish that the node verified a remote credential.
     #[must_use]
     pub const fn new(principal_id: PrincipalId, client_idempotency_key: IdempotencyKey) -> Self {
         Self {
             principal_id,
             client_idempotency_key,
+            authentication: AdmissionAuthentication::OperatorAssertion,
             ref_write_scope: None,
         }
+    }
+
+    /// Attach a verifier's result at the node-owned transport boundary.
+    #[must_use]
+    pub(crate) const fn with_authentication(
+        mut self,
+        authentication: AdmissionAuthentication,
+    ) -> Self {
+        self.authentication = authentication;
+        self
+    }
+
+    /// The recorded method establishes no principal kind or membership facts.
+    #[must_use]
+    pub const fn authentication(&self) -> AdmissionAuthentication {
+        self.authentication
     }
 
     /// Narrow the existing authentication boundary's code-write grant. This is
@@ -9323,10 +9355,10 @@ impl OneNode {
                 RefusalCode::EvidenceInvalid,
             ));
         }
-        Ok(DurableAsyncAdmissionProjection::new(
-            &self.admission_materializer,
-            context.clone(),
-        ))
+        Ok(
+            DurableAsyncAdmissionProjection::new(&self.admission_materializer, context.clone())
+                .with_authentication(AdmissionAuthentication::OperatorAssertion),
+        )
     }
 
     /// Admits one verified receive-pack session through the node-owned durable
@@ -9486,9 +9518,20 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_validated_receive_durable_in(request, &context, validated, limits)
-            .await
-            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
+        let projection = self
+            .durable_admission_projection(&context)
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
+            .with_authentication(authenticated.authentication());
+        admit_validated_receive_async(
+            &self.authority,
+            request.authority(),
+            &context,
+            validated,
+            limits,
+            &projection,
+        )
+        .await
+        .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
 
     /// Admits a basis-bound receive through the authenticated loopback
@@ -9537,9 +9580,16 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        Box::pin(self.admit_basis_bound_validated_receive_publishing_in(
-            request, &context, validated, limits, staging,
-        ))
+        Box::pin(
+            self.admit_basis_bound_validated_receive_with_authentication_in(
+                request,
+                &context,
+                validated,
+                limits,
+                staging,
+                authenticated.authentication(),
+            ),
+        )
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
@@ -11722,8 +11772,8 @@ mod tests {
 
     use fgit_admission::evidence::{
         DURABLE_REFUSAL_EVIDENCE_DETAIL, EvaluatedPolicyDecisionEvidence, ForgeEventBatch,
-        InvariantEvidence, OutboxEffectBatch, PrincipalSnapshot, RefusalEvidence,
-        RefusalEvidenceBodies, RetentionDelta, evidence_root,
+        InvariantEvidence, OutboxEffectBatch, RefusalEvidence, RefusalEvidenceBodies,
+        RetentionDelta, evidence_root,
     };
     use fgit_admission::{
         AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionSnapshot,
@@ -14396,11 +14446,19 @@ mod tests {
         let principal_identity = record.principal_snapshot_id.as_internal_object_id();
         let principal_snapshot_root =
             Digest::new(principal_identity.algorithm(), *principal_identity.digest());
-        assert_published_evidence_body::<PrincipalSnapshot>(
-            &node,
-            &authority_request,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-            principal_snapshot_root,
+        let principal_snapshot = node
+            .runtime()
+            .block_on(read_principal_snapshot_in(
+                &node.authority,
+                authority_request.authority(),
+                node.repository_id,
+                principal_snapshot_root,
+                &|| false,
+            ))
+            .expect("the published principal snapshot is canonical and matches its root");
+        assert_eq!(
+            principal_snapshot.authentication(),
+            Some(AdmissionAuthentication::OperatorAssertion),
         );
         assert_published_evidence_body::<EvaluatedPolicyDecisionEvidence>(
             &node,

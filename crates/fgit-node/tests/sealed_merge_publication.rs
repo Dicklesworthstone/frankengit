@@ -7,7 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_admission::evidence::{DecisionEvidenceBodies, evidence_root, principal_snapshot_id};
+use fgit_admission::evidence::{
+    AdmissionAuthentication, DecisionEvidenceBodies, evidence_root, principal_snapshot_id,
+};
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
 use fgit_admission::merge::{SealedMerge, seal_attempt_for};
 use fgit_admission::{
@@ -431,8 +433,14 @@ fn prepare_evidence(node: &OneNode, context: &AdmissionContext, offer: &mut Offe
         matches!(fold.outcome, FoldOutcome::Folded(_)),
         "permitted fixture has a complete non-aborting fold"
     );
-    let bodies =
-        DecisionEvidenceBodies::derive(context, selected.basis(), &request, &fold).unwrap();
+    let bodies = DecisionEvidenceBodies::derive_with_authentication(
+        context,
+        selected.basis(),
+        &request,
+        &fold,
+        AdmissionAuthentication::OperatorAssertion,
+    )
+    .unwrap();
     offer.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
         forge_event_batch_root: event_root,
@@ -441,6 +449,20 @@ fn prepare_evidence(node: &OneNode, context: &AdmissionContext, offer: &mut Offe
         outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
         retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),
     };
+    let prepared = node
+        .runtime()
+        .block_on(node.prepare_sealed_merge_evidence_in(
+            &request_context,
+            context,
+            &offer.sealed(offer.attempt.workspace_epoch),
+            None,
+        ))
+        .unwrap();
+    assert_eq!(
+        prepared.evidence, offer.evidence,
+        "the public preparation and independent complete-fold oracle agree",
+    );
+    offer.evidence = prepared.evidence;
 }
 
 #[test]

@@ -4,6 +4,7 @@
 use super::{
     NativeMergeIntent, NativeMergeProjection, PreparationFailure, metadata, storage, unavailable,
 };
+use crate::evidence::AdmissionAuthentication;
 use crate::merge::NativeMergeBasis;
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, PermittedObjectClosure,
@@ -219,7 +220,7 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    enforce_direct_selected_at(store, cx, basis, refs, fold, None, cancelled)
+    enforce_direct_selected_at(store, cx, basis, refs, fold, None, None, cancelled)
         .await
         .map(|_| ())
 }
@@ -231,6 +232,7 @@ async fn enforce_direct_selected_at<S, C>(
     refs: &BTreeMap<RefName, GitOid>,
     fold: &fgit_txn::TransactionFoldReport,
     principal: Option<PrincipalId>,
+    authentication: Option<AdmissionAuthentication>,
     cancelled: &C,
 ) -> Result<Option<ProtectionState>, ProjectionFailure>
 where
@@ -247,7 +249,13 @@ where
         .await
         .map_err(infrastructure)?;
     if let Some(policy) = selected.protection() {
-        enforce_installed_snapshot(policy, refs, &effects.refs, principal)?;
+        enforce_installed_snapshot_with_authentication(
+            policy,
+            refs,
+            &effects.refs,
+            principal,
+            authentication,
+        )?;
         let has_protected = effects.refs.keys().any(|name| {
             policy
                 .branch(name)
@@ -331,6 +339,62 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    direct_decision_evidence_selected_at(
+        store, cx, context, basis, current, layout, request, fold, None, cancelled,
+    )
+    .await
+}
+
+/// The same authority-selected decision gate with host-verified authentication.
+/// The fact is retained in the principal receipt and supplied to policy before
+/// evaluation; it never changes the sealed request or transaction identity.
+pub async fn direct_decision_evidence_with_authentication_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    current: &crate::CanonicalRefState,
+    layout: fgit_types::RootLayoutVersion,
+    request: &fgit_reference::intent::TransactionRequest,
+    fold: &fgit_txn::TransactionFoldReport,
+    authentication: AdmissionAuthentication,
+    cancelled: &C,
+) -> Result<crate::evidence::DecisionEvidenceBodies, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    direct_decision_evidence_selected_at(
+        store,
+        cx,
+        context,
+        basis,
+        current,
+        layout,
+        request,
+        fold,
+        Some(authentication),
+        cancelled,
+    )
+    .await
+}
+
+async fn direct_decision_evidence_selected_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    current: &crate::CanonicalRefState,
+    layout: fgit_types::RootLayoutVersion,
+    request: &fgit_reference::intent::TransactionRequest,
+    fold: &fgit_txn::TransactionFoldReport,
+    authentication: Option<AdmissionAuthentication>,
+    cancelled: &C,
+) -> Result<crate::evidence::DecisionEvidenceBodies, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     if context.repository_id != basis.body().repository_id
         || request.repository != context.repository_id
         || request.tenant != context.tenant_id
@@ -345,12 +409,23 @@ where
         current.refs(),
         fold,
         Some(context.principal_id),
+        authentication,
         cancelled,
     )
     .await?;
-    let mut evidence =
-        crate::evidence::DecisionEvidenceBodies::derive(context, basis, request, fold)
-            .map_err(ProjectionFailure::Unavailable)?;
+    let mut evidence = match authentication {
+        Some(authentication) => {
+            crate::evidence::DecisionEvidenceBodies::derive_with_authentication(
+                context,
+                basis,
+                request,
+                fold,
+                authentication,
+            )
+        }
+        None => crate::evidence::DecisionEvidenceBodies::derive(context, basis, request, fold),
+    }
+    .map_err(ProjectionFailure::Unavailable)?;
     if let Some(selected) = selected {
         let branches = review_branches(&selected);
         match selected.protection().and_then(|p| p.ref_policy.as_ref()) {
@@ -465,6 +540,24 @@ where
                 )
                 .map_err(ProjectionFailure::Unavailable)?;
         }
+        crate::evidence::PolicyDecisionRecord::AuthenticationActivated(record) => {
+            let selected = read_at(store, cx, basis, cancelled)
+                .await
+                .map_err(infrastructure)?;
+            let snapshot = selected
+                .protection()
+                .and_then(|p| p.ref_policy.as_ref())
+                .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+            record
+                .verify_provenance(
+                    basis,
+                    current,
+                    layout,
+                    &review_branches(&selected),
+                    snapshot,
+                )
+                .map_err(ProjectionFailure::Unavailable)?;
+        }
     }
     live(cancelled).map_err(infrastructure)
 }
@@ -510,6 +603,66 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    attach_prepared_policy_selected_at(
+        store,
+        cx,
+        context,
+        basis,
+        resolved,
+        prepared,
+        publication,
+        None,
+        cancelled,
+    )
+    .await
+}
+
+/// Attach a current policy decision and an authenticated principal receipt to a
+/// completely folded merge before staging any body or attempting publication.
+pub async fn attach_prepared_policy_with_authentication_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    resolved: &NativeMergeBasis,
+    prepared: &mut crate::merge::PreparedNativeMerge,
+    publication: crate::evidence::RefPolicyPublication,
+    authentication: AdmissionAuthentication,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    attach_prepared_policy_selected_at(
+        store,
+        cx,
+        context,
+        basis,
+        resolved,
+        prepared,
+        publication,
+        Some(authentication),
+        cancelled,
+    )
+    .await
+}
+
+pub(super) async fn attach_prepared_policy_selected_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    resolved: &NativeMergeBasis,
+    prepared: &mut crate::merge::PreparedNativeMerge,
+    publication: crate::evidence::RefPolicyPublication,
+    authentication: Option<AdmissionAuthentication>,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     let selected = if publication == crate::evidence::RefPolicyPublication::Direct {
         enforce_direct_selected_at(
             store,
@@ -518,6 +671,7 @@ where
             resolved.refs.refs(),
             &prepared.fold,
             Some(context.principal_id),
+            authentication,
             cancelled,
         )
         .await?
@@ -536,6 +690,26 @@ where
             .await
             .map_err(infrastructure)?
     };
+    if let Some(authentication) = authentication {
+        prepared.evidence = crate::evidence::DecisionEvidenceBodies::derive_with_authentication(
+            context,
+            basis,
+            &prepared.request,
+            &prepared.fold,
+            authentication,
+        )
+        .map_err(ProjectionFailure::Unavailable)?;
+        prepared.materialization.record.principal_snapshot_id = prepared
+            .evidence
+            .principal_snapshot()
+            .id()
+            .map_err(ProjectionFailure::Unavailable)?;
+        prepared.materialization.record.policy_decision_root = prepared
+            .evidence
+            .policy_decision()
+            .root()
+            .map_err(ProjectionFailure::Unavailable)?;
+    }
     if let Some(snapshot) = selected.protection().and_then(|p| p.ref_policy.as_ref()) {
         prepared
             .evidence
@@ -559,11 +733,22 @@ where
     live(cancelled).map_err(infrastructure)
 }
 
+#[cfg(test)]
 fn enforce_installed_snapshot(
     policy: &ReviewProtection,
     refs: &BTreeMap<RefName, GitOid>,
     effects: &BTreeMap<RefName, fgit_reference::effect::RefEffect>,
     principal: Option<PrincipalId>,
+) -> Result<(), ProjectionFailure> {
+    enforce_installed_snapshot_with_authentication(policy, refs, effects, principal, None)
+}
+
+fn enforce_installed_snapshot_with_authentication(
+    policy: &ReviewProtection,
+    refs: &BTreeMap<RefName, GitOid>,
+    effects: &BTreeMap<RefName, fgit_reference::effect::RefEffect>,
+    principal: Option<PrincipalId>,
+    authentication: Option<AdmissionAuthentication>,
 ) -> Result<(), ProjectionFailure> {
     let Some(snapshot) = &policy.ref_policy else {
         return Ok(());
@@ -575,7 +760,8 @@ fn enforce_installed_snapshot(
             // Frozen ref-only predicates cannot inspect this compatibility fact.
             principal.unwrap_or_else(|| PrincipalId::from_bytes([0; 16]))
         }
-        fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1 => {
+        fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1
+        | fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1 => {
             principal.ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?
         }
     };
@@ -583,6 +769,26 @@ fn enforce_installed_snapshot(
         .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ResourceBudgetExceeded))?;
     let updates = crate::policy_bridge::ref_updates_from_effects(refs, effects)
         .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+    if profile == fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1
+    {
+        let authentication =
+            authentication.ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?;
+        let input = fgit_policy::reference_profile::AuthenticatedReferenceInput::try_new(
+            principal,
+            authentication.authentication_strength(),
+            updates,
+        )
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+        let verdict = fgit_policy::reference_profile::evaluate_authenticated(snapshot, &input)
+            .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+        return if verdict.decision() == fgit_policy::Decision::Allow {
+            Ok(())
+        } else {
+            Err(ProjectionFailure::Refuse(
+                RefusalCode::ProtectedRefTransitionDenied,
+            ))
+        };
+    }
     let input = crate::policy_bridge::build_input_root(
         principal,
         crate::policy_bridge::default_principal_snapshot_id(),
@@ -648,12 +854,58 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    enforce_merge_selected_at(store, cx, basis, refs, intent, submitter, None, cancelled).await
+}
+
+/// Enforce the native merge gate with authentication established by its host.
+/// Reviews and required checks remain independent requirements.
+pub async fn enforce_merge_with_authentication_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
+    intent: &NativeMergeIntent,
+    submitter: PrincipalId,
+    authentication: AdmissionAuthentication,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    enforce_merge_selected_at(
+        store,
+        cx,
+        basis,
+        refs,
+        intent,
+        submitter,
+        Some(authentication),
+        cancelled,
+    )
+    .await
+}
+
+async fn enforce_merge_selected_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
+    intent: &NativeMergeIntent,
+    submitter: PrincipalId,
+    authentication: Option<AdmissionAuthentication>,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     let selected = read_at(store, cx, basis, cancelled)
         .await
         .map_err(infrastructure)?;
     let merge = intent.merge().map_err(infrastructure)?;
     if let Some(policy) = selected.protection() {
-        enforce_installed_snapshot(
+        enforce_installed_snapshot_with_authentication(
             policy,
             refs,
             &BTreeMap::from([(
@@ -661,6 +913,7 @@ where
                 fgit_reference::effect::RefEffect::Set(merge.merge_commit),
             )]),
             Some(submitter),
+            authentication,
         )?;
     }
     if let Some(rule) = selected
@@ -770,6 +1023,124 @@ mod direct_policy_tests {
     use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
     use fgit_types::{GitOid, GitOidSha1, RefName};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn installed_authentication_policy_requires_verified_facts_with_permitted_twins() {
+        let principal = PrincipalId::from_bytes([0x33; 16]);
+        let mut policy = ReviewProtection {
+            administrators: vec![principal],
+            branches: Vec::new(),
+            ref_policy: Some(fgit_forge::event::protection::compile_ref_policy(
+                "policy credential { rule writers { when actor.id == \"33333333333333333333333333333333\" and actor.authentication >= single_factor then allow } default deny \"credential required\" }"
+            ).unwrap()),
+        };
+        let effects = BTreeMap::from([(
+            RefName::try_new(b"refs/heads/main").unwrap(),
+            fgit_reference::effect::RefEffect::Set(GitOid::Sha1(GitOidSha1::from_bytes([1; 20]))),
+        )]);
+        let refs = BTreeMap::new();
+        assert!(matches!(
+            enforce_installed_snapshot(&policy, &refs, &effects, Some(principal)),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing)),
+        ));
+        assert!(matches!(
+            enforce_installed_snapshot_with_authentication(
+                &policy,
+                &refs,
+                &effects,
+                Some(principal),
+                Some(AdmissionAuthentication::OperatorAssertion),
+            ),
+            Err(ProjectionFailure::Refuse(
+                RefusalCode::ProtectedRefTransitionDenied
+            )),
+        ));
+        for authentication in [
+            AdmissionAuthentication::HttpToken,
+            AdmissionAuthentication::SshDeployKey,
+        ] {
+            enforce_installed_snapshot_with_authentication(
+                &policy,
+                &refs,
+                &effects,
+                Some(principal),
+                Some(authentication),
+            )
+            .unwrap();
+            assert!(matches!(
+                enforce_installed_snapshot_with_authentication(
+                    &policy,
+                    &refs,
+                    &effects,
+                    None,
+                    Some(authentication)
+                ),
+                Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing)),
+            ));
+            assert!(matches!(
+                enforce_installed_snapshot_with_authentication(
+                    &policy,
+                    &refs,
+                    &effects,
+                    Some(PrincipalId::from_bytes([0x99; 16])),
+                    Some(authentication)
+                ),
+                Err(ProjectionFailure::Refuse(
+                    RefusalCode::ProtectedRefTransitionDenied
+                )),
+            ));
+        }
+        for strength in ["multi_factor", "hardware_backed"] {
+            policy.ref_policy = Some(fgit_forge::event::protection::compile_ref_policy(&format!(
+                "policy stronger {{ rule credential {{ when actor.authentication >= {strength} then allow }} default deny \"stronger credential required\" }}"
+            )).unwrap());
+            for authentication in [
+                AdmissionAuthentication::HttpToken,
+                AdmissionAuthentication::SshDeployKey,
+            ] {
+                assert!(matches!(
+                    enforce_installed_snapshot_with_authentication(
+                        &policy,
+                        &refs,
+                        &effects,
+                        Some(principal),
+                        Some(authentication)
+                    ),
+                    Err(ProjectionFailure::Refuse(
+                        RefusalCode::ProtectedRefTransitionDenied
+                    )),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn absent_authentication_cannot_satisfy_a_negated_predicate() {
+        let principal = PrincipalId::from_bytes([0x33; 16]);
+        let policy = ReviewProtection {
+            administrators: vec![principal],
+            branches: Vec::new(),
+            ref_policy: Some(fgit_forge::event::protection::compile_ref_policy(
+                "policy explicit { rule weak { when not actor.authentication >= single_factor then allow } default deny \"explicit weak identity required\" }"
+            ).unwrap()),
+        };
+        let effects = BTreeMap::from([(
+            RefName::try_new(b"refs/heads/main").unwrap(),
+            fgit_reference::effect::RefEffect::Set(GitOid::Sha1(GitOidSha1::from_bytes([1; 20]))),
+        )]);
+        assert!(matches!(
+            enforce_installed_snapshot(&policy, &BTreeMap::new(), &effects, Some(principal)),
+            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing)),
+        ));
+        enforce_installed_snapshot_with_authentication(
+            &policy,
+            &BTreeMap::new(),
+            &effects,
+            Some(principal),
+            Some(AdmissionAuthentication::OperatorAssertion),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn installed_actor_policy_requires_actual_principal_and_has_permit_twin() {

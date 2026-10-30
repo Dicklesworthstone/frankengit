@@ -129,14 +129,14 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
     )
     .await?;
     stage(store, cx, repository, CLOSURE, &prepared.closure).await?;
-    stage(
-        store,
-        cx,
-        repository,
-        PRINCIPAL,
-        prepared.evidence.principal_snapshot(),
-    )
-    .await?;
+    match prepared.evidence.principal_snapshot() {
+        crate::evidence::PrincipalSnapshotRecord::Legacy(body) => {
+            stage(store, cx, repository, PRINCIPAL, body).await?;
+        }
+        crate::evidence::PrincipalSnapshotRecord::Authenticated(body) => {
+            stage(store, cx, repository, PRINCIPAL, body).await?;
+        }
+    }
     match prepared.evidence.policy_decision() {
         crate::evidence::PolicyDecisionRecord::Legacy(body) => {
             stage(store, cx, repository, POLICY, body).await?;
@@ -148,6 +148,9 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
             stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
         crate::evidence::PolicyDecisionRecord::ActorActivated(body) => {
+            stage(store, cx, repository, POLICY, body.as_ref()).await?;
+        }
+        crate::evidence::PolicyDecisionRecord::AuthenticationActivated(body) => {
             stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
     }

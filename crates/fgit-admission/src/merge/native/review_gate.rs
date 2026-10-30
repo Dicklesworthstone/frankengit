@@ -181,6 +181,10 @@ where
     S: AsyncAuthorityStore + ?Sized,
     P: NativeMergeProjection<S> + Sync + ?Sized,
 {
+    fn admission_authentication(&self) -> Option<crate::evidence::AdmissionAuthentication> {
+        self.inner.admission_authentication()
+    }
+
     fn merge_checkpoint(&self, cx: &S::Context) -> Result<(), RefusalCode> {
         self.inner.merge_checkpoint(cx)
     }

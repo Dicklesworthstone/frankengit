@@ -21,8 +21,15 @@ use crate::AdmissionContext;
 #[path = "policy_evidence.rs"]
 mod policy_decision;
 pub use policy_decision::{
-    ActivatedPolicyDecisionEvidence, ActorPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence,
-    PolicyDecisionRecord, RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
+    ActivatedPolicyDecisionEvidence, ActorPolicyDecisionEvidence,
+    AuthenticationPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord,
+    RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
+};
+#[path = "principal_snapshot.rs"]
+mod principal_snapshot;
+pub use principal_snapshot::{
+    AdmissionAuthentication, AuthenticatedPrincipalSnapshot, PrincipalSnapshotIdentity,
+    PrincipalSnapshotRecord,
 };
 
 /// Stable refusal-record detail for a refusal supported by
@@ -264,7 +271,7 @@ impl CanonicalBody for RefusalEvidence {
 /// leaving an independently identifiable configuration/principal witness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefusalEvidenceBodies {
-    principal_snapshot: PrincipalSnapshot,
+    principal_snapshot: PrincipalSnapshotRecord,
     refusal_evidence: RefusalEvidence,
 }
 
@@ -277,7 +284,30 @@ impl RefusalEvidenceBodies {
         tx_id: TxId,
         code: RefusalCode,
     ) -> Result<Self, RefusalCode> {
-        let principal_snapshot = PrincipalSnapshot::from_context(context, basis);
+        Self::derive_snapshot(context, basis, tx_id, code, None)
+    }
+
+    /// Derive a refusal receipt with the authentication established by the host.
+    /// This never changes the sealed transaction identity.
+    pub fn derive_with_authentication(
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+        authentication: AdmissionAuthentication,
+    ) -> Result<Self, RefusalCode> {
+        Self::derive_snapshot(context, basis, tx_id, code, Some(authentication))
+    }
+
+    fn derive_snapshot(
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+        authentication: Option<AdmissionAuthentication>,
+    ) -> Result<Self, RefusalCode> {
+        let principal_snapshot =
+            PrincipalSnapshotRecord::from_context(context, basis, authentication);
         let principal_snapshot_id = principal_snapshot_id(&principal_snapshot)?;
         Ok(Self {
             refusal_evidence: RefusalEvidence {
@@ -292,7 +322,7 @@ impl RefusalEvidenceBodies {
     }
 
     #[must_use]
-    pub const fn principal_snapshot(&self) -> &PrincipalSnapshot {
+    pub const fn principal_snapshot(&self) -> &PrincipalSnapshotRecord {
         &self.principal_snapshot
     }
 
@@ -305,7 +335,7 @@ impl RefusalEvidenceBodies {
 /// All immutable evidence bodies required for one committing decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecisionEvidenceBodies {
-    principal_snapshot: PrincipalSnapshot,
+    principal_snapshot: PrincipalSnapshotRecord,
     policy_decision: PolicyDecisionRecord,
     invariant_evidence: InvariantEvidence,
     forge_event_batch: ForgeEventBatch,
@@ -321,10 +351,33 @@ impl DecisionEvidenceBodies {
         request: &fgit_reference::intent::TransactionRequest,
         fold: &TransactionFoldReport,
     ) -> Result<Self, RefusalCode> {
+        Self::derive_snapshot(context, basis, request, fold, None)
+    }
+
+    /// Derive schema-1.1 principal evidence from an authentication-bound host.
+    /// Authentication is a decision receipt; it is not part of the request seal.
+    pub fn derive_with_authentication(
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        request: &fgit_reference::intent::TransactionRequest,
+        fold: &TransactionFoldReport,
+        authentication: AdmissionAuthentication,
+    ) -> Result<Self, RefusalCode> {
+        Self::derive_snapshot(context, basis, request, fold, Some(authentication))
+    }
+
+    fn derive_snapshot(
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        request: &fgit_reference::intent::TransactionRequest,
+        fold: &TransactionFoldReport,
+        authentication: Option<AdmissionAuthentication>,
+    ) -> Result<Self, RefusalCode> {
         let effects = fold
             .effects()
             .ok_or(RefusalCode::ConflictingSemanticEffects)?;
-        let principal_snapshot = PrincipalSnapshot::from_context(context, basis);
+        let principal_snapshot =
+            PrincipalSnapshotRecord::from_context(context, basis, authentication);
         let principal_snapshot_id = principal_snapshot_id(&principal_snapshot)?;
         Ok(Self {
             policy_decision: PolicyDecisionRecord::Legacy(PolicyDecisionEvidence {
@@ -358,8 +411,8 @@ impl DecisionEvidenceBodies {
     /// roots: every root used by admission must first be recomputed from one
     /// of these concrete canonical bodies.
     #[must_use]
-    pub const fn from_decoded(
-        principal_snapshot: PrincipalSnapshot,
+    pub fn from_decoded(
+        principal_snapshot: impl Into<PrincipalSnapshotRecord>,
         policy_decision: PolicyDecisionRecord,
         invariant_evidence: InvariantEvidence,
         forge_event_batch: ForgeEventBatch,
@@ -367,7 +420,7 @@ impl DecisionEvidenceBodies {
         retention_delta: RetentionDelta,
     ) -> Self {
         Self {
-            principal_snapshot,
+            principal_snapshot: principal_snapshot.into(),
             policy_decision,
             invariant_evidence,
             forge_event_batch,
@@ -377,7 +430,7 @@ impl DecisionEvidenceBodies {
     }
 
     #[must_use]
-    pub const fn principal_snapshot(&self) -> &PrincipalSnapshot {
+    pub const fn principal_snapshot(&self) -> &PrincipalSnapshotRecord {
         &self.principal_snapshot
     }
     #[must_use]
@@ -394,8 +447,22 @@ impl DecisionEvidenceBodies {
         request: &fgit_reference::intent::TransactionRequest,
         fold: &TransactionFoldReport,
     ) -> Result<(), RefusalCode> {
-        let mut expected = Self::derive(context, basis, request, fold)?;
+        self.principal_snapshot.verify_context(context, basis)?;
+        // Replay the receipt actually recorded with the terminal outcome. A
+        // retry's new transport or credential cannot rewrite historical facts.
+        let mut expected = Self::derive_snapshot(
+            context,
+            basis,
+            request,
+            fold,
+            self.principal_snapshot.authentication(),
+        )?;
         if self.policy_decision.base() != expected.policy_decision.base() {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        if self.policy_decision.authentication().is_some()
+            && self.policy_decision.authentication() != self.principal_snapshot.authentication()
+        {
             return Err(RefusalCode::EvidenceInvalid);
         }
         self.policy_decision.verify_decision(context, basis, fold)?;
@@ -443,6 +510,28 @@ impl DecisionEvidenceBodies {
     ) -> Result<(), RefusalCode> {
         let profile = fgit_policy::reference_profile::classify(&snapshot)
             .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if profile
+            == fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1
+        {
+            let authentication = self
+                .principal_snapshot
+                .authentication()
+                .ok_or(RefusalCode::EvidenceMissing)?;
+            let record = AuthenticationPolicyDecisionEvidence::evaluate(
+                self.policy_decision.base().clone(),
+                context,
+                basis,
+                current,
+                layout,
+                fold,
+                review_branches,
+                snapshot,
+                publication,
+                authentication,
+            )?;
+            self.policy_decision = PolicyDecisionRecord::AuthenticationActivated(Box::new(record));
+            return Ok(());
+        }
         if profile == fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1 {
             let record = ActorPolicyDecisionEvidence::evaluate(
                 self.policy_decision.base().clone(),
@@ -491,13 +580,10 @@ impl DecisionEvidenceBodies {
 }
 
 /// Domain-pinned identity of a principal snapshot body.
-pub fn principal_snapshot_id(body: &PrincipalSnapshot) -> Result<PrincipalSnapshotId, RefusalCode> {
-    body_id(&CryptoBodyIdentity, body)
-        .map_err(|_| RefusalCode::CanonicalFramingInvalid)
-        .and_then(|identity| {
-            PrincipalSnapshotId::from_internal_object_id(identity)
-                .map_err(|_| RefusalCode::CanonicalFramingInvalid)
-        })
+pub fn principal_snapshot_id(
+    body: &(impl PrincipalSnapshotIdentity + ?Sized),
+) -> Result<PrincipalSnapshotId, RefusalCode> {
+    body.snapshot_id()
 }
 
 /// Domain-pinned root of any immutable evidence body.
@@ -594,7 +680,10 @@ mod tests {
             .expect("derivation is deterministic");
         assert_eq!(first, second, "same decision derives identical body values");
 
-        let snapshot_frame = encode_body(first.principal_snapshot()).expect("snapshot frames");
+        let snapshot_frame = first
+            .principal_snapshot()
+            .encode()
+            .expect("snapshot frames");
         let policy_frame = first.policy_decision().encode().expect("policy frames");
         let invariant_frame = encode_body(first.invariant_evidence()).expect("invariant frames");
         let forge_frame = encode_body(first.forge_event_batch()).expect("forge frames");
@@ -602,7 +691,7 @@ mod tests {
         let retention_frame = encode_body(first.retention_delta()).expect("retention frames");
 
         assert_eq!(
-            decode_body::<PrincipalSnapshot>(&snapshot_frame, fgit_codec::DecodeLimits::DEFAULT)
+            PrincipalSnapshotRecord::decode(&snapshot_frame, fgit_codec::DecodeLimits::DEFAULT)
                 .expect("snapshot frame decodes"),
             first.principal_snapshot().clone()
         );
@@ -729,8 +818,232 @@ mod tests {
         );
         assert_ne!(
             evidence_root(first.refusal_evidence()).expect("refusal root"),
-            evidence_root(first.principal_snapshot()).expect("snapshot root"),
+            {
+                let id = first.principal_snapshot().id().expect("snapshot root");
+                Digest::new(
+                    id.as_internal_object_id().algorithm(),
+                    *id.as_internal_object_id().digest(),
+                )
+            },
             "refusal evidence uses a domain distinct from its principal witness"
         );
+    }
+
+    #[test]
+    fn authenticated_decisions_replay_recorded_provenance_and_preserve_request_identity() {
+        let (context, basis, request, fold) = fixture();
+        let legacy = DecisionEvidenceBodies::derive(&context, &basis, &request, &fold).unwrap();
+        let mut roots = vec![legacy.principal_snapshot().id().unwrap()];
+        for authentication in [
+            AdmissionAuthentication::OperatorAssertion,
+            AdmissionAuthentication::HttpToken,
+            AdmissionAuthentication::SshDeployKey,
+        ] {
+            let bodies = DecisionEvidenceBodies::derive_with_authentication(
+                &context,
+                &basis,
+                &request,
+                &fold,
+                authentication,
+            )
+            .unwrap();
+            bodies
+                .verify_decision(&context, &basis, &request, &fold)
+                .unwrap();
+            assert_eq!(
+                bodies.policy_decision.base().tx_id,
+                legacy.policy_decision.base().tx_id
+            );
+            assert_eq!(
+                bodies.policy_decision.base().request_digest,
+                legacy.policy_decision.base().request_digest
+            );
+            assert_eq!(bodies.invariant_evidence, legacy.invariant_evidence);
+            assert_eq!(
+                bodies.policy_decision.base().principal_snapshot_id,
+                bodies.principal_snapshot().id().unwrap()
+            );
+            assert!(!roots.contains(&bodies.principal_snapshot().id().unwrap()));
+            roots.push(bodies.principal_snapshot().id().unwrap());
+
+            let restored = DecisionEvidenceBodies::from_decoded(
+                PrincipalSnapshotRecord::decode(
+                    &bodies.principal_snapshot().encode().unwrap(),
+                    fgit_codec::DecodeLimits::DEFAULT,
+                )
+                .unwrap(),
+                PolicyDecisionRecord::decode(
+                    &bodies.policy_decision().encode().unwrap(),
+                    fgit_codec::DecodeLimits::DEFAULT,
+                )
+                .unwrap(),
+                bodies.invariant_evidence.clone(),
+                bodies.forge_event_batch.clone(),
+                bodies.outbox_effect_batch.clone(),
+                bodies.retention_delta.clone(),
+            );
+            // Readback needs only the recorded witness and its original basis;
+            // it never needs the old secret or the retry's authentication.
+            restored
+                .verify_decision(&context, &basis, &request, &fold)
+                .unwrap();
+            assert_eq!(restored, bodies);
+
+            let mut substituted = bodies.clone();
+            substituted.principal_snapshot = legacy.principal_snapshot.clone();
+            assert_eq!(
+                substituted.verify_decision(&context, &basis, &request, &fold),
+                Err(RefusalCode::EvidenceInvalid)
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_snapshot_cannot_move_across_principal_repository_tenant_or_configuration() {
+        let (context, basis, request, fold) = fixture();
+        let bodies = DecisionEvidenceBodies::derive_with_authentication(
+            &context,
+            &basis,
+            &request,
+            &fold,
+            AdmissionAuthentication::HttpToken,
+        )
+        .unwrap();
+        let mut wrong_principal = context.clone();
+        wrong_principal.principal_id = PrincipalId::from_bytes([0x99; 16]);
+        let mut wrong_repository = context.clone();
+        wrong_repository.repository_id = RepositoryId::from_bytes([0x99; 16]);
+        let mut wrong_tenant = context.clone();
+        wrong_tenant.tenant_id = TenantId::from_bytes([0x99; 16]);
+        for wrong in [&wrong_principal, &wrong_repository, &wrong_tenant] {
+            assert_eq!(
+                bodies.verify_decision(wrong, &basis, &request, &fold),
+                Err(RefusalCode::EvidenceInvalid)
+            );
+        }
+        let mut changed = basis.body().clone();
+        changed.configuration_root = digest_of(99);
+        let changed_basis = PublicationBasis::new(basis.id(), changed);
+        assert_eq!(
+            bodies.verify_decision(&context, &changed_basis, &request, &fold),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+    }
+
+    #[test]
+    fn authenticated_refusal_binds_provenance_without_changing_the_terminal_transaction() {
+        let (context, basis, request, _) = fixture();
+        let legacy = RefusalEvidenceBodies::derive(
+            &context,
+            &basis,
+            request.tx_id,
+            RefusalCode::ProtectedRefTransitionDenied,
+        )
+        .unwrap();
+        let authenticated = RefusalEvidenceBodies::derive_with_authentication(
+            &context,
+            &basis,
+            request.tx_id,
+            RefusalCode::ProtectedRefTransitionDenied,
+            AdmissionAuthentication::HttpToken,
+        )
+        .unwrap();
+        assert_eq!(
+            authenticated.refusal_evidence.tx_id,
+            legacy.refusal_evidence.tx_id
+        );
+        assert_eq!(
+            authenticated.refusal_evidence.basis_head_id,
+            legacy.refusal_evidence.basis_head_id
+        );
+        assert_eq!(
+            authenticated.refusal_evidence.code,
+            legacy.refusal_evidence.code
+        );
+        assert_eq!(
+            authenticated.refusal_evidence.principal_snapshot_id,
+            authenticated.principal_snapshot().id().unwrap()
+        );
+        assert_ne!(
+            evidence_root(authenticated.refusal_evidence()).unwrap(),
+            evidence_root(legacy.refusal_evidence()).unwrap()
+        );
+        assert_eq!(
+            authenticated.principal_snapshot().authentication(),
+            Some(AdmissionAuthentication::HttpToken)
+        );
+    }
+
+    #[test]
+    fn authenticated_policy_cannot_substitute_an_equally_strong_credential_method() {
+        use fgit_reference::effect::FoldBasis;
+        use fgit_reference::intent::{Intent, RefIntent, Statement};
+        use fgit_reference::refs::ExpectedRefState;
+        use fgit_types::{GitOid, GitOidSha1, MismatchPolicy, RefName, RootLayoutVersion};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let (context, basis, mut request, _) = fixture();
+        let current = crate::CanonicalRefState::default();
+        request.statements = vec![Statement {
+            intents: vec![Intent::Ref(RefIntent::Update {
+                name: RefName::try_new(b"refs/tags/authenticated").unwrap(),
+                expected: ExpectedRefState::Absent,
+                new: GitOid::Sha1(GitOidSha1::from_bytes([0x55; 20])),
+                force: false,
+            })],
+            mismatch_policy: MismatchPolicy::TxnAbort,
+        }];
+        let fold = fgit_txn::IntentEvaluator::new().evaluate(
+            FoldBasis {
+                refs: current.refs(),
+                forge_positions: &BTreeMap::new(),
+                retention: &BTreeSet::new(),
+                outbox: &BTreeMap::new(),
+            },
+            &request,
+        );
+        let policy = fgit_forge::event::protection::compile_ref_policy(
+            "policy credential { rule writers { when actor.authentication >= single_factor then allow } default deny \"credential required\" }",
+        ).unwrap();
+        let mut bodies = DecisionEvidenceBodies::derive_with_authentication(
+            &context,
+            &basis,
+            &request,
+            &fold,
+            AdmissionAuthentication::HttpToken,
+        )
+        .unwrap();
+        for method in [
+            AdmissionAuthentication::HttpToken,
+            AdmissionAuthentication::SshDeployKey,
+        ] {
+            // Each policy body independently replays to Allow and names the
+            // correct principal snapshot ID. The enclosing receipt must also
+            // prove that its authentication method is the snapshot's method.
+            let record = AuthenticationPolicyDecisionEvidence::evaluate(
+                bodies.policy_decision.base().clone(),
+                &context,
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &fold,
+                Vec::new(),
+                policy.clone(),
+                RefPolicyPublication::Direct,
+                method,
+            )
+            .unwrap();
+            record.replay().unwrap();
+            bodies.policy_decision =
+                PolicyDecisionRecord::AuthenticationActivated(Box::new(record));
+            assert_eq!(
+                bodies.verify_decision(&context, &basis, &request, &fold),
+                if method == AdmissionAuthentication::HttpToken {
+                    Ok(())
+                } else {
+                    Err(RefusalCode::EvidenceInvalid)
+                },
+            );
+        }
     }
 }

@@ -108,7 +108,8 @@ impl OneNode {
         };
         let projection = self
             .durable_admission_projection_publishing(&context, staging)
-            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
+            .with_authentication(authenticated.authentication());
         let checkpoint = || match checkpoint_pack_context(request.authority()) {
             PackContextCheckpoint::Live => Ok(()),
             PackContextCheckpoint::Stopped { budget_exhaustion } => {

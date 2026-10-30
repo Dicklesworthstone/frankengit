@@ -11,12 +11,54 @@ use std::io::Write;
 use std::net::Shutdown;
 use std::sync::{Arc, Barrier};
 
+fn require_credential_authentication(node: &fgit_node::OneNode) {
+    use fgit_authority::IdempotencyKey;
+    use fgit_forge::ExpectedVersion;
+    use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection, compile_ref_policy};
+
+    let request = node.request_context();
+    let selected = node
+        .runtime()
+        .block_on(node.read_review_protection_in(&request))
+        .unwrap();
+    let command = ProtectionCommand {
+        expected_version: selected
+            .version()
+            .map_or(ExpectedVersion::NewStream, ExpectedVersion::Exactly),
+        expected_epoch: selected.policy_epoch,
+        protection: ReviewProtection {
+            administrators: vec![OWNER],
+            branches: Vec::new(),
+            ref_policy: Some(compile_ref_policy(
+                "policy authentication { rule credential { when actor.authentication >= single_factor then allow } default deny \"credential authentication required\" }",
+            ).unwrap()),
+        },
+    };
+    let result = node
+        .runtime()
+        .block_on(node.admit_review_protection_durable_in(
+            &request,
+            &fgit_node::LoopbackReceiveSession::authenticated(
+                OWNER,
+                IdempotencyKey::new(b"source-edit-requires-credential".to_vec()).unwrap(),
+            ),
+            &command,
+            Default::default(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        result.1.outcome,
+        fgit_types::DecisionOutcome::Committed { .. }
+    ));
+}
+
 #[test]
 fn remote_multi_file_patch_inspects_and_publishes_exactly_once_after_restart() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
         let config = root.config(format);
         let (node, base) = fixture(&root, format);
+        require_credential_authentication(&node);
         let before = generation(&node);
         let path = root.0.join("credentials");
         configure(&node, &path);

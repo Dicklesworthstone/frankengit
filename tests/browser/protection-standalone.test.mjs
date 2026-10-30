@@ -10,7 +10,7 @@ const script = readFileSync(new URL('protection-view.mjs', browser), 'utf8');
 import { harness, deferred, snapshot, actor, reviewer, token, hex } from './protection-standalone-fixture.mjs';
 import { refPolicy } from './protection-fixtures.mjs';
 
-for (const profile of ['reference_facts_v1', 'reference_actor_id_v1']) {
+for (const profile of ['reference_facts_v1', 'reference_actor_id_v1', 'reference_authentication_v1']) {
 test(`${profile}: standalone editor preserves an observed policy unless clear-all is explicit`, async () => {
   const compiled = refPolicy(profile);
   const calls = [];

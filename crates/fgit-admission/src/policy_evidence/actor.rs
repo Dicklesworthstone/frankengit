@@ -51,6 +51,7 @@ impl ActorPolicyDecisionEvidence {
             review_branches,
             snapshot,
             publication,
+            None,
         )?);
         let bytes = encode_body(&value).map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
         if bytes.len() > MAX_FRAME_BYTES {
@@ -101,6 +102,7 @@ impl CanonicalBody for ActorPolicyDecisionEvidence {
         Ok(Self(ActivatedPolicyDecisionEvidence::read_fields(
             input,
             Profile::RepositoryActorIdV1,
+            None,
         )?))
     }
 }

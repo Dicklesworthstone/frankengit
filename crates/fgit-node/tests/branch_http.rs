@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 //! Real TCP -> native empty-pack quarantine -> sealed atomic admission -> reopen.
 //! Reuse the source API's imported native-object fixture and HTTP client.
+#[path = "branch_http/authentication.rs"]
+mod authentication;
 #[path = "source_http/support.rs"]
 mod support;
 use support::*;

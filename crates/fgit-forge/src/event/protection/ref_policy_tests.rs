@@ -125,7 +125,15 @@ fn actor_selection_retains_existing_admin_and_epoch_fences() {
         validate_transition(Some(&first), &unauthorized, epoch),
         Err(RefusalCode::ProtectedRefTransitionDenied)
     );
-    assert!(compile_ref_policy("policy p { rule r { when actor.id == \"33333333333333333333333333333333\" and actor.authentication >= multi_factor then allow } default allow }").is_err());
+    let authentication = compile_ref_policy("policy p { rule r { when actor.id == \"33333333333333333333333333333333\" and actor.authentication >= multi_factor then allow } default allow }").unwrap();
+    assert!(
+        fgit_policy::reference_profile::validate_for(
+            fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1,
+            &authentication,
+        )
+        .is_err(),
+        "the historical actor-ID profile remains closed"
+    );
 }
 
 #[test]

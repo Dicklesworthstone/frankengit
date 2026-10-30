@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_admission::evidence::{
-    DecisionEvidenceBodies, OutboxEffectBatch, evidence_root, principal_snapshot_id,
+    AdmissionAuthentication, DecisionEvidenceBodies, OutboxEffectBatch, evidence_root,
+    principal_snapshot_id,
 };
 use fgit_admission::merge::native::delivery::{self, EFFECT_NAMESPACE, OUTBOX_NAMESPACE};
 use fgit_admission::merge::native::objects::validate_merge_objects;
@@ -484,6 +485,30 @@ impl OfferedPackage {
 }
 
 fn offered(node: &OneNode, f: &Fixture, number: u64, epoch: u64, key: &[u8]) -> OfferedPackage {
+    let mut offer = unprepared_offer(node, f, number, epoch, key);
+    let request = node.request_context();
+    let prepared = node
+        .runtime()
+        .block_on(node.prepare_sealed_merge_evidence_in(
+            &request,
+            &context(node, key),
+            &offer.sealed(offer.attempt.workspace_epoch),
+            None,
+        ))
+        .expect("a current offer uses independently verified server preparation");
+    offer.evidence = prepared.evidence;
+    offer
+}
+
+/// Construct the independently folded offer for tests that deliberately cannot
+/// pass native preparation, or that compare it with activated-policy evidence.
+fn unprepared_offer(
+    node: &OneNode,
+    f: &Fixture,
+    number: u64,
+    epoch: u64,
+    key: &[u8],
+) -> OfferedPackage {
     // The candidate is the only object this merge adds above the selected
     // closure; admission also names its base and both parents (lh8z).
     let objects = BTreeSet::from([f.candidate, f.base, f.target, f.source]);
@@ -577,7 +602,7 @@ fn original_sealed_api_prepares_activated_policy_evidence_without_changing_autho
                 .unwrap()
                 .1,
         );
-        let mut offer = offered(&node, &f, 1, 7, b"activated-sealed");
+        let mut offer = unprepared_offer(&node, &f, 1, 7, b"activated-sealed");
         let before = snapshot(&node);
         let prepared = node
             .runtime()
@@ -673,6 +698,24 @@ fn complete_evidence(
     key: &[u8],
     entry: CanonicalOutboxStateEntry,
 ) -> DecisionEvidenceBodies {
+    complete_evidence_for_authentication(
+        node,
+        before,
+        offer,
+        key,
+        entry,
+        Some(AdmissionAuthentication::OperatorAssertion),
+    )
+}
+
+fn complete_evidence_for_authentication(
+    node: &OneNode,
+    before: &MaterializedAdmission,
+    offer: &OfferedPackage,
+    key: &[u8],
+    entry: CanonicalOutboxStateEntry,
+    authentication: Option<AdmissionAuthentication>,
+) -> DecisionEvidenceBodies {
     let context = context(node, key);
     let sealed = offer.sealed(offer.attempt.workspace_epoch);
     let attempt = seal_attempt_for(&context, &sealed).unwrap();
@@ -729,7 +772,155 @@ fn complete_evidence(
         &request,
     );
     assert!(matches!(fold.outcome, FoldOutcome::Folded(_)));
-    DecisionEvidenceBodies::derive(&context, before.basis(), &request, &fold).unwrap()
+    match authentication {
+        Some(authentication) => DecisionEvidenceBodies::derive_with_authentication(
+            &context,
+            before.basis(),
+            &request,
+            &fold,
+            authentication,
+        ),
+        None => DecisionEvidenceBodies::derive(&context, before.basis(), &request, &fold),
+    }
+    .unwrap()
+}
+
+#[test]
+fn legacy_unsubmitted_evidence_must_be_refreshed_without_changing_the_request_seal() {
+    let scratch = Scratch::new();
+    let node = new_node(&scratch, GitHashAlgorithm::Sha256);
+    let f = fixture(&node, &scratch, true);
+    let current = offered(&node, &f, 1, 7, b"legacy-unsubmitted");
+    let legacy = legacy_offer(&node, &current, b"legacy-unsubmitted");
+    assert_ne!(
+        legacy.evidence.principal_snapshot_id,
+        current.evidence.principal_snapshot_id
+    );
+    assert_ne!(
+        legacy.evidence.policy_decision_root,
+        current.evidence.policy_decision_root
+    );
+    assert_eq!(
+        legacy.evidence.invariant_evidence_root,
+        current.evidence.invariant_evidence_root
+    );
+    let context = context(&node, b"legacy-unsubmitted");
+    assert_eq!(
+        seal_attempt_for(&context, &legacy.sealed(legacy.attempt.workspace_epoch)).unwrap(),
+        seal_attempt_for(&context, &current.sealed(current.attempt.workspace_epoch)).unwrap(),
+        "refreshing derived authentication evidence never changes the seal",
+    );
+    let refused = apply(&node, &legacy, b"legacy-unsubmitted", 7).unwrap();
+    assert!(matches!(
+        refused.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::EvidenceInvalid,
+            ..
+        }
+    ));
+    let after_refusal = snapshot(&node);
+    assert_eq!(
+        apply(&node, &current, b"legacy-unsubmitted", 7).unwrap(),
+        refused
+    );
+    assert_eq!(snapshot(&node).basis(), after_refusal.basis());
+
+    let refreshed = offered(&node, &f, 1, 7, b"fresh-current-evidence");
+    let old_profile = legacy_offer(&node, &refreshed, b"fresh-current-evidence");
+    let committed = committed(apply(&node, &refreshed, b"fresh-current-evidence", 7).unwrap());
+    let after_commit = snapshot(&node);
+    assert_eq!(
+        apply(&node, &old_profile, b"fresh-current-evidence", 7).unwrap(),
+        committed
+    );
+    assert_eq!(snapshot(&node).basis(), after_commit.basis());
+    node.shutdown().unwrap();
+}
+
+fn legacy_offer(node: &OneNode, offer: &OfferedPackage, key: &[u8]) -> OfferedPackage {
+    let before = snapshot(node);
+    let (entry, _) = expected_entry(node, &before, offer, key);
+    let bodies = complete_evidence_for_authentication(node, &before, offer, key, entry, None);
+    let mut legacy = offer.clone();
+    legacy.evidence = CommitEvidence {
+        principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
+        forge_event_batch_root: entry.payload_root(),
+        policy_decision_root: bodies.policy_decision().root().unwrap(),
+        invariant_evidence_root: evidence_root(bodies.invariant_evidence()).unwrap(),
+        outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
+        retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),
+    };
+    legacy
+}
+
+#[test]
+fn historical_legacy_terminal_replays_after_current_operator_receipts_are_enabled() {
+    let scratch = Scratch::new();
+    let format = GitHashAlgorithm::Sha256;
+    let node = new_node(&scratch, format);
+    let f = fixture(&node, &scratch, true);
+    let current = offered(&node, &f, 1, 7, b"historical-legacy");
+    let legacy = legacy_offer(&node, &current, b"historical-legacy");
+    let context = context(&node, b"historical-legacy");
+    let request = node.request_context();
+    // Use the real native validator and publication driver with the legacy
+    // compatibility constructor, not injected authority records.
+    let projection = NodeNativeMergeProjection {
+        node: &node,
+        inner: crate::DurableAsyncAdmissionProjection::new(
+            &node.admission_materializer,
+            context.clone(),
+        ),
+        object_limits: MergeObjectLimits::default(),
+        workspace: None,
+        workspace_capability: None,
+        workspace_clock_floor: 0,
+        staging: None,
+    };
+    let terminal = committed(
+        node.runtime()
+            .block_on(
+                fgit_admission::merge::native::admit_sealed_native_merge_async(
+                    &node.authority,
+                    request.authority(),
+                    &context,
+                    &legacy.sealed(legacy.attempt.workspace_epoch),
+                    AdmissionLimits::default(),
+                    &projection,
+                ),
+            )
+            .unwrap(),
+    );
+    let history = node
+        .runtime()
+        .block_on(node.snapshot_history_in(&request))
+        .unwrap();
+    assert_eq!(
+        history.last().unwrap().batch.committed_rcrs[0].principal_snapshot_id,
+        legacy.evidence.principal_snapshot_id,
+    );
+    let before_retry = snapshot(&node);
+    assert_eq!(
+        apply(&node, &current, b"historical-legacy", 7).unwrap(),
+        terminal
+    );
+    assert_eq!(snapshot(&node).basis(), before_retry.basis());
+    drop(projection);
+    node.shutdown().unwrap();
+
+    let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+    reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let before_retry = snapshot(&reopened);
+    assert_eq!(
+        apply(&reopened, &current, b"historical-legacy", 99).unwrap(),
+        terminal
+    );
+    assert_eq!(
+        apply(&reopened, &legacy, b"historical-legacy", 7).unwrap(),
+        terminal
+    );
+    assert_eq!(snapshot(&reopened).basis(), before_retry.basis());
+    reopened.shutdown().unwrap();
 }
 
 #[test]
@@ -941,7 +1132,7 @@ fn missing_native_object_remains_retryable_and_is_not_laundered_by_package_evide
     let scratch = Scratch::new();
     let node = new_node(&scratch, GitHashAlgorithm::Sha256);
     let f = fixture(&node, &scratch, false);
-    let offer = offered(&node, &f, 1, 7, b"missing-object");
+    let offer = unprepared_offer(&node, &f, 1, 7, b"missing-object");
     let before = snapshot(&node);
     assert!(matches!(
         apply(&node, &offer, b"missing-object", 7),
@@ -973,7 +1164,7 @@ fn invalid_native_parents_refuse_even_with_self_consistent_claimed_closure() {
         )
         .unwrap()
         .identity();
-    let offer = offered(&node, &f, 1, 7, b"wrong-parent-order");
+    let offer = unprepared_offer(&node, &f, 1, 7, b"wrong-parent-order");
     let before = snapshot(&node);
     let refused = apply(&node, &offer, b"wrong-parent-order", 7).unwrap();
     assert!(matches!(

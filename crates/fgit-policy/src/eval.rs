@@ -43,8 +43,8 @@
 use core::fmt::Write as _;
 
 use crate::basis::{
-    AggregateName, EvidenceKind, EvidenceReceipt, IssuerLabel, PolicyInputRoot, PolicyInstant,
-    RefUpdateFact, RefUpdateKind,
+    AggregateName, AuthenticationStrength, EvidenceKind, EvidenceReceipt, IssuerLabel,
+    PolicyInputRoot, PolicyInstant, RefUpdateFact, RefUpdateKind,
 };
 use crate::content::{PolicySnapshot, PolicySnapshotId};
 use crate::error::{PolicyEvalRefusal, refusal_name};
@@ -228,16 +228,52 @@ pub fn evaluate(
 
     let actor_id = input.principal().principal().to_string();
     let actor_snapshot = input.principal().snapshot().to_string();
+    Ok(evaluate_facts(
+        snapshot,
+        input.updates(),
+        Some(input),
+        input.principal().authentication(),
+        &actor_id,
+        Some(&actor_snapshot),
+    ))
+}
 
-    let mut subjects = Vec::with_capacity(input.updates().len());
+/// Called only after the closed reference profile has checked every predicate.
+/// Keep absent facts absent; no compatibility PrincipalFacts is constructed.
+pub(crate) fn evaluate_authenticated_reference(
+    snapshot: &PolicySnapshot,
+    input: &crate::reference_profile::AuthenticatedReferenceInput,
+) -> PolicyEvaluation {
+    evaluate_facts(
+        snapshot,
+        input.updates(),
+        None,
+        input.authentication(),
+        &input.principal().to_string(),
+        None,
+    )
+}
+
+fn evaluate_facts(
+    snapshot: &PolicySnapshot,
+    updates: &[RefUpdateFact],
+    input: Option<&PolicyInputRoot>,
+    authentication: AuthenticationStrength,
+    actor_id: &str,
+    actor_snapshot: Option<&str>,
+) -> PolicyEvaluation {
+    let policy = snapshot.policy();
+
+    let mut subjects = Vec::with_capacity(updates.len());
     let mut overall = Decision::Allow;
-    for (index, update) in input.updates().iter().enumerate() {
+    for (index, update) in updates.iter().enumerate() {
         let facts = Facts {
             policy,
             input,
+            authentication,
             subject: update,
-            actor_id: &actor_id,
-            actor_snapshot: &actor_snapshot,
+            actor_id,
+            actor_snapshot,
         };
         let outcome = decide_subject(index, &facts);
         if outcome.decision == Decision::Deny {
@@ -246,12 +282,12 @@ pub fn evaluate(
         subjects.push(outcome);
     }
 
-    Ok(PolicyEvaluation {
+    PolicyEvaluation {
         policy: policy.name(),
         snapshot: snapshot.id(),
         decision: overall,
         subjects,
-    })
+    }
 }
 
 /// Missing ancestry is not a false fast-forward predicate. Inspect the entire
@@ -339,10 +375,13 @@ fn require_aggregates(
 
 struct Facts<'a> {
     policy: &'a CompiledPolicy,
-    input: &'a PolicyInputRoot,
+    // None is possible only after the whole authenticated-reference profile
+    // has refused every selector that requires this complete input root.
+    input: Option<&'a PolicyInputRoot>,
+    authentication: AuthenticationStrength,
     subject: &'a RefUpdateFact,
     actor_id: &'a str,
-    actor_snapshot: &'a str,
+    actor_snapshot: Option<&'a str>,
 }
 
 impl Facts<'_> {
@@ -351,7 +390,7 @@ impl Facts<'_> {
             Selector::RefName => self.subject.name().as_bytes(),
             Selector::RefScope => self.subject.scope(),
             Selector::ActorId => self.actor_id.as_bytes(),
-            Selector::ActorSnapshot => self.actor_snapshot.as_bytes(),
+            Selector::ActorSnapshot => self.actor_snapshot.map_or(&[], str::as_bytes),
             // Reached only through a compiled predicate, and the compiler only
             // builds text comparisons for the four selectors above.
             _ => &[],
@@ -360,8 +399,9 @@ impl Facts<'_> {
 
     fn accepted(&self, kind: EvidenceKind) -> Option<&EvidenceReceipt> {
         let requirement = self.policy.requirement(kind)?;
-        let instant = self.input.instant();
-        self.input.receipts().iter().find(|receipt| {
+        let input = self.input?;
+        let instant = input.instant();
+        input.receipts().iter().find(|receipt| {
             receipt.kind() == kind
                 && receipt.subject() == self.subject.name()
                 && receipt.issuer() == requirement.issuer()
@@ -373,7 +413,7 @@ impl Facts<'_> {
     }
 
     fn aggregate(&self, name: AggregateName) -> Option<u64> {
-        self.input.aggregates().get(&name).copied()
+        self.input?.aggregates().get(&name).copied()
     }
 }
 
@@ -474,15 +514,22 @@ fn holds(predicate: &Predicate, facts: &Facts<'_>) -> bool {
         Predicate::TextMatches { selector, pattern } => pattern.matches(facts.text(*selector)),
         Predicate::UpdateKindEquals(kind) => facts.subject.kind() == *kind,
         Predicate::UpdateKindIn(kinds) => kinds.contains(&facts.subject.kind()),
-        Predicate::PrincipalKindEquals(kind) => facts.input.principal().kind() == *kind,
-        Predicate::PrincipalKindIn(kinds) => kinds.contains(&facts.input.principal().kind()),
-        Predicate::AuthenticationCompare { operator, value } => operator.holds(
-            facts.input.principal().authentication().rank(),
-            value.rank(),
-        ),
+        Predicate::PrincipalKindEquals(kind) => facts
+            .input
+            .is_some_and(|input| input.principal().kind() == *kind),
+        Predicate::PrincipalKindIn(kinds) => facts
+            .input
+            .is_some_and(|input| kinds.contains(&input.principal().kind())),
+        Predicate::AuthenticationCompare { operator, value } => {
+            operator.holds(facts.authentication.rank(), value.rank())
+        }
         Predicate::LabelContains { selector, label } => match selector {
-            Selector::ActorTeams => facts.input.principal().teams().contains(label),
-            Selector::ActorCapabilities => facts.input.principal().capabilities().contains(label),
+            Selector::ActorTeams => facts
+                .input
+                .is_some_and(|input| input.principal().teams().contains(label)),
+            Selector::ActorCapabilities => facts
+                .input
+                .is_some_and(|input| input.principal().capabilities().contains(label)),
             // Reached only through a compiled predicate, and the compiler only
             // builds label containment for the two selectors above.
             _ => false,

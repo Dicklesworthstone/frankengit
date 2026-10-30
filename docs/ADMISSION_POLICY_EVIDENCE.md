@@ -11,7 +11,7 @@ source import, workspace publication, and other ordinary ref transitions,
 including each child of a receive microbatch. An attempt that changes no refs
 retains the historical evidence profile. Native merge evidence retains its
 historical profile unless an activated repository DSL policy selects schema
-1.2 or 1.3. Metadata remains unchanged; native review/check obligations remain in
+1.2, 1.3 or 1.4. Metadata remains unchanged; native review/check obligations remain in
 their own canonical gates.
 
 ## Exact version preservation
@@ -22,15 +22,22 @@ their own canonical gates.
 | 1.1 | The 1.0 fields plus authority-head identity, actual input ref root, native HEAD and review selectors, native old/new ref values, evaluated snapshots, verdicts and traces | Authenticate provenance and replay the recorded snapshots against the recorded structural facts. |
 | 1.2 | The complete 1.1 structural receipt plus the canonically activated repository DSL snapshot, direct/native-merge publication kind, verdict and trace | Require exact equality with the snapshot selected by the original authenticated forge frontier, then replay those stored bytes and facts. |
 | 1.3 | The same structural commitments and selected snapshot, using the distinct actor-ID factual profile | Replay the exact sealed principal identifier as well as the ref facts; independently verify the principal against the admission context, sealed request and principal snapshot. |
+| 1.4 | The same activated commitments plus the original authentication method, using the distinct authentication profile | Replay the restricted actor/ref/authentication facts and require exact method agreement with principal snapshot 1.1. Legacy unknown provenance cannot satisfy this profile. |
 
 `PolicyDecisionEvidence` remains the exact schema-1.0 canonical type.
 `EvaluatedPolicyDecisionEvidence` owns schema 1.1 and
 `ActivatedPolicyDecisionEvidence` owns the frozen ref-only schema 1.2.
-`ActorPolicyDecisionEvidence` owns schema 1.3. `PolicyDecisionRecord`
+`ActorPolicyDecisionEvidence` owns schema 1.3 and
+`AuthenticationPolicyDecisionEvidence` owns schema 1.4. `PolicyDecisionRecord`
 dispatches supported minors, reproduces the selected minor's original bytes,
 and computes its original root. Unknown minors, profiles, substituted snapshot
 identities, malformed inputs, changed verdicts, and changed traces are refused.
 No historical record is rewritten or reinterpreted as a newer profile.
+
+[Authentication facts in durable admission](ADMISSION_AUTHENTICATION.md)
+describes principal snapshot 1.1, the transport-method mapping, authentication
+policy activation, and retry behavior. Ordinary verified HTTP tokens and SSH
+keys establish only single-factor strength; operator assertions are explicit.
 
 The existing immutable namespace and RCR field remain in use. No new mutable
 policy authority or configuration field is introduced.

@@ -135,7 +135,10 @@ fn actor_id_support_never_implies_authentication_membership_or_snapshot_facts() 
             ))
             .unwrap();
             assert_eq!(
-                reference_profile::classify(&policy),
+                reference_profile::validate_for(
+                    ReferencePolicyProfile::ReferenceActorIdV1,
+                    &policy,
+                ),
                 Err(ReferencePolicyRefusal::UnsupportedFacts),
                 "{condition}"
             );

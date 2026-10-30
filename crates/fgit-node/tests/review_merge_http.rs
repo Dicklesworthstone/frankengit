@@ -421,7 +421,11 @@ fn a_merge_grant_and_weaker_requested_reviewer_list_cannot_bypass_mandatory_prot
             expected_version: ExpectedVersion::NewStream,
             expected_epoch: candidate.epoch,
             protection: ReviewProtection {
-                ref_policy: None,
+                // Both review-owner and admission review-gate projections
+                // must retain the HTTP credential fact through native merge.
+                ref_policy: Some(fgit_forge::event::protection::compile_ref_policy(
+                    "policy authentication { rule credential { when actor.authentication >= single_factor then allow } default deny \"credential authentication required\" }",
+                ).unwrap()),
                 administrators: vec![OWNER],
                 branches: vec![ProtectedBranch {
                     required_approvals: 2,

@@ -189,7 +189,7 @@ pub(super) fn execute(
         } => drive_request_while(
             node,
             &context,
-            node.apply_reviewed_merge_bundle_with_method_durable_in(
+            node.apply_reviewed_merge_bundle_with_authentication_in(
                 &context,
                 authenticated.principal_id(),
                 authenticated.client_idempotency_key().as_bytes(),
@@ -200,6 +200,7 @@ pub(super) fn execute(
                 required.policy_epoch(),
                 required.reviewers(),
                 *method,
+                authenticated.authentication(),
             ),
             &mut live,
         )

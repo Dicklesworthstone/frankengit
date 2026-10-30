@@ -1,6 +1,9 @@
 //! Native SSH receive with real persisted authority, quarantine and recovery.
 //! Encrypted command-grant propagation is covered in fgit-ssh's session suite.
 
+#[path = "ref_scope_tests/authentication.rs"]
+mod authentication;
+
 use super::*;
 use crate::{LoopbackReceiveSession, NodeConfig, NodeSmartHttpRefusal};
 use fgit_admission::policy_bridge::receive_session::recovery::SessionRecovery;

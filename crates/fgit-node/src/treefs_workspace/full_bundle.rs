@@ -509,12 +509,13 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_basis_bound_validated_receive_publishing_in(
+        self.admit_basis_bound_validated_receive_with_authentication_in(
             request,
             &context,
             &validated,
             limits,
             Some(&staging),
+            authenticated.authentication(),
         )
         .await
         .map_err(admission_error)

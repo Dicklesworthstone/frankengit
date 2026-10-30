@@ -6,6 +6,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::future::Future;
 
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::merge::native::objects::{
     CanonicalObjectHeader, FrontierObjectHeaders, MAX_REUSED_BLOB_BYTES, MergeObjectLimits,
     ObjectFrontier, validate_fast_forward_objects_above, validate_merge_objects_above,
@@ -442,7 +443,8 @@ impl OneNode {
         self.receive_publication_admitted()?;
         let inner = self
             .durable_admission_projection(&context)
-            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
+            .with_authentication(authenticated.authentication());
         let projection = NodeNativeMergeProjection {
             node: self,
             inner,
@@ -539,6 +541,10 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn admission_authentication(&self) -> Option<AdmissionAuthentication> {
+        self.inner.authentication
+    }
+
     fn validate_comment_anchor_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -824,16 +830,33 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             }
             closure
         };
-        fgit_admission::merge::native::protection::enforce_merge_at(
-            authority,
-            cx,
-            basis,
-            &selected.snapshot().refs,
-            intent,
-            self.inner.context.principal_id,
-            &|| self.merge_checkpoint(cx).is_err(),
-        )
-        .await?;
+        match self.inner.authentication {
+            Some(authentication) => {
+                fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
+                    authority,
+                    cx,
+                    basis,
+                    &selected.snapshot().refs,
+                    intent,
+                    self.inner.context.principal_id,
+                    authentication,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+            }
+            None => {
+                fgit_admission::merge::native::protection::enforce_merge_at(
+                    authority,
+                    cx,
+                    basis,
+                    &selected.snapshot().refs,
+                    intent,
+                    self.inner.context.principal_id,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+            }
+        }?;
         self.merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)
