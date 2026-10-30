@@ -31,8 +31,9 @@ recovery identities do not change. A full bundle may also be supplied to
 Export verifies current visible history with the native upload-pack graph
 reader and excludes the complete prerequisite closure. The original buffered
 profile uses the native pack planner and writer; the explicit streaming profile
-below emits each selected body through the existing bounded encoder. Export does not mutate canonical state,
-and never replaces an existing output file. The current implementation still
+below emits each selected body through the existing bounded encoder. Export
+does not mutate canonical state, and never replaces an existing output file.
+The current implementation still
 verifies the complete visible graph, so reduced transfer size is not a claim
 of reduced server-side read cost or larger repository capacity.
 
@@ -49,11 +50,15 @@ fg bundle sync-export "$SOURCE" "$TENANT" "$REPOSITORY" change.bundle \
   --max-compression-work 4000000000 --timeout-secs 600
 ```
 
-The streaming path keeps one bounded native object and compressor plus bounded
-object, edge and header metadata. Output and expanded-body allowances each
-default to 128 MiB and can be raised independently through 16384 MiB. The
-per-object default and ceiling remain 32 MiB. It accepts the same byte, object,
-reference, graph, compression-work and timeout options as
+The streaming path keeps bounded native metadata, a blob input chunk and
+compressor state plus bounded object, edge and header metadata. Output and
+expanded-body allowances each default to 128 MiB and can be raised independently
+through 16384 MiB. The
+buffered object default and ceiling remain 32 MiB. The independent
+`--max-blob-mib` allowance defaults to 32 MiB and accepts 1 through 16384 MiB;
+large selected blobs use the checked native streaming reader. This does not
+widen metadata, aggregate expanded-byte, output or work limits. It accepts the
+same byte, object, reference, graph, compression-work and timeout options as
 [full streaming export](NATIVE_GIT_BUNDLE_STREAMING_EXPORT.md). The independent
 64-reference and 64-prerequisite frontier bounds still apply. The reference
 ceiling also bounds all visible roots needed to prove the prerequisite history,
@@ -69,6 +74,13 @@ than rereading omitted bodies; all graph discovery remains independently
 bounded and retains the native reader's 4,000,000-edge ceiling. Selected payload
 sizes are bounded before emission, and the codec
 checks each emitted object's native identity and actual typed edges.
+
+An emitted blob must finish at its declared length and pass the original stored
+commitments and native hash before the bundle completes. Premature EOF, extra
+bytes, corruption and cancellation cannot produce a successful receipt. Short
+source reads are combined into the same fixed input chunks; small-object
+ordering, compression bytes and both existing streaming profile identifiers
+are preserved.
 
 An external closure is a transfer assumption: the receiver must possess the
 declared history. This export does not certify the physical health of omitted

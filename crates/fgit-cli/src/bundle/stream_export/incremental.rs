@@ -9,6 +9,7 @@ pub(super) const USAGE: &str =
   --streaming --trusted-local [--object-format sha1|sha256]
   --ref <refs/name>... --prerequisite <commit-oid>...
   [--max-output-mib N] [--max-expanded-mib N] [--max-object-mib N]
+  [--max-blob-mib N]
   [--max-objects N] [--max-refs N] [--max-edges N]
   [--max-compression-work N] [--timeout-secs N]
 
@@ -18,9 +19,11 @@ history. A prerequisite must belong to the current visible graph; a retained
 or hidden object alone never authorizes export. Maximum 64 refs and 64 unique
 prerequisites. The source head identifies the snapshot selected at the start.
 
-Streaming retains one bounded source object and compressor plus bounded
-identity/edge metadata. Output and expanded-byte defaults are 128 MiB, with
-independent ceilings of 16384 MiB. Per-object default and ceiling are 32 MiB.
+Streaming retains bounded native metadata, a blob input chunk and compressor
+state plus bounded identity/edge metadata. Output and expanded-byte defaults
+are 128 MiB, with independent ceilings of 16384 MiB. Buffered object default
+and ceiling are 32 MiB; the separate blob allowance defaults to 32 MiB and can
+be raised through 16384 MiB without increasing metadata or aggregate limits.
 Object count defaults to 100000 (ceiling 1000000), ref-header count to 4096
 (ceiling 1000000), graph edges to 1000000 (ceiling 8000000), compression work
 to 1000000000 (ceiling 1000000000000). Timeout is 1..3600 seconds, default 300,
@@ -49,7 +52,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 7
         || args.len() > 320
         || args.first().map(String::as_str) != Some("sync-export")
-        || args.iter().any(|arg| arg.len() > 4096 || arg.contains('\0'))
+        || args
+            .iter()
+            .any(|arg| arg.len() > 4096 || arg.contains('\0'))
         || args
             .iter()
             .try_fold(0usize, |sum, arg| sum.checked_add(arg.len()))
@@ -66,9 +71,15 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         let flag = args[at].as_str();
         at += 1;
         if matches!(flag, "--ref" | "--prerequisite") {
-            let value = args.get(at).ok_or_else(|| format!("missing value for {flag}"))?;
+            let value = args
+                .get(at)
+                .ok_or_else(|| format!("missing value for {flag}"))?;
             at += 1;
-            let target = if flag == "--ref" { &mut names } else { &mut prerequisites };
+            let target = if flag == "--ref" {
+                &mut names
+            } else {
+                &mut prerequisites
+            };
             if target.len() == 64 {
                 return Err(format!("too many {flag} values"));
             }
@@ -109,7 +120,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         }
         ids.push(id);
     }
-    options.incremental = Some(Selection { references, prerequisites: ids });
+    options.incremental = Some(Selection {
+        references,
+        prerequisites: ids,
+    });
     Ok(options)
 }
 
@@ -150,17 +164,42 @@ mod tests {
             assert_eq!(options.query.timeout, Duration::from_secs(300));
             assert_eq!(options.query.limits.pack.max_entries, 100_000);
             assert_eq!(options.query.limits.pack.max_object_bytes, 32 * 1024 * 1024);
+            assert_eq!(
+                options.query.limits.max_streamed_blob_bytes,
+                32 * 1024 * 1024
+            );
             assert_eq!(options.query.limits.pack.max_input_bytes, 128 * 1024 * 1024);
-            let expanded = parse(&args(format, &[
-                "--max-output-mib", "16384",
-                "--max-expanded-mib", "4096",
-                "--max-object-mib", "1",
-                "--max-compression-work", "7",
-                "--timeout-secs", "12",
-            ])).unwrap();
-            assert_eq!(expanded.query.limits.envelope.max_bundle_bytes as u64, 16384 * 1024 * 1024);
-            assert_eq!(expanded.query.limits.pack.max_total_expanded_bytes as u64, 4096 * 1024 * 1024);
+            let expanded = parse(&args(
+                format,
+                &[
+                    "--max-output-mib",
+                    "16384",
+                    "--max-expanded-mib",
+                    "4096",
+                    "--max-object-mib",
+                    "1",
+                    "--max-blob-mib",
+                    "16384",
+                    "--max-compression-work",
+                    "7",
+                    "--timeout-secs",
+                    "12",
+                ],
+            ))
+            .unwrap();
+            assert_eq!(
+                expanded.query.limits.envelope.max_bundle_bytes as u64,
+                16384 * 1024 * 1024
+            );
+            assert_eq!(
+                expanded.query.limits.pack.max_total_expanded_bytes as u64,
+                4096 * 1024 * 1024
+            );
             assert_eq!(expanded.query.limits.pack.max_object_bytes, 1024 * 1024);
+            assert_eq!(
+                expanded.query.limits.max_streamed_blob_bytes as u64,
+                16384 * 1024 * 1024
+            );
             assert_eq!(expanded.query.limits.max_compression_work, 7);
             assert_eq!(expanded.query.timeout, Duration::from_secs(12));
         }
@@ -179,6 +218,9 @@ mod tests {
             vec!["--expect", "refs/heads/main=absent"],
             vec!["--max-output-mib", "16385"],
             vec!["--max-object-mib", "33"],
+            vec!["--max-blob-mib", "16385"],
+            vec!["--max-blob-mib", "0"],
+            vec!["--max-blob-mib", "1", "--max-blob-mib", "2"],
             vec!["--max-objects", "0"],
             vec!["--streaming"],
             vec!["--timeout-secs", "0"],
@@ -234,9 +276,15 @@ mod tests {
         super::super::run_with_output(
             &["sync-export".into(), "--streaming".into(), "--help".into()],
             &mut output,
-        ).unwrap();
+        )
+        .unwrap();
         let help = String::from_utf8(output).unwrap();
-        for expected in ["--prerequisite", "create-only", "32 MiB", "128 MiB input limit"] {
+        for expected in [
+            "--prerequisite",
+            "create-only",
+            "32 MiB",
+            "128 MiB input limit",
+        ] {
             assert!(help.contains(expected), "{help}");
         }
     }

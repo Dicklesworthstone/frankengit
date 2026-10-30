@@ -33,6 +33,10 @@ fn streaming_options_keep_byte_object_and_work_bounds_independent() {
         defaults.query.limits.pack.max_object_bytes,
         32 * 1024 * 1024
     );
+    assert_eq!(
+        defaults.query.limits.max_streamed_blob_bytes,
+        32 * 1024 * 1024
+    );
     assert_eq!(defaults.query.limits.pack.max_entries, 100_000);
     assert_eq!(defaults.query.limits.pack.max_index_entries, 100_000);
     assert_eq!(defaults.query.limits.envelope.max_references, 4096);
@@ -45,6 +49,8 @@ fn streaming_options_keep_byte_object_and_work_bounds_independent() {
         "4096",
         "--max-object-mib",
         "1",
+        "--max-blob-mib",
+        "16384",
         "--max-objects",
         "3",
         "--max-refs",
@@ -69,6 +75,10 @@ fn streaming_options_keep_byte_object_and_work_bounds_independent() {
         4096 * MIB
     );
     assert_eq!(wide.query.limits.pack.max_object_bytes as u64, MIB);
+    assert_eq!(
+        wide.query.limits.max_streamed_blob_bytes as u64,
+        16_384 * MIB
+    );
     assert_eq!(wide.query.limits.pack.max_entries, 3);
     assert_eq!(wide.query.limits.pack.max_index_entries, 3);
     assert_eq!(wide.query.limits.envelope.max_references, 2);
@@ -88,6 +98,7 @@ fn every_limit_has_a_permitted_boundary_and_refused_successor() {
         ("--max-output-mib", 16_384_u64),
         ("--max-expanded-mib", 16_384),
         ("--max-object-mib", 32),
+        ("--max-blob-mib", 16_384),
         ("--max-objects", 1_000_000),
         ("--max-refs", 1_000_000),
         ("--max-edges", 8_000_000),
@@ -165,6 +176,7 @@ fn help_requires_no_node_and_names_all_operator_bounds() {
         "--max-output-mib",
         "--max-compression-work",
         "--max-edges",
+        "--max-blob-mib",
     ] {
         assert!(help.contains(name));
     }

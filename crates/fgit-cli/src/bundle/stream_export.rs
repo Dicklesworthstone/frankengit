@@ -19,16 +19,19 @@ pub(super) const USAGE: &str =
     "usage: fg bundle export <storage-root> <tenant-id> <repository-id> <new-bundle-file>
   --streaming --trusted-local [--object-format sha1|sha256]
   [--max-output-mib N] [--max-expanded-mib N] [--max-object-mib N]
+  [--max-blob-mib N]
   [--max-objects N] [--max-refs N] [--max-edges N]
   [--max-compression-work N] [--timeout-secs N]
 
-The streaming profile retains one bounded native object and compressor plus
-bounded object/edge metadata. It writes V2/SHA-1 or V3/SHA-256 full bundles in
+The streaming profile retains bounded native metadata, a blob input chunk and
+compressor state plus bounded object/edge metadata. It writes V2/SHA-1 or V3/SHA-256 full bundles in
 deterministic native object-ID order with whole objects and no delta window.
 Only current visible refs and their complete verified graph are exported.
 
 Output and expanded-byte defaults are 128 MiB; each can be set to 1..16384 MiB.
-The object-byte default and ceiling are 32 MiB. Object count defaults to 100000,
+The buffered object-byte default and ceiling are 32 MiB. The independent blob
+allowance defaults to 32 MiB and accepts 1..16384 MiB. A larger blob allowance
+does not widen metadata allocation or aggregate expanded bytes. Object count defaults to 100000,
 and ref-header count to 4096 (including HEAD); both have a ceiling of 1000000.
 Graph edges default to 1000000 (ceiling 8000000); compression work defaults to
 1000000000 (ceiling 1000000000000). Limits are independent; raising a byte limit
@@ -80,7 +83,10 @@ fn mib(flag: &str, value: &str, maximum: u64) -> Result<usize, String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.first().is_some_and(|operation| operation == "sync-export") {
+    if args
+        .first()
+        .is_some_and(|operation| operation == "sync-export")
+    {
         return incremental::parse(args);
     }
     parse_full(args)
@@ -141,6 +147,9 @@ fn parse_full(args: &[String]) -> Result<Options, String> {
             }
             "--max-object-mib" => {
                 query.limits.pack.max_object_bytes = mib(flag, value, 32)?;
+            }
+            "--max-blob-mib" => {
+                query.limits.max_streamed_blob_bytes = mib(flag, value, 16_384)?;
             }
             "--max-objects" => {
                 let count = number(flag, value, 1_000_000)? as u32;
@@ -242,6 +251,7 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
     let config = NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
         .with_object_format(options.format)
         .with_max_object_bytes(options.query.limits.pack.max_object_bytes as u64)
+        .with_selected_pack_blob_limit(options.query.limits.max_streamed_blob_bytes)
         .with_git_daemon_session_timeout(session_timeout);
     let mut node = OneNode::open_existing(config).map_err(|error| abort(&mut stage, error))?;
     let operation = (|| {
