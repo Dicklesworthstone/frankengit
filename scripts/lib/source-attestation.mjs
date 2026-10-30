@@ -216,12 +216,30 @@ async function streamArtifact(path, context, expected = null, consume = null) {
       at += bytesRead; readCalls++; maximumRead = Math.max(maximumRead, bytesRead);
       await progress(Object.freeze({ bytes_hashed: at, total_bytes: total })); guard();
     }
-    if ((await file.read(buffer, 0, 1, total)).bytesRead) fail('attestation_file_changed');
-    const after = await file.stat({ bigint: true });
-    let named;
-    try { named = await lstat(path, { bigint: true }); } catch { fail('attestation_file_changed'); }
-    if (!named.isFile() || FILE_IDENTITY_FIELDS.some(key => before[key] !== after[key] || after[key] !== named[key])) fail('attestation_file_changed');
-    guard(); const sha256 = digest.digest('hex');
+    const verifyIdentity = async () => {
+      guard();
+      if ((await file.read(buffer, 0, 1, total)).bytesRead) fail('attestation_file_changed');
+      const after = await file.stat({ bigint: true });
+      let named;
+      try { named = await lstat(path, { bigint: true }); } catch { fail('attestation_file_changed'); }
+      if (!named.isFile() || FILE_IDENTITY_FIELDS.some(key => before[key] !== after[key] || after[key] !== named[key])) fail('attestation_file_changed');
+      guard(); return after;
+    };
+    await verifyIdentity();
+    const sha256 = digest.digest('hex');
+    // Timestamp precision is not filesystem update resolution. A same-size
+    // overwrite of an already-read prefix can leave every identity field equal.
+    // Re-read through the same descriptor without replaying callbacks or copy
+    // effects, using the same buffer, cancellation and original deadline.
+    const verification = createHash('sha256'); let verified = 0;
+    while (verified < total) {
+      guard(); const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, total - verified), verified); guard();
+      if (!bytesRead) fail('attestation_file_changed');
+      verification.update(buffer.subarray(0, bytesRead)); verified += bytesRead;
+      readCalls++; maximumRead = Math.max(maximumRead, bytesRead);
+    }
+    const after = await verifyIdentity();
+    if (verification.digest('hex') !== sha256) fail('attestation_file_changed');
     if (expected !== null && sha256 !== expected.sha256) fail('attestation_artifact_mismatch');
     return { bytes: total, sha256, identity: after, streaming: { read_calls: readCalls, maximum_read_bytes: maximumRead } };
   } finally { buffer?.fill(0); await file.close(); }

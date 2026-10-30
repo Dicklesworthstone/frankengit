@@ -2,12 +2,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createHash } from 'node:crypto';
-import { open, mkdtemp, writeFile, readFile, rename, symlink, chmod, rm } from 'node:fs/promises';
+import fsPromises, { open, mkdtemp, writeFile, readFile, rename, symlink, chmod, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { ATTESTATION_LIMITS, attestationFileLimits, signSourceBackup, signSourceBackupFile,
-  verifySourceAttestation, authenticateSourceBackup, authenticateSourceBackupFile }
+  verifySourceAttestation, authenticateSourceBackup, authenticateSourceBackupFile, copyAuthenticatedSourceBackup }
   from '../../scripts/lib/source-attestation.mjs';
 const pair = generateKeyPairSync('ed25519');
 const privatePem = Buffer.from(pair.privateKey.export({ type: 'pkcs8', format: 'pem' }));
@@ -34,7 +35,7 @@ test('streamed signatures are byte-identical to the existing owned-byte signer',
   const streamed = await signSourceBackupFile(f.input, privatePem, metadata, { ...options, onProgress: event => events.push(event) });
   assert.deepEqual(streamed.envelope, old.envelope); assert.deepEqual(streamed.statement, old.statement);
   assert.equal(streamed.signer_key_id, old.signer_key_id);
-  assert.deepEqual(streamed.streaming, { read_calls: 3, maximum_read_bytes: 65536 });
+  assert.deepEqual(streamed.streaming, { read_calls: 6, maximum_read_bytes: 65536 });
   assert.deepEqual(events.map(e => e.bytes_hashed), [0, 65536, 131072, body.length]);
   assert(events.every(e => Object.isFrozen(e) && e.total_bytes === body.length));
   const result = await authenticateSourceBackupFile(f.input, old.envelope, publicPem, policy, options);
@@ -114,6 +115,94 @@ for (const change of ['grow', 'truncate', 'overwrite', 'replace', 'permissions']
   };
   await assert.rejects(signSourceBackupFile(f.input, privatePem, metadata, { ...options, onProgress: mutate }), refused('attestation_file_changed'));
   assert(changed);
+}));
+
+// Keep real file reads/writes and identity fields. Freeze only the two time
+// fields to model a filesystem whose timestamps cannot distinguish this write.
+// The ordinary overwrite case above separately exercises the actual filesystem.
+async function withUnchangedTimes(path, run, read = null) {
+  const originalOpen = fsPromises.open, originalLstat = fsPromises.lstat;
+  const probe = await originalOpen(path, 'r');
+  let before;
+  try { before = await probe.stat({ bigint: true }); } finally { await probe.close(); }
+  const times = value => {
+    value.mtimeNs = before.mtimeNs; value.ctimeNs = before.ctimeNs;
+    return value;
+  };
+  fsPromises.open = async (...args) => {
+    const file = await originalOpen(...args);
+    if (args[0] === path) {
+      const stat = file.stat.bind(file);
+      file.stat = async (...options) => times(await stat(...options));
+      if (read !== null) {
+        const originalRead = file.read.bind(file);
+        file.read = async (...options) => {
+          const result = await originalRead(...options);
+          await read(options, result); return result;
+        };
+      }
+    }
+    return file;
+  };
+  fsPromises.lstat = async (...args) => {
+    const value = await originalLstat(...args);
+    return args[0] === path ? times(value) : value;
+  };
+  syncBuiltinESMExports();
+  try { return await run(); }
+  finally {
+    fsPromises.open = originalOpen; fsPromises.lstat = originalLstat;
+    syncBuiltinESMExports();
+  }
+}
+
+for (const operation of ['sign', 'authenticate', 'copy']) test(`${operation} refuses changed consumed bytes even when timestamps match`, () => fixture(async f => {
+  const approved = await signSourceBackup(body, privatePem, metadata, options);
+  let changed = false;
+  const mutate = async event => {
+    if (changed || !event.bytes_hashed) return;
+    changed = true;
+    const file = await open(f.input, 'r+');
+    try { await file.write(Buffer.of(255), 0, 1, 0); } finally { await file.close(); }
+  };
+  const destination = join(f.directory, 'checked.bundle');
+  await withUnchangedTimes(f.input, async () => {
+    const controls = { ...options, onProgress: mutate };
+    const result = operation === 'sign' ? signSourceBackupFile(f.input, privatePem, metadata, controls)
+      : operation === 'authenticate' ? authenticateSourceBackupFile(f.input, approved.envelope, publicPem, policy, controls)
+        : copyAuthenticatedSourceBackup(f.input, destination, approved.envelope, publicPem, policy, controls);
+    await assert.rejects(result, refused('attestation_file_changed'));
+  });
+  assert(changed); assert.equal((await readFile(f.input))[0], 255);
+  await assert.rejects(readFile(destination), { code: 'ENOENT' });
+}));
+
+test('unchanged timestamps and unchanged content preserve exact signing, authentication and copy', () => fixture(async f => {
+  const approved = await signSourceBackup(body, privatePem, metadata, options);
+  await withUnchangedTimes(f.input, async () => {
+    const signed = await signSourceBackupFile(f.input, privatePem, metadata, options);
+    assert.deepEqual(signed.envelope, approved.envelope);
+    assert.equal((await authenticateSourceBackupFile(f.input, approved.envelope, publicPem, policy, options)).authentication.signature_verified, true);
+    const destination = join(f.directory, 'checked.bundle');
+    await copyAuthenticatedSourceBackup(f.input, destination, approved.envelope, publicPem, policy, options);
+    assert.deepEqual(await readFile(destination), body);
+  });
+}));
+
+for (const stop of ['cancellation', 'deadline']) test(`content recheck retains the original ${stop} boundary`, () => fixture(async f => {
+  const controller = new AbortController(); let starts = 0, rechecked = false;
+  await withUnchangedTimes(f.input, async () => {
+    await assert.rejects(signSourceBackupFile(f.input, privatePem, metadata, {
+      ...options, signal: controller.signal, ...(stop === 'deadline' ? { timeoutMs: 500 } : {}),
+    }), refused(stop === 'deadline' ? 'attestation_deadline' : 'attestation_cancelled'));
+  }, async args => {
+    if (args[3] !== 0 || ++starts !== 2) return;
+    rechecked = true;
+    if (stop === 'cancellation') controller.abort();
+    else await new Promise(resolve => setTimeout(resolve, 600));
+  });
+  assert(rechecked, 'the stop occurred inside the second content traversal');
+  assert.equal((await signSourceBackupFile(f.input, privatePem, metadata, options)).statement.artifact.bytes, body.length);
 }));
 
 test('file mutation after final data read is checked before any authentication success', () => fixture(async f => {
@@ -203,7 +292,7 @@ test('over 1 GiB is hashed end to end with bounded observed read sizes and subli
   assert.equal(child.status, 0, child.stderr);
   const report = JSON.parse(child.stdout); t.diagnostic(JSON.stringify(report));
   assert.equal(report.bytes, length); assert.equal(report.signature_verified, true);
-  assert.equal(report.maximum_read_bytes, 65536); assert.equal(report.read_calls, Math.ceil(length / 65536));
+  assert.equal(report.maximum_read_bytes, 65536); assert.equal(report.read_calls, 2 * Math.ceil(length / 65536));
   if (process.platform === 'linux') assert(report.max_rss_kib < 256 * 1024, JSON.stringify(report));
   // Independent expected hash over a logical zero stream, without reading the file.
   const digest = createHash('sha256'), zeros = Buffer.alloc(1024 * 1024);
