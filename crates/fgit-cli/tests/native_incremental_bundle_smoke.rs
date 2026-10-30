@@ -20,7 +20,14 @@ fn fresh_process_incremental_bundles_synchronize_exact_refs_without_bypassing_pr
     );
     let text = String::from_utf8(output.stdout).unwrap();
     for format in ["sha1", "sha256"] {
-        assert!(text.contains(&format!("INCREMENTAL_BUNDLE_CLI format={format} ")));
+        for profile in ["buffered", "streaming"] {
+            assert!(
+                text.contains(&format!(
+                    "INCREMENTAL_BUNDLE_CLI format={format} profile={profile} "
+                )),
+                "{text}",
+            );
+        }
     }
     print!("{text}");
 }

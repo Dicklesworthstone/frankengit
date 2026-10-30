@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-cargo test --locked -p fgit-pack --test incremental_bundle --test full_bundle
+cargo test --locked -p fgit-pack --test incremental_bundle --test incremental_bundle_stream --test full_bundle
 cargo check --locked -p fgit-cli --all-targets
 cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle -- --nocapture
 cargo test --locked -p fgit-cli --bin fg bundle:: -- --nocapture

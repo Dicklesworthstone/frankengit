@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import os
 from pathlib import Path
 import tempfile
 from pull_request_smoke import TENANT, REPOSITORY, PRINCIPAL, fixture, document, require
 from full_bundle_smoke import invoke, decode_export
 
 
-def run_format(binary, algorithm):
+def run_format(binary, algorithm, streaming=False):
     with tempfile.TemporaryDirectory(prefix="fg-incremental-bundle-") as directory:
         root = Path(directory)
         raw_source, source, target = root / "raw", root / "source", root / "target"
@@ -29,9 +30,20 @@ def run_format(binary, algorithm):
         before_source, before_target = refs(source), refs(target)
         output = root / "increment.bundle"
         command = args("sync-export", source, output, "--ref", "refs/heads/main", "--ref", "refs/heads/topic", "--prerequisite", f["base"])
+        if streaming:
+            command.extend(["--streaming"])
         exported = document(invoke(binary, command))
         require(exported["type"] == "git_bundle_incremental_export" and exported["object_count"] == 2, "incremental export must omit all base objects")
         require(exported["reference_count"] == 2 and exported["prerequisite_count"] == 1 and not exported["repository_changed"], "export scope")
+        if streaming:
+            require(exported["streaming"] and exported["publication_state"] == "durable", "streamed publication receipt")
+            require(exported["node_closed"] and exported["bundle_created"], "streamed source/output custody")
+            require(exported["external_object_count"] == 3, "complete omitted base history")
+            repeated_path = root / "repeat.bundle"
+            repeated = list(command)
+            repeated[5] = repeated_path
+            require(document(invoke(binary, repeated)) == exported, "same-profile deterministic receipt")
+            require(repeated_path.read_bytes() == output.read_bytes(), "same-profile deterministic bytes")
         raw = output.read_bytes()
         header, pack = raw.split(b"\n\n", 1)
         lines = header.split(b"\n")
@@ -43,6 +55,46 @@ def run_format(binary, algorithm):
         require(advertised == {b"refs/heads/main": f["target"], b"refs/heads/topic": f["source"]}, "exact named ref set")
         invoke(binary, command, code=2)
         require(output.read_bytes() == raw and refs(source) == before_source, "create-only export and unchanged source")
+        if streaming:
+            def no_stages():
+                require(not any(item.name.startswith(".fg-stream-export-") for item in root.iterdir()), "private export stage leaked")
+            no_stages()
+            for extra in (
+                ["--max-objects", "1"],
+                ["--max-refs", "1"],
+                ["--max-edges", "1"],
+                ["--max-compression-work", "1"],
+            ):
+                refused_path = root / "limited.bundle"
+                limited = list(command)
+                limited[5] = refused_path
+                invoke(binary, limited + extra, code=2)
+                require(not refused_path.exists() and refs(source) == before_source, "limit refusal published output or changed source")
+                no_stages()
+            for invalid in (f["blob"], "f" * len(f["base"])):
+                refused_path = root / "invalid-prerequisite.bundle"
+                invalid_command = args("sync-export", source, refused_path, "--streaming",
+                                       "--ref", "refs/heads/main", "--prerequisite", invalid)
+                invoke(binary, invalid_command, code=2)
+                require(not refused_path.exists() and refs(source) == before_source, "invalid prerequisite changed publication")
+                no_stages()
+            stopped_path = root / "stopped.bundle"
+            stopped = list(command)
+            stopped[5] = stopped_path
+            invoke(binary, ["--timeout-secs", "0.000000001", *stopped], code=2)
+            require(not stopped_path.exists(), "expired global timeout published a bundle")
+            no_stages()
+            empty_path = root / "no-new-objects.bundle"
+            empty_report = document(invoke(binary, args(
+                "sync-export", source, empty_path, "--streaming",
+                "--ref", "refs/heads/main", "--prerequisite", f["target"])))
+            require(empty_report["object_count"] == 0 and empty_report["external_object_count"] == 4, "up-to-date transfer must use an empty pack")
+            empty_header, empty_pack = empty_path.read_bytes().split(b"\n\n", 1)
+            empty_plain = b"\n".join(line for line in empty_header.split(b"\n") if not line.startswith(b"-"))
+            empty_refs, empty_objects = decode_export(empty_plain + b"\n\n" + empty_pack, algorithm)
+            require(not empty_objects and empty_refs == {b"refs/heads/main": f["target"]}, "empty transfer native inventory")
+            require(refs(source) == before_source, "up-to-date export changed source")
+            no_stages()
         missing_consent = upload(target, output)
         missing_consent.remove("--allow-ref-updates")
         invoke(binary, missing_consent, code=2, data=b"no-consent")
@@ -92,15 +144,29 @@ def run_format(binary, algorithm):
         result = document(invoke(binary, upload(fresh, output), code=3, data=b"protected-sync"))
         require(result["refusal_code"] == "ProtectedRefTransitionDenied", "incremental transfer bypassed required review")
         require(refs(fresh)["branches"] == protected["branches"], "atomic protected refusal moved unprotected companion ref")
-        print(f"INCREMENTAL_BUNDLE_CLI format={algorithm} reduced_pack=2 explicit_leases=checked replay=checked prerequisites=checked atomic_protection=checked")
+        profile = "streaming" if streaming else "buffered"
+        print(f"INCREMENTAL_BUNDLE_CLI format={algorithm} profile={profile} reduced_pack=2 explicit_leases=checked replay=checked prerequisites=checked atomic_protection=checked")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fg", required=True, type=Path)
     args = parser.parse_args()
-    for algorithm in ("sha1", "sha256"):
-        run_format(args.fg.resolve(), algorithm)
+    binary = args.fg.resolve()
+    # Only the absolute native fg executable is invoked once the campaign starts.
+    # The fixture and independent pack decoder use Python's standard library.
+    old_path = os.environ.get("PATH")
+    with tempfile.TemporaryDirectory(prefix="fg-incremental-empty-path-") as empty_path:
+        os.environ["PATH"] = empty_path
+        try:
+            for algorithm in ("sha1", "sha256"):
+                for streaming in (False, True):
+                    run_format(binary, algorithm, streaming)
+        finally:
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
 
 
 if __name__ == "__main__":

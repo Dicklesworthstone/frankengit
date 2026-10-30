@@ -1,4 +1,5 @@
 //! Explicit streaming Git-only export with caller-owned local publication.
+mod incremental;
 mod local_file;
 
 use std::collections::BTreeSet;
@@ -52,6 +53,7 @@ struct Options {
     path: PathBuf,
     format: GitHashAlgorithm,
     query: StreamBundleExportQuery,
+    incremental: Option<incremental::Selection>,
 }
 
 fn number(flag: &str, value: &str, maximum: u64) -> Result<u64, String> {
@@ -78,6 +80,13 @@ fn mib(flag: &str, value: &str, maximum: u64) -> Result<usize, String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
+    if args.first().is_some_and(|operation| operation == "sync-export") {
+        return incremental::parse(args);
+    }
+    parse_full(args)
+}
+
+fn parse_full(args: &[String]) -> Result<Options, String> {
     if args.len() < 7
         || args.len() > 40
         || args.first().map(String::as_str) != Some("export")
@@ -167,6 +176,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         path,
         format,
         query,
+        incremental: None,
     })
 }
 
@@ -188,8 +198,17 @@ fn abort(stage: &mut OwnedExport, cause: impl std::fmt::Display) -> String {
 }
 
 fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, String> {
-    if args == ["export", "--streaming", "--help"] || args == ["export", "--help", "--streaming"] {
-        writeln!(output, "{USAGE}").map_err(|error| error.to_string())?;
+    if args.len() == 3
+        && matches!(args[0].as_str(), "export" | "sync-export")
+        && ((args[1] == "--streaming" && args[2] == "--help")
+            || (args[1] == "--help" && args[2] == "--streaming"))
+    {
+        let usage = if args[0] == "sync-export" {
+            incremental::USAGE
+        } else {
+            USAGE
+        };
+        writeln!(output, "{usage}").map_err(|error| error.to_string())?;
         return Ok(0);
     }
     let mut options = parse(args)?;
@@ -247,15 +266,28 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
         };
         // Keep the native future through completion after requesting stop.
         // Dropping it would not finish the node's cleanup obligations.
-        node.runtime()
-            .block_on(node.export_full_git_bundle_stream_controlled_in(
-                &request,
-                &Default::default(),
-                options.query.clone(),
-                &mut stage,
-                &mut allow_work,
-            ))
-            .map_err(|error| error.to_string())
+        let exported = if let Some(selection) = &options.incremental {
+            node.runtime()
+                .block_on(node.export_incremental_git_bundle_stream_controlled_in(
+                    &request,
+                    &selection.references,
+                    &selection.prerequisites,
+                    &Default::default(),
+                    options.query.clone(),
+                    &mut stage,
+                    &mut allow_work,
+                ))
+        } else {
+            node.runtime()
+                .block_on(node.export_full_git_bundle_stream_controlled_in(
+                    &request,
+                    &Default::default(),
+                    options.query.clone(),
+                    &mut stage,
+                    &mut allow_work,
+                ))
+        };
+        exported.map_err(|error| error.to_string())
     })();
     // Every successfully opened node closes, including after failed reads.
     let shutdown = node.shutdown().map_err(|error| error.to_string());
@@ -285,8 +317,22 @@ fn write_receipt(
     report: &SelectedStreamBundleExport,
 ) -> Result<(), String> {
     let receipt = report.receipt();
+    let (kind, incremental_fields) = if let Some(selection) = &options.incremental {
+        (
+            "git_bundle_incremental_export",
+            format!(
+                ",\"reference_count\":{},\"prerequisite_count\":{},\"external_object_count\":{}",
+                selection.references.len(),
+                receipt.prerequisite_count(),
+                receipt.external_object_count(),
+            ),
+        )
+    } else {
+        ("git_bundle_export", String::new())
+    };
     let line = format!(
-        "{{\"type\":\"git_bundle_export\",\"schema_version\":1,\"streaming\":true,\"profile\":{},\"source_head\":{},\"source_generation\":{},\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"object_count\":{},\"total_object_bytes\":{},\"pack_checksum\":{},\"pack_bytes\":{},\"header_bytes\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"compression_work\":{},\"publication_state\":\"durable\",\"bundle_created\":true,\"node_closed\":true,\"repository_changed\":false,\"includes_forge_metadata\":false}}",
+        "{{\"type\":{},\"schema_version\":1,\"streaming\":true,\"profile\":{},\"source_head\":{},\"source_generation\":{},\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"object_count\":{},\"total_object_bytes\":{},\"pack_checksum\":{},\"pack_bytes\":{},\"header_bytes\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"compression_work\":{},\"publication_state\":\"durable\",\"bundle_created\":true,\"node_closed\":true,\"repository_changed\":false,\"includes_forge_metadata\":false{incremental_fields}}}",
+        quote(kind),
         quote(receipt.profile_id()),
         quote(&report.head().to_string()),
         report.generation().get(),
