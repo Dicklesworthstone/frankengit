@@ -133,10 +133,17 @@ SSH identification, authentication and command selection have the pre-command
 60-second idle ceiling and the accepted session's absolute deadline. Once a Git
 command is authorized, I/O uses the remaining absolute session budget, without a
 60-second idle ceiling. Git data delivered to the native reader can earn the
-configured finite work extension; SSH control packets and window traffic do not
-restart or extend it. The native terminal writer can install its separate
-response deadline after admission. This permits legitimate quiet pack generation
-while bounding silent peers, control traffic and blocked channel windows.
+configured finite work extension. For upload-pack, the exact selected expanded
+bytes earn their bounded allowance after disclosure, filtering and size checks,
+before body reads. Ingress and selected work share the same extension cap;
+repeating a selection cannot add duplicate credit. Transfer poll/cost quotas
+remain unchanged. SSH control packets and window traffic do not earn work time.
+The native terminal writer can install its separate response deadline after
+receive admission or for one terminal upload refusal. A refused upload's
+response phase permits bounded window-control reads needed to send its error;
+it does not reopen Git input, handshake I/O, or expired pack work. This permits
+legitimate quiet pack generation while bounding silent peers, control traffic
+and blocked channel windows.
 
 A stop-file inspection interval of 50 ms is a polling interval, not a guarantee
 about filesystem latency or scheduler delay. The drain envelope depends on the

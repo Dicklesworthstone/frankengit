@@ -175,7 +175,7 @@ impl SshConnectionState {
     }
 
     fn flush_outgoing(&mut self) -> io::Result<()> {
-        self.deadline.remaining()?;
+        self.deadline.remaining_write()?;
         let out = self.session.take_outgoing_bytes();
         deadline::write_all(&mut self.stream, &self.deadline, &out)
     }
@@ -183,12 +183,15 @@ impl SshConnectionState {
     /// Reads one burst from the client and feeds it to the session. A socket
     /// read timeout is idleness, not a transient condition: it ends the
     /// session instead of spinning.
-    fn pump_incoming(&mut self) -> io::Result<usize> {
+    fn pump_incoming(
+        &mut self,
+        read: fn(&mut TcpStream, &GitDaemonSessionDeadline, &mut [u8]) -> io::Result<usize>,
+    ) -> io::Result<usize> {
         // Anything queued (such as a receive-window adjustment) must reach the
         // client before we block waiting for it to send more.
         self.flush_outgoing()?;
         let mut wire_buf = [0u8; 16384];
-        let n = match deadline::read(&mut self.stream, &self.deadline, &mut wire_buf) {
+        let n = match read(&mut self.stream, &self.deadline, &mut wire_buf) {
             Ok(n) => n,
             Err(source)
                 if matches!(
@@ -246,7 +249,7 @@ impl SshConnectionState {
                 return Ok(0);
             }
 
-            if self.pump_incoming()? == 0 {
+            if self.pump_incoming(deadline::read)? == 0 {
                 return Ok(0);
             }
 
@@ -265,7 +268,7 @@ impl SshConnectionState {
     fn write_channel(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut written = 0;
         while written < buf.len() {
-            self.deadline.remaining()?;
+            self.deadline.remaining_write()?;
             let accepted = self.session.send_channel_data(&buf[written..]);
             written += accepted;
             self.flush_outgoing()?;
@@ -279,7 +282,10 @@ impl SshConnectionState {
                         "ssh channel closed while output was pending",
                     ));
                 }
-                if self.pump_incoming()? == 0 {
+                // A terminal diagnostic can still need a window adjustment.
+                // This bounded control read never delivers queued Git input
+                // to the parser, whose original work deadline stays expired.
+                if self.pump_incoming(deadline::read_for_write)? == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         "ssh client disconnected while its channel window was exhausted",
@@ -893,20 +899,24 @@ impl OneNode {
                             }
                         }
                     };
-                    self.materialize_selected_pack_in_scope(
+                    self.prepare_upload_pack_selection(
                         &materialized,
-                        disclosure
-                            .closure_for(&materialized)
-                            .map_err(crate::GitDaemonServeError::Pack)?,
-                        Some((&disclosure, pack_request)),
-                        Some(&pack_request.wants),
-                        &pack_request.haves,
-                        crate::selected_fetch_write_profile(pack_request),
-                        request.authority(),
-                        &database_exhaustion,
-                        Some(&session_is_live),
+                        &disclosure,
+                        pack_request,
+                        deadline,
+                        &pack_context,
                         &mut is_live,
                     )
+                    .and_then(|prepared| {
+                        self.materialize_prepared_upload_pack(
+                            &materialized,
+                            &prepared,
+                            request.authority(),
+                            &database_exhaustion,
+                            Some(&session_is_live),
+                            &mut is_live,
+                        )
+                    })
                 };
 
                 if deadline.expired() || session_deadline_expired.get() {
@@ -996,6 +1006,8 @@ fn ssh_git_service(
 mod authorization_tests;
 #[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+mod upload_deadline_tests;
 
 #[cfg(test)]
 mod tests {

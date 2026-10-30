@@ -9,9 +9,10 @@ use super::{
     BTreeSet, BudgetClass, Cell, GitDaemonSessionDeadline, GitHashAlgorithm, GitOid,
     MaterializedAdmission, NodeAdmissionViewRefusal, NodeGitDaemonServeRefusal,
     NodePackMaterializationRefusal, NodeRequestContext, ObjectType, OneNode, PackError, PackLimits,
-    PackRequest, PackWriteError, ParseLimits, PermittedClosureTraversalSource,
+    PackOrderKey, PackRequest, PackWriteError, ParseLimits, PermittedClosureTraversalSource,
     PermittedObjectClosure, PublicationBasis, RefusalCode, UploadPackRepository,
     VerifiedFabricPackSource, WireError, WireLimits, entry_limit_error, parse_object_body,
+    selected_pack_ids_and_held,
 };
 #[cfg(test)]
 use super::{
@@ -24,10 +25,11 @@ use super::{
     SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, TcpListener, TcpStream, TenantId,
     UploadPackVersion, V2UploadPack, ValidatedClosure, VerifiedFabricBlobReader,
     crypto_object_kind, encode_packets, git_object_id, permitted_object_closure_root,
-    selected_pack_ids_and_held, validate_source_import,
+    validate_source_import,
 };
 #[cfg(test)]
 use super::{CanonicalBlobReader, PackPayloadSource};
+use std::cell::RefCell;
 mod partial_clone;
 pub(crate) use partial_clone::unserved_filter_name;
 pub mod shallow;
@@ -52,6 +54,86 @@ pub struct VisibleUploadPack {
 }
 
 impl VisibleUploadPack {
+    /// Selects once over the verified graph, then counts only the final pack's
+    /// exact object bytes. No object-fabric body is read by this preparation.
+    pub(super) fn prepare_selection(
+        &self,
+        request: &PackRequest,
+        limits: &PackLimits,
+        buffered_object_bytes: usize,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<PackOrderKey>, BTreeSet<GitOid>, usize), NodePackMaterializationRefusal> {
+        let (mut ids, held) = if shallow::requested(request) {
+            (Vec::new(), BTreeSet::new())
+        } else {
+            let source = PreparedGraphSelection {
+                format: self.repository.object_format,
+                objects: &self.objects,
+                live: RefCell::new(&mut *live),
+            };
+            selected_pack_ids_and_held(
+                &source,
+                &self.closure,
+                Some(&request.wants),
+                &request.haves,
+                limits,
+            )?
+        };
+        self.select_partial(&mut ids, request, limits, live)?;
+        if request.options.include_tag() {
+            self.tags.extend_selected(&mut ids, limits, live)?;
+        }
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(ids.len()).map_err(|_| {
+            PackWriteError::from(PackError::AllocationFailed {
+                requested: ids.len(),
+            })
+        })?;
+        let mut expanded_bytes = 0_usize;
+        for id in ids {
+            if !live() {
+                return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+            }
+            let object = self
+                .objects
+                .get(&id)
+                .ok_or(PackWriteError::MissingCanonicalObject(id))?;
+            let maximum_object_bytes = if object.kind == ObjectType::Blob {
+                limits.max_object_bytes
+            } else {
+                buffered_object_bytes
+            };
+            if object.size > maximum_object_bytes {
+                return Err(PackWriteError::from(PackError::ObjectSizeLimit {
+                    actual: object.size,
+                    limit: maximum_object_bytes,
+                })
+                .into());
+            }
+            expanded_bytes = expanded_bytes.checked_add(object.size).ok_or_else(|| {
+                PackWriteError::from(PackError::IntegerOverflow {
+                    context: "selected upload expanded bytes",
+                })
+            })?;
+            keys.push(PackOrderKey {
+                id,
+                object_type: object.kind,
+                recency: 0,
+                path_hash: 0,
+            });
+        }
+        // Complete the bounded metadata pass so the refusal reports the actual
+        // selected total, rather than the first object that crosses the limit.
+        if expanded_bytes > limits.max_total_expanded_bytes {
+            return Err(PackWriteError::from(PackError::TotalExpandedLimit {
+                actual: expanded_bytes,
+                limit: limits.max_total_expanded_bytes,
+            })
+            .into());
+        }
+        Ok((keys, held, expanded_bytes))
+    }
+
     pub(super) fn select_partial(
         &self,
         ids: &mut Vec<GitOid>,
@@ -103,6 +185,37 @@ impl VisibleUploadPack {
             return Err(disclosure_refusal(RefusalCode::AuthorityReceiptStale));
         }
         Ok(&self.closure)
+    }
+}
+
+/// The disclosure graph is already verified. Preflight needs its edges and a
+/// Transfer checkpoint, never a body-capable fabric source.
+struct PreparedGraphSelection<'a, F> {
+    format: GitHashAlgorithm,
+    objects: &'a BTreeMap<GitOid, partial_clone::FilterObject>,
+    live: RefCell<&'a mut F>,
+}
+
+impl<F: FnMut() -> bool> PermittedClosureTraversalSource for PreparedGraphSelection<'_, F> {
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.format
+    }
+
+    fn selection_checkpoint(&self) -> Result<(), PackWriteError> {
+        if (self.live.borrow_mut())() {
+            Ok(())
+        } else {
+            Err(PackError::DeadlineExceeded.into())
+        }
+    }
+
+    fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+        self.selection_checkpoint()?;
+        let object = self
+            .objects
+            .get(id)
+            .ok_or(PackWriteError::MissingCanonicalObject(*id))?;
+        Ok(object.edges.iter().map(|(child, _)| *child).collect())
     }
 }
 

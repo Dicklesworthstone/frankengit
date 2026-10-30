@@ -42,7 +42,6 @@ use super::{
     NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, NodeReceiveTransportRefusal,
     OneNode, PackContextCheckpoint, ProductionReceiveQuarantineHandoff, SELECTED_PACK_BUDGET_CLASS,
     SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context, git_daemon_capabilities,
-    selected_fetch_write_profile,
 };
 
 /// Complete successful Smart HTTP discovery response.
@@ -740,18 +739,24 @@ impl OneNode {
                             }
                         }
                     };
-                    self.materialize_selected_pack_in_scope(
+                    self.prepare_upload_pack_selection(
                         &materialized,
-                        disclosure.closure_for(&materialized)?,
-                        Some((&disclosure, pack_request)),
-                        Some(&pack_request.wants),
-                        &pack_request.haves,
-                        selected_fetch_write_profile(pack_request),
-                        node_request.authority(),
-                        &database_exhaustion,
-                        Some(&session_is_live),
+                        &disclosure,
+                        pack_request,
+                        &deadline,
+                        &pack_context,
                         &mut is_live,
                     )
+                    .and_then(|prepared| {
+                        self.materialize_prepared_upload_pack(
+                            &materialized,
+                            &prepared,
+                            node_request.authority(),
+                            &database_exhaustion,
+                            Some(&session_is_live),
+                            &mut is_live,
+                        )
+                    })
                 };
                 if deadline.expired() || session_deadline_expired.get() {
                     return Err(NodeGitDaemonServeRefusal::from(

@@ -500,6 +500,16 @@ Non-canonical replicas use conflict-absorbing lattices. Canonical refs/order are
 
 ATP-Git is a separate FrankenGit-native capability, not a reinterpretation of Git protocol v2.
 
+Network upload-pack selected-work admission MUST use the exact authenticated
+disclosure basis and the final want/have, shallow, filter and tag selection.
+It MUST check complete expanded bytes and per-object serving limits before
+reading selected bodies, then materialize that same private selection. Work
+credit MUST stay within the operator's finite extension cap, MUST NOT compound
+on repeated selection, and MUST NOT revive cancellation or exhausted work.
+Adjusting the Transfer wall clock MUST preserve remaining poll/cost quotas and
+priority. Any separate terminal-write allowance MUST be finite and one-shot;
+it MUST NOT authorize further Git input, pack work, disclosure or publication.
+
 ### 16.2 Quarantine
 
 Incoming bytes remain transaction-scoped and non-retained until bounded validation covers:

@@ -124,8 +124,18 @@ by the fabric's stored-file and envelope profiles and verify namespace, OID,
 kind and exact stored length. Commit, tree, tag and untyped ref-root bodies
 retain their existing parsing limits. Filtering changes no retention root.
 
-A request whose pack exceeds the envelope is refused after the advertisement,
-on the side band. git prints it and then stops, for example under
+After negotiation, Git, SSH and HTTP prepare the exact requested object set
+from the verified visible graph before reading its bodies (frankengit-1tl9).
+Want/have subtraction, shallow boundaries, filters, explicit lazy wants and
+include-tag handling all run before the aggregate and per-object checks.
+The same private selection drives pack construction. A refused request earns
+no extra work time, and a filtered fetch earns none from objects it omits.
+Blob bodies still require complete native and fabric verification before any
+completed pack is sent.
+
+A request whose pack exceeds the envelope is refused after the advertisement.
+Git and SSH report it on the negotiated Fatal side band, even for quiet clients.
+git prints it and then stops, for example under
 `--pack-max-expanded-mib 128`:
 
 ```text
@@ -133,8 +143,30 @@ remote: pack needs 134217845 bytes of objects, over this server's upload envelop
 fatal: early EOF
 ```
 
-The first figure is where the writer crossed the limit, not the full pack
-size.
+This historical example reported the running total where the writer crossed
+the limit. Network preflight now reports the complete selected expanded total;
+it does not need to read the selected blob bodies to discover that refusal.
+
+An admitted selection also earns a finite work allowance from its expanded
+bytes. The work clock is the original base plus
+`min((admitted_client_bytes + selected_expanded_bytes) * per_byte, max_extension)`.
+The existing session flags select the base, rate and cap. Repeating a selection
+does not accumulate duplicate credit; the largest admitted selection and
+ingress share one cap. The Transfer context keeps its remaining poll/cost
+quotas and priority. A stopped, cancelled or expired context cannot be revived,
+and flat scaling still has no extension. Successful preflight does not remove
+the pack-output, compression-work, memory-window or storage limits.
+
+A selected-pack work timeout or build refusal has one fresh, finite terminal
+write allowance on Git and SSH, bounded by the configured base session timeout.
+It can deliver the diagnostic after computation expires without reopening Git
+input or computation. SSH can accept the control packets needed to drain that
+write window within the same allowance; retries do not restart it. HTTP already
+starts a separate finite response phase at its first write.
+
+These changes address late limit discovery and the clone work-clock mismatch.
+They do not make cold clones reuse stored pack representations or establish a
+new throughput/RSS result for the original large repository in frankengit-1tl9.
 
 For selected-pack failures after negotiation, Smart HTTP sends one bounded Git
 ERR packet in an HTTP 200 upload-pack response. This covers the selected-object,

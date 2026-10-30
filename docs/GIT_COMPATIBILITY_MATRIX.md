@@ -397,6 +397,18 @@ naming the limit (diagnosable, not an unexplained early EOF); without
 sideband the connection ends as in upstream mid-service failure. `fg export`
 prints the typed refusal directly.
 
+For network upload-pack, the verified visible graph now supplies an exact
+preflight after wants, haves, shallow boundaries, filters and tag inclusion.
+The complete selected expanded size and each selected object's serving limit
+are checked before body reads. That prepared selection also drives the writer,
+which still verifies the selected bodies before exposing its completed pack.
+Successful selection earns time using the existing rate and hard extension
+cap, shared with client ingress; repeated selection does not accumulate credit.
+The Transfer context preserves its remaining poll/cost quotas and priority,
+and expired or cancelled contexts earn no extension. Flat scaling stays flat.
+Git and SSH have a one-shot finite terminal-write phase for selected-pack
+refusals, including work expiry, without reopening input or computation.
+
 Smart HTTP selected-pack resource refusals use a bounded Git ERR packet inside
 HTTP 200, before any negotiation or pack bytes, so v0/v2 and quiet clients can
 read the cause. Only public size/output/window limits, named runtime exhaustion

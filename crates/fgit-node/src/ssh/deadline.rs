@@ -1,7 +1,10 @@
-//! Socket I/O bounded by one accepted or native response-phase deadline.
+//! Socket I/O bounded by accepted work or a terminal response phase.
 //!
-//! SSH wire/control bytes never purchase Git ingress time. Only bytes delivered
-//! by SshReader to the native Git parser are charged to its work allowance.
+//! SSH wire/control bytes never purchase work time. Only bytes delivered by
+//! SshReader count as Git ingress; the native upload coordinator separately
+//! charges verified selected-pack work.
+//! Control reads needed to drain a terminal write may use its separate allowance;
+//! they never reopen the Git reader or its computation deadline.
 
 use super::{GitDaemonSessionDeadline, Read, TcpStream, Write, io};
 use std::time::Duration;
@@ -13,7 +16,17 @@ pub(super) fn read(
     deadline: &GitDaemonSessionDeadline,
     buf: &mut [u8],
 ) -> io::Result<usize> {
-    read_with_idle_limit(stream, deadline, buf, None)
+    read_with_idle_limit(stream, || deadline.remaining(), buf, None)
+}
+
+/// Reads only for an outstanding channel write, which may require a peer's
+/// window adjustment after Git work has already reached a terminal result.
+pub(super) fn read_for_write(
+    stream: &mut TcpStream,
+    deadline: &GitDaemonSessionDeadline,
+    buf: &mut [u8],
+) -> io::Result<usize> {
+    read_with_idle_limit(stream, || deadline.remaining_write(), buf, None)
 }
 
 pub(super) fn read_handshake(
@@ -21,12 +34,12 @@ pub(super) fn read_handshake(
     deadline: &GitDaemonSessionDeadline,
     buf: &mut [u8],
 ) -> io::Result<usize> {
-    read_with_idle_limit(stream, deadline, buf, Some(HANDSHAKE_IDLE))
+    read_with_idle_limit(stream, || deadline.remaining(), buf, Some(HANDSHAKE_IDLE))
 }
 
 fn read_with_idle_limit(
     stream: &mut TcpStream,
-    deadline: &GitDaemonSessionDeadline,
+    remaining: impl Fn() -> io::Result<Duration>,
     buf: &mut [u8],
     idle: Option<Duration>,
 ) -> io::Result<usize> {
@@ -34,12 +47,12 @@ fn read_with_idle_limit(
         return Ok(0);
     }
     loop {
-        let remaining = deadline.remaining()?;
-        stream.set_read_timeout(Some(idle.map_or(remaining, |limit| remaining.min(limit))))?;
+        let allowance = remaining()?;
+        stream.set_read_timeout(Some(idle.map_or(allowance, |limit| allowance.min(limit))))?;
         match stream.read(buf) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => {
-                deadline.remaining()?;
+                remaining()?;
                 return result;
             }
         }
@@ -51,7 +64,7 @@ pub(super) fn write_all(
     deadline: &GitDaemonSessionDeadline,
     bytes: &[u8],
 ) -> io::Result<()> {
-    write_all_with_idle_limit(stream, deadline, bytes, None)
+    write_all_with_idle_limit(stream, || deadline.remaining_write(), bytes, None)
 }
 
 pub(super) fn write_all_handshake(
@@ -59,18 +72,18 @@ pub(super) fn write_all_handshake(
     deadline: &GitDaemonSessionDeadline,
     bytes: &[u8],
 ) -> io::Result<()> {
-    write_all_with_idle_limit(stream, deadline, bytes, Some(HANDSHAKE_IDLE))
+    write_all_with_idle_limit(stream, || deadline.remaining(), bytes, Some(HANDSHAKE_IDLE))
 }
 
 fn write_all_with_idle_limit(
     stream: &mut TcpStream,
-    deadline: &GitDaemonSessionDeadline,
+    remaining: impl Fn() -> io::Result<Duration>,
     mut bytes: &[u8],
     idle: Option<Duration>,
 ) -> io::Result<()> {
     while !bytes.is_empty() {
-        let remaining = deadline.remaining()?;
-        stream.set_write_timeout(Some(idle.map_or(remaining, |limit| remaining.min(limit))))?;
+        let allowance = remaining()?;
+        stream.set_write_timeout(Some(idle.map_or(allowance, |limit| allowance.min(limit))))?;
         match stream.write(bytes) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -83,10 +96,10 @@ fn write_all_with_idle_limit(
             Err(error) => return Err(error),
         }
     }
-    let remaining = deadline.remaining()?;
-    stream.set_write_timeout(Some(idle.map_or(remaining, |limit| remaining.min(limit))))?;
+    let allowance = remaining()?;
+    stream.set_write_timeout(Some(idle.map_or(allowance, |limit| allowance.min(limit))))?;
     stream.flush()?;
-    deadline.remaining()?;
+    remaining()?;
     Ok(())
 }
 
@@ -211,5 +224,76 @@ mod tests {
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
         ));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn terminal_writes_and_window_control_do_not_reopen_git_reads_or_handshake() {
+        let (mut client, mut server) = pair();
+        let mut deadline = budget(Duration::from_secs(5));
+        deadline.started = Instant::now() - Duration::from_secs(10);
+        let work = deadline.clone();
+        deadline.begin_terminal_response();
+        client.write_all(b"window").unwrap();
+        let mut input = [0u8; 6];
+        assert_eq!(
+            read(&mut server, &deadline, &mut input).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            read_handshake(&mut server, &deadline, &mut input)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            write_all_handshake(&mut server, &deadline, b"handshake")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+
+        let mut received = 0;
+        while received < input.len() {
+            let n = read_for_write(&mut server, &deadline, &mut input[received..]).unwrap();
+            assert_ne!(n, 0);
+            received += n;
+        }
+        assert_eq!(&input, b"window");
+        write_all(&mut server, &deadline, b"fatal").unwrap();
+        let mut output = [0u8; 5];
+        client.read_exact(&mut output).unwrap();
+        assert_eq!(&output, b"fatal");
+        assert!(work.expired(), "terminal writes must not resume pack work");
+        assert_eq!(deadline.shared.admitted_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_silent_terminal_window_wait_has_its_own_finite_bound() {
+        let (_client, mut server) = pair();
+        let mut deadline = budget(Duration::from_millis(40));
+        deadline.started = Instant::now() - Duration::from_secs(1);
+        deadline.begin_terminal_response();
+        let started = Instant::now();
+        let error = read_for_write(&mut server, &deadline, &mut [0u8; 1]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(deadline.expired());
+        let remaining = deadline.remaining_write();
+        deadline.begin_terminal_response();
+        match remaining {
+            Ok(before) => assert!(
+                deadline
+                    .remaining_write()
+                    .map_or(true, |after| after <= before),
+                "a repeated report must not extend its write allowance"
+            ),
+            Err(_) => assert!(
+                deadline.remaining_write().is_err(),
+                "a repeated report must not restart its write allowance"
+            ),
+        }
     }
 }

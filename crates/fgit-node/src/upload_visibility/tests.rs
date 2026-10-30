@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+mod selection_preflight;
 mod shallow_transport;
 use std::io::{Read, Write};
 

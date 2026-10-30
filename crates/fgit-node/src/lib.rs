@@ -32,7 +32,7 @@ use std::mem::size_of;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use fgit_admission::evidence::{
@@ -978,6 +978,19 @@ pub struct AuthoritySelectedPackPayload {
     closure: AuthoritySelectedClosure,
     receipt: PackWriteReceipt,
     pack: pack_spool::SpooledPack,
+}
+
+/// An exact-head upload selection whose count, individual object sizes, and
+/// expanded total passed the configured envelope before any body was loaded.
+/// Private fields prevent callers from substituting wants after work admission.
+#[derive(Debug)]
+struct PreparedUploadPack {
+    basis: PublicationBasis,
+    request: PackRequest,
+    keys: Vec<PackOrderKey>,
+    held: BTreeSet<GitOid>,
+    limits: PackLimits,
+    write_profile: PackWriteProfile,
 }
 
 impl AuthoritySelectedPackPayload {
@@ -5284,20 +5297,21 @@ impl Error for GitDaemonReceiveProcessingTimeoutRefusal {}
 
 /// Work-proportional extension of one git-daemon session envelope.
 ///
-/// The session budget is `base + min(admitted_bytes * per_byte, max_extension)`,
-/// where `admitted_bytes` counts every byte received from the client on this
-/// connection.  A fixed wall-clock deadline caps a legitimate large first push
+/// The session budget is `base + min(work_bytes * per_byte, max_extension)`.
+/// Work counts received client bytes and the exact expanded bytes of an
+/// upload selection that passed disclosure, filtering, and pack limits. A
+/// repeated selection does not accumulate credit. A fixed deadline caps a large first push
 /// at whatever the host's seal throughput happens to be (frankengit-asb8), so
-/// the envelope instead charges time against admitted work: holding a session
-/// open past the base requires having delivered
+/// the ingress envelope instead charges time against admitted work: holding a
+/// push's ingress open past the base requires having delivered
 /// `(elapsed - base) / per_byte` bytes, which is a sustained minimum-rate
 /// policy rather than an idle-timeout loophole.  The hard `max_extension`
 /// ceiling keeps the envelope finite regardless of admitted bytes.
 ///
 /// A zero `per_byte` selects the flat envelope: the session is bounded by the
 /// base timeout alone, exactly as before this knob existed.  The compatibility
-/// default scales, so an ordinary large push is bounded by its own size rather
-/// than by one fixed 300 s value.
+/// default scales, so large pushes and selected clone/fetch work are bounded
+/// by their admitted size instead of one fixed 300 s value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GitDaemonSessionWorkScaling {
     per_byte: Duration,
@@ -5532,10 +5546,9 @@ impl Error for NodeGitDaemonServerRefusal {
 /// The deadline is shared by the read and write halves. Each socket operation
 /// installs only the remaining duration, so a peer cannot turn an idle timeout
 /// into an unbounded session by periodically sending a single byte. The budget
-/// itself scales with admitted client bytes (see [`GitDaemonSessionWorkScaling`]),
-/// so a large-but-legitimate push is bounded by its own work rather than by
-/// one fixed wall-clock value, while a peer that stops delivering bytes still
-/// reaches the same deadline.
+/// itself scales with admitted client bytes and a preflighted upload selection
+/// (see [`GitDaemonSessionWorkScaling`]). A clone's small negotiation request
+/// therefore does not confine a large selected pack to the base timeout.
 ///
 /// Receive processing and the terminal report each select a fresh finite
 /// deadline after ingress completes. Neither reopens this ingress clock.
@@ -5553,6 +5566,11 @@ struct GitDaemonSessionDeadline {
 struct GitDaemonSessionDeadlineShared {
     /// Every byte received from the client on this connection.
     admitted_bytes: AtomicU64,
+    /// Exact expanded bytes of the admitted upload selection. Repeating the
+    /// same preparation cannot accumulate another extension.
+    selected_upload_bytes: AtomicU64,
+    /// One finite terminal-write phase, independent of the expired work clock.
+    terminal_response: OnceLock<Instant>,
 }
 
 impl GitDaemonSessionDeadline {
@@ -5563,24 +5581,43 @@ impl GitDaemonSessionDeadline {
             scaling,
             shared: Arc::new(GitDaemonSessionDeadlineShared {
                 admitted_bytes: AtomicU64::new(0),
+                selected_upload_bytes: AtomicU64::new(0),
+                terminal_response: OnceLock::new(),
             }),
         }
     }
 
     /// Charges bytes received from the client to the work-scaled envelope.
     fn note_admitted(&self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let _ = self.shared.admitted_bytes.try_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |admitted| Some(admitted.saturating_add(bytes)),
+        );
+    }
+
+    /// Grants time only for a fully selected, visible, in-envelope pack while
+    /// its original work clock is still live. This never revives a timeout or
+    /// a session already reporting its terminal result.
+    fn note_selected_upload_work(&self, bytes: usize) -> bool {
+        if self.shared.terminal_response.get().is_some() || self.expired() {
+            return false;
+        }
         self.shared
-            .admitted_bytes
-            .fetch_add(bytes as u64, Ordering::Relaxed);
+            .selected_upload_bytes
+            .fetch_max(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+        true
     }
 
     /// The current total session budget: base plus the extension earned by
-    /// admitted client bytes (clamped to the configured ceiling).
+    /// admitted client bytes and selected upload work, sharing one hard ceiling.
     fn budget(&self) -> Duration {
         let admitted = self.shared.admitted_bytes.load(Ordering::Relaxed);
+        let selected = self.shared.selected_upload_bytes.load(Ordering::Relaxed);
         self.timeout
             .duration()
-            .saturating_add(self.scaling.extension(admitted))
+            .saturating_add(self.scaling.extension(admitted.saturating_add(selected)))
     }
 
     fn remaining(&self) -> io::Result<Duration> {
@@ -5596,6 +5633,29 @@ impl GitDaemonSessionDeadline {
 
     fn expired(&self) -> bool {
         self.remaining().is_err()
+    }
+
+    /// Starts at most one bounded attempt to report a terminal upload refusal.
+    /// Reads, pack computation, and work admission keep the original clock.
+    fn begin_terminal_response(&self) {
+        self.shared.terminal_response.get_or_init(|| {
+            let now = Instant::now();
+            now.checked_add(self.timeout.duration()).unwrap_or(now)
+        });
+    }
+
+    fn remaining_write(&self) -> io::Result<Duration> {
+        let Some(deadline) = self.shared.terminal_response.get() else {
+            return self.remaining();
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "git-daemon terminal response deadline elapsed",
+            ));
+        }
+        Ok(remaining)
     }
 
     fn check(&self, operation: &'static str) -> Result<(), GitDaemonTransportRefusal> {
@@ -5871,7 +5931,7 @@ impl<'stream> DeadlineTcpStream<'stream> {
 
     fn prepare_write(&self) -> io::Result<()> {
         self.stream
-            .set_write_timeout(Some(self.deadline.remaining()?))
+            .set_write_timeout(Some(self.deadline.remaining_write()?))
     }
 }
 
@@ -5994,7 +6054,9 @@ impl Display for GitDaemonTransportRefusal {
             Self::SessionDeadlineExceeded { operation } => {
                 write!(
                     formatter,
-                    "git-daemon session deadline exceeded while {operation}"
+                    "git-daemon session deadline exceeded while {operation}; the operator can \
+                     adjust --session-timeout-secs, --session-secs-per-mib, and \
+                     --session-max-extension-secs"
                 )
             }
             Self::InvalidGreetingLength => {
@@ -6493,19 +6555,24 @@ where
                     GitDaemonTransportRefusal::IncompleteNegotiation,
                 ));
             }
-            check_session_deadline(session_deadline, "build selected git pack")
+            check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
                 .map_err(GitDaemonServeError::Transport)?;
             let mut payload = match build_pack(&request, &pack_request) {
                 Ok(payload) => payload,
                 Err(error) => {
                     // A pack-build refusal is reported to a sideband-
                     // negotiated client before the session ends (e6jj).
-                    let _ =
-                        emit_pack_build_refusal(writer, &pack_request, &error.to_string(), &limits);
+                    let _ = emit_terminal_pack_refusal(
+                        writer,
+                        &pack_request,
+                        &error.to_string(),
+                        &limits,
+                        session_deadline,
+                    );
                     return Err(error);
                 }
             };
-            check_session_deadline(session_deadline, "build selected git pack")
+            check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
                 .map_err(GitDaemonServeError::Transport)?;
             emit_pack_payload(
                 writer,
@@ -6629,22 +6696,23 @@ where
                     ls_refs_completed = true;
                 }
                 WireEvent::PackRequested(pack_request) => {
-                    check_session_deadline(session_deadline, "build selected git pack")
+                    check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
                         .map_err(GitDaemonServeError::Transport)?;
                     let mut payload = match build_pack(&request, &pack_request) {
                         Ok(payload) => payload,
                         Err(error) => {
                             // Same sideband Fatal surfacing as the v1 lane.
-                            let _ = emit_pack_build_refusal(
+                            let _ = emit_terminal_pack_refusal(
                                 writer,
                                 &pack_request,
                                 &error.to_string(),
                                 &limits,
+                                session_deadline,
                             );
                             return Err(error);
                         }
                     };
-                    check_session_deadline(session_deadline, "build selected git pack")
+                    check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
                         .map_err(GitDaemonServeError::Transport)?;
                     emit_pack_payload(
                         writer,
@@ -7172,6 +7240,34 @@ fn refuse_unserved_filter(
     Some(GitDaemonTransportRefusal::UnservedFilter { filter })
 }
 
+fn check_selected_pack_deadline(
+    writer: &mut impl Write,
+    request: &PackRequest,
+    limits: &WireLimits,
+    deadline: Option<&GitDaemonSessionDeadline>,
+) -> Result<(), GitDaemonTransportRefusal> {
+    if let Err(error) = check_session_deadline(deadline, "build selected git pack") {
+        let _ = emit_terminal_pack_refusal(writer, request, &error.to_string(), limits, deadline);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// A terminal error gets its own finite write attempt even when work timed
+/// out. This cannot reopen Git reads or resume pack computation.
+fn emit_terminal_pack_refusal(
+    writer: &mut impl Write,
+    request: &PackRequest,
+    message: &str,
+    limits: &WireLimits,
+    deadline: Option<&GitDaemonSessionDeadline>,
+) -> Result<(), GitDaemonTransportRefusal> {
+    if let Some(deadline) = deadline {
+        deadline.begin_terminal_response();
+    }
+    emit_pack_build_refusal(writer, request, message, limits)
+}
+
 /// Surfaces a selected-pack build refusal to a sideband-negotiated client as
 /// one Fatal sideband message before the session ends, so an over-envelope or
 /// budget-exhausted build is diagnosable (the client prints the band-3 text)
@@ -7664,9 +7760,9 @@ impl NodeConfig {
     }
 
     /// Selects the work-proportional extension of the git-daemon session
-    /// envelope (frankengit-asb8). The default scales with admitted client
-    /// bytes; [`GitDaemonSessionWorkScaling::FLAT`] restores the legacy fixed
-    /// wall-clock bound.
+    /// envelope (frankengit-asb8, frankengit-1tl9). The default scales with
+    /// admitted client bytes and an exact, preflighted upload selection;
+    /// [`GitDaemonSessionWorkScaling::FLAT`] keeps a fixed wall-clock bound.
     #[must_use]
     pub const fn with_git_daemon_session_work_scaling(
         mut self,
@@ -7702,10 +7798,8 @@ impl NodeConfig {
         if let Some(bytes) = max_expanded_bytes {
             self.git_daemon_receive_limits.pack.max_total_expanded_bytes = bytes;
             self.git_daemon_receive_limits.pack.max_cached_bytes = bytes;
-            self.git_daemon_receive_limits.pack.max_delta_work = receive_delta_work_limit(
-                bytes,
-                self.git_daemon_receive_limits.pack.max_entries,
-            );
+            self.git_daemon_receive_limits.pack.max_delta_work =
+                receive_delta_work_limit(bytes, self.git_daemon_receive_limits.pack.max_entries);
         }
         self
     }
@@ -8643,8 +8737,8 @@ impl OneNode {
     /// wall clock is what remains of the session's own budget: an operator who
     /// sets `--session-timeout-secs` for large repositories must not have every
     /// clone cut at the Transfer class's fixed 300 s regardless (a 200 MB SSH
-    /// clone failed exactly there, x2mv.4.4). The default session timeout
-    /// equals the class default, so default deployments are unchanged.
+    /// clone failed exactly there, x2mv.4.4). A successful exact-selection
+    /// preflight can extend this clock while preserving its remaining quotas.
     fn session_pack_materialization_context(
         &self,
         deadline: &GitDaemonSessionDeadline,
@@ -8662,6 +8756,76 @@ impl OneNode {
                 .request_cx_with_budget(limits.at(self.runtime.now())),
         );
         context
+    }
+
+    /// Selected work may lengthen only the wall clock of the existing Transfer
+    /// context. Preserve its remaining quotas and priority, and refuse to
+    /// replace any context that has already stopped.
+    fn rearm_session_pack_materialization_context(
+        &self,
+        context: &FsqliteCx,
+        deadline: &GitDaemonSessionDeadline,
+        selected_bytes: usize,
+    ) -> Result<(), NodePackMaterializationRefusal> {
+        match checkpoint_pack_context(context) {
+            PackContextCheckpoint::Live => {}
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(dimension),
+            } => {
+                return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+                    class: SELECTED_PACK_BUDGET_CLASS,
+                    dimension,
+                    operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                });
+            }
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: None,
+            } => {
+                return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+            }
+        }
+        let Some(native) = context.attached_native_cx() else {
+            return if deadline.note_selected_upload_work(selected_bytes) {
+                Ok(())
+            } else {
+                Err(PackWriteError::from(PackError::DeadlineExceeded).into())
+            };
+        };
+        let budget = native.budget();
+        let left = budget.remaining(self.runtime.now());
+        let exhausted = if left.deadline.is_some_and(|left| left.is_zero()) {
+            Some(Exhaustion::Deadline)
+        } else if left.polls == Some(0) {
+            Some(Exhaustion::PollQuota)
+        } else if left.cost == Some(0) {
+            Some(Exhaustion::CostQuota)
+        } else {
+            None
+        };
+        if let Some(dimension) = exhausted {
+            return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+                class: SELECTED_PACK_BUDGET_CLASS,
+                dimension,
+                operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+            });
+        }
+        if !deadline.note_selected_upload_work(selected_bytes) {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
+        let remaining = deadline
+            .remaining()
+            .map_err(|_| PackWriteError::from(PackError::DeadlineExceeded))?;
+        let limits = ClassLimits {
+            timeout: Some(remaining),
+            poll_quota: left.polls.unwrap_or(u32::MAX),
+            cost_quota: left.cost,
+            priority: budget.priority,
+        };
+        context.set_native_cx(
+            self.runtime
+                .request_cx_with_budget(limits.at(self.runtime.now())),
+        );
+        Ok(())
     }
 
     /// Reads the current authority-selected head in `request`.
@@ -9495,6 +9659,129 @@ impl OneNode {
         self.authority_selected_pack_payload_in(&request).await
     }
 
+    fn selected_pack_write_envelope(
+        &self,
+        write_profile: PackWriteProfile,
+    ) -> (PackLimits, PackWriteProfile, usize) {
+        let mut limits = self.selected_pack_limits.clone();
+        let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
+        let blob_limit = self
+            .service_config
+            .selected_pack_blob_limit
+            .unwrap_or(configured_limit);
+        limits.max_object_bytes = limits.max_object_bytes.min(blob_limit);
+        let write_profile = if limits.max_object_bytes > DEFAULT_MAX_OBJECT_BYTES as usize {
+            if write_profile == PackWriteProfile::COMPRESSED_V5 {
+                PackWriteProfile::COMPRESSED_V6
+            } else if write_profile == PackWriteProfile::COMPRESSED_V5_THIN {
+                PackWriteProfile::COMPRESSED_V6_THIN
+            } else if write_profile == PackWriteProfile::COMPRESSED_NO_DELTA_V1 {
+                PackWriteProfile::COMPRESSED_NO_DELTA_V2
+            } else {
+                write_profile
+            }
+        } else {
+            write_profile
+        };
+        let maximum_object_bytes = limits.max_object_bytes.min(configured_limit);
+        (limits, write_profile, maximum_object_bytes)
+    }
+
+    /// Authorizes the exact upload work before reading selected bodies. The
+    /// visible proof supplies selection and sizes, so a filtered request or a
+    /// small fetch never earns time from unrelated repository objects.
+    fn prepare_upload_pack_selection(
+        &self,
+        materialized: &MaterializedAdmission,
+        disclosure: &upload_visibility::VisibleUploadPack,
+        request: &PackRequest,
+        deadline: &GitDaemonSessionDeadline,
+        pack_context: &FsqliteCx,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedUploadPack, NodePackMaterializationRefusal> {
+        disclosure.closure_for(materialized)?;
+        if !live() || deadline.expired() {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
+        let (limits, write_profile, maximum_object_bytes) =
+            self.selected_pack_write_envelope(selected_fetch_write_profile(request));
+        let (keys, held, expanded_bytes) =
+            disclosure.prepare_selection(request, &limits, maximum_object_bytes, live)?;
+        // The caller's checkpoint retains peer cancellation and exact Transfer
+        // exhaustion. Neither a refused selection nor a stopped peer earns time.
+        if !live() {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
+        self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
+        Ok(PreparedUploadPack {
+            basis: materialized.basis().clone(),
+            request: request.clone(),
+            keys,
+            held,
+            limits,
+            write_profile,
+        })
+    }
+
+    /// Materializes precisely the preflighted selection. No second graph walk
+    /// or caller-supplied replacement request can widen its work or disclosure.
+    fn materialize_prepared_upload_pack(
+        &self,
+        materialized: &MaterializedAdmission,
+        prepared: &PreparedUploadPack,
+        database_context: &FsqliteCx,
+        database_exhaustion: &Cell<Option<Exhaustion>>,
+        session_is_live: Option<&dyn Fn() -> bool>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        if prepared.basis != *materialized.basis() {
+            return Err(NodePackMaterializationRefusal::DisclosureGraph(
+                RefusalCode::AuthorityReceiptStale,
+            ));
+        }
+        if !live() {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
+        let source = VerifiedFabricPackSource {
+            fabric: &self.fabric,
+            object_format: self.object_format,
+            maximum_object_bytes: prepared
+                .limits
+                .max_object_bytes
+                .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)),
+            database_context,
+            database_exhaustion,
+            session_is_live,
+        };
+        let ceiling = session_is_live.and_then(|_| {
+            FabricReadCeiling::new(self, database_context, self.git_daemon_session_work_scaling)
+        });
+        let served = CeiledFabricSource {
+            inner: &source,
+            ceiling: ceiling.as_ref(),
+        };
+        let thin_bases = if prepared.write_profile.thin && !prepared.held.is_empty() {
+            let sent = prepared.keys.iter().map(|key| key.id).collect();
+            served.thin_base_hints(
+                &prepared.request.wants,
+                &prepared.request.haves,
+                &sent,
+                &prepared.held,
+            )?
+        } else {
+            Vec::new()
+        };
+        self.stream_selected_pack(
+            materialized,
+            &served,
+            &prepared.keys,
+            &thin_bases,
+            prepared.write_profile,
+            &prepared.limits,
+            live,
+        )
+    }
+
     fn materialize_selected_pack(
         &self,
         materialized: &MaterializedAdmission,
@@ -9536,30 +9823,12 @@ impl OneNode {
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         // The operator-selected write envelope governs (frankengit-e6jj).
-        let mut limits = self.selected_pack_limits.clone();
-        let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
-        let blob_limit = self
-            .service_config
-            .selected_pack_blob_limit
-            .unwrap_or(configured_limit);
-        limits.max_object_bytes = limits.max_object_bytes.min(blob_limit);
-        let write_profile = if limits.max_object_bytes > DEFAULT_MAX_OBJECT_BYTES as usize {
-            if write_profile == PackWriteProfile::COMPRESSED_V5 {
-                PackWriteProfile::COMPRESSED_V6
-            } else if write_profile == PackWriteProfile::COMPRESSED_V5_THIN {
-                PackWriteProfile::COMPRESSED_V6_THIN
-            } else if write_profile == PackWriteProfile::COMPRESSED_NO_DELTA_V1 {
-                PackWriteProfile::COMPRESSED_NO_DELTA_V2
-            } else {
-                write_profile
-            }
-        } else {
-            write_profile
-        };
+        let (limits, write_profile, maximum_object_bytes) =
+            self.selected_pack_write_envelope(write_profile);
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
             object_format: self.object_format,
-            maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
+            maximum_object_bytes,
             database_context,
             database_exhaustion,
             session_is_live,
@@ -9645,11 +9914,32 @@ impl OneNode {
                 path_hash: 0,
             });
         }
+        self.stream_selected_pack(
+            materialized,
+            &served,
+            &keys,
+            &thin_bases,
+            write_profile,
+            &limits,
+            is_live,
+        )
+    }
+
+    fn stream_selected_pack(
+        &self,
+        materialized: &MaterializedAdmission,
+        source: &impl CanonicalObjectSource,
+        keys: &[PackOrderKey],
+        thin_bases: &[ThinBase],
+        write_profile: PackWriteProfile,
+        limits: &PackLimits,
+        is_live: &mut impl FnMut() -> bool,
+    ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         let cache = &self.service_config.pack_computation_cache;
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone())
             .with_computation_cache(Arc::clone(cache));
         let mut encoder = if write_profile.stream_blob_threshold.is_some() {
-            MemoizedPackEncoder::for_pack_limits(write_profile, &limits, Arc::clone(cache))
+            MemoizedPackEncoder::for_pack_limits(write_profile, limits, Arc::clone(cache))
                 .map_err(NodePackMaterializationRefusal::from)?
         } else {
             MemoizedPackEncoder::for_profile(write_profile, Arc::clone(cache))
@@ -9657,10 +9947,10 @@ impl OneNode {
         let mut spool = pack_spool::PackSpool::new(self.storage_root());
         let receipt = planner
             .stream_selected_thin(
-                &served,
-                &keys,
-                &thin_bases,
-                &PackWriter::new(limits),
+                source,
+                keys,
+                thin_bases,
+                &PackWriter::new(limits.clone()),
                 &mut encoder,
                 &mut spool,
                 is_live,
@@ -9901,20 +10191,24 @@ impl OneNode {
                             }
                         }
                     };
-                    self.materialize_selected_pack_in_scope(
+                    self.prepare_upload_pack_selection(
                         &materialized,
-                        disclosure
-                            .closure_for(&materialized)
-                            .map_err(GitDaemonServeError::Pack)?,
-                        Some((&disclosure, pack_request)),
-                        Some(&pack_request.wants),
-                        &pack_request.haves,
-                        selected_fetch_write_profile(pack_request),
-                        request.authority(),
-                        &database_exhaustion,
-                        Some(&session_is_live),
+                        &disclosure,
+                        pack_request,
+                        &deadline,
+                        &pack_context,
                         &mut is_live,
                     )
+                    .and_then(|prepared| {
+                        self.materialize_prepared_upload_pack(
+                            &materialized,
+                            &prepared,
+                            request.authority(),
+                            &database_exhaustion,
+                            Some(&session_is_live),
+                            &mut is_live,
+                        )
+                    })
                 };
                 // Re-probe after the full materialization result, before any
                 // Database/Transfer/raw-error classification. The source also
@@ -11144,6 +11438,7 @@ mod tests {
     mod closure_selection;
     mod fabric_read_budget;
     mod policy_evidence;
+    mod upload_work_budget;
 
     #[test]
     fn git_daemon_server_limits_require_nonzero_session_and_in_flight_bounds() {

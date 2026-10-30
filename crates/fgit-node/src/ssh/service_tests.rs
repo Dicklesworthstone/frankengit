@@ -300,6 +300,57 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
 }
 
 #[test]
+fn terminal_write_allowance_flushes_without_restarting_buffered_git_reads() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let mut session = SshServerSession::new(
+        host_key(),
+        Vec::new(),
+        Arc::new(asupersync::util::OsEntropy),
+    );
+    session.start();
+    let mut work = GitDaemonSessionDeadline::new(
+        GitDaemonSessionTimeout::try_new(Duration::from_secs(5)).unwrap(),
+        GitDaemonSessionWorkScaling::FLAT,
+    );
+    work.started = Instant::now() - Duration::from_secs(10);
+    let state = RefCell::new(SshConnectionState {
+        session,
+        stream,
+        deadline: work.clone(),
+        read_buf: b"git".to_vec(),
+        read_pos: 0,
+    });
+    let mut reader = SshReader(&state);
+    let mut writer = SshWriter(&state);
+    assert_eq!(writer.flush().unwrap_err().kind(), io::ErrorKind::TimedOut);
+
+    // The native upload engine arms the shared terminal clock. SSH can now
+    // drain already queued output without replacing its original work clock.
+    work.begin_terminal_response();
+    writer.flush().unwrap();
+    let mut identification = [0u8; 4];
+    client.read_exact(&mut identification).unwrap();
+    assert_eq!(&identification, b"SSH-");
+    assert_eq!(
+        reader.read(&mut [0u8; 3]).unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    let state = state.borrow();
+    assert_eq!(
+        state.read_pos, 0,
+        "terminal output did not admit more Git input"
+    );
+    assert_eq!(state.deadline.started, work.started);
+    assert!(work.expired());
+    assert_eq!(work.shared.admitted_bytes.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn ssh_receive_command_limit_reports_counts_and_accepts_the_boundary_twin() {
     use fgit_types::{DecisionOutcome, GitHashAlgorithm};
     use fgit_wire::receive::{ReceiveError, ReceiveLimits};
