@@ -1044,3 +1044,30 @@ alone is insufficient. The original deflater was retained; after restoration,
 the shipped pack/deflate suites at `6aff7387` passed 341 tests with 0 failures
 and 10 ignored across 40 targets. No full-node, transport or real-repository
 clone improvement, or completion of `frankengit-1tl9`, follows from this work.
+
+### NEG-042 — Equal file timestamps establish unchanged streamed content
+
+**Rejected.** At `24c95101ccdbb2712fc389b143d08ffcc4a049b7`, Node 26.8.1 on
+Linux, the complete browser contract campaign accepted an overwrite of the
+already-hashed first byte in `bundle-attestation-stream.test.mjs` where the
+unchanged refusal test required `attestation_file_changed`. Nanosecond timestamp
+fields do not imply that every intervening write has distinguishable metadata.
+The first failed campaign remains retained at
+`/data/tmp/frankengit-gap-work-20261030/browser-contract-with-chrome`.
+
+The focused regression keeps actual file reads/writes and freezes only observed
+mtime/ctime fields: the original signer, authenticator and authenticated copier
+all incorrectly succeed, while their unchanged-content twin succeeds correctly.
+The correction compares complete SHA-256 traversals through the same descriptor
+and retains EOF/path/metadata checks at both boundaries. It reuses one 64 KiB
+buffer and the original cancellation/deadline budget, with a second traversal's
+data I/O and hash cost counted explicitly. Tests stop inside that traversal and
+retain the existing greater-than-1-GiB independent-digest/memory case.
+
+This is bounded regression evidence, not proof that two matching reads establish
+an atomic snapshot. The operator must still provide a quiescent filesystem;
+arbitrary concurrent writers remain outside the profile. Canonical attestation
+bytes and signature scope do not change. Revisit the extra traversal only with
+an admitted immutable input/snapshot primitive that preserves this content and
+ownership boundary. Owner: `frankengit-attestation-content-consistency-i3ex`;
+reproducer and permitted twins: `tests/browser/bundle-attestation-stream.test.mjs`.

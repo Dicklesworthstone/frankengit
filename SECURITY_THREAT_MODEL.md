@@ -622,6 +622,8 @@ containment substrate and its independent campaign.
 - dependency/compiler/build script/proc macro compromised;
 - local DSR host/SSH route/source checkout tampered;
 - partial/mismatched assets uploaded;
+- a local signed artifact changes after its prefix was read, while filesystem
+  timestamp observations remain indistinguishable;
 - GitHub account or release page altered;
 - rollback to vulnerable binary/toolchain/configuration.
 
@@ -634,6 +636,11 @@ containment substrate and its independent campaign.
 - dated nightly and intentional advancement;
 - DSR exact source/host/toolchain/target attempt identities;
 - exact asset allowlist/checksums/SBOM/provenance/signatures/installer smoke;
+- streamed source attestations compare two complete content traversals through
+  one descriptor, with identity checks and the original cancellation/deadline
+  bounds; authenticated copies additionally verify quarantine before install.
+  Matching reads require a quiescent operator filesystem and do not establish
+  an atomic snapshot or protection against arbitrary concurrent writers;
 - local signed release manifest published last;
 - remote mirror reconciliation and update anti-rollback;
 - independent rebuild/verification for high assurance.

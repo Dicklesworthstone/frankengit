@@ -32,10 +32,22 @@ Both modes use one data-read buffer of at most 64 KiB. Input is opened with
 no-follow and nonblocking flags and must be a nonempty regular file. The signed
 length is checked before a verifying reader allocates its buffer. Every chunk
 is hashed before buffer reuse. EOF, descriptor identity, nanosecond modification
-and change times, size, mode, owner, link count, and final pathname identity are
-checked before success. Concurrent replacement, truncation, growth, or mutation
-at these boundaries fails rather than signing a mixed or partial artifact.
-These checks are not a filesystem sandbox against a malicious same-user process.
+and change fields, size, mode, owner, link count, and final pathname identity are
+checked before and after a second complete content traversal through the same
+descriptor. Both SHA-256 digests must match. Timestamp field precision does not
+establish filesystem update resolution: this content comparison also catches an
+already-read prefix overwritten without distinguishable metadata changes.
+Replacement, truncation, growth, changed identity, or unequal content traversals
+refuse before success or copy installation. Repeated matching reads are not an
+atomic filesystem snapshot and cannot exclude every concurrent write. The
+quiescent-filesystem requirement still applies; this is not a filesystem sandbox
+against a malicious same-user process.
+
+The second traversal reuses the same 64 KiB buffer, original deadline, and
+cancellation checks. It doubles data bytes read and hashed for signing and file
+authentication. It does not repeat progress callbacks or staged-copy writes.
+Authenticated copying additionally retains its existing independent quarantine
+readback before installation.
 
 Authentication verifies the signature, externally selected key, repository name,
 sequence floor and lifetime **before opening the artifact**. Cancellation and
@@ -50,7 +62,8 @@ The canonical DSSE payload and Ed25519 signature profile are unchanged. For the
 same small bytes, metadata and key, streaming produces the same envelope as the
 existing in-memory signer. CLI output adds `streaming.read_calls` and
 `streaming.maximum_read_bytes`, measured by the reader, not a claim about total
-process memory. The externally supplied repository and sequence floor remain
+process memory. `read_calls` counts data reads in both input traversals; EOF
+probes are excluded. The externally supplied repository and sequence floor remain
 mandatory for checking; see [signed backups](SIGNED_GIT_SOURCE_BACKUPS.md).
 
 ## Library and compatibility boundaries
@@ -88,6 +101,12 @@ opaque artifact, not a claim about Git validity or disk-throughput performance.
 Other tests cover exact small-envelope equivalence, byte allowances, same-size
 substitution, path and metadata mutation, cancellation, deadlines, signer and
 policy capture, expiry during reads, and actual sign/check CLI execution.
+The unchanged-timestamp regression cases retain real file reads and writes while
+holding only timestamp observations fixed; signing, authentication and copying
+must reject the changed content. Their unchanged-content twins still succeed.
+Separate cases stop inside the second traversal to check cancellation/deadline
+propagation. These simulated timestamp observations are bounded regression
+evidence, alongside the original test on the actual local filesystem.
 
 ## Verify large signed bundle contents
 
