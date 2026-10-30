@@ -3,8 +3,11 @@
 //! One batch at a time is in flight: staged, with its files syncing in the
 //! background and no name linked. It is settled before the next batch stages
 //! and before placement returns, so reading, hashing and sealing the next
-//! batch overlaps that sync (frankengit-ai60).
+//! batch overlaps that sync (frankengit-ai60). Durable imports retain synced
+//! batches without linking them until ordinary admission prepares a commit;
+//! the standalone staging API keeps its established placement behavior.
 use super::{ImportControl, LooseGitImportRefusal, OneNode};
+use crate::receive_staging::ReceiveStaging;
 use crate::{NodeRefusal, OBJECT_CODEC_NAMESPACE};
 use fgit_crypto::IdentifiedGitObject;
 use fgit_object_fabric::fabric::{PlacementAdmission, VerifiedObject};
@@ -20,6 +23,7 @@ pub(super) struct Placements<'a> {
     objects: Vec<VerifiedObject>,
     bytes: usize,
     in_flight: Option<InFlight>,
+    deferred: Option<&'a ReceiveStaging>,
 }
 
 /// A staged batch and the ledger holding its reservations.
@@ -35,7 +39,13 @@ impl<'a> Placements<'a> {
             objects: Vec::new(),
             bytes: 0,
             in_flight: None,
+            deferred: None,
         }
+    }
+
+    pub(super) const fn with_deferred(mut self, staging: Option<&'a ReceiveStaging>) -> Self {
+        self.deferred = staging;
+        self
     }
     pub(super) fn prepare(
         &mut self,
@@ -62,6 +72,15 @@ impl Placements<'_> {
     ) -> Result<(), LooseGitImportRefusal> {
         self.prepare(object.body().len(), control)?;
         if object.body().len() > CHUNK_BYTES {
+            if let Some(staging) = self.deferred {
+                // Large objects must use the same private custody as ordinary
+                // chunks; the direct placement fast path would leak them on
+                // a later admission refusal. Drain the earlier sync first.
+                self.settle(control)?;
+                let verified = self.verify(expected, object)?;
+                let result = staging.stage(self.node, &[verified], &mut || control.is_live());
+                return control.after(result, node_error);
+            }
             let kind = object.kind();
             let stored = self
                 .node
@@ -167,8 +186,8 @@ impl Placements<'_> {
         }
     }
 
-    /// Places the pending objects and settles every batch. Only after this
-    /// returns is each placed object durable under its immutable name.
+    /// Settles every pending batch. Standalone staging places durable immutable
+    /// names; deferred staging retains synced private custody for admission.
     pub(super) fn finish(
         &mut self,
         control: &ImportControl<'_>,
@@ -191,12 +210,23 @@ impl Placements<'_> {
         aborted.map_or_else(|error| node_error(NodeRefusal::from(error)), |()| refusal)
     }
 
-    /// Waits for the batch in flight to sync, then links its names and syncs
-    /// their directories.
+    /// Waits for the batch in flight to sync, then either transfers private
+    /// custody to admission or links names for the standalone staging API.
     fn settle(&mut self, control: &ImportControl<'_>) -> Result<(), LooseGitImportRefusal> {
         let Some(InFlight { batch, ledger }) = self.in_flight.take() else {
             return Ok(());
         };
+        if let Some(staging) = self.deferred {
+            return match batch.synchronize(&mut || control.is_live()) {
+                Ok(batch) => control.after(staging.retain_synced((ledger, batch)), node_error),
+                Err(error) => {
+                    if !ledger.close().is_quiescent() {
+                        return Err(node_error(NodeRefusal::ResourceContainment));
+                    }
+                    control.after(Err(error), |error| node_error(NodeRefusal::from(error)))
+                }
+            };
+        }
         let result = self
             .node
             .fabric

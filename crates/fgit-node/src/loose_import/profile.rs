@@ -3,6 +3,7 @@
 use super::{
     ImportControl, LooseGitImportRefusal, StagedLooseGitImport, checkpoint_request, graph,
 };
+use crate::receive_staging::ReceiveStaging;
 use crate::{NodeRequestContext, NodeSourceImportRefusal, OneNode};
 use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionResult, SourceImportOrigin, SourceImportReceipt,
@@ -29,12 +30,13 @@ pub(super) fn validate_limit(maximum: u64) -> Result<(), LooseGitImportRefusal> 
 }
 
 impl OneNode {
-    fn stage_import_profile_in(
+    pub(super) fn stage_import_profile_in(
         &self,
         request: &NodeRequestContext,
         source: &Path,
         max_refs: usize,
         maximum_bytes: u64,
+        staging: Option<&ReceiveStaging>,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         let mut stopped = None;
         let mut live = || match checkpoint_request(request) {
@@ -45,10 +47,20 @@ impl OneNode {
             }
         };
         let control = ImportControl::new(&mut live);
-        let result =
-            self.stage_loose_git_import_controlled(source, max_refs, maximum_bytes, &control);
+        let result = self.stage_loose_git_import_controlled(
+            source,
+            max_refs,
+            maximum_bytes,
+            &control,
+            staging,
+        );
         let result = control.after(result, |error| error);
         drop(control);
+        if matches!(&result, Err(LooseGitImportRefusal::Node(error))
+            if matches!(**error, crate::NodeRefusal::ResourceContainment))
+        {
+            return result;
+        }
         match stopped {
             Some(error) => Err(error),
             None => result,
@@ -87,8 +99,15 @@ impl OneNode {
         let idempotency_key = IdempotencyKey::new(idempotency_key.to_vec())
             .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
         let limits = AdmissionLimits::default();
+        let staging = ReceiveStaging::default();
         let staged = self
-            .stage_import_profile_in(request, source, limits.command_limit(true), maximum_bytes)
+            .stage_import_profile_in(
+                request,
+                source,
+                limits.command_limit(true),
+                maximum_bytes,
+                Some(&staging),
+            )
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
         let object_count = u32::try_from(staged.object_count()).map_err(|_| {
             NodeSourceImportRefusal::ObjectCountOutOfRange {
@@ -134,9 +153,15 @@ impl OneNode {
         // detach admission with a fresh budget after expensive preparation.
         checkpoint_request(request)
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
-        self.admit_validated_source_import_durable_in(request, &context, &validated, limits)
-            .await
-            .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
+        self.admit_validated_source_import_publishing_in(
+            request,
+            &context,
+            &validated,
+            limits,
+            Some(&staging),
+        )
+        .await
+        .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
     }
 }
 

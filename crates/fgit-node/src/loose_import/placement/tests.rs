@@ -276,3 +276,81 @@ fn an_in_flight_batch_links_nothing_when_abandoned_or_cancelled() {
     assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
     close(node, root);
 }
+
+#[test]
+fn cancellation_after_a_deferred_batch_drains_every_private_batch_without_linking() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (node, root) = node(format);
+        let mut input: Vec<_> = (0..520)
+            .map(|index| {
+                let body = format!("deferred import {index}").into_bytes();
+                (git_object_id(format, ObjectType::Blob, &body), body)
+            })
+            .collect();
+        input.sort_by_key(|(id, _)| *id);
+        let staging = ReceiveStaging::default();
+        let first = input[0].0;
+        // Cancel only after a complete first batch has been synced and handed
+        // to deferred custody. This reaches beyond unstarted-request checks.
+        let mut live = || !staging.contains(first);
+        let control = ImportControl::new(&mut live);
+        let mut placement = Placements::new(&node).with_deferred(Some(&staging));
+        let result = input.iter().try_for_each(|(id, body)| {
+            placement.push(
+                *id,
+                IdentifiedGitObject::identify(format, ObjectType::Blob, body.clone()),
+                &control,
+            )
+        });
+        let refusal = placement.abandon(result.unwrap_err());
+        assert!(matches!(refusal, LooseGitImportRefusal::Interrupted { .. }));
+        assert!(staging.contains(first));
+        assert_eq!(
+            std::fs::read_dir(root.join("staging")).unwrap().count(),
+            CHUNK_OBJECTS
+        );
+        for (id, _) in &input {
+            assert!(matches!(
+                node.fabric.read_whole(*id),
+                Err(StoreRefusal::ObjectAbsent)
+            ));
+        }
+        drop(placement);
+        drop(control);
+        drop(staging);
+        assert_eq!(std::fs::read_dir(root.join("staging")).unwrap().count(), 0);
+
+        let staging = ReceiveStaging::default();
+        let mut live = || true;
+        let control = ImportControl::new(&mut live);
+        let mut placement = Placements::new(&node).with_deferred(Some(&staging));
+        for (id, body) in &input {
+            placement
+                .push(
+                    *id,
+                    IdentifiedGitObject::identify(format, ObjectType::Blob, body.clone()),
+                    &control,
+                )
+                .unwrap();
+        }
+        placement.finish(&control).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.join("staging")).unwrap().count(),
+            input.len()
+        );
+        for (id, _) in &input {
+            assert!(matches!(
+                node.fabric.read_whole(*id),
+                Err(StoreRefusal::ObjectAbsent)
+            ));
+        }
+        staging.publish(&node.fabric, &mut || true).unwrap();
+        for (id, body) in &input {
+            assert_eq!(node.fabric.read_whole(*id).unwrap().object.payload(), body);
+        }
+        assert_eq!(std::fs::read_dir(root.join("staging")).unwrap().count(), 0);
+        drop(placement);
+        drop(staging);
+        close(node, root);
+    }
+}

@@ -77,8 +77,16 @@ impl<'a> ImportControl<'a> {
         result: Result<T, E>,
         map: impl FnOnce(E) -> LooseGitImportRefusal,
     ) -> Result<T, LooseGitImportRefusal> {
+        let result = result.map_err(map);
+        // An interrupted preparation still has to settle the responsibility it
+        // accepted. Cancellation must not hide a failed obligation drain.
+        if matches!(&result, Err(LooseGitImportRefusal::Node(error))
+            if matches!(**error, crate::NodeRefusal::ResourceContainment))
+        {
+            return result;
+        }
         self.checkpoint()?;
-        result.map_err(map)
+        result
     }
 }
 

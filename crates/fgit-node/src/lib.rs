@@ -9610,7 +9610,22 @@ impl OneNode {
         validated: &ValidatedSourceImport,
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, AdmissionError> {
-        let projection = self.durable_admission_projection(context)?;
+        self.admit_validated_source_import_publishing_in(request, context, validated, limits, None)
+            .await
+    }
+
+    /// The durable directory importer retains verified objects in private
+    /// custody. Admission links them only when it stages a commit, before the
+    /// ref/closure frames and authority-head CAS that can make them canonical.
+    async fn admit_validated_source_import_publishing_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        validated: &ValidatedSourceImport,
+        limits: AdmissionLimits,
+        staging: Option<&receive_staging::ReceiveStaging>,
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self.durable_admission_projection_publishing(context, staging)?;
         Box::pin(admit_validated_source_import_async(
             &self.authority,
             request.authority(),
@@ -9637,6 +9652,9 @@ impl OneNode {
     /// `idempotency_key` is explicit rather than derived from a source path or
     /// mutable filesystem metadata. The method itself accepts neither
     /// caller-supplied closure roots nor a caller-supplied publication basis.
+    /// Verified objects remain in private synced custody until admission plans
+    /// a commit. Ordinary refusals and interrupted validation abandon that
+    /// custody rather than permanently placing unreferenced objects.
     pub async fn import_loose_git_directory_durable_in(
         &self,
         request: &NodeRequestContext,
@@ -9660,8 +9678,14 @@ impl OneNode {
         let idempotency_key = IdempotencyKey::new(idempotency_key.to_vec())
             .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
         let limits = AdmissionLimits::default();
+        let staging = receive_staging::ReceiveStaging::default();
         let staged = self
-            .stage_loose_git_import_with_ref_limit_in(request, source, limits.command_limit(true))
+            .stage_loose_git_import_with_ref_limit_in(
+                request,
+                source,
+                limits.command_limit(true),
+                &staging,
+            )
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
         let object_count = u32::try_from(staged.object_count()).map_err(|_| {
             NodeSourceImportRefusal::ObjectCountOutOfRange {
@@ -9707,9 +9731,15 @@ impl OneNode {
         // detach admission with a fresh budget after expensive preparation.
         loose_import::checkpoint_request(request)
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
-        self.admit_validated_source_import_durable_in(request, &context, &validated, limits)
-            .await
-            .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
+        self.admit_validated_source_import_publishing_in(
+            request,
+            &context,
+            &validated,
+            limits,
+            Some(&staging),
+        )
+        .await
+        .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
     }
 
     /// Materializes a bounded Git pack from exactly one authority-selected closure.

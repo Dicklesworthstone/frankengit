@@ -2,8 +2,10 @@
 //!
 //! This module owns only the pre-publication half of import: it validates a
 //! local Git directory, follows the closure named by its direct refs, resolves
-//! those objects from checksum-bound loose or idx/pack storage, and places
-//! verified immutable object bodies in the node's fabric.  The returned
+//! those objects from checksum-bound loose or idx/pack storage, and retains
+//! verified immutable object bodies in the node's fabric. Standalone staging
+//! links their immutable names; durable import keeps synced private custody
+//! until ordinary admission prepares a commit. The returned
 //! [`StagedLooseGitImport`] is not a publication capability.  In particular,
 //! objects staged here remain non-canonical until the caller has sealed an
 //! import request, recorded its admission, and published an RCR through the
@@ -57,6 +59,7 @@ use fgit_pack::{
 use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, RefName, TypeRefusal};
 
 use super::{NodeRefusal, NodeRequestContext, OneNode};
+use crate::receive_staging::ReceiveStaging;
 
 const MAX_IMPORT_REFS: usize = 65_536;
 const MAX_IMPORT_OBJECTS: usize = 1_000_000;
@@ -77,8 +80,9 @@ const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 ///
 /// This type has no public constructor.  Its refs and closure can only be
 /// produced after every object reachable from a direct source ref was parsed,
-/// re-identified, and placed through the immutable fabric.  It is still only
-/// a candidate: publishing it requires the separate sealed import path.
+/// re-identified, and retained through the immutable fabric. Standalone staging
+/// places immutable names; durable import holds private synced files. It is
+/// still only a candidate: publishing it requires the sealed import path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedLooseGitImport {
     refs: CanonicalRefState,
@@ -160,21 +164,15 @@ impl OneNode {
         request: &NodeRequestContext,
         source: &Path,
         max_refs: usize,
+        staging: &ReceiveStaging,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
-        let mut stopped = None;
-        let result = self.stage_loose_git_import_with_control(source, max_refs, &mut || {
-            match checkpoint_request(request) {
-                Ok(()) => true,
-                Err(error) => {
-                    stopped = Some(error);
-                    false
-                }
-            }
-        });
-        match stopped {
-            Some(error) => Err(error),
-            None => result,
-        }
+        self.stage_import_profile_in(
+            request,
+            source,
+            max_refs,
+            graph::MAX_REACHABLE_OBJECT_BYTES,
+            Some(staging),
+        )
     }
 
     fn stage_loose_git_import_with_control(
@@ -189,6 +187,7 @@ impl OneNode {
             max_refs,
             graph::MAX_REACHABLE_OBJECT_BYTES,
             &control,
+            None,
         );
         // All effects here are noncanonical placement. Never apply this
         // post-operation cancellation rule to the result of authority CAS.
@@ -201,6 +200,7 @@ impl OneNode {
         max_refs: usize,
         maximum_bytes: u64,
         control: &ImportControl<'_>,
+        staging: Option<&ReceiveStaging>,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         control.checkpoint()?;
         if max_refs > MAX_IMPORT_REFS {
@@ -271,9 +271,10 @@ impl OneNode {
             control,
         )?;
         let total_object_bytes = validated.total_bytes;
-        // All required local edges and object bodies have now verified. Only
-        // placement failures or cancellation can leave verified, noncanonical objects.
-        let mut placements = placement::Placements::new(self);
+        // All required local edges and object bodies have now verified. The
+        // standalone API places immutable names; durable import retains only
+        // private synced batches until admission prepares its first commit.
+        let mut placements = placement::Placements::new(self).with_deferred(staging);
         let placed = (|| {
             for (identity, entry) in validated.objects {
                 // Flush before reading an object that would exceed the chunk budget.

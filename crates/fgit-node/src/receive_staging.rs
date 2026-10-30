@@ -17,12 +17,14 @@
 //! stale-info refusal stay indistinguishable in latency as well as in bytes.
 //!
 //! Every raw receive entry (git://, SSH, smart HTTP, the loopback and native
-//! session APIs) owns one. Residue that remains: a commit planned, published
+//! session APIs) and each durable local directory import owns one. Imports
+//! preserve their overlapped batch syncing and transfer payload-free custody
+//! here before ordinary admission. Residue that remains: a commit planned, published
 //! and then lost at the head CAS to another process, whose replan refuses,
 //! leaves its objects linked and unreferenced, as every refusal did before;
 //! in a non-atomic session the first commit publishes the objects of its
 //! refused siblings too; and workspace publications (branches, full bundles,
-//! TreeFS publication) and `fg import` still place objects before admission.
+//! TreeFS publication) still place objects before admission.
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -121,6 +123,16 @@ impl ReceiveStaging {
             return Ok(());
         }
         let staged = node.stage_synced_git_objects(objects, live)?;
+        self.retain_synced(staged)
+    }
+
+    /// Retains an already-synced private batch and its reservation owner.
+    /// Import can overlap the next batch's preparation with this batch's
+    /// syncing, then transfer only paths and reservations into admission.
+    pub(crate) fn retain_synced(
+        &self,
+        staged: (ObligationLedger, SyncedBatch),
+    ) -> Result<(), NodeRefusal> {
         let mut state = self.lock();
         if state.published || state.failed.is_some() {
             // Validation finishes before admission publishes, so this is
@@ -129,9 +141,7 @@ impl ReceiveStaging {
             settle_abandoned(staged);
             return Err(NodeRefusal::ResourceContainment);
         }
-        state
-            .staged
-            .extend(objects.iter().map(VerifiedObject::identity));
+        state.staged.extend(staged.1.identities().iter().copied());
         state.batches.push(staged);
         Ok(())
     }

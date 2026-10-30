@@ -480,3 +480,20 @@ fn the_graph_loader_and_shared_edge_reader_cannot_restart_a_cancelled_walk() {
     .unwrap();
     assert_eq!(valid.objects.len(), 2);
 }
+
+#[test]
+fn cancellation_does_not_hide_an_unsettled_placement_obligation() {
+    let mut stopped = || false;
+    let control = ImportControl::new(&mut stopped);
+    let result = control.after::<(), _>(Err(NodeRefusal::ResourceContainment), |error| {
+        LooseGitImportRefusal::Node(Box::new(error))
+    });
+    assert!(matches!(result, Err(LooseGitImportRefusal::Node(error))
+        if matches!(*error, NodeRefusal::ResourceContainment)));
+    // A normal failed preparation still reports the caller's cancellation.
+    let result = control.after::<(), _>(
+        Err(LooseGitImportRefusal::ObjectLimitExceeded { limit: 7 }),
+        |error| error,
+    );
+    assert!(matches!(result, Err(ref error) if is_cancelled(error)));
+}
