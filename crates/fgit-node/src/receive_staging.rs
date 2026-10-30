@@ -92,7 +92,15 @@ impl std::fmt::Debug for ReceiveStaging {
 
 impl ReceiveStaging {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut state = poisoned.into_inner();
+            // Publication may have drained every batch before an unwind
+            // abandoned the remaining custody. An empty list is not evidence
+            // that those objects became durable. Contain this owner permanently.
+            state.failed = Some(Failure::Containment);
+            state.received_pack.take();
+            state
+        })
     }
 
     /// Whether this receive has already staged `id` (a waiting pre-stage did).
