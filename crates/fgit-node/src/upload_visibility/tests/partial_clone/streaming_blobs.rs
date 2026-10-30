@@ -59,7 +59,10 @@ fn configured_blob_limits_select_v6_without_changing_small_object_bytes() {
                 )
                 .unwrap();
             assert_eq!(payload.receipt().writer().unwrap().profile, selected);
-            assert_eq!(payload.receipt().writer().unwrap().object_count as usize, visible.len());
+            assert_eq!(
+                payload.receipt().writer().unwrap().object_count as usize,
+                visible.len()
+            );
             assert_eq!(
                 payload.into_bytes().unwrap(),
                 planned_pack(&node, &ids, requested)
