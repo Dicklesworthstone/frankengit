@@ -447,7 +447,8 @@ struct Pending {
 /// A batch staged by [`LocalFilesystemFabric::stage_batch_if_absent`]: every
 /// staged file is written and syncing on background threads, no immutable
 /// name is linked and no receipt exists. Settle it with
-/// [`LocalFilesystemFabric::publish_staged_batch`] or [`Self::abandon`].
+/// [`LocalFilesystemFabric::publish_staged_batch`] or [`Self::abandon`], or
+/// retain it without payload buffers through [`Self::synchronize`].
 /// Dropping it unsettled still joins its syncs and removes its staged files,
 /// but its reservations then count as leaks in their ledger.
 #[must_use = "a staged batch holds reservations until it is published or abandoned"]
@@ -468,6 +469,33 @@ impl std::fmt::Debug for StagedBatch {
 }
 
 impl StagedBatch {
+    /// Joins every sync without linking an immutable name, then releases the
+    /// payload buffers and file descriptors. The returned custody holds only
+    /// identities, staged paths and the original reservations, so a caller can
+    /// prepare subsequent batches while retaining this one until admission.
+    ///
+    /// Cancellation and sync failure drain all workers and abort every
+    /// reservation before returning. A settlement failure outranks the
+    /// original refusal, exactly as [`Self::abandon`] does.
+    pub fn synchronize(
+        mut self,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<SyncedBatch, StoreRefusal> {
+        let before = batch_checkpoint(live);
+        // Always join, including when the caller was already cancelled.
+        let synced = self.syncing.wait();
+        let result = before.and(synced).and_then(|()| batch_checkpoint(live));
+        if let Err(error) = result {
+            return Err(abort_all(std::mem::take(&mut self.pending.entries))
+                .err()
+                .unwrap_or(error));
+        }
+        Ok(SyncedBatch {
+            identities: self.objects.iter().map(VerifiedObject::identity).collect(),
+            pending: std::mem::take(&mut self.pending),
+        })
+    }
+
     /// Waits for every sync, then aborts every reservation and removes every
     /// staged file. Links nothing.
     pub fn abandon(mut self) -> Result<(), StoreRefusal> {

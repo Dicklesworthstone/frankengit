@@ -736,6 +736,99 @@ fn a_synced_batch_links_nothing_holds_no_descriptor_and_publishes_like_a_blockin
     }
 }
 
+#[test]
+fn an_overlapped_batch_can_release_its_buffers_before_admission_without_publishing() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let input = objects(format, 64);
+        let (blocking_root, deferred_root) = (Root::new(), Root::new());
+        let (blocking, deferred) = (blocking_root.fabric(None), deferred_root.fabric(None));
+        let first: Vec<_> = input.iter().step_by(2).cloned().collect();
+        // Fresh, mixed-existing and identical-retry cases retain exact receipts.
+        for offered in [&first[..], &input[..], &input[..]] {
+            let expected = run(&blocking, offered, &mut || true).unwrap();
+            let before = stored_files(&deferred_root);
+            let (ledger, amount) = ledger_for(offered, LeakDisposition::FailFast);
+            let batch = stage(&deferred, offered, &ledger, amount)
+                .synchronize(&mut || true)
+                .unwrap();
+            assert_eq!(stored_files(&deferred_root), before);
+            assert_eq!(
+                batch.identities(),
+                offered
+                    .iter()
+                    .map(VerifiedObject::identity)
+                    .collect::<Vec<_>>()
+            );
+            #[cfg(target_os = "linux")]
+            assert_eq!(open_staged_files(&deferred_root.0.join("staging")), 0);
+            assert_eq!(
+                deferred.publish_synced_batch(batch, &mut || true).unwrap(),
+                expected
+            );
+            assert!(ledger.close().is_quiescent());
+            deferred_root.clean();
+        }
+        assert_eq!(stored_files(&deferred_root), stored_files(&blocking_root));
+    }
+}
+
+#[test]
+fn cancellation_before_or_after_sync_aborts_only_the_owned_private_files() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for stop_after in [0, 1] {
+            let root = Root::new();
+            let store = root.fabric(None);
+            let input = objects(format, 8);
+            run(&store, &input[..2], &mut || true).unwrap();
+            let before = stored_files(&root);
+            let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+            let batch = stage(&store, &input, &ledger, amount);
+            let mut probes = 0;
+            let result = batch.synchronize(&mut || {
+                probes += 1;
+                probes <= stop_after
+            });
+            assert!(matches!(
+                result,
+                Err(StoreRefusal::RuntimeCheckpointRejected)
+            ));
+            assert!(ledger.close().is_quiescent());
+            assert_eq!(stored_files(&root), before);
+            root.clean();
+            // Cancellation did not poison an immutable identity or its ledger.
+            assert_eq!(run_split(&store, &input).unwrap().len(), input.len());
+        }
+    }
+}
+
+#[test]
+fn abandoning_a_synchronized_batch_preserves_an_identical_concurrent_publication() {
+    let root = Root::new();
+    let store = root.fabric(None);
+    let input = objects(GitHashAlgorithm::Sha256, 8);
+    let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+    let batch = stage(&store, &input, &ledger, amount)
+        .synchronize(&mut || true)
+        .unwrap();
+    assert_eq!(staged_count(&root), input.len());
+    // Another operation publishes an identity while this operation still owns
+    // private custody. Abandonment may unlink only the latter's stage file.
+    run(&store, &input[..1], &mut || true).unwrap();
+    batch.abandon().unwrap();
+    assert!(ledger.close().is_quiescent());
+    root.clean();
+    assert_eq!(
+        store.read_whole(input[0].identity()).unwrap().object,
+        input[0]
+    );
+    for object in &input[1..] {
+        assert!(matches!(
+            store.read_whole(object.identity()),
+            Err(StoreRefusal::ObjectAbsent)
+        ));
+    }
+}
+
 /// Abandoning a synced batch removes every staged file, links nothing and
 /// settles every reservation; dropping one unsettled still removes its files
 /// but reports the reservations as leaked.
