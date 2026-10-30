@@ -17,14 +17,15 @@
 //! stale-info refusal stay indistinguishable in latency as well as in bytes.
 //!
 //! Every raw receive entry (git://, SSH, smart HTTP, the loopback and native
-//! session APIs) and each durable local directory import owns one. Imports
-//! preserve their overlapped batch syncing and transfer payload-free custody
-//! here before ordinary admission. Residue that remains: a commit planned, published
+//! session APIs), durable local directory imports and bundle import/fetch
+//! paths own one. Directory imports preserve their overlapped batch syncing
+//! and transfer payload-free custody here before ordinary admission.
+//! Residue that remains: a commit planned, published
 //! and then lost at the head CAS to another process, whose replan refuses,
 //! leaves its objects linked and unreferenced, as every refusal did before;
 //! in a non-atomic session the first commit publishes the objects of its
-//! refused siblings too; and workspace publications (branches, full bundles,
-//! TreeFS publication) still place objects before admission.
+//! refused siblings too; and reviewed workspace, merge and rebase candidates
+//! still place objects before their additional validation and admission.
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};

@@ -164,6 +164,7 @@ fn empty_incremental_pack_reuses_only_declared_history_and_cas_is_atomic() {
         ));
         let bundle = sync_export(&source, &["refs/heads/main", "refs/heads/new"], &[base]);
         let before = snapshot(&destination);
+        assert_missing(&destination, child);
         let wrong = [("refs/heads/main", None), ("refs/heads/new", None)];
         let refused =
             sync_import(&destination, bundle.bytes(), &wrong, "old-tip-mismatch").unwrap();
@@ -178,12 +179,17 @@ fn empty_incremental_pack_reuses_only_declared_history_and_cas_is_atomic() {
             snapshot(&destination).snapshot().refs,
             before.snapshot().refs
         );
+        assert_missing(&destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
         let decided = snapshot(&destination);
         assert_eq!(
             sync_import(&destination, bundle.bytes(), &wrong, "old-tip-mismatch").unwrap(),
             refused
         );
         assert_eq!(snapshot(&destination).basis(), decided.basis());
+        assert_missing(&destination, child);
+        assert_staging_empty(&destination);
         accepted(sync_import(
             &destination,
             bundle.bytes(),
@@ -193,6 +199,9 @@ fn empty_incremental_pack_reuses_only_declared_history_and_cas_is_atomic() {
         let after = snapshot(&destination);
         assert_eq!(after.snapshot().refs[&reference("refs/heads/main")], child);
         assert_eq!(after.snapshot().refs[&reference("refs/heads/new")], child);
+        assert_native_transfer(&source, &destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
         destination.shutdown().unwrap();
         source.shutdown().unwrap();
     }
@@ -518,6 +527,33 @@ fn incremental_atomic_update_cannot_bypass_repository_required_review_protection
             snapshot(&destination).snapshot().outbox,
             before.snapshot().outbox
         );
+        assert_missing(&destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
+        assert_eq!(
+            sync_import(
+                &destination,
+                artifact.bytes(),
+                &[("refs/heads/main", Some(base)), ("refs/heads/new", None)],
+                "protected-sync",
+            )
+            .unwrap(),
+            result
+        );
+        assert_missing(&destination, child);
+        let permitted = sync_export(&source, &["refs/heads/new"], &[base]);
+        accepted(sync_import(
+            &destination,
+            permitted.bytes(),
+            &[("refs/heads/new", None)],
+            "unprotected-sync",
+        ));
+        let after = snapshot(&destination);
+        assert_eq!(after.snapshot().refs[&reference("refs/heads/main")], base);
+        assert_eq!(after.snapshot().refs[&reference("refs/heads/new")], child);
+        assert_native_transfer(&source, &destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
         destination.shutdown().unwrap();
         source.shutdown().unwrap();
     }

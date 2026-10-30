@@ -119,6 +119,7 @@ fn stale_expectation_refuses_the_whole_batch_and_refusal_replays() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
         let (source, base, child, _) = fixture(&root, format);
+        accepted(apply(&source, &[create("refs/heads/topic", base)], "topic"));
         let bytes = export(&source, &Default::default()).into_bytes();
         let target = Scratch::new();
         let destination = empty_node(&target, format);
@@ -126,36 +127,44 @@ fn stale_expectation_refuses_the_whole_batch_and_refusal_replays() {
             &destination,
             &bytes,
             &[mapping(
-                "refs/heads/main",
+                "refs/heads/topic",
                 "refs/remotes/upstream/main",
                 None,
             )],
             "initial",
         ));
+        assert_missing(&destination, child);
         let before = snapshot(&destination);
         let mappings = [
-            mapping("refs/heads/main", "refs/remotes/upstream/main", Some(base)),
+            mapping("refs/heads/main", "refs/remotes/upstream/main", Some(child)),
             mapping("refs/heads/main", "refs/heads/new", None),
         ];
         let refused = fetch(&destination, &bytes, &mappings, "stale").unwrap();
-        assert!(
-            refused
-                .commands
-                .iter()
-                .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Refused { .. }))
-        );
+        assert_eq!(refused.commands.len(), 2);
+        assert!(refused.commands.iter().all(|c| matches!(
+            c.terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                ..
+            }
+        )));
         assert_eq!(
             snapshot(&destination).snapshot().refs,
             before.snapshot().refs
         );
-        assert_eq!(tip(&destination, "refs/remotes/upstream/main"), Some(child));
+        assert_eq!(tip(&destination, "refs/remotes/upstream/main"), Some(base));
         assert!(tip(&destination, "refs/heads/new").is_none());
+        assert_missing(&destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
         let after = snapshot(&destination);
         assert_eq!(
             fetch(&destination, &bytes, &mappings, "stale").unwrap(),
             refused
         );
         assert_eq!(snapshot(&destination).basis(), after.basis());
+        assert_missing(&destination, child);
+        assert_staging_empty(&destination);
         assert!(
             fetch(
                 &destination,
@@ -166,6 +175,16 @@ fn stale_expectation_refuses_the_whole_batch_and_refusal_replays() {
             .is_err()
         );
         assert_eq!(snapshot(&destination).basis(), after.basis());
+        let allowed = [
+            mapping("refs/heads/main", "refs/remotes/upstream/main", Some(base)),
+            mappings[1].clone(),
+        ];
+        accepted(fetch(&destination, &bytes, &allowed, "correct-leases"));
+        assert_eq!(tip(&destination, "refs/remotes/upstream/main"), Some(child));
+        assert_eq!(tip(&destination, "refs/heads/new"), Some(child));
+        assert_native_transfer(&source, &destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
         destination.shutdown().unwrap();
         source.shutdown().unwrap();
     }

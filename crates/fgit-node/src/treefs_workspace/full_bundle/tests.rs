@@ -197,6 +197,24 @@ fn empty_node(root: &Scratch, format: GitHashAlgorithm) -> OneNode {
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     node
 }
+
+fn assert_missing(node: &OneNode, id: GitOid) {
+    assert!(
+        matches!(node.read_git_object(id), Err(crate::NodeRefusal::Fabric(error))
+            if matches!(*error, fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)),
+        "uncommitted bundle object {id} escaped private custody"
+    );
+}
+
+fn assert_staging_empty(node: &OneNode) {
+    assert_eq!(
+        fs::read_dir(node.storage_root().join("staging"))
+            .unwrap()
+            .count(),
+        0,
+        "bundle custody must settle before returning"
+    );
+}
 #[test]
 fn full_bundle_is_atomic_and_replays_after_reopen() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
@@ -236,28 +254,91 @@ fn full_bundle_is_atomic_and_replays_after_reopen() {
     }
 }
 #[test]
-fn collision_refuses_every_ref_without_publishing_a_prefix() {
-    let root = Scratch::new();
-    let (source, base, _, _) = fixture(&root, GitHashAlgorithm::Sha1);
-    accepted(apply(&source, &[create("refs/heads/topic", base)], "topic"));
-    let bytes = export(&source, &Default::default()).into_bytes();
-    let target = Scratch::new();
-    let (destination, _, _, _) = fixture(&target, GitHashAlgorithm::Sha1);
-    let before = snapshot(&destination);
-    let result = import(&destination, &bytes, "collision").unwrap();
-    assert!(
-        result
-            .commands
-            .iter()
-            .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Refused { .. }))
-    );
-    assert_eq!(
-        snapshot(&destination).snapshot().refs,
-        before.snapshot().refs
-    );
-    assert_eq!(import(&destination, &bytes, "collision").unwrap(), result);
-    destination.shutdown().unwrap();
-    source.shutdown().unwrap();
+fn collision_abandons_new_bundle_objects_atomically_and_allowed_twin_commits() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (source, base, child, _) = fixture(&root, format);
+        accepted(apply(&source, &[create("refs/heads/topic", base)], "topic"));
+        let bytes = export(&source, &Default::default()).into_bytes();
+        let target = Scratch::new();
+        let destination = empty_node(&target, format);
+        let request = destination.request_context();
+        accepted(
+            destination
+                .runtime()
+                .block_on(destination.fetch_full_git_bundle_durable_in(
+                    &request,
+                    &session("seed-base"),
+                    &bytes,
+                    &[BundleRefMapping {
+                        source: reference("refs/heads/topic"),
+                        destination: reference("refs/heads/main"),
+                        expected_old: None,
+                    }],
+                    AdmissionLimits::default(),
+                )),
+        );
+        assert_missing(&destination, child);
+        let before = snapshot(&destination);
+        let result = import(&destination, &bytes, "collision").unwrap();
+        assert_eq!(result.commands.len(), 2);
+        assert!(result.commands.iter().all(|command| matches!(
+            command.terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                ..
+            }
+        )));
+        assert_eq!(
+            snapshot(&destination).snapshot().refs,
+            before.snapshot().refs
+        );
+        assert_missing(&destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
+        destination.shutdown().unwrap();
+
+        let mut destination = OneNode::open_existing(target.config(format)).unwrap();
+        let head = destination
+            .runtime()
+            .block_on(destination.authenticate_authority_head())
+            .unwrap();
+        destination
+            .bring_into_service(head.receipt().generation())
+            .unwrap();
+        assert_eq!(import(&destination, &bytes, "collision").unwrap(), result);
+        assert_missing(&destination, child);
+        assert_staging_empty(&destination);
+
+        accepted(apply(
+            &source,
+            &[create("refs/heads/allowed", child)],
+            "allowed-branch",
+        ));
+        let mut visibility = RefVisibility::new();
+        visibility
+            .push_rule(b"refs/heads/main", &Default::default())
+            .unwrap();
+        let allowed = export(&source, &visibility);
+        let committed = accepted(import(&destination, allowed.bytes(), "allowed-transfer"));
+        assert_eq!(committed.commands.len(), 2);
+        let after = snapshot(&destination);
+        assert_eq!(after.snapshot().refs[&reference("refs/heads/main")], base);
+        assert_eq!(after.snapshot().refs[&reference("refs/heads/topic")], base);
+        assert_eq!(
+            after.snapshot().refs[&reference("refs/heads/allowed")],
+            child
+        );
+        assert_native_transfer(&source, &destination, child);
+        assert_native_transfer(&source, &destination, base);
+        assert_staging_empty(&destination);
+        assert_eq!(
+            import(&destination, allowed.bytes(), "allowed-transfer").unwrap(),
+            committed
+        );
+        destination.shutdown().unwrap();
+        source.shutdown().unwrap();
+    }
 }
 #[test]
 fn export_excludes_hidden_refs_and_their_exclusive_objects() {

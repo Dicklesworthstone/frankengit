@@ -4,6 +4,7 @@
 use super::publication::receive_error;
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionQuarantineValidator;
+use crate::receive_staging::ReceiveStaging;
 use crate::{
     LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode,
     VerifiedFabricPackSource, selected_pack_ids,
@@ -162,7 +163,9 @@ impl OneNode {
     ///
     /// Authenticated exact terminal replay precedes current intake gates. Fresh
     /// intake reconstructs only supplied pack bytes, verifies every native edge,
-    /// stages the complete closure, and uses ordinary expected-absent admission.
+    /// retains the complete closure in synced private custody, and uses ordinary
+    /// expected-absent admission. Refusals abandon new objects; a planned commit
+    /// publishes their durable names before the authoritative head can name them.
     /// A staging/transport error is not evidence of a terminal non-commit.
     pub async fn import_full_git_bundle_durable_in(
         &self,
@@ -185,7 +188,8 @@ impl OneNode {
     /// Complete supplied objects pass the same self-contained quarantine as
     /// import. No current object is borrowed to repair an incomplete bundle.
     /// Terminal replay precedes intake gates; new writes retain ordinary policy
-    /// and exact-basis admission. An I/O failure does not prove non-commit.
+    /// and exact-basis admission. Objects stay in private custody until admission
+    /// plans a commit. An I/O failure does not prove non-commit.
     pub async fn fetch_full_git_bundle_durable_in(
         &self,
         request: &NodeRequestContext,
@@ -201,6 +205,8 @@ impl OneNode {
     /// Synchronize every advertised ref under explicit old-tip or absent leases.
     /// No implicit refresh or deletion. Caller authorization is required for
     /// exact-tip updates, including rewrites; mandatory repository policy remains.
+    /// New objects retain private synced custody until ordinary admission plans
+    /// a commit, under the same placement rule as full-bundle import and fetch.
     pub async fn import_incremental_git_bundle_durable_in(
         &self,
         request: &NodeRequestContext,
@@ -414,13 +420,15 @@ impl OneNode {
             max_object_bytes: receive_limits.pack.max_object_bytes,
             ..ParseLimits::default()
         };
+        let staging = ReceiveStaging::default();
         let validator = self
             .production_quarantine_validator(
                 &materialized,
                 receive_limits.pack.clone(),
                 parse_limits,
             )
-            .map_err(|code| receive_error(ReceiveError::AuthoritativeRefusal(code)))?;
+            .map_err(|code| receive_error(ReceiveError::AuthoritativeRefusal(code)))?
+            .with_receive_staging(&staging);
         let capability_bytes = format!(
             "report-status atomic object-format={}",
             self.object_format.as_str()
@@ -499,9 +507,15 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_basis_bound_validated_receive_durable_in(request, &context, &validated, limits)
-            .await
-            .map_err(admission_error)
+        self.admit_basis_bound_validated_receive_publishing_in(
+            request,
+            &context,
+            &validated,
+            limits,
+            Some(&staging),
+        )
+        .await
+        .map_err(admission_error)
     }
 }
 

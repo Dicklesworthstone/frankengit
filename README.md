@@ -283,10 +283,12 @@ descriptor, option-replication, response, storage and runtime budgets remain
 in force. This is per-session batching; cross-session combiner scheduling and
 independent full-bead acceptance remain incomplete.
 
-Durable local imports retain verified objects in private synced batches until
-admission plans a commit. Stale refs, refname conflicts, policy refusals and
-pre-publication cancellation discard those private files. Standalone staging
-APIs still place objects explicitly. Objects published before a later CAS loss
+Durable local imports, full-bundle imports, mapped bundle fetches and incremental
+bundle imports retain verified objects in private synced batches until admission
+plans a commit. Stale refs, refname conflicts, policy refusals and pre-publication
+cancellation discard those private files. Standalone staging APIs still place
+objects explicitly. Reviewed workspace and merge candidates still place objects
+before their additional validation. Objects published before a later CAS loss
 and residue after a process crash still require garbage collection.
 
 **What still blocks the product:**
