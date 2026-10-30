@@ -85,6 +85,19 @@ impl VisibleProjectionCache {
         found
     }
 
+    /// The current entry, at any basis and roots, when it was computed under
+    /// the same object format and limits: its per-object facts seed the next
+    /// walk (slice 2). Facts describe content-addressed objects, so they hold
+    /// at every basis; the walk re-applies every check and budget itself.
+    fn seed(&self, key: &ProjectionKey<'_>) -> Option<Arc<VisibleProjection>> {
+        self.entry.read().ok().and_then(|entry| {
+            entry
+                .as_ref()
+                .filter(|projection| projection.same_terms(key))
+                .map(Arc::clone)
+        })
+    }
+
     fn publish(&self, projection: Arc<VisibleProjection>) {
         let Ok(mut entry) = self.entry.write() else {
             return;
@@ -148,13 +161,26 @@ impl VisibleProjection {
     }
 
     fn matches(&self, key: &ProjectionKey<'_>) -> bool {
+        self.same_terms(key)
+            && self
+                .key
+                .as_ref()
+                .is_some_and(|stored| stored.binding == key.binding && stored.roots == key.roots)
+    }
+
+    fn same_terms(&self, key: &ProjectionKey<'_>) -> bool {
         self.key.as_ref().is_some_and(|stored| {
-            stored.binding == key.binding
-                && stored.format == key.format
+            stored.format == key.format
                 && stored.limits == *key.limits
                 && stored.maximum_object_bytes == key.maximum_object_bytes
-                && stored.roots == key.roots
         })
+    }
+
+    fn memo(&self) -> ProjectionMemo<'_> {
+        ProjectionMemo {
+            objects: &self.objects,
+            facts: &self.graph.facts,
+        }
     }
 
     fn generation(&self) -> Option<HeadGeneration> {
@@ -411,11 +437,13 @@ impl OneNode {
         let computed = reused.is_none();
         let projection = reused.map_or_else(
             || {
-                project_visible_graph(
+                let seed = key.as_ref().and_then(|key| cache.seed(key));
+                walk_visible_graph(
                     &source,
                     materialized.selected_closure().closure(),
                     roots.iter().copied(),
                     &self.selected_pack_limits,
+                    seed.as_deref().map(VisibleProjection::memo).as_ref(),
                 )
                 .map(|graph| Arc::new(VisibleProjection::new(key.as_ref(), graph)))
             },
@@ -545,12 +573,33 @@ impl<S: PermittedClosureTraversalSource> PermittedClosureTraversalSource
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct VisibleGraph {
     closure: PermittedObjectClosure,
     tag_targets: BTreeMap<GitOid, GitOid>,
     objects: BTreeMap<GitOid, partial_clone::FilterObject>,
     path_hashes: BTreeMap<GitOid, u64>,
+    /// How the walk handled each object it read whole, so a later walk can
+    /// reproduce that without reading it again (frankengit-8g42).
+    facts: BTreeMap<GitOid, WalkFacts>,
+}
+
+/// What one whole-object read contributed to a walk, beyond its
+/// [`partial_clone::FilterObject`]. Objects are content-addressed, so these
+/// never depend on the basis; the budgets they are charged against do, and a
+/// seeded walk re-applies them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct WalkFacts {
+    /// Edge-budget units the read charged (a tree's gitlink entries included).
+    charged: usize,
+    /// For a tree, the basename hint of each local edge, in edge order.
+    hints: Vec<u64>,
+}
+
+/// Facts from an earlier walk under the same object format and limits.
+struct ProjectionMemo<'a> {
+    objects: &'a BTreeMap<GitOid, partial_clone::FilterObject>,
+    facts: &'a BTreeMap<GitOid, WalkFacts>,
 }
 
 #[cfg(test)]
@@ -569,6 +618,34 @@ fn project_visible_graph(
     roots: impl IntoIterator<Item = GitOid>,
     limits: &PackLimits,
 ) -> Result<VisibleGraph, NodePackMaterializationRefusal> {
+    walk_visible_graph(source, admitted, roots, limits, None)
+}
+
+/// Walks the visible graph from `roots`. With a `memo`, an object an earlier
+/// walk already read is not read again: its stored facts pass through the
+/// same checks, in the same order, as a read would (frankengit-8g42), so the
+/// result, including any refusal, equals an unseeded walk's.
+fn walk_visible_graph(
+    source: &impl VisibilitySource,
+    admitted: &PermittedObjectClosure,
+    roots: impl IntoIterator<Item = GitOid>,
+    limits: &PackLimits,
+    memo: Option<&ProjectionMemo<'_>>,
+) -> Result<VisibleGraph, NodePackMaterializationRefusal> {
+    let edge_budget = limits.max_total_expanded_bytes.min(MAX_DISCLOSURE_EDGES);
+    walk_within_edge_budget(source, admitted, roots, limits, edge_budget, memo)
+}
+
+/// [`walk_visible_graph`] with its edge budget named, so the budget a seeded
+/// walk charges can be exercised below the byte envelope.
+fn walk_within_edge_budget(
+    source: &impl VisibilitySource,
+    admitted: &PermittedObjectClosure,
+    roots: impl IntoIterator<Item = GitOid>,
+    limits: &PackLimits,
+    edge_budget: usize,
+    memo: Option<&ProjectionMemo<'_>>,
+) -> Result<VisibleGraph, NodePackMaterializationRefusal> {
     source.checkpoint()?;
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
     let mut required = BTreeMap::<GitOid, Option<ObjectType>>::new();
@@ -577,6 +654,7 @@ fn project_visible_graph(
     let mut tag_targets = BTreeMap::new();
     let mut objects = BTreeMap::new();
     let mut path_hashes = BTreeMap::new();
+    let mut facts = BTreeMap::new();
     // Validate ALL roots before a read. A visible ref outside the authenticated
     // admitted set is inconsistent state, never permission to search storage.
     for root in roots {
@@ -592,18 +670,23 @@ fn project_visible_graph(
         )?;
     }
     let mut bytes = 0_usize;
-    let mut edges_left = limits.max_total_expanded_bytes.min(MAX_DISCLOSURE_EDGES);
+    let mut edges_left = edge_budget;
     let parse_limits = source.parse_limits();
     while let Some(id) = pending.pop_first() {
         source.checkpoint()?;
+        let remembered = memo.and_then(|memo| memo.objects.get(&id).map(|object| (memo, object)));
         // A blob reached through a typed edge has no edges of its own, so the
         // walk needs only its kind and size (frankengit-8xyq). Reading the
         // header keeps every ls-remote and fetch independent of blob bytes,
         // and a blob's body is read and verified only when a pack selects it.
         if required.get(&id) == Some(&Some(ObjectType::Blob)) {
-            let header = source.load_header(id);
-            source.checkpoint()?;
-            let (kind, size) = header?;
+            let (kind, size) = if let Some((_, object)) = remembered {
+                (object.kind, object.size)
+            } else {
+                let header = source.load_header(id);
+                source.checkpoint()?;
+                header?
+            };
             // A typed blob has no outgoing edges. Retain its exact size for
             // filter selection without applying a body-allocation limit to
             // metadata. The pack source checks that limit before any selected
@@ -619,6 +702,43 @@ fn project_visible_graph(
                     edges: Vec::new(),
                 },
             );
+            continue;
+        }
+        if let Some((object, stored)) =
+            remembered.and_then(|(memo, object)| Some((object, memo.facts.get(&id)?)))
+        {
+            // The checks a read of these exact bytes would make, in order.
+            if object.size > limits.max_object_bytes || object.size > parse_limits.max_object_bytes
+            {
+                return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
+            }
+            bytes = bytes
+                .checked_add(object.size)
+                .ok_or_else(|| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
+            if bytes > limits.max_total_expanded_bytes {
+                return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
+            }
+            if let Some(Some(expected)) = required.get(&id) {
+                require_kind(object.kind, *expected)?;
+            }
+            edges_left = edges_left
+                .checked_sub(stored.charged)
+                .ok_or_else(|| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
+            visit_edges(
+                source,
+                admitted,
+                maximum,
+                id,
+                object.kind,
+                &object.edges,
+                &mut known,
+                &mut tag_targets,
+                &mut required,
+                &mut pending,
+            )?;
+            merge_path_hints(&object.edges, &stored.hints, &mut path_hashes);
+            objects.insert(id, object.clone());
+            facts.insert(id, stored.clone());
             continue;
         }
         let loaded = source.load(id);
@@ -650,6 +770,7 @@ fn project_visible_graph(
             Some(parsed.map_err(|_| disclosure_refusal(RefusalCode::ObjectHeaderInvalid))?)
         };
         let commit_time = parsed.as_ref().and_then(shallow::cutoffs::committer_time);
+        let charge_before = edges_left;
         let edges = if let Some(parsed) = &parsed {
             let mut stopped = None;
             let edges = crate::loose_import::graph::references(
@@ -680,35 +801,28 @@ fn project_visible_graph(
         } else {
             Vec::new()
         };
-        if kind == ObjectType::Tag {
-            let [(target, _)] = edges.as_slice() else {
-                return Err(disclosure_refusal(RefusalCode::ObjectHeaderInvalid));
-            };
-            tag_targets.insert(id, *target);
-        }
-        known.insert(id, kind);
-        for &(child, expected) in &edges {
-            source.checkpoint()?;
-            // Every edge is checked, including one into an already loaded root.
-            if let Some(actual) = known.get(&child) {
-                require_kind(*actual, expected)?;
-            }
-            enqueue(
-                source.format(),
-                admitted,
-                child,
-                Some(expected),
-                maximum,
-                &mut required,
-                &mut pending,
-            )?;
-        }
-        if let Some(ParsedObject::Tree(entries)) = &parsed {
+        let charged = charge_before - edges_left;
+        visit_edges(
+            source,
+            admitted,
+            maximum,
+            id,
+            kind,
+            &edges,
+            &mut known,
+            &mut tag_targets,
+            &mut required,
+            &mut pending,
+        )?;
+        let hints = if let Some(ParsedObject::Tree(entries)) = &parsed {
             // Every local edge was admitted and charged above, so this map
             // cannot grow beyond the bounded set of required objects. The
             // parser already owns the names; retain only one hash per object.
-            record_tree_path_hashes(source, entries, &edges, &mut path_hashes)?;
-        }
+            tree_path_hints(source, entries, &edges)?
+        } else {
+            Vec::new()
+        };
+        merge_path_hints(&edges, &hints, &mut path_hashes);
         objects.insert(
             id,
             partial_clone::FilterObject {
@@ -718,6 +832,7 @@ fn project_visible_graph(
                 edges,
             },
         );
+        facts.insert(id, WalkFacts { charged, hints });
     }
     source.checkpoint()?;
     Ok(VisibleGraph {
@@ -725,19 +840,73 @@ fn project_visible_graph(
         tag_targets,
         objects,
         path_hashes,
+        facts,
     })
+}
+
+/// Records a loaded object's kind and tag target, and admits its edges.
+fn visit_edges(
+    source: &impl VisibilitySource,
+    admitted: &PermittedObjectClosure,
+    maximum: usize,
+    id: GitOid,
+    kind: ObjectType,
+    edges: &[(GitOid, ObjectType)],
+    known: &mut BTreeMap<GitOid, ObjectType>,
+    tag_targets: &mut BTreeMap<GitOid, GitOid>,
+    required: &mut BTreeMap<GitOid, Option<ObjectType>>,
+    pending: &mut BTreeSet<GitOid>,
+) -> Result<(), NodePackMaterializationRefusal> {
+    if kind == ObjectType::Tag {
+        let [(target, _)] = edges else {
+            return Err(disclosure_refusal(RefusalCode::ObjectHeaderInvalid));
+        };
+        tag_targets.insert(id, *target);
+    }
+    known.insert(id, kind);
+    for &(child, expected) in edges {
+        source.checkpoint()?;
+        // Every edge is checked, including one into an already loaded root.
+        if let Some(actual) = known.get(&child) {
+            require_kind(*actual, expected)?;
+        }
+        enqueue(
+            source.format(),
+            admitted,
+            child,
+            Some(expected),
+            maximum,
+            required,
+            pending,
+        )?;
+    }
+    Ok(())
+}
+
+/// Keeps the minimum hint per object across every tree that names it.
+fn merge_path_hints(
+    edges: &[(GitOid, ObjectType)],
+    hints: &[u64],
+    path_hashes: &mut BTreeMap<GitOid, u64>,
+) {
+    for (&(child, _), &hint) in edges.iter().zip(hints) {
+        path_hashes
+            .entry(child)
+            .and_modify(|previous| *previous = (*previous).min(hint))
+            .or_insert(hint);
+    }
 }
 
 /// Fold names in the same edge order as the shared native graph classifier.
 /// The mode's type bits, rather than spelling, exclude imported gitlinks.
 /// Multiple names choose the minimum hash independent of root or tree order;
 /// collisions can affect compression only, never object disclosure.
-fn record_tree_path_hashes(
+fn tree_path_hints(
     source: &impl VisibilitySource,
     entries: &[fgit_git_object::TreeEntry],
     edges: &[(GitOid, ObjectType)],
-    path_hashes: &mut BTreeMap<GitOid, u64>,
-) -> Result<(), NodePackMaterializationRefusal> {
+) -> Result<Vec<u64>, NodePackMaterializationRefusal> {
+    let mut hints = Vec::with_capacity(edges.len());
     let mut local_edges = edges.iter();
     for entry in entries {
         source.checkpoint()?;
@@ -756,15 +925,12 @@ fn record_tree_path_hashes(
         }
         let hint = basename_path_hash(&entry.name);
         source.checkpoint()?;
-        path_hashes
-            .entry(*child)
-            .and_modify(|previous| *previous = (*previous).min(hint))
-            .or_insert(hint);
+        hints.push(hint);
     }
     if local_edges.next().is_some() {
         return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
     }
-    Ok(())
+    Ok(hints)
 }
 
 fn enqueue(

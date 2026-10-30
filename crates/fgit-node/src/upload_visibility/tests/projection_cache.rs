@@ -287,3 +287,41 @@ fn an_equal_ref_view_at_a_later_generation_is_recomputed_not_reused() {
         drop(scratch);
     }
 }
+
+#[test]
+fn a_new_basis_reads_only_objects_the_previous_projection_never_read() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let Fixture {
+            scratch,
+            node,
+            public,
+            ancestor,
+            visible,
+            ..
+        } = fixture(format);
+        let first = prepare(&node).unwrap();
+        create_named_ref(
+            &node,
+            public,
+            &visible,
+            b"refs/heads/extra",
+            b"extra-seeded",
+        );
+        // The new basis needs `ancestor` again, but the previous projection
+        // already read it: with its file gone, only the seeded walk answers.
+        let hidden = Hidden::object(&scratch.0, ancestor);
+        let seeded = prepare(&node).unwrap();
+        assert_eq!(node.upload_visibility_cache_stats(), (0, 2));
+        assert_same_projection(&first, &seeded);
+        assert!(seeded.repository().contains_want(public));
+        node.shutdown().unwrap();
+
+        // Its twin: an independent service has nothing to seed from.
+        let cold = OneNode::open_existing(independent_config(&scratch.0, format)).unwrap();
+        assert!(prepare(&cold).is_err());
+        drop(hidden);
+        assert_same_projection(&seeded, &prepare(&cold).unwrap());
+        cold.shutdown().unwrap();
+        drop(scratch);
+    }
+}
