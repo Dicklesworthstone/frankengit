@@ -7453,6 +7453,9 @@ pub struct NodeConfig {
     /// Verified historical closure prefix, shared across service children but
     /// revalidated against each request's exact authority basis before reuse.
     admission_closure_cache: Arc<closure_selection::AdmissionClosureCache>,
+    /// The last visible upload-pack projection, shared across service children
+    /// and reused only at its exact authority basis (frankengit-8g42).
+    upload_visibility_cache: Arc<upload_visibility::VisibleProjectionCache>,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
     /// Work-proportional extension of the git-daemon session envelope: the
@@ -7544,6 +7547,7 @@ impl NodeConfig {
                 DEFAULT_RECEIVED_PACK_CACHE_BYTES,
             )),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
+            upload_visibility_cache: Arc::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
@@ -8532,6 +8536,14 @@ impl OneNode {
     #[must_use]
     pub const fn serving_cell(&self) -> ServingCell {
         self.serving_cell
+    }
+
+    /// Observes this service's shared visible upload-pack projection cache:
+    /// sessions that reused a projection, then sessions that computed one
+    /// (frankengit-8g42). Neither count participates in disclosure.
+    #[must_use]
+    pub fn upload_visibility_cache_stats(&self) -> (u64, u64) {
+        self.service_config.upload_visibility_cache.stats()
     }
 
     /// Observes this service's disposable pack computation cache, including

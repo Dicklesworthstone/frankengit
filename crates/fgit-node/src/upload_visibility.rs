@@ -6,26 +6,25 @@
 //! rewrite the canonical per-decision closure or the trusted local exporter.
 use super::{
     AcceptanceProfile, AdmissionUploadPackRepository, AdvertisedRef, AnyGitOid, Arc, BTreeMap,
-    BTreeSet, BudgetClass, Cell, GitDaemonSessionDeadline, GitHashAlgorithm, GitOid,
-    MaterializedAdmission, NodeAdmissionViewRefusal, NodeGitDaemonServeRefusal,
-    NodePackMaterializationRefusal, NodeRequestContext, ObjectType, OneNode, PackError, PackLimits,
-    PackOrderKey, PackRequest, PackWriteError, ParseLimits, ParsedObject,
-    PermittedClosureTraversalSource, PermittedObjectClosure, PublicationBasis, RefusalCode,
-    UploadPackRepository, VerifiedFabricPackSource, WireError, WireLimits, entry_limit_error,
-    parse_object_body, selected_pack_ids_and_held,
+    BTreeSet, BudgetClass, CacheBinding, CacheScope, Cell, GitDaemonSessionDeadline,
+    GitHashAlgorithm, GitOid, HeadGeneration, MaterializedAdmission, NodeAdmissionViewRefusal,
+    NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, NodeRequestContext, ObjectType,
+    OneNode, OpaqueHandle, PackError, PackLimits, PackOrderKey, PackRequest, PackWriteError,
+    ParseLimits, ParsedObject, PermittedClosureTraversalSource, PermittedObjectClosure,
+    PublicationBasis, RefusalCode, RwLock, UploadPackRepository, VerifiedFabricPackSource,
+    WireError, WireLimits, entry_limit_error, parse_object_body, selected_pack_ids_and_held,
 };
 #[cfg(test)]
 use super::{
     AdmissionContext, AdmissionLimits, AdmissionSnapshot, AtomicBool, AtomicU64, Capabilities,
     CeiledFabricSource, Duration, FsqliteCx, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
-    GitDaemonSessionWorkScaling, GitObjectKind, HeadGeneration, IdempotencyKey,
-    LoopbackReceiveSession, NodeConfig, NodeSmartHttpRefusal, Ordering, PackPlanner,
-    PackWriteProfile, PackWriter, Packet, PathBuf, PrincipalId, ReceiveContext, ReceiveLimits,
-    RefName, RefVisibility, RepositoryId, SegmentLimits, Shutdown, SignedPushProfile,
-    SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, TcpListener, TcpStream, TenantId,
-    UploadPackVersion, V2UploadPack, ValidatedClosure, VerifiedFabricBlobReader,
-    crypto_object_kind, encode_packets, git_object_id, permitted_object_closure_root,
-    validate_source_import,
+    GitDaemonSessionWorkScaling, GitObjectKind, IdempotencyKey, LoopbackReceiveSession, NodeConfig,
+    NodeSmartHttpRefusal, Ordering, PackPlanner, PackWriteProfile, PackWriter, Packet, PathBuf,
+    PrincipalId, ReceiveContext, ReceiveLimits, RefName, RefVisibility, RepositoryId,
+    SegmentLimits, Shutdown, SignedPushProfile, SourceImportOrigin, SourceImportReceipt,
+    SourceRefUpdate, TcpListener, TcpStream, TenantId, UploadPackVersion, V2UploadPack,
+    ValidatedClosure, VerifiedFabricBlobReader, crypto_object_kind, encode_packets, git_object_id,
+    permitted_object_closure_root, validate_source_import,
 };
 #[cfg(test)]
 use super::{CanonicalBlobReader, PackPayloadSource};
@@ -38,6 +37,130 @@ pub mod tags;
 
 const MAX_DISCLOSURE_EDGES: usize = 4_000_000;
 const DISCLOSURE_OPERATION: &str = "verify visible upload-pack graph";
+const VISIBLE_PROJECTION_CACHE_SCOPE: &[u8] = b"node/upload-visibility-cache/v1";
+
+/// One reusable visible projection, shared by the service children opened
+/// from one configuration (frankengit-8g42).
+///
+/// `project_visible_graph` reads every visible commit, tree and tag and every
+/// blob header, so before this cache every ls-remote, fetch and clone of a long
+/// history paid for the whole history even when the head had not moved. The
+/// projection is a pure function of the materialization's exact authenticated
+/// basis (its repository, head identity and generation, as a [`CacheBinding`]),
+/// the advertised roots, and the object format and limits it was computed
+/// under; an entry is reused only when all of them match. It never selects objects or grants disclosure on its own: every
+/// session still materializes and authenticates its own basis first, wants and
+/// packs are still checked against it, and a refused or deadline-cut
+/// projection is never stored. Losing the entry only costs a recomputation.
+#[derive(Debug, Default)]
+pub struct VisibleProjectionCache {
+    entry: RwLock<Option<Arc<VisibleProjection>>>,
+    reused: std::sync::atomic::AtomicU64,
+    computed: std::sync::atomic::AtomicU64,
+}
+
+impl VisibleProjectionCache {
+    /// Sessions that reused the entry, and sessions that computed one.
+    pub fn stats(&self) -> (u64, u64) {
+        (
+            self.reused.load(std::sync::atomic::Ordering::Relaxed),
+            self.computed.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn lookup(&self, key: &ProjectionKey<'_>) -> Option<Arc<VisibleProjection>> {
+        // A poisoned lock only loses the reuse; the session recomputes.
+        let found = self.entry.read().ok().and_then(|entry| {
+            entry
+                .as_ref()
+                .filter(|projection| projection.matches(key))
+                .map(Arc::clone)
+        });
+        let counter = if found.is_some() {
+            &self.reused
+        } else {
+            &self.computed
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        found
+    }
+
+    fn publish(&self, projection: Arc<VisibleProjection>) {
+        let Ok(mut entry) = self.entry.write() else {
+            return;
+        };
+        // A late session at an older basis must not displace a newer entry.
+        let Some(generation) = projection.generation() else {
+            return;
+        };
+        let newer = entry
+            .as_ref()
+            .and_then(|current| current.generation())
+            .is_some_and(|current| current > generation);
+        if !newer {
+            *entry = Some(projection);
+        }
+    }
+}
+
+/// Everything a cached projection was computed from.
+struct ProjectionKey<'a> {
+    binding: CacheBinding,
+    format: GitHashAlgorithm,
+    limits: &'a PackLimits,
+    maximum_object_bytes: usize,
+    roots: &'a [GitOid],
+}
+
+/// The session-independent part of a [`VisibleUploadPack`].
+#[derive(Debug)]
+struct VisibleProjection {
+    /// `None` only when no cache key could be built; such a projection is
+    /// used by its own session and never published.
+    key: Option<StoredKey>,
+    graph: VisibleGraph,
+    objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
+}
+
+#[derive(Debug)]
+struct StoredKey {
+    binding: CacheBinding,
+    format: GitHashAlgorithm,
+    limits: PackLimits,
+    maximum_object_bytes: usize,
+    roots: Vec<GitOid>,
+}
+
+impl VisibleProjection {
+    fn new(key: Option<&ProjectionKey<'_>>, mut graph: VisibleGraph) -> Self {
+        let objects = Arc::new(core::mem::take(&mut graph.objects));
+        Self {
+            key: key.map(|key| StoredKey {
+                binding: key.binding,
+                format: key.format,
+                limits: key.limits.clone(),
+                maximum_object_bytes: key.maximum_object_bytes,
+                roots: key.roots.to_vec(),
+            }),
+            graph,
+            objects,
+        }
+    }
+
+    fn matches(&self, key: &ProjectionKey<'_>) -> bool {
+        self.key.as_ref().is_some_and(|stored| {
+            stored.binding == key.binding
+                && stored.format == key.format
+                && stored.limits == *key.limits
+                && stored.maximum_object_bytes == key.maximum_object_bytes
+                && stored.roots == key.roots
+        })
+    }
+
+    fn generation(&self) -> Option<HeadGeneration> {
+        self.key.as_ref().map(|stored| stored.binding.generation())
+    }
+}
 
 /// Constructible only after the entire selected graph has been checked:
 /// every commit, tree and tag body is read and native-verified, and every blob
@@ -249,31 +372,62 @@ impl OneNode {
         .map_err(NodeAdmissionViewRefusal::from)?;
         let exhaustion = Cell::new(None);
         let live = || !deadline.expired();
+        let maximum_object_bytes = self
+            .selected_pack_limits
+            .max_object_bytes
+            .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
             object_format: self.object_format,
-            maximum_object_bytes: self
-                .selected_pack_limits
-                .max_object_bytes
-                .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)),
+            maximum_object_bytes,
             database_context: request.authority(),
             database_exhaustion: &exhaustion,
             session_is_live: Some(&live),
         };
-        let graph = project_visible_graph(
-            &source,
-            materialized.selected_closure().closure(),
-            repository
-                .advertised_refs()
-                .iter()
-                .map(|reference| reference.oid),
-            &self.selected_pack_limits,
+        let roots = repository
+            .advertised_refs()
+            .iter()
+            .map(|reference| reference.oid)
+            .collect::<Vec<_>>();
+        // The binding names the exact authenticated basis this session
+        // materialized; the scope cannot fail to build from a constant, and
+        // without one the session simply does not reuse or publish.
+        let key = OpaqueHandle::new(VISIBLE_PROJECTION_CACHE_SCOPE)
+            .ok()
+            .map(|scope| ProjectionKey {
+                binding: CacheBinding::new(
+                    self.repository_id,
+                    materialized.basis().id(),
+                    materialized.basis().generation(),
+                    CacheScope::new(scope),
+                ),
+                format: self.object_format,
+                limits: &self.selected_pack_limits,
+                maximum_object_bytes,
+                roots: &roots,
+            });
+        let cache = &self.service_config.upload_visibility_cache;
+        let reused = key.as_ref().and_then(|key| cache.lookup(key));
+        let computed = reused.is_none();
+        let projection = reused.map_or_else(
+            || {
+                project_visible_graph(
+                    &source,
+                    materialized.selected_closure().closure(),
+                    roots.iter().copied(),
+                    &self.selected_pack_limits,
+                )
+                .map(|graph| Arc::new(VisibleProjection::new(key.as_ref(), graph)))
+            },
+            Ok,
         );
-        let derived = graph.and_then(|graph| {
-            tags::TagProjection::new(&graph.tag_targets, repository.advertised_refs(), || {
-                source.checkpoint()
-            })
-            .map(|tags| (graph, tags))
+        let derived = projection.and_then(|projection| {
+            tags::TagProjection::new(
+                &projection.graph.tag_targets,
+                repository.advertised_refs(),
+                || source.checkpoint(),
+            )
+            .map(|tags| (projection, tags))
         });
         // Preserve the established outer-session > Database > object-refusal
         // precedence, including a deadline crossed inside an immutable read.
@@ -286,11 +440,14 @@ impl OneNode {
             }
             .into());
         }
-        let (graph, tags) = derived?;
-        let closure = graph.closure;
+        let (projection, tags) = derived?;
+        if computed {
+            cache.publish(Arc::clone(&projection));
+        }
+        let closure = projection.graph.closure.clone();
         let mut repository = repository.with_closure_objects(closure.objects().clone());
         repository.tag_peels = tags.peels.clone();
-        let objects = Arc::new(graph.objects);
+        let objects = Arc::clone(&projection.objects);
         repository.shallow_proof = Some(shallow::ShallowProof::new(
             Arc::clone(&objects),
             self.selected_pack_limits.clone(),
@@ -302,7 +459,7 @@ impl OneNode {
             repository,
             tags,
             objects,
-            path_hashes: graph.path_hashes,
+            path_hashes: projection.graph.path_hashes.clone(),
         })
     }
 }
@@ -388,6 +545,7 @@ impl<S: PermittedClosureTraversalSource> PermittedClosureTraversalSource
     }
 }
 
+#[derive(Debug)]
 struct VisibleGraph {
     closure: PermittedObjectClosure,
     tag_targets: BTreeMap<GitOid, GitOid>,

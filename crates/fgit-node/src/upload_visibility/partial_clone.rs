@@ -29,7 +29,7 @@ pub(crate) fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str
     None
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FilterObject {
     pub(super) kind: ObjectType,
     pub(super) commit_time: Option<i64>,

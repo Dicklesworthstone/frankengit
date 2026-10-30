@@ -441,9 +441,9 @@ fn preflight_allows_streamed_blob_metadata_above_the_buffered_body_cap() {
         .map(|(id, _)| *id)
         .unwrap();
     // Header-only fixture: no allocation or body read is needed for admission.
+    // The node's projection cache shares the map, so forge on a private copy.
     scope.repository.shallow_proof = None;
-    Arc::get_mut(&mut scope.objects)
-        .unwrap()
+    Arc::make_mut(&mut scope.objects)
         .get_mut(&blob)
         .unwrap()
         .size = large;
@@ -459,8 +459,7 @@ fn preflight_allows_streamed_blob_metadata_above_the_buffered_body_cap() {
     assert_eq!(keys[0].path_hash, scope.path_hash_of(&blob));
     assert_ne!(keys[0].path_hash, 0);
     assert_eq!(bytes, large);
-    Arc::get_mut(&mut scope.objects)
-        .unwrap()
+    Arc::make_mut(&mut scope.objects)
         .get_mut(&public)
         .unwrap()
         .size = large;
