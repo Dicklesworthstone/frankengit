@@ -475,6 +475,9 @@ mod incremental_tests;
 #[path = "streaming_incremental_tests.rs"]
 mod streaming_incremental_tests;
 
+#[path = "streaming_blob_tests.rs"]
+mod streaming_blob_tests;
+
 // Native Git bytes cross repositories; incarnation-scoped storage envelopes do
 // not. Compare the entire object after rebinding ONLY the namespace, and prove
 // both original envelopes remain bound to their own independently created node.

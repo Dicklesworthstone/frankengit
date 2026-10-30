@@ -646,6 +646,29 @@ fn walk_within_edge_budget(
     edge_budget: usize,
     memo: Option<&ProjectionMemo<'_>>,
 ) -> Result<VisibleGraph, NodePackMaterializationRefusal> {
+    walk_within_edge_budget_and_root_blobs(
+        source,
+        admitted,
+        roots,
+        limits,
+        edge_budget,
+        memo,
+        false,
+    )
+}
+
+/// Streaming bundle selection may identify an untyped blob root from its
+/// envelope: the emitted payload is verified by the later blob stream. Other
+/// disclosure callers retain their existing root-body verification policy.
+fn walk_within_edge_budget_and_root_blobs(
+    source: &impl VisibilitySource,
+    admitted: &PermittedObjectClosure,
+    roots: impl IntoIterator<Item = GitOid>,
+    limits: &PackLimits,
+    edge_budget: usize,
+    memo: Option<&ProjectionMemo<'_>>,
+    blob_root_headers: bool,
+) -> Result<VisibleGraph, NodePackMaterializationRefusal> {
     source.checkpoint()?;
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
     let mut required = BTreeMap::<GitOid, Option<ObjectType>>::new();
@@ -675,12 +698,22 @@ fn walk_within_edge_budget(
     while let Some(id) = pending.pop_first() {
         source.checkpoint()?;
         let remembered = memo.and_then(|memo| memo.objects.get(&id).map(|object| (memo, object)));
+        let root_blob = if blob_root_headers && required.get(&id) == Some(&None) {
+            let header = source.load_header(id);
+            source.checkpoint()?;
+            let header = header?;
+            (header.0 == ObjectType::Blob).then_some(header)
+        } else {
+            None
+        };
         // A blob reached through a typed edge has no edges of its own, so the
         // walk needs only its kind and size (frankengit-8xyq). Reading the
         // header keeps every ls-remote and fetch independent of blob bytes,
         // and a blob's body is read and verified only when a pack selects it.
-        if required.get(&id) == Some(&Some(ObjectType::Blob)) {
-            let (kind, size) = if let Some((_, object)) = remembered {
+        if required.get(&id) == Some(&Some(ObjectType::Blob)) || root_blob.is_some() {
+            let (kind, size) = if let Some(header) = root_blob {
+                header
+            } else if let Some((_, object)) = remembered {
                 (object.kind, object.size)
             } else {
                 let header = source.load_header(id);
@@ -992,9 +1025,8 @@ pub fn bundle_visible_closure(
     project_visible_graph(source, admitted, roots, limits).map(|graph| graph.closure)
 }
 
-
 /// A bounded visible native-metadata and typed-closure proof for one offline
-/// transfer. Blob facts reached through typed edges use checked envelopes only;
+/// transfer. Blob facts, including untyped roots, use checked envelopes only;
 /// this does not certify the present health of omitted blob payloads. The caller
 /// binds the admitted set and visible roots to its authenticated snapshot.
 pub(super) struct BundleVisibleGraph {
@@ -1007,15 +1039,15 @@ impl BundleVisibleGraph {
     }
 
     pub(super) fn object_metadata(&self, id: &GitOid) -> Option<(ObjectType, usize)> {
-        self.graph.objects.get(id).map(|object| (object.kind, object.size))
+        self.graph
+            .objects
+            .get(id)
+            .map(|object| (object.kind, object.size))
     }
 
     /// Traverse facts already checked under the visible roots, without loading
     /// the omitted prerequisite bodies again.
-    pub(super) fn selection_source<'a, S>(
-        &'a self,
-        source: &'a S,
-    ) -> VisibleGraphSelection<'a, S> {
+    pub(super) fn selection_source<'a, S>(&'a self, source: &'a S) -> VisibleGraphSelection<'a, S> {
         VisibleGraphSelection {
             objects: &self.graph.objects,
             source,
@@ -1050,13 +1082,14 @@ pub(super) fn bundle_visible_graph_bounded(
         database_exhaustion: source.database_exhaustion,
         session_is_live: source.session_is_live,
     };
-    walk_within_edge_budget(
+    walk_within_edge_budget_and_root_blobs(
         &bounded_source,
         admitted,
         roots,
         &bounded,
         maximum_edges.min(MAX_DISCLOSURE_EDGES),
         None,
+        true,
     )
     .map(|graph| BundleVisibleGraph { graph })
 }

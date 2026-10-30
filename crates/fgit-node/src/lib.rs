@@ -7910,9 +7910,11 @@ impl NodeConfig {
     }
 
     /// Selects an explicit per-blob serving/export ceiling. Above 32 MiB the
-    /// node selects the V6 streaming profiles; commit/tree/tag parsing and
-    /// untyped ref-root reads retain their 32 MiB buffered ceiling. The local
-    /// stored-file bound includes independently bounded envelope/framing bytes.
+    /// node selects the V6 streaming serving profiles; commit/tree/tag parsing
+    /// and ordinary untyped ref-root reads retain their 32 MiB buffered ceiling.
+    /// Streaming bundle export identifies blob roots from checked envelopes and
+    /// retains its own deterministic bundle profile. The local stored-file bound
+    /// includes independently bounded envelope/framing bytes.
     /// Existing configurations keep their original profiles and 32 MiB limit.
     /// Receive/import object limits and the total pack envelope are separate.
     #[must_use]

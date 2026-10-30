@@ -168,13 +168,18 @@ pub(super) fn prepare(
         if external.contains_key(&id) {
             continue;
         }
-        let (_, size) = graph
+        let (kind, size) = graph
             .object_metadata(&id)
             .ok_or_else(|| bundle_error(FullBundleError::MissingObject(id)))?;
-        if size > limits.pack.max_object_bytes {
+        let maximum = if kind == ObjectType::Blob {
+            limits.max_streamed_blob_bytes
+        } else {
+            limits.pack.max_object_bytes
+        };
+        if size > maximum {
             return Err(bundle_error(PackError::ObjectSizeLimit {
                 actual: size,
-                limit: limits.pack.max_object_bytes,
+                limit: maximum,
             }));
         }
         selected_bytes = selected_bytes.checked_add(size).ok_or_else(|| {
