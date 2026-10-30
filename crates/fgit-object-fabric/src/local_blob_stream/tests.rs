@@ -20,6 +20,11 @@ struct Fixture {
 
 impl Fixture {
     fn new(format: GitHashAlgorithm, body: Vec<u8>) -> Self {
+        Self::for_kind(format, ObjectKind::Blob, body)
+    }
+
+    fn for_kind(format: GitHashAlgorithm, kind: ObjectKind, body: Vec<u8>) -> Self {
+        let native = native_kind(kind).unwrap();
         let root = std::env::temp_dir().join(format!(
             "frankengit-blob-stream-{}-{}",
             std::process::id(),
@@ -34,16 +39,13 @@ impl Fixture {
             SegmentLimits::default(),
         ))
         .unwrap();
-        let id = fgit_crypto::git_object_id(format, GitObjectKind::Blob, &body);
-        let commitment = fgit_crypto::git_payload_commitment(
-            GitObjectKind::Blob,
-            &body,
-            CANONICAL_CODEC_VERSION,
-        );
+        let id = fgit_crypto::git_object_id(format, native, &body);
+        let commitment =
+            fgit_crypto::git_payload_commitment(native, &body, CANONICAL_CODEC_VERSION);
         let envelope = ObjectEnvelope::new(
             b"stream-test".to_vec(),
             id,
-            ObjectKind::Blob,
+            kind,
             body.len() as u64,
             commitment.digest().as_bytes().try_into().unwrap(),
             b"raw".to_vec(),
@@ -273,4 +275,362 @@ fn replacing_the_path_does_not_replace_the_checked_descriptor_and_drop_is_retrya
     assert!(!interrupted.is_verified());
     drop(interrupted);
     assert_eq!(collect(&mut fixture.open(), 7).unwrap(), fixture.body);
+}
+
+const NATIVE_KINDS: [ObjectKind; 4] = [
+    ObjectKind::Commit,
+    ObjectKind::Tree,
+    ObjectKind::Blob,
+    ObjectKind::Tag,
+];
+
+#[test]
+fn integrity_scan_matches_whole_object_verification_for_every_native_kind_and_format() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for kind in NATIVE_KINDS {
+            for body in [Vec::new(), vec![91; CHUNK_BYTES * 2 + 17]] {
+                let fixture = Fixture::for_kind(format, kind, body);
+                let maximum = fixture.body.len() as u64;
+                let original = fixture
+                    .fabric
+                    .read_whole_bounded(fixture.id, maximum)
+                    .unwrap()
+                    .object;
+                let mut probes = 0;
+                let receipt = fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || {
+                        probes += 1;
+                        true
+                    })
+                    .unwrap();
+                assert_eq!(receipt.identity(), original.identity());
+                assert_eq!(receipt.object_kind(), original.envelope().object_kind());
+                assert_eq!(receipt.payload_length(), original.payload().len() as u64);
+                assert!(probes >= 4);
+                if !fixture.body.is_empty() {
+                    assert!(
+                        probes > 4,
+                        "multi-chunk scans retain cooperative checkpoints"
+                    );
+                }
+                assert_eq!(
+                    fs::read_dir(fixture.root.join("staging")).unwrap().count(),
+                    0
+                );
+                if kind != ObjectKind::Blob {
+                    assert!(matches!(
+                        fixture.fabric.open_blob_stream_bounded(fixture.id, maximum),
+                        Err(StoreRefusal::NativeObjectIdentityMismatch)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn integrity_preflight_refuses_limits_and_invalid_envelopes_before_payload_work() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for kind in NATIVE_KINDS {
+            let fixture = Fixture::for_kind(format, kind, vec![42; CHUNK_BYTES + 17]);
+            let maximum = fixture.body.len() as u64;
+            let mut corrupt = fixture.body.clone();
+            *corrupt.last_mut().unwrap() ^= 1;
+            fixture.store(&fixture.envelope, &corrupt);
+            // A corrupt body must not be scanned to discover a known budget
+            // failure. Opening and its post-I/O probe are the only checkpoints.
+            let mut probes = 0;
+            assert_eq!(
+                fixture.fabric.verify_object_integrity_bounded(
+                    fixture.id,
+                    maximum - 1,
+                    &mut || {
+                        probes += 1;
+                        true
+                    },
+                ),
+                Err(StoreRefusal::StreamingBudgetExceeded {
+                    offered: maximum,
+                    maximum: maximum - 1,
+                })
+            );
+            assert_eq!(probes, 2);
+            assert_eq!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || true,),
+                Err(StoreRefusal::PayloadCommitmentMismatch)
+            );
+            for fault in ["namespace", "identity", "internal", "length"] {
+                let mut envelope = fixture.envelope.clone();
+                match fault {
+                    "namespace" => envelope.namespace = b"foreign".to_vec(),
+                    "identity" => {
+                        envelope.object_identity = fgit_crypto::git_object_id(
+                            format,
+                            native_kind(kind).unwrap(),
+                            b"another identity",
+                        );
+                    }
+                    "internal" => envelope.object_kind = ObjectKind::Internal,
+                    "length" => envelope.declared_length += 1,
+                    _ => unreachable!(),
+                }
+                fixture.store(&envelope, &fixture.body);
+                let error = fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || true)
+                    .unwrap_err();
+                match fault {
+                    "namespace" => assert_eq!(error, StoreRefusal::NamespaceMismatch),
+                    "identity" => assert!(matches!(
+                        error,
+                        StoreRefusal::StoredObjectReconstructionMismatch { .. }
+                    )),
+                    "internal" => assert_eq!(error, StoreRefusal::NativeObjectIdentityMismatch),
+                    "length" => assert_eq!(error, StoreRefusal::MalformedStoredObject),
+                    _ => unreachable!(),
+                }
+            }
+            fixture.store(&fixture.envelope, &fixture.body);
+            assert_eq!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || true)
+                    .unwrap()
+                    .payload_length(),
+                maximum
+            );
+        }
+    }
+}
+
+#[test]
+fn integrity_scan_checks_both_original_commitments_for_every_kind() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for kind in NATIVE_KINDS {
+            let fixture = Fixture::for_kind(format, kind, vec![42; CHUNK_BYTES + 17]);
+            let maximum = fixture.body.len() as u64;
+            let mut changed = fixture.envelope.clone();
+            changed.payload_commitment[0] ^= 1;
+            fixture.store(&changed, &fixture.body);
+            assert_eq!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || true,),
+                Err(StoreRefusal::PayloadCommitmentMismatch)
+            );
+            // The strong commitment still matches these bytes, but the claimed
+            // native identity does not. The keyed path alone cannot bless it.
+            changed = fixture.envelope.clone();
+            let wrong = fgit_crypto::git_object_id(
+                format,
+                native_kind(kind).unwrap(),
+                b"wrong native bytes",
+            );
+            changed.object_identity = wrong;
+            fixture.store(&changed, &fixture.body);
+            let wrong_path = fixture.fabric.object_path(wrong);
+            fs::rename(&fixture.path, &wrong_path).unwrap();
+            assert_eq!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(wrong, maximum, &mut || true,),
+                Err(StoreRefusal::NativeObjectIdentityMismatch)
+            );
+            fs::rename(wrong_path, &fixture.path).unwrap();
+            fixture.store(&fixture.envelope, &fixture.body);
+            assert!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || true,)
+                    .is_ok()
+            );
+        }
+    }
+}
+
+#[test]
+fn integrity_scan_detects_mutation_after_open_and_keeps_the_checked_descriptor() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for kind in NATIVE_KINDS {
+            for fault in ["payload", "short", "extra", "replace"] {
+                let fixture = Fixture::for_kind(format, kind, vec![73; CHUNK_BYTES * 3 + 17]);
+                let maximum = fixture.body.len() as u64;
+                let mut probes = 0;
+                let result = fixture.fabric.verify_object_integrity_bounded(
+                    fixture.id,
+                    maximum,
+                    &mut || {
+                        probes += 1;
+                        // The post-open probe owns a checked descriptor but
+                        // has not started body reads. Mutate the path now.
+                        if probes == 2 {
+                            match fault {
+                                "payload" => {
+                                    let mut corrupt = fixture.body.clone();
+                                    *corrupt.last_mut().unwrap() ^= 1;
+                                    fixture.store(&fixture.envelope, &corrupt);
+                                }
+                                "short" => {
+                                    let file =
+                                        File::options().write(true).open(&fixture.path).unwrap();
+                                    file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+                                }
+                                "extra" => {
+                                    File::options()
+                                        .append(true)
+                                        .open(&fixture.path)
+                                        .unwrap()
+                                        .write_all(&[1])
+                                        .unwrap();
+                                }
+                                "replace" => {
+                                    fs::rename(
+                                        &fixture.path,
+                                        fixture.path.with_extension("original"),
+                                    )
+                                    .unwrap();
+                                    fixture.store(&fixture.envelope, &vec![1; fixture.body.len()]);
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        true
+                    },
+                );
+                match fault {
+                    "payload" => assert_eq!(result, Err(StoreRefusal::PayloadCommitmentMismatch)),
+                    "short" | "extra" => {
+                        assert_eq!(result, Err(StoreRefusal::MalformedStoredObject))
+                    }
+                    "replace" => {
+                        assert_eq!(result.unwrap().identity(), fixture.id);
+                        assert_eq!(
+                            fixture.fabric.verify_object_integrity_bounded(
+                                fixture.id,
+                                maximum,
+                                &mut || true,
+                            ),
+                            Err(StoreRefusal::PayloadCommitmentMismatch)
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                fixture.store(&fixture.envelope, &fixture.body);
+                assert!(
+                    fixture
+                        .fabric
+                        .verify_object_integrity_bounded(fixture.id, maximum, &mut || true,)
+                        .is_ok()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn integrity_cancellation_is_chunk_bounded_closes_custody_and_preserves_error_precedence() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for kind in NATIVE_KINDS {
+            let fixture = Fixture::for_kind(format, kind, vec![59; CHUNK_BYTES * 3 + 17]);
+            let maximum = fixture.body.len() as u64;
+            let mut probes = 0;
+            assert_eq!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || {
+                        probes += 1;
+                        probes < 5
+                    },),
+                Err(StoreRefusal::RuntimeCheckpointRejected)
+            );
+            assert_eq!(probes, 5, "cancel before the second bounded chunk");
+            #[cfg(target_os = "linux")]
+            {
+                let held = fs::read_dir("/proc/self/fd")
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| fs::read_link(entry.path()).ok())
+                    .filter(|path| path == &fixture.path)
+                    .count();
+                assert_eq!(
+                    held, 0,
+                    "cancelled integrity reads must close their descriptor"
+                );
+            }
+            assert!(
+                fixture
+                    .fabric
+                    .verify_object_integrity_bounded(fixture.id, maximum, &mut || true,)
+                    .is_ok()
+            );
+
+            let empty = Fixture::for_kind(format, kind, Vec::new());
+            let mut changed = empty.envelope.clone();
+            changed.payload_commitment[0] ^= 1;
+            empty.store(&changed, &[]);
+            let mut probes = 0;
+            assert_eq!(
+                empty
+                    .fabric
+                    .verify_object_integrity_bounded(empty.id, 0, &mut || {
+                        probes += 1;
+                        probes < 4
+                    }),
+                Err(StoreRefusal::RuntimeCheckpointRejected),
+                "post-read expiry outranks the failed exact-EOF commitment check"
+            );
+            assert_eq!(probes, 4);
+            assert_eq!(
+                empty
+                    .fabric
+                    .verify_object_integrity_bounded(empty.id, 0, &mut || true),
+                Err(StoreRefusal::PayloadCommitmentMismatch)
+            );
+            empty.store(&empty.envelope, &[]);
+            assert_eq!(
+                empty
+                    .fabric
+                    .verify_object_integrity_bounded(empty.id, 0, &mut || true)
+                    .unwrap()
+                    .payload_length(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn integrity_scan_never_promotes_or_reads_private_unplaced_residue() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::new(format, vec![97; 100]);
+        let private = fixture.root.join("staging").join("unplaced.stage");
+        fs::rename(&fixture.path, &private).unwrap();
+        assert_eq!(
+            fixture
+                .fabric
+                .verify_object_integrity_bounded(fixture.id, 100, &mut || false),
+            Err(StoreRefusal::RuntimeCheckpointRejected)
+        );
+        assert_eq!(
+            fixture
+                .fabric
+                .verify_object_integrity_bounded(fixture.id, 100, &mut || true),
+            Err(StoreRefusal::ObjectAbsent)
+        );
+        assert!(
+            private.exists(),
+            "integrity inspection must not mutate private custody"
+        );
+        assert!(!fixture.path.exists());
+        fs::rename(private, &fixture.path).unwrap();
+        assert!(
+            fixture
+                .fabric
+                .verify_object_integrity_bounded(fixture.id, 100, &mut || true)
+                .is_ok()
+        );
+    }
 }

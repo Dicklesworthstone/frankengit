@@ -14,7 +14,7 @@ mod bounded_read;
 
 #[path = "local_blob_stream.rs"]
 mod blob_stream;
-pub use blob_stream::LocalBlobStream;
+pub use blob_stream::{LocalBlobStream, VerifiedObjectIntegrity};
 
 #[path = "local_blob_write.rs"]
 mod blob_write;
