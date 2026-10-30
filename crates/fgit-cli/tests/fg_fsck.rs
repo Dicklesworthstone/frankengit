@@ -359,3 +359,6 @@ fn deleted_branch_history_is_still_audited_and_corruption_is_not_repaired() {
 
 #[path = "fg_fsck/graph_cases.rs"]
 mod graph_cases;
+
+#[path = "fg_fsck/streaming.rs"]
+mod streaming;

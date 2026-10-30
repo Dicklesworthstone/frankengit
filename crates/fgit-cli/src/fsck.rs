@@ -2,11 +2,10 @@
 //! Trusted-local integrity audit of one authenticated, immutable object set.
 //! Physical residue is never used to discover canonical objects.
 
-use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fgit_node::source_retrieval::integrity::{
     GraphAuditQuery, GraphAuditRefusal, GraphLimits, GraphRefusal, GraphReport,
@@ -29,7 +28,8 @@ const USAGE: &str = "usage: fg fsck <storage-root> <tenant-id> <repository-id> -
   [--object-format sha1|sha256] [--expected-generation <non-zero>]
   [--expected-head <algorithm-qualified-snapshot-token>]
   [--max-objects <1..1000000>] [--max-bytes <1..17179869184>]
-  [--max-object-bytes <1..268435456>] [--timeout-secs <1..3600>]
+  [--max-object-bytes <1..268435456>] [--max-blob-bytes <1..17179869184>]
+  [--timeout-secs <1..3600>]
   [--max-edges <1..8000000> | --objects-only]
 
 Verify EVERY object in the authenticated authority-selected closure, including
@@ -51,9 +51,16 @@ whole-repository authorization via --trusted-local. It does not discover orphan
 files, repair storage, change refs, follow symlinks/submodules, or run external Git.
 Defaults: 100000 objects, 1000000 inspected edges, 512 MiB total payload,
 32 MiB per object, 300 seconds; at most 1000000 references in graph mode.
-The per-object ceiling is enforced before allocation; the total counts verified
-payload bytes, not physical I/O. A failing scan may read one additional bounded
-object before refusing. The scan timeout is checked between operations; it does
+--max-blob-bytes explicitly selects a separate streamed blob ceiling in either
+mode; omitted, blobs keep --max-object-bytes. Metadata objects retain
+--max-object-bytes. Native identity and the independent payload commitment are
+verified through bounded chunks without retaining complete blob bodies.
+A blob stream checks its kind and size allowance on the retained file
+descriptor before payload reads. Metadata reads keep their independent
+allocation bound. Both paths check the remaining total allowance before
+reading a body. Every success receipt satisfies blob, metadata and total
+payload limits. The total counts verified payload bytes, not physical I/O.
+The scan timeout is checked between operations and streamed chunks; it does
 not interrupt a blocking filesystem call. Inherited runtime budgets may stop
 work earlier. Revalidation is an observation, not a lock against later writes.
 No success receipt is emitted before all checks and node shutdown complete.
@@ -77,6 +84,7 @@ struct Limits {
     objects: usize,
     bytes: u64,
     object_bytes: u64,
+    blob_bytes: Option<u64>,
     seconds: u64,
 }
 
@@ -86,6 +94,7 @@ impl Default for Limits {
             objects: 100_000,
             bytes: 512 * MIB,
             object_bytes: 32 * MIB,
+            blob_bytes: None,
             seconds: 300,
         }
     }
@@ -97,8 +106,6 @@ enum Refusal {
     Deadline,
     Source(String),
     Object { oid: GitOid, detail: String },
-    ReferenceOutsideClosure(GitOid),
-    ObjectFormat(GitOid),
     Generation { expected: u64, observed: u64 },
     ExpectedHead,
     SnapshotChanged,
@@ -113,10 +120,6 @@ impl Display for Refusal {
             Self::Deadline => out.write_str("audit_deadline_exceeded"),
             Self::Source(detail) => write!(out, "authority_read_failed: {detail}"),
             Self::Object { oid, detail } => write!(out, "object_read_failed: {oid}: {detail}"),
-            Self::ReferenceOutsideClosure(oid) => {
-                write!(out, "reference_outside_selected_closure: {oid}")
-            }
-            Self::ObjectFormat(oid) => write!(out, "object_format_mismatch: {oid}"),
             Self::Generation { expected, observed } => write!(
                 out,
                 "authority_generation_mismatch: expected {expected}, observed {observed}"
@@ -210,7 +213,7 @@ pub(super) fn head_token(head: RepositoryAuthorityHeadId) -> String {
 
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 20
+        || args.len() > 22
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
         || args[0].is_empty()
@@ -224,6 +227,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut objects = None;
     let mut bytes = None;
     let mut object_bytes = None;
+    let mut blob_bytes = None;
     let mut seconds = None;
     let mut objects_only = None;
     let mut edges = None;
@@ -264,6 +268,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--max-object-bytes" => {
                 set_once(&mut object_bytes, positive(value, 256 * MIB, flag)?, flag)?;
             }
+            "--max-blob-bytes" => {
+                set_once(&mut blob_bytes, positive(value, MAX_BYTES, flag)?, flag)?;
+            }
             "--timeout-secs" => set_once(&mut seconds, positive(value, 3600, flag)?, flag)?,
             "--max-edges" => set_once(
                 &mut edges,
@@ -296,72 +303,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
             objects: objects.unwrap_or(defaults.objects),
             bytes: bytes.unwrap_or(defaults.bytes),
             object_bytes: object_bytes.unwrap_or(defaults.object_bytes),
+            blob_bytes,
             seconds: seconds.unwrap_or(defaults.seconds),
         },
     })
-}
-
-fn live(started: Instant, seconds: u64) -> Result<(), Refusal> {
-    if started.elapsed() >= Duration::from_secs(seconds) {
-        Err(Refusal::Deadline)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_fences(
-    options: &Options,
-    head: RepositoryAuthorityHeadId,
-    generation: u64,
-) -> Result<(), Refusal> {
-    if let Some(expected) = options.expected_generation
-        && expected != generation
-    {
-        return Err(Refusal::Generation {
-            expected,
-            observed: generation,
-        });
-    }
-    if options
-        .expected_head
-        .is_some_and(|expected| expected != head)
-    {
-        return Err(Refusal::ExpectedHead);
-    }
-    Ok(())
-}
-
-/// The reader is a verified-whole-read boundary, not a source of unchecked
-/// payloads. Only the node fabric implements that boundary in the command.
-fn check_objects(
-    objects: &BTreeSet<GitOid>,
-    format: GitHashAlgorithm,
-    limits: Limits,
-    mut read: impl FnMut(GitOid) -> Result<u64, String>,
-    mut checkpoint: impl FnMut() -> Result<(), Refusal>,
-) -> Result<u64, Refusal> {
-    if objects.len() > limits.objects {
-        return Err(Refusal::Limit("max-objects"));
-    }
-    let mut bytes = 0_u64;
-    for &oid in objects {
-        checkpoint()?;
-        if oid.algorithm() != format || oid.is_zero() {
-            return Err(Refusal::ObjectFormat(oid));
-        }
-        let read = read(oid);
-        checkpoint()?;
-        let size = read.map_err(|detail| Refusal::Object { oid, detail })?;
-        if size > limits.object_bytes {
-            return Err(Refusal::Limit("max-object-bytes"));
-        }
-        bytes = bytes
-            .checked_add(size)
-            .filter(|total| *total <= limits.bytes)
-            .ok_or(Refusal::Limit("max-bytes"))?;
-    }
-    checkpoint()?;
-    Ok(bytes)
 }
 
 fn graph_error(error: GraphAuditRefusal) -> Refusal {
@@ -369,6 +314,9 @@ fn graph_error(error: GraphAuditRefusal) -> Refusal {
         GraphAuditRefusal::Graph(GraphRefusal::Limit("objects")) => Refusal::Limit("max-objects"),
         GraphAuditRefusal::Graph(GraphRefusal::Limit("object bytes")) => {
             Refusal::Limit("max-object-bytes")
+        }
+        GraphAuditRefusal::Graph(GraphRefusal::Limit("blob bytes")) => {
+            Refusal::Limit("max-blob-bytes")
         }
         GraphAuditRefusal::Graph(GraphRefusal::Limit("payload bytes")) => {
             Refusal::Limit("max-bytes")
@@ -379,14 +327,18 @@ fn graph_error(error: GraphAuditRefusal) -> Refusal {
         GraphAuditRefusal::ExpectedGeneration { expected, observed } => {
             Refusal::Generation { expected, observed }
         }
+        GraphAuditRefusal::Object { oid, cause } => Refusal::Object {
+            oid,
+            detail: cause.to_string(),
+        },
         GraphAuditRefusal::SnapshotChanged => Refusal::SnapshotChanged,
         GraphAuditRefusal::Deadline => Refusal::Deadline,
         other => Refusal::NodeGraph(other.to_string()),
     }
 }
 
-fn inspect_graph(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
-    let query = GraphAuditQuery {
+fn audit_query(options: &Options) -> Result<GraphAuditQuery, Refusal> {
+    Ok(GraphAuditQuery {
         expected_head: options.expected_head,
         expected_generation: options
             .expected_generation
@@ -401,9 +353,29 @@ fn inspect_graph(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
                 .map_err(|_| Refusal::Limit("max-object-bytes"))?,
             max_payload_bytes: options.limits.bytes,
         },
+        max_blob_bytes: options.limits.blob_bytes,
         timeout: Duration::from_secs(options.limits.seconds),
-    };
-    let request = fgit_cli::command_request_context(&node);
+    })
+}
+
+fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
+    let query = audit_query(options)?;
+    let request = fgit_cli::command_request_context(node);
+    if options.objects_only {
+        let report = node
+            .runtime()
+            .block_on(node.audit_selected_object_integrity_local_in(&request, query))
+            .map_err(graph_error)?;
+        return Ok(Report {
+            head: report.head(),
+            generation: report.generation().get(),
+            closure_root: report.closure_root().to_string(),
+            references: report.references(),
+            objects: report.objects(),
+            payload_bytes: report.payload_bytes(),
+            graph: None,
+        });
+    }
     let report = node
         .runtime()
         .block_on(node.audit_selected_object_graph_local_in(&request, query))
@@ -420,56 +392,16 @@ fn inspect_graph(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
     })
 }
 
-fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
-    if !options.objects_only {
-        return inspect_graph(node, options);
+fn node_config(options: &Options) -> Result<NodeConfig, String> {
+    let mut config = NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
+        .with_object_format(options.format)
+        .with_max_object_bytes(options.limits.object_bytes);
+    if let Some(bytes) = options.limits.blob_bytes {
+        let bytes = usize::try_from(bytes)
+            .map_err(|_| "--max-blob-bytes exceeds this target's address space")?;
+        config = config.with_selected_pack_blob_limit(bytes);
     }
-    let started = Instant::now();
-    let request = fgit_cli::command_request_context(&node);
-    let selected = node
-        .runtime()
-        .block_on(node.materialize_admission_in(&request))
-        .map_err(|error| Refusal::Source(error.to_string()))?;
-    let generation = selected.authenticated().receipt().generation().get();
-    let head = selected.basis().id();
-    check_fences(options, head, generation)?;
-    let objects = selected.selected_closure().closure().objects();
-    for oid in selected.snapshot().refs.values() {
-        live(started, options.limits.seconds)?;
-        if !objects.contains(oid) {
-            return Err(Refusal::ReferenceOutsideClosure(*oid));
-        }
-    }
-    let payload_bytes = check_objects(
-        objects,
-        options.format,
-        options.limits,
-        |oid| {
-            node.read_git_object(oid)
-                .map(|object| object.payload().len() as u64)
-                .map_err(|error| error.to_string())
-        },
-        || live(started, options.limits.seconds),
-    )?;
-    let current = node
-        .runtime()
-        .block_on(node.materialize_admission_in(&request))
-        .map_err(|error| Refusal::Source(error.to_string()))?;
-    live(started, options.limits.seconds)?;
-    if current.basis() != selected.basis()
-        || current.selected_closure() != selected.selected_closure()
-    {
-        return Err(Refusal::SnapshotChanged);
-    }
-    Ok(Report {
-        head,
-        generation,
-        closure_root: selected.selected_closure().root().to_string(),
-        references: selected.snapshot().refs.len(),
-        objects: objects.len(),
-        payload_bytes,
-        graph: None,
-    })
+    Ok(config)
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
@@ -478,12 +410,8 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let options = parse(args)?;
-    let mut node = OneNode::open_existing(
-        NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
-            .with_object_format(options.format)
-            .with_max_object_bytes(options.limits.object_bytes),
-    )
-    .map_err(|error| format!("cannot open fsck node: {error}"))?;
+    let mut node = OneNode::open_existing(node_config(&options)?)
+        .map_err(|error| format!("cannot open fsck node: {error}"))?;
     let result = node
         .bring_into_service(HeadGeneration::FIRST)
         .map_err(|error| Refusal::Source(error.to_string()))

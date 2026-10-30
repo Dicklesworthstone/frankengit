@@ -192,6 +192,10 @@ fn valid_commitment_bytes_do_not_prove_local_connectivity_or_target_kinds() {
             node.read_git_object(target).unwrap();
             node.runtime().block_on(node.doctor(Some(root))).unwrap();
             let before = node.runtime().block_on(node.read_authority_head()).unwrap();
+            // Native commitments can succeed while graph structure fails.
+            // Objects-only verification must not silently become a graph parser.
+            let integrity = run_objects(&node, GraphAuditQuery::default()).unwrap();
+            assert_eq!(integrity.objects(), if wrong_kind { 2 } else { 1 });
             let result = run(&node, GraphAuditQuery::default());
             if wrong_kind {
                 assert!(
@@ -356,5 +360,462 @@ fn final_revalidation_rejects_a_real_authority_successor() {
         Err(GraphAuditRefusal::SnapshotChanged)
     ));
     revalidate_head(&after, &after).unwrap();
+    node.shutdown().unwrap();
+}
+
+const STREAMED_BLOB_BYTES: usize = 5 * 64 * 1024 + 17;
+
+fn large_graph(node: &OneNode, message_padding: usize) -> (GitOid, GitOid, GitOid) {
+    let blob = put(
+        node,
+        ObjectKind::Blob,
+        (0..STREAMED_BLOB_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect(),
+    );
+    let mut body = b"100644 large\0".to_vec();
+    body.extend_from_slice(blob.as_bytes());
+    let tree = put(node, ObjectKind::Tree, body);
+    let mut body = commit(tree);
+    body.resize(body.len() + message_padding, b'x');
+    (blob, tree, put(node, ObjectKind::Commit, body))
+}
+
+fn run_objects(
+    node: &OneNode,
+    query: GraphAuditQuery,
+) -> Result<SelectedObjectIntegrityAudit, GraphAuditRefusal> {
+    node.runtime()
+        .block_on(node.audit_selected_object_integrity_local_in(&node.request_context(), query))
+}
+
+fn run_mode(
+    node: &OneNode,
+    query: GraphAuditQuery,
+    verify_graph: bool,
+) -> Result<(usize, u64), GraphAuditRefusal> {
+    if verify_graph {
+        run(node, query).map(|report| (report.graph().objects, report.graph().payload_bytes))
+    } else {
+        run_objects(node, query).map(|report| (report.objects(), report.payload_bytes()))
+    }
+}
+
+fn streaming_query() -> GraphAuditQuery {
+    GraphAuditQuery {
+        max_blob_bytes: Some(STREAMED_BLOB_BYTES as u64),
+        limits: GraphLimits {
+            max_object_bytes: 2048,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+// Test-only fault location. Production inspection uses exactly the selected
+// native IDs, never a filesystem scan as a membership or retention decision.
+fn body_path(root: &std::path::Path, oid: GitOid) -> PathBuf {
+    let mut pending = vec![root.to_owned()];
+    let mut found = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() && entry.file_name().to_str() == Some(oid.to_string().as_str())
+            {
+                assert!(fs::read(entry.path()).unwrap().starts_with(b"FGOB"));
+                found.push(entry.path());
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "expected one actual native body");
+    found.pop().unwrap()
+}
+
+fn assert_fabric_refusal(
+    result: Result<(usize, u64), GraphAuditRefusal>,
+    expected_oid: GitOid,
+    expected: impl FnOnce(&StoreRefusal) -> bool,
+) {
+    match result {
+        Err(GraphAuditRefusal::Object { oid, cause }) => {
+            assert_eq!(oid, expected_oid);
+            match cause.as_ref() {
+                NodeRefusal::Fabric(error) => assert!(expected(error), "{error:?}"),
+                error => panic!("expected fabric refusal, got {error:?}"),
+            }
+        }
+        result => panic!("expected object refusal, got {result:?}"),
+    }
+}
+
+#[test]
+fn streamed_graph_and_object_receipts_keep_metadata_small_and_total_bytes_exact() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (scratch, mut node) = setup(format);
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let (blob, tree, root) = large_graph(&node, 0);
+        publish(&node, root, BTreeSet::from([blob, tree, root]));
+        let baseline = run(&node, GraphAuditQuery::default()).unwrap();
+        let before = node.runtime().block_on(node.read_authority_head()).unwrap();
+        let path = body_path(&scratch.0, blob);
+        let original = fs::read(&path).unwrap();
+        let config = node
+            .service_config
+            .clone()
+            .with_max_object_bytes(2048)
+            .with_selected_pack_blob_limit(STREAMED_BLOB_BYTES);
+        node.shutdown().unwrap();
+
+        let mut node = OneNode::open_existing(config).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        // The new allowance does not turn the ordinary buffered read into a
+        // whole-blob allocation path.
+        assert!(node.read_git_object(blob).is_err());
+        let query = GraphAuditQuery {
+            expected_head: Some(baseline.head()),
+            expected_generation: Some(baseline.generation()),
+            limits: GraphLimits {
+                max_payload_bytes: baseline.graph().payload_bytes,
+                ..streaming_query().limits
+            },
+            ..streaming_query()
+        };
+        let graph = run(&node, query).unwrap();
+        assert_eq!(graph.graph(), baseline.graph());
+        assert_eq!(graph.closure_root(), baseline.closure_root());
+        let objects = run_objects(&node, query).unwrap();
+        assert_eq!(objects.repository_id(), node.repository_id());
+        assert_eq!(
+            objects.repository_incarnation_id(),
+            node.repository_incarnation_id()
+        );
+        assert_eq!(objects.head(), graph.head());
+        assert_eq!(objects.generation(), graph.generation());
+        assert_eq!(objects.closure_root(), graph.closure_root());
+        assert_eq!(objects.objects(), graph.graph().objects);
+        assert_eq!(objects.references(), graph.graph().references);
+        assert_eq!(objects.payload_bytes(), graph.graph().payload_bytes);
+
+        for verify_graph in [false, true] {
+            for (limited, expected) in [
+                (
+                    GraphAuditQuery {
+                        max_blob_bytes: None,
+                        ..query
+                    },
+                    "object bytes",
+                ),
+                (
+                    GraphAuditQuery {
+                        max_blob_bytes: Some(STREAMED_BLOB_BYTES as u64 - 1),
+                        ..query
+                    },
+                    "blob bytes",
+                ),
+                (
+                    GraphAuditQuery {
+                        limits: GraphLimits {
+                            max_payload_bytes: graph.graph().payload_bytes - 1,
+                            ..query.limits
+                        },
+                        ..query
+                    },
+                    "payload bytes",
+                ),
+            ] {
+                let result = run_mode(&node, limited, verify_graph);
+                assert!(
+                    matches!(result, Err(GraphAuditRefusal::Graph(GraphRefusal::Limit(name))) if name == expected),
+                    "{verify_graph}: {expected}: {result:?}"
+                );
+            }
+        }
+        fn require_send(value: impl Send) {
+            drop(value);
+        }
+        let request = node.request_context();
+        require_send(node.audit_selected_object_graph_local_in(&request, query));
+        require_send(node.audit_selected_object_integrity_local_in(&request, query));
+        assert_eq!(fs::read(path).unwrap(), original);
+        assert_eq!(
+            node.runtime().block_on(node.read_authority_head()).unwrap(),
+            before
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn a_blob_allowance_never_widens_metadata_or_the_nodes_selected_blob_policy() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut node) = setup(format);
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let (blob, tree, root) = large_graph(&node, 8192);
+        publish(&node, root, BTreeSet::from([blob, tree, root]));
+        let baseline = run(&node, GraphAuditQuery::default()).unwrap();
+        let before = node.runtime().block_on(node.read_authority_head()).unwrap();
+        let config = node
+            .service_config
+            .clone()
+            .with_selected_pack_blob_limit(STREAMED_BLOB_BYTES);
+        node.shutdown().unwrap();
+
+        let mut node = OneNode::open_existing(config.clone().with_max_object_bytes(2048)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let query = GraphAuditQuery {
+            limits: GraphLimits {
+                max_object_bytes: 16 * 1024,
+                ..Default::default()
+            },
+            ..streaming_query()
+        };
+        for verify_graph in [false, true] {
+            assert!(matches!(
+                run_mode(&node, query, verify_graph),
+                Err(GraphAuditRefusal::Graph(GraphRefusal::Limit(
+                    "object bytes"
+                )))
+            ));
+        }
+        assert_eq!(
+            node.runtime().block_on(node.read_authority_head()).unwrap(),
+            before
+        );
+        node.shutdown().unwrap();
+
+        let mut node =
+            OneNode::open_existing(config.clone().with_max_object_bytes(16 * 1024)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        for verify_graph in [false, true] {
+            assert_eq!(
+                run_mode(&node, query, verify_graph).unwrap(),
+                (3, baseline.graph().payload_bytes)
+            );
+            assert!(matches!(
+                run_mode(&node, streaming_query(), verify_graph),
+                Err(GraphAuditRefusal::Graph(GraphRefusal::Limit(
+                    "object bytes"
+                )))
+            ));
+        }
+        node.shutdown().unwrap();
+
+        let mut node = OneNode::open_existing(
+            config
+                .with_max_object_bytes(16 * 1024)
+                .with_selected_pack_blob_limit(STREAMED_BLOB_BYTES - 1),
+        )
+        .unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        // This envelope fits the independent stored-file policy, but its body
+        // is one byte above the node's selected-blob allowance.
+        node.git_object_header(blob).unwrap();
+        for verify_graph in [false, true] {
+            assert!(matches!(
+                run_mode(&node, query, verify_graph),
+                Err(GraphAuditRefusal::Graph(GraphRefusal::Limit("blob bytes")))
+            ));
+        }
+        assert_eq!(
+            node.runtime().block_on(node.read_authority_head()).unwrap(),
+            before
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn streaming_limits_precede_corrupt_body_work_and_exact_framing_still_refuses() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (scratch, mut node) = setup(format);
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let (blob, tree, root) = large_graph(&node, 0);
+        publish(&node, root, BTreeSet::from([blob, tree, root]));
+        let before = node.runtime().block_on(node.read_authority_head()).unwrap();
+        let path = body_path(&scratch.0, blob);
+        let original = fs::read(&path).unwrap();
+        let config = node
+            .service_config
+            .clone()
+            .with_max_object_bytes(2048)
+            .with_selected_pack_blob_limit(STREAMED_BLOB_BYTES);
+        node.shutdown().unwrap();
+        let mut node = OneNode::open_existing(config).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+
+        let mut damaged = original.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        fs::write(&path, &damaged).unwrap();
+        for verify_graph in [false, true] {
+            for (limited, expected) in [
+                (
+                    GraphAuditQuery {
+                        max_blob_bytes: Some(STREAMED_BLOB_BYTES as u64 - 1),
+                        ..streaming_query()
+                    },
+                    "blob bytes",
+                ),
+                (
+                    GraphAuditQuery {
+                        limits: GraphLimits {
+                            max_payload_bytes: STREAMED_BLOB_BYTES as u64 - 1,
+                            ..streaming_query().limits
+                        },
+                        ..streaming_query()
+                    },
+                    "payload bytes",
+                ),
+            ] {
+                let result = run_mode(&node, limited, verify_graph);
+                assert!(
+                    matches!(result, Err(GraphAuditRefusal::Graph(GraphRefusal::Limit(name))) if name == expected),
+                    "{verify_graph}: {expected}: {result:?}"
+                );
+            }
+            assert_fabric_refusal(
+                run_mode(&node, streaming_query(), verify_graph),
+                blob,
+                |error| matches!(error, StoreRefusal::PayloadCommitmentMismatch),
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+
+        for altered in [
+            original[..original.len() - 1].to_vec(),
+            [original.as_slice(), b"x"].concat(),
+        ] {
+            fs::write(&path, &altered).unwrap();
+            for verify_graph in [false, true] {
+                assert_fabric_refusal(
+                    run_mode(&node, streaming_query(), verify_graph),
+                    blob,
+                    |error| matches!(error, StoreRefusal::MalformedStoredObject),
+                );
+            }
+            assert_eq!(fs::read(&path).unwrap(), altered);
+        }
+        fs::write(&path, &original).unwrap();
+        for verify_graph in [false, true] {
+            assert_eq!(
+                run_mode(&node, streaming_query(), verify_graph).unwrap().0,
+                3
+            );
+        }
+        assert_eq!(
+            node.runtime().block_on(node.read_authority_head()).unwrap(),
+            before
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn checked_stream_progress_keeps_exact_cancellation_and_deadline_causes() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut node) = setup(format);
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let (blob, tree, root) = large_graph(&node, 0);
+        publish(&node, root, BTreeSet::from([blob, tree, root]));
+        let before = node.runtime().block_on(node.read_authority_head()).unwrap();
+
+        for stop in 0..3 {
+            let request = node.request_context();
+            let mut checkpoints =
+                AuditCheckpoints::new(&request, Instant::now(), Duration::from_secs(5));
+            let mut stream = node
+                .open_git_blob_stream(blob, STREAMED_BLOB_BYTES as u64)
+                .unwrap();
+            let mut buffer = [0; 64 * 1024];
+            let count = read_audit_blob(&mut stream, &mut buffer, &checkpoints).unwrap();
+            assert!((1..=buffer.len()).contains(&count));
+            assert!(!stream.is_verified());
+            if stop == 0 {
+                request.cancel();
+            } else if stop == 1 {
+                // Inject the runtime's typed quota stop after actual file
+                // progress, without replacing or renewing this request.
+                request
+                    .authority()
+                    .attached_native_cx()
+                    .unwrap()
+                    .set_cancel_reason(asupersync::types::CancelReason::poll_quota());
+            } else {
+                checkpoints.started = Instant::now() - Duration::from_secs(6);
+            }
+            assert!(matches!(
+                read_audit_blob(&mut stream, &mut buffer, &checkpoints),
+                Err(StoreRefusal::RuntimeCheckpointRejected)
+            ));
+            if stop == 1 {
+                // A later local cancellation must not erase the first precise
+                // runtime cause latched by the chunk reader.
+                request.cancel();
+            }
+            let result = checkpoints.check();
+            assert!(
+                matches!(
+                    (stop, &result),
+                    (0, Err(GraphAuditRefusal::Cancelled { exhaustion: None }))
+                        | (
+                            1,
+                            Err(GraphAuditRefusal::Cancelled {
+                                exhaustion: Some(Exhaustion::PollQuota)
+                            })
+                        )
+                        | (2, Err(GraphAuditRefusal::Deadline))
+                ),
+                "{stop}: {result:?}"
+            );
+            assert!(!stream.is_verified());
+        }
+        for verify_graph in [false, true] {
+            assert_eq!(
+                run_mode(&node, streaming_query(), verify_graph).unwrap().0,
+                3
+            );
+        }
+        assert_eq!(
+            node.runtime().block_on(node.read_authority_head()).unwrap(),
+            before
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn reference_membership_is_checked_before_body_work_in_both_audit_modes() {
+    let (scratch, mut node) = setup(GitHashAlgorithm::Sha256);
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let (blob, tree, root) = valid(&node);
+    publish(&node, root, BTreeSet::from([blob, tree, root]));
+    let before = node.runtime().block_on(node.read_authority_head()).unwrap();
+    let path = body_path(&scratch.0, blob);
+    let mut damaged = fs::read(&path).unwrap();
+    *damaged.last_mut().unwrap() ^= 1;
+    fs::write(&path, damaged).unwrap();
+    let references = BTreeMap::from([(RefName::try_new(b"refs/heads/main").unwrap(), root)]);
+    for verify_graph in [false, true] {
+        let result = node.audit_selected_payloads(
+            &node.request_context(),
+            &BTreeSet::from([blob]),
+            &references,
+            GraphAuditQuery::default(),
+            Instant::now(),
+            verify_graph,
+        );
+        assert!(
+            matches!(result, Err(GraphAuditRefusal::Graph(GraphRefusal::MissingTarget {
+                source: None, target
+            })) if target == root),
+            "{verify_graph}: {result:?}"
+        );
+    }
+    assert_eq!(
+        node.runtime().block_on(node.read_authority_head()).unwrap(),
+        before
+    );
     node.shutdown().unwrap();
 }

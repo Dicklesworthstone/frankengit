@@ -113,6 +113,42 @@ object-size refusal remains an unverifiable-object finding, while an
 insufficient page allowance remains a resource refusal or a page boundary.
 Neither is a corruption diagnosis.
 
+## Complete graph audit with larger blobs
+
+`fg fsck` verifies the complete authority-selected object set and, by default,
+its local graph. It accepts an independent `--max-blob-bytes` allowance up to
+16 GiB. Omitting that option preserves the existing `--max-object-bytes`
+ceiling for every object. Explicitly allowing a larger blob does not raise the
+commit, tree or tag limit, the total `--max-bytes` allowance, object count,
+graph edge count, or timeout.
+
+Blob bodies stream through bounded chunks while the native Git identity and
+the independent stored payload commitment are checked. The blob stream checks
+its kind and size allowance using the retained file descriptor before payload
+reads. Metadata reads retain an independent allocation bound, and both paths
+check the remaining total allowance before reading a body. Final verified-kind
+checks ensure every successful receipt satisfies blob, metadata and total
+payload limits. Metadata parsing remains bounded by
+`--max-object-bytes` (32 MiB by default, maximum 256 MiB). For example,
+audit a repository containing blobs up to 4 GiB while retaining the default
+metadata bound and allowing up to 8 GiB of verified payload:
+
+```sh
+fg fsck ./fgit-data \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222 \
+  --trusted-local \
+  --max-blob-bytes 4294967296 \
+  --max-bytes 8589934592
+```
+
+Both the default graph audit and explicit `--objects-only` mode use the
+same node-owned selection, integrity checks, request budget and final exact-head
+authentication. The latter continues to report `object_graph_verified=false`;
+it does not parse metadata or claim graph connectivity. Any size, integrity,
+deadline or source-fence failure prevents a success receipt. Successful receipt
+fields and the requirement to finish node shutdown before output are unchanged.
+
 ## Complete bounded sweep
 
 `fg scrub ... --trusted-local --all` drives native pages in one process, under
