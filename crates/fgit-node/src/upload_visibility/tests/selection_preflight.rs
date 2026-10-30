@@ -237,9 +237,18 @@ fn selected_work_follows_have_subtraction_filters_shallow_and_explicit_lazy_want
             GitDaemonSessionTimeout::DEFAULT,
             GitDaemonSessionWorkScaling::DEFAULT,
         );
-        let scope = node
+        let mut scope = node
             .prepare_visible_upload_pack(&context, &materialized, &WireLimits::default(), &deadline)
             .unwrap();
+        assert!(!scope.path_hashes.contains_key(&private));
+        assert!(!scope.path_hashes.contains_key(&private_blob));
+        assert!(!scope.path_hashes.contains_key(&deleted_tag));
+        assert!(
+            scope
+                .path_hashes
+                .keys()
+                .all(|id| scope.objects.contains_key(id))
+        );
         let base = fetch(public);
         let mut requests = vec![base.clone()];
         for filter in [
@@ -320,6 +329,11 @@ fn selected_work_follows_have_subtraction_filters_shallow_and_explicit_lazy_want
                 .unwrap();
             let ids = selected_ids(&prepared.keys);
             assert!(!ids.contains(&private_blob) && !ids.contains(&deleted_tag));
+            assert!(prepared.keys.windows(2).all(|pair| pair[0].id < pair[1].id));
+            for key in &prepared.keys {
+                assert_eq!(key.recency, 0);
+                assert_eq!(key.path_hash, scope.path_hash_of(&key.id));
+            }
             let exact: usize = ids.iter().map(|id| scope.objects[id].size).sum();
             let (_, _, admitted) = scope
                 .prepare_selection(
@@ -330,6 +344,21 @@ fn selected_work_follows_have_subtraction_filters_shallow_and_explicit_lazy_want
                 )
                 .unwrap();
             assert_eq!(admitted, exact);
+            // Packing hints cannot alter membership, have evidence or admitted
+            // work under any of these filter/shallow/include-tag selections.
+            let hints = std::mem::take(&mut scope.path_hashes);
+            let unhinted = scope.prepare_selection(
+                &request,
+                &node.selected_pack_limits,
+                usize::MAX,
+                &mut || true,
+            );
+            scope.path_hashes = hints;
+            let (unhinted, held, bytes) = unhinted.unwrap();
+            assert_eq!(selected_ids(&unhinted), ids);
+            assert_eq!(held, prepared.held);
+            assert_eq!(bytes, exact);
+            assert!(unhinted.iter().all(|key| key.path_hash == 0));
             if request.wants == [blob] {
                 assert_eq!(ids, BTreeSet::from([blob]));
             }
@@ -427,6 +456,8 @@ fn preflight_allows_streamed_blob_metadata_above_the_buffered_body_cap() {
         .prepare_selection(&fetch(blob), &limits, 32 * 1024 * 1024, &mut || true)
         .unwrap();
     assert_eq!(selected_ids(&keys), BTreeSet::from([blob]));
+    assert_eq!(keys[0].path_hash, scope.path_hash_of(&blob));
+    assert_ne!(keys[0].path_hash, 0);
     assert_eq!(bytes, large);
     Arc::get_mut(&mut scope.objects)
         .unwrap()

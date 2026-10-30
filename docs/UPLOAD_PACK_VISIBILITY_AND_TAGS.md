@@ -35,6 +35,106 @@ not the current production capability set. The strict no-capability refusal
 remains covered in wire tests. Current visibility and historical-retention
 boundaries are unchanged.
 
+## Verified basename grouping for served packs
+
+The visible-graph walk retains a deterministic packing hint from each verified
+tree entry's raw basename. Equal names group versions across directories without
+retaining names or reading additional object bodies. The frozen byte-hash
+definition lives in [`basename_path_hash`](../crates/fgit-pack/src/writer/ordering.rs).
+If an object has several visible names, the smallest hash wins independent of
+root or traversal order. Unnamed objects use zero; recency remains zero. Mode
+type bits exclude gitlinks even under unusual accepted import spellings.
+
+Hints belong to this exact visible proof. Hidden-only, deleted-only, unadmitted
+and foreign-repository objects cannot contribute them. The map retains at most
+one integer per named visible object and shares the walk's object, edge, byte
+and cancellation bounds. A hash collision can change delta candidates; it cannot
+authorize an object or bypass native verification.
+
+Wants, common haves, filters, shallow boundaries and tag inclusion still decide
+the selected set. Preparation records the corresponding hints in its ID-sorted
+keys, and materialization uses those same keys through `PackOrderingSource`.
+The adapter changes only ordering metadata on the source's owned result: it
+does not copy a body, add a source read, buffer a streamed blob or relabel an ID
+or type. External client-held thin bases keep their original metadata. All Git,
+SSH and HTTP upload-pack paths share this consumer; local export retains its
+existing zero hints.
+
+The pack profile's comparator, delta rules, codec, window and resource limits
+are unchanged. **Served pack bytes may change**, because the caller now supplies
+meaningful path hints instead of zeros. The same selection and hints must still
+produce identical planned and streamed packs independent of input order. A
+large streamed base still clears the candidate window and never becomes a
+buffered delta candidate.
+
+The regression in [`path_grouping.rs`](../crates/fgit-pack/tests/path_grouping.rs)
+uses actual native IDs, encoding and unpacking for SHA-1 and SHA-256. Its
+deliberately dispersed synthetic object set checks that related versions which
+miss the 32-entry ID-ordered window become useful delta candidates with hints.
+This is component evidence, not a stock-client clone benchmark. The server
+still reads and verifies selected expanded bodies; persistent reuse of stored
+pack/delta representations and the original large-history cold-clone campaign
+remain separate work.
+
+### Component evidence and remaining integration gate
+
+Pack-component source: `59b2b411aa55de91fb2c2a29acb517e829f43153`, with
+the six published pack-source blob IDs identical to the tested candidate.
+On 2026-10-30, `cargo test -p fgit-pack --all-targets --locked --offline`
+completed all 33 targets: **278 passed, zero failed, nine ignored**. The ignored
+`measure_basename_grouping_interleaved_a_b_a` was then run explicitly and passed.
+The normal run includes both new native grouping regressions and ten ordering
+adapter tests, including thin bases, corruption and a 33 MiB streamed blob.
+
+The experiment uses 263 genuine blobs / 539,072 expanded bytes: four seeded
+16 KiB file families with eight versions each, separated by unrelated 64-byte
+blobs in native-ID order. Both arms use `git-pack-compressed-v5`, fresh
+planners/encoders and no computation cache. The already resident fixture and
+prepared keys are outside the timer, as is the independent native unpack check.
+The timed work includes the source's owned body copies and in-memory pack sink.
+This tests a cold computation cache, not cold disk or a transport session.
+
+| Native format | Zero-hint pack bytes | Basename-hint pack bytes | Deltas, zero → basename |
+| --- | ---: | ---: | ---: |
+| SHA-1 | 542,543 | 88,284 | 0 → 28 |
+| SHA-256 | 542,556 | 88,421 | 0 → 28 |
+
+Every sample in an arm produced identical bytes and receipts. Raw interleaved
+elapsed samples, in milliseconds (A = zero hints, B = basename hints):
+
+| Format | Round | A before | B | A after |
+| --- | ---: | ---: | ---: | ---: |
+| SHA-1 | 0 | 242.630212 | 172.425577 | 282.645889 |
+| SHA-1 | 1 | 234.092159 | 167.124556 | 283.764240 |
+| SHA-1 | 2 | 234.871020 | 165.647354 | 227.165326 |
+| SHA-256 | 0 | 313.657387 | 222.843999 | 265.931807 |
+| SHA-256 | 1 | 333.978076 | 222.000303 | 320.651060 |
+| SHA-256 | 2 | 345.560644 | 194.119414 | 303.476320 |
+
+Host/target: `x86_64-unknown-linux-gnu`; pinned nightly-2026-08-31,
+`rustc 1.100.0-nightly (908501772 2026-08-30)`, LLVM 23.1.0. This is an
+unoptimized test-profile run in a shared container, not release throughput or
+a statistically supported tail estimate. CPU time, RSS, disk I/O, network
+requests and economic cost were not measured. Reproduction settings:
+
+```bash
+env CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_INCREMENTAL=0 \
+  RUSTFLAGS='-Z unstable-options --jobs=1' \
+  MALLOC_CONF='narenas:1,dirty_decay_ms:0,muzzy_decay_ms:0,tcache:false' \
+  cargo test -p fgit-pack --test path_grouping --locked --offline \
+  measure_basename_grouping_interleaved_a_b_a -- --ignored --exact --nocapture
+```
+
+The node integration passed scoped rustfmt parsing and independent source
+review. Its native tests were **not compiled or executed** in this session:
+the pinned `asupersync` 0.5.0 dependency's metadata build was killed by the
+container memory limit during earlier one-job, no-debuginfo attempts. No
+dependency, feature or limit was weakened to obtain a green result. The full
+node/transport suite and original repository cold-clone comparison remain
+required. Reverting the serving hint wiring restores zero-hint input without
+changing canonical state or requiring a storage migration.
+
 ## Native annotated-tag serving
 
 The graph walk retains the already-verified tag edges and derives request-local

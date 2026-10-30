@@ -638,10 +638,26 @@ never by match length.
 
 This row stays refuted: output-preserving bounds still cannot skip hopeless
 pairs. V3 is the separately identified, measured change the consequence
-paragraph called for. Deferred:
-- a planner that reuses stored deltas;
-- path-aware candidate order. The served source supplies `path_hash = 0` and
-  `recency = 0`, so the window is ordered by object ID.
+paragraph called for. A planner that reuses stored deltas remains deferred.
+
+**Follow-up (2026-10-30, frankengit-1tl9; partial implementation).** Network
+upload-pack now carries raw-basename hints from the already verified visible
+tree graph into the existing pack ordering inputs. Recency stays zero; an
+object with multiple visible names takes the smallest basename hash. This
+keeps related versions in the candidate window without another body read or a
+change to disclosure, the profile comparator, delta rules or resource limits.
+It intentionally can change served pack bytes from the previous all-zero-hint
+inputs. Trusted local export keeps zero hints.
+
+The native `fgit-pack/tests/path_grouping.rs` fixture exercises deliberately
+dispersed object IDs, real V5 encoding, exact unpacked identities, reversed
+selection order and both hash formats. Its optional A/B/A measurement is a
+component experiment, not a whole-repository throughput claim. Selected bodies
+are still expanded, read and verified; no persisted pack representation is
+reused. The original large-history cold-clone workload and full node integration
+remain outstanding, so this follow-up does not close the bead or overturn the
+original negative result. See the
+[served ordering contract](UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs).
 
 ### NEG-034 — thin-pack bases chosen by program length, measured by bytes written, mislead in both directions (frankengit-pazc)
 

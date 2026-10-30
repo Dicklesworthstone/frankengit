@@ -76,6 +76,11 @@ zero disables retention). Independently reopened request children reuse it,
 while each request still authenticates and selects its permitted objects. This
 retained-entry budget is additional to the delta window and is not a total RSS
 limit; the measurements above predate the cache.
+Network packs also group related versions using verified raw tree-entry
+basenames, improving access to delta candidates within that same bounded
+window. The [ordering contract](docs/UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs)
+preserves selection and native verification while allowing different pack
+bytes. It adds no blob reads and makes no new whole-clone throughput claim.
 The pre-advertisement walk reads blob headers, not blob bodies
 (frankengit-8xyq), so a repository larger than the envelope is still
 advertised and incrementally fetchable. A blob reached through a verified tree

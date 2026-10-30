@@ -127,8 +127,8 @@ use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_pack::{
     CanonicalBlobReader, CanonicalBlobStream, CanonicalObjectSource, CanonicalPackObject,
     MAX_THIN_BASES_PER_TARGET, MemoizedPackEncoder, PackBoundaryScanner, PackCacheStats,
-    PackComputationCache, PackError, PackLimits, PackOrderKey, PackPlanner, PackWriteError,
-    PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus, ThinBase,
+    PackComputationCache, PackError, PackLimits, PackOrderKey, PackOrderingSource, PackPlanner,
+    PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus, ThinBase,
 };
 use fgit_reference::intent::TransactionRequest;
 use fgit_resource::{
@@ -987,6 +987,7 @@ pub struct AuthoritySelectedPackPayload {
 struct PreparedUploadPack {
     basis: PublicationBasis,
     request: PackRequest,
+    /// Identity-sorted for the source's allocation-free ordering-hint lookup.
     keys: Vec<PackOrderKey>,
     held: BTreeSet<GitOid>,
     limits: PackLimits,
@@ -9911,9 +9912,10 @@ impl OneNode {
                 id: *id,
                 object_type,
                 recency: 0,
-                path_hash: 0,
+                path_hash: fetch.map_or(0, |(scope, _)| scope.path_hash_of(id)),
             });
         }
+        keys.sort_unstable_by_key(|key| key.id);
         self.stream_selected_pack(
             materialized,
             &served,
@@ -9935,6 +9937,15 @@ impl OneNode {
         limits: &PackLimits,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        // Both preparation paths keep identity-sorted keys. Overlay only the
+        // exact selection's verified metadata; the adapter preserves native
+        // identity, kind, owned bodies and streamed readers. Client-held thin
+        // bases outside this selection retain their original source metadata.
+        let ordered = PackOrderingSource::new(source, |id| {
+            keys.binary_search_by_key(id, |key| key.id)
+                .ok()
+                .map(|index| keys[index])
+        });
         let cache = &self.service_config.pack_computation_cache;
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone())
             .with_computation_cache(Arc::clone(cache));
@@ -9947,7 +9958,7 @@ impl OneNode {
         let mut spool = pack_spool::PackSpool::new(self.storage_root());
         let receipt = planner
             .stream_selected_thin(
-                source,
+                &ordered,
                 keys,
                 thin_bases,
                 &PackWriter::new(limits.clone()),

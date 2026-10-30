@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+mod basename_ordering;
 mod selection_preflight;
 mod shallow_transport;
 use std::io::{Read, Write};
@@ -125,13 +126,14 @@ fn disclosure_walk_keeps_shared_history_and_tags_without_reading_hidden_or_gitli
         let tag = source.put(ObjectType::Tag, tag_bytes(tip, "commit"));
         let outer_tag = source.put(ObjectType::Tag, tag_bytes(tag, "tag"));
         source.put(ObjectType::Blob, b"admitted but unrelated".to_vec());
-        let result = project_visible_closure(
+        let graph = project_visible_graph(
             &source,
             &source.admitted(),
             [outer_tag, tip, outer_tag],
             &PackLimits::default(),
         )
         .unwrap();
+        let result = &graph.closure;
         let expected = BTreeSet::from([common, base_tree, base, public, tree, tip, tag, outer_tag]);
         assert_eq!(result.objects(), &expected);
         // Bodies of commits, trees and tags; only the headers of blobs reached
@@ -155,6 +157,14 @@ fn disclosure_walk_keeps_shared_history_and_tags_without_reading_hidden_or_gitli
         );
         assert!(!result.objects().contains(&secret));
         assert!(!result.objects().contains(&private));
+        assert_eq!(
+            graph.path_hashes,
+            BTreeMap::from([
+                (common, basename_path_hash(b"common")),
+                (public, basename_path_hash(b"public")),
+            ]),
+            "hidden, unrelated and gitlink objects contribute no ordering hints"
+        );
     }
 }
 
@@ -974,7 +984,7 @@ fn hidden_ref_rules_select_the_negotiation_scope_before_any_hidden_body_read() {
             1,
             "hidden ref cannot consume the visible advertisement limit"
         );
-        let closure = project_visible_closure(
+        let graph = project_visible_graph(
             &source,
             &source.admitted(),
             repository
@@ -984,7 +994,11 @@ fn hidden_ref_rules_select_the_negotiation_scope_before_any_hidden_body_read() {
             &PackLimits::default(),
         )
         .unwrap();
-        let repository = repository.with_closure_objects(closure.objects().clone());
+        assert_eq!(
+            graph.path_hashes,
+            BTreeMap::from([(blob, basename_path_hash(b"shared"))])
+        );
+        let repository = repository.with_closure_objects(graph.closure.objects().clone());
         for id in [public, ancestor, tree, blob] {
             assert!(repository.contains_want(id));
             assert!(repository.is_common(id));

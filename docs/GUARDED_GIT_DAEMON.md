@@ -88,6 +88,16 @@ RSS limit. `NodeConfig::with_pack_cache_bytes` exposes the same control to
 embedded callers, and `OneNode::pack_cache_stats` reports shared cache activity.
 No new wall-time, CPU, or peak-RSS improvement is claimed here.
 
+Network upload-pack also supplies verified tree-entry basename hints to the
+existing pack ordering policy. Related versions can then share the bounded
+delta window even when their native IDs are far apart. This adds no blob-body
+reads and does not change the selected object set, limits or local-export
+ordering. Served pack bytes can change. The
+[visibility contract](UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs)
+defines raw-byte hashing, multiple-name ties and the component-only evidence.
+It does not establish a new cold-clone throughput result or persistent reuse
+of stored deltas.
+
 The following measurements predate this computation cache:
 
 Measured with a release fg of 25ba1840 built on ba7f09a3, on one commit of

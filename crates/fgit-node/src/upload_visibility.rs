@@ -9,10 +9,10 @@ use super::{
     BTreeSet, BudgetClass, Cell, GitDaemonSessionDeadline, GitHashAlgorithm, GitOid,
     MaterializedAdmission, NodeAdmissionViewRefusal, NodeGitDaemonServeRefusal,
     NodePackMaterializationRefusal, NodeRequestContext, ObjectType, OneNode, PackError, PackLimits,
-    PackOrderKey, PackRequest, PackWriteError, ParseLimits, PermittedClosureTraversalSource,
-    PermittedObjectClosure, PublicationBasis, RefusalCode, UploadPackRepository,
-    VerifiedFabricPackSource, WireError, WireLimits, entry_limit_error, parse_object_body,
-    selected_pack_ids_and_held,
+    PackOrderKey, PackRequest, PackWriteError, ParseLimits, ParsedObject,
+    PermittedClosureTraversalSource, PermittedObjectClosure, PublicationBasis, RefusalCode,
+    UploadPackRepository, VerifiedFabricPackSource, WireError, WireLimits, entry_limit_error,
+    parse_object_body, selected_pack_ids_and_held,
 };
 #[cfg(test)]
 use super::{
@@ -29,6 +29,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{CanonicalBlobReader, PackPayloadSource};
+use fgit_pack::basename_path_hash;
 use std::cell::RefCell;
 mod partial_clone;
 pub(crate) use partial_clone::unserved_filter_name;
@@ -51,6 +52,10 @@ pub struct VisibleUploadPack {
     repository: AdmissionUploadPackRepository,
     pub(super) tags: tags::TagProjection,
     objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
+    /// One deterministic ordering hint per named visible object. These never
+    /// authorize membership or retain names; body verification still governs
+    /// every selected object. Unnamed roots retain the zero hint.
+    path_hashes: BTreeMap<GitOid, u64>,
 }
 
 impl VisibleUploadPack {
@@ -119,7 +124,7 @@ impl VisibleUploadPack {
                 id,
                 object_type: object.kind,
                 recency: 0,
-                path_hash: 0,
+                path_hash: self.path_hash_of(&id),
             });
         }
         // Complete the bounded metadata pass so the refusal reports the actual
@@ -131,6 +136,9 @@ impl VisibleUploadPack {
             })
             .into());
         }
+        // Source adapters look up metadata by identity without retaining a
+        // second map. The writer independently applies its frozen pack order.
+        keys.sort_unstable_by_key(|key| key.id);
         Ok((keys, held, expanded_bytes))
     }
 
@@ -166,6 +174,11 @@ impl VisibleUploadPack {
     /// before any body is read (frankengit-8xyq).
     pub(super) fn kind_of(&self, id: &GitOid) -> Option<ObjectType> {
         self.objects.get(id).map(|object| object.kind)
+    }
+
+    /// A packing hint from verified visible tree metadata, never authority.
+    pub(super) fn path_hash_of(&self, id: &GitOid) -> u64 {
+        self.path_hashes.get(id).copied().unwrap_or(0)
     }
 
     /// Pack selection over this proof's verified graph (frankengit-8xyq).
@@ -289,6 +302,7 @@ impl OneNode {
             repository,
             tags,
             objects,
+            path_hashes: graph.path_hashes,
         })
     }
 }
@@ -378,6 +392,7 @@ struct VisibleGraph {
     closure: PermittedObjectClosure,
     tag_targets: BTreeMap<GitOid, GitOid>,
     objects: BTreeMap<GitOid, partial_clone::FilterObject>,
+    path_hashes: BTreeMap<GitOid, u64>,
 }
 
 #[cfg(test)]
@@ -403,6 +418,7 @@ fn project_visible_graph(
     let mut known = BTreeMap::<GitOid, ObjectType>::new();
     let mut tag_targets = BTreeMap::new();
     let mut objects = BTreeMap::new();
+    let mut path_hashes = BTreeMap::new();
     // Validate ALL roots before a read. A visible ref outside the authenticated
     // admitted set is inconsistent state, never permission to search storage.
     for root in roots {
@@ -463,9 +479,8 @@ fn project_visible_graph(
             require_kind(kind, *expected)?;
         }
         // Blobs have no local edges. Avoid a second full-body parsed copy.
-        let mut commit_time = None;
-        let edges = if kind == ObjectType::Blob {
-            Vec::new()
+        let parsed = if kind == ObjectType::Blob {
+            None
         } else {
             let parsed = parse_object_body(
                 kind,
@@ -474,13 +489,14 @@ fn project_visible_graph(
                 &parse_limits,
             );
             source.checkpoint()?;
-            let parsed =
-                parsed.map_err(|_| disclosure_refusal(RefusalCode::ObjectHeaderInvalid))?;
-            commit_time = shallow::cutoffs::committer_time(&parsed);
+            Some(parsed.map_err(|_| disclosure_refusal(RefusalCode::ObjectHeaderInvalid))?)
+        };
+        let commit_time = parsed.as_ref().and_then(shallow::cutoffs::committer_time);
+        let edges = if let Some(parsed) = &parsed {
             let mut stopped = None;
             let edges = crate::loose_import::graph::references(
                 source.format(),
-                &parsed,
+                parsed,
                 &body,
                 &parse_limits,
                 &mut edges_left,
@@ -503,6 +519,8 @@ fn project_visible_graph(
             }
             source.checkpoint()?;
             edges.map_err(disclosure_refusal)?
+        } else {
+            Vec::new()
         };
         if kind == ObjectType::Tag {
             let [(target, _)] = edges.as_slice() else {
@@ -527,6 +545,12 @@ fn project_visible_graph(
                 &mut pending,
             )?;
         }
+        if let Some(ParsedObject::Tree(entries)) = &parsed {
+            // Every local edge was admitted and charged above, so this map
+            // cannot grow beyond the bounded set of required objects. The
+            // parser already owns the names; retain only one hash per object.
+            record_tree_path_hashes(source, entries, &edges, &mut path_hashes)?;
+        }
         objects.insert(
             id,
             partial_clone::FilterObject {
@@ -542,7 +566,47 @@ fn project_visible_graph(
         closure: PermittedObjectClosure::new(known.into_keys().collect()),
         tag_targets,
         objects,
+        path_hashes,
     })
+}
+
+/// Fold names in the same edge order as the shared native graph classifier.
+/// The mode's type bits, rather than spelling, exclude imported gitlinks.
+/// Multiple names choose the minimum hash independent of root or tree order;
+/// collisions can affect compression only, never object disclosure.
+fn record_tree_path_hashes(
+    source: &impl VisibilitySource,
+    entries: &[fgit_git_object::TreeEntry],
+    edges: &[(GitOid, ObjectType)],
+    path_hashes: &mut BTreeMap<GitOid, u64>,
+) -> Result<(), NodePackMaterializationRefusal> {
+    let mut local_edges = edges.iter();
+    for entry in entries {
+        source.checkpoint()?;
+        let mode = std::str::from_utf8(&entry.mode)
+            .ok()
+            .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+            .ok_or_else(|| disclosure_refusal(RefusalCode::ObjectHeaderInvalid))?;
+        if mode & 0o170_000 == 0o160_000 {
+            continue;
+        }
+        let (child, _) = local_edges
+            .next()
+            .ok_or_else(|| disclosure_refusal(RefusalCode::EvidenceInvalid))?;
+        if child.as_bytes() != entry.object_id.as_slice() {
+            return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
+        }
+        let hint = basename_path_hash(&entry.name);
+        source.checkpoint()?;
+        path_hashes
+            .entry(*child)
+            .and_modify(|previous| *previous = (*previous).min(hint))
+            .or_insert(hint);
+    }
+    if local_edges.next().is_some() {
+        return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
+    }
+    Ok(())
 }
 
 fn enqueue(

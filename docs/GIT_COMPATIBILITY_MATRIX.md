@@ -409,6 +409,16 @@ and expired or cancelled contexts earn no extension. Flat scaling stays flat.
 Git and SSH have a one-shot finite terminal-write phase for selected-pack
 refusals, including work expiry, without reopening input or computation.
 
+The same prepared keys now carry deterministic basename hints from verified
+visible trees. A metadata-only source adapter makes buffered and streamed
+objects agree with those keys, preserving IDs, kinds and reader ownership.
+The [basename grouping contract](UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs)
+changes served pack order and possibly bytes, not closure/filter/have decisions
+or the frozen profile's comparator, encoding and resource rules. Local export
+keeps its existing zero hints. Pack-component regressions cover both hash
+formats and actual decoded content; they are not a stock-client or full node
+integration result.
+
 Smart HTTP selected-pack resource refusals use a bounded Git ERR packet inside
 HTTP 200, before any negotiation or pack bytes, so v0/v2 and quiet clients can
 read the cause. Only public size/output/window limits, named runtime exhaustion

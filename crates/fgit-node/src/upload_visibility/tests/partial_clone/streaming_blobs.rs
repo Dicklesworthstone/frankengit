@@ -242,6 +242,21 @@ fn a_blob_above_32_mib_uses_verified_file_chunks_and_never_enters_buffered_loadi
         .prepare_visible_upload_pack(&request, &materialized, &WireLimits::default(), &deadline)
         .unwrap();
     let fetch = super::request(vec![id], vec![ancestor], None);
+    assert_eq!(visible.path_hash_of(&id), basename_path_hash(b"public"));
+    let pack_context = node.session_pack_materialization_context(&deadline);
+    let prepared = node
+        .prepare_upload_pack_selection(
+            &materialized,
+            &visible,
+            &fetch,
+            &deadline,
+            &pack_context,
+            &mut || true,
+        )
+        .unwrap();
+    assert_eq!(prepared.keys.len(), 1);
+    assert_eq!(prepared.keys[0].id, id);
+    assert_eq!(prepared.keys[0].path_hash, basename_path_hash(b"public"));
     let mut payload = node
         .materialize_selected_pack_in_scope(
             &materialized,
