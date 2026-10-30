@@ -27,6 +27,7 @@ mod source;
 mod workflow;
 pub use source::{source_agent_context_json, source_retrieval_json};
 mod stock_receive;
+mod upload_liveness;
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -1563,7 +1564,6 @@ fn serve_connection(
                     .map_err(|_| Status::Unavailable)?;
             } else {
                 let request = git_request.as_ref().ok_or(Status::BadRequest)?;
-                let mut live = || true;
                 let git_result = (|| -> Result<(), NodeSmartHttpRefusal> {
                     match request.operation {
                         Operation::Discover(service) => {
@@ -1586,6 +1586,10 @@ fn serve_connection(
                                 .map_err(|source| io_error("write HTTP discovery body", source))?;
                         }
                         Operation::Rpc(Service::UploadPack) => {
+                            let probe = writer.inner.stream.try_clone().map_err(|source| {
+                                io_error("duplicate HTTP upload connection for liveness", source)
+                            })?;
+                            let mut live = upload_liveness::cancellation(probe);
                             node.smart_http_upload_stream_in(
                                 request,
                                 &mut body,
@@ -1597,6 +1601,7 @@ fn serve_connection(
                             )?;
                         }
                         Operation::Rpc(Service::ReceivePack) => {
+                            let mut live = || true;
                             let _outcome = node.smart_http_receive_stream_gated_in(
                                 request,
                                 &session,

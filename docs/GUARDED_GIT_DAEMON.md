@@ -180,6 +180,14 @@ Storage errors, object identifiers and authority details do not cross this
 diagnostic boundary. Cancellation and the configured response-size limit still
 apply.
 
+HTTP upload work also uses the same bounded, sticky peer-reset probe as raw Git.
+It checks at most once per 100 ms without consuming queued input. An observed
+socket reset/error cancels subsequent work checkpoints and stays cancelled;
+ordinary EOF remains inconclusive because clients may finish the request with
+a write-side half-close and continue reading their pack. The finite work
+deadline still bounds that case. Receive admission and outcome recovery retain
+their separate cancellation semantics.
+
 A repository whose commit, tree and tag bytes alone exceed the envelope is
 refused before any advertisement, with one `ERR` packet such as, under
 `--pack-max-expanded-mib 128`,
