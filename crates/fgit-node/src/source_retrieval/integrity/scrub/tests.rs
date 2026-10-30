@@ -60,6 +60,19 @@ pub(super) fn publish_ref(
     reference: &[u8],
     key: &[u8],
 ) -> (BTreeSet<GitOid>, Vec<GitOid>) {
+    publish_ref_with_payloads(
+        node,
+        reference,
+        key,
+        (0..4).map(|i| format!("admitted history payload {i}\n").into_bytes()),
+    )
+}
+pub(super) fn publish_ref_with_payloads(
+    node: &OneNode,
+    reference: &[u8],
+    key: &[u8],
+    payloads: impl IntoIterator<Item = Vec<u8>>,
+) -> (BTreeSet<GitOid>, Vec<GitOid>) {
     let blob = put(node, GitKind::Blob, b"live content\n".to_vec());
     let mut body = b"100644 file\0".to_vec();
     body.extend_from_slice(blob.as_bytes());
@@ -67,14 +80,9 @@ pub(super) fn publish_ref(
     let root = put(node, GitKind::Commit, format!(
         "tree {tree}\nauthor A <a@example.invalid> 1 +0000\ncommitter C <c@example.invalid> 1 +0000\n\nfixture\n"
     ).into_bytes());
-    let extra = (0..4)
-        .map(|i| {
-            put(
-                node,
-                GitKind::Blob,
-                format!("admitted history payload {i}\n").into_bytes(),
-            )
-        })
+    let extra = payloads
+        .into_iter()
+        .map(|payload| put(node, GitKind::Blob, payload))
         .collect::<Vec<_>>();
     let mut objects = BTreeSet::from([blob, tree, root]);
     objects.extend(extra.iter().copied());

@@ -24,7 +24,7 @@ const USAGE: &str = "usage: fg scrub <storage-root> <tenant-id> <repository-id> 
   [--expected-head <snapshot-token>] [--resume-after <native-oid>]
   [--max-selected-objects <1..1000000>] [--max-page-objects <1..100000>]
   [--max-findings <1..1000>] [--max-bytes <1..17179869184>]
-  [--max-object-bytes <1..268435456>] [--timeout-secs <1..3600>]
+  [--max-object-bytes <1..17179869184>] [--timeout-secs <1..3600>]
   [--all [--max-pages <1..1000000>] [--max-sweep-bytes <1..17179869184>]]
 
 --all walks all pages with one request budget and one exact authority head.
@@ -50,10 +50,15 @@ This does not verify graph connectivity, repair objects, grant retention, inspec
 physical orphans, or change authority. Use fg fsck for the separate graph audit.
 
 Defaults: 1000 objects/page, 100 findings/page, 64 MiB accounted payload/page,
-32 MiB per object, 1000000 selected objects, 300 seconds. The payload budget
-counts verified bytes included in a page, not physical I/O. One extra bounded
-object may be read at a page boundary; the node's per-object ceiling still applies.
-Timeouts are cooperative and cannot interrupt a blocking filesystem operation.
+32 MiB per object, 1000000 selected objects, 300 seconds. Native payloads are
+verified through bounded streaming reads; the object ceiling is not a buffer size.
+A larger object needs explicit --max-object-bytes AND --max-bytes allowances;
+--all also retains its independent --max-sweep-bytes allowance. Raising one limit
+never raises another. The payload budget counts verified bytes included in a page,
+not total physical I/O. An extra bounded envelope read may detect a page boundary,
+but that object's payload is not read until it fits. The per-object ceiling still
+applies. Cancellation is checked between chunks; a blocking OS read cannot be
+interrupted until it returns.
 Exit 0: all selected object bytes verified in a complete page or --all sweep;
 3: this page has findings; 4: a clean page without a whole-selection certificate;
 2: invalid input, systemic failure, incomplete shutdown, or output failure.";
@@ -132,7 +137,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--max-findings" => query.max_findings = positive(value, 1_000, flag)? as usize,
             "--max-bytes" => query.max_payload_bytes = positive(value, 16 * 1024 * MIB, flag)?,
-            "--max-object-bytes" => object_bytes = positive(value, 256 * MIB, flag)?,
+            "--max-object-bytes" => object_bytes = positive(value, 16 * 1024 * MIB, flag)?,
             "--timeout-secs" => query.timeout = Duration::from_secs(positive(value, 3600, flag)?),
             "--max-pages" => sweep_limits.pages = positive(value, 1_000_000, flag)? as usize,
             "--max-sweep-bytes" => {

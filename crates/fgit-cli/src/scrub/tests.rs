@@ -135,7 +135,7 @@ fn numeric_bounds_and_overflow_refuse_without_silent_clamping() {
         ("--max-page-objects", 100_000),
         ("--max-findings", 1_000),
         ("--max-bytes", 16 * 1024 * MIB),
-        ("--max-object-bytes", 256 * MIB),
+        ("--max-object-bytes", 16 * 1024 * MIB),
         ("--timeout-secs", 3_600),
     ] {
         assert!(parse(&args(&[flag, &maximum.to_string()])).is_ok());
@@ -144,6 +144,53 @@ fn numeric_bounds_and_overflow_refuse_without_silent_clamping() {
             assert!(parse(&args(&[flag, bad])).is_err(), "{flag}: {bad}");
         }
     }
+}
+
+#[test]
+fn streaming_object_opt_in_keeps_page_and_sweep_budgets_independent() {
+    let defaults = parse(&args(&[])).unwrap();
+    assert_eq!(defaults.object_bytes, 32 * MIB);
+
+    // Exercise a value above u32::MAX without allocating a large fixture.
+    let large = 4 * 1024 * MIB;
+    let large_text = large.to_string();
+    let object_only = parse(&args(&["--max-object-bytes", &large_text])).unwrap();
+    assert_eq!(object_only.object_bytes, large);
+    assert_eq!(object_only.query.max_payload_bytes, 64 * MIB);
+    assert!(object_only.sweep.is_none());
+
+    // A wider storage ceiling cannot silently widen a deliberately small
+    // page or whole-sweep allowance. The native scan enforces both at read time.
+    let page_text = (2 * MIB).to_string();
+    let sweep_text = (3 * MIB).to_string();
+    let narrow = parse(&args(&[
+        "--all",
+        "--max-object-bytes",
+        &large_text,
+        "--max-bytes",
+        &page_text,
+        "--max-sweep-bytes",
+        &sweep_text,
+    ]))
+    .unwrap();
+    assert_eq!(narrow.object_bytes, large);
+    assert_eq!(narrow.query.max_payload_bytes, 2 * MIB);
+    assert_eq!(narrow.sweep.unwrap().payload_bytes, 3 * MIB);
+
+    // The explicitly widened twin retains all three independent allowances.
+    let permitted = parse(&args(&[
+        "--all",
+        "--max-object-bytes",
+        &large_text,
+        "--max-bytes",
+        &large_text,
+        "--max-sweep-bytes",
+        &large_text,
+    ]))
+    .unwrap();
+    assert_eq!(permitted.object_bytes, large);
+    assert_eq!(permitted.query.max_payload_bytes, large);
+    assert_eq!(permitted.sweep.unwrap().payload_bytes, large);
 }
 
 #[test]

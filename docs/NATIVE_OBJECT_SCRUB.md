@@ -56,24 +56,62 @@ The CLI bounds diagnostic text and marks truncation. Other selected objects
 continue until the page's object, finding or payload bound is reached.
 
 Native identity, exact payload length, namespace and independent payload
-commitments are checked by the existing object-fabric read path. The
-per-object allocation ceiling is selected by the node configuration. Selection
-materialization retains its existing node bounds; the query's selection-count
-limit is checked before native object inspection. The query bounds included
-payload, not total physical I/O. One additional bounded object read may be
-needed to detect the next page boundary. That object is not skipped by the
-continuation cursor. An object exceeding an otherwise empty page's byte
-budget causes a typed resource refusal, not an infinite zero-progress cursor.
+commitments are checked through bounded object-fabric streaming reads. Scrub
+does not buffer a complete native payload. The node's per-object ceiling
+still limits which objects may be verified, while the streaming buffer stays
+bounded independently of that ceiling. Selection materialization retains its
+existing bounds; the query's selection-count limit is checked before native
+object inspection.
+
+The next object's bounded envelope is inspected before reading its payload.
+An object that does not fit the remaining page allowance is left for the next
+page without reading its body. An object exceeding an otherwise empty page's
+byte budget causes a typed resource refusal, not an infinite zero-progress
+cursor. The query counts verified payload included in the page, not total
+physical I/O: envelope probes and failed verification attempts remain work
+under the request's deadline. A boundary probe never skips that object in
+the continuation cursor.
 
 Cancellation, deadline and authority failure never turn into object findings
 or a successful partial report. The same request controls selection, reads and
-final head authentication. The cooperative timeout cannot interrupt a blocking
-OS read. Head revalidation is an observation, not a lock against later writes
-or later physical corruption. The CLI emits no page before successful shutdown.
+final head authentication. Cancellation and timeout checks occur between
+streaming chunks, but cannot interrupt a blocking OS read before it returns.
+Head revalidation is an observation, not a lock against later writes or later
+physical corruption. The CLI emits no page before successful shutdown.
 
 This command does not repair, delete, create retention roots, check local graph
 connectivity, validate signatures, or certify orphan files. `fg fsck` retains its
 existing complete, all-or-error graph audit without implicit fallback.
+
+## Larger objects
+
+The default per-object ceiling remains 32 MiB. `--max-object-bytes` accepts
+an explicit positive byte count up to 16 GiB, matching the existing maximum
+page and whole-sweep payload allowances. This changes only the read-only
+scrub invocation's storage ceiling; it does not change serving, import or
+other node defaults, and it does not allocate a buffer of that size.
+
+The per-object, per-page and whole-sweep allowances are independent. Raising
+`--max-object-bytes` alone leaves the default 64 MiB page budget unchanged.
+To verify a larger object, explicitly allow it in `--max-bytes` too. A sweep
+also needs sufficient remaining `--max-sweep-bytes`; no option silently
+widens another. For example, permit objects up to 4 GiB, pages up to 8 GiB,
+and at most 16 GiB of verified payload across the complete sweep:
+
+```sh
+fg scrub ./fgit-data \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222 \
+  --trusted-local --all \
+  --max-object-bytes 4294967296 \
+  --max-bytes 8589934592 \
+  --max-sweep-bytes 17179869184
+```
+
+The original finding and receipt formats remain unchanged. A configured
+object-size refusal remains an unverifiable-object finding, while an
+insufficient page allowance remains a resource refusal or a page boundary.
+Neither is a corruption diagnosis.
 
 ## Complete bounded sweep
 

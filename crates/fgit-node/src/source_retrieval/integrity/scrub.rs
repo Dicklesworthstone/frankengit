@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use super::{GraphAuditRefusal, checkpoint, revalidate_head};
 use crate::{MaterializedAdmission, NodeRefusal, NodeRequestContext, OneNode};
 use fgit_object_fabric::ObjectKind;
+use fgit_object_fabric::fabric::StoreRefusal;
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{
     Digest, GitOid, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId,
@@ -58,8 +59,9 @@ pub struct ScrubQuery {
     pub max_selected_objects: usize,
     pub max_page_objects: usize,
     pub max_findings: usize,
-    /// Accounted, verified payload bytes in this page, not physical I/O. One
-    /// additional node-bounded object may be read to detect a page boundary.
+    /// Accounted, verified payload bytes in this page, not physical I/O. A
+    /// boundary object's bounded envelope may be inspected, but its payload is
+    /// not read until it fits both this page and the node's object ceiling.
     pub max_payload_bytes: u64,
     /// Cooperative timeout; a blocking filesystem call is not interruptible.
     pub timeout: Duration,
@@ -287,8 +289,9 @@ impl SelectedObjectScrub {
 impl OneNode {
     /// Inspect a sorted page of selected Git objects using real fabric reads.
     /// All work, including final exact-head revalidation, belongs to `request`.
-    /// Individual read failures become bounded findings; authority failures,
-    /// cancellation and deadlines never become a partial-success receipt.
+    /// Native identity and strong payload commitments are verified in fixed-size
+    /// chunks. Individual read failures become bounded findings; authority
+    /// failures, cancellation and deadlines never become a partial-success receipt.
     pub async fn scrub_selected_objects_local_in(
         &self,
         request: &NodeRequestContext,
@@ -399,31 +402,54 @@ impl OneNode {
             if oid.algorithm() != self.object_format || oid.is_zero() {
                 return Err(ScrubRefusal::ObjectFormat(oid));
             }
-            let read = self.read_git_object(oid);
+            // The same descriptor checks framing and its declared length before
+            // reading payload bytes. A page boundary needs only that bounded
+            // envelope, not a read or allocation of the next object's body.
+            let remaining_bytes = query.max_payload_bytes - report.payload_bytes;
+            let maximum = self.max_object_bytes.min(remaining_bytes);
+            let mut interrupted = None;
+            let read =
+                self.fabric.verify_object_integrity_bounded(
+                    oid,
+                    maximum,
+                    &mut || match checkpoint(request, started, query.timeout) {
+                        Ok(()) => true,
+                        Err(cause) => {
+                            if interrupted.is_none() {
+                                interrupted = Some(cause);
+                            }
+                            false
+                        }
+                    },
+                );
             report.read_attempts += 1;
+            if let Some(cause) = interrupted {
+                return Err(cause.into());
+            }
             checkpoint(request, started, query.timeout)?;
             let finding = match read {
-                Err(cause) => Some(ScrubFindingCause::ObjectRead(Box::new(cause))),
-                Ok(object) => {
-                    let size = object.payload().len() as u64;
-                    if size > query.max_payload_bytes && report.checked_objects > 0 {
-                        report.stop = ScrubStop::PayloadLimit;
-                        break;
-                    }
-                    if size > query.max_payload_bytes {
+                // Preserve the node's independent per-object policy: exceeding
+                // it remains a read finding. Only the tighter page envelope
+                // produces a continuation or a zero-progress page refusal.
+                Err(StoreRefusal::StreamingBudgetExceeded { offered, .. })
+                    if offered <= self.max_object_bytes =>
+                {
+                    if report.checked_objects == 0 {
                         return Err(ScrubRefusal::ObjectExceedsPage {
                             oid,
-                            payload_bytes: size,
+                            payload_bytes: offered,
                             maximum: query.max_payload_bytes,
                         });
                     }
-                    if size > query.max_payload_bytes - report.payload_bytes {
-                        report.stop = ScrubStop::PayloadLimit;
-                        break;
-                    }
-                    // Charge even a verified envelope with a non-Git kind.
-                    report.payload_bytes += size;
-                    if object.envelope().object_kind() == ObjectKind::Internal {
+                    report.stop = ScrubStop::PayloadLimit;
+                    break;
+                }
+                Err(cause) => Some(ScrubFindingCause::ObjectRead(Box::new(NodeRefusal::from(
+                    cause,
+                )))),
+                Ok(object) => {
+                    report.payload_bytes += object.payload_length();
+                    if object.object_kind() == ObjectKind::Internal {
                         Some(ScrubFindingCause::NonGitObject)
                     } else {
                         report.verified_objects += 1;
@@ -461,3 +487,6 @@ impl OneNode {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod streaming_tests;
