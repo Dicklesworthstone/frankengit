@@ -1,10 +1,11 @@
-//! Native full-bundle export with one source body in custody at a time.
+//! Native full and incremental bundle export with one source body in custody at a time.
 //!
 //! Every output byte is tentative. The caller owns a private staged artifact
 //! and publishes it only after this function returns its complete receipt and
 //! the caller's source/runtime obligations close. Neither a successful write
 //! nor a pack trailer by itself publishes an artifact.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::ops::Range;
 
@@ -18,7 +19,7 @@ use fgit_git_object::{
     parse_object_body, required_ref_target_kind,
 };
 
-use super::{FullBundleError, FullBundleLimits, append_ref};
+use super::{FullBundleError, FullBundleLimits, MAX_BUNDLE_PREREQUISITES, append_ref};
 use crate::writer::{encode_entry_header, pack_header};
 use crate::{
     BundleReference, CanonicalObjectSource, CanonicalPackObject, Deadline, ObjectFormat, ObjectId,
@@ -30,6 +31,14 @@ const CHUNK_BYTES: usize = 16 * 1024;
 /// OID ordering is separate from the materializing planner's type/recency/path
 /// ordering. Only its frozen no-delta compression policy is shared.
 pub const STREAM_FULL_BUNDLE_PROFILE: &str = "git-pack-compressed-oid-no-delta-v1";
+
+/// The same frozen OID-ordered compression policy with an explicit prerequisite
+/// envelope. This profile is transfer data, not a self-contained backup.
+pub const STREAM_INCREMENTAL_BUNDLE_PROFILE: &str =
+    "git-bundle-incremental-compressed-oid-no-delta-v1";
+
+/// Hard ceiling on caller-verified omitted-object metadata for one transfer.
+pub const MAX_INCREMENTAL_EXTERNAL_OBJECTS: usize = 1_000_000;
 
 /// One operation's independent byte, object, graph and compression bounds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,15 +110,20 @@ impl From<PackWriteError> for StreamFullBundleError {
     }
 }
 
-/// Complete native bytes and graph verification, without object bodies or
-/// per-object receipts. Construction does not establish file durability or
-/// authorize disclosure; those remain the selecting caller's responsibilities.
+/// Complete native output and selected-graph verification, without object
+/// bodies or per-object receipts. A nonzero prerequisite count identifies an
+/// incremental transfer using caller-validated omitted closure/type facts.
+/// This receipt authenticates the emitted bytes, not omitted payload bytes.
+/// Construction does not establish file durability or authorize disclosure;
+/// those remain the selecting caller's responsibilities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamFullBundleReceipt {
     format: ObjectFormat,
     profile_id: &'static str,
     pack_checksum: ObjectId,
     object_count: u32,
+    prerequisite_count: usize,
+    external_object_count: usize,
     total_object_bytes: usize,
     pack_bytes: usize,
     header_bytes: usize,
@@ -134,6 +148,18 @@ impl StreamFullBundleReceipt {
     #[must_use]
     pub const fn object_count(&self) -> u32 {
         self.object_count
+    }
+    /// Number of explicitly declared native commit prerequisites; zero for a
+    /// self-contained full bundle.
+    #[must_use]
+    pub const fn prerequisite_count(&self) -> usize {
+        self.prerequisite_count
+    }
+    /// Number of omitted objects in the caller-validated prerequisite closure;
+    /// their payload bytes are neither loaded nor authenticated by this codec.
+    #[must_use]
+    pub const fn external_object_count(&self) -> usize {
+        self.external_object_count
     }
     #[must_use]
     pub const fn total_object_bytes(&self) -> usize {
@@ -188,6 +214,85 @@ pub fn write_full_bundle_stream<W: Write + ?Sized>(
     deadline: &mut impl Deadline,
     output: &mut W,
 ) -> Result<StreamFullBundleReceipt, StreamFullBundleError> {
+    write_bundle_stream(
+        format,
+        references,
+        head,
+        &[],
+        selected,
+        &BTreeMap::new(),
+        STREAM_FULL_BUNDLE_PROFILE,
+        source,
+        limits,
+        deadline,
+        output,
+    )
+}
+
+/// Stream a native incremental bundle into caller-owned tentative output.
+///
+/// The caller must independently validate prerequisite reachability and complete
+/// closure/type facts in the selected repository snapshot. This map is a
+/// transfer boundary, never a caller-supplied authorization or retention root.
+/// The codec validates its shape, but does not load or authenticate omitted
+/// payload bytes; the receiver is assumed to hold the declared history.
+/// Every prerequisite must be a commit in that map, and the selected and omitted
+/// inventories must be disjoint. Advertisements may target either inventory,
+/// including an entirely external advertisement with an empty emitted pack.
+///
+/// Selected bodies retain the full writer's identity, parsing, typed-edge and
+/// reachability checks. Each parsed local edge must resolve to a selected object
+/// of the required kind or an external entry of that exact kind. All selected
+/// objects must be reachable from an advertisement without walking beyond the
+/// validated external boundary. Gitlinks remain foreign and consume edge budget.
+///
+/// Ref, header and frontier validation precedes source reads and output. The
+/// same independent pack, body, graph, compression and cancellation budgets
+/// apply; omitted bodies consume no new read allowance here. All output remains
+/// tentative until this receipt and the caller's lifecycle obligations complete.
+pub fn write_incremental_bundle_stream<W: Write + ?Sized>(
+    format: ObjectFormat,
+    references: &[BundleReference],
+    prerequisites: &[ObjectId],
+    selected: &[ObjectId],
+    external: &BTreeMap<ObjectId, ObjectType>,
+    source: &impl CanonicalObjectSource,
+    limits: &StreamFullBundleLimits,
+    deadline: &mut impl Deadline,
+    output: &mut W,
+) -> Result<StreamFullBundleReceipt, StreamFullBundleError> {
+    if prerequisites.is_empty() {
+        checkpoint(deadline)?;
+        return Err(FullBundleError::Invalid("empty prerequisite frontier").into());
+    }
+    write_bundle_stream(
+        format,
+        references,
+        None,
+        prerequisites,
+        selected,
+        external,
+        STREAM_INCREMENTAL_BUNDLE_PROFILE,
+        source,
+        limits,
+        deadline,
+        output,
+    )
+}
+
+fn write_bundle_stream<W: Write + ?Sized>(
+    format: ObjectFormat,
+    references: &[BundleReference],
+    head: Option<ObjectId>,
+    prerequisites: &[ObjectId],
+    selected: &[ObjectId],
+    external: &BTreeMap<ObjectId, ObjectType>,
+    profile_id: &'static str,
+    source: &impl CanonicalObjectSource,
+    limits: &StreamFullBundleLimits,
+    deadline: &mut impl Deadline,
+    output: &mut W,
+) -> Result<StreamFullBundleReceipt, StreamFullBundleError> {
     let mut control = Control {
         deadline,
         cancelled: false,
@@ -197,11 +302,14 @@ pub fn write_full_bundle_stream<W: Write + ?Sized>(
         return Err(FullBundleError::Limit("compression work").into());
     }
     let ids = selected_ids(format, selected, limits, &mut control)?;
+    let boundary = prerequisite_ids(format, prerequisites, &ids, external, &mut control)?;
     let header = header(
         format,
         references,
         head,
+        &boundary,
         &ids,
+        external,
         limits.envelope,
         &mut control,
     )?;
@@ -246,7 +354,7 @@ pub fn write_full_bundle_stream<W: Write + ?Sized>(
             .into());
         }
         verify_identity(&object, &mut control)?;
-        graph.object(format, &object, &ids, &limits.pack, &mut control)?;
+        graph.object(format, &object, &ids, external, &limits.pack, &mut control)?;
         emitter.emit(
             &encode_entry_header(object.object_type().type_code(), object.body().len())?,
             true,
@@ -294,7 +402,7 @@ pub fn write_full_bundle_stream<W: Write + ?Sized>(
         // The source object, parser view and compressor never survive to the
         // next load. Only exact native kinds and index-valued edges are retained.
     }
-    graph.verify(&ids, references, &mut control)?;
+    graph.verify(&ids, references, external, &mut control)?;
     checkpoint(&mut control)?;
     let pack_checksum = emitter.native.clone().finish();
     emitter.emit(pack_checksum.as_bytes(), false, &mut control)?;
@@ -302,9 +410,11 @@ pub fn write_full_bundle_stream<W: Write + ?Sized>(
     let bundle_bytes = emitter.bytes;
     Ok(StreamFullBundleReceipt {
         format,
-        profile_id: STREAM_FULL_BUNDLE_PROFILE,
+        profile_id,
         pack_checksum,
         object_count: count,
+        prerequisite_count: boundary.len(),
+        external_object_count: external.len(),
         total_object_bytes,
         pack_bytes: bundle_bytes - header_bytes,
         header_bytes,
@@ -349,11 +459,66 @@ fn selected_ids(
     Ok(ids)
 }
 
+fn prerequisite_ids(
+    format: ObjectFormat,
+    prerequisites: &[ObjectId],
+    ids: &[ObjectId],
+    external: &BTreeMap<ObjectId, ObjectType>,
+    control: &mut impl Deadline,
+) -> Result<Vec<ObjectId>, FullBundleError> {
+    if prerequisites.len() > MAX_BUNDLE_PREREQUISITES {
+        return Err(FullBundleError::Limit("prerequisites"));
+    }
+    if external.len() > MAX_INCREMENTAL_EXTERNAL_OBJECTS {
+        return Err(FullBundleError::Limit("external closure"));
+    }
+    if prerequisites.is_empty() && !external.is_empty() {
+        return Err(FullBundleError::Invalid("external closure"));
+    }
+    for id in external.keys() {
+        checkpoint(control)?;
+        if id.is_zero() || id.algorithm() != format {
+            return Err(FullBundleError::Invalid("external closure"));
+        }
+        if ids.binary_search(id).is_ok() {
+            return Err(FullBundleError::Invalid(
+                "selected object in prerequisite closure",
+            ));
+        }
+    }
+    let mut boundary = Vec::new();
+    boundary
+        .try_reserve_exact(prerequisites.len())
+        .map_err(|_| FullBundleError::Limit("prerequisite metadata"))?;
+    for &id in prerequisites {
+        checkpoint(control)?;
+        if id.is_zero() || id.algorithm() != format {
+            return Err(FullBundleError::Invalid("prerequisite identity"));
+        }
+        match external.get(&id) {
+            None => return Err(FullBundleError::Invalid("prerequisite closure")),
+            Some(ObjectType::Commit) => {}
+            Some(_) => return Err(FullBundleError::Invalid("prerequisite target kind")),
+        }
+        boundary.push(id);
+    }
+    boundary.sort_unstable();
+    for pair in boundary.windows(2) {
+        checkpoint(control)?;
+        if pair[0] == pair[1] {
+            return Err(FullBundleError::Invalid("duplicate prerequisite"));
+        }
+    }
+    Ok(boundary)
+}
+
 fn header(
     format: ObjectFormat,
     references: &[BundleReference],
     head: Option<ObjectId>,
+    prerequisites: &[ObjectId],
     ids: &[ObjectId],
+    external: &BTreeMap<ObjectId, ObjectType>,
     limits: FullBundleLimits,
     control: &mut impl Deadline,
 ) -> Result<Vec<u8>, FullBundleError> {
@@ -377,7 +542,14 @@ fn header(
             return Err(FullBundleError::Invalid("full reference name required"));
         }
         if ids.binary_search(id).is_err() {
-            return Err(FullBundleError::MissingObject(*id));
+            let kind = external
+                .get(id)
+                .ok_or(FullBundleError::MissingObject(*id))?;
+            if required_ref_target_kind(reference.name().as_bytes())
+                .is_some_and(|required| *kind != required)
+            {
+                return Err(FullBundleError::Invalid("branch target kind"));
+            }
         }
         refs.push(reference);
     }
@@ -405,6 +577,17 @@ fn header(
     let maximum = limits.max_header_bytes.min(limits.max_bundle_bytes);
     if header.len() >= maximum {
         return Err(FullBundleError::Limit("header bytes"));
+    }
+    for id in prerequisites {
+        checkpoint(control)?;
+        if header.len().checked_add(1).is_none_or(|n| n >= maximum) {
+            return Err(FullBundleError::Limit("header bytes"));
+        }
+        header
+            .try_reserve(1)
+            .map_err(|_| FullBundleError::Limit("header bytes"))?;
+        header.push(b'-');
+        append_ref(&mut header, *id, b"required history", maximum)?;
     }
     if let Some(id) = head {
         append_ref(&mut header, id, b"HEAD", maximum)?;
@@ -498,13 +681,21 @@ impl Graph {
         id: ObjectId,
         required: ObjectType,
         ids: &[ObjectId],
+        external: &BTreeMap<ObjectId, ObjectType>,
     ) -> Result<(), FullBundleError> {
         if id.is_zero() {
             return Err(FullBundleError::Invalid("zero graph edge"));
         }
-        let target = ids
-            .binary_search(&id)
-            .map_err(|_| FullBundleError::MissingObject(id))?;
+        let target = match ids.binary_search(&id) {
+            Ok(index) => index,
+            Err(_) => {
+                return match external.get(&id) {
+                    Some(kind) if *kind == required => Ok(()),
+                    Some(_) => Err(FullBundleError::Invalid("graph edge target kind")),
+                    None => Err(FullBundleError::MissingObject(id)),
+                };
+            }
+        };
         self.edges
             .try_reserve(1)
             .map_err(|_| FullBundleError::Limit("graph metadata"))?;
@@ -517,6 +708,7 @@ impl Graph {
         format: ObjectFormat,
         object: &CanonicalPackObject,
         ids: &[ObjectId],
+        external: &BTreeMap<ObjectId, ObjectType>,
         limits: &PackLimits,
         control: &mut impl Deadline,
     ) -> Result<(), FullBundleError> {
@@ -557,6 +749,7 @@ impl Graph {
                             object_id_from_bytes(format, &entry.object_id)?,
                             required,
                             ids,
+                            external,
                         )?;
                     }
                 }
@@ -576,7 +769,12 @@ impl Graph {
                             return Err(FullBundleError::Invalid("commit graph headers"));
                         }
                         self.charge_edge()?;
-                        self.edge(hex_reference(format, &field.value)?, required, ids)?;
+                        self.edge(
+                            hex_reference(format, &field.value)?,
+                            required,
+                            ids,
+                            external,
+                        )?;
                     }
                     if trees != 1 {
                         return Err(FullBundleError::Invalid("commit tree"));
@@ -601,7 +799,7 @@ impl Graph {
                         TagTargetType::Tag => ObjectType::Tag,
                     };
                     self.charge_edge()?;
-                    self.edge(target.oid, required, ids)?;
+                    self.edge(target.oid, required, ids, external)?;
                 }
             }
         }
@@ -617,6 +815,7 @@ impl Graph {
         &self,
         ids: &[ObjectId],
         refs: &[BundleReference],
+        external: &BTreeMap<ObjectId, ObjectType>,
         control: &mut impl Deadline,
     ) -> Result<(), FullBundleError> {
         let mut seen = Vec::new();
@@ -635,9 +834,20 @@ impl Graph {
         }
         for reference in refs {
             checkpoint(control)?;
-            let index = ids
-                .binary_search(reference.target())
-                .map_err(|_| FullBundleError::MissingObject(*reference.target()))?;
+            let index = match ids.binary_search(reference.target()) {
+                Ok(index) => index,
+                Err(_) => {
+                    let kind = external
+                        .get(reference.target())
+                        .ok_or(FullBundleError::MissingObject(*reference.target()))?;
+                    if required_ref_target_kind(reference.name().as_bytes())
+                        .is_some_and(|required| *kind != required)
+                    {
+                        return Err(FullBundleError::Invalid("branch target kind"));
+                    }
+                    continue;
+                }
+            };
             if required_ref_target_kind(reference.name().as_bytes())
                 .is_some_and(|required| self.nodes[index].kind != required)
             {
