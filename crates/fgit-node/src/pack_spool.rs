@@ -229,7 +229,7 @@ impl SpooledPack {
 /// under the storage root, unlinked on Unix as soon as it exists, created on
 /// the first append, appended to and read back by handle, and gone on drop.
 #[derive(Debug)]
-pub(crate) struct ObjectSpool {
+pub struct ObjectSpool {
     root: PathBuf,
     scratch: Option<ScratchFile>,
     len: u64,

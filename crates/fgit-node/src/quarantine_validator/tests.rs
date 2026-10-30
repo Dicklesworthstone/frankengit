@@ -1162,14 +1162,17 @@ fn a_storage_failure_while_staging_is_a_durability_refusal_not_an_evidence_verdi
 /// A file grown over twelve commits, so its versions delta against each
 /// other, plus one unreachable upload: (pack, object count, tip, junk blob).
 fn delta_history_pack() -> (Vec<u8>, u32, GitOid, GitOid) {
+    use std::fmt::Write as _;
     let mut objects = BTreeMap::new();
     let mut parent: Option<GitOid> = None;
     let mut text = String::new();
     for line in 0..400 {
-        text.push_str(&format!("line {line}: the same history, revised again\n"));
+        writeln!(text, "line {line}: the same history, revised again")
+            .expect("writing to a String cannot fail");
     }
     for version in 0..12 {
-        text.push_str(&format!("revision {version} appends this line\n"));
+        writeln!(text, "revision {version} appends this line")
+            .expect("writing to a String cannot fail");
         let blob_body = text.clone().into_bytes();
         let blob_id =
             fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &blob_body);
