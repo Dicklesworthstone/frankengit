@@ -22,8 +22,9 @@ use fgit_git_object::{
 use super::{FullBundleError, FullBundleLimits, MAX_BUNDLE_PREREQUISITES, append_ref};
 use crate::writer::{encode_entry_header, pack_header};
 use crate::{
-    BundleReference, CanonicalObjectSource, CanonicalPackObject, Deadline, ObjectFormat, ObjectId,
-    PackError, PackLimits, PackWriteError, PackWriteProfile, checkpoint, object_id_from_bytes,
+    BundleReference, CanonicalBlobReader, CanonicalBlobStream, CanonicalObjectSource,
+    CanonicalPackObject, Deadline, ObjectFormat, ObjectId, PackError, PackLimits, PackWriteError,
+    PackWriteProfile, checkpoint, object_id_from_bytes,
 };
 
 const CHUNK_BYTES: usize = 16 * 1024;
@@ -44,10 +45,15 @@ pub const MAX_INCREMENTAL_EXTERNAL_OBJECTS: usize = 1_000_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamFullBundleLimits {
     /// `max_input_bytes` bounds emitted pack bytes, including its trailer.
-    /// Source bodies share `max_total_expanded_bytes`; each also obeys
-    /// `max_object_bytes`. Both entry and index counts bound retained metadata.
+    /// Source bodies share `max_total_expanded_bytes`. Buffered bodies retain
+    /// `max_object_bytes`; a verified blob reader uses the independent streamed
+    /// blob ceiling. Both entry and index counts bound retained metadata.
     pub pack: PackLimits,
     pub envelope: FullBundleLimits,
+    /// Independent per-blob ceiling when the source supports `open_blob`.
+    /// Buffered fallback blobs obey both this and `pack.max_object_bytes`;
+    /// raising it never permits a larger buffered body or metadata allocation.
+    pub max_streamed_blob_bytes: usize,
     /// Counts every parsed graph edge, including repeated edges and gitlinks.
     pub max_graph_edges: usize,
     /// One exact deterministic encoder-work allowance across all zlib members.
@@ -59,6 +65,7 @@ impl Default for StreamFullBundleLimits {
         Self {
             pack: PackLimits::default(),
             envelope: FullBundleLimits::default(),
+            max_streamed_blob_bytes: 32 * 1024 * 1024,
             max_graph_edges: 1_000_000,
             max_compression_work: 1_000_000_000,
         }
@@ -191,15 +198,18 @@ impl StreamFullBundleReceipt {
 /// caller-owned tentative output. This function never flushes or promotes it.
 ///
 /// The selected set and advertisements are checked before the first source
-/// load or output write. Objects are loaded once in increasing native OID
-/// order, authenticated, parsed and compressed independently. Source-provided
+/// read or output write. Objects are read in increasing native OID order,
+/// authenticated, parsed and compressed independently. Blob sources may supply
+/// a bounded reader; its exact length, EOF and original native identity are
+/// checked before completion. Source-provided
 /// edge metadata cannot substitute for the edges in those exact native bytes.
 /// Before emitting the pack trailer, every local edge must resolve to its
 /// required kind and every selected object must be reachable from an advertised
 /// ref. Gitlinks remain foreign references and are never loaded.
 ///
-/// Memory is bounded by one body plus its bounded parsed view, one encoder's
-/// buffers, the bounded header and O(objects + graph edges) metadata. There is
+/// Memory is bounded by one buffered body plus its bounded parsed view, or a
+/// fixed blob input chunk, one encoder's buffers, the bounded header and
+/// O(objects + graph edges) metadata. There is
 /// no whole-pack buffer, delta window or retained body plan. Cancellation is
 /// latched and checked between source reads, parsing, hashing chunks, encoder
 /// work and output writes. The caller must bound blocking source and writer
@@ -280,6 +290,11 @@ pub fn write_incremental_bundle_stream<W: Write + ?Sized>(
     )
 }
 
+enum SourceBody<'a> {
+    Streamed(CanonicalBlobStream<'a>),
+    Buffered(CanonicalPackObject),
+}
+
 fn write_bundle_stream<W: Write + ?Sized>(
     format: ObjectFormat,
     references: &[BundleReference],
@@ -332,19 +347,57 @@ fn write_bundle_stream<W: Write + ?Sized>(
     let mut compression_work = 0_u64;
     for id in &ids {
         checkpoint(&mut control)?;
-        let loaded = source.load(id);
+        let opened = source.open_blob(id);
         checkpoint(&mut control)?;
-        let object = loaded?;
-        if object.id() != *id {
+        let object = match opened? {
+            Some(blob) => SourceBody::Streamed(blob),
+            None => {
+                checkpoint(&mut control)?;
+                let loaded = source.load(id);
+                checkpoint(&mut control)?;
+                SourceBody::Buffered(loaded?)
+            }
+        };
+        let (returned, kind, length, input_limit) = match &object {
+            SourceBody::Streamed(blob) => (
+                blob.order_key().id,
+                blob.order_key().object_type,
+                blob.length(),
+                limits.max_streamed_blob_bytes,
+            ),
+            SourceBody::Buffered(object) => (
+                object.id(),
+                object.object_type(),
+                object.body().len(),
+                limits.pack.max_object_bytes,
+            ),
+        };
+        if returned != *id {
             return Err(PackWriteError::SourceIdentityMismatch {
                 requested: *id,
-                returned: object.id(),
+                returned,
             }
             .into());
         }
-        limits.pack.object_size(object.body().len())?;
+        if matches!(object, SourceBody::Streamed(_)) && kind != ObjectType::Blob {
+            return Err(PackWriteError::SourceOrderMismatch(*id).into());
+        }
+        if length > input_limit {
+            return Err(PackError::ObjectSizeLimit {
+                actual: length,
+                limit: input_limit,
+            }
+            .into());
+        }
+        if kind == ObjectType::Blob && length > limits.max_streamed_blob_bytes {
+            return Err(PackError::ObjectSizeLimit {
+                actual: length,
+                limit: limits.max_streamed_blob_bytes,
+            }
+            .into());
+        }
         total_object_bytes = total_object_bytes
-            .checked_add(object.body().len())
+            .checked_add(length)
             .ok_or(FullBundleError::Limit("source bytes"))?;
         if total_object_bytes > limits.pack.max_total_expanded_bytes {
             return Err(PackError::TotalExpandedLimit {
@@ -353,10 +406,15 @@ fn write_bundle_stream<W: Write + ?Sized>(
             }
             .into());
         }
-        verify_identity(&object, &mut control)?;
-        graph.object(format, &object, &ids, external, &limits.pack, &mut control)?;
+        match &object {
+            SourceBody::Streamed(_) => graph.blob(),
+            SourceBody::Buffered(object) => {
+                verify_identity(object, &mut control)?;
+                graph.object(format, object, &ids, external, &limits.pack, &mut control)?;
+            }
+        }
         emitter.emit(
-            &encode_entry_header(object.object_type().type_code(), object.body().len())?,
+            &encode_entry_header(kind.type_code(), length)?,
             true,
             &mut control,
         )?;
@@ -366,7 +424,7 @@ fn write_bundle_stream<W: Write + ?Sized>(
             .filter(|left| *left > 0)
             .ok_or(FullBundleError::Limit("compression work"))?;
         let compression_limits = DeflateLimits {
-            max_input_bytes: limits.pack.max_object_bytes.max(1),
+            max_input_bytes: input_limit.max(1),
             max_output_bytes: emitter.remaining_pack_bytes().min(
                 limits
                     .envelope
@@ -382,12 +440,49 @@ fn write_bundle_stream<W: Write + ?Sized>(
         )
         .map_err(PackWriteError::from)?;
         emitter.emit(&encoder.take_output(), true, &mut control)?;
-        for chunk in object.body().chunks(CHUNK_BYTES) {
-            checkpoint(&mut control)?;
-            encoder
-                .push_with_control(chunk, &mut control)
-                .map_err(PackWriteError::from)?;
-            emitter.emit(&encoder.take_output(), true, &mut control)?;
+        match object {
+            SourceBody::Buffered(object) => {
+                for chunk in object.body().chunks(CHUNK_BYTES) {
+                    checkpoint(&mut control)?;
+                    encoder
+                        .push_with_control(chunk, &mut control)
+                        .map_err(PackWriteError::from)?;
+                    emitter.emit(&encoder.take_output(), true, &mut control)?;
+                }
+            }
+            SourceBody::Streamed(mut blob) => {
+                let mut reader = blob.verified_reader()?;
+                let mut chunk = [0; CHUNK_BYTES];
+                loop {
+                    // Preserve the frozen encoder's exact input chunking even
+                    // when a source returns short reads. No reader survives to
+                    // the next selected object.
+                    let mut filled = 0;
+                    while filled < chunk.len() {
+                        checkpoint(&mut control)?;
+                        let read = reader.read(&mut chunk[filled..]);
+                        checkpoint(&mut control)?;
+                        let count = read?;
+                        if count == 0 {
+                            break;
+                        }
+                        filled += count;
+                    }
+                    if filled == 0 {
+                        break;
+                    }
+                    encoder
+                        .push_with_control(&chunk[..filled], &mut control)
+                        .map_err(PackWriteError::from)?;
+                    emitter.emit(&encoder.take_output(), true, &mut control)?;
+                    if filled < chunk.len() {
+                        break;
+                    }
+                }
+                checkpoint(&mut control)?;
+                reader.finish()?;
+                checkpoint(&mut control)?;
+            }
         }
         encoder
             .finish_with_control(&mut control)
@@ -674,6 +769,14 @@ impl Graph {
             .checked_sub(1)
             .ok_or(FullBundleError::Limit("graph edges"))?;
         Ok(())
+    }
+
+    fn blob(&mut self) {
+        let end = self.edges.len();
+        self.nodes.push(Node {
+            kind: ObjectType::Blob,
+            edges: end..end,
+        });
     }
 
     fn edge(
