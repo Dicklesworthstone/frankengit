@@ -180,6 +180,7 @@ pub use smart_http::{
     NodeSmartHttpUploadReceipt,
 };
 pub use termination::TerminationSignals;
+mod ancestry_metadata;
 mod quarantine_validator;
 mod receive_refusal;
 mod receive_staging;
@@ -7450,6 +7451,9 @@ pub struct NodeConfig {
     /// Verified ingress representations. A hit never selects or authorizes
     /// objects and survives only within this service's process lifetime.
     received_pack_cache: Arc<received_pack::ReceivedPackCache>,
+    /// Bounded verified commit metadata reused by merge preparation. Every
+    /// consumer still checks its current selected closure and logical budget.
+    ancestry_metadata_cache: Arc<ancestry_metadata::AncestryMetadataCache>,
     /// Verified historical closure prefix, shared across service children but
     /// revalidated against each request's exact authority basis before reuse.
     admission_closure_cache: Arc<closure_selection::AdmissionClosureCache>,
@@ -7545,6 +7549,9 @@ impl NodeConfig {
             pack_computation_cache: Arc::new(PackComputationCache::new(DEFAULT_PACK_CACHE_BYTES)),
             received_pack_cache: Arc::new(received_pack::ReceivedPackCache::new(
                 DEFAULT_RECEIVED_PACK_CACHE_BYTES,
+            )),
+            ancestry_metadata_cache: Arc::new(ancestry_metadata::AncestryMetadataCache::new(
+                DEFAULT_ANCESTRY_METADATA_CACHE_BYTES,
             )),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             upload_visibility_cache: Arc::default(),
@@ -7947,6 +7954,25 @@ impl NodeConfig {
         self
     }
 
+    /// Selects the process-local verified commit metadata cache capacity.
+    ///
+    /// The default is 16 MiB, independent of pack caches. Zero disables
+    /// retention. Reopened service children share entries, while each lookup
+    /// still enforces its current selection, source scope and read limits.
+    /// This disposable memory is additional to per-request traversal budgets.
+    #[must_use]
+    pub fn with_ancestry_metadata_cache_bytes(mut self, max_bytes: usize) -> Self {
+        self.ancestry_metadata_cache =
+            Arc::new(ancestry_metadata::AncestryMetadataCache::new(max_bytes));
+        self
+    }
+
+    /// Byte ceiling for retained verified commit metadata.
+    #[must_use]
+    pub fn ancestry_metadata_cache_bytes(&self) -> usize {
+        self.ancestry_metadata_cache.max_bytes()
+    }
+
     /// The byte ceiling for verified received-pack representations.
     #[must_use]
     pub fn received_pack_cache_bytes(&self) -> usize {
@@ -7958,6 +7984,7 @@ impl NodeConfig {
 /// request's bounded delta window and private output spool.
 const DEFAULT_PACK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_RECEIVED_PACK_CACHE_BYTES: usize = 128 * 1024 * 1024;
+const DEFAULT_ANCESTRY_METADATA_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default selected-pack envelope (frankengit-8xyq): 4 GiB of expanded
 /// objects. It bounds work and scratch disk; the delta window bounds memory.
@@ -8552,6 +8579,10 @@ impl OneNode {
     #[must_use]
     pub fn pack_cache_stats(&self) -> PackCacheStats {
         self.service_config.pack_computation_cache.stats()
+    }
+
+    pub(crate) fn ancestry_metadata_cache(&self) -> &ancestry_metadata::AncestryMetadataCache {
+        &self.service_config.ancestry_metadata_cache
     }
 
     pub(crate) fn received_pack_cache(&self) -> &received_pack::ReceivedPackCache {

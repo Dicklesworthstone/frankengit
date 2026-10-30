@@ -478,6 +478,7 @@ fn actual_fabric_read_ceiling_remains_a_resource_refusal_in_the_selected_source(
                     session_is_live: None,
                 },
                 selected: selected.selected_closure(),
+                ancestry: None,
                 limits: ParseLimits {
                     tree_reference_bytes: format.digest_len(),
                     max_object_bytes: maximum,
@@ -521,6 +522,7 @@ fn actual_commit_and_tree_parser_limits_preserve_resource_refusals() {
                 session_is_live: None,
             },
             selected: selected.selected_closure(),
+            ancestry: None,
             limits,
             read_bytes: Cell::new(0),
             budget_failed: Cell::new(false),

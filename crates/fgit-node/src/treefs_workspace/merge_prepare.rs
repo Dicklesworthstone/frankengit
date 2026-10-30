@@ -45,7 +45,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use super::NodeWorkspaceRefusal;
-use crate::upload_visibility::shallow::cutoffs::committer_time;
+use crate::ancestry_metadata::{AncestryMetadataAccess, VerifiedCommitMetadata};
 use crate::{
     AuthoritySelectedClosure, NodeRequestContext, OneNode, PackContextCheckpoint,
     VerifiedFabricPackSource, checkpoint_pack_context,
@@ -66,7 +66,9 @@ impl OneNode {
     /// Construct a reviewable two-parent candidate using explicit PathMergeV1.
     /// Both branch tips come from the SAME authenticated head. Caller policy
     /// can hide more refs, never expose an authority-hidden one. Every original
-    /// object is checked against that head's admitted closure and native hash.
+    /// object is checked against that head's admitted closure. Commit metadata
+    /// may reuse a bounded native-hash-verified parse from this same store and
+    /// repository incarnation; current traversal and object budgets still apply.
     ///
     /// New objects exist only in the returned artifact, not in node storage.
     /// The resulting merge is independently checked by the production native
@@ -189,6 +191,7 @@ impl OneNode {
                 session_is_live: None,
             },
             selected: selected.selected_closure(),
+            ancestry: Some(AncestryMetadataAccess::for_node(self)),
             limits: ParseLimits {
                 tree_reference_bytes: self.object_format.digest_len(),
                 max_tree_entries: limits.max_tree_entries,
@@ -336,17 +339,14 @@ const fn source_error(error: MergeSourceError) -> NodeWorkspaceRefusal {
 struct SelectedSource<'a> {
     inner: VerifiedFabricPackSource<'a>,
     selected: &'a AuthoritySelectedClosure,
+    ancestry: Option<AncestryMetadataAccess<'a>>,
     limits: ParseLimits,
     read_bytes: Cell<usize>,
     budget_failed: Cell<bool>,
 }
 
 impl SelectedSource<'_> {
-    fn read(
-        &self,
-        id: GitOid,
-        expected: Option<ObjectType>,
-    ) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {
+    fn check_selected(&self, id: GitOid) -> Result<(), MergeSourceError> {
         self.checkpoint()?;
         if !self.selected.closure().objects().contains(&id) {
             return Err(MergeSourceError::OutsideSelection);
@@ -354,6 +354,36 @@ impl SelectedSource<'_> {
         if id.is_zero() || id.algorithm() != self.inner.object_format {
             return Err(MergeSourceError::InvalidObject(id));
         }
+        Ok(())
+    }
+
+    fn charge_read(&self, bytes: usize) -> Result<(), MergeSourceError> {
+        let Some(total) = self
+            .read_bytes
+            .get()
+            .checked_add(bytes)
+            .filter(|n| *n <= MAX_READ_BYTES)
+        else {
+            self.budget_failed.set(true);
+            return Err(MergeSourceError::BudgetExceeded);
+        };
+        self.read_bytes.set(total);
+        Ok(())
+    }
+
+    fn retain_failure(&self, error: MergeSourceError) -> MergeSourceError {
+        if error == MergeSourceError::BudgetExceeded {
+            self.budget_failed.set(true);
+        }
+        error
+    }
+
+    fn read(
+        &self,
+        id: GitOid,
+        expected: Option<ObjectType>,
+    ) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {
+        self.check_selected(id)?;
         let read = self.inner.read_object(&id);
         self.checkpoint()?;
         let (kind, body) = read.map_err(|error| match error {
@@ -365,20 +395,17 @@ impl SelectedSource<'_> {
             }
             _ => MergeSourceError::Unavailable(id),
         })?;
-        let Some(total) = self
-            .read_bytes
-            .get()
-            .checked_add(body.len())
-            .filter(|n| *n <= MAX_READ_BYTES)
-        else {
-            self.budget_failed.set(true);
-            return Err(MergeSourceError::BudgetExceeded);
-        };
-        self.read_bytes.set(total);
+        self.charge_read(body.len())?;
         if expected.is_some_and(|expected| kind != expected)
             || git_object_id(self.inner.object_format, kind, &body) != id
         {
             return Err(MergeSourceError::InvalidObject(id));
+        }
+        #[cfg(test)]
+        if kind == ObjectType::Commit
+            && let Some(cache) = &self.ancestry
+        {
+            cache.record_body_read();
         }
         self.checkpoint()?;
         Ok((kind, body))
@@ -424,46 +451,28 @@ impl MergeObjectSource for SelectedSource<'_> {
         self.commit_with_date(id).map(|(commit, _)| commit)
     }
     fn commit_with_date(&self, id: GitOid) -> Result<(CommitInput, Option<i64>), MergeSourceError> {
-        let (_, body) = self.read(id, Some(ObjectType::Commit))?;
-        let parsed = parse_object_body(
-            ObjectType::Commit,
-            &body,
-            AcceptanceProfile::GitCompatibleImport,
-            &self.limits,
-        )
-        .map_err(|error| self.parse_error(id, error))?;
-        // The date only orders merge-base traversal; it is never trusted.
-        let date = committer_time(&parsed);
-        let ParsedObject::Commit(commit) = parsed else {
-            return Err(MergeSourceError::InvalidObject(id));
-        };
-        // Import preserves unusual headers; computation cannot choose one of
-        // multiple tree headers or discard continuation bytes on graph edges.
-        if commit
-            .headers()
-            .iter()
-            .filter(|header| header.name == b"tree")
-            .count()
-            != 1
-            || commit.headers().iter().any(|header| {
-                (header.name == b"tree" || header.name == b"parent")
-                    && !header.continuations.is_empty()
-            })
+        // A warm entry never grants membership or extends a current request's
+        // byte/parser envelope. The graph algorithms still charge every visited
+        // commit and edge, regardless of the source of this verified metadata.
+        self.check_selected(id)?;
+        if let Some(cache) = &self.ancestry
+            && let Some(entry) = cache.lookup(id, &self.limits, self.inner.buffered_object_limit())
         {
-            return Err(MergeSourceError::InvalidObject(id));
+            self.checkpoint()?;
+            let entry = entry.map_err(|error| self.retain_failure(error))?;
+            self.charge_read(entry.body_bytes())?;
+            self.checkpoint()?;
+            return Ok(entry.into_commit());
         }
-        let tree = self.oid(
-            commit
-                .tree_reference()
-                .ok_or(MergeSourceError::InvalidObject(id))?,
-            id,
-        )?;
-        let parents = commit
-            .parent_references()
-            .map(|value| self.oid(value, id))
-            .collect::<Result<Vec<_>, _>>()?;
+        let (_, body) = self.read(id, Some(ObjectType::Commit))?;
+        let entry = VerifiedCommitMetadata::parse(id, &body, &self.limits)
+            .map_err(|error| self.retain_failure(error))?;
         self.checkpoint()?;
-        Ok((CommitInput { tree, parents }, date))
+        if let Some(cache) = &self.ancestry {
+            cache.insert(&entry);
+        }
+        self.checkpoint()?;
+        Ok(entry.into_commit())
     }
     fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError> {
         let (_, body) = self.read(id, Some(ObjectType::Tree))?;
@@ -761,6 +770,7 @@ mod tests {
                     session_is_live: None,
                 },
                 selected: selected.selected_closure(),
+                ancestry: None,
                 limits: ParseLimits {
                     tree_reference_bytes: format.digest_len(),
                     max_object_bytes: 32 * 1024 * 1024,
@@ -977,3 +987,7 @@ mod tests {
 #[cfg(test)]
 #[path = "merge_prepare/rename_tests.rs"]
 mod rename_tests;
+
+#[cfg(test)]
+#[path = "merge_prepare/ancestry_tests.rs"]
+mod ancestry_tests;

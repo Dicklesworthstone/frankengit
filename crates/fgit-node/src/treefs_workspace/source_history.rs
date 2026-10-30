@@ -188,6 +188,7 @@ impl OneNode {
                 session_is_live: None,
             },
             selected: selected.selected_closure(),
+            ancestry: None,
             limits: ParseLimits {
                 tree_reference_bytes: self.object_format.digest_len(),
                 max_tree_entries: limits.max_tree_entries,

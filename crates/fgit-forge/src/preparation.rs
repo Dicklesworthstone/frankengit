@@ -308,10 +308,12 @@ impl<S: MergeObjectSource> CommitGraph for Graph<'_, S> {
 /// Find the exact best bases, reading from the selected source only the
 /// commits between the tips and those bases (frankengit-rffg). `limits` bound
 /// the commits and parent edges this query reads, not the repository's total
-/// history, so a long history with a recent base succeeds. Nothing is cached:
-/// no prior query can make missing objects, a narrowed budget or cancellation
-/// disappear. Automatic preparation, explicit resolution and review share this
-/// graph boundary, while object disclosure and eventual publication remain
+/// history, so a long history with a recent base succeeds. This query does not
+/// cache answers: every traversal charges its own commits/edges and checks
+/// cancellation. A source may reuse verified metadata while retaining its own
+/// current selection and logical object budgets. Automatic preparation, explicit
+/// resolution and review share this graph boundary, while object disclosure and
+/// eventual publication remain
 /// owned by the caller's source and admission path respectively.
 pub(crate) fn source_merge_bases<S: MergeObjectSource>(
     source: &S,

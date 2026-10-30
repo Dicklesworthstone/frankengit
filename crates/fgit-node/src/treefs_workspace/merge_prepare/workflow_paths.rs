@@ -20,6 +20,7 @@ pub(in crate::treefs_workspace) fn changed_paths(
             session_is_live: original.inner.session_is_live,
         },
         selected: original.selected,
+        ancestry: None,
         limits: ParseLimits {
             tree_reference_bytes: original.inner.object_format.digest_len(),
             max_tree_entries: 100_000,

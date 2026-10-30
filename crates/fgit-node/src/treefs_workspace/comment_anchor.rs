@@ -60,6 +60,7 @@ impl NodeNativeMergeProjection<'_> {
                 session_is_live: None,
             },
             selected: selected.selected_closure(),
+            ancestry: None,
             limits: ParseLimits {
                 tree_reference_bytes: self.node.object_format.digest_len(),
                 max_tree_entries: 100_000,
