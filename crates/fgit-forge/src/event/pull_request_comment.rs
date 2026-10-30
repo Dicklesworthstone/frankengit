@@ -3,11 +3,13 @@
 //! retain exact immutable coordinates and require independent object validation.
 
 mod anchor;
+mod append;
 pub use anchor::{
     MAX_SOURCE_COMMENT_BLOB_BYTES, MAX_SOURCE_COMMENT_LINES, MAX_SOURCE_COMMENT_SPAN_BYTES,
     SOURCE_COMMENT_PROFILE, SourceCommentAnchor, SourceCommentComparison, SourceCommentError,
     SourceCommentSide, SourceCommentStatus,
 };
+pub use append::PullRequestAppendCommentCommand;
 
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::{AggregateId, AggregateVersion, ExpectedVersion, PullRequestNumber};

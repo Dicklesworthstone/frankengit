@@ -10,6 +10,7 @@ pub use fgit_calm::{ForgeAdmissionRule, ForgeOperation, ForgeReplanPolicy};
 pub enum ForgeCommandProfile {
     ExactVersion,
     AppendIssueCommentV1,
+    AppendPullRequestCommentV1,
     /// Unrecognized semantics never gain append eligibility.
     Unknown,
 }
@@ -28,6 +29,15 @@ pub const fn classify_event(
             }
             _ => ForgeOperation::Unknown,
         },
+        ForgeCommandProfile::AppendPullRequestCommentV1 => {
+            match (&event.aggregate, &event.payload) {
+                (
+                    crate::AggregateId::PullRequestConversation(_),
+                    ForgeEventPayload::PullRequestCommentedNative(_),
+                ) => ForgeOperation::PullRequestAppendComment,
+                _ => ForgeOperation::Unknown,
+            }
+        }
         ForgeCommandProfile::Unknown => ForgeOperation::Unknown,
         ForgeCommandProfile::ExactVersion => match &event.payload {
             ForgeEventPayload::PullRequestOpened { .. } => ForgeOperation::PullRequestOpen,
@@ -106,6 +116,7 @@ mod tests {
             for profile in [
                 ForgeCommandProfile::ExactVersion,
                 ForgeCommandProfile::Unknown,
+                ForgeCommandProfile::AppendPullRequestCommentV1,
             ] {
                 assert_eq!(
                     classify_event(&event, profile).replan,
@@ -119,6 +130,46 @@ mod tests {
                 } else {
                     ForgeReplanPolicy::PreservePreconditions
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn pr_append_eligibility_requires_its_own_profile_and_conversation_aggregate() {
+        use crate::event::pull_request_comment::PullRequestAppendCommentCommand;
+        use crate::{AggregateId, PullRequestNumber};
+        use fgit_calm::CoordinationClass;
+
+        let event = PullRequestAppendCommentCommand {
+            number: PullRequestNumber::FIRST,
+            body: "Independent contribution".into(),
+            anchor: None,
+        }
+        .commitment_event(PrincipalId::from_bytes([7; 16]))
+        .unwrap();
+        let rule = classify_event(&event, ForgeCommandProfile::AppendPullRequestCommentV1);
+        assert_eq!(rule.replan, ForgeReplanPolicy::RevalidateAppend);
+        assert_eq!(rule.coordination, CoordinationClass::HeadCasRequired);
+        for profile in [
+            ForgeCommandProfile::ExactVersion,
+            ForgeCommandProfile::Unknown,
+            ForgeCommandProfile::AppendIssueCommentV1,
+        ] {
+            assert_eq!(
+                classify_event(&event, profile).replan,
+                ForgeReplanPolicy::PreservePreconditions
+            );
+        }
+        for aggregate in [
+            AggregateId::PullRequest(PullRequestNumber::FIRST),
+            AggregateId::Issue(IssueNumber::FIRST),
+            AggregateId::ReviewProtection,
+        ] {
+            let mut wrong = event.clone();
+            wrong.aggregate = aggregate;
+            assert_eq!(
+                classify_event(&wrong, ForgeCommandProfile::AppendPullRequestCommentV1).replan,
+                ForgeReplanPolicy::PreservePreconditions
             );
         }
     }
