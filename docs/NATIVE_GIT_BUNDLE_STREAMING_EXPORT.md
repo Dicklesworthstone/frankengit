@@ -70,6 +70,30 @@ restore forge events, authority decisions, access policy, credentials or signed
 capsule state. This implements the streaming Git portion of
 `frankengit-root-doctrine-x2mv.4.21`; that broader bead remains open.
 
+## Prerequisite-scoped streaming
+
+`fg bundle sync-export --streaming` reuses this encoder and private-file
+publication owner for incremental Git transfer. It takes explicit named refs
+and commit prerequisites and omits their complete declared closure.
+See [incremental synchronization](INCREMENTAL_GIT_BUNDLES.md) for its command,
+receipt and receiver limits.
+
+The library entry point is
+`fgit_pack::full_bundle::stream::write_incremental_bundle_stream`. It accepts
+the selected inventory and an independently caller-validated typed external
+closure. The node derives that closure from its authenticated visible graph;
+caller-supplied have sets are not disclosure authority. The codec checks
+prerequisite kinds, selected/external disjointness, exact native edges and
+target kinds, and reachability of every emitted object. All omitted object
+identities are bounded and validated, but the export receipt does not certify
+omitted payload bytes. Its `prerequisite_count` and `external_object_count`
+are zero for a full stream.
+
+The full writer's byte profile and public signature are unchanged. Incremental
+streams use a distinct profile and retain the same independent resource bounds.
+They are not self-contained inputs for the existing full-bundle verify/recover
+commands, and exporting a larger artifact does not widen sync-import's
+128 MiB input limit.
 ## Focused validation
 
 ```sh

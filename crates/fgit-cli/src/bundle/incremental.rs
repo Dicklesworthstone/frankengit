@@ -16,7 +16,10 @@ Every advertised destination ref needs one exact expectation. A matching old tip
 permits replacement, including non-fast-forward replacement; no implicit force,
 ref deletion, stale-tip refresh or policy bypass is performed. Protection rules
 still apply. Prerequisites must be complete currently visible native commit history.
-Maximum 64 refs and 64 prerequisites. Output is create-only. This is Git transfer,
+Maximum 64 refs and 64 prerequisites. Output is create-only.
+For bounded-memory export with larger aggregate limits, use sync-export --streaming;
+see fg bundle sync-export --streaming --help. Import remains bounded to 128 MiB.
+This is Git transfer,
 not an authority/forge backup. Import receipts use the existing git_bundle_import
 schema and retain historical terminal outcomes; input failures do not prove non-commit.";
 
