@@ -136,6 +136,14 @@ pub const fn operation_statements() -> &'static [SchemaStatement] {
             sql: "SELECT COUNT(*) FROM fgit_immutable_body",
             parameters: 0,
         },
+        // An upper bound on body.count without a table scan: every body has a
+        // distinct positive rowid (frankengit-8b50). NULL for an empty table is
+        // resolved by the caller.
+        SchemaStatement {
+            name: "body.rowid_bound",
+            sql: "SELECT MAX(rowid) FROM fgit_immutable_body",
+            parameters: 0,
+        },
         SchemaStatement {
             name: "head.read",
             sql: "SELECT token, generation, body_bytes FROM fgit_head_slot WHERE head_key = ?",
@@ -186,6 +194,12 @@ pub const fn operation_statements() -> &'static [SchemaStatement] {
         SchemaStatement {
             name: "issuance.count",
             sql: "SELECT COUNT(*) FROM fgit_version_issuance",
+            parameters: 0,
+        },
+        // The same bound as body.rowid_bound, for the token ledger.
+        SchemaStatement {
+            name: "issuance.rowid_bound",
+            sql: "SELECT MAX(rowid) FROM fgit_version_issuance",
             parameters: 0,
         },
         // Portable snapshots preflight byte/count bounds in the same SQL

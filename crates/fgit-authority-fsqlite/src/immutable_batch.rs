@@ -77,17 +77,25 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
-        // COUNT is a table scan. It runs once for this finite transaction;
-        // only actual new rows increase the in-transaction occupancy. The
-        // engine's commit validation still arbitrates concurrent writers.
-        let mut occupancy = self.occupancy(cx, "body.count").await?;
+        // COUNT is a table scan. It runs at most once for this finite
+        // transaction, and not at all when the rowid bound proves that no entry
+        // can reach the limit (frankengit-8b50); only actual new rows increase
+        // the in-transaction occupancy. The engine's commit validation still
+        // arbitrates concurrent writers.
+        let mut occupancy = if self.bodies_certainly_fit(cx, entries.len()).await? {
+            None
+        } else {
+            Some(self.occupancy(cx, "body.count").await?)
+        };
         let limit = self.limits.immutable_slots;
         for ((key, body), outcome) in entries.iter().zip(outcomes) {
             checkpoint(cx)?;
             if outcome.is_some() {
                 continue;
             }
-            if occupancy >= limit {
+            if let Some(occupancy) = occupancy
+                && occupancy >= limit
+            {
                 // A full store must still answer identical retries and
                 // conflicts, including a key created earlier in this batch.
                 let rows = self.query(cx, "body.read", &[blob(key.as_bytes())]).await?;
@@ -107,7 +115,9 @@ impl FsqliteAuthorityStore {
             *outcome = Some(match interpret_put_if_absent(changed) {
                 PutStep::Created => {
                     // occupancy < limit <= usize::MAX above proves this add.
-                    occupancy += 1;
+                    if let Some(occupancy) = &mut occupancy {
+                        *occupancy += 1;
+                    }
                     PutOutcome::Created
                 }
                 PutStep::OccupiedNeedsComparison => {

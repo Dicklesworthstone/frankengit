@@ -515,12 +515,10 @@ impl FsqliteAuthorityStore {
     /// ceiling it enforced before the kill, and a counter in memory would
     /// forget. Same reasoning as `issuance.max_sequence`.
     ///
-    /// COST, stated rather than hidden: `COUNT(*)` is a scan, and this runs on
-    /// the write paths that can occupy a slot. It is correct and it is not
-    /// optimised. The optimisation, if it is ever wanted, is a transactionally
-    /// maintained counter row -- which is a schema change with its own
-    /// generation bump and its own crash-equivalence argument, not something to
-    /// smuggle in beside a correctness fix. No performance claim is made here.
+    /// COST, stated rather than hidden: `COUNT(*)` is a scan. The body and
+    /// version-token checks take it only when [`Self::certainly_below`] cannot
+    /// rule a refusal out, i.e. near the ceiling (frankengit-8b50); a head
+    /// creation, which is rare, still takes it.
     async fn occupancy<Caps>(
         &self,
         cx: &Cx<Caps>,
@@ -537,6 +535,48 @@ impl FsqliteAuthorityStore {
         // "empty": a count that cannot be represented is not a reason to admit
         // one more row. Unreachable on any target whose usize is 64 bits.
         Ok(usize::try_from(counted).unwrap_or(usize::MAX))
+    }
+
+    /// Whether `adding` new rows on top of a table's stored ones certainly
+    /// stay below `limit`, answered without a table scan (frankengit-8b50).
+    /// `rowid_bound` reads the table's largest rowid. No statement assigns a
+    /// rowid, so fsqlite gives every row a distinct positive one and the
+    /// largest bounds the row count from above (gaps only loosen it); fsqlite
+    /// answers `MAX(rowid)` with one seek to the last leaf. `false` means only
+    /// that the exact count must decide.
+    pub(crate) async fn certainly_below<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        rowid_bound: &'static str,
+        adding: usize,
+        limit: usize,
+    ) -> Result<bool, EngineError>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+        cap::None: cap::SubsetOf<Caps>,
+    {
+        let rows = self.query(cx, rowid_bound, &[]).await?;
+        let row = rows.first().ok_or(EngineError::RowMissing {
+            statement: rowid_bound,
+        })?;
+        // NULL is an empty table. Saturating toward "full", as in `occupancy`.
+        let bound = read_optional_unsigned(row, 0)?.unwrap_or(0);
+        let bound = usize::try_from(bound).unwrap_or(usize::MAX);
+        Ok(bound.saturating_add(adding) < limit)
+    }
+
+    /// [`Self::certainly_below`] for `adding` new bodies and `immutable_slots`.
+    pub(crate) async fn bodies_certainly_fit<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        adding: usize,
+    ) -> Result<bool, EngineError>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+        cap::None: cap::SubsetOf<Caps>,
+    {
+        self.certainly_below(cx, "body.rowid_bound", adding, self.limits.immutable_slots)
+            .await
     }
 
     /// Record one minted token in the append-only ledger.
@@ -666,17 +706,21 @@ impl FsqliteAuthorityStore {
         // `None` arm, after the identical-retry and conflict arms), so the
         // existence read is taken only once the ceiling is reached.
         let limit = self.limits.immutable_slots;
-        let occupancy = self.occupancy(cx, "body.count").await?;
-        if occupancy >= limit
-            && self
-                .query(cx, "body.read", &[blob(key.as_bytes())])
-                .await?
-                .is_empty()
-        {
-            return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
-                occupancy,
-                limit,
-            }));
+        // The exact count is a table scan; it is taken only when the rowid
+        // bound cannot rule a refusal out (frankengit-8b50).
+        if !self.bodies_certainly_fit(cx, 0).await? {
+            let occupancy = self.occupancy(cx, "body.count").await?;
+            if occupancy >= limit
+                && self
+                    .query(cx, "body.read", &[blob(key.as_bytes())])
+                    .await?
+                    .is_empty()
+            {
+                return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                    occupancy,
+                    limit,
+                }));
+            }
         }
 
         let changed = self
@@ -827,12 +871,17 @@ impl FsqliteAuthorityStore {
             }
 
             let token_limit = self.limits.version_tokens;
-            let issued = self.occupancy(cx, "issuance.count").await?;
-            if issued >= token_limit {
-                return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
-                    occupancy: issued,
-                    limit: token_limit,
-                }));
+            if !self
+                .certainly_below(cx, "issuance.rowid_bound", 0, token_limit)
+                .await?
+            {
+                let issued = self.occupancy(cx, "issuance.count").await?;
+                if issued >= token_limit {
+                    return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                        occupancy: issued,
+                        limit: token_limit,
+                    }));
+                }
             }
         }
 
@@ -953,17 +1002,25 @@ impl FsqliteAuthorityStore {
         // predecessor token matches and the generation is strictly increasing,
         // so those same two conditions gate it here; anything else falls
         // through to the ordinary CAS disambiguation below.
+        // Every decision mints a token, so the ledger only grows: the exact
+        // count is taken only when the rowid bound cannot rule a refusal out
+        // (frankengit-8b50).
         let token_limit = self.limits.version_tokens;
-        let issued = self.occupancy(cx, "issuance.count").await?;
-        if issued >= token_limit
-            && let Some((current, current_generation, _)) = self.head_row(cx, key).await?
-            && current == expected
-            && new_generation > current_generation
+        if !self
+            .certainly_below(cx, "issuance.rowid_bound", 0, token_limit)
+            .await?
         {
-            return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
-                occupancy: issued,
-                limit: token_limit,
-            }));
+            let issued = self.occupancy(cx, "issuance.count").await?;
+            if issued >= token_limit
+                && let Some((current, current_generation, _)) = self.head_row(cx, key).await?
+                && current == expected
+                && new_generation > current_generation
+            {
+                return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                    occupancy: issued,
+                    limit: token_limit,
+                }));
+            }
         }
 
         let sequence = self.next_sequence(cx).await?;

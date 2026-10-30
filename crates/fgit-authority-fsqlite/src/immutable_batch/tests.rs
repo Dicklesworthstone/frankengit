@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use fgit_authority::{
     AmbiguityReason, AsyncAuthorityStore, AuthorityFailure, AuthorityLimits, AuthorityStore,
-    HeadKey, HeadRead, ImmutableBatchFailure, ImmutableBatchRefusal, ImmutableRead,
-    MAX_IMMUTABLE_BATCH_BYTES, MAX_IMMUTABLE_BATCH_ITEMS, MemoryAuthorityStore, MemoryStoreConfig,
-    StoreInstanceId,
+    CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead, ImmutableBatchFailure,
+    ImmutableBatchRefusal, ImmutableRead, MAX_IMMUTABLE_BATCH_BYTES, MAX_IMMUTABLE_BATCH_ITEMS,
+    MemoryAuthorityStore, MemoryStoreConfig, StoreInstanceId,
 };
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
 use fgit_runtime::meter::{BudgetClass, ClassLimits};
@@ -595,5 +595,146 @@ fn closed_workers_cannot_answer_nonempty_batches_from_the_old_cache() {
     assert!(fixture.put(&entries).is_err());
     fixture.reopen();
     assert_eq!(fixture.put(&entries), Ok(vec![PutOutcome::IdenticalRetry]));
+    fixture.close();
+}
+
+#[test]
+fn the_rowid_bound_skips_the_count_only_where_no_entry_can_reach_the_limit() {
+    // frankengit-8b50: below the limit the largest rowid answers without a
+    // scan; once the bound plus the new entries reaches the limit the exact
+    // count decides, so every refusal keeps its exact occupancy.
+    let mut fixture = Fixture::new(AuthorityLimits {
+        immutable_slots: 4,
+        ..AuthorityLimits::default()
+    });
+    let fits = |fixture: &Fixture, adding| {
+        fixture
+            .node
+            .block_on(fixture.store.bodies_certainly_fit(&fixture.cx, adding))
+            .expect("the bound reads")
+    };
+    let single = |fixture: &Fixture, name, body: &[u8]| {
+        fixture
+            .node
+            .block_on(fixture.store.put_if_absent(&fixture.cx, &key(name), body))
+    };
+    let exhausted = Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+        occupancy: 4,
+        limit: 4,
+    }));
+    assert!(fits(&fixture, 3), "an empty store has room for three");
+    assert!(!fits(&fixture, 4), "a fourth would reach the limit");
+    assert_eq!(
+        fixture.put(&[entry("one", b"1"), entry("two", b"2")]),
+        Ok(vec![PutOutcome::Created; 2])
+    );
+    assert!(fits(&fixture, 1));
+    assert!(!fits(&fixture, 2));
+    // A batch that crosses the limit is counted and refused as a whole.
+    let crossing = [
+        entry("three", b"3"),
+        entry("four", b"4"),
+        entry("five", b"5"),
+    ];
+    assert_eq!(fixture.put(&crossing), Err(capacity(4, 4)));
+    assert_eq!(fixture.read(&key("three")), ImmutableRead::Absent);
+    // Single puts below the limit take the bound; at the limit the count.
+    assert_eq!(single(&fixture, "three", b"3"), Ok(PutOutcome::Created));
+    assert_eq!(single(&fixture, "four", b"4"), Ok(PutOutcome::Created));
+    assert!(!fits(&fixture, 0));
+    assert_eq!(single(&fixture, "five", b"5"), exhausted);
+    // A reopened store has no cached bodies: retries and conflicts at
+    // capacity go through the counted path and are still answered.
+    fixture.reopen();
+    assert_eq!(
+        single(&fixture, "two", b"2"),
+        Ok(PutOutcome::IdenticalRetry)
+    );
+    assert_eq!(single(&fixture, "two", b"x"), Ok(PutOutcome::Conflict));
+    assert_eq!(single(&fixture, "five", b"5"), exhausted);
+    assert_eq!(
+        fixture.put(&[entry("one", b"1"), entry("five", b"5")]),
+        Err(capacity(4, 4))
+    );
+    assert_eq!(
+        fixture.put(&[entry("one", b"1"), entry("three", b"x")]),
+        Ok(vec![PutOutcome::IdenticalRetry, PutOutcome::Conflict])
+    );
+    fixture.close();
+}
+
+#[test]
+fn the_token_ledger_bound_keeps_every_version_token_refusal_exact() {
+    // frankengit-8b50: every decision mints a token, so the ledger's exact
+    // count is taken only once its rowid bound reaches `version_tokens`.
+    let mut fixture = Fixture::new(AuthorityLimits {
+        version_tokens: 3,
+        ..AuthorityLimits::default()
+    });
+    let fits = |fixture: &Fixture, adding| {
+        fixture
+            .node
+            .block_on(
+                fixture
+                    .store
+                    .certainly_below(&fixture.cx, "issuance.rowid_bound", adding, 3),
+            )
+            .expect("the bound reads")
+    };
+    let generation = |value| HeadGeneration::try_new(value).expect("admissible");
+    let init = |fixture: &Fixture, name: &str, body: &[u8]| {
+        let key = HeadKey::new(name.as_bytes().to_vec()).expect("admissible");
+        fixture.node.block_on(
+            fixture
+                .store
+                .initialize_head(&fixture.cx, &key, generation(1), body),
+        )
+    };
+    let exchange = |fixture: &Fixture, name: &str, expected, to, body: &[u8]| {
+        let key = HeadKey::new(name.as_bytes().to_vec()).expect("admissible");
+        fixture.node.block_on(fixture.store.compare_exchange_head(
+            &fixture.cx,
+            &key,
+            expected,
+            generation(to),
+            body,
+        ))
+    };
+    let exhausted = EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+        occupancy: 3,
+        limit: 3,
+    });
+    assert!(fits(&fixture, 2));
+    assert!(!fits(&fixture, 3));
+    let Ok(HeadInit::Created(a1)) = init(&fixture, "a", b"a1") else {
+        panic!("the first head is created");
+    };
+    let Ok(CasOutcome::Committed(a2)) = exchange(&fixture, "a", a1.token(), 2, b"a2") else {
+        panic!("the first exchange commits");
+    };
+    assert!(fits(&fixture, 0), "two of three tokens are minted");
+    let Ok(HeadInit::Created(b1)) = init(&fixture, "b", b"b1") else {
+        panic!("the third token is still inside the ceiling");
+    };
+    assert!(!fits(&fixture, 0));
+    assert_eq!(
+        exchange(&fixture, "a", a2.token(), 3, b"a3").err(),
+        Some(exhausted.clone())
+    );
+    assert_eq!(init(&fixture, "c", b"c1").err(), Some(exhausted.clone()));
+    // A losing exchange mints nothing and is not refused for capacity.
+    assert!(matches!(
+        exchange(&fixture, "a", a1.token(), 3, b"a3"),
+        Ok(CasOutcome::PredecessorMismatch)
+    ));
+    fixture.reopen();
+    assert_eq!(
+        exchange(&fixture, "b", b1.token(), 2, b"b2").err(),
+        Some(exhausted)
+    );
+    assert!(matches!(
+        init(&fixture, "b", b"b1"),
+        Ok(HeadInit::IdenticalRetry(_))
+    ));
     fixture.close();
 }
