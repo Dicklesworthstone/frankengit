@@ -991,3 +991,72 @@ pub fn bundle_visible_closure(
 ) -> Result<PermittedObjectClosure, NodePackMaterializationRefusal> {
     project_visible_graph(source, admitted, roots, limits).map(|graph| graph.closure)
 }
+
+
+/// A bounded visible native-metadata and typed-closure proof for one offline
+/// transfer. Blob facts reached through typed edges use checked envelopes only;
+/// this does not certify the present health of omitted blob payloads. The caller
+/// binds the admitted set and visible roots to its authenticated snapshot.
+pub(super) struct BundleVisibleGraph {
+    graph: VisibleGraph,
+}
+
+impl BundleVisibleGraph {
+    pub(super) const fn closure(&self) -> &PermittedObjectClosure {
+        &self.graph.closure
+    }
+
+    pub(super) fn object_metadata(&self, id: &GitOid) -> Option<(ObjectType, usize)> {
+        self.graph.objects.get(id).map(|object| (object.kind, object.size))
+    }
+
+    /// Traverse facts already checked under the visible roots, without loading
+    /// the omitted prerequisite bodies again.
+    pub(super) fn selection_source<'a, S>(
+        &'a self,
+        source: &'a S,
+    ) -> VisibleGraphSelection<'a, S> {
+        VisibleGraphSelection {
+            objects: &self.graph.objects,
+            source,
+        }
+    }
+}
+
+/// Preserve the ordinary visible-closure API and its callers. Streaming export
+/// additionally retains the checked facts and applies its independent index,
+/// metadata-byte and graph-work ceilings to the complete visibility proof.
+pub(super) fn bundle_visible_graph_bounded(
+    source: &VerifiedFabricPackSource<'_>,
+    admitted: &PermittedObjectClosure,
+    roots: impl IntoIterator<Item = GitOid>,
+    limits: &PackLimits,
+    maximum_edges: usize,
+) -> Result<BundleVisibleGraph, NodePackMaterializationRefusal> {
+    let mut bounded = limits.clone();
+    bounded.max_entries = bounded.max_entries.min(
+        u32::try_from(
+            bounded
+                .max_index_entries
+                .min(fgit_pack::full_bundle::stream::MAX_INCREMENTAL_EXTERNAL_OBJECTS),
+        )
+        .unwrap_or(u32::MAX),
+    );
+    let bounded_source = VerifiedFabricPackSource {
+        fabric: source.fabric,
+        object_format: source.object_format,
+        maximum_object_bytes: source.maximum_object_bytes.min(bounded.max_object_bytes),
+        database_context: source.database_context,
+        database_exhaustion: source.database_exhaustion,
+        session_is_live: source.session_is_live,
+    };
+    walk_within_edge_budget(
+        &bounded_source,
+        admitted,
+        roots,
+        &bounded,
+        maximum_edges.min(MAX_DISCLOSURE_EDGES),
+        None,
+    )
+    .map(|graph| BundleVisibleGraph { graph })
+}
