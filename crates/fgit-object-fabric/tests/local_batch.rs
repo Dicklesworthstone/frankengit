@@ -941,3 +941,271 @@ fn a_cancelled_synced_publication_settles_and_can_be_retried() {
         assert_eq!(stored_files(&root).len(), 4);
     }
 }
+
+fn only_private_stage(root: &Root) -> PathBuf {
+    let mut files = fs::read_dir(root.0.join("staging")).unwrap();
+    let path = files.next().unwrap().unwrap().path();
+    assert!(files.next().is_none());
+    path
+}
+
+fn stored_encoding(object: &VerifiedObject) -> Vec<u8> {
+    let root = Root::new();
+    let store = root.fabric(None);
+    run(&store, std::slice::from_ref(object), &mut || true).unwrap();
+    fs::read(root.path(object)).unwrap()
+}
+
+#[test]
+fn private_reads_verify_owned_bytes_without_linking_and_keep_both_settlement_paths() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for publish in [false, true] {
+            let root = Root::new();
+            let store = root.fabric(None);
+            let existing = object(format, b"already present", b"batch");
+            let private = object(format, b"private candidate", b"batch");
+            let empty = object(format, b"", b"batch");
+            let unowned = object(format, b"unowned dependency", b"batch");
+            let mut before = vec![existing.clone(), unowned.clone()];
+            before.sort_by_key(VerifiedObject::identity);
+            run(&store, &before, &mut || true).unwrap();
+            let mut input = vec![existing.clone(), private.clone(), empty.clone()];
+            input.sort_by_key(VerifiedObject::identity);
+            let (ledger, amount) = ledger_for(&input, LeakDisposition::FailFast);
+            let batch = stage_synced(&store, &input, &ledger, amount);
+            assert_eq!(staged_count(&root), 2);
+            for entry in &input {
+                assert_eq!(
+                    batch
+                        .read_object_bounded(&store, entry.identity(), entry.payload().len() as u64)
+                        .unwrap(),
+                    Some(entry.clone())
+                );
+            }
+            assert_eq!(
+                batch
+                    .read_object_bounded(&store, unowned.identity(), 0)
+                    .unwrap(),
+                None,
+                "only identities owned by this batch may be read here"
+            );
+            assert!(matches!(
+                batch.read_object_bounded(&store, private.identity(), private.payload().len() as u64 - 1),
+                Err(StoreRefusal::StreamingBudgetExceeded { offered, maximum })
+                    if offered == private.payload().len() as u64 && maximum + 1 == offered
+            ));
+            for entry in [&private, &empty] {
+                assert!(matches!(
+                    store.read_whole(entry.identity()),
+                    Err(StoreRefusal::ObjectAbsent)
+                ));
+            }
+            #[cfg(target_os = "linux")]
+            assert_eq!(open_staged_files(&root.0.join("staging")), 0);
+            if publish {
+                let receipts = store.publish_synced_batch(batch, &mut || true).unwrap();
+                assert_eq!(receipts.len(), input.len());
+                for entry in &input {
+                    assert_eq!(store.read_whole(entry.identity()).unwrap().object, *entry);
+                }
+            } else {
+                batch.abandon().unwrap();
+                for entry in [&private, &empty] {
+                    assert!(matches!(
+                        store.read_whole(entry.identity()),
+                        Err(StoreRefusal::ObjectAbsent)
+                    ));
+                }
+            }
+            assert!(ledger.close().is_quiescent());
+            assert_eq!(
+                store.read_whole(existing.identity()).unwrap().object,
+                existing
+            );
+            assert_eq!(
+                store.read_whole(unowned.identity()).unwrap().object,
+                unowned
+            );
+            root.clean();
+        }
+    }
+}
+
+#[test]
+fn an_owned_corrupt_missing_or_swapped_stage_never_uses_a_valid_permanent_copy() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for fault in ["payload", "truncated", "swapped", "missing"] {
+            let root = Root::new();
+            let store = root.fabric(None);
+            let original = object(format, b"original private payload", b"batch");
+            let input = std::slice::from_ref(&original);
+            let (ledger, amount) = ledger_for(input, LeakDisposition::FailFast);
+            let batch = stage_synced(&store, input, &ledger, amount);
+            let path = only_private_stage(&root);
+            let original_bytes = fs::read(&path).unwrap();
+            assert_eq!(
+                batch
+                    .read_object_bounded(&store, original.identity(), 4096)
+                    .unwrap(),
+                Some(original.clone())
+            );
+            // A concurrent successful receive cannot mask this owner's damaged custody.
+            run(&store, input, &mut || true).unwrap();
+            match fault {
+                "payload" => {
+                    let mut bytes = original_bytes.clone();
+                    *bytes.last_mut().unwrap() ^= 1;
+                    fs::write(&path, bytes).unwrap();
+                }
+                "truncated" => fs::write(&path, &original_bytes[..7]).unwrap(),
+                "swapped" => fs::write(
+                    &path,
+                    stored_encoding(&object(format, b"different native identity", b"batch")),
+                )
+                .unwrap(),
+                "missing" => fs::remove_file(&path).unwrap(),
+                _ => unreachable!(),
+            }
+            let error = batch
+                .read_object_bounded(&store, original.identity(), 4096)
+                .unwrap_err();
+            match fault {
+                "payload" => assert_eq!(error, StoreRefusal::PayloadCommitmentMismatch),
+                "truncated" => assert_eq!(error, StoreRefusal::MalformedStoredObject),
+                "swapped" => assert!(matches!(
+                    error,
+                    StoreRefusal::StoredObjectReconstructionMismatch { requested, .. }
+                        if requested == original.identity()
+                )),
+                "missing" => assert_eq!(error, StoreRefusal::ObjectAbsent),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store.read_whole(original.identity()).unwrap().object,
+                original
+            );
+            // Restoring exactly the original owned bytes is the permitted twin.
+            fs::write(&path, &original_bytes).unwrap();
+            assert_eq!(
+                batch
+                    .read_object_bounded(&store, original.identity(), 4096)
+                    .unwrap(),
+                Some(original.clone())
+            );
+            batch.abandon().unwrap();
+            assert!(ledger.close().is_quiescent());
+            assert_eq!(
+                store.read_whole(original.identity()).unwrap().object,
+                original
+            );
+            root.clean();
+        }
+    }
+}
+
+#[test]
+fn synced_reads_require_the_original_envelope_even_for_a_self_consistent_same_oid() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for existing in [false, true] {
+            let root = Root::new();
+            let store = root.fabric(None);
+            let original = object(format, b"same native bytes", b"batch");
+            let envelope = original.envelope();
+            let changed = VerifiedObject::new(
+                ObjectEnvelope::new(
+                    envelope.namespace().to_vec(),
+                    original.identity(),
+                    envelope.object_kind(),
+                    envelope.declared_length(),
+                    envelope.payload_commitment(),
+                    b"other-codec".to_vec(),
+                    envelope.logical_content_identity(),
+                    envelope.manifest_reference(),
+                    &SegmentLimits::default(),
+                )
+                .unwrap(),
+                original.payload().to_vec(),
+            )
+            .unwrap();
+            assert_eq!(changed.identity(), original.identity());
+            assert_ne!(changed, original);
+            let input = std::slice::from_ref(&original);
+            if existing {
+                run(&store, input, &mut || true).unwrap();
+            }
+            let (ledger, amount) = ledger_for(input, LeakDisposition::FailFast);
+            let batch = stage_synced(&store, input, &ledger, amount);
+            let path = if existing {
+                root.path(&original)
+            } else {
+                only_private_stage(&root)
+            };
+            let bytes = fs::read(&path).unwrap();
+            fs::write(&path, stored_encoding(&changed)).unwrap();
+            assert_eq!(
+                batch.read_object_bounded(&store, original.identity(), 4096),
+                Err(StoreRefusal::StoredObjectIdentityCollision)
+            );
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                batch
+                    .read_object_bounded(&store, original.identity(), 4096)
+                    .unwrap(),
+                Some(original.clone())
+            );
+            batch.abandon().unwrap();
+            assert!(ledger.close().is_quiescent());
+            if existing {
+                assert_eq!(
+                    store.read_whole(original.identity()).unwrap().object,
+                    original
+                );
+            } else {
+                assert!(matches!(
+                    store.read_whole(original.identity()),
+                    Err(StoreRefusal::ObjectAbsent)
+                ));
+            }
+            root.clean();
+        }
+    }
+}
+
+#[test]
+fn private_reads_enforce_the_supplied_namespace_without_consuming_custody() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Root::new();
+        let foreign_root = Root::new();
+        let store = root.fabric(None);
+        let foreign = LocalFilesystemFabric::open(LocalFilesystemConfig::new(
+            foreign_root.0.clone(),
+            b"foreign".to_vec(),
+            OpaqueHandle::new(b"disk").unwrap(),
+            OpaqueHandle::new(b"key").unwrap(),
+            128 * 1024 * 1024,
+            SegmentLimits::default(),
+        ))
+        .unwrap();
+        let original = object(format, b"namespace-owned candidate", b"batch");
+        let input = std::slice::from_ref(&original);
+        let (ledger, amount) = ledger_for(input, LeakDisposition::FailFast);
+        let batch = stage_synced(&store, input, &ledger, amount);
+        assert_eq!(
+            batch.read_object_bounded(&foreign, original.identity(), 4096),
+            Err(StoreRefusal::NamespaceMismatch)
+        );
+        assert_eq!(
+            batch
+                .read_object_bounded(&store, original.identity(), 4096)
+                .unwrap(),
+            Some(original.clone())
+        );
+        store.publish_synced_batch(batch, &mut || true).unwrap();
+        assert!(ledger.close().is_quiescent());
+        assert_eq!(
+            store.read_whole(original.identity()).unwrap().object,
+            original
+        );
+        root.clean();
+    }
+}

@@ -534,6 +534,56 @@ impl SyncedBatch {
         &self.identities
     }
 
+    /// Read one object owned by this synced batch without linking its name.
+    ///
+    /// None means only that the identity is not in this batch. An owned
+    /// object's missing or corrupt stage is an error, even if another operation
+    /// published that identity meanwhile. Every read rechecks framing, payload
+    /// bounds, namespace, native identity and the original envelope commitment.
+    /// Existing entries use the immutable path with the same checks.
+    ///
+    /// The returned object is verified candidate data, not a placement receipt
+    /// or authority. This synchronous read retains no descriptor; callers must
+    /// check their cancellation/work budget before and after it.
+    pub fn read_object_bounded(
+        &self,
+        fabric: &LocalFilesystemFabric,
+        identity: GitOid,
+        maximum_payload_bytes: u64,
+    ) -> Result<Option<VerifiedObject>, StoreRefusal> {
+        let Ok(index) = self.identities.binary_search(&identity) else {
+            return Ok(None);
+        };
+        let entry = self
+            .pending
+            .entries
+            .get(index)
+            .ok_or(StoreRefusal::MalformedStoredObject)?;
+        let (object, original) = match entry {
+            PendingPlacement::Existing(placement) => (
+                fabric.load_object_within(identity, Some(maximum_payload_bytes))?,
+                placement,
+            ),
+            PendingPlacement::Written {
+                stage, placement, ..
+            } => (
+                fabric.load_object_path_within(
+                    stage.path(),
+                    identity,
+                    Some(maximum_payload_bytes),
+                )?,
+                placement,
+            ),
+        };
+        // A self-consistent replacement envelope is insufficient: the batch
+        // retained this commitment before it released the original payload.
+        let envelope = LocalFilesystemFabric::object_envelope_id(&object)?;
+        if envelope.as_internal_object_id().digest().as_bytes() != original.locator().as_bytes() {
+            return Err(StoreRefusal::StoredObjectIdentityCollision);
+        }
+        Ok(Some(object))
+    }
+
     /// Aborts every reservation and removes every staged file. Links nothing.
     pub fn abandon(mut self) -> Result<(), StoreRefusal> {
         abort_all(std::mem::take(&mut self.pending.entries))

@@ -377,15 +377,25 @@ impl LocalFilesystemFabric {
         identity: GitOid,
         maximum_payload: Option<u64>,
     ) -> Result<VerifiedObject, StoreRefusal> {
-        let path = self.object_path(identity);
+        self.load_object_path_within(&self.object_path(identity), identity, maximum_payload)
+    }
+
+    // Only immutable names or a StageFile owned by this module may reach this
+    // path-based verifier. It grants neither placement nor publication.
+    fn load_object_path_within(
+        &self,
+        path: &Path,
+        identity: GitOid,
+        maximum_payload: Option<u64>,
+    ) -> Result<VerifiedObject, StoreRefusal> {
         let bytes = match maximum_payload {
             Some(maximum) => bounded_read::read_object(
-                &path,
+                path,
                 self.max_stored_object_bytes,
                 self.envelope_limits.max_envelope_bytes,
                 maximum,
             )?,
-            None => self.read_bounded(&path)?,
+            None => self.read_bounded(path)?,
         };
         if bytes.len() < 8 || bytes.get(..4) != Some(OBJECT_MAGIC.as_slice()) {
             return Err(StoreRefusal::MalformedStoredObject);
