@@ -386,7 +386,8 @@ impl OneNode {
                 .flush()
                 .map_err(|e| io_error("flush receive advertisement", e))?;
             drop(selected);
-            let mut machine = ReceivePack::new(context)?;
+            let mut machine = ReceivePack::new(context)?
+                .with_pack_retention(self.received_pack_cache().capture_limit());
             let mut prefix = Vec::new();
             let ready = 'commands: loop {
                 checkpoint(ingress)?;

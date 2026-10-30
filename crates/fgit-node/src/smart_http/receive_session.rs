@@ -210,7 +210,8 @@ impl OneNode {
             .map_err(ReceiveError::AuthoritativeRefusal)?
             .with_receive_staging(&staging);
         let wire_limits = receive_context.limits.wire.clone();
-        let mut receive = ReceivePack::new(receive_context)?;
+        let mut receive = ReceivePack::new(receive_context)?
+            .with_pack_retention(self.received_pack_cache().capture_limit());
         bounded_intake::push(&mut receive, input, &wire_limits, &mut live)?;
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());

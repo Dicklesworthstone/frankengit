@@ -883,11 +883,57 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
             &independent,
             deadline,
         )?;
+        // Native-verified custody remains ineligible until placement's strong
+        // payload collision defense succeeds, including its final concurrent
+        // link check. Unreachable raw extras never pass placement and therefore
+        // make this optional representation capture miss.
+        let mut all_objects_placed = pack.retained_bytes().is_some();
+        if all_objects_placed {
+            for id in verified.keys() {
+                checkpoint(deadline)?;
+                if !closure.contains(id) {
+                    all_objects_placed = false;
+                    break;
+                }
+            }
+        }
+        let pending_pack = if all_objects_placed {
+            self.node
+                .received_pack_cache()
+                .prepare_verified(
+                    pack,
+                    verified.iter().map(|(id, object)| {
+                        crate::received_pack::VerifiedReceivedObject {
+                            id: *id,
+                            kind: object.object_type,
+                            bytes: match &object.body {
+                                ObjectBody::Resident(body) => body.len(),
+                                ObjectBody::Spooled(handle) => handle.length,
+                            },
+                        }
+                    }),
+                    &ids_at_offset,
+                    &self.pack_limits,
+                    deadline,
+                )
+                .map_err(map_pack_error)?
+        } else {
+            None
+        };
         // This second phase keeps a later malformed delta from leaving earlier
         // reachable objects in fabric.  Immutable placement remains
         // non-authority, but only the fully validated exact closure may
         // acquire that responsibility.
         self.stage_closure(&closure, &mut verified, &mut spool, deadline)?;
+        if let Some(pending) = pending_pack {
+            if let Some(staging) = self.staging {
+                staging.retain_received_pack(pending)?;
+            } else {
+                // Direct validation completed durable placement. Raw receive
+                // staging activates only after successful batch publication.
+                pending.commit();
+            }
+        }
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
                 closure.clone(),

@@ -1104,7 +1104,8 @@ impl OneNode {
 
         let receive_limits = self.git_daemon_receive_limits.clone();
         let context = self.smart_http_receive_context(receive_limits.wire.clone())?;
-        let mut rpc = ReceiveRpc::new(request, request.requested_version, context, http_limits)?;
+        let mut rpc = ReceiveRpc::new(request, request.requested_version, context, http_limits)?
+            .with_pack_retention(self.received_pack_cache().capture_limit());
         let decoded_body_bytes =
             match body.consume(cancellation, |bytes, live| rpc.push(bytes, live)) {
                 Ok(bytes) => bytes,

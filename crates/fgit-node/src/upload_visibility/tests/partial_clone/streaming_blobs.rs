@@ -58,8 +58,8 @@ fn configured_blob_limits_select_v6_without_changing_small_object_bytes() {
                     &mut || true,
                 )
                 .unwrap();
-            assert_eq!(payload.receipt().profile, selected);
-            assert_eq!(payload.receipt().object_count as usize, visible.len());
+            assert_eq!(payload.receipt().writer().unwrap().profile, selected);
+            assert_eq!(payload.receipt().writer().unwrap().object_count as usize, visible.len());
             assert_eq!(
                 payload.into_bytes().unwrap(),
                 planned_pack(&node, &ids, requested)
@@ -271,7 +271,7 @@ fn a_blob_above_32_mib_uses_verified_file_chunks_and_never_enters_buffered_loadi
             &mut || true,
         )
         .unwrap();
-    let receipt = payload.receipt().clone();
+    let receipt = payload.receipt().writer().unwrap().clone();
     assert_eq!(receipt.profile, PackWriteProfile::COMPRESSED_V6_THIN);
     assert_eq!(receipt.object_count, 1);
     assert_eq!(receipt.total_object_bytes, LENGTH);

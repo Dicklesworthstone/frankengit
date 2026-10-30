@@ -183,6 +183,8 @@ pub use termination::TerminationSignals;
 mod quarantine_validator;
 mod receive_refusal;
 mod receive_staging;
+mod received_pack;
+pub use received_pack::ReceivedPackReceipt;
 mod ssh;
 mod upload_visibility;
 mod verified_reads;
@@ -968,16 +970,71 @@ impl MaterializedAdmission {
 /// A bounded Git pack derived from one authority-selected object closure.
 ///
 /// The payload is consumable only after the `fgit-pack` writer finished its
-/// temporary artifact and checksum.  Its evidence retains both the exact
+/// temporary artifact and checksum, or a native-verified received pack matched
+/// the complete current authorized selection. Its evidence retains both the exact
 /// authority head basis and the RCR/genesis source that selected the objects.
-/// The completed pack lives in private scratch custody (frankengit-8xyq) and
-/// is read back in bounded chunks, never held whole by a serving session.
+/// Written packs live in private scratch custody (frankengit-8xyq); received
+/// packs share bounded immutable cache custody. Each session reads bounded
+/// chunks through its own cursor.
 #[derive(Debug)]
 pub struct AuthoritySelectedPackPayload {
     basis: PublicationBasis,
     closure: AuthoritySelectedClosure,
-    receipt: PackWriteReceipt,
-    pack: pack_spool::SpooledPack,
+    receipt: PackMaterializationReceipt,
+    pack: SelectedPackData,
+}
+
+/// Provenance of the exact bytes served for an authorized object selection.
+/// Received packs preserve their sender's representation; they do not claim
+/// the deterministic writer's ordering, compression profile, or work receipts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PackMaterializationReceipt {
+    /// A new artifact produced by the frozen native pack writer.
+    Written(PackWriteReceipt),
+    /// The unchanged bytes of a fully native-verified received pack.
+    Received(ReceivedPackReceipt),
+}
+
+impl PackMaterializationReceipt {
+    /// Construction evidence, present only for newly written packs.
+    #[must_use]
+    pub const fn writer(&self) -> Option<&PackWriteReceipt> {
+        match self {
+            Self::Written(receipt) => Some(receipt),
+            Self::Received(_) => None,
+        }
+    }
+
+    /// Native-verification and representation evidence for a reused pack.
+    #[must_use]
+    pub const fn received(&self) -> Option<&ReceivedPackReceipt> {
+        match self {
+            Self::Written(_) => None,
+            Self::Received(receipt) => Some(receipt),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SelectedPackData {
+    Written(pack_spool::SpooledPack),
+    Received(received_pack::ReceivedPackPayload),
+}
+
+impl SelectedPackData {
+    fn next_chunk(&mut self, maximum: usize) -> std::io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Written(pack) => pack.next_chunk(maximum),
+            Self::Received(pack) => pack.next_chunk(maximum),
+        }
+    }
+
+    fn into_bytes(self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Written(pack) => pack.into_bytes(),
+            Self::Received(pack) => pack.into_bytes(),
+        }
+    }
 }
 
 /// An exact-head upload selection whose count, individual object sizes, and
@@ -1007,9 +1064,9 @@ impl AuthoritySelectedPackPayload {
         &self.closure
     }
 
-    /// The completed deterministic pack-writer receipt.
+    /// The completed pack's explicit construction or verified-reuse receipt.
     #[must_use]
-    pub const fn receipt(&self) -> &PackWriteReceipt {
+    pub const fn receipt(&self) -> &PackMaterializationReceipt {
         &self.receipt
     }
 
@@ -7390,6 +7447,9 @@ pub struct NodeConfig {
     /// independently reopened children. This cache never selects objects or
     /// grants disclosure; each request authenticates its own selected closure.
     pack_computation_cache: Arc<PackComputationCache>,
+    /// Verified ingress representations. A hit never selects or authorizes
+    /// objects and survives only within this service's process lifetime.
+    received_pack_cache: Arc<received_pack::ReceivedPackCache>,
     /// Verified historical closure prefix, shared across service children but
     /// revalidated against each request's exact authority basis before reuse.
     admission_closure_cache: Arc<closure_selection::AdmissionClosureCache>,
@@ -7480,6 +7540,9 @@ impl NodeConfig {
             selected_pack_limits: default_selected_pack_limits(),
             selected_pack_blob_limit: None,
             pack_computation_cache: Arc::new(PackComputationCache::new(DEFAULT_PACK_CACHE_BYTES)),
+            received_pack_cache: Arc::new(received_pack::ReceivedPackCache::new(
+                DEFAULT_RECEIVED_PACK_CACHE_BYTES,
+            )),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
@@ -7868,11 +7931,29 @@ impl NodeConfig {
     pub fn pack_cache_bytes(&self) -> usize {
         self.pack_computation_cache.max_bytes()
     }
+
+    /// Bounds immutable received-pack retention shared by service children.
+    ///
+    /// The default is 128 MiB and each captured input is at most 64 MiB.
+    /// Zero disables capture and reuse. This disposable cache is independent
+    /// of deterministic pack computation memoization and stores no authority.
+    #[must_use]
+    pub fn with_received_pack_cache_bytes(mut self, max_bytes: usize) -> Self {
+        self.received_pack_cache = Arc::new(received_pack::ReceivedPackCache::new(max_bytes));
+        self
+    }
+
+    /// The byte ceiling for verified received-pack representations.
+    #[must_use]
+    pub fn received_pack_cache_bytes(&self) -> usize {
+        self.received_pack_cache.max_bytes()
+    }
 }
 
 /// Shared by a service and its reopened children, separately from each
 /// request's bounded delta window and private output spool.
 const DEFAULT_PACK_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_RECEIVED_PACK_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Default selected-pack envelope (frankengit-8xyq): 4 GiB of expanded
 /// objects. It bounds work and scratch disk; the delta window bounds memory.
@@ -8459,6 +8540,10 @@ impl OneNode {
     #[must_use]
     pub fn pack_cache_stats(&self) -> PackCacheStats {
         self.service_config.pack_computation_cache.stats()
+    }
+
+    pub(crate) fn received_pack_cache(&self) -> &received_pack::ReceivedPackCache {
+        &self.service_config.received_pack_cache
     }
 
     /// What this cell may currently serve.
@@ -9459,8 +9544,9 @@ impl OneNode {
             })?
             .with_receive_staging(&staging);
         let wire_limits = receive_context.limits.wire.clone();
-        let mut receive =
-            ReceivePack::new(receive_context).map_err(NodeReceiveTransportRefusal::from)?;
+        let mut receive = ReceivePack::new(receive_context)
+            .map_err(NodeReceiveTransportRefusal::from)?
+            .with_pack_retention(self.received_pack_cache().capture_limit());
         bounded_receive_intake::push(&mut receive, input, &wire_limits, &mut || {
             cancellation.checkpoint()
         })
@@ -9767,6 +9853,23 @@ impl OneNode {
         if !live() {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
+        // Selection, current visibility, and work admission have already been
+        // checked against this exact basis. Only an exact native-verified
+        // representation may avoid reading and recompressing the selected
+        // bodies. Local exports retain their frozen writer profile.
+        if let Some(pack) = self.received_pack_cache().try_reuse(
+            &prepared.keys,
+            &prepared.limits,
+            prepared.request.options.ofs_delta(),
+            live,
+        )? {
+            return Ok(AuthoritySelectedPackPayload {
+                basis: materialized.basis().clone(),
+                closure: materialized.selected_closure().clone(),
+                receipt: PackMaterializationReceipt::Received(pack.receipt().clone()),
+                pack: SelectedPackData::Received(pack),
+            });
+        }
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
             object_format: self.object_format,
@@ -9997,8 +10100,8 @@ impl OneNode {
         Ok(AuthoritySelectedPackPayload {
             basis: materialized.basis().clone(),
             closure: materialized.selected_closure().clone(),
-            receipt,
-            pack,
+            receipt: PackMaterializationReceipt::Written(receipt),
+            pack: SelectedPackData::Written(pack),
         })
     }
 

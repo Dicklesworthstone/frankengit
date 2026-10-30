@@ -30,8 +30,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use fgit_object_fabric::fabric::{PlacementAdmission, StoreRefusal, VerifiedObject};
 use fgit_object_fabric::local::{LocalFilesystemFabric, SyncedBatch};
 use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
-use fgit_types::GitOid;
+use fgit_types::{GitOid, RefusalCode};
 
+use crate::received_pack::PendingReceivedPack;
 use crate::{NodeRefusal, OneNode};
 
 /// One receive's staged, synced and unpublished verified objects.
@@ -44,6 +45,9 @@ pub struct ReceiveStaging {
 struct State {
     batches: Vec<(ObligationLedger, SyncedBatch)>,
     staged: BTreeSet<GitOid>,
+    /// Prepared representation custody is ineligible for serving until every
+    /// staged object passes publication's final identity-collision recheck.
+    received_pack: Option<PendingReceivedPack>,
     published: bool,
     /// A failed publication may have linked some batches and abandoned the
     /// rest, so no later caller may treat this receive's objects as placed.
@@ -71,6 +75,7 @@ impl std::fmt::Debug for ReceiveStaging {
         f.debug_struct("ReceiveStaging")
             .field("batches", &state.batches.len())
             .field("staged", &state.staged.len())
+            .field("received_pack_pending", &state.received_pack.is_some())
             .field("published", &state.published)
             .field("failed", &state.failed.is_some())
             .finish()
@@ -85,6 +90,23 @@ impl ReceiveStaging {
     /// Whether this receive has already staged `id` (a waiting pre-stage did).
     pub(crate) fn contains(&self, id: GitOid) -> bool {
         self.lock().staged.contains(&id)
+    }
+
+    /// Keep a verified representation under the same publication responsibility
+    /// as its objects. Speculative validation may offer the same receive twice;
+    /// retaining the first candidate avoids duplicate cache reservations.
+    pub(crate) fn retain_received_pack(
+        &self,
+        pending: PendingReceivedPack,
+    ) -> Result<(), RefusalCode> {
+        let mut state = self.lock();
+        if state.published || state.failed.is_some() {
+            return Err(RefusalCode::InternalInvariantBreach);
+        }
+        if state.received_pack.is_none() {
+            state.received_pack = Some(pending);
+        }
+        Ok(())
     }
 
     /// Stages and syncs identity-sorted `objects` (at most one synced batch)
@@ -143,10 +165,14 @@ impl ReceiveStaging {
                 }
                 let refusal = failure.refusal();
                 state.failed = Some(failure);
+                state.received_pack.take();
                 return Err(refusal);
             }
         }
         state.published = true;
+        if let Some(pending) = state.received_pack.take() {
+            pending.commit();
+        }
         Ok(())
     }
 }
