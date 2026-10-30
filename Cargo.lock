@@ -889,6 +889,7 @@ dependencies = [
  "fgit-chronicle",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-diff",
  "fgit-doc",
  "fgit-forge",
  "fgit-git-object",

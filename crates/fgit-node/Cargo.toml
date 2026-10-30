@@ -49,6 +49,7 @@ rustix.workspace = true
 fgit-runner.workspace = true
 
 [dev-dependencies]
+fgit-diff.workspace = true
 fgit-lab.workspace = true
 fgit-runner.workspace = true
 
