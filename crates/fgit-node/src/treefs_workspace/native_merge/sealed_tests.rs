@@ -101,6 +101,82 @@ fn context(node: &OneNode, key: &[u8]) -> AdmissionContext {
     }
 }
 
+#[test]
+fn frontier_headers_never_shadow_a_supplied_overlap_with_a_healthy_permanent_copy() {
+    // This adapter fixture supplies its selected set directly. The merge
+    // preparation campaign separately exercises authority-derived membership.
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, _) = OneNode::init(scratch.config(format)).unwrap();
+        let body = b"verified supplied overlap\n";
+        let object = node
+            .verified_git_object(fgit_git_object::ObjectType::Blob, body.to_vec())
+            .unwrap();
+        let id = object.identity();
+        let staging = ReceiveStaging::default();
+        staging.stage(&node, &[object], &mut || true).unwrap();
+        assert_eq!(
+            node.put_git_object(fgit_git_object::ObjectType::Blob, body.to_vec())
+                .unwrap()
+                .identity(),
+            id
+        );
+        let request = node.request_context();
+        let exhaustion = Cell::new(None);
+        let source = || VerifiedFabricPackSource {
+            fabric: &node.fabric,
+            object_format: format,
+            maximum_object_bytes: 1024,
+            database_context: request.authority(),
+            database_exhaustion: &exhaustion,
+            session_is_live: None,
+        };
+        let selected = BTreeSet::from([id]);
+        let headers = NativeFrontierHeaders {
+            source: source(),
+            selected: &selected,
+            staging: &staging,
+            maximum_blob_bytes: 4096,
+        };
+        assert_eq!(headers.load_header(&id).unwrap(), None);
+        let outside = git_object_id(format, GitObjectKind::Blob, b"unselected");
+        assert!(matches!(headers.load_header(&outside),
+            Err(PackWriteError::MissingCanonicalObject(missing)) if missing == outside));
+        let candidate = source().with_staging(&staging);
+        assert_eq!(candidate.read_object(&id).unwrap().1, body);
+        let private = fs::read_dir(node.storage_root().join("staging"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(private, b"corrupt private framing").unwrap();
+        assert_eq!(headers.load_header(&id).unwrap(), None);
+        assert!(candidate.read_object(&id).is_err());
+        assert_eq!(node.read_git_object(id).unwrap().payload(), body);
+        drop(candidate);
+        drop(headers);
+        drop(staging);
+        assert_eq!(
+            fs::read_dir(node.storage_root().join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let empty = ReceiveStaging::default();
+        let headers = NativeFrontierHeaders {
+            source: source(),
+            selected: &selected,
+            staging: &empty,
+            maximum_blob_bytes: 4096,
+        };
+        let header = headers.load_header(&id).unwrap().unwrap();
+        assert_eq!(header.object_type, fgit_git_object::ObjectType::Blob);
+        assert_eq!(header.body_bytes, body.len());
+        node.shutdown().unwrap();
+    }
+}
+
 fn snapshot(node: &OneNode) -> MaterializedAdmission {
     let request = node.request_context();
     node.runtime()

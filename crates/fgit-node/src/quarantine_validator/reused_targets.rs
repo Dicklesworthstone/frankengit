@@ -155,12 +155,10 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         if self.kinds.len() >= MAX_ORIGINAL_OBJECTS {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
-        let maximum = self
-            .validator
-            .pack_limits
-            .max_object_bytes
-            .min(self.validator.parse_limits.max_object_bytes) as u64;
-        let maximum = maximum.min(self.validator.node.max_object_bytes);
+        // This method is reached only by reviewed-candidate reuse after a
+        // verified original Blob edge. Bodies and external delta bases retain
+        // their separate buffered limits in with_object.
+        let maximum = self.validator.node.reused_merge_blob_limit() as u64;
         let result = self.validator.node.fabric.read_header_bounded(id, maximum);
         checkpoint(deadline)?;
         let header = result.map_err(|error| match error {
