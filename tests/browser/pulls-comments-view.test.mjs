@@ -26,8 +26,7 @@ function conversation(extra = {}) {
 }
 function terminal(pending, outcome = 'committed') {
   return { ...ids, object_format: pending.scope.format, type: 'pull_request_comment_publication',
-    number: pending.number, action: 'comment', expected_version: pending.fields.expected_version,
-    comment_version: outcome === 'committed' ? pending.fields.expected_version + 1 : null,
+    number: pending.number, action: 'append-comment', expected_version: null, comment_version: null,
     principal_id: actor, tx_id: 'conversation-transaction', decision_sequence: 7, outcome,
     repository_commit_id: outcome === 'committed' ? 'conversation-rcr' : null,
     refusal_record_id: outcome === 'refused' ? 'conversation-refusal' : null,
@@ -76,9 +75,12 @@ async function harness({ observed = show(), read = null, dispatch = null, compar
     const call = { url: String(url), ...options, bytes: options.body === undefined ? null
       : typeof options.body === 'string' ? options.body : await options.body.text() };
     calls.push(call);
+    if (url.pathname.endsWith('/comments/append')) {
+      assert.equal(call.method, 'POST');
+      return dispatch ? dispatch(call, app.client.pending) : json(terminal(app.client.pending));
+    }
     if (url.pathname.endsWith('/comments')) {
-      if (call.method === 'POST') return dispatch ? dispatch(call, app.client.pending)
-        : json(terminal(app.client.pending));
+      assert.equal(call.method, 'GET', 'the comment form must use the distinct append route');
       return read ? read(call) : json(conversation({ object_format: observed.object_format,
         after: Number(url.searchParams.get('after') ?? 0), limit: Number(url.searchParams.get('limit') ?? 5) }));
     }
@@ -184,6 +186,7 @@ for (const format of ['sha1', 'sha256']) for (const mode of ['merge-base', 'dire
     h.node('comment-body').value = 'Other editor text'; assert.equal(h.client.pending.fields.body, saved.fields.body);
     await h.send();
     const first = new URLSearchParams(writes(h.calls)[0].bytes);
+    assert.equal(first.has('expected_version'), false);
     assert.equal(first.get('anchor_blob'), before.blob); assert.equal(first.get('anchor_pull_request_version'), '1');
     assert.equal(first.get('anchor_comparison'), before.comparison); assert.equal(first.get('body'), saved.fields.body);
     assert.deepEqual(h.client.candidate, candidate); assert.equal(h.node('candidate').textContent, candidateText);
@@ -205,7 +208,7 @@ test('switching explicitly to a general comment preserves the draft and omits al
   assert.match(h.node('comment-location').textContent, /General conversation comment/);
   h.submit('comment-form'); await h.ready();
   assert.equal(Object.hasOwn(h.client.pending.fields, 'anchor'), false);
-  await h.send(); assert.deepEqual([...new URLSearchParams(writes(h.calls)[0].bytes).keys()], ['expected_version', 'body']);
+  await h.send(); assert.deepEqual([...new URLSearchParams(writes(h.calls)[0].bytes).keys()], ['body']);
 });
 
 test('stale diff refresh fences a retained source selection without silently turning the draft into a general comment', async t => {
@@ -253,7 +256,8 @@ test('comment paging keeps its own exact snapshot and high water while preservin
   assert.equal(h.node('comment-paging').textContent, ''); assert.equal(h.node('comment-version').value, '7');
   assert.equal(h.node('comment-body').value, 'Draft spanning two pages');
   await h.stage(h.node('comment-body').value);
-  assert.equal(h.client.pending.fields.expected_version, 7); assert.equal(writes(h.calls).length, 0);
+  assert.equal(h.client.pending.action, 'append-comment');
+  assert.equal(Object.hasOwn(h.client.pending.fields, 'expected_version'), false); assert.equal(writes(h.calls).length, 0);
 });
 
 test('an oversized conversation can be retried with a smaller page while draft, pin and continuation size stay exact', async t => {
@@ -292,12 +296,12 @@ test('an oversized conversation can be retried with a smaller page while draft, 
   assert.equal(h.node('snapshot').textContent, selected); assert.equal(h.client.pending, null); assert.equal(writes(h.calls).length, 0);
 });
 
-test('preparing stores exact body and discussion version locally until an explicitly confirmed send', async t => {
+test('preparing stores an exact additive comment without a selected conversation version until an explicitly confirmed send', async t => {
   const h = await harness(); t.after(h.disconnect); await h.load();
   const original = ' é\r\n<script>literal comment</script> \n', snapshot = h.node('snapshot').textContent;
   h.node('comment-version').value = '999';
   await h.stage(original); const saved = h.client.pending;
-  assert.equal(saved.action, 'comment'); assert.equal(saved.fields.expected_version, 2);
+  assert.equal(saved.action, 'append-comment'); assert.equal(Object.hasOwn(saved.fields, 'expected_version'), false);
   assert.equal(saved.fields.body, original); assert.equal(writes(h.calls).length, 0);
   assert.equal(h.node('confirm').checked, false); assert.equal(h.node('send').disabled, true);
   h.node('comment-body').value = 'Later editor text'; h.node('comment-version').value = '1000';
@@ -307,8 +311,9 @@ test('preparing stores exact body and discussion version locally until an explic
   assert.match(h.node('status').textContent, /Explicitly confirm/); assert.equal(writes(h.calls).length, 0);
   await h.send();
   const call = writes(h.calls)[0], form = new URLSearchParams(call.bytes);
-  assert.equal(call.headers['Idempotency-Key'], saved.key); assert.equal(form.get('expected_version'), '2');
-  assert.equal(form.get('body'), original); assert.deepEqual([...form.keys()], ['expected_version', 'body']);
+  assert.equal(call.headers['Idempotency-Key'], saved.key); assert.equal(form.has('expected_version'), false);
+  assert.equal(new URL(call.url).pathname, '/repository/api/v1/pulls/1/comments/append');
+  assert.equal(form.get('body'), original); assert.deepEqual([...form.keys()], ['body']);
   assert.equal(h.client.pending, null); assert.match(h.node('status').textContent, /Canonical committed/);
   assert.equal(h.node('snapshot').textContent, snapshot); assert.equal(h.node('comment-version').value, '');
   assert.equal(h.node('comment-body').value, ''); assert.equal(h.node('comment-stage').disabled, true);
@@ -321,8 +326,8 @@ test('closed and merged native PRs retain explicit discussion controls without e
     const h = await harness({ observed: show({ pull_request: row(1, { state, merge }) }) }); t.after(h.disconnect);
     assert.equal(h.node('prepare-candidate').disabled, true); assert.equal(h.node('fast-forward-stage').disabled, true);
     await h.load(); assert.equal(h.node('comment-stage').disabled, false);
-    await h.stage(`Discuss this ${state} PR`); assert.equal(h.client.pending.action, 'comment');
-    assert.equal(h.client.pending.fields.expected_version, 2); assert.equal(writes(h.calls).length, 0);
+    await h.stage(`Discuss this ${state} PR`); assert.equal(h.client.pending.action, 'append-comment');
+    assert.equal(Object.hasOwn(h.client.pending.fields, 'expected_version'), false); assert.equal(writes(h.calls).length, 0);
   }
 });
 
@@ -369,7 +374,8 @@ test('an existing empty discussion permits its first comment while unavailable d
   const empty = await harness({ read: () => json(conversation({ discussion_version: 0 })) }); t.after(empty.disconnect);
   await empty.load(); assert.match(empty.node('conversation').textContent, /No comments at this snapshot/);
   assert.equal(empty.node('comment-version').value, '0'); await empty.stage('First comment');
-  assert.equal(empty.client.pending.fields.expected_version, 0);
+  assert.equal(empty.client.pending.action, 'append-comment');
+  assert.equal(Object.hasOwn(empty.client.pending.fields, 'expected_version'), false);
   const missing = await harness({ read: () => json(conversation({ found: false, source_head: null,
     snapshot_token: null, discussion_version: null, comments: [] }), 404) }); t.after(missing.disconnect);
   await missing.load(); assert.match(missing.node('conversation').textContent, /absent or not disclosed/);

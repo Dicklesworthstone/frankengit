@@ -39,6 +39,122 @@ fn comment_form_keeps_exact_text_and_its_independent_discussion_version() {
     assert_eq!(command(&reordered).unwrap(), first);
 }
 
+fn append_command(
+    body: &str,
+    format: GitHashAlgorithm,
+) -> Result<PullRequestAppendCommentCommand, ApiError> {
+    let bytes = format!(
+        "POST /repo.git/api/v1/pulls/7/comments/append HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let request = Request::parse(&envelope)?.unwrap();
+    assert!(request.is_mutation());
+    assert!(request.is_append());
+    assert!(request.command(body.as_bytes(), format).is_err());
+    request.append_command(body.as_bytes(), format)
+}
+
+#[test]
+fn append_form_has_no_conversation_predecessor_and_keeps_literal_text() {
+    let parsed =
+        append_command("body=Review+%F0%9F%A6%80%0A%252f", GitHashAlgorithm::Sha1).unwrap();
+    assert_eq!(parsed.number.get(), 7);
+    assert_eq!(parsed.body, "Review 🦀\n%2f");
+    assert!(parsed.anchor.is_none());
+    for body in [
+        "",
+        "body=",
+        "body=+%09%0A",
+        "body=%00",
+        "body=%FF",
+        "body=%",
+        "body=comment&expected_version=0",
+        "body=comment&expected_version=1",
+        "body=comment&body=changed",
+        "body=comment&actor=admin",
+        "body=comment&principal_id=admin",
+        "body=comment&approved=true",
+        "body=comment&pull_request_version=1",
+        "body=comment&anchor_status=exact",
+    ] {
+        assert!(
+            append_command(body, GitHashAlgorithm::Sha1).is_err(),
+            "{body}"
+        );
+    }
+    let exact = "é".repeat(MAX_COMMENT_BYTES / 2);
+    assert_eq!(
+        append_command(&format!("body={exact}"), GitHashAlgorithm::Sha1)
+            .unwrap()
+            .body
+            .len(),
+        MAX_COMMENT_BYTES
+    );
+    assert_eq!(
+        append_command(&format!("body={exact}a"), GitHashAlgorithm::Sha1)
+            .unwrap_err()
+            .status,
+        super::super::super::super::Status::TooLarge
+    );
+    assert!(
+        command("body=comment").is_err(),
+        "strict comment still requires an exact predecessor"
+    );
+}
+
+#[test]
+fn append_form_retains_every_source_anchor_precondition() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fields = anchor_fields(format);
+        let strict = anchored_form(&fields);
+        let append = strict.strip_prefix("expected_version=0&").unwrap();
+        let parsed = append_command(append, format).unwrap();
+        assert_eq!(
+            parsed.anchor,
+            command_with_format(&strict, format).unwrap().anchor
+        );
+        for field in ANCHOR_FIELDS {
+            let mut missing = fields.clone();
+            missing.remove(field);
+            let form = anchored_form(&missing);
+            assert!(
+                append_command(form.strip_prefix("expected_version=0&").unwrap(), format).is_err(),
+                "missing {field}"
+            );
+            assert!(
+                append_command(&format!("{append}&{field}={}", fields[field]), format).is_err(),
+                "duplicate {field}"
+            );
+        }
+        let other = if format == GitHashAlgorithm::Sha1 {
+            GitHashAlgorithm::Sha256
+        } else {
+            GitHashAlgorithm::Sha1
+        };
+        assert!(append_command(append, other).is_err());
+    }
+}
+
+#[test]
+fn append_route_cannot_be_read_or_used_with_a_query() {
+    for (method, suffix, length) in [
+        ("GET", "", 0),
+        ("PUT", "", 6),
+        ("POST", "?expected_version=0", 6),
+    ] {
+        let raw = format!(
+            "{method} /repo.git/api/v1/pulls/7/comments/append{suffix} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {length}\r\n\r\n"
+        );
+        let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+            .unwrap()
+            .unwrap();
+        assert!(Request::parse(&envelope).is_err());
+    }
+}
+
 fn anchor_fields(format: GitHashAlgorithm) -> BTreeMap<String, String> {
     let bytes = match format {
         GitHashAlgorithm::Sha1 => 20,

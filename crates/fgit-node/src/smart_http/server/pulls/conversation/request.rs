@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use fgit_forge::event::pull_request_comment::{
-    MAX_COMMENT_BYTES, PullRequestCommentCommand, SourceCommentAnchor, SourceCommentComparison,
-    SourceCommentSide, validate_body,
+    MAX_COMMENT_BYTES, PullRequestAppendCommentCommand, PullRequestCommentCommand,
+    SourceCommentAnchor, SourceCommentComparison, SourceCommentSide, validate_body,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
@@ -21,6 +21,7 @@ pub(in crate::smart_http::server) struct Request<'a> {
     pub number: PullRequestNumber,
     pub page: Page,
     mutation: bool,
+    append: bool,
 }
 
 impl<'a> Request<'a> {
@@ -34,7 +35,11 @@ impl<'a> Request<'a> {
         let Some((repository_route, suffix)) = path.split_once("/api/v1/pulls/") else {
             return Ok(None);
         };
-        let Some(number) = suffix.strip_suffix("/comments") else {
+        let (number, append) = if let Some(number) = suffix.strip_suffix("/comments/append") {
+            (number, true)
+        } else if let Some(number) = suffix.strip_suffix("/comments") {
+            (number, false)
+        } else {
             return Ok(None);
         };
         if repository_route.len() < 2
@@ -55,7 +60,7 @@ impl<'a> Request<'a> {
             return Err(ApiError::bad("git_protocol_not_applicable"));
         }
         let (mutation, page) = match head.method {
-            "GET" => {
+            "GET" if !append => {
                 if !matches!(
                     head.body,
                     BodyFraming::Empty | BodyFraming::ContentLength(0)
@@ -95,6 +100,7 @@ impl<'a> Request<'a> {
             number,
             page,
             mutation,
+            append,
         }))
     }
 
@@ -102,28 +108,19 @@ impl<'a> Request<'a> {
         self.mutation
     }
 
+    pub(super) const fn is_append(&self) -> bool {
+        self.append
+    }
+
     pub(super) fn command(
         &self,
         bytes: &[u8],
         format: GitHashAlgorithm,
     ) -> Result<PullRequestCommentCommand, ApiError> {
-        if !self.mutation {
+        if !self.mutation || self.append {
             return Err(ApiError::bad("not_a_mutation"));
         }
-        let (mut version, mut body) = (None, None);
-        let mut anchor_fields = BTreeMap::new();
-        for (name, value) in parse_form(bytes, 18)? {
-            match name.as_str() {
-                "expected_version" if version.is_none() => version = Some(parse_decimal(&value)?),
-                "body" if body.is_none() => body = Some(value),
-                field if ANCHOR_FIELDS.contains(&field) => {
-                    if anchor_fields.insert(name, value).is_some() {
-                        return Err(ApiError::bad("unknown_or_duplicate_field"));
-                    }
-                }
-                _ => return Err(ApiError::bad("unknown_or_duplicate_field")),
-            }
-        }
+        let (version, body, anchor) = self.fields(bytes, format)?;
         let version = version.ok_or_else(|| ApiError::bad("required_field_missing"))?;
         let expected_version = if version == 0 {
             ExpectedVersion::NewStream
@@ -135,17 +132,57 @@ impl<'a> Request<'a> {
                 .map_err(|_| ApiError::bad("version_exhausted"))?;
             ExpectedVersion::Exactly(version)
         };
+        Ok(PullRequestCommentCommand {
+            number: self.number,
+            expected_version,
+            body,
+            anchor,
+        })
+    }
+
+    pub(super) fn append_command(
+        &self,
+        bytes: &[u8],
+        format: GitHashAlgorithm,
+    ) -> Result<PullRequestAppendCommentCommand, ApiError> {
+        if !self.mutation || !self.append {
+            return Err(ApiError::bad("not_an_append"));
+        }
+        let (_, body, anchor) = self.fields(bytes, format)?;
+        Ok(PullRequestAppendCommentCommand {
+            number: self.number,
+            body,
+            anchor,
+        })
+    }
+
+    fn fields(
+        &self,
+        bytes: &[u8],
+        format: GitHashAlgorithm,
+    ) -> Result<(Option<u64>, String, Option<SourceCommentAnchor>), ApiError> {
+        let (mut version, mut body) = (None, None);
+        let mut anchor_fields = BTreeMap::new();
+        for (name, value) in parse_form(bytes, 18)? {
+            match name.as_str() {
+                "expected_version" if !self.append && version.is_none() => {
+                    version = Some(parse_decimal(&value)?);
+                }
+                "body" if body.is_none() => body = Some(value),
+                field if ANCHOR_FIELDS.contains(&field) => {
+                    if anchor_fields.insert(name, value).is_some() {
+                        return Err(ApiError::bad("unknown_or_duplicate_field"));
+                    }
+                }
+                _ => return Err(ApiError::bad("unknown_or_duplicate_field")),
+            }
+        }
         let body = body.ok_or_else(|| ApiError::bad("required_field_missing"))?;
         if body.len() > MAX_COMMENT_BYTES {
             return Err(ApiError::too_large());
         }
         validate_body(&body).map_err(|_| ApiError::bad("invalid_comment_body"))?;
-        Ok(PullRequestCommentCommand {
-            number: self.number,
-            expected_version,
-            body,
-            anchor: parse_anchor(&anchor_fields, format)?,
-        })
+        Ok((version, body, parse_anchor(&anchor_fields, format)?))
     }
 }
 

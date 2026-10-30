@@ -7,6 +7,9 @@ mod support;
 #[path = "pull_request_comments_http/source_anchors.rs"]
 mod source_anchors;
 
+#[path = "pull_request_comments_http/append.rs"]
+mod append;
+
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::event::pull_request_comment::PullRequestCommentCommand;

@@ -3,16 +3,18 @@ use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::mutations as common;
 use super::{NodeTools, decimal, decimal_schema, head, head_token, limit, require_fields};
+use fgit_authority::TerminalOutcome;
 use fgit_forge::event::pull_request_comment::{
-    PullRequestCommentCommand, SOURCE_COMMENT_PROFILE, SourceCommentAnchor,
-    SourceCommentComparison, SourceCommentSide,
+    PullRequestAppendCommentCommand, PullRequestCommentCommand, SOURCE_COMMENT_PROFILE,
+    SourceCommentAnchor, SourceCommentComparison, SourceCommentSide,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_node::PullRequestCommentsPage;
-use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
+use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryAuthorityHeadId, TxId};
 
 pub(super) const READ: &str = "frankengit_pull_comments";
 pub(super) const WRITE: &str = "frankengit_pull_comment";
+pub(super) const APPEND: &str = "frankengit_pull_append_comment";
 
 pub(super) fn write_tool() -> Tool {
     let mut properties = common::base_properties();
@@ -55,6 +57,28 @@ pub(super) fn read_tool() -> Tool {
     }
 }
 
+pub(super) fn append_tool() -> Tool {
+    let mut properties = Object::new();
+    properties.insert("number".into(), decimal_schema());
+    let Value::Object(mut key) = common::key_schema() else {
+        unreachable!("key schema object")
+    };
+    key.insert("description".into(), text(
+        "Original durable printable ASCII key. Retry only the identical PR number, literal body and optional source anchor; never replace this key after an uncertain response."
+    ));
+    properties.insert("idempotency_key".into(), Value::Object(key));
+    properties.insert(
+        "body".into(),
+        common::text_schema(common::MAX_TEXT_BYTES as u64),
+    );
+    properties.insert("anchor".into(), anchor_schema());
+    Tool {
+        name: APPEND,
+        description: "Append a literal comment to an existing visible PR without expected_version. Independent comments do not become stale when another comment appends. Optional complete source anchors still require the exact original PR basis and verified whole-line byte span. Authorship is fixed by the launch principal. Retry the identical number, body, anchor and original durable key to recover the same terminal outcome without a duplicate. Does not change PR metadata, branch tips or approvals.",
+        schema: common::input_schema(properties, &["number", "idempotency_key", "body"]),
+    }
+}
+
 fn command(
     args: &Object,
     format: GitHashAlgorithm,
@@ -84,6 +108,24 @@ fn command(
     })
 }
 
+fn append_command(
+    args: &Object,
+    format: GitHashAlgorithm,
+) -> Result<PullRequestAppendCommentCommand, ToolError> {
+    require_fields(args, &["number", "idempotency_key", "body", "anchor"])?;
+    let number = PullRequestNumber::try_new(common::number(args, "number")?)
+        .ok_or(ToolError::invalid("positive_pull_number_required"))?;
+    let body = common::body(args, "body")?.ok_or(ToolError::invalid("body_required"))?;
+    if body.trim().is_empty() {
+        return Err(ToolError::invalid("nonblank_comment_required"));
+    }
+    Ok(PullRequestAppendCommentCommand {
+        number,
+        body,
+        anchor: parse_anchor(args, format)?,
+    })
+}
+
 pub(super) fn append(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     if !backend.options.writes.pulls {
         return Err(ToolError::invalid("tool_not_granted"));
@@ -105,29 +147,97 @@ pub(super) fn append(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
             Default::default(),
         ))
         .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
+    Ok(publication_result(
+        backend,
+        principal,
+        command.number,
+        Some(command.expected_version),
+        command.anchor.as_ref(),
+        tx,
+        &terminal,
+    ))
+}
+
+pub(super) fn append_comment(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    if !backend.options.writes.pulls {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
+    let command = append_command(args, backend.options.format)?;
+    let session = common::session(backend, common::key(args)?)?;
+    let principal = session
+        .authenticated_session()
+        .ok_or(ToolError::invalid("principal_not_bound"))?
+        .principal_id();
+    command
+        .commitment_event(principal)
+        .map_err(|_| ToolError::invalid("invalid_pull_comment"))?;
+    let context = fgit_cli::command_request_context(&backend.node);
+    let (tx, terminal) = backend
+        .node
+        .runtime()
+        .block_on(backend.node.admit_pull_request_append_comment_durable_in(
+            &context,
+            &session,
+            &command,
+            Default::default(),
+        ))
+        .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
+    Ok(publication_result(
+        backend,
+        principal,
+        command.number,
+        None,
+        command.anchor.as_ref(),
+        tx,
+        &terminal,
+    ))
+}
+
+fn publication_result(
+    backend: &NodeTools,
+    principal: PrincipalId,
+    number: PullRequestNumber,
+    expected: Option<ExpectedVersion>,
+    anchor: Option<&SourceCommentAnchor>,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+) -> Value {
     let mut result = common::binding(backend, principal, false);
-    result.extend(common::terminal(tx, &terminal));
+    result.extend(common::terminal(tx, terminal));
     result.insert("type".into(), text("pull_request_comment_publication"));
-    result.insert("action".into(), text("comment"));
-    result.insert("number".into(), text(command.number.get().to_string()));
+    result.insert(
+        "action".into(),
+        text(if expected.is_some() {
+            "comment"
+        } else {
+            "append-comment"
+        }),
+    );
+    result.insert("number".into(), text(number.get().to_string()));
     result.insert(
         "expected_version".into(),
-        text(
-            match command.expected_version {
-                ExpectedVersion::NewStream => 0,
-                ExpectedVersion::Exactly(version) => version.get(),
-            }
-            .to_string(),
-        ),
+        expected.map_or(Value::Null, |expected| {
+            text(
+                match expected {
+                    ExpectedVersion::NewStream => 0,
+                    ExpectedVersion::Exactly(version) => version.get(),
+                }
+                .to_string(),
+            )
+        }),
     );
+    if expected.is_none() {
+        // Today's high water cannot establish a historical append's version.
+        result.insert("comment_version".into(), Value::Null);
+    }
     result.insert("complete".into(), Value::Bool(true));
     result.insert("refs_changed".into(), Value::Bool(false));
     result.insert("delivery_acknowledged".into(), Value::Null);
     result.insert("historical_outcome".into(), Value::Bool(true));
-    if let Some(anchor) = &command.anchor {
+    if let Some(anchor) = anchor {
         result.insert("anchor".into(), render_anchor(anchor));
     }
-    Ok(Value::Object(result))
+    Value::Object(result)
 }
 
 struct Query {

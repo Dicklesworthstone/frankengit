@@ -55,7 +55,8 @@ const fn valid_prototype() -> McpToolEntry {
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 52);
+    assert_eq!(REGISTRY.len(), 53);
+    assert!(find_tool("frankengit_pull_append_comment").is_some());
 
     // Verify strict alphabetical ASCII sort order
     for pair in REGISTRY.windows(2) {
@@ -372,15 +373,20 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 52"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 48"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 53"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 49"));
+    assert!(
+        mcp_tools
+            .contents
+            .contains("frankengit_pull_append_comment")
+    );
     assert!(mcp_tools.contents.contains("\"unsupported_count\": 4"));
 
     let mcp_parity = artifacts
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 52"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 53"));
 }
 
 #[test]
@@ -390,7 +396,8 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 48);
+    assert_eq!(active_names.len(), 49);
+    assert!(active_names.contains(&"frankengit_pull_append_comment"));
 
     // 1. Consistent twin passes.
     assert_eq!(validate_server_parity(&active_names, REGISTRY), Ok(()));

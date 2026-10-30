@@ -42,6 +42,8 @@ usage: fg pr checks --help
   Read canonical workflow observations for the PR's exact source commit.
 usage: fg pr comment --help
   Append a durable conversation comment without changing PR or review versions.
+usage: fg pr append-comment --help
+  Append without a discussion predecessor; retain the original key for retries.
 usage: fg pr comments --help
   Read the PR conversation at one authenticated snapshot.
 
@@ -54,10 +56,9 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 This is a trusted local-operator interface, not a remote authorization service.";
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
-    if arguments
-        .first()
-        .is_some_and(|argument| matches!(argument.as_str(), "comment" | "comments"))
-    {
+    if arguments.first().is_some_and(|argument| {
+        matches!(argument.as_str(), "comment" | "append-comment" | "comments")
+    }) {
         return comments::run(arguments, &mut std::io::stdout().lock());
     }
     if arguments

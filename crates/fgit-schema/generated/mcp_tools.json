@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 52,
-  "active_count": 48,
+  "total_count": 53,
+  "active_count": 49,
   "unsupported_count": 4,
   "tools": [
     {
@@ -678,6 +678,34 @@
       "refusal_codes": ["snapshot_moved", "protection_read_failed", "invalid_protection_state"],
       "cli_command": "fg protection show",
       "rest_api_path": "GET /repos/{id}/protection"
+    },
+    {
+      "name": "frankengit_pull_append_comment",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Append literal PR discussion without expected_version. Admission chooses the discussion predecessor at each authority-head attempt while the number, body and optional exact source anchor remain fixed. Retry the identical intent and original durable key for one historical terminal outcome.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "server_selected_head",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_pull_number_required", "invalid_idempotency_key", "body_required", "invalid_bounded_text", "nonblank_comment_required", "invalid_pull_comment", "source_anchor_object_required", "invalid_source_anchor_oid", "invalid_source_anchor_ref", "invalid_source_anchor_version", "invalid_source_anchor_comparison", "invalid_source_anchor_side", "invalid_source_anchor_mode", "invalid_source_anchor", "invalid_source_anchor_hex", "mutation_outcome_unknown"],
+      "cli_command": "fg pr append-comment",
+      "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/comments/append"
     },
     {
       "name": "frankengit_pull_checks",

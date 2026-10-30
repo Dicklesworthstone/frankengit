@@ -74,25 +74,48 @@ pub(super) fn execute(
     if request.is_mutation() {
         // Finish framing and validate the entire supplied form before the
         // native driver can acquire any publication responsibility.
-        let command = request.command(&read_form(reader, framing, limits)?, node.object_format)?;
-        command
-            .proposed_event(principal)
-            .map_err(|_| ApiError::bad("invalid_comment_command"))?;
-        let (tx, terminal) = drive_request_while(
-            node,
-            &context,
-            node.admit_pull_request_comment_durable_in(
+        let form = read_form(reader, framing, limits)?;
+        let (tx, terminal, body) = if request.is_append() {
+            let command = request.append_command(&form, node.object_format)?;
+            command
+                .commitment_event(principal)
+                .map_err(|_| ApiError::bad("invalid_comment_command"))?;
+            let (tx, terminal) = drive_request_while(
+                node,
                 &context,
-                session,
-                &command,
-                Default::default(),
-            ),
-            &mut live,
-        )
-        .map_err(admission_error)?;
-        // Do not read a newer discussion here: an exact historical retry must
-        // retain its original terminal after later comments or PR changes.
-        let body = output::publication(node, principal, &command, tx, terminal)?;
+                node.admit_pull_request_append_comment_durable_in(
+                    &context,
+                    session,
+                    &command,
+                    Default::default(),
+                ),
+                &mut live,
+            )
+            .map_err(admission_error)?;
+            let body = output::append_publication(node, principal, &command, tx, terminal)?;
+            (tx, terminal, body)
+        } else {
+            let command = request.command(&form, node.object_format)?;
+            command
+                .proposed_event(principal)
+                .map_err(|_| ApiError::bad("invalid_comment_command"))?;
+            let (tx, terminal) = drive_request_while(
+                node,
+                &context,
+                node.admit_pull_request_comment_durable_in(
+                    &context,
+                    session,
+                    &command,
+                    Default::default(),
+                ),
+                &mut live,
+            )
+            .map_err(admission_error)?;
+            let body = output::publication(node, principal, &command, tx, terminal)?;
+            (tx, terminal, body)
+        };
+        // Never read a newer discussion to manufacture a receipt version:
+        // historical retries retain their original terminal after later writes.
         if body.len() > maximum {
             eprintln!(
                 "PR comment HTTP response limit after canonical outcome for transaction {tx}; recover the original key"

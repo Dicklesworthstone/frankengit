@@ -434,7 +434,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
         }
         if (result.reply.next_after !== null) button(nodes['comment-paging'], 'Next comments page', () => loadComments(result.reply.next_after, result.head, limit));
         item(doc, nodes.conversation, 'p', result.reply.complete ? 'All comments after this cursor are shown.' : 'More comments remain at this snapshot.');
-        status('Conversation loaded. Preparing a comment uses its displayed discussion version and preserves PR metadata.');
+        status('Conversation loaded. Independent comments can be appended while preserving PR metadata and any exact source anchor.');
       } catch (error) {
         guard(); clearComments(true);
         item(doc, nodes.conversation, 'p', `Conversation unavailable: ${error.message || 'read failed'}. Reload explicitly before preparing a comment.`);
@@ -452,7 +452,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       } else status(`Outcome unknown (${result.state}). No request was reexecuted. Absence never proves non-commit. Keep the original receipt and check its outcome again; this credential cannot resend it.`);
       return;
     }
-    if (result.action === 'comment') {
+    if (['comment', 'append-comment'].includes(result.action)) {
       nodes.confirm.checked = false;
       if (result.terminal) {
         clearComments(result.outcome !== 'committed');
@@ -506,10 +506,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('comment-form', 'submit', () => run('stage', async guard => {
     if (!selected || !conversation?.reply.found || conversation.reply.number !== selected.row.number) fail('Load the selected PR conversation first.');
     if (inlineSelection && (inlineSelection.row !== selected.row || inlineSelection.head !== selected.head || selected.stale || inlineSelection.stale)) fail('Reload the PR and select current source lines, or explicitly choose a general comment.');
-    await client.stageComment(selected.row.number, conversation.reply.discussion_version, nodes['comment-body'].value, inlineSelection?.anchor); guard();
+    await client.stageAppendComment(selected.row.number, nodes['comment-body'].value, inlineSelection?.anchor); guard();
     nodes.confirm.checked = false;
     status(inlineSelection ? 'Source comment prepared locally. Review the exact path, side, lines, blob, PR version and comment body below, then send it explicitly.'
-      : 'Comment prepared locally. Review its exact body and discussion version below, then send it explicitly.');
+      : 'Comment prepared locally. Review its exact body below, then send it explicitly. Other comments can arrive without invalidating this request.');
   }));
   on('new-pr', 'click', () => {
     if (operation || !client.connected || client.recoveryOnly) return;

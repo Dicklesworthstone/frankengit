@@ -51,13 +51,13 @@
     <p>Choose a smaller page if long comments exceed the response limit.</p>
     <div id="conversation"></div><div id="comment-paging"></div>
     <form id="comment-form">
-      <label>Conversation version <input id="comment-version" readonly aria-readonly="true"></label>
+      <label>Last read conversation version <input id="comment-version" readonly aria-readonly="true"></label>
       <div id="comment-location" role="status" aria-live="polite"></div>
       <button id="comment-general" type="button">Use a general comment instead</button>
       <label>Your comment <textarea id="comment-body" rows="5" maxlength="65536" required></textarea></label>
       <button id="comment-stage" type="submit">Prepare comment — do not send</button>
     </form>
-    <p>Load the conversation first. Your token determines the author. Preparing a comment saves its exact body and conversation version for sending or recovery below.</p>
+    <p>Load the conversation first. Your token determines the author. Preparing a comment saves its exact body and any selected source lines for sending or recovery below. Other comments can arrive before yours is sent.</p>
   </section>
   <details>
     <summary>Open, update, close, or reopen a PR</summary>

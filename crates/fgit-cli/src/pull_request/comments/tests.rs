@@ -318,3 +318,210 @@ fn comment_reports_preserve_exact_anchor_identity_and_explicit_outdated_status()
     page.comments[0].anchor_status = None;
     assert!(read_report(&options, "incarnation", Some(&page)).is_err());
 }
+
+fn independent_input(format: GitHashAlgorithm, anchored: bool) -> Vec<String> {
+    let mut input = if anchored {
+        anchored_input(format)
+    } else {
+        let mut input = args(true);
+        input.extend(["--object-format".into(), format.as_str().into()]);
+        input
+    };
+    input[0] = "append-comment".into();
+    let index = input
+        .iter()
+        .position(|value| value == "--expected-version")
+        .unwrap();
+    input.drain(index..index + 2);
+    input
+}
+
+#[test]
+fn append_comment_is_explicit_and_preserves_literal_body_and_optional_source_anchor() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for anchored in [false, true] {
+            let input = independent_input(format, anchored);
+            let parsed = options::parse(&input).unwrap();
+            assert_eq!(parsed.format, format);
+            let Operation::AppendComment {
+                principal,
+                key,
+                command,
+                body_file,
+            } = parsed.operation
+            else {
+                panic!("version-independent append")
+            };
+            assert_eq!(command.number.get(), 7);
+            assert_eq!(command.body, " é\r\n<script>literal</script> \n");
+            assert_eq!(command.anchor.is_some(), anchored);
+            assert_eq!(principal, PrincipalId::from_bytes([0x33; 16]));
+            assert_eq!(key, b"private-key");
+            assert!(body_file.is_none());
+            command.commitment_event(principal).unwrap();
+            if let Some(anchor) = command.anchor {
+                assert_eq!(anchor.source_tip.algorithm(), format);
+                assert_eq!(anchor.path, b"src/\xff.rs");
+                assert_eq!(anchor.pull_request_version, AggregateVersion::FIRST);
+            }
+            let mut exact_without_version = input.clone();
+            exact_without_version[0] = "comment".into();
+            assert!(options::parse(&exact_without_version).is_err());
+            for version in ["0", "1", "18446744073709551615"] {
+                let mut injected = input.clone();
+                injected.extend(["--expected-version".into(), version.into()]);
+                assert!(options::parse(&injected).is_err());
+            }
+        }
+    }
+    let mut help = Vec::new();
+    assert_eq!(
+        run(&["append-comment".into(), "--help".into()], &mut help).unwrap(),
+        0
+    );
+    assert!(
+        String::from_utf8(help)
+            .unwrap()
+            .contains("usage: fg pr append-comment")
+    );
+}
+
+#[test]
+fn append_comment_refuses_authority_overrides_missing_fields_and_partial_anchors() {
+    let input = independent_input(GitHashAlgorithm::Sha1, false);
+    for field in ["--principal", "--idempotency-key", "--body"] {
+        let mut missing = input.clone();
+        let index = missing.iter().position(|value| value == field).unwrap();
+        missing.drain(index..index + 2);
+        assert!(options::parse(&missing).is_err(), "missing {field}");
+    }
+    for field in [
+        "--force",
+        "--title",
+        "--source-tip",
+        "--after",
+        "--expected-head",
+    ] {
+        let mut injected = input.clone();
+        injected.extend([field.into(), "untrusted".into()]);
+        assert!(options::parse(&injected).is_err(), "{field}");
+    }
+    let mut untrusted = input.clone();
+    untrusted.retain(|arg| arg != "--trusted-local");
+    assert!(options::parse(&untrusted).is_err());
+    for body in ["", " \r\n\t", "a\0b"] {
+        let mut invalid = input.clone();
+        replace(&mut invalid, "--body", body);
+        assert!(options::parse(&invalid).is_err());
+    }
+    let mut bounded = input;
+    replace(&mut bounded, "--body", &"x".repeat(65_536));
+    assert!(options::parse(&bounded).is_ok());
+    replace(&mut bounded, "--body", &"é".repeat(32_769));
+    assert!(options::parse(&bounded).is_err());
+    for (field, _) in anchor_args(GitHashAlgorithm::Sha1) {
+        let mut missing = independent_input(GitHashAlgorithm::Sha1, true);
+        let index = missing.iter().position(|value| value == &field).unwrap();
+        missing.drain(index..index + 2);
+        assert!(options::parse(&missing).is_err(), "missing {field}");
+    }
+}
+
+#[test]
+fn append_comment_validates_body_files_before_opening_or_sealing_a_node() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "fg-pr-append-body-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let body = root.join("body");
+    std::fs::write(&body, " \r\n\t").unwrap();
+    let mut input = independent_input(GitHashAlgorithm::Sha1, false);
+    let index = input.iter().position(|value| value == "--body").unwrap();
+    input[index] = "--body-file".into();
+    input[index + 1] = body.to_str().unwrap().into();
+    input[1] = root.join("must-not-open").to_str().unwrap().into();
+    let parsed = options::parse(&input).unwrap();
+    let Operation::AppendComment {
+        command, body_file, ..
+    } = parsed.operation
+    else {
+        panic!("append")
+    };
+    assert!(command.body.is_empty());
+    assert_eq!(body_file.as_deref(), Some(body.as_path()));
+    let error = run(&input, &mut Vec::new()).unwrap_err();
+    assert!(error.contains("comment must contain nonblank"));
+    assert!(!root.join("must-not-open").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn append_receipts_keep_original_terminal_identity_without_inventing_discussion_positions() {
+    use fgit_types::{DecisionSequence, RefusalCode, RefusalRecordId, RepositoryCommitId};
+    let parsed = options::parse(&independent_input(GitHashAlgorithm::Sha1, true)).unwrap();
+    let Operation::AppendComment {
+        principal, command, ..
+    } = &parsed.operation
+    else {
+        panic!("append")
+    };
+    let algorithm = DigestAlgorithmId::try_new(1).unwrap();
+    let digest = |seed| DigestBytes::try_new(&[seed; 32]).unwrap();
+    let tx = TxId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest(1));
+    for outcome in [
+        DecisionOutcome::Committed {
+            repository_commit_id: RepositoryCommitId::from_digest(
+                algorithm,
+                CANONICAL_CODEC_VERSION,
+                digest(2),
+            ),
+        },
+        DecisionOutcome::Refused {
+            code: RefusalCode::EvidenceStale,
+            refusal_record_id: RefusalRecordId::from_digest(
+                algorithm,
+                CANONICAL_CODEC_VERSION,
+                digest(3),
+            ),
+        },
+    ] {
+        let terminal = TerminalOutcome {
+            decision_sequence: DecisionSequence::FIRST,
+            outcome,
+        };
+        let receipt = append_report(
+            &parsed,
+            "incarnation",
+            *principal,
+            None,
+            command.anchor.as_ref(),
+            tx,
+            &terminal,
+            None,
+        );
+        assert!(receipt.contains("\"action\":\"append-comment\""));
+        assert!(receipt.contains("\"expected_version\":null,\"comment_version\":null"));
+        assert!(receipt.contains(&tx.to_string()));
+        assert!(receipt.contains("\"historical_outcome\":true"));
+        assert!(receipt.contains("\"refs_changed\":false"));
+        assert!(receipt.contains(SOURCE_COMMENT_PROFILE));
+        assert!(!receipt.contains("private-key"));
+        let exact = append_report(
+            &parsed,
+            "incarnation",
+            *principal,
+            Some(ExpectedVersion::NewStream),
+            None,
+            tx,
+            &terminal,
+            None,
+        );
+        assert!(exact.contains("\"action\":\"comment\""));
+        assert!(exact.contains("\"expected_version\":\"0\""));
+        assert!(!exact.contains("comment_version"));
+    }
+}

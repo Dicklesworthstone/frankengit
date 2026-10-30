@@ -1,10 +1,11 @@
 //! Bounded JSON over an exact canonical discussion page or immutable receipt.
 
 use fgit_authority::TerminalOutcome;
-use fgit_forge::ExpectedVersion;
 use fgit_forge::event::pull_request_comment::{
-    PullRequestCommentCommand, SOURCE_COMMENT_PROFILE, SourceCommentAnchor,
+    PullRequestAppendCommentCommand, PullRequestCommentCommand, SOURCE_COMMENT_PROFILE,
+    SourceCommentAnchor,
 };
+use fgit_forge::{ExpectedVersion, PullRequestNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 
 use super::super::super::Status;
@@ -176,15 +177,64 @@ pub(super) fn publication(
         ExpectedVersion::NewStream => 0,
         ExpectedVersion::Exactly(version) => version.get(),
     };
+    publication_fields(
+        node,
+        principal,
+        Publication {
+            number: command.number,
+            expected: Some(expected),
+            anchor: command.anchor.as_ref(),
+        },
+        tx,
+        terminal,
+    )
+}
+
+pub(super) fn append_publication(
+    node: &OneNode,
+    principal: PrincipalId,
+    command: &PullRequestAppendCommentCommand,
+    tx: TxId,
+    terminal: TerminalOutcome,
+) -> Result<String, ApiError> {
+    publication_fields(
+        node,
+        principal,
+        Publication {
+            number: command.number,
+            expected: None,
+            anchor: command.anchor.as_ref(),
+        },
+        tx,
+        terminal,
+    )
+}
+
+struct Publication<'a> {
+    number: PullRequestNumber,
+    expected: Option<u64>,
+    anchor: Option<&'a SourceCommentAnchor>,
+}
+
+fn publication_fields(
+    node: &OneNode,
+    principal: PrincipalId,
+    command: Publication<'_>,
+    tx: TxId,
+    terminal: TerminalOutcome,
+) -> Result<String, ApiError> {
     let (outcome, version, rcr, refusal, code, code_point) = match terminal.outcome {
         DecisionOutcome::Committed {
             repository_commit_id,
         } => (
             "committed",
-            expected
-                .checked_add(1)
-                .ok_or_else(ApiError::unknown)?
-                .to_string(),
+            match command.expected {
+                Some(expected) => expected
+                    .checked_add(1)
+                    .ok_or_else(ApiError::unknown)?
+                    .to_string(),
+                None => "null".to_owned(),
+            },
             quote(&repository_commit_id.to_string()),
             "null".to_owned(),
             "null".to_owned(),
@@ -205,7 +255,7 @@ pub(super) fn publication(
     Ok(format!(
         concat!(
             "{{\"type\":\"pull_request_comment_publication\",{},\"principal_id\":{},",
-            "\"number\":{},\"action\":\"comment\",\"expected_version\":{},\"comment_version\":{},",
+            "\"number\":{},\"action\":{},\"expected_version\":{},\"comment_version\":{},",
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"refusal_code_point\":{},",
             "\"refs_changed\":false,\"delivery_acknowledged\":null{}}}"
@@ -213,7 +263,12 @@ pub(super) fn publication(
         binding(node),
         quote(&principal.to_string()),
         command.number.get(),
-        expected,
+        quote(if command.expected.is_some() {
+            "comment"
+        } else {
+            "append-comment"
+        }),
+        optional(command.expected),
         version,
         quote(&tx.to_string()),
         quote(outcome),
@@ -222,7 +277,7 @@ pub(super) fn publication(
         refusal,
         code,
         code_point,
-        command.anchor.as_ref().map_or_else(String::new, |anchor| {
+        command.anchor.map_or_else(String::new, |anchor| {
             format!(",\"anchor\":{}", anchor_json(anchor))
         }),
     ))

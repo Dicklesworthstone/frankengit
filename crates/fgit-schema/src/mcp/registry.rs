@@ -5,6 +5,7 @@ mod agent_context;
 mod append;
 mod artifacts;
 mod core;
+mod pull_append;
 use super::types;
 use types::{FieldClassification, McpField, McpToolEntry};
 
@@ -67,12 +68,13 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 5] = [
+const ADDITIONS: [McpToolEntry; 6] = [
     agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,
     TRANSACTION,
     append::ENTRY,
+    pull_append::ENTRY,
 ];
 const fn assemble() -> [McpToolEntry; core::REGISTRY.len() + ADDITIONS.len()] {
     let mut result = [TRANSACTION; core::REGISTRY.len() + ADDITIONS.len()];

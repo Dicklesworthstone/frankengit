@@ -12,6 +12,13 @@ export function commentCommand(fields) {
     expected_version: integer(fields.expected_version, 'conversation version', 0, Number.MAX_SAFE_INTEGER - 1), body,
     ...(Object.hasOwn(fields, 'anchor') ? { anchor: sourceCommentAnchor(fields.anchor, fields.object_format) } : {}) };
 }
+export function appendCommentCommand(fields) {
+  keys(fields, ['object_format', 'body', 'anchor']);
+  const body = text(fields.body, 64 * 1024, 'comment body');
+  if (!body.trim()) fail('Write a nonblank comment.');
+  return { object_format: format(fields.object_format), body,
+    ...(Object.hasOwn(fields, 'anchor') ? { anchor: sourceCommentAnchor(fields.anchor, fields.object_format) } : {}) };
+}
 export function collaborationCommand(action, fields) {
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unsupported review action.');
   keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', ...(action === 'merge' ? ['required_reviewer', 'method'] : ['expected_version', 'reason'])]);
@@ -43,12 +50,14 @@ export function fastForwardCommand(fields) {
 }
 export function command(action, fields) {
   if (action === 'comment') return commentCommand(fields);
+  if (action === 'append-comment') return appendCommentCommand(fields);
   if (action === 'fast-forward') return fastForwardCommand(fields);
   return ['open', 'update', 'close', 'reopen'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
 }
 export function requestPath(number, action) {
   integer(number, 'PR number', 1);
   if (action === 'comment') return `pulls/${number}/comments`;
+  if (action === 'append-comment') return `pulls/${number}/comments/append`;
   if (!['open', 'update', 'close', 'reopen', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
   return `pulls/${number}/${['approve', 'request-changes', 'withdraw'].includes(action) ? `reviews/${action}` : action}`;
 }
@@ -57,7 +66,8 @@ export function requestBody(action, fields, bundle, nonce) {
   // Plain comment bytes remain unchanged; an anchored comment additionally
   // binds the complete source selection, with no caller-selected authority.
   // The retained request scope independently binds the repository hash domain.
-  const encoded = form(action === 'comment' ? { expected_version: normalized.expected_version, body: normalized.body,
+  const encoded = form(['comment', 'append-comment'].includes(action) ? {
+    ...(action === 'comment' ? { expected_version: normalized.expected_version } : {}), body: normalized.body,
     ...(normalized.anchor ? sourceCommentFields(normalized.anchor) : {}) } : normalized);
   if (!/^[0-9a-f]{32}$/.test(nonce)) fail('Invalid request nonce.');
   if (['approve', 'request-changes', 'merge'].includes(action)) {
@@ -79,10 +89,11 @@ export function publication(reply, pending, status) {
   const metadata = ['open', 'update', 'close', 'reopen'].includes(pending.action);
   if (metadata) {
     if (reply.type !== 'pull_request_publication' || reply.number !== pending.number || reply.expected_version !== pending.fields.expected_version) fail('Wrong terminal PR command.');
-  } else if (pending.action === 'comment') {
+  } else if (['comment', 'append-comment'].includes(pending.action)) {
+    const expected = pending.action === 'comment' ? pending.fields.expected_version : null;
     if (reply.type !== 'pull_request_comment_publication' || reply.number !== pending.number ||
-        reply.expected_version !== pending.fields.expected_version || reply.refs_changed !== false ||
-        reply.comment_version !== (reply.outcome === 'committed' ? pending.fields.expected_version + 1 : null)) fail('Wrong terminal conversation command.');
+        reply.expected_version !== expected || reply.refs_changed !== false ||
+        reply.comment_version !== (reply.outcome === 'committed' && expected !== null ? expected + 1 : null)) fail('Wrong terminal conversation command.');
     if (Object.hasOwn(reply, 'anchor_status') || Object.hasOwn(reply, 'anchor') !== Object.hasOwn(pending.fields, 'anchor')) fail('Terminal source comment coordinates changed.');
     if (Object.hasOwn(reply, 'anchor') && JSON.stringify(sourceCommentAnchor(reply.anchor, pending.scope.format)) !==
         JSON.stringify(sourceCommentAnchor(pending.fields.anchor, pending.scope.format))) fail('Terminal source comment anchor changed.');

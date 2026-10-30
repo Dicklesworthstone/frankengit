@@ -307,6 +307,10 @@ export class PullClient {
     return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body,
       ...(anchor === undefined ? {} : { anchor }) }, null);
   }
+  async stageAppendComment(number, body, anchor = undefined) {
+    return this.#stage(number, 'append-comment', { object_format: this.#selected().format, body,
+      ...(anchor === undefined ? {} : { anchor }) }, null);
+  }
   async stageReview(action, version, reason) {
     if (!['approve', 'request-changes', 'withdraw'].includes(action) || !this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a review.');
     const { number, fields, bundle } = this.#artifact;
@@ -409,8 +413,8 @@ export class PullClient {
       });
       const result = publication(response.value, p, response.status);
       this.#pending = null;
-      if (p.action !== 'comment') this.invalidateCandidate();
-      return p.action === 'comment' ? { ...result, action: 'comment' } : result;
+      if (!['comment', 'append-comment'].includes(p.action)) this.invalidateCandidate();
+      return ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } catch (error) { error.outcomeUnknown = true; throw error; }
     finally { this.#busy = false; }
   }
@@ -420,9 +424,9 @@ export class PullClient {
     try {
       const response = await this.#transport.request('outcomes', { method: 'POST', key: p.key, read: false, maximum: 32 * 1024 });
       const result = recovery(response.value, p);
-      if (result.terminal) { this.#pending = null; if (p.action !== 'comment') this.invalidateCandidate(); }
+      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment'].includes(p.action)) this.invalidateCandidate(); }
       else { p.observedTx = result.tx; p.observedPrincipal = result.principal; if (result.tx) p.sent = true; }
-      return p.action === 'comment' ? { ...result, action: 'comment' } : result;
+      return ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } finally { this.#busy = false; }
   }
 }

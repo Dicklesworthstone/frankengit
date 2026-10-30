@@ -7,11 +7,14 @@ on open, closed, and merged native PRs. Commenting changes neither the PR's
 metadata version nor its review streams, branch tips, or policy epoch.
 
 This implements append-only conversations and comments on exact original source
-lines within `frankengit-root-doctrine-x2mv.4.20`. Editing, deletion, thread
+lines within `frankengit-root-doctrine-x2mv.4.20`, with an explicit
+version-independent append profile from `frankengit-root-doctrine-x2mv.4.39`.
+Editing, deletion, thread
 resolution and source remapping remain outside this profile. Legacy-only and
 merge-only records without native PR metadata do not acquire a fabricated
 conversation subject. The canonical contract is
-[`20.1 of the normative protocol](NORMATIVE_PROTOCOL_CONTRACTS.md#201-native-pr-conversation-streams).
+[§20.1 of the normative protocol](NORMATIVE_PROTOCOL_CONTRACTS.md#201-native-pr-conversation-streams)
+and [§20.2.2 for version-independent appends](NORMATIVE_PROTOCOL_CONTRACTS.md#2022-native-pull-request-append-comment-intents).
 
 ## Read and append with `fg`
 
@@ -26,7 +29,25 @@ An available PR with no comments returns `found: true` and
 null version. Storage, integrity, cancellation, and pagination failures are
 errors; they are never represented as an empty conversation.
 
-Append a comment using the returned **discussion** version:
+Append an independent comment without selecting a discussion predecessor:
+
+```sh
+fg pr append-comment "$STORAGE" "$TENANT" "$REPOSITORY" 7 --trusted-local \
+  --principal "$PRINCIPAL" --idempotency-key 'pr-7-append-1' \
+  --body-file ./comment.md
+```
+
+Admission selects the next conversation position at each authority-head attempt.
+If another comment publishes first, it revalidates the same sealed request and
+replans only that position. The original author, PR number, body and optional
+source anchor cannot change. Different keys with identical text create distinct
+comments; retrying one original key and identical request recovers its one
+terminal outcome. The operation still requires the canonical authority-head CAS
+and remains subject to permission, resource and source-validation limits.
+`--expected-version` is rejected for `append-comment`.
+
+The existing `comment` command remains available when the caller deliberately
+requires the returned **discussion** version:
 
 ```sh
 fg pr comment "$STORAGE" "$TENANT" "$REPOSITORY" 7 --trusted-local \
@@ -39,11 +60,19 @@ UTF-8, at most 65,536 bytes, without NUL. Whitespace, line endings, Markdown,
 and Unicode are preserved. Body files use the existing bounded, regular-file,
 trusted-operator input path. The file is read before opening the repository.
 
-The command's version is independent of the PR metadata version. Two writers
-using the same discussion predecessor cannot both append at its successor:
+For this strict command, the version is independent of the PR metadata version.
+Two strict writers using the same discussion predecessor cannot both append at its successor:
 one must receive a canonical stale-version refusal and deliberately submit a
-new command if the author still wants to post it. A successful first append
+new command if the author still wants to post it. This strict command is never
+silently upgraded to the version-independent profile. A successful first append
 creates comment version 1; each later append advances the discussion by one.
+
+An `append-comment` receipt reports `action: "append-comment"`,
+`expected_version: null` and `comment_version: null`. It identifies the original
+transaction, decision sequence and committed repository record or refusal.
+The receipt does not infer an assigned comment version from a later discussion
+read. Read the conversation to observe its ordered rows. Existing strict-command
+receipt shapes remain unchanged.
 
 Add `--object-format sha256` for a SHA-256 repository. This metadata workflow
 does not infer the repository format from a comment or invoke Git.
@@ -73,8 +102,10 @@ fg pr diff "$STORAGE" "$TENANT" "$REPOSITORY" 7 --trusted-local \
 
 The existing [PR diff](SOURCE_REVIEW_COMMAND.md) uses recorded source and target
 tips from one authenticated head. A branch push does not silently refresh them.
-`pull_request.version` is the **PR metadata version**; obtain the independent
-**discussion version** through `fg pr comments` before appending.
+`pull_request.version` is the **PR metadata version**. A source anchor requires
+that exact inspected PR basis even for `append-comment`. The independent
+**discussion version** from `fg pr comments` is required only for the strict
+`fg pr comment` command.
 
 The source profile is fixed as `frankengit.source-comment.myers-lines.v1`.
 Choose a nonempty before- or after-side range of whole original lines from a
@@ -125,9 +156,9 @@ hyphens. For example, after inspecting a regular `src/lib.rs` whose selected
 after-side first line is exactly `reviewed\n` (nine original bytes):
 
 ```sh
-fg pr comment "$STORAGE" "$TENANT" "$REPOSITORY" 7 --trusted-local \
+fg pr append-comment "$STORAGE" "$TENANT" "$REPOSITORY" 7 --trusted-local \
   --principal "$PRINCIPAL" --idempotency-key 'pr-7-source-comment-1' \
-  --expected-version "$DISCUSSION_VERSION" --body-file ./comment.md \
+  --body-file ./comment.md \
   --anchor-pull-request-version "$PR_VERSION" \
   --anchor-source-ref-hex "$SOURCE_REF_HEX" \
   --anchor-target-ref-hex "$TARGET_REF_HEX" \
@@ -144,6 +175,12 @@ path and range apply only to those exact bytes. Add `--object-format sha256` to
 both CLI commands for a SHA-256 repository. Omitting every anchor flag creates
 an ordinary conversation comment. A partial anchor, duplicate field, unknown
 field or caller-supplied profile is rejected.
+
+For the strict equivalent, use `fg pr comment` with the same complete anchor
+and add `--expected-version "$DISCUSSION_VERSION"`. Version-independent
+replanning does not refresh an anchor's PR version, recorded tips or coordinates.
+A stale source anchor requires a newly inspected selection and a new command;
+it must never be edited while recovering an uncertain request.
 
 An anchored row adds `anchor`, including the fixed output-only `profile`, and
 `anchor_status`. CLI and MCP encode the PR version and all four coordinates as
@@ -171,11 +208,16 @@ also apply.
 
 ```text
 GET  /<repository-route>/api/v1/pulls/7/comments?limit=20
+POST /<repository-route>/api/v1/pulls/7/comments/append
 POST /<repository-route>/api/v1/pulls/7/comments
 ```
 
 A POST requires `Content-Type: application/x-www-form-urlencoded`, a stable
-`Idempotency-Key`, and `expected_version` plus `body`. For an anchored comment,
+`Idempotency-Key`, and `body`. The `/comments/append` route selects the discussion
+predecessor during admission and rejects `expected_version`. The existing
+`/comments` route requires `expected_version` and retains its strict semantics.
+The append route accepts POST only and has no read or pagination operation.
+For an anchored comment on either route,
 add every field in the table above with the prefix `anchor_`; for example,
 `anchor_pull_request_version`, `anchor_source_ref_hex` and `anchor_byte_start`.
 The decoded form values are strings; decimal values must be canonical, without
@@ -187,10 +229,10 @@ For the same inspected nine-byte line used in the CLI example, with `BASE_URL`
 including the configured repository route:
 
 ```sh
-curl "$BASE_URL/api/v1/pulls/7/comments" \
+curl "$BASE_URL/api/v1/pulls/7/comments/append" \
+  -A 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)' \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Idempotency-Key: pr-7-source-comment-http-1' \
-  --data-urlencode "expected_version=$DISCUSSION_VERSION" \
   --data-urlencode body@./comment.md \
   --data-urlencode "anchor_pull_request_version=$PR_VERSION" \
   --data-urlencode "anchor_source_ref_hex=$SOURCE_REF_HEX" \
@@ -211,10 +253,14 @@ The recorded [PR diff HTTP route](PULL_REQUEST_DIFF_HTTP.md) provides source
 coordinates under its own conjunctive source-read and PR-read grants.
 Comment-write permission does not grant that source read.
 
-The service returns the canonical committed/refused receipt, including
-`comment_version` on commit and the supplied anchor when present. Receipts do
-not include `anchor_status`: publication does not perform a later state read
-that could obscure a completed outcome.
+The service returns the canonical committed/refused receipt and the supplied
+anchor when present. Append receipts use `action: "append-comment"`,
+`expected_version: null` and `comment_version: null`, with the original
+transaction, decision sequence and repository commit or refusal. Strict
+`/comments` receipts retain their supplied expected version and assigned
+`comment_version` on commit. Neither receipt includes `anchor_status`:
+publication does not perform a later state read that could obscure a completed
+outcome or attach another comment's version to an old append.
 
 A GET accepts `after`, `limit` (1–100), `expected_head`, and the existing
 `render=html_safe` presentation option. It rejects request bodies and
@@ -244,6 +290,7 @@ The ordinary operator-sponsored MCP profile exposes:
 | Tool | Required independent launch grant | Input |
 |---|---|---|
 | `frankengit_pull_comments` | `--allow-pulls` | `number`, optional `after`, `limit`, `expected_head` |
+| `frankengit_pull_append_comment` | `--allow-pull-writes` | `number`, `idempotency_key`, `body`, optional complete `anchor` |
 | `frankengit_pull_comment` | `--allow-pull-writes` | `number`, `expected_version`, `idempotency_key`, `body`, optional complete `anchor` |
 
 Writes also require the existing launch-bound `--principal` and exact
@@ -257,23 +304,28 @@ MCP text ceiling of 16 KiB; previously published larger native comments can be
 read subject to the protocol's response budget. Text is returned as data, not
 an instruction or HTML authority.
 
+For `frankengit_pull_append_comment`, supply no discussion version:
+
 ```json
 {
   "number": "7",
-  "expected_version": "0",
   "idempotency_key": "pr-7-comment-1",
   "body": "Could we cover the cancellation path before merging?"
 }
 ```
 
-For a source comment, include a nested `anchor` object with all 15 fields from
+The strict `frankengit_pull_comment` tool instead requires
+`"expected_version": "0"` for a first comment, or the last observed discussion
+version as a decimal string. Adding this field to the append tool is invalid.
+Both tools retain the launch-bound author and original-key recovery semantics.
+
+For an append with a source comment, include a nested `anchor` object with all 15 fields from
 the source-anchor table. The following is a SHA-1 wire-shape example; replace
 the illustrative OIDs and coordinates with the exact inspected PR selection:
 
 ```json
 {
   "number": "7",
-  "expected_version": "0",
   "idempotency_key": "pr-7-source-comment-mcp-1",
   "body": "Could we cover the cancellation path on this line?",
   "anchor": {
@@ -303,6 +355,11 @@ The running tool's discovery schema lists the complete required nested fields
 with `additionalProperties: false`. Anchored read rows return `anchor_status`;
 publication receipts echo only the original anchor.
 
+Append receipts report `action: "append-comment"`, `expected_version: null` and
+`comment_version: null`. They preserve the original terminal identity rather
+than performing a new read to derive an assigned version. Legacy strict tool
+receipts keep their existing fields.
+
 ## Browser conversation
 
 Open the repository's `/ui/pulls/` page, connect an explicitly scoped token,
@@ -315,12 +372,16 @@ the HTTP response budget without silently truncating bodies.
 The page displays each comment's version, authenticated author, and literal
 body, with the existing source-bound safe Markdown presentation when available.
 Missing or undisclosed conversations cannot be mistaken for an available empty
-stream. A malformed or stale page clears the old conversation and writable
+stream. A malformed or stale page clears the old conversation and its displayed
 version, while preserving the unsent draft for an explicit reload. Credential
 rejection or disconnect clears private views and drafts.
 
-**Prepare comment** saves the original body and the loaded conversation version
-locally. It does not publish. The existing explicit confirmation and send controls
+**Prepare comment** saves the original body and optional complete source anchor
+locally as an `append-comment` request. The displayed **Last read conversation
+version** gives reading context; it is not submitted as a publication precondition.
+The page still requires loading the selected conversation before preparing a
+comment. Another comment arriving afterward does not invalidate the saved
+request. Preparation does not publish. The existing explicit confirmation and send controls
 submit that saved request; later form edits cannot change it. An uncertain result
 retains the original request and key for retry, receipt export, and outcome
 recovery. Terminal comment outcomes preserve independently inspected candidates,
@@ -333,7 +394,7 @@ To attach the draft to source, load a complete PR source diff and choose
 nonempty text-hunk range. These controls select at most 128 lines and 64 KiB
 from a blob within the 1 MiB profile. The page retains the exact PR basis and
 source coordinates and displays the selected original bytes as inert text.
-Load the discussion version when needed, write the comment body, and choose
+Load the conversation when needed, write the comment body, and choose
 **Prepare comment**. Review the saved anchor and body before the existing
 explicit confirmation and send step.
 
@@ -347,16 +408,25 @@ An uncertain send retains the complete original anchor and body for recovery.
 
 ## Retry, history, and delivery
 
-Retry an uncertain append using the **identical principal, original key, PR
-number, expected discussion version, body bytes, and every optional anchor
-coordinate**. Preserve whether an anchor was present. Do not increment either
-version, refresh the PR tips, replace the key, trim the body or reread a modified
+Retry an uncertain publication using the **identical profile, principal, original
+key, PR number, body bytes, and every optional anchor coordinate**. A strict
+`comment` request must also retain its original expected discussion version;
+an `append-comment` request must continue to omit it. Preserve whether an anchor
+was present. Do not switch profiles, increment a version, refresh the PR tips,
+replace the key, trim the body or reread a modified
 file to recover an old request. The native node resolves and revalidates a known
 immutable terminal result before applying fresh-publication intake, quota or
 source-basis checks. The original command can recover its committed outcome
 after PR metadata changes or restart; a new command with the stale anchor must
 be refused. A changed body or anchor cannot claim the old outcome by reusing
 its key.
+
+A lost response, disconnect or cancellation does not establish non-commit.
+Automatic replanning after a lost authority-head CAS preserves the append's
+original sealed identity; it does not permit a client to replace a command
+whose outcome is uncertain. Fresh appends after restart use the current
+authenticated conversation frontier, while original-key recovery returns the
+historical terminal result even if later comments have advanced that frontier.
 
 An append is one canonical event plus its delivery obligation. Delivery is
 at least once unless the destination supplies stronger semantics; a receipt's
@@ -396,6 +466,15 @@ as metadata or approvals. There is no second mutable comment store or side
 publication step. Current canonical outbox/history capacity limits still
 apply; this feature does not claim to remove those broader limits.
 
+Version-independent appends use the same kind-12 or kind-15 publication encoding.
+Their request commitment has the distinct `pull-request.append-comment.v1`
+scope and a fixed version-1 event template, as specified in §20.2.2. That template
+binds the immutable intent and is not the selected publication predecessor.
+Strict requests keep the `pull-request-comment.event-batch-root.v1` scope.
+Final preparation independently validates the complete seal before admitting
+either profile. No stored-comment migration or rewritten historical receipt is
+required, and additive replanning still requires the exact authority-head CAS.
+
 ## Verification scope
 
 Conversation regression suites cover codec/stream and reference transitions,
@@ -408,8 +487,10 @@ metadata changes. Webhook selector tests exercise both kinds and whole-batch
 refusal. Browser tests use controlled HTTP responses and do not establish
 execution of the Rust server.
 
-Source formatting and review do not replace native gates. The source-anchor
-node/CLI campaigns were added without executing native builds or tests in this
-editing session; unchanged Asupersync compilation had exceeded the shared
-runner's memory budget. Revision-bound execution evidence remains required, and
-the broader PR-workflow bead remains open.
+Append regressions cover fixed intent seals, strict/append profile separation,
+competing publications and CAS retries, identical text under distinct keys,
+original-key recovery after restart, stopped intake and stale anchors, independent
+transport grants, and browser request/receipt preservation. Source formatting,
+test definitions and review do not replace native gates. Revision-bound execution
+evidence remains required; this bounded PR append profile does not close the
+broader PR-workflow or CALM-admission beads.

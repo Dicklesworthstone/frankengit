@@ -153,6 +153,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.writes.pulls {
         tools.extend(pull_writes::tools());
         tools.push(pull_comments::write_tool());
+        tools.push(pull_comments::append_tool());
     }
     if options.writes.source {
         tools.extend(source_writes::tools());
@@ -215,7 +216,8 @@ impl ReadTools for NodeTools {
     fn is_mutation(&self, name: &str) -> bool {
         (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
-            || (self.options.writes.pulls && name == pull_comments::WRITE)
+            || (self.options.writes.pulls
+                && matches!(name, pull_comments::WRITE | pull_comments::APPEND))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
             || (self.options.writes.merges && merge_writes::is_tool(name))
@@ -240,6 +242,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.writes.pulls && name == pull_comments::WRITE {
             return pull_comments::append(self, args);
+        }
+        if self.options.writes.pulls && name == pull_comments::APPEND {
+            return pull_comments::append_comment(self, args);
         }
         if self.options.writes.source && source_writes::is_tool(name) {
             return source_writes::call(self, name, args);
@@ -494,7 +499,8 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 48);
+        assert_eq!(server_names.len(), 49);
+        assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
         let append = issue_writes::tools()

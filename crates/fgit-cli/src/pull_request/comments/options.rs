@@ -1,11 +1,11 @@
-//! Exact discussion versions and bounded literal comment input.
+//! Explicit exact-predecessor and version-independent comment inputs.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::pull_request_comment::{
-    MAX_COMMENT_BYTES, PullRequestCommentCommand, SourceCommentAnchor, SourceCommentComparison,
-    SourceCommentSide,
+    MAX_COMMENT_BYTES, PullRequestAppendCommentCommand, PullRequestCommentCommand,
+    SourceCommentAnchor, SourceCommentComparison, SourceCommentSide,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::{
@@ -33,6 +33,12 @@ pub(super) enum Operation {
         command: PullRequestCommentCommand,
         body_file: Option<PathBuf>,
     },
+    AppendComment {
+        principal: PrincipalId,
+        key: Vec<u8>,
+        command: PullRequestAppendCommentCommand,
+        body_file: Option<PathBuf>,
+    },
     Read {
         after: u64,
         limit: u16,
@@ -46,9 +52,11 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     }
     let append = match args[0].as_str() {
         "comment" => true,
+        "append-comment" => true,
         "comments" => false,
         _ => return Err(super::USAGE.into()),
     };
+    let independent = args[0] == "append-comment";
     if args.iter().any(|arg| arg.len() > MAX_COMMENT_BYTES)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
         || args[1].is_empty()
@@ -75,12 +83,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             || if append {
                 matches!(
                     flag,
-                    "--principal"
-                        | "--idempotency-key"
-                        | "--expected-version"
-                        | "--body"
-                        | "--body-file"
-                ) || ANCHOR_FIELDS.contains(&flag)
+                    "--principal" | "--idempotency-key" | "--body" | "--body-file"
+                ) || (flag == "--expected-version" && !independent)
+                    || ANCHOR_FIELDS.contains(&flag)
             } else {
                 matches!(flag, "--after" | "--limit" | "--expected-head")
             };
@@ -114,14 +119,6 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             PrincipalId::from_hex(required("--principal")?).map_err(|_| "invalid principal ID")?;
         let key = required("--idempotency-key")?.as_bytes().to_vec();
         IdempotencyKey::new(key.clone()).map_err(|_| "invalid bounded idempotency key")?;
-        let version = decimal(required("--expected-version")?)?;
-        let expected_version = if version == 0 {
-            ExpectedVersion::NewStream
-        } else {
-            let version = AggregateVersion::try_new(version).ok_or("invalid discussion version")?;
-            version.next().map_err(|_| "discussion version exhausted")?;
-            ExpectedVersion::Exactly(version)
-        };
         let (body, body_file) = match (flags.get("--body"), flags.get("--body-file")) {
             (Some(body), None) => {
                 validate_body(body)?;
@@ -132,16 +129,39 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             }
             _ => return Err("supply exactly one of --body or --body-file".into()),
         };
-        Operation::Append {
-            principal,
-            key,
-            command: PullRequestCommentCommand {
-                number,
-                expected_version,
-                body,
-                anchor: parse_anchor(&flags, format)?,
-            },
-            body_file,
+        let anchor = parse_anchor(&flags, format)?;
+        if independent {
+            Operation::AppendComment {
+                principal,
+                key,
+                command: PullRequestAppendCommentCommand {
+                    number,
+                    body,
+                    anchor,
+                },
+                body_file,
+            }
+        } else {
+            let version = decimal(required("--expected-version")?)?;
+            let expected_version = if version == 0 {
+                ExpectedVersion::NewStream
+            } else {
+                let version =
+                    AggregateVersion::try_new(version).ok_or("invalid discussion version")?;
+                version.next().map_err(|_| "discussion version exhausted")?;
+                ExpectedVersion::Exactly(version)
+            };
+            Operation::Append {
+                principal,
+                key,
+                command: PullRequestCommentCommand {
+                    number,
+                    expected_version,
+                    body,
+                    anchor,
+                },
+                body_file,
+            }
         }
     } else {
         let after = decimal(flags.get("--after").copied().unwrap_or("0"))?;

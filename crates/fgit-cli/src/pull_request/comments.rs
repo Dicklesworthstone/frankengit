@@ -27,6 +27,11 @@ usage: fg pr comment <storage-root> <tenant-id> <repository-id> <number>
    --anchor-byte-start <offset> --anchor-byte-end <offset>
    --anchor-line-start <zero-based line> --anchor-line-count <1..128>]
 
+usage: fg pr append-comment <storage-root> <tenant-id> <repository-id> <number>
+  --trusted-local --principal <id> --idempotency-key <key>
+  (--body <text> | --body-file <path>) [--object-format sha1|sha256]
+  [the same complete --anchor-* group as comment]
+
 usage: fg pr comments <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local [--object-format sha1|sha256] [--limit <1..100>]
   [--after <comment version> --expected-head <snapshot-token>]
@@ -34,6 +39,9 @@ usage: fg pr comments <storage-root> <tenant-id> <repository-id> <number>
 Comments append to an independent conversation stream. The expected version is
 the discussion_version from a complete or paginated comments read, not the PR
 metadata version. Comments do not change branch tips, PR versions or approvals.
+append-comment omits the discussion predecessor and refuses --expected-version.
+Its literal body and optional source anchor remain fixed while admission selects
+the current discussion position. Source anchors still require their exact PR basis.
 Open, closed and merged native PRs can be discussed. Optional source anchors
 require the complete immutable diff basis and exact whole-line byte coordinates.
 Use all anchor fields together; paths and refs are lowercase byte hex. Lines are
@@ -42,7 +50,9 @@ PR source and retained exactly. Reads label old PR metadata anchors outdated;
 they never silently move a comment. No edits or deletions are admitted.
 Bodies are literal nonblank UTF-8, up to 64 KiB.
 Retry an uncertain append using the identical principal, key, number, discussion
-version, body bytes and optional anchor. Never refresh an uncertain request or replace its key.
+version (for comment), body bytes and optional anchor. Never refresh an uncertain
+request or replace its key. append-comment receipts identify the original transaction
+and repository commit; they do not infer its assigned version from today's discussion.
 Exit 0: committed append or complete page; 3: canonical refusal;
 4: PR absent or hidden; 2: input/infrastructure/cleanup/output failure.";
 
@@ -51,14 +61,28 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
         return super::write_read_report(out, USAGE).map(|()| 0);
     }
     let mut options = options::parse(args)?;
-    if let Operation::Append {
-        command, body_file, ..
-    } = &mut options.operation
-    {
+    let input = match &mut options.operation {
+        Operation::Append {
+            command, body_file, ..
+        } => Some((&mut command.body, body_file)),
+        Operation::AppendComment {
+            command, body_file, ..
+        } => Some((&mut command.body, body_file)),
+        Operation::Read { .. } => None,
+    };
+    if let Some((body, body_file)) = input {
         if let Some(path) = body_file {
-            command.body = super::read_body_file(path)?;
+            *body = super::read_body_file(path)?;
         }
-        options::validate_body(&command.body)?;
+        options::validate_body(body)?;
+    }
+    if let Operation::AppendComment {
+        principal, command, ..
+    } = &options.operation
+    {
+        command
+            .commitment_event(*principal)
+            .map_err(|_| "invalid version-independent PR comment".to_owned())?;
     }
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
@@ -119,23 +143,50 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                 let report = read_report(&options, &incarnation, page.as_ref())?;
                 Ok(Completed::Read(report, if page.is_some() { 0 } else { 4 }))
             }
+            Operation::AppendComment {
+                principal,
+                key,
+                command,
+                ..
+            } => {
+                let session = LoopbackReceiveSession::authenticated(
+                    *principal,
+                    IdempotencyKey::new(key.clone()).map_err(|_| "invalid key")?,
+                );
+                node.runtime()
+                    .block_on(node.admit_pull_request_append_comment_durable_in(
+                        &request,
+                        &session,
+                        command,
+                        Default::default(),
+                    ))
+                    .map(Completed::Append)
+                    .map_err(|error| error.to_string())
+            }
         }
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     match operation {
         Ok(Completed::Append((tx, terminal))) => {
-            let Operation::Append {
-                principal, command, ..
-            } = &options.operation
-            else {
-                return Err("internal comment operation mismatch".into());
+            let (principal, expected, anchor) = match &options.operation {
+                Operation::Append {
+                    principal, command, ..
+                } => (
+                    *principal,
+                    Some(command.expected_version),
+                    command.anchor.as_ref(),
+                ),
+                Operation::AppendComment {
+                    principal, command, ..
+                } => (*principal, None, command.anchor.as_ref()),
+                Operation::Read { .. } => return Err("internal comment operation mismatch".into()),
             };
             let report = append_report(
                 &options,
                 &incarnation,
-                *principal,
-                command.expected_version,
-                command.anchor.as_ref(),
+                principal,
+                expected,
+                anchor,
                 tx,
                 &terminal,
                 cleanup.as_deref(),
@@ -166,14 +217,16 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
         }
         Err(error) => {
             let error = with_cleanup(error, cleanup.as_deref());
-            if matches!(options.operation, Operation::Append { .. }) {
-                Err(format!(
+            match options.operation {
+                Operation::Append { .. } => Err(format!(
                     "no terminal comment outcome returned: {error}; this does not prove non-commit. Retry the identical principal, key, number, discussion version, body bytes and optional anchor"
-                ))
-            } else {
-                Err(format!(
+                )),
+                Operation::AppendComment { .. } => Err(format!(
+                    "no terminal append-comment outcome returned: {error}; this does not prove non-commit. Retry the identical principal, key, number, body bytes and optional anchor; do not add a discussion version or replace the key"
+                )),
+                Operation::Read { .. } => Err(format!(
                     "comments read failed: {error}; no complete page returned"
-                ))
+                )),
             }
         }
     }
@@ -292,7 +345,7 @@ fn append_report(
     options: &Options,
     incarnation: &str,
     principal: PrincipalId,
-    expected: ExpectedVersion,
+    expected: Option<ExpectedVersion>,
     anchor: Option<&SourceCommentAnchor>,
     tx: TxId,
     terminal: &TerminalOutcome,
@@ -319,15 +372,35 @@ fn append_report(
             false,
         ),
     };
-    let version = match expected {
-        ExpectedVersion::NewStream => 0,
-        ExpectedVersion::Exactly(version) => version.get(),
+    let version = expected.map_or_else(
+        || "null".into(),
+        |expected| {
+            quote(
+                &match expected {
+                    ExpectedVersion::NewStream => 0,
+                    ExpectedVersion::Exactly(version) => version.get(),
+                }
+                .to_string(),
+            )
+        },
+    );
+    let action = if expected.is_some() {
+        "comment"
+    } else {
+        "append-comment"
+    };
+    let assigned_version = if expected.is_none() {
+        ",\"comment_version\":null"
+    } else {
+        ""
     };
     format!(
-        "{{\"type\":\"pull_request_comment_publication\",{},\"action\":\"comment\",\"principal_id\":{},\"expected_version\":{},\"outcome\":{},\"command_committed\":{},\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},\"terminal\":true,\"historical_outcome\":true,\"refs_changed\":false,\"delivery_acknowledged\":null,\"node_closed\":{},\"cleanup_error\":{}{}}}",
+        "{{\"type\":\"pull_request_comment_publication\",{},\"action\":{},\"principal_id\":{},\"expected_version\":{}{},\"outcome\":{},\"command_committed\":{},\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},\"terminal\":true,\"historical_outcome\":true,\"refs_changed\":false,\"delivery_acknowledged\":null,\"node_closed\":{},\"cleanup_error\":{}{}}}",
         scope(options, incarnation),
+        quote(action),
         quote(&principal.to_string()),
-        quote(&version.to_string()),
+        version,
+        assigned_version,
         quote(outcome),
         committed,
         quote(&tx.to_string()),
