@@ -3,6 +3,7 @@
 //! describes the mutation. Neither is a substitute for the other.
 
 use super::{CandidateEnvelope, MAX_BUNDLE_BYTES, MAX_CANDIDATE_BYTES, invalid, receive_error};
+use crate::receive_staging::ReceiveStaging;
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode, VerifiedFabricPackSource};
 use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionResult, CommandOutcome, SessionMapping,
@@ -29,6 +30,8 @@ impl OneNode {
     /// chain from the candidate to onto (at most 256 commits). A zero-commit
     /// series may move the branch directly to onto, including an empty pack.
     /// Existing workspace apply remains exactly one commit/one prerequisite.
+    /// New candidate objects remain private during chain validation and are
+    /// placed only when atomic receive admission prepares a commit.
     ///
     /// Ref protection, current disclosure, quota, closure verification, and
     /// exact-basis CAS remain the production receive path. This method does not
@@ -114,79 +117,90 @@ impl OneNode {
         self.push_quota
             .evaluate(&principal_id)
             .map_err(receive_error)?;
+        let staging = ReceiveStaging::default();
         let (validated, mut parse_limits) = self
-            .quarantine_bound_envelope_in(request, reference, expected_source, &envelope, &[])
+            .quarantine_bound_envelope_in(
+                request,
+                reference,
+                expected_source,
+                &envelope,
+                &[],
+                Some(&staging),
+            )
             .await?;
-        parse_limits.max_object_bytes = parse_limits.max_object_bytes.min(MAX_CANDIDATE_BYTES);
-        let exhaustion = Cell::new(None);
-        let source = VerifiedFabricPackSource {
-            fabric: &self.fabric,
-            object_format: self.object_format,
-            maximum_object_bytes: parse_limits.max_object_bytes,
-            database_context: request.authority(),
-            database_exhaustion: &exhaustion,
-            session_is_live: None,
-        };
-        let mut cursor = expected_candidate;
-        let mut seen = BTreeSet::new();
-        let mut bytes = 0_usize;
-        while cursor != onto {
+        {
+            parse_limits.max_object_bytes = parse_limits.max_object_bytes.min(MAX_CANDIDATE_BYTES);
+            let exhaustion = Cell::new(None);
+            let source = VerifiedFabricPackSource {
+                fabric: &self.fabric,
+                object_format: self.object_format,
+                maximum_object_bytes: parse_limits.max_object_bytes,
+                database_context: request.authority(),
+                database_exhaustion: &exhaustion,
+                session_is_live: None,
+            }
+            .with_staging(&staging);
+            let mut cursor = expected_candidate;
+            let mut seen = BTreeSet::new();
+            let mut bytes = 0_usize;
+            while cursor != onto {
+                if !super::super::workspace_request_live(request) {
+                    return Err(NodeWorkspaceRefusal::Cancelled {
+                        exhaustion: exhaustion.get(),
+                    });
+                }
+                if seen.len() == MAX_REBASE_COMMITS || !seen.insert(cursor) {
+                    return Err(invalid(
+                        "rebase candidate exceeds the bounded linear series",
+                    ));
+                }
+                let read = source.read_object(&cursor);
+                if !super::super::workspace_request_live(request) || exhaustion.get().is_some() {
+                    return Err(NodeWorkspaceRefusal::Cancelled {
+                        exhaustion: exhaustion.get(),
+                    });
+                }
+                let (kind, body) =
+                    read.map_err(|_| invalid("rebase commit bytes could not be verified"))?;
+                bytes = bytes
+                    .checked_add(body.len())
+                    .filter(|total| *total <= MAX_BUNDLE_BYTES)
+                    .ok_or_else(|| invalid("rebase commit traversal exceeds its byte budget"))?;
+                if kind != ObjectType::Commit {
+                    return Err(invalid("rebase candidate ancestry must contain commits"));
+                }
+                let ParsedObject::Commit(commit) = parse_object_body(
+                    kind,
+                    &body,
+                    AcceptanceProfile::GitCompatibleImport,
+                    &parse_limits,
+                )
+                .map_err(|_| invalid("rebase candidate is not a bounded native commit"))?
+                else {
+                    return Err(invalid("rebase candidate ancestry must contain commits"));
+                };
+                let mut parents = commit.parent_references();
+                let parent = parents
+                    .next()
+                    .ok_or_else(|| invalid("rebase series does not reach its onto prerequisite"))?;
+                if parents.next().is_some() {
+                    return Err(invalid(
+                        "rebase publication accepts only a single-parent series",
+                    ));
+                }
+                cursor = std::str::from_utf8(parent)
+                    .ok()
+                    .and_then(|text| {
+                        GitOid::from_hex(self.object_format, &text.to_ascii_lowercase()).ok()
+                    })
+                    .filter(|id| !id.is_zero())
+                    .ok_or_else(|| invalid("invalid rebase parent identity"))?;
+            }
             if !super::super::workspace_request_live(request) {
                 return Err(NodeWorkspaceRefusal::Cancelled {
                     exhaustion: exhaustion.get(),
                 });
             }
-            if seen.len() == MAX_REBASE_COMMITS || !seen.insert(cursor) {
-                return Err(invalid(
-                    "rebase candidate exceeds the bounded linear series",
-                ));
-            }
-            let read = source.read_object(&cursor);
-            if !super::super::workspace_request_live(request) || exhaustion.get().is_some() {
-                return Err(NodeWorkspaceRefusal::Cancelled {
-                    exhaustion: exhaustion.get(),
-                });
-            }
-            let (kind, body) =
-                read.map_err(|_| invalid("rebase commit bytes could not be verified"))?;
-            bytes = bytes
-                .checked_add(body.len())
-                .filter(|total| *total <= MAX_BUNDLE_BYTES)
-                .ok_or_else(|| invalid("rebase commit traversal exceeds its byte budget"))?;
-            if kind != ObjectType::Commit {
-                return Err(invalid("rebase candidate ancestry must contain commits"));
-            }
-            let ParsedObject::Commit(commit) = parse_object_body(
-                kind,
-                &body,
-                AcceptanceProfile::GitCompatibleImport,
-                &parse_limits,
-            )
-            .map_err(|_| invalid("rebase candidate is not a bounded native commit"))?
-            else {
-                return Err(invalid("rebase candidate ancestry must contain commits"));
-            };
-            let mut parents = commit.parent_references();
-            let parent = parents
-                .next()
-                .ok_or_else(|| invalid("rebase series does not reach its onto prerequisite"))?;
-            if parents.next().is_some() {
-                return Err(invalid(
-                    "rebase publication accepts only a single-parent series",
-                ));
-            }
-            cursor = std::str::from_utf8(parent)
-                .ok()
-                .and_then(|text| {
-                    GitOid::from_hex(self.object_format, &text.to_ascii_lowercase()).ok()
-                })
-                .filter(|id| !id.is_zero())
-                .ok_or_else(|| invalid("invalid rebase parent identity"))?;
-        }
-        if !super::super::workspace_request_live(request) {
-            return Err(NodeWorkspaceRefusal::Cancelled {
-                exhaustion: exhaustion.get(),
-            });
         }
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
@@ -196,11 +210,12 @@ impl OneNode {
             idempotency_key: key,
             object_format: self.object_format,
         };
-        self.admit_basis_bound_validated_receive_durable_in(
+        self.admit_basis_bound_validated_receive_publishing_in(
             request,
             &context,
             &validated,
             AdmissionLimits::default(),
+            Some(&staging),
         )
         .await
         .map_err(admission_error)

@@ -214,6 +214,23 @@ fn observed(node: &OneNode) -> (GitOid, String) {
     )
 }
 
+fn assert_discarded(node: &OneNode, objects: &[GitOid]) {
+    for id in objects {
+        assert!(
+            matches!(node.read_git_object(*id),
+            Err(fgit_node::NodeRefusal::Fabric(error))
+                if matches!(*error, fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)),
+            "refused candidate object {id} must not be placed"
+        );
+    }
+    assert_eq!(
+        fs::read_dir(node.storage_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
 #[test]
 fn candidate_publishes_preserves_untouched_objects_and_replays_after_reopen() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
@@ -270,7 +287,8 @@ fn epoch_zero_candidate_refuses_before_publication_and_epoch_one_twin_commits() 
         let refused_tip = git_object_id(format, GitObjectKind::Commit, epoch_zero.as_bytes());
         assert_ne!(refused_tip, valid);
         let blob = format!("{message}\n").into_bytes();
-        let tree = tree(git_object_id(format, GitObjectKind::Blob, &blob), untouched);
+        let blob_id = git_object_id(format, GitObjectKind::Blob, &blob);
+        let tree = tree(blob_id, untouched);
         assert_eq!(git_object_id(format, GitObjectKind::Tree, &tree), tree_id);
         let packed = pack(
             format,
@@ -299,12 +317,9 @@ fn epoch_zero_candidate_refuses_before_publication_and_epoch_one_twin_commits() 
                 "strict refusal cannot publish any root"
             );
         }
-        // Quarantine accepted and staged the import-compatible native object;
-        // the workspace's additional strict creation profile refused it.
-        assert_eq!(
-            node.read_git_object(refused_tip).unwrap().payload(),
-            epoch_zero.as_bytes()
-        );
+        // Native quarantine accepted the bytes, but strict workspace creation
+        // refused them while all three new objects remained private.
+        assert_discarded(&node, &[refused_tip, tree_id, blob_id]);
         let accepted = apply(&node, b"epoch-one", base, valid, &valid_bundle).unwrap();
         assert!(matches!(
             accepted.commands[0].terminal.outcome,
@@ -325,7 +340,8 @@ fn competing_candidate_is_refused_and_key_reuse_cannot_alias_the_winner() {
         let scratch = Scratch::new();
         let (node, base, untouched) = setup(&scratch.0, format);
         let (winner, _, first) = candidate(format, base, untouched, &[base], "winner");
-        let (loser, _, second) = candidate(format, base, untouched, &[base], "loser");
+        let (loser, loser_tree, second) = candidate(format, base, untouched, &[base], "loser");
+        let loser_blob = git_object_id(format, GitObjectKind::Blob, b"loser\n");
         let accepted = apply(&node, b"first", base, winner, &first).unwrap();
         assert!(matches!(
             accepted.commands[0].terminal.outcome,
@@ -333,6 +349,7 @@ fn competing_candidate_is_refused_and_key_reuse_cannot_alias_the_winner() {
         ));
         let after_winner = observed(&node);
         assert!(apply(&node, b"first", base, loser, &second).is_err());
+        assert_discarded(&node, &[loser, loser_tree, loser_blob]);
         assert_eq!(
             observed(&node),
             after_winner,
@@ -348,6 +365,7 @@ fn competing_candidate_is_refused_and_key_reuse_cannot_alias_the_winner() {
         let replay = apply(&node, b"second", base, loser, &second).unwrap();
         assert_eq!(replay.commands[0].terminal, refused.commands[0].terminal);
         assert_eq!(observed(&node), after_refusal);
+        assert_discarded(&node, &[loser, loser_tree, loser_blob]);
         node.shutdown().unwrap();
     }
 }
@@ -366,7 +384,8 @@ fn corrupt_packs_wrong_reviewed_tips_and_non_fast_forward_shapes_never_publish()
         assert!(apply(&node, b"wrong-review", base, untouched, &valid).is_err());
         assert_eq!(observed(&node), original);
         for (index, parents) in [vec![], vec![base, base]].iter().enumerate() {
-            let (bad, _, bytes) = candidate(format, base, untouched, parents, "invalid shape");
+            let (bad, bad_tree, bytes) =
+                candidate(format, base, untouched, parents, "invalid shape");
             assert!(
                 apply(
                     &node,
@@ -378,6 +397,8 @@ fn corrupt_packs_wrong_reviewed_tips_and_non_fast_forward_shapes_never_publish()
                 .is_err()
             );
             assert_eq!(observed(&node), original);
+            let bad_blob = git_object_id(format, GitObjectKind::Blob, b"invalid shape\n");
+            assert_discarded(&node, &[bad, bad_tree, bad_blob]);
         }
         let blob_pack = pack(format, &[(GitObjectKind::Blob, b"not a commit".to_vec())]);
         let blob = git_object_id(format, GitObjectKind::Blob, b"not a commit");

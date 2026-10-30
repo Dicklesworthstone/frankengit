@@ -17,26 +17,29 @@
 //! stale-info refusal stay indistinguishable in latency as well as in bytes.
 //!
 //! Every raw receive entry (git://, SSH, smart HTTP, the loopback and native
-//! session APIs), durable local directory imports and bundle import/fetch
-//! paths own one. Directory imports preserve their overlapped batch syncing
-//! and transfer payload-free custody here before ordinary admission.
+//! session APIs), durable local directory imports, bundle import/fetch and
+//! reviewed workspace/rebase paths own one. Candidate validators can read
+//! verified private custody without linking objects. Directory imports preserve
+//! their overlapped batch syncing and transfer payload-free custody here before
+//! ordinary admission.
 //! Residue that remains: a commit planned, published
 //! and then lost at the head CAS to another process, whose replan refuses,
 //! leaves its objects linked and unreferenced, as every refusal did before;
 //! in a non-atomic session the first commit publishes the objects of its
-//! refused siblings too; and reviewed workspace, merge and rebase candidates
-//! still place objects before their additional validation and admission.
+//! refused siblings too; and reviewed merge candidates still place objects
+//! before their additional native validation and admission.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use fgit_object_fabric::fabric::{PlacementAdmission, StoreRefusal, VerifiedObject};
 use fgit_object_fabric::local::{LocalFilesystemFabric, SyncedBatch};
+use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
 use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
 use fgit_types::{GitOid, RefusalCode};
 
 use crate::received_pack::PendingReceivedPack;
-use crate::{NodeRefusal, OneNode};
+use crate::{NodeRefusal, OneNode, VerifiedFabricPackSource};
 
 /// One receive's staged, synced and unpublished verified objects.
 #[derive(Default)]
@@ -47,7 +50,8 @@ pub struct ReceiveStaging {
 #[derive(Default)]
 struct State {
     batches: Vec<(ObligationLedger, SyncedBatch)>,
-    staged: BTreeSet<GitOid>,
+    // Exact owned identity -> batch index: private graph reads never scan all batches.
+    staged: BTreeMap<GitOid, usize>,
     /// Prepared representation custody is ineligible for serving until every
     /// staged object passes publication's final identity-collision recheck.
     received_pack: Option<PendingReceivedPack>,
@@ -92,7 +96,44 @@ impl ReceiveStaging {
 
     /// Whether this receive has already staged `id` (a waiting pre-stage did).
     pub(crate) fn contains(&self, id: GitOid) -> bool {
-        self.lock().staged.contains(&id)
+        self.lock().staged.contains_key(&id)
+    }
+
+    /// Read only custody owned by this request. Missing/corrupt owned data is
+    /// an error, never permission to try an unrelated permanent representation.
+    /// Holding the mutex prevents publication/drop from consuming a stage file
+    /// while its bounded read and original-commitment verification are in flight.
+    pub(crate) fn read_object_bounded(
+        &self,
+        fabric: &LocalFilesystemFabric,
+        identity: GitOid,
+        maximum_payload_bytes: u64,
+    ) -> Result<Option<VerifiedObject>, NodeRefusal> {
+        let state = self.lock();
+        if let Some(failure) = &state.failed {
+            return Err(failure.refusal());
+        }
+        let Some(index) = state.staged.get(&identity) else {
+            return Ok(None);
+        };
+        if state.published {
+            // A head-CAS retry may revalidate after this holder linked all its
+            // objects. Its private files are gone; ordinary immutable reads
+            // still verify the exact identity, namespace and payload bounds.
+            return fabric
+                .read_whole_bounded(identity, maximum_payload_bytes)
+                .map(|read| Some(read.object))
+                .map_err(NodeRefusal::from);
+        }
+        let (_, batch) = state
+            .batches
+            .get(*index)
+            .ok_or(NodeRefusal::ResourceContainment)?;
+        batch
+            .read_object_bounded(fabric, identity, maximum_payload_bytes)
+            .map_err(NodeRefusal::from)?
+            .map(Some)
+            .ok_or(NodeRefusal::ResourceContainment)
     }
 
     /// Keep a verified representation under the same publication responsibility
@@ -142,7 +183,10 @@ impl ReceiveStaging {
             settle_abandoned(staged);
             return Err(NodeRefusal::ResourceContainment);
         }
-        state.staged.extend(staged.1.identities().iter().copied());
+        let index = state.batches.len();
+        for identity in staged.1.identities() {
+            state.staged.entry(*identity).or_insert(index);
+        }
         state.batches.push(staged);
         Ok(())
     }
@@ -254,5 +298,58 @@ impl OneNode {
                 Err(NodeRefusal::from(error))
             }
         }
+    }
+}
+
+/// A candidate validator's source, never an upload or disclosure source.
+/// New objects are read from this request's synced custody; dependencies not
+/// owned by it use the existing verified fabric path.
+pub(crate) struct StagedCandidatePackSource<'source, 'staging> {
+    source: VerifiedFabricPackSource<'source>,
+    staging: &'staging ReceiveStaging,
+}
+
+impl<'source> VerifiedFabricPackSource<'source> {
+    pub(crate) fn with_staging<'staging>(
+        self,
+        staging: &'staging ReceiveStaging,
+    ) -> StagedCandidatePackSource<'source, 'staging> {
+        StagedCandidatePackSource {
+            source: self,
+            staging,
+        }
+    }
+}
+
+impl StagedCandidatePackSource<'_, '_> {
+    pub(crate) fn read_object(
+        &self,
+        id: &GitOid,
+    ) -> Result<(fgit_git_object::ObjectType, Vec<u8>), PackWriteError> {
+        self.source.read_object_using(None, |maximum| {
+            match self
+                .staging
+                .read_object_bounded(self.source.fabric, *id, maximum)
+            {
+                Ok(Some(object)) => Ok(object),
+                Ok(None) => self
+                    .source
+                    .fabric
+                    .read_whole_bounded(*id, maximum)
+                    .map(|read| read.object)
+                    .map_err(|error| self.source.object_read_refusal(*id, error)),
+                Err(NodeRefusal::Fabric(error)) => {
+                    Err(self.source.object_read_refusal(*id, *error))
+                }
+                Err(_) => Err(PackWriteError::TemporaryReadRefused),
+            }
+        })
+    }
+}
+
+impl CanonicalObjectSource for StagedCandidatePackSource<'_, '_> {
+    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        let (kind, body) = self.read_object(id)?;
+        Ok(CanonicalPackObject::new(*id, kind, body, Vec::new(), 0, 0))
     }
 }

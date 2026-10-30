@@ -3563,11 +3563,22 @@ impl VerifiedFabricPackSource<'_> {
         id: &GitOid,
         ceiling: Option<&FabricReadCeiling<'_>>,
     ) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
+        self.read_object_using(ceiling, |maximum| {
+            self.fabric
+                .read_whole_bounded(*id, maximum)
+                .map(|read| read.object)
+                .map_err(|error| self.object_read_refusal(*id, error))
+        })
+    }
+
+    /// Share the same pre/post liveness probes with request-private candidate
+    /// reads. A read error is interpreted only after both post-read probes.
+    fn read_object_using(
+        &self,
+        ceiling: Option<&FabricReadCeiling<'_>>,
+        read: impl FnOnce(u64) -> Result<VerifiedObject, PackWriteError>,
+    ) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
         let maximum = self.buffered_object_limit();
-        // Preserve the outer-session → Database → synchronous fabric read →
-        // outer-session → Database ordering. In particular, retain the fabric
-        // result until both post-read probes ran, so an expiry cannot be
-        // overwritten by a later missing-object or parse refusal.
         self.session_checkpoint()?;
         if let Some(ceiling) = ceiling {
             ceiling.rearm(self.database_context);
@@ -3575,26 +3586,18 @@ impl VerifiedFabricPackSource<'_> {
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
-        let read = self.fabric.read_whole_bounded(*id, maximum as u64);
+        let read = read(maximum as u64);
         if let (Some(ceiling), Ok(verified)) = (ceiling, &read) {
-            ceiling.note_read(verified.object.payload().len());
+            ceiling.note_read(verified.payload().len());
             ceiling.rearm(self.database_context);
         }
         self.session_checkpoint()?;
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
-        let verified = read.map_err(|error| match error {
-            StoreRefusal::StreamingBudgetExceeded { offered, .. } => {
-                PackWriteError::from(PackError::ObjectSizeLimit {
-                    actual: usize::try_from(offered).unwrap_or(usize::MAX),
-                    limit: maximum,
-                })
-            }
-            _ => PackWriteError::MissingCanonicalObject(*id),
-        })?;
-        let object_type = native_object_type(verified.object.envelope().object_kind())?;
-        let payload = verified.object.payload();
+        let verified = read?;
+        let object_type = native_object_type(verified.envelope().object_kind())?;
+        let payload = verified.payload();
         if payload.len() > maximum {
             return Err(PackError::ObjectSizeLimit {
                 actual: payload.len(),
@@ -3609,6 +3612,18 @@ impl VerifiedFabricPackSource<'_> {
             })?;
         body.extend_from_slice(payload);
         Ok((object_type, body))
+    }
+
+    fn object_read_refusal(&self, id: GitOid, error: StoreRefusal) -> PackWriteError {
+        match error {
+            StoreRefusal::StreamingBudgetExceeded { offered, .. } => {
+                PackWriteError::from(PackError::ObjectSizeLimit {
+                    actual: usize::try_from(offered).unwrap_or(usize::MAX),
+                    limit: self.buffered_object_limit(),
+                })
+            }
+            _ => PackWriteError::MissingCanonicalObject(id),
+        }
     }
 
     /// The kind and exact length of one stored object, from its envelope

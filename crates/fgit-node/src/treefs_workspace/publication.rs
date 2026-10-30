@@ -13,7 +13,9 @@ mod rebase_apply;
 pub use bundle_review::BundleInspectionRefusal;
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
+use crate::VerifiedFabricPackSource;
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
+use crate::receive_staging::ReceiveStaging;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
 use fgit_admission::{
     AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
@@ -29,6 +31,7 @@ use fgit_object_fabric::ObjectKind;
 use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, ReceivePack, SignedPushProfile};
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
+use std::cell::Cell;
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -211,6 +214,8 @@ impl OneNode {
     /// the header and sealed request; it does not revalidate a transport pack
     /// or grant a fresh bundle-verification receipt. New operations still pass
     /// every current gate, production quarantine and single-parent validation.
+    /// New objects remain in private synced custody through these checks and
+    /// are placed only when admission prepares a commit.
     /// Staging is not publication and an infrastructure error is not evidence
     /// of non-commit.
     pub async fn apply_workspace_bundle_durable_in(
@@ -258,33 +263,53 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
+        let staging = ReceiveStaging::default();
         let (validated, parse_limits) = self
-            .quarantine_reviewed_bundle_in(
+            .quarantine_bound_envelope_in(
                 request,
                 reference,
                 expected_base,
-                expected_candidate,
-                input,
+                &envelope,
                 &[],
+                Some(&staging),
             )
             .await?;
-        let candidate = self
-            .read_git_object(expected_candidate)
-            .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
-        if candidate.envelope().object_kind() != ObjectKind::Commit {
-            return Err(invalid("candidate must identify a commit"));
+        // Candidate-specific validation reads this request's private custody.
+        // A rejected shape or stale ref never needs permanent object placement.
+        {
+            let exhaustion = Cell::new(None);
+            let source = VerifiedFabricPackSource {
+                fabric: &self.fabric,
+                object_format: self.object_format,
+                maximum_object_bytes: parse_limits.max_object_bytes.min(MAX_CANDIDATE_BYTES),
+                database_context: request.authority(),
+                database_exhaustion: &exhaustion,
+                session_is_live: None,
+            }
+            .with_staging(&staging);
+            let candidate = source.read_object(&expected_candidate);
+            if !workspace_request_live(request) || exhaustion.get().is_some() {
+                return Err(NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: exhaustion.get(),
+                });
+            }
+            let (kind, body) =
+                candidate.map_err(|_| invalid("candidate bytes could not be verified"))?;
+            if kind != ObjectType::Commit {
+                return Err(invalid("candidate must identify a commit"));
+            }
+            check_candidate_commit(&body, expected_base, parse_limits)?;
         }
-        check_candidate_commit(candidate.payload(), expected_base, parse_limits)?;
-        drop(candidate);
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
         let session = LoopbackReceiveSession::authenticated(principal_id, key);
-        self.admit_basis_bound_loopback_receive_durable_in(
+        self.admit_basis_bound_loopback_receive_publishing_in(
             request,
             &session,
             &validated,
             AdmissionLimits::default(),
+            Some(&staging),
         )
         .await
         .map_err(receive_error)
@@ -386,6 +411,7 @@ impl OneNode {
             expected_base,
             &envelope,
             additional_visible_refs,
+            None,
         )
         .await
     }
@@ -400,6 +426,7 @@ impl OneNode {
         expected_old: GitOid,
         envelope: &CandidateEnvelope<'_>,
         additional_visible_refs: &[RefName],
+        staging: Option<&ReceiveStaging>,
     ) -> Result<(BasisBoundValidatedReceive, ParseLimits), NodeWorkspaceRefusal> {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
@@ -477,6 +504,10 @@ impl OneNode {
                 receive_error(fgit_wire::receive::ReceiveError::AuthoritativeRefusal(code))
             })?
             .for_reviewed_candidate();
+        let validator = match staging {
+            Some(staging) => validator.with_receive_staging(staging),
+            None => validator,
+        };
         let context =
             ReceiveContext::new(wire_format, advertised, limits, SignedPushProfile::Refuse)
                 .map_err(receive_error)?;
