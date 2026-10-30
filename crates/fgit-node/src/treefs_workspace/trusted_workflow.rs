@@ -5,6 +5,7 @@ pub(super) mod artifacts;
 mod candidate;
 mod completion;
 mod durable;
+mod shared_inputs;
 use artifacts::TrustedWorkflowArtifactConfig;
 use candidate::WorkflowInputs;
 pub use durable::workflow_watch;
@@ -20,7 +21,9 @@ use std::time::Instant;
 
 use fgit_crypto::{GitHashAlgorithm, NativeObjectIdentity, Sha1, Sha256};
 use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
-use fgit_runner::sparse_workspace::{HostRefusal, SparseWorkspace, SparseWorkspacePlan};
+use fgit_runner::sparse_workspace::{
+    HostRefusal, SharedInputCacheStats, SparseWorkspace, SparseWorkspacePlan,
+};
 use fgit_runner::workflow::{
     StepLimits, StepObservation, WorkerFailure, WorkflowExecutor, WorkflowJob, WorkflowLimits,
     WorkflowPlan, WorkflowReport, run_trusted_step_with_context,
@@ -115,6 +118,10 @@ pub struct TrustedWorkflowRun {
     pub artifact_logs: Vec<artifacts::TrustedWorkflowJobLogs>,
     /// Verified copies supplied to started consumers in their private namespace.
     pub artifact_inputs: Vec<artifacts::TrustedWorkflowJobArtifactInputs>,
+    /// Attempt-wide source materialization work, recorded only after cache
+    /// drain. Cloned bytes are logical bytes, not measured physical disk usage.
+    /// This local observation is excluded from the immutable attempt identity.
+    pub shared_inputs: Option<SharedInputCacheStats>,
     pub execution: WorkflowReport,
 }
 impl TrustedWorkflowRun {
@@ -240,6 +247,12 @@ impl TrustedWorkflowRun {
                     .join(",")
             ));
         }
+        if let Some(stats) = &self.shared_inputs {
+            artifacts.push_str(&format!(
+                ",\"shared_inputs\":{}",
+                shared_inputs::statistics_json(stats)
+            ));
+        }
         format!(
             concat!(
                 "{{\"type\":\"trusted_workflow_run\",{},\"succeeded\":{},",
@@ -265,8 +278,9 @@ impl OneNode {
     ///
     /// The workflow itself must be a regular file within the declared top-level
     /// input prefixes. Validate the entire graph and all host inputs before any
-    /// script starts. Each job gets a fresh descriptor-relative TreeFS copy;
-    /// steps in one job share only that job's copy. No edited source is imported.
+    /// script starts. Each job gets fresh descriptor-relative TreeFS files;
+    /// supporting filesystems share immutable extents through copy-on-write.
+    /// Steps in one job share only that job's files. No edited source is imported.
     ///
     /// An exclusive, persistent workflow-<run_id> directory prevents accidental
     /// replay. A synced attempt marker precedes all processes. report.json is
@@ -639,6 +653,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         artifacts: Vec::new(),
         artifact_logs: Vec::new(),
         artifact_inputs: Vec::new(),
+        shared_inputs: None,
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),
@@ -694,6 +709,8 @@ fn run_inputs<A: GitHashAlgorithm>(
         ))
     })?;
     let collector = artifact_session.map(|session| artifacts::Collector::new(session, &report));
+    let shared_inputs = shared_inputs::SharedInputs::open(&host_plan, &root, &live)
+        .map_err(|error| journal_error(format!("shared input preparation before jobs: {error}")))?;
     let mut worker = Executor {
         plan: host_plan,
         source_bytes: inputs.payload_bytes(),
@@ -705,12 +722,29 @@ fn run_inputs<A: GitHashAlgorithm>(
         retained: false,
         job_index: 0,
         artifacts: collector,
+        shared_inputs,
     };
     // This outer predicate also charges source discovery against the run budget.
     // The scheduler owns every begun job and always calls non-cancellable close.
     // Queue custody and a durable Started fence precede the first process.
     // Each normalized job result is synced before a dependent scope can open.
-    report.execution = coordinated.execute(&report.run_directory, &mut worker, &live)?;
+    let execution = coordinated.execute(&report.run_directory, &mut worker, &live);
+    // Finalization is independent of run cancellation or a journal error.
+    // The cache never owns job files: every clone has a distinct private inode.
+    let drained = worker.shared_inputs.close();
+    match (execution, drained) {
+        (Ok(execution), Ok(stats)) => {
+            report.execution = execution;
+            report.shared_inputs = Some(stats);
+        }
+        (Err(error), Ok(_)) => return Err(error),
+        (result, Err(error)) => {
+            return Err(journal_error(format!(
+                "shared input cache did not settle after execution: {error}; execution error: {:?}; inspect this attempt, do not replay",
+                result.err()
+            )));
+        }
+    }
     if let Some(collector) = &mut worker.artifacts {
         report.artifacts = std::mem::take(&mut collector.jobs);
         report.artifact_logs = std::mem::take(&mut collector.logs);
@@ -761,6 +795,7 @@ struct Executor<'a, A: GitHashAlgorithm> {
     retained: bool,
     job_index: usize,
     artifacts: Option<artifacts::Collector<'a>>,
+    shared_inputs: shared_inputs::SharedInputs,
 }
 impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
     fn begin_job(
@@ -797,6 +832,13 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
             .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
         let slot = TreePath::parse_default(format!("job-{index:03}").as_bytes())
             .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
+        let cache = match self.shared_inputs.cache() {
+            Ok(cache) => cache,
+            Err(error) => {
+                self.retained = true;
+                return Err(WorkerFailure::new(error.to_string(), true));
+            }
+        };
         let ledger = ObligationLedger::root(
             RegionId::new(index as u64 + 1),
             LeakDisposition::RecordAndContinue,
@@ -808,7 +850,7 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         let reserved = ledger
             .reserve(plan.reservation(), granted)
             .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
-        match SparseWorkspace::materialize(
+        match SparseWorkspace::materialize_with_cache(
             plan,
             parent,
             slot,
@@ -816,6 +858,7 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
             self.capability,
             0,
             &|_| !live(),
+            cache,
         ) {
             Ok(workspace) => {
                 self.current = Some((workspace, ledger));

@@ -96,9 +96,25 @@ zero run IDs, and missing trust confirmation refuse before opening the node.
 
 The entire workflow graph and its source manifest are validated before any job
 starts. Jobs run serially in the native deterministic topological order. Steps
-within a job share that job's working directory. Every other job receives a new
-copy of the original pinned source, even when it depends on an earlier job.
+within a job share that job's working directory. Every other job receives fresh
+private files from the original pinned source, even when it depends on an earlier job.
 There is no implicit artifact/output transfer between jobs.
+
+One invocation-owned source cache serves those jobs. On supporting Linux
+filesystems, it seeds each retained source body once and materializes verified
+reflinks into distinct job inodes. Writes and truncation affect only that job's
+files. Unsupported filesystems and a full cache use private copies. The cache
+retains at most 128 distinct source bodies, has a separate bounded resource lease,
+and closes after execution even when a job, cancellation or journal operation
+fails. Supplemental artifact inputs remain on their independent copy path.
+
+Completed reports include a `shared_inputs` observation with profile
+`verified-reflink-or-copy-v1`: actual probe support, seeded bytes, successfully
+cloned bytes, fallback bytes and file counts, and zero resident bytes/entries
+after cache close. These are logical work counters, not physical disk-allocation
+measurements. They do not change the original attempt marker or check-journal
+identity. Canonical, candidate and merge-candidate execution use the same cache
+owner; separate invocations do not share a persistent host cache.
 
 A failed job stops its remaining steps and skips dependent jobs. Independent jobs
 can still run. A containment failure stops further job starts. Every begun job
@@ -114,7 +130,7 @@ preemptive wall-clock deadlines.
 
 Source manifests are limited to 10,000 entries, 16 MiB per source object/file and
 64 MiB of retained file payloads. Aggregate job materialization is limited to
-256 MiB of replicated payloads and 100,000 replicated manifest entries. Native
+256 MiB of logical materialized payloads and 100,000 materialized manifest entries. Native
 fetch accounting additionally limits source reads. Symlink materialization,
 gitlink materialization, and unsupported host paths refuse before execution.
 
@@ -226,6 +242,7 @@ trust, replay refusal, and unchanged repository authority.
 
 ```sh
 cargo test --locked -p fgit-runner --test workflow_execution
+cargo test --locked -p fgit-runner --test shared_workspace
 cargo test --locked -p fgit-node --test trusted_workflow
 cargo test --locked -p fgit-cli --bin fg workflow_command::
 cargo test --locked -p fgit-cli --test workflow_run
@@ -234,3 +251,23 @@ cargo test --locked -p fgit-cli --test workflow_run
 The commands above identify relevant focused checks; a passing focused run is
 not a whole-repository verification result or release certificate. No hosted or
 hostile-code readiness is claimed.
+
+The shared-input component tests exercised the copy fallback on the development
+host, whose overlay filesystem refused FICLONE. The explicit tmpfs fallback test
+and required-reflink test keep unsupported and positive sharing evidence
+separate. Use a known supporting filesystem for the latter:
+
+```sh
+FGIT_SHARED_WORKSPACE_TEST_ROOT=/path/on/reflink-filesystem \
+  cargo test --locked -p fgit-runner --test shared_workspace \
+  required_reflink_isolation -- --ignored --exact
+```
+
+This test fails if actual reflinks are unavailable. No successful reflink-host or
+1,000-workspace allocation measurement is claimed by the fallback run. The exact
+node cache-owner module and its four lifecycle tests were compiled independently
+against the production runner libraries: both native formats, pre-open
+cancellation, repeated close, and a workspace surviving cache close passed.
+This validates that component, not the surrounding node driver. The full node
+integration regression was added but could not run in that development session:
+compilation of the pinned Asupersync dependency exceeded the host memory limit.

@@ -89,6 +89,7 @@ pub(super) fn report(temp: &Temp) -> TrustedWorkflowRun {
         artifacts: Vec::new(),
         artifact_logs: Vec::new(),
         artifact_inputs: Vec::new(),
+        shared_inputs: None,
         execution: WorkflowReport {
             source: plan.source_commitment(),
             graph: plan.graph_commitment(),
@@ -99,6 +100,29 @@ pub(super) fn report(temp: &Temp) -> TrustedWorkflowRun {
 }
 pub(super) fn prepare(report: &TrustedWorkflowRun) -> Prepared {
     Prepared::new(report, WorkflowPlan::compile(SOURCE).unwrap()).unwrap()
+}
+
+#[test]
+fn shared_input_observations_do_not_change_the_original_attempt_identity() {
+    let temp = Temp::new();
+    let mut observed = report(&temp);
+    let marker = observed.attempt_marker();
+    let scope = observed.check_journal_scope();
+    observed.shared_inputs = Some(fgit_runner::sparse_workspace::SharedInputCacheStats {
+        reflink_supported: true,
+        seeded_bytes: 1024,
+        seeded_entries: 1,
+        probe_entries: 2,
+        cloned_bytes: 2048,
+        clone_operations: 2,
+        ..Default::default()
+    });
+    assert_eq!(observed.attempt_marker(), marker);
+    assert_eq!(observed.check_journal_scope(), scope);
+    let json = observed.to_json();
+    assert!(json.contains("\"cache_closed\":true"));
+    assert!(json.contains("\"cloned_bytes\":2048"));
+    assert!(json.contains("\"seeded_bytes\":1024"));
 }
 
 pub(super) struct Executor {

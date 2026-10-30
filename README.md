@@ -462,7 +462,7 @@ It accelerates internal replication, agent/CI inputs, migration, repair, artifac
 
 See [`docs/ATP_GIT_PROFILE.md`](docs/ATP_GIT_PROFILE.md).
 
-### 5. Git TreeFS: a million workspaces without a million clones
+### 5. Git TreeFS: sparse workspaces with shared immutable inputs
 
 An agent or CI job opens:
 
@@ -472,7 +472,14 @@ An agent or CI job opens:
 - typed edit intents and source-span lineage;
 - explicit staged, visible, and durable output epochs.
 
-The reference interface is a direct Rust API. Sparse-directory and FrankenFS/FUSE adapters support ordinary tools. Export produces exact Git objects plus a proposed repository transaction; the workspace never gains publication authority merely because a file exists locally.
+The reference interface is a direct Rust API. The implemented Linux sparse-directory
+adapter supports ordinary trusted tools. Its bounded source cache uses verified
+reflinks on supporting filesystems, with distinct job inodes and private-copy
+fallback. Trusted workflows reuse this cache across jobs and report actual
+seeded, cloned and copied bytes. These logical counters do not establish the
+1,000-workspace physical-allocation target. FrankenFS/FUSE remains an architectural
+adapter path. Export produces exact Git objects plus a proposed repository
+transaction; a workspace gains no publication authority from a local file.
 
 See [`docs/GIT_TREE_FS.md`](docs/GIT_TREE_FS.md).
 

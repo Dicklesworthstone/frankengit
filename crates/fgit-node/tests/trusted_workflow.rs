@@ -226,6 +226,18 @@ fn one_source_snapshot_fresh_job_copies_and_persistent_report_in_both_formats() 
             .unwrap();
         assert!(result.succeeded());
         assert!(result.workspaces_closed);
+        let shared = result.shared_inputs.as_ref().expect("source cache drained");
+        assert_eq!(shared.resident_bytes, 0);
+        assert_eq!(shared.resident_entries, 0);
+        assert_eq!(
+            shared.cloned_bytes + shared.fallback_bytes,
+            3 * (workflow.len() + b"original\n".len()) as u64,
+            "every job receives the same logical source, regardless of sharing"
+        );
+        if !shared.reflink_supported {
+            assert_eq!(shared.cloned_bytes, 0);
+            assert_eq!(shared.seeded_bytes, 0);
+        }
         assert_eq!(result.source_commit, f.tip);
         assert_eq!(result.workflow_blob, f.workflow);
         assert_eq!(result.source_reference, reference().as_bytes());
@@ -266,6 +278,7 @@ fn one_source_snapshot_fresh_job_copies_and_persistent_report_in_both_formats() 
         assert!(
             json.contains("\"published\":false") && json.contains("\"authoritative_check\":false")
         );
+        assert!(json.contains("\"shared_inputs\":{\"profile\":\"verified-reflink-or-copy-v1\""));
         let mut names = fs::read_dir(&result.run_directory)
             .unwrap()
             .map(|e| e.unwrap().file_name())
