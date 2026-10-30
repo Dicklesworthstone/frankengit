@@ -4,6 +4,8 @@
 //! Blame follows exact line matches through all parents, in stored parent order.
 //! It does not guess renames, copies, whitespace equivalence or human authorship.
 
+/// Recent first-parent pages without traversing the complete ancestor DAG.
+pub mod first_parent;
 /// Exact file and directory change history, without history simplification.
 pub mod path;
 

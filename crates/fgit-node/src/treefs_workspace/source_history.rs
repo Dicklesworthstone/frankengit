@@ -1,6 +1,8 @@
 //! Authenticated commit history and line provenance over the same private
 //! native object owner as source review and merge preparation. Read-only.
 
+mod first_parent;
+
 use super::{
     Cell, MergeObjectSource, MergeSourceError, ObjectType, ParseLimits, RefVisibility,
     SelectedSource, VerifiedFabricPackSource,
