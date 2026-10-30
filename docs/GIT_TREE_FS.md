@@ -238,6 +238,44 @@ Where FUSE is unavailable, a deterministic materializer creates only declared in
 
 Neither adapter changes canonical workspace semantics.
 
+### 10.3 Bounded shared inputs in the Linux sparse-directory adapter
+
+The implemented `fgit-runner::sparse_workspace` adapter retains the copy-only
+`SparseWorkspace::materialize` baseline and adds `materialize_with_cache`.
+An explicit `SharedInputCache` seeds authorized immutable source bodies into
+private anonymous files. On a supporting filesystem, FICLONE gives each
+workspace a distinct inode with copy-on-write extents. Every clone's complete
+body and length are checked against the manifest before the workspace becomes
+visible. Raw path bytes, executable modes, alias refusals, output import and
+workspace capability checks retain their existing semantics.
+
+The cache scope binds the repository, full RCR identity, pinned source, candidate
+provenance where applicable, and exact source inventory. Reusing a cache never
+authorizes another workspace. Supplemental job artifact inputs remain private
+copies and do not enter this source cache. There is no persistent cache namespace
+or new authority/retention root.
+
+`SharedInputPolicy::PreferReflink` copies on recognized unsupported filesystems
+or exhausted cache capacity. `RequireReflink` instead returns a typed refusal.
+Other I/O failures and failed content verification refuse. Shared hardlinks are
+not used. Source files are unlinked, close-on-exec descriptors retained only by
+the broker; this remains the existing trusted-tool execution profile.
+
+A separate typed cache lease funds source seeding, object work and descriptor
+custody. At most 128 distinct source bodies are retained; entries are not evicted
+and reseeded. Partial seeding charges the admitted body once and poisons the
+cache until close. Non-cancellable close drops all source descriptors before
+settlement. Each workspace keeps its full logical input allowance, including
+successfully cloned bytes, so later writes cannot evade the existing budget.
+
+`shared_host_bytes` and cache `cloned_bytes` count logical bytes successfully
+cloned and verified. `seeded_bytes` records the separate cache work and
+`fallback_bytes` records private copies. These counters do not measure exclusive
+physical allocation. The bounded `shared_workspace` tests include an explicitly
+requested, support-required reflink isolation test and an interleaved
+materialization measurement. The 1,000-workspace / 100 MB physical-allocation
+acceptance target remains unverified; fallback results do not establish it.
+
 ## 11. Build and test inputs
 
 A CI job receives a `BuildInputCapsule`:

@@ -10,13 +10,19 @@
 //! This profile requires Linux openat2 and a byte-preserving local filesystem.
 //! It supports trusted tools, not hostile-process isolation. The broker must
 //! exclude concurrent tools during import/close and protect the parent from
-//! rename or deletion by other principals. FUSE, reflinks, shared host inodes,
-//! symlink materialization, and gitlinks are not supported by this profile.
+//! rename or deletion by other principals. The optional shared-input cache
+//! uses distinct-inode reflinks, with an explicit private-copy fallback.
+//! FUSE, shared host inodes, symlink materialization, and gitlinks are unsupported.
 
 mod inputs;
 mod job_inputs;
+mod shared_inputs;
 use inputs::WorkspaceManifest;
 pub use job_inputs::JobInput;
+pub use shared_inputs::{
+    SharedInputCache, SharedInputCacheClosed, SharedInputCacheLease, SharedInputCachePlan,
+    SharedInputCacheReservation, SharedInputCacheStats, SharedInputFallback, SharedInputPolicy,
+};
 
 use crate::Commitment;
 use fgit_codec::Encoder;
@@ -73,6 +79,10 @@ pub enum HostRefusal {
     AliasedEntry(TreePath),
     ChangedDuringRead(TreePath),
     IncompleteWorkspace,
+    SharedInputUnavailable(SharedInputFallback),
+    SharedInputScopeMismatch,
+    SharedInputCorrupt,
+    SharedInputCacheUnusable,
     Cancelled(HostEpoch),
     Io {
         operation: &'static str,
@@ -358,6 +368,7 @@ pub struct SparseWorkspace<A: GitHashAlgorithm> {
     name: TreePath,
     obligation: ReservedObligation<SparseDirectoryLease>,
     copied_bytes: u64,
+    shared_host_bytes: u64,
     metadata_bytes: u64,
     imported_bytes: u64,
     created_entries: u64,
@@ -377,10 +388,55 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         now: u64,
         cancelled: &dyn Fn(HostEpoch) -> bool,
     ) -> Result<Self, HostRefusal> {
+        Self::materialize_inner(
+            plan, parent, name, obligation, capability, now, cancelled, None,
+        )
+    }
+
+    /// Materialize the same authorized bytes with a separately owned source
+    /// cache. Reflink targets retain private inodes and kernel copy-on-write;
+    /// unsupported filesystems use the cache's explicit fallback policy.
+    /// Supplemental job inputs always use their original private-copy path.
+    pub fn materialize_with_cache(
+        plan: SparseWorkspacePlan<A>,
+        parent: File,
+        name: TreePath,
+        obligation: ReservedObligation<SparseDirectoryLease>,
+        capability: &TreeCapability,
+        now: u64,
+        cancelled: &dyn Fn(HostEpoch) -> bool,
+        cache: &mut SharedInputCache,
+    ) -> Result<Self, HostRefusal> {
+        Self::materialize_inner(
+            plan,
+            parent,
+            name,
+            obligation,
+            capability,
+            now,
+            cancelled,
+            Some(cache),
+        )
+    }
+
+    fn materialize_inner(
+        plan: SparseWorkspacePlan<A>,
+        parent: File,
+        name: TreePath,
+        obligation: ReservedObligation<SparseDirectoryLease>,
+        capability: &TreeCapability,
+        now: u64,
+        cancelled: &dyn Fn(HostEpoch) -> bool,
+        mut cache: Option<&mut SharedInputCache>,
+    ) -> Result<Self, HostRefusal> {
         let validation = validate_slot(&name)
             .and_then(|()| validate_parent(&parent))
             .and_then(|()| plan.authorize(capability, now))
             .and_then(|()| validate_reservation(&plan, &obligation))
+            .and_then(|()| match &cache {
+                Some(cache) => cache.validate_scope(&plan),
+                None => Ok(()),
+            })
             .and_then(|()| checkpoint(cancelled, HostEpoch::Reserved));
         if let Err(error) = validation {
             let _settled = obligation.abort_unused(error.clone());
@@ -408,6 +464,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             }
         };
         let mut visible = false;
+        let mut shared_host_bytes = 0_u64;
         let result = (|| {
             lock(&root)?;
             write_new(
@@ -430,13 +487,27 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             for (index, entry) in plan.manifest.entries().iter().enumerate() {
                 checkpoint(cancelled, HostEpoch::Writing(index))?;
                 if let SparseEntryKind::File { mode, body } = entry.kind() {
-                    let file = write_new(
-                        &root,
-                        entry.path().as_bytes(),
-                        body,
-                        host_mode(*mode),
-                        &|| checkpoint(cancelled, HostEpoch::Writing(index)),
-                    )?;
+                    let live = || checkpoint(cancelled, HostEpoch::Writing(index));
+                    let (file, shared) = match cache.as_deref_mut() {
+                        Some(cache) => {
+                            cache.write_input(&root, entry.path(), body, host_mode(*mode), &live)?
+                        }
+                        None => (
+                            write_new(
+                                &root,
+                                entry.path().as_bytes(),
+                                body,
+                                host_mode(*mode),
+                                &live,
+                            )?,
+                            false,
+                        ),
+                    };
+                    if shared {
+                        shared_host_bytes = shared_host_bytes
+                            .checked_add(body.len() as u64)
+                            .ok_or(HostRefusal::ResourceLimit)?;
+                    }
                     remember_inode(&file, entry.path(), &mut aliases)?;
                 }
             }
@@ -507,7 +578,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 }
             }
         }
-        let copied_bytes = plan.manifest.receipt().payload_bytes() as u64
+        let copied_bytes = plan.manifest.receipt().payload_bytes() as u64 - shared_host_bytes
             + plan
                 .job_inputs
                 .iter()
@@ -522,6 +593,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             name,
             obligation,
             copied_bytes,
+            shared_host_bytes,
             metadata_bytes,
             imported_bytes: 0,
             created_entries,
@@ -562,6 +634,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 name,
                 obligation,
                 copied_bytes: 0,
+                shared_host_bytes: 0,
                 metadata_bytes: 0,
                 imported_bytes: 0,
                 created_entries: 0,
@@ -760,7 +833,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             plan: self.plan.reservation.plan,
             copied_bytes: self.copied_bytes,
             metadata_bytes: self.metadata_bytes,
-            shared_host_bytes: 0,
+            shared_host_bytes: self.shared_host_bytes,
             imported_bytes: self.imported_bytes,
             created_entries: self.created_entries,
             imported_entries: self.imported_entries,
@@ -769,7 +842,10 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         let actual = ResourceVector::from_grades(&[
             (
                 Grade::Bytes,
-                receipt.copied_bytes + receipt.metadata_bytes + receipt.imported_bytes,
+                receipt.copied_bytes
+                    + receipt.shared_host_bytes
+                    + receipt.metadata_bytes
+                    + receipt.imported_bytes,
             ),
             (
                 Grade::Objects,
