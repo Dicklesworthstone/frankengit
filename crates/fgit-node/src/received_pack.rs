@@ -594,7 +594,10 @@ fn dependencies(
         if entry.header.declared_size > limits.max_object_bytes {
             return Ok(None);
         }
-        let Some(total) = result.total_entry_bytes.checked_add(entry.header.declared_size) else {
+        let Some(total) = result
+            .total_entry_bytes
+            .checked_add(entry.header.declared_size)
+        else {
             return Ok(None);
         };
         if total > limits.max_total_expanded_bytes {

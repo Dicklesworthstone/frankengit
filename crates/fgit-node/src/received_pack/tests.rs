@@ -107,7 +107,13 @@ fn fixture(format: GitHashAlgorithm, entries: &[Input]) -> Fixture {
             path_hash: 0,
         })
         .collect();
-    Fixture { raw, pack, objects, offsets, keys }
+    Fixture {
+        raw,
+        pack,
+        objects,
+        offsets,
+        keys,
+    }
 }
 
 fn literal_delta(base_len: usize, body: &[u8]) -> Vec<u8> {
@@ -142,7 +148,13 @@ fn payload(cache: &ReceivedPackCache, fixture: &Fixture) -> Option<ReceivedPackP
 #[test]
 fn exact_bytes_receipts_and_independent_cursors_in_both_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let f = fixture(format, &[Input::Whole(b"first".to_vec()), Input::Whole(b"second".to_vec())]);
+        let f = fixture(
+            format,
+            &[
+                Input::Whole(b"first".to_vec()),
+                Input::Whole(b"second".to_vec()),
+            ],
+        );
         let cache = ReceivedPackCache::new(64 * 1024);
         retain(&cache, &f);
         let mut one = payload(&cache, &f).unwrap();
@@ -168,7 +180,10 @@ fn exact_bytes_receipts_and_independent_cursors_in_both_domains() {
 
 #[test]
 fn exact_membership_kinds_and_formats_cannot_be_widened() {
-    let f = fixture(GitHashAlgorithm::Sha1, &[Input::Whole(b"a".to_vec()), Input::Whole(b"b".to_vec())]);
+    let f = fixture(
+        GitHashAlgorithm::Sha1,
+        &[Input::Whole(b"a".to_vec()), Input::Whole(b"b".to_vec())],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &f);
     let mut wrong_kind = f.keys.clone();
@@ -177,38 +192,77 @@ fn exact_membership_kinds_and_formats_cannot_be_widened() {
     duplicate[1] = duplicate[0];
     let mut reversed = f.keys.clone();
     reversed.reverse();
-    let other = fixture(GitHashAlgorithm::Sha256, &[Input::Whole(b"a".to_vec()), Input::Whole(b"b".to_vec())]);
-    for keys in [Vec::new(), f.keys[..1].to_vec(), wrong_kind, duplicate, reversed, other.keys] {
-        assert!(cache.try_reuse(&keys, &PackLimits::default(), true, &mut || true).unwrap().is_none());
+    let other = fixture(
+        GitHashAlgorithm::Sha256,
+        &[Input::Whole(b"a".to_vec()), Input::Whole(b"b".to_vec())],
+    );
+    for keys in [
+        Vec::new(),
+        f.keys[..1].to_vec(),
+        wrong_kind,
+        duplicate,
+        reversed,
+        other.keys,
+    ] {
+        assert!(
+            cache
+                .try_reuse(&keys, &PackLimits::default(), true, &mut || true)
+                .unwrap()
+                .is_none()
+        );
     }
     let mut hints = f.keys.clone();
     for key in &mut hints {
         key.path_hash = 42;
         key.recency = 17;
     }
-    assert!(cache.try_reuse(&hints, &PackLimits::default(), true, &mut || true).unwrap().is_some());
+    assert!(
+        cache
+            .try_reuse(&hints, &PackLimits::default(), true, &mut || true)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
 fn ofs_capability_depth_and_fanout_are_rechecked() {
     let base = b"base";
-    let f = fixture(GitHashAlgorithm::Sha1, &[
-        Input::Whole(base.to_vec()),
-        Input::Ofs(0, literal_delta(base.len(), b"first"), b"first".to_vec()),
-        Input::Ofs(0, literal_delta(base.len(), b"second"), b"second".to_vec()),
-    ]);
+    let f = fixture(
+        GitHashAlgorithm::Sha1,
+        &[
+            Input::Whole(base.to_vec()),
+            Input::Ofs(0, literal_delta(base.len(), b"first"), b"first".to_vec()),
+            Input::Ofs(0, literal_delta(base.len(), b"second"), b"second".to_vec()),
+        ],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &f);
     let received = payload(&cache, &f).unwrap();
     assert_eq!(received.receipt().ofs_delta_count(), 2);
     assert_eq!(received.receipt().ref_delta_count(), 0);
     assert_eq!(received.receipt().maximum_delta_depth(), 1);
-    assert!(cache.try_reuse(&f.keys, &PackLimits::default(), false, &mut || true).unwrap().is_none());
+    assert!(
+        cache
+            .try_reuse(&f.keys, &PackLimits::default(), false, &mut || true)
+            .unwrap()
+            .is_none()
+    );
     for limits in [
-        PackLimits { max_delta_depth: 0, ..PackLimits::default() },
-        PackLimits { max_delta_fanout: 1, ..PackLimits::default() },
+        PackLimits {
+            max_delta_depth: 0,
+            ..PackLimits::default()
+        },
+        PackLimits {
+            max_delta_fanout: 1,
+            ..PackLimits::default()
+        },
     ] {
-        assert!(cache.try_reuse(&f.keys, &limits, true, &mut || true).unwrap().is_none());
+        assert!(
+            cache
+                .try_reuse(&f.keys, &limits, true, &mut || true)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -219,14 +273,24 @@ fn forward_ref_chains_are_self_contained_without_ofs_negotiation() {
     let middle = b"middle";
     let base_id = git_object_id(format, GitObjectKind::Blob, base);
     let middle_id = git_object_id(format, GitObjectKind::Blob, middle);
-    let f = fixture(format, &[
-        Input::Ref(middle_id, literal_delta(middle.len(), b"last"), b"last".to_vec()),
-        Input::Ref(base_id, literal_delta(base.len(), middle), middle.to_vec()),
-        Input::Whole(base.to_vec()),
-    ]);
+    let f = fixture(
+        format,
+        &[
+            Input::Ref(
+                middle_id,
+                literal_delta(middle.len(), b"last"),
+                b"last".to_vec(),
+            ),
+            Input::Ref(base_id, literal_delta(base.len(), middle), middle.to_vec()),
+            Input::Whole(base.to_vec()),
+        ],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &f);
-    let received = cache.try_reuse(&f.keys, &PackLimits::default(), false, &mut || true).unwrap().unwrap();
+    let received = cache
+        .try_reuse(&f.keys, &PackLimits::default(), false, &mut || true)
+        .unwrap()
+        .unwrap();
     assert_eq!(received.receipt().ref_delta_count(), 2);
     assert_eq!(received.receipt().maximum_delta_depth(), 2);
     assert_eq!(received.into_bytes().unwrap(), f.raw);
@@ -236,23 +300,36 @@ fn forward_ref_chains_are_self_contained_without_ofs_negotiation() {
 fn external_delta_bases_and_cycles_cannot_establish_custody() {
     let format = GitHashAlgorithm::Sha1;
     let base = git_object_id(format, GitObjectKind::Blob, b"outside");
-    let thin = fixture(format, &[Input::Ref(base, literal_delta(7, b"inside"), b"inside".to_vec())]);
+    let thin = fixture(
+        format,
+        &[Input::Ref(
+            base,
+            literal_delta(7, b"inside"),
+            b"inside".to_vec(),
+        )],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &thin);
     assert_eq!(cache.retained_entries(), 0);
     let a = git_object_id(format, GitObjectKind::Blob, b"a");
     let b = git_object_id(format, GitObjectKind::Blob, b"b");
-    let cyclic = fixture(format, &[
-        Input::Ref(b, literal_delta(1, b"a"), b"a".to_vec()),
-        Input::Ref(a, literal_delta(1, b"b"), b"b".to_vec()),
-    ]);
+    let cyclic = fixture(
+        format,
+        &[
+            Input::Ref(b, literal_delta(1, b"a"), b"a".to_vec()),
+            Input::Ref(a, literal_delta(1, b"b"), b"b".to_vec()),
+        ],
+    );
     retain(&cache, &cyclic);
     assert_eq!(cache.retained_entries(), 0);
 }
 
 #[test]
 fn current_entry_output_native_object_and_total_limits_are_inclusive() {
-    let f = fixture(GitHashAlgorithm::Sha1, &[Input::Whole(b"aaaa".to_vec()), Input::Whole(b"bb".to_vec())]);
+    let f = fixture(
+        GitHashAlgorithm::Sha1,
+        &[Input::Whole(b"aaaa".to_vec()), Input::Whole(b"bb".to_vec())],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &f);
     let exact = PackLimits {
@@ -262,14 +339,36 @@ fn current_entry_output_native_object_and_total_limits_are_inclusive() {
         max_total_expanded_bytes: 6,
         ..PackLimits::default()
     };
-    assert!(cache.try_reuse(&f.keys, &exact, true, &mut || true).unwrap().is_some());
+    assert!(
+        cache
+            .try_reuse(&f.keys, &exact, true, &mut || true)
+            .unwrap()
+            .is_some()
+    );
     for limited in [
-        PackLimits { max_entries: 1, ..exact.clone() },
-        PackLimits { max_input_bytes: f.raw.len() - 1, ..exact.clone() },
-        PackLimits { max_object_bytes: 3, ..exact.clone() },
-        PackLimits { max_total_expanded_bytes: 5, ..exact.clone() },
+        PackLimits {
+            max_entries: 1,
+            ..exact.clone()
+        },
+        PackLimits {
+            max_input_bytes: f.raw.len() - 1,
+            ..exact.clone()
+        },
+        PackLimits {
+            max_object_bytes: 3,
+            ..exact.clone()
+        },
+        PackLimits {
+            max_total_expanded_bytes: 5,
+            ..exact.clone()
+        },
     ] {
-        assert!(cache.try_reuse(&f.keys, &limited, true, &mut || true).unwrap().is_none());
+        assert!(
+            cache
+                .try_reuse(&f.keys, &limited, true, &mut || true)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -278,24 +377,46 @@ fn inflated_delta_programs_cannot_bypass_smaller_current_envelopes() {
     let base = b"x";
     let result = b"yz";
     let program = literal_delta(1, result); // Five instruction bytes, two result bytes.
-    let f = fixture(GitHashAlgorithm::Sha1, &[
-        Input::Whole(base.to_vec()),
-        Input::Ofs(0, program.clone(), result.to_vec()),
-    ]);
+    let f = fixture(
+        GitHashAlgorithm::Sha1,
+        &[
+            Input::Whole(base.to_vec()),
+            Input::Ofs(0, program.clone(), result.to_vec()),
+        ],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &f);
-    assert_eq!(payload(&cache, &f).unwrap().receipt().total_object_bytes(), 3);
+    assert_eq!(
+        payload(&cache, &f).unwrap().receipt().total_object_bytes(),
+        3
+    );
     let exact = PackLimits {
         max_object_bytes: program.len(),
         max_total_expanded_bytes: base.len() + program.len(),
         ..PackLimits::default()
     };
-    assert!(cache.try_reuse(&f.keys, &exact, true, &mut || true).unwrap().is_some());
+    assert!(
+        cache
+            .try_reuse(&f.keys, &exact, true, &mut || true)
+            .unwrap()
+            .is_some()
+    );
     for limited in [
-        PackLimits { max_object_bytes: result.len(), ..exact.clone() },
-        PackLimits { max_total_expanded_bytes: 3, ..exact.clone() },
+        PackLimits {
+            max_object_bytes: result.len(),
+            ..exact.clone()
+        },
+        PackLimits {
+            max_total_expanded_bytes: 3,
+            ..exact.clone()
+        },
     ] {
-        assert!(cache.try_reuse(&f.keys, &limited, true, &mut || true).unwrap().is_none());
+        assert!(
+            cache
+                .try_reuse(&f.keys, &limited, true, &mut || true)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -303,14 +424,32 @@ fn inflated_delta_programs_cannot_bypass_smaller_current_envelopes() {
 fn pending_custody_is_invisible_and_abandonment_releases_its_reservation() {
     let f = whole(b"pending");
     let cache = ReceivedPackCache::new(64 * 1024);
-    let pending = cache.prepare_verified(&f.pack, f.objects.iter().copied(), &f.offsets, &PackLimits::default(), &mut || true).unwrap().unwrap();
+    let pending = cache
+        .prepare_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || true,
+        )
+        .unwrap()
+        .unwrap();
     assert_eq!(cache.retained_entries(), 0);
     assert!(payload(&cache, &f).is_none());
     assert_eq!(cache.state.lock().unwrap().reservations, 1);
     drop(pending);
     assert_eq!(cache.state.lock().unwrap().reserved_bytes, 0);
     assert_eq!(cache.state.lock().unwrap().reservations, 0);
-    let pending = cache.prepare_verified(&f.pack, f.objects.iter().copied(), &f.offsets, &PackLimits::default(), &mut || true).unwrap().unwrap();
+    let pending = cache
+        .prepare_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || true,
+        )
+        .unwrap()
+        .unwrap();
     pending.commit();
     assert_eq!(cache.retained_entries(), 1);
     assert!(payload(&cache, &f).is_some());
@@ -320,8 +459,26 @@ fn pending_custody_is_invisible_and_abandonment_releases_its_reservation() {
 fn duplicate_speculative_captures_release_extra_charges() {
     let f = whole(b"same");
     let cache = ReceivedPackCache::new(64 * 1024);
-    let one = cache.prepare_verified(&f.pack, f.objects.iter().copied(), &f.offsets, &PackLimits::default(), &mut || true).unwrap().unwrap();
-    let two = cache.prepare_verified(&f.pack, f.objects.iter().copied(), &f.offsets, &PackLimits::default(), &mut || true).unwrap().unwrap();
+    let one = cache
+        .prepare_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || true,
+        )
+        .unwrap()
+        .unwrap();
+    let two = cache
+        .prepare_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || true,
+        )
+        .unwrap()
+        .unwrap();
     one.commit();
     let charge = cache.state.lock().unwrap().resident_bytes;
     two.commit();
@@ -336,7 +493,8 @@ fn duplicate_speculative_captures_release_extra_charges() {
 fn pinned_readers_keep_capacity_until_they_finish() {
     let one = whole(b"one");
     let two = whole(b"two");
-    let charge = ENTRY_OVERHEAD + OBJECT_OVERHEAD + one.pack.retained_bytes().unwrap().retained_capacity();
+    let charge =
+        ENTRY_OVERHEAD + OBJECT_OVERHEAD + one.pack.retained_bytes().unwrap().retained_capacity();
     let cache = ReceivedPackCache::new(charge);
     retain(&cache, &one);
     let pin = payload(&cache, &one).unwrap();
@@ -374,7 +532,13 @@ fn disabled_capacity_and_duplicate_metadata_are_safe_misses() {
     assert_eq!(disabled.capture_limit(), 0);
     retain(&disabled, &f);
     assert_eq!(disabled.retained_entries(), 0);
-    let duplicate = fixture(GitHashAlgorithm::Sha1, &[Input::Whole(b"same".to_vec()), Input::Whole(b"same".to_vec())]);
+    let duplicate = fixture(
+        GitHashAlgorithm::Sha1,
+        &[
+            Input::Whole(b"same".to_vec()),
+            Input::Whole(b"same".to_vec()),
+        ],
+    );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &duplicate);
     assert_eq!(cache.retained_entries(), 0);
@@ -393,15 +557,22 @@ fn public_quarantine_metadata_and_permissive_verifiers_do_not_establish_proof() 
     assert_eq!(cache.retained_entries(), 0);
     struct Permit;
     impl PackTrailerVerifier for Permit {
-        fn verify(&self, _: &[u8], _: &[u8], _: GitHashAlgorithm) -> bool { true }
+        fn verify(&self, _: &[u8], _: &[u8], _: GitHashAlgorithm) -> bool {
+            true
+        }
     }
     let mut f = whole(b"body");
     let last = f.raw.len() - 1;
     f.raw[last] ^= 1;
     f.pack = read_verified_pack_owned(
-        f.raw.clone(), GitHashAlgorithm::Sha1, &PackLimits::default(),
-        &mut || true, &Permit, MAX_CAPTURE_BYTES,
-    ).unwrap();
+        f.raw.clone(),
+        GitHashAlgorithm::Sha1,
+        &PackLimits::default(),
+        &mut || true,
+        &Permit,
+        MAX_CAPTURE_BYTES,
+    )
+    .unwrap();
     retain(&cache, &f);
     assert_eq!(cache.retained_entries(), 0);
 }
@@ -426,7 +597,12 @@ fn damaged_hash_identity_binding_and_resource_bounds_never_serve_bytes() {
                 _ => entry.total_entry_bytes = 0,
             }
         }
-        assert!(cache.try_reuse(&keys, &PackLimits::default(), true, &mut || true).unwrap().is_none());
+        assert!(
+            cache
+                .try_reuse(&keys, &PackLimits::default(), true, &mut || true)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -435,13 +611,36 @@ fn every_capture_checkpoint_preserves_cancellation_and_releases_reservations() {
     let f = whole(b"cancellable capture");
     let baseline = ReceivedPackCache::new(64 * 1024);
     let mut calls = 0usize;
-    let pending = baseline.prepare_verified(&f.pack, f.objects.iter().copied(), &f.offsets, &PackLimits::default(), &mut || { calls += 1; true }).unwrap();
+    let pending = baseline
+        .prepare_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || {
+                calls += 1;
+                true
+            },
+        )
+        .unwrap();
     drop(pending);
     for stop in 1..=calls {
         let cache = ReceivedPackCache::new(64 * 1024);
         let mut at = 0usize;
-        let result = cache.prepare_verified(&f.pack, f.objects.iter().copied(), &f.offsets, &PackLimits::default(), &mut || { at += 1; at < stop });
-        assert!(matches!(result, Err(PackError::DeadlineExceeded)), "capture checkpoint {stop}");
+        let result = cache.prepare_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || {
+                at += 1;
+                at < stop
+            },
+        );
+        assert!(
+            matches!(result, Err(PackError::DeadlineExceeded)),
+            "capture checkpoint {stop}"
+        );
         let state = cache.state.lock().unwrap();
         assert_eq!(state.resident_bytes, 0);
         assert_eq!(state.reserved_bytes, 0);
@@ -455,11 +654,27 @@ fn every_lookup_checkpoint_cancels_without_losing_verified_custody() {
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &f);
     let mut calls = 0usize;
-    drop(cache.try_reuse(&f.keys, &PackLimits::default(), true, &mut || { calls += 1; true }).unwrap());
+    drop(
+        cache
+            .try_reuse(&f.keys, &PackLimits::default(), true, &mut || {
+                calls += 1;
+                true
+            })
+            .unwrap(),
+    );
     for stop in 1..=calls {
         let mut at = 0usize;
-        let result = cache.try_reuse(&f.keys, &PackLimits::default(), true, &mut || { at += 1; at < stop });
-        assert!(matches!(result, Err(PackWriteError::Pack(PackError::DeadlineExceeded))), "lookup checkpoint {stop}");
+        let result = cache.try_reuse(&f.keys, &PackLimits::default(), true, &mut || {
+            at += 1;
+            at < stop
+        });
+        assert!(
+            matches!(
+                result,
+                Err(PackWriteError::Pack(PackError::DeadlineExceeded))
+            ),
+            "lookup checkpoint {stop}"
+        );
         assert_eq!(cache.retained_entries(), 1);
         assert!(payload(&cache, &f).is_some());
     }
