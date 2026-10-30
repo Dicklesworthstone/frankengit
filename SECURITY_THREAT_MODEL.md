@@ -267,6 +267,12 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - canonical predecessor-linked monotone head body;
 - exact-key authority reads before sensitive operations;
 - seal put-if-absent and immutable outcome index;
+- additive issue/PR comment profiles use distinct complete seals; final preparation
+  reconstructs the original author, subject, body and optional source anchor.
+  Only the planned event position may change across a head-CAS loss. Current
+  disclosure and immutable source coordinates are revalidated; strict comments
+  cannot be relabeled as append intents, and a later read cannot supply a
+  fabricated version for an earlier publication receipt;
 - lost-response resolution by rereading head/outcome;
 - no local projection or notification authority;
 - prepared-capsule witness revalidation and deterministic policy basis;

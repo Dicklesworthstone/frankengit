@@ -1996,6 +1996,13 @@ Exact-version repository-local commands seal their canonical event bytes and exp
 
 A `RepositoryCommitRecord` atomically admits the actual canonical event bytes with any associated ref delta and outbox obligation. Physical stream segments and projections may lag, but the canonical event cannot be lost or detached from the transaction that admitted it. The append profile changes neither event encoding nor the historical request identity of any existing command; its complete seal and retry contract is defined in the normative protocol contracts, section 20.2.1.
 
+The explicit native PR append-comment profile similarly seals the PR, actor,
+literal body and optional exact source anchor without a conversation predecessor.
+Admission replans only the conversation position after a lost head CAS; current
+permissions and every original source-anchor precondition remain required. Its
+distinct request identity and historical strict-command compatibility are defined
+in the normative protocol contracts, section 20.2.2.
+
 The transactional outbox is separate. Canonical commits atomically record intents for **derived or external** work: search, graph, notifications, webhooks, CI scheduling, caches, and federation delivery. Consumers are at least once and idempotent; their acknowledgements are not repository truth.
 
 Outbox or projector lag never rolls back a RefTxn and never creates a second canonical event. A read requiring current forge state may replay commit records/event bytes or refuse on an insufficient watermark rather than silently trust a stale projection.

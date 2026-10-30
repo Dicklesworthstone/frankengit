@@ -547,6 +547,15 @@ Region close must report zero unresolved obligations or a typed containment fail
 
 ## 16. Forge/product state verification
 
+Version-independent PR comments exercise the real metadata admission driver with
+forced CAS loss, lost publication responses, bounded retry and same-key recovery.
+The paired strict-comment path keeps its exact predecessor. Native persisted-node
+tests cover overlapping writers, duplicate text under distinct keys, restart,
+stopped intake, hidden/missing PRs, cancellation and exact source anchors in both
+Git hash formats. Changed body, actor, anchor or request profile cannot reuse a
+seal. Transport tests separately check independent grants, rejected predecessor
+injection and receipt recovery without manufacturing a comment position.
+
 Event aggregates, projections, APIs, and merge queue test:
 
 - event identity/order/schema/upcast;

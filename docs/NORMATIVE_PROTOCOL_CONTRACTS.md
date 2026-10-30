@@ -631,9 +631,11 @@ content version, invalidate a review, move a Git ref, or change the policy epoch
 Admission resolves the native PR at the exact publication basis and checks both
 branches against current disclosure policy; closed and merged native PRs remain
 valid conversation subjects. An absent or legacy-only PR cannot be invented by
-posting a comment. Exact discussion versions, the authenticated actor, PR number,
-original text and optional original source anchor form the sealed command;
-retries never refresh these values.
+posting a comment. For the exact-version profile, the discussion predecessor,
+authenticated actor, PR number, original text and optional original source anchor
+form the sealed command; retries never refresh these values. The separate
+version-independent append profile in §20.2.2 selects only the conversation
+position during admission, retaining every original source-anchor precondition.
 
 The canonical owner is `fgit-forge/src/event/pull_request_comment.rs`. The new
 required aggregate kind is **8** after the existing zero escape, followed by the
@@ -825,8 +827,8 @@ restart or stopped intake. Reusing a key with a different body, issue or request
 profile cannot create another comment. Two different request identities with
 the same text remain two comments.
 
-The CALM rule table classifies only this explicit profile as eligible for
-additive replanning; unknown profiles, strict comments, field replacement,
+The CALM rule table classifies this explicit profile and the PR append profile
+in §20.2.2 as eligible for additive replanning; unknown profiles, strict comments, field replacement,
 assignment, lifecycle changes and all other current forge operations preserve
 their existing preconditions. Every operation remains `HeadCasRequired` for
 canonical publication. Logical comment membership grows by transaction identity;
@@ -835,6 +837,49 @@ outcomes still depend on the chosen authority head. This does not claim a
 commutative canonical history root or implement observed-remove label sets.
 The shared publication owner atomically records each admitted event and its
 single outbox obligation; retries cannot manufacture a second terminal decision.
+
+### 20.2.2 Native pull-request append-comment intents
+
+`PullRequestAppendCommentCommand` adds one comment to an existing native PR
+without selecting a conversation predecessor. It binds the PR number,
+authenticated actor, exact bounded UTF-8 body and optional complete source anchor,
+together with the ordinary tenant, repository, object format and idempotency key.
+Adapters MUST reject `expected_version` for this explicit profile. Historical
+`PullRequestCommentCommand` requests and their saved receipts remain strict.
+
+The commitment template uses the existing kind-12 or kind-15 native event at
+fixed conversation **version 1**. Its single-event batch root is the value of
+the `forge` request entry `pull-request.append-comment.v1`, distinct from the
+legacy `pull-request-comment.event-batch-root.v1` scope. The template is neither
+a publication position nor a selected predecessor. The request has no ref
+updates or push options and retains atomic admission. Final preparation MUST
+independently reconstruct and compare the complete original seal; the presence
+of a comment payload alone cannot opt a strict request into additive replanning.
+
+Each attempt selects the next checked conversation position from authenticated
+current forge positions, then verifies the native PR, its current disclosure
+policy and the complete conversation frontier at that same basis. A missing
+conversation begins at version 1 only when the native PR exists. Missing native
+PR metadata refuses with `EvidenceMissing`; version exhaustion refuses with
+`ResourceBudgetExceeded`. Open, closed and merged PRs permit comments. All
+source-anchor rules in §20.1.1 remain exact: replanning MUST NOT refresh the PR
+metadata version, references, recorded tips, comparison, blob or source span.
+
+A head-CAS loser revalidates the same sealed intent and changes only its planned
+conversation position. Historical terminal recovery precedes fresh intake,
+quota and PR validation, and still verifies the original seal. Changed text,
+actor, PR, source anchor or strict/append profile under a previously bound key
+cannot create another comment. Different keys with identical text remain
+different comments. Cancellation, budget exhaustion and ambiguous publication
+retain the existing undecided/recovery semantics; no extra terminal is invented.
+
+The event, conversation position and one outbox obligation publish together
+through the ordinary authority-head CAS. PR metadata, review streams, Git refs
+and policy epochs remain unchanged. `HeadCasRequired` remains the CALM class;
+additive replanning does not claim an order-independent canonical history root.
+Receipts MUST NOT infer the assigned comment version from a later conversation
+read. A receipt limited to the original terminal decision reports a null comment
+version and names its exact TxId, decision sequence and RCR instead.
 
 ### 20.3 Native protected-review quorums
 

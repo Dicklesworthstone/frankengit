@@ -5,6 +5,8 @@ use fgit_admission::merge::native::pull_request::comments as conversation;
 use fgit_forge::event::pull_request_comment::PullRequestCommentCommand;
 use fgit_forge::{AggregateVersion, ForgeEventPayload};
 
+mod append;
+
 fn opened(format: GitHashAlgorithm) -> PrFixture {
     PrFixture::new(format, PullRequestAction::Update).with_key(b"comment-first")
 }

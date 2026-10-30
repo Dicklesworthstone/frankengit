@@ -25,6 +25,9 @@ use crate::{
     ProjectionFailure, ValidatedClosure,
 };
 
+mod append;
+pub use append::{admit_append_async, append_proposal};
+
 const MAX_PAGE: u16 = 100;
 const MAX_SCAN_EVENTS: usize = 65_536;
 const MAX_SCAN_BYTES: usize = 128 * 1024 * 1024;

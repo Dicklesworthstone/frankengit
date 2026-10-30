@@ -146,9 +146,6 @@ pub fn prepare_event(
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
         ForgeEventPayload::PullRequestCommentedNative(comment) => {
-            let fgit_forge::AggregateId::PullRequestConversation(number) = event.aggregate else {
-                return Err(RefusalCode::EvidenceInvalid);
-            };
             comment
                 .validate()
                 .map_err(|_| RefusalCode::EvidenceInvalid)?;
@@ -158,26 +155,7 @@ pub fn prepare_event(
             {
                 return Err(RefusalCode::EvidenceInvalid);
             }
-            let expected_version = if event.version == fgit_forge::AggregateVersion::FIRST {
-                fgit_forge::ExpectedVersion::NewStream
-            } else {
-                fgit_forge::ExpectedVersion::Exactly(
-                    fgit_forge::AggregateVersion::try_new(event.version.get() - 1)
-                        .ok_or(RefusalCode::EvidenceInvalid)?,
-                )
-            };
-            let command = fgit_forge::event::pull_request_comment::PullRequestCommentCommand {
-                number,
-                expected_version,
-                body: comment.body.clone(),
-                anchor: comment.anchor.clone(),
-            };
-            let (expected, sealed) =
-                super::native::pull_request::comments::proposal(context, &command)
-                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
-            if expected != *event || sealed != *attempt {
-                return Err(RefusalCode::EvidenceInvalid);
-            }
+            verify_pull_request_comment_seal(context, event, attempt)?;
             (
                 ForgeEventKind::PullRequestCommented {
                     conversation: entity,
@@ -594,3 +572,63 @@ fn verify_issue_seal(
 
 #[cfg(test)]
 mod issue_seal_tests;
+
+/// Reconstruct the entire supported seal independently of the append planner.
+/// Only an exact match to the explicit append profile may omit a predecessor;
+/// the common preparation path still verifies the current conversation frontier.
+fn verify_pull_request_comment_seal(
+    context: &AdmissionContext,
+    event: &ForgeEvent,
+    attempt: &SealAttempt,
+) -> Result<(), RefusalCode> {
+    use fgit_forge::event::pull_request_comment::{
+        PullRequestAppendCommentCommand, PullRequestCommentCommand,
+    };
+    use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion};
+
+    let (
+        AggregateId::PullRequestConversation(number),
+        ForgeEventPayload::PullRequestCommentedNative(comment),
+    ) = (event.aggregate, &event.payload)
+    else {
+        return Err(RefusalCode::EvidenceInvalid);
+    };
+    let expected_version = if event.version == AggregateVersion::FIRST {
+        ExpectedVersion::NewStream
+    } else {
+        ExpectedVersion::Exactly(
+            AggregateVersion::try_new(event.version.get() - 1)
+                .ok_or(RefusalCode::EvidenceInvalid)?,
+        )
+    };
+    let command = PullRequestCommentCommand {
+        number,
+        expected_version,
+        body: comment.body.clone(),
+        anchor: comment.anchor.clone(),
+    };
+    let (expected, strict) = super::native::pull_request::comments::proposal(context, &command)
+        .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if expected != *event {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    if strict == *attempt {
+        return Ok(());
+    }
+    let (_, append) = super::native::pull_request::comments::append_proposal(
+        context,
+        &PullRequestAppendCommentCommand {
+            number,
+            body: comment.body.clone(),
+            anchor: comment.anchor.clone(),
+        },
+    )
+    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if append != *attempt {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pull_comment_seal_tests;

@@ -6,7 +6,9 @@ use fgit_admission::merge::native::pull_request::comments;
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
 use fgit_forge::PullRequestNumber;
-use fgit_forge::event::pull_request_comment::PullRequestCommentCommand;
+use fgit_forge::event::pull_request_comment::{
+    PullRequestAppendCommentCommand, PullRequestCommentCommand,
+};
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, TxId};
 use fgit_wire::visibility::RefVisibility;
@@ -16,6 +18,12 @@ use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
 
 pub use comments::{PullRequestCommentView, PullRequestCommentsPage};
+
+#[derive(Clone, Copy)]
+enum CommentSubmission<'a> {
+    Exact(&'a PullRequestCommentCommand),
+    Append(&'a PullRequestAppendCommentCommand),
+}
 
 impl OneNode {
     /// Append one exact-version comment and its delivery obligation in the
@@ -27,6 +35,41 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         command: &PullRequestCommentCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_pull_request_comment_submission_in(
+            request,
+            session,
+            CommentSubmission::Exact(command),
+            limits,
+        )
+        .await
+    }
+
+    /// Append without choosing a conversation version. The sealed intent is
+    /// stable across races; admission revalidates current authority and assigns
+    /// the next conversation position before exact-head publication.
+    pub async fn admit_pull_request_append_comment_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &PullRequestAppendCommentCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_pull_request_comment_submission_in(
+            request,
+            session,
+            CommentSubmission::Append(command),
+            limits,
+        )
+        .await
+    }
+
+    async fn admit_pull_request_comment_submission_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        submission: CommentSubmission<'_>,
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session
@@ -41,7 +84,11 @@ impl OneNode {
             object_format: self.object_format,
         };
         let map = |error| NodeReceiveTransportRefusal::Admission(Box::new(error));
-        let (_, attempt) = comments::proposal(&context, command).map_err(map)?;
+        let (_, attempt) = match submission {
+            CommentSubmission::Exact(command) => comments::proposal(&context, command),
+            CommentSubmission::Append(command) => comments::append_proposal(&context, command),
+        }
+        .map_err(map)?;
         let tx = attempt
             .derive()
             .map_err(|_| {
@@ -78,15 +125,30 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = comments::admit_async(
-            &self.authority,
-            request.authority(),
-            &context,
-            command,
-            limits,
-            &projection,
-        )
-        .await
+        let terminal = match submission {
+            CommentSubmission::Exact(command) => {
+                comments::admit_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                )
+                .await
+            }
+            CommentSubmission::Append(command) => {
+                comments::admit_append_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                )
+                .await
+            }
+        }
         .map_err(map)?;
         Ok((tx, terminal))
     }
