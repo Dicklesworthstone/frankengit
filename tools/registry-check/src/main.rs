@@ -3065,7 +3065,7 @@ const fn admission_ledger_config(command: CheckSet) -> Option<AdmissionLedgerCon
         }),
         CheckSet::LedgerFsqlitePolicy => Some(AdmissionLedgerConfig {
             root_package: "fsqlite",
-            root_version: "0.4.0",
+            root_version: "0.4.10",
             decision: "allow_transitive_admitted_fsqlite",
             owner: "storage",
         }),
@@ -7886,7 +7886,7 @@ impl CanonicalBody for EvidenceRecordBody {
         let config = admission_ledger_config(CheckSet::LedgerFsqlitePolicy)
             .expect("fsqlite policy generator must have a configuration");
         assert_eq!(config.root_package, "fsqlite");
-        assert_eq!(config.root_version, "0.4.0");
+        assert_eq!(config.root_version, "0.4.10");
         assert_eq!(config.decision, "allow_transitive_admitted_fsqlite");
         assert_eq!(config.owner, "storage");
         assert_ne!(

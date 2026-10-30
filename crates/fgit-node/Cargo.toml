@@ -37,7 +37,7 @@ fgit-wire.workspace = true
 # This names the FrankenSQLite context held for the authority store lifetime.
 # It is already in the admitted fsqlite authority closure (DEP-202), so this
 # direct edge adds no new dependency surface.
-fsqlite-types = { version = "=0.4.0", default-features = false, features = ["native"] }
+fsqlite-types = { version = "=0.4.10", default-features = false, features = ["native"] }
 
 [target.'cfg(unix)'.dependencies]
 # DEP-118: bounded deploy-key reads reject symlinks/FIFOs before reading.

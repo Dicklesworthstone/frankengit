@@ -29,7 +29,9 @@ in `Cargo.lock`**:
 
 | Crate | Version | Binding pin (crates.io checksum) |
 |---|---|---|
-| `fsqlite` | `0.3.7` | `sha256:0b7b5b479b155c0c6f32a4e725d33b5b7fc89303a821566ddb0711238883847c` |
+| `fsqlite` | `0.4.10` | `sha256:320c4c2f02197d82fca24ca3d26998126196008b9312431c4c95f7361b75b545` |
+
+Pin history: `0.3.7` (`sha256:0b7b5b47...`) -> `0.4.0` (this table was not updated then) -> `0.4.10` (2026-10-30, frankengit-fg1d: same Asupersync 0.5.0, same transitive crate set; regenerated `constellation.lock` evidence). The revision comparison below was made for `0.3.7`; `0.4.10`'s artifact records `92aeb2b9762f2f38154fde74c4055959c6ebe294`, and the checksum still binds.
 
 Why the checksum and not the revision, stated so this is not re-litigated: the
 checksum is content-addressed and exact, cargo enforces it on every build, and a
