@@ -54,6 +54,8 @@ if case == "build_sleep":
         out.write(json.dumps({"kind": "build_waiting"}) + "\n")
     time.sleep(20)
 directory = target / "x86_64-unknown-linux-gnu/debug/deps"
+if case.startswith("wrapped"):
+    directory = target / "x86_64-unknown-linux-gnu/debug/build/fgit-diff/0123456789abcdef/out"
 if case == "foreign":
     directory = target / "wasm32-unknown-unknown/debug/deps"
 if case == "outside":
@@ -66,6 +68,8 @@ if case == "parent_symlink":
 else:
     directory.mkdir(parents=True, exist_ok=True)
 executable = directory / "differential_pinned_oracle-a1b2"
+if case.startswith("wrapped"):
+    executable = directory / "differential_pinned_oracle-0123456789abcdef"
 executable.write_text("#!" + sys.executable + "\n" +
     "import json, os, sys\n" +
     "with open(os.environ['TEST_LOG'], 'a') as out:\n" +
@@ -86,6 +90,14 @@ artifact = {"reason": "compiler-artifact", "package_id": "worker-path-package",
             "name": "differential_pinned_oracle", "src_path": str(source)},
             "profile": {"test": case != "wrong_mode"}, "executable": str(executable),
             "filenames": [str(executable)]}
+if case.startswith("wrapped") and case != "wrapped_no_binding":
+    artifact["rch"] = {"receipt": {"wrapper_id": "explicit-fake-contract"},
+                       "worker_record": {"target": artifact["target"]},
+                       "executable_blake3": "a" * 64}
+    if case == "wrapped_bad_fingerprint":
+        artifact["rch"]["executable_blake3"] = "not-a-fingerprint"
+    if case == "wrapped_wrong_target":
+        artifact["rch"]["worker_record"] = {"target": {"name": "unrelated", "kind": ["test"]}}
 if case in ("wrong_manifest", "wrong_source"):
     other = root / "other"
     other.write_text("not selected")
@@ -149,6 +161,16 @@ class HostTestContract(unittest.TestCase):
         if expected in (2, 101, 103):
             self.assertFalse(any(r["kind"] == "native" for r in rows), rows)
         return rows
+
+    def test_wrapped_output_requires_exact_delivered_rch_binding(self):
+        self.invoke("wrapped")
+        for case in ("wrapped_no_binding", "wrapped_bad_fingerprint", "wrapped_wrong_target"):
+            with self.subTest(case=case):
+                # Each fake build needs a fresh output tree, as in separate invocations.
+                if self.target.exists():
+                    shutil.rmtree(self.target)
+                self.log.unlink()
+                self.invoke(case, expected=2)
 
     def test_real_selected_receipt_preserves_host_arguments_context_and_job_limit(self):
         rows = self.invoke(changes={"CARGO_BUILD_JOBS": "2"})

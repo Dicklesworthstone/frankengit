@@ -109,8 +109,26 @@ def select_executable(metadata, records, package, target, host, private_target):
     require(str(executable) in artifact["filenames"], "executable is absent from Cargo filenames")
     require(not executable.is_symlink(), "test executable is a symlink")
     executable = executable.resolve(strict=True)
-    require(executable.parent == target_root / host / "debug" / "deps",
-            "test executable is outside the private native host output")
+    native = target_root / host / "debug"
+    standard = executable.parent == native / "deps"
+    # The approved RCH rustc wrapper isolates each executable in a build slot.
+    # Accept that exact layout only with its delivered Cargo/RCH binding.
+    relative = executable.relative_to(native)
+    parts = relative.parts
+    binding = artifact.get("rch")
+    wrapped = (len(parts) == 5 and parts[:2] == ("build", package)
+               and re.fullmatch(r"[0-9a-f]{16}", parts[2]) is not None
+               and parts[3] == "out"
+               and parts[4] == target.replace("-", "_") + "-" + parts[2]
+               and isinstance(binding, dict)
+               and isinstance(binding.get("receipt"), dict)
+               and bool(binding["receipt"])
+               and isinstance(binding.get("worker_record"), dict)
+               and binding["worker_record"].get("target", {}).get("name") == target
+               and binding["worker_record"]["target"].get("kind") == ["test"]
+               and isinstance(binding.get("executable_blake3"), str)
+               and re.fullmatch(r"[0-9a-f]{64}", binding["executable_blake3"]) is not None)
+    require(standard or wrapped, "test executable is outside the private native host output")
     require(stat.S_ISREG(executable.stat().st_mode) and os.access(executable, os.X_OK),
             "returned test executable is missing or not executable")
     return executable
