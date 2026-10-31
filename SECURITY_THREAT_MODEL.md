@@ -241,6 +241,10 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
   expiry never establishes non-commit or erases a known canonical outcome;
 - native typed hash domains and collision-defense profile;
 - exact hidden-ref authorization and advertisement policy;
+- received-pack reuse requires a freshly authorized exact object set. Joining
+  cached packs requires a disjoint complete cover, a self-contained combined
+  delta graph, aggregate limits, and verification of bytes plus parent metadata.
+  Cached presence never authorizes an extra object or an external thin base;
 - protocol/service/capability matrix; no fictional protocol-v2 push assumption;
 - fuzz/source-derived/adversarial differential corpus;
 - no shell command/path construction from repository data.

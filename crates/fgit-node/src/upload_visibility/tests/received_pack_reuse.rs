@@ -6,6 +6,8 @@ use fgit_pack::{
 };
 use fgit_wire::ObjectFilter;
 
+mod composition;
+
 struct ReceivedSource(MemorySource);
 
 impl CanonicalObjectSource for ReceivedSource {

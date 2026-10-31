@@ -78,9 +78,12 @@ retained-entry budget is additional to the delta window and is not a total RSS
 limit; the measurements above predate the cache.
 The three serving commands also retain fully verified received packs under
 `--received-pack-cache-mib <0..65536>` (128 MiB by default, zero disables).
-When a later fetch's freshly authorized object set matches a self-contained
-received pack exactly, the first clone can reuse its compressed bytes without
-re-reading blob bodies or recomputing deltas. Reuse begins only after immutable
+When a later fetch's freshly authorized object set matches one received pack
+or a disjoint combination of complete packs exactly, the clone can reuse their
+compressed entries without re-reading blob bodies or recomputing deltas. This
+also supports compatible thin incremental pushes when all their delta bases
+are present in the selected combination. The complete delta graph and resource
+limits are rechecked before streaming a self-contained pack. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
 its own representation receipt. This bounded process-local capability is
 described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);

@@ -7,8 +7,11 @@
 //! that selection, with all delta bases inside it; it cannot disclose a hidden
 //! extra object or turn physical presence into reachability.
 //!
-//! The received-pack-v1 profile preserves the sender's verified representation,
-//! rather than claiming the native writer's ordering or compression receipts.
+//! The received-pack-v1 profile preserves one sender representation. The
+//! received-pack-concat-v1 profile joins complete, disjoint entry runs after
+//! verifying their combined delta graph. Neither claims native-writer ordering
+//! or compression work. A retained thin pack cannot be served until every base
+//! is present in the independently authorized, self-contained output.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -21,6 +24,8 @@ use fgit_pack::{
     PackWriteError, ParsedDeltaBase, QuarantinedPack, RetainedPackBytes, validate_pack_trailer,
 };
 use fgit_types::GitOid;
+
+mod composition;
 
 const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 8;
@@ -50,12 +55,22 @@ pub struct ReceivedPackReceipt {
     total_object_bytes: usize,
     output_bytes: usize,
     maximum_delta_depth: usize,
+    source_pack_count: usize,
 }
 
 impl ReceivedPackReceipt {
     #[must_use]
     pub const fn profile(&self) -> &'static str {
-        "received-pack-v1"
+        if self.source_pack_count == 1 {
+            "received-pack-v1"
+        } else {
+            "received-pack-concat-v1"
+        }
+    }
+    /// Number of complete verified sender entry runs in this representation.
+    #[must_use]
+    pub const fn source_pack_count(&self) -> usize {
+        self.source_pack_count
     }
     #[must_use]
     pub const fn checksum(&self) -> GitOid {
@@ -95,6 +110,9 @@ impl ReceivedPackReceipt {
 struct Entry {
     bytes: RetainedPackBytes,
     objects: Vec<VerifiedReceivedObject>,
+    // In the same sorted order as objects. REF parents may be external to the
+    // received pack; OFS parents were verified inside its unchanged entry run.
+    parents: Vec<Option<GitOid>>,
     receipt: ReceivedPackReceipt,
     // Includes both native body sizes and inflated delta-program sizes.
     maximum_object_bytes: usize,
@@ -266,9 +284,11 @@ impl ReceivedPackCache {
             total_object_bytes,
             output_bytes: bytes.bytes().len(),
             maximum_delta_depth: dependencies.depth,
+            source_pack_count: 1,
         };
         let binding = metadata_binding(
             &metadata,
+            &dependencies.parents,
             &receipt,
             maximum_object_bytes,
             dependencies.total_entry_bytes,
@@ -280,6 +300,7 @@ impl ReceivedPackCache {
             entry: Entry {
                 bytes: bytes.clone(),
                 objects: metadata,
+                parents: dependencies.parents,
                 receipt,
                 maximum_object_bytes,
                 total_entry_bytes: dependencies.total_entry_bytes,
@@ -326,68 +347,7 @@ impl ReceivedPackCache {
         allow_ofs_delta: bool,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Option<ReceivedPackPayload>, PackWriteError> {
-        check(live)?;
-        if keys.is_empty() || keys.len() > limits.max_entries as usize {
-            return Ok(None);
-        }
-        for pair in keys.windows(2) {
-            check(live)?;
-            if pair[0].id >= pair[1].id {
-                return Ok(None);
-            }
-        }
-        let selected = {
-            let Ok(state) = self.state.lock() else {
-                return Ok(None);
-            };
-            let mut selected = None;
-            for entry in &state.entries {
-                check(live)?;
-                if entry.objects.len() != keys.len()
-                    || entry.receipt.output_bytes > limits.max_input_bytes
-                    || entry.maximum_object_bytes > limits.max_object_bytes
-                    || entry.receipt.total_object_bytes > limits.max_total_expanded_bytes
-                    || entry.total_entry_bytes > limits.max_total_expanded_bytes
-                    || entry.receipt.maximum_delta_depth > limits.max_delta_depth
-                    || entry.maximum_delta_fanout > limits.max_delta_fanout
-                    || (!allow_ofs_delta && entry.receipt.ofs_delta_count != 0)
-                {
-                    continue;
-                }
-                let mut matches = true;
-                for (object, key) in entry.objects.iter().zip(keys) {
-                    check(live)?;
-                    if object.id != key.id || object.kind != key.object_type {
-                        matches = false;
-                        break;
-                    }
-                }
-                if matches {
-                    selected = Some(Arc::clone(entry));
-                    break;
-                }
-            }
-            selected
-        };
-        let Some(entry) = selected else {
-            check(live)?;
-            return Ok(None);
-        };
-        if strong_hash(entry.bytes.bytes(), live)? != entry.receipt.sha256
-            || metadata_binding(
-                &entry.objects,
-                &entry.receipt,
-                entry.maximum_object_bytes,
-                entry.total_entry_bytes,
-                entry.maximum_delta_fanout,
-                live,
-            )? != entry.binding
-        {
-            check(live)?;
-            return Ok(None);
-        }
-        check(live)?;
-        Ok(Some(ReceivedPackPayload { entry, offset: 0 }))
+        composition::select(self, keys, limits, allow_ofs_delta, live).map_err(Into::into)
     }
 }
 
@@ -446,31 +406,68 @@ impl PendingReceivedPack {
 /// Each active reader has its own cursor and pins the accounted bytes.
 #[derive(Debug)]
 pub struct ReceivedPackPayload {
-    entry: Arc<Entry>,
+    entries: Vec<Arc<Entry>>,
+    receipt: ReceivedPackReceipt,
+    // None preserves a single sender's bytes, including its original header.
+    // A composed pack emits this header, each complete entry run, then its new
+    // native trailer. No expanded body or joined compressed copy is allocated.
+    header: Option<[u8; 12]>,
+    part: usize,
     offset: usize,
 }
 
 impl ReceivedPackPayload {
     pub(crate) fn receipt(&self) -> &ReceivedPackReceipt {
-        &self.entry.receipt
+        &self.receipt
+    }
+
+    fn part_bytes(&self, part: usize) -> Option<&[u8]> {
+        let Some(header) = &self.header else {
+            return (part == 0).then(|| self.entries[0].bytes.bytes());
+        };
+        if part == 0 {
+            Some(header)
+        } else if let Some(entry) = self.entries.get(part - 1) {
+            let bytes = entry.bytes.bytes();
+            Some(&bytes[12..bytes.len() - self.receipt.checksum.as_bytes().len()])
+        } else if part == self.entries.len() + 1 {
+            Some(self.receipt.checksum.as_bytes())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn next_chunk(&mut self, maximum: usize) -> io::Result<Option<Vec<u8>>> {
         if maximum == 0 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let bytes = self.entry.bytes.bytes();
-        if self.offset == bytes.len() {
-            return Ok(None);
+        loop {
+            let Some(bytes) = self.part_bytes(self.part) else {
+                return Ok(None);
+            };
+            if self.offset == bytes.len() {
+                self.part += 1;
+                self.offset = 0;
+                continue;
+            }
+            let end = self.offset + maximum.min(bytes.len() - self.offset);
+            let chunk = copy_bytes(&bytes[self.offset..end])?;
+            self.offset = end;
+            return Ok(Some(chunk));
         }
-        let end = self.offset + maximum.min(bytes.len() - self.offset);
-        let chunk = copy_bytes(&bytes[self.offset..end])?;
-        self.offset = end;
-        Ok(Some(chunk))
     }
 
     pub(crate) fn into_bytes(self) -> io::Result<Vec<u8>> {
-        copy_bytes(self.entry.bytes.bytes())
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(self.receipt.output_bytes)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let mut part = 0;
+        while let Some(fragment) = self.part_bytes(part) {
+            bytes.extend_from_slice(fragment);
+            part += 1;
+        }
+        Ok(bytes)
     }
 }
 
@@ -503,6 +500,7 @@ fn strong_hash(bytes: &[u8], deadline: &mut impl Deadline) -> Result<[u8; 32], P
 
 fn metadata_binding(
     objects: &[VerifiedReceivedObject],
+    parents: &[Option<GitOid>],
     receipt: &ReceivedPackReceipt,
     maximum_object_bytes: usize,
     total_entry_bytes: usize,
@@ -511,7 +509,7 @@ fn metadata_binding(
 ) -> Result<[u8; 32], PackError> {
     check(deadline)?;
     let mut hash = Sha256Hasher::new();
-    hash.update(b"frankengit/received-pack-v1/verified-association\0");
+    hash.update(b"frankengit/received-pack-v2/verified-association\0");
     hash.update(&receipt.sha256);
     hash.update(&[receipt.checksum.as_bytes().len() as u8]);
     hash.update(receipt.checksum.as_bytes());
@@ -522,10 +520,12 @@ fn metadata_binding(
         receipt.total_object_bytes,
         receipt.output_bytes,
         receipt.maximum_delta_depth,
+        receipt.source_pack_count,
         maximum_object_bytes,
         total_entry_bytes,
         maximum_delta_fanout,
         objects.len(),
+        parents.len(),
     ] {
         hash.update(&(value as u64).to_be_bytes());
     }
@@ -541,6 +541,16 @@ fn metadata_binding(
         }]);
         hash.update(&(object.bytes as u64).to_be_bytes());
     }
+    for parent in parents {
+        check(deadline)?;
+        match parent {
+            Some(id) => {
+                hash.update(&[id.as_bytes().len() as u8]);
+                hash.update(id.as_bytes());
+            }
+            None => hash.update(&[0]),
+        }
+    }
     check(deadline)?;
     Ok(hash.finish())
 }
@@ -552,10 +562,12 @@ struct Dependencies {
     fanout: usize,
     maximum_entry_bytes: usize,
     total_entry_bytes: usize,
+    parents: Vec<Option<GitOid>>,
 }
 
-/// Validate the pack-local graph. Forward REF bases are supported; external
-/// bases, cycles and malformed joins cannot establish self-contained custody.
+/// Validate the pack-local graph and retain verified external REF dependencies.
+/// External roots give only a lower bound on depth/fanout here. Serving always
+/// revalidates the complete graph and refuses an unresolved external base.
 fn dependencies(
     pack: &QuarantinedPack,
     metadata: &[VerifiedReceivedObject],
@@ -569,11 +581,13 @@ fn dependencies(
     let mut depths = Vec::new();
     let mut seen = Vec::new();
     let mut chain = Vec::new();
+    let mut parent_ids = Vec::new();
     if parents.try_reserve_exact(count).is_err()
         || fanout.try_reserve_exact(count).is_err()
         || depths.try_reserve_exact(count).is_err()
         || seen.try_reserve_exact(count).is_err()
         || chain.try_reserve_exact(count).is_err()
+        || parent_ids.try_reserve_exact(count).is_err()
     {
         return Ok(None);
     }
@@ -581,6 +595,7 @@ fn dependencies(
     fanout.resize(count, 0usize);
     depths.resize(count, usize::MAX);
     seen.resize(count, 0u8);
+    parent_ids.resize(count, None);
     let mut result = Dependencies {
         ofs: 0,
         reference: 0,
@@ -588,6 +603,7 @@ fn dependencies(
         fanout: 0,
         maximum_entry_bytes: 0,
         total_entry_bytes: 0,
+        parents: Vec::new(),
     };
     for entry in pack.entries() {
         check(deadline)?;
@@ -647,8 +663,17 @@ fn dependencies(
         let Some(base) = base else {
             return Ok(None);
         };
-        let Ok(parent) = metadata.binary_search_by_key(base, |object| object.id) else {
+        if base.algorithm() != pack.format || base.is_zero() {
             return Ok(None);
+        }
+        parent_ids[index] = Some(*base);
+        let Ok(parent) = metadata.binary_search_by_key(base, |object| object.id) else {
+            // OFS parents must resolve in this run; only REF deltas can refer
+            // to objects placed by an earlier validated receive.
+            if entry.header.kind != EntryKind::RefDelta {
+                return Ok(None);
+            }
+            continue;
         };
         if metadata[parent].kind != metadata[index].kind {
             return Ok(None);
@@ -693,7 +718,7 @@ fn dependencies(
                     Some(depth) => depth,
                     None => return Ok(None),
                 },
-                None => 0,
+                None => usize::from(parent_ids[index].is_some()),
             };
             if depth > limits.max_delta_depth {
                 return Ok(None);
@@ -703,6 +728,7 @@ fn dependencies(
             result.depth = result.depth.max(depth);
         }
     }
+    result.parents = parent_ids;
     Ok(Some(result))
 }
 

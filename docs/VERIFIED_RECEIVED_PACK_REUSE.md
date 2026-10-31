@@ -1,10 +1,12 @@
-# Reuse a verified received pack for the first clone
+# Reuse verified received packs for full and incremental histories
 
 The network receive and upload paths share a bounded, immutable compressed
-representation inside one serving process (`frankengit-1tl9`). After a push has
-validated and placed a self-contained pack, a matching clone's pack-materialization
-step can serve those original bytes without re-reading expanded blob bodies,
-choosing new deltas, or recompressing them. Normal authorization and graph
+representation inside one serving process (`frankengit-1tl9`). After pushes have
+validated and placed their objects, a matching clone's pack-materialization
+step can reuse one original pack or join complete entry runs from several
+packs without re-reading expanded blob bodies, choosing new deltas, or
+recompressing them. This includes an initial full push followed by compatible
+thin incremental pushes. Normal authorization and graph
 selection still run first; this is not a claim of an I/O-free whole fetch.
 The HTTP, SSH, and raw Git request children share this cache through their
 service configuration.
@@ -18,10 +20,12 @@ resolve every delta, verify every native object identity and structure, and
 validate the requested closure.
 
 A reusable candidate records every raw entry's verified identity, type and
-expanded length. Every entry must belong to the validated closure and traverse
-the object fabric's placement checks. Every delta base must be another entry
-inside the pack. External thin bases, duplicate identities, dependency cycles,
-or incompatible metadata prevent retention.
+expanded length, plus its delta-parent identity when present. Every entry must
+belong to the validated closure and traverse the object fabric's placement
+checks. A thin pack may retain a REF-delta dependency on an object already
+verified by the receive path. This does not make the thin pack independently
+servable. Duplicate identities, local dependency cycles, or incompatible
+metadata prevent retention; OFS parents must remain inside their original run.
 
 The candidate holds a cache reservation while its objects are staged. It becomes
 eligible only after all immutable placement batches have passed publication,
@@ -31,17 +35,35 @@ does not publish a ref: repository state still changes only at the ordinary
 authority-head CAS.
 
 Every fetch independently authenticates its basis and computes the visible
-selection. Reuse requires exact equality of the sorted native identities
-and types, including the entry count. A cache cannot authorize an object, add a
-delta-support object, or widen a filtered, shallow, or have-reduced selection.
+selection. Reuse requires an exact, disjoint cover of those sorted native
+identities and types using complete cached packs. Each candidate must be a
+subset of the selection; overlapping objects cannot be emitted twice. A cache
+cannot authorize an object, add a delta-support object, or widen a filtered,
+shallow, or have-reduced selection.
 An OFS-delta representation also requires the client's negotiated `ofs-delta`
 capability. Self-contained REF deltas do not require that capability.
 
+The composed delta graph is checked against the complete selected object set.
+Every external REF base must resolve inside that set with the same object type;
+depth and fanout limits apply across pack boundaries, and cycles refuse reuse.
+An unresolved base cannot be supplied merely because it exists in storage or
+in a pack containing other unselected objects. A failed cover does not prevent
+trying another compatible retained representation, or the ordinary native writer.
+
+Composition emits one new pack header, the unchanged complete entry run from
+each selected source, and one newly computed native trailer. Keeping every run
+contiguous preserves its relative OFS-delta distances; REF deltas resolve by
+native object identity across runs. The source order is deterministic: an exact
+single source is preferred, then fewer sources, then FIFO source order. The
+payload streams these segments without allocating a combined compressed buffer.
+
 Current object-count, object-size, aggregate-expanded, output-byte, delta-depth,
-and fanout limits still apply. Object-size checks include inflated delta programs
+and fanout limits apply to the complete output. Object-size checks include inflated delta programs
 as well as native bodies; raw entry inflation and reconstructed object totals
 are bounded separately. The node rechecks the retained bytes' SHA-256 and
-their metadata association with bounded cancellation checkpoints before reuse.
+their metadata and parent association with bounded cancellation checkpoints
+before reuse. Bytes are hashed only for candidates participating in a complete
+cover, at most once per retained source per request.
 Incompatible or unavailable entries use the existing native writer. Cancelled
 work remains cancelled.
 
@@ -61,15 +83,21 @@ still received normally under the independent receive envelope.
 
 This setting is separate from `--pack-cache-mib`, which controls deterministic
 delta and compression memoization. Each active reuse reader pins its cache
-entry and owns an independent cursor. FIFO eviction skips pinned readers, and
+entries and owns an independent cursor. FIFO eviction skips pinned readers, and
 pending captures reserve their full charge before allocating metadata.
 This is a retained-entry budget, not a total process RSS ceiling.
 
+At most eight sources allow at most 255 cover combinations. Membership and
+pairwise overlaps are computed once; cover enumeration uses these bounded
+summaries. Graph scratch is bounded by the selected object count and the
+existing conservative per-object cache charge. Sources are pinned under the
+cache lock, then comparisons, graph checks and hashing run outside that lock.
+
 The cache is process-local and disposable. A newly started service rebuilds
 outgoing packs until it receives another eligible representation. Native
-imports, arbitrary subsets of existing packs, and combinations of several
-received packs still use the native construction path. This change does not
-claim restart-persistent reuse or completion of the large-history clone bead.
+imports, selections that require splitting a cached pack, and histories whose
+needed base representations have been evicted still use the native construction
+path. This change does not claim restart-persistent reuse or completion of the large-history clone bead.
 
 ## Explicit representation receipt
 
@@ -80,10 +108,14 @@ claim restart-persistent reuse or completion of the large-history clone bead.
   profile, checksum, ordering and compression receipts.
 - `Received(ReceivedPackReceipt)` records the `received-pack-v1` representation,
   native checksum, full-byte SHA-256, entry count, separate OFS and REF delta
-  counts, expanded bytes, output bytes, and maximum delta depth.
+  counts, expanded bytes, output bytes, and maximum delta depth. A composition
+  uses the distinct `received-pack-concat-v1` profile with newly computed
+  checksums and aggregate counts. `source_pack_count()` identifies the number
+  of complete verified sender runs in either profile.
 
-The received profile preserves the sender's bytes and ordering. It does not
-claim equivalence to the native writer's frozen encoding. Both profiles must
+The singleton received profile preserves the sender's bytes and ordering; the
+composed profile preserves the constituent entry runs and replaces their outer
+framing. Neither claims equivalence to the native writer's frozen encoding. Both profiles must
 represent the exact authorized native object set. Local exports continue to
 use their explicit deterministic writer profile.
 
@@ -115,6 +147,16 @@ graceful server drain are its oracles. Native tests establish cache-hit behavior
 the transport suite by itself establishes neither a cache hit nor a speedup.
 It records the actual Git/OpenSSH versions and does not claim pinned
 differential evidence.
+
+The composition regressions additionally resolve forward REF chains and shifted
+OFS runs without an external-base oracle, exercise global depth/fanout and
+aggregate limits, and reject corrupt parent associations. A native-node test
+receives a full pack and a thin incremental push, removes access to all object
+files after authorized selection, and materializes the composite. Receiving
+that output into a second empty node independently checks its complete native
+closure. Reduced, private, deleted and missing-base selections exercise the
+ordinary writer fallback. These tests do not establish a whole-clone speedup
+or persistence across service restarts.
 
 The node and CLI tests and stock-client campaign **were not executed** in the
 development session. Repeated node builds and a metadata check stopped while

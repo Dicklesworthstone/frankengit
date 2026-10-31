@@ -297,7 +297,7 @@ fn forward_ref_chains_are_self_contained_without_ofs_negotiation() {
 }
 
 #[test]
-fn external_delta_bases_and_cycles_cannot_establish_custody() {
+fn external_delta_bases_require_a_complete_cover_and_local_cycles_are_rejected() {
     let format = GitHashAlgorithm::Sha1;
     let base = git_object_id(format, GitObjectKind::Blob, b"outside");
     let thin = fixture(
@@ -310,7 +310,8 @@ fn external_delta_bases_and_cycles_cannot_establish_custody() {
     );
     let cache = ReceivedPackCache::new(64 * 1024);
     retain(&cache, &thin);
-    assert_eq!(cache.retained_entries(), 0);
+    assert_eq!(cache.retained_entries(), 1);
+    assert!(payload(&cache, &thin).is_none());
     let a = git_object_id(format, GitObjectKind::Blob, b"a");
     let b = git_object_id(format, GitObjectKind::Blob, b"b");
     let cyclic = fixture(
@@ -321,7 +322,8 @@ fn external_delta_bases_and_cycles_cannot_establish_custody() {
         ],
     );
     retain(&cache, &cyclic);
-    assert_eq!(cache.retained_entries(), 0);
+    assert_eq!(cache.retained_entries(), 1);
+    assert!(payload(&cache, &cyclic).is_none());
 }
 
 #[test]
@@ -679,3 +681,5 @@ fn every_lookup_checkpoint_cancels_without_losing_verified_custody() {
         assert!(payload(&cache, &f).is_some());
     }
 }
+
+mod composition;

@@ -992,13 +992,14 @@ pub struct AuthoritySelectedPackPayload {
 }
 
 /// Provenance of the exact bytes served for an authorized object selection.
-/// Received packs preserve their sender's representation; they do not claim
+/// Received packs preserve verified sender entry runs; they do not claim
 /// the deterministic writer's ordering, compression profile, or work receipts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackMaterializationReceipt {
     /// A new artifact produced by the frozen native pack writer.
     Written(PackWriteReceipt),
-    /// The unchanged bytes of a fully native-verified received pack.
+    /// A fully native-verified sender pack or exact disjoint composition of
+    /// complete sender entry runs, identified by its representation profile.
     Received(ReceivedPackReceipt),
 }
 
