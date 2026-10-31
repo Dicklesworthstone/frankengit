@@ -439,7 +439,7 @@ pub(in crate::merge) fn prepare_coupled_events(
         refs: expected_refs,
     } = input;
     if event.events.len() != 1 {
-        super::native::queue::validate_landing_shape(&event)?;
+        super::native::queue::validate_publication_shape(&event)?;
     }
     if event.events.is_empty()
         || event.events.len() > 3

@@ -183,7 +183,7 @@ where
         None,
         limits,
         projection,
-        Some(command),
+        Some(super::Landing::FastForward(command)),
     )
     .await
 }
@@ -269,7 +269,7 @@ pub(in crate::merge::native) async fn validate_landing_at<S, P>(
     basis: &PublicationBasis,
     snapshot: &AdmissionSnapshot,
     resolved: &NativeMergeBasis,
-    command: &QueueLandingCommand,
+    selection: super::Landing<'_>,
     events: &ForgeEventBatch,
     projection: &P,
 ) -> Result<(), PreparationFailure>
@@ -277,6 +277,7 @@ where
     S: AsyncAuthorityStore + ?Sized,
     P: NativeMergeProjection<S> + ?Sized,
 {
+    let command = selection.guards();
     let cancelled = || projection.merge_checkpoint(cx).is_err();
     let mut queues = super::read::replay_selected(
         store,
@@ -366,7 +367,9 @@ where
     {
         return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
     }
-    validate_landing_shape(events).map_err(ProjectionFailure::Refuse)?;
+    selection
+        .validate_shape(events)
+        .map_err(ProjectionFailure::Refuse)?;
     for event in [&events.events[0], &events.events[2]] {
         queue
             .apply_event(event)

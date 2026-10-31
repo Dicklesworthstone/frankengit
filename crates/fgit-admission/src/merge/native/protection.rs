@@ -684,7 +684,7 @@ where
                 ..
             }]
         ) {
-            super::queue::validate_landing_shape(&prepared.event)
+            super::queue::validate_publication_shape(&prepared.event)
                 .map_err(ProjectionFailure::Unavailable)?;
         }
         read_at(store, cx, basis, cancelled)
