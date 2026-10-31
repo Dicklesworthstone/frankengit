@@ -84,11 +84,23 @@ fn loose(
     id
 }
 fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid, GitOid, GitOid) {
-    let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
+    fixture_with_default(scratch, format, "refs/heads/main")
+}
+fn fixture_with_default(
+    scratch: &Scratch,
+    format: GitHashAlgorithm,
+    default: &str,
+) -> (OneNode, GitOid, GitOid, GitOid) {
+    let (mut node, _) = OneNode::init(
+        scratch
+            .config(format)
+            .with_initial_branch(reference(default)),
+    )
+    .unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let root = scratch.0.join("source");
     fs::create_dir_all(root.join("refs/heads")).unwrap();
-    fs::write(root.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    fs::write(root.join("HEAD"), format!("ref: {default}\n")).unwrap();
     fs::write(root.join("config"),match format {
         GitHashAlgorithm::Sha1=>"[core]\nrepositoryformatversion = 0\nbare = true\n",
         GitHashAlgorithm::Sha256=>"[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n",
@@ -119,6 +131,14 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid, Git
     );
     let child=loose(&root,format,GitObjectKind::Commit,"commit",format!("tree {tree}\nparent {base}\nauthor Fixture <fixture@example.invalid> 2 +0000\ncommitter Fixture <fixture@example.invalid> 2 +0000\n\nchild\n").as_bytes());
     fs::write(root.join("refs/heads/main"), format!("{child}\n")).unwrap();
+    if default != "refs/heads/main" {
+        // A real independent default remains protected while the test deletes
+        // the only branch that reaches the prerequisite commit.
+        let independent = loose(&root, format, GitObjectKind::Commit, "commit", format!(
+            "tree {tree}\nauthor Fixture <fixture@example.invalid> 3 +0000\ncommitter Fixture <fixture@example.invalid> 3 +0000\n\nindependent default\n"
+        ).as_bytes());
+        fs::write(root.join(default), format!("{independent}\n")).unwrap();
+    }
     let request = node.request_context();
     let imported = node
         .runtime()

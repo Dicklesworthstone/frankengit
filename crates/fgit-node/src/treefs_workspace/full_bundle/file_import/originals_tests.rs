@@ -147,7 +147,8 @@ fn original_selection_freezes_exact_prerequisite_closure_and_charges_discovery_a
 fn stored_hidden_deleted_and_wrong_kind_objects_do_not_become_original_prerequisites() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
-        let (node, base, child, blob) = fixture(&scratch, format);
+        let (node, base, child, blob) =
+            fixture_with_default(&scratch, format, "refs/heads/retained-default");
         let request = node.import_request_context(None);
         let materialized = snapshot(&node);
         let tree = node

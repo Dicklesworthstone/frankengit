@@ -329,7 +329,15 @@ fn file_incremental_deleted_prerequisites_are_unavailable_despite_retained_nativ
     let source_root = Scratch::new();
     let (source, base, child, _) = fixture(&source_root, format);
     let destination_root = Scratch::new();
-    let destination = empty_node(&destination_root, format);
+    let (mut destination, _) = OneNode::init(
+        destination_root
+            .config(format)
+            .with_initial_branch(reference("refs/heads/retained-default")),
+    )
+    .unwrap();
+    destination
+        .bring_into_service(HeadGeneration::FIRST)
+        .unwrap();
     seed_originals(&source, &destination, base);
     let path = source_root.0.join("deleted.bundle");
     fs::write(
@@ -337,16 +345,23 @@ fn file_incremental_deleted_prerequisites_are_unavailable_despite_retained_nativ
         incremental_bytes(&source, &["refs/heads/main"], &[base]),
     )
     .unwrap();
-    accepted(apply(
-        &destination,
-        &["refs/heads/main", "refs/heads/seed"].map(|name| RefCommand {
-            name: reference(name),
-            expected_old: ExpectedOld::Exactly(base),
-            proposed_new: ProposedNew::Delete,
-            force: false,
-        }),
-        "file-sync-delete-original-roots",
-    ));
+    // Each branch edit uses its real single-target contract; a pair of
+    // deletions is not a rename. The independent unborn default is untouched.
+    for (index, name) in ["refs/heads/main", "refs/heads/seed"]
+        .into_iter()
+        .enumerate()
+    {
+        accepted(apply(
+            &destination,
+            &[RefCommand {
+                name: reference(name),
+                expected_old: ExpectedOld::Exactly(base),
+                proposed_new: ProposedNew::Delete,
+                force: false,
+            }],
+            &format!("file-sync-delete-original-root-{index}"),
+        ));
+    }
     let before = snapshot(&destination);
     assert!(
         before
