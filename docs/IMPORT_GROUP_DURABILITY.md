@@ -30,6 +30,30 @@ bytes. SHA-1 and SHA-256 stay distinct, and returned placement receipts never
 claim canonical visibility. The import consumer deliberately uses the narrower
 8 MiB profile.
 
+## Exact replay bounds and durability
+
+Publishing a synced stage can race another writer of the same immutable name.
+That collision path compares regular-file handles in two fixed 16 KiB buffers.
+Both handle lengths must fit the configured stored-object limit before either
+body is read. The comparison requires every byte and a one-byte EOF probe;
+matching metadata, a matching prefix, identical oversized files, and truncated
+files cannot produce an `AlreadyPresent` receipt. Persistent nonregular files
+are refused under the same file-type policy as bounded object reads. The
+operator must still keep the storage root and its ancestors stable.
+
+Manifest and retention publication also establish their own parent-directory
+fence when the immutable name already contains identical bytes. Another writer
+may have linked the name without completing its sync. A retry therefore cannot
+report durability from byte equality alone. Conflicting immutable bytes remain
+an error, and failure removes only the caller's private stage.
+
+The focused regressions are `local::bounded_compare` unit tests,
+`tests/local_batch/bounded_compare.rs`, and `tests/local_immutable_durability.rs`.
+They exercise bounded and interrupted reads, both native hash domains, sparse
+oversized files, corruption, nonregular targets, injected sync interruptions,
+reopen, and retry. Injected interruptions do not establish physical power-loss
+behavior or make unreferenced object files authoritative.
+
 ## Validation
 
 `cargo test --locked -p fgit-object-fabric --all-targets` covers the storage API,

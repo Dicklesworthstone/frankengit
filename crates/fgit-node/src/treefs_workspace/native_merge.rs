@@ -3,10 +3,13 @@
 //! predecessor state are resolved here, never accepted as caller-minted roots.
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::future::Future;
 
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::merge::native::objects::{
-    MergeObjectLimits, validate_fast_forward_objects_above, validate_merge_objects_above,
+    CanonicalObjectHeader, FrontierObjectHeaders, MAX_REUSED_BLOB_BYTES, MergeObjectLimits,
+    ObjectFrontier, validate_fast_forward_objects_above, validate_merge_objects_above,
     validate_squash_objects_above,
 };
 use fgit_admission::merge::native::{
@@ -23,9 +26,10 @@ use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::NativeMerge;
+use fgit_pack::{PackError, PackWriteError};
 use fgit_reference::intent::TransactionRequest;
 use fgit_txn::TransactionFoldReport;
-use fgit_types::{PrincipalId, RefusalCode, TxId};
+use fgit_types::{GitOid, PrincipalId, RefusalCode, TxId};
 use fsqlite_types::cx::Cx;
 
 use super::publication::receive_error;
@@ -36,6 +40,73 @@ use crate::{
     NodeRequestContext, OneNode, PackContextCheckpoint, VerifiedFabricPackSource,
     async_projection_unavailable, checkpoint_pack_context,
 };
+
+impl OneNode {
+    /// The configured selected-blob policy also bounds omitted admitted blobs.
+    /// It never widens a native metadata/body parser or permits unselected reads.
+    pub(crate) fn reused_merge_blob_limit(&self) -> usize {
+        self.selected_pack_limits
+            .max_object_bytes
+            .min(
+                self.service_config
+                    .selected_pack_blob_limit
+                    .unwrap_or_else(|| {
+                        usize::try_from(self.max_object_bytes)
+                            .unwrap_or(usize::MAX)
+                            .min(MergeObjectLimits::default().max_reused_blob_bytes)
+                    }),
+            )
+            .min(usize::try_from(MAX_REUSED_BLOB_BYTES).unwrap_or(usize::MAX))
+    }
+}
+
+pub(super) fn read_frontier_header(
+    source: &VerifiedFabricPackSource<'_>,
+    id: &GitOid,
+    maximum_blob_bytes: usize,
+) -> Result<CanonicalObjectHeader, PackWriteError> {
+    let metadata_limit = source.buffered_object_limit();
+    let (object_type, body_bytes) =
+        source.read_object_header_within(id, metadata_limit.max(maximum_blob_bytes))?;
+    let limit = if object_type == fgit_git_object::ObjectType::Blob {
+        maximum_blob_bytes
+    } else {
+        metadata_limit
+    };
+    if body_bytes > limit {
+        return Err(PackError::ObjectSizeLimit {
+            actual: body_bytes,
+            limit,
+        }
+        .into());
+    }
+    Ok(CanonicalObjectHeader {
+        id: *id,
+        object_type,
+        body_bytes,
+    })
+}
+
+struct NativeFrontierHeaders<'source, 'selected, 'staging> {
+    source: VerifiedFabricPackSource<'source>,
+    selected: &'selected BTreeSet<GitOid>,
+    staging: &'staging ReceiveStaging,
+    maximum_blob_bytes: usize,
+}
+impl FrontierObjectHeaders for NativeFrontierHeaders<'_, '_, '_> {
+    fn load_header(&self, id: &GitOid) -> Result<Option<CanonicalObjectHeader>, PackWriteError> {
+        self.source.session_checkpoint()?;
+        if !self.selected.contains(id) {
+            return Err(PackWriteError::MissingCanonicalObject(*id));
+        }
+        if self.staging.contains(*id) {
+            // Supplied bytes retain full verification, even when their native
+            // identity is also present in the selected predecessor closure.
+            return Ok(None);
+        }
+        read_frontier_header(&self.source, id, self.maximum_blob_bytes).map(Some)
+    }
+}
 
 /// Preserve the legacy merge seal by default. A squash is an explicit PR
 /// operation, and a fast-forward has its own existing-object publication path.
@@ -71,6 +142,8 @@ impl OneNode {
     /// A later publication independently checks the same evidence; a policy or
     /// ref change can make it stale. The optional digest selects the existing
     /// workspace-bound seal profile; it does not claim workspace ownership.
+    /// This context-only API retains operator-asserted authentication. Use the
+    /// session-bound variant when a transport verified the caller's credential.
     pub async fn prepare_sealed_merge_evidence_in(
         &self,
         request: &NodeRequestContext,
@@ -81,10 +154,76 @@ impl OneNode {
         fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
         AdmissionError,
     > {
+        self.prepare_sealed_merge_evidence_with_authentication_in(
+            request,
+            context,
+            sealed,
+            workspace_snapshot,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    /// Prepare exact offered evidence using the identity, retry key, and
+    /// authentication method retained by the publication session. The caller
+    /// supplies the same session and workspace digest to later admission;
+    /// credential provenance is never inferred from a principal ID.
+    ///
+    /// Like the context-only variant, this neither seals nor publishes a
+    /// request and does not claim ownership of the optional workspace digest.
+    /// Admission revalidates the offer against its actual publication basis.
+    pub async fn prepare_sealed_merge_evidence_for_session_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        sealed: &SealedMerge<'_>,
+        workspace_snapshot: Option<[u8; 32]>,
+    ) -> Result<
+        fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
+        NodeWorkspaceRefusal,
+    > {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: authenticated.principal_id(),
+            idempotency_key: authenticated.client_idempotency_key().clone(),
+            object_format: self.object_format,
+        };
+        self.prepare_sealed_merge_evidence_with_authentication_in(
+            request,
+            &context,
+            sealed,
+            workspace_snapshot,
+            authenticated.authentication(),
+        )
+        .await
+        .map_err(|error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error))))
+    }
+
+    async fn prepare_sealed_merge_evidence_with_authentication_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        sealed: &SealedMerge<'_>,
+        workspace_snapshot: Option<[u8; 32]>,
+        authentication: AdmissionAuthentication,
+    ) -> Result<
+        fgit_admission::merge::native::policy_preparation::PreparedSealedMergeEvidence,
+        AdmissionError,
+    > {
         let projection = NodeNativeMergeProjection {
             node: self,
-            inner: self.durable_admission_projection(context)?,
-            object_limits: MergeObjectLimits::default(),
+            inner: self
+                .durable_admission_projection(context)?
+                .with_authentication(authentication),
+            object_limits: MergeObjectLimits {
+                max_reused_blob_bytes: self.reused_merge_blob_limit(),
+                ..MergeObjectLimits::default()
+            },
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
@@ -112,7 +251,10 @@ impl OneNode {
         let projection = NodeNativeMergeProjection {
             node: self,
             inner,
-            object_limits: MergeObjectLimits::default(),
+            object_limits: MergeObjectLimits {
+                max_reused_blob_bytes: self.reused_merge_blob_limit(),
+                ..MergeObjectLimits::default()
+            },
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
@@ -266,7 +408,10 @@ impl OneNode {
             inner: self
                 .durable_admission_projection(&context)
                 .map_err(map_admission)?,
-            object_limits: MergeObjectLimits::default(),
+            object_limits: MergeObjectLimits {
+                max_reused_blob_bytes: self.reused_merge_blob_limit(),
+                ..MergeObjectLimits::default()
+            },
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
@@ -363,7 +508,8 @@ impl OneNode {
         self.receive_publication_admitted()?;
         let inner = self
             .durable_admission_projection(&context)
-            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
+            .with_authentication(authenticated.authentication());
         let projection = NodeNativeMergeProjection {
             node: self,
             inner,
@@ -420,6 +566,20 @@ impl NodeNativeMergeProjection<'_> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        head_key: &'a fgit_authority::HeadKey,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<
+        Output = Result<fgit_authority::CumulativeOutcomes, fgit_authority::OutcomeFailure>,
+    > + Send
+    + 'a {
+        self.inner
+            .collect_cumulative_outcomes_async(authority, cx, head_key, authenticated)
+    }
+
     fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -460,6 +620,10 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn admission_authentication(&self) -> Option<AdmissionAuthentication> {
+        self.inner.authentication
+    }
+
     fn validate_comment_anchor_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -622,20 +786,36 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         // an asynchronous authority operation.
         let closure = {
             let exhaustion = Cell::new(None);
-            let source = VerifiedFabricPackSource {
-                fabric: &self.node.fabric,
-                object_format: self.node.object_format,
-                maximum_object_bytes: self
+            let object_limits = MergeObjectLimits {
+                max_object_bytes: self
                     .object_limits
                     .max_object_bytes
                     .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
+                max_reused_blob_bytes: self
+                    .object_limits
+                    .max_reused_blob_bytes
+                    .min(self.node.reused_merge_blob_limit()),
+                ..self.object_limits
+            };
+            let source = VerifiedFabricPackSource {
+                fabric: &self.node.fabric,
+                object_format: self.node.object_format,
+                maximum_object_bytes: object_limits.max_object_bytes,
                 database_context: cx,
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
             };
             let parse_limits = source.parse_limits();
             let existing_only = ReceiveStaging::default();
-            let source = source.with_staging(self.staging.unwrap_or(&existing_only));
+            let staging = self.staging.unwrap_or(&existing_only);
+            let objects = selected.selected_closure().closure().objects();
+            let headers = NativeFrontierHeaders {
+                source: VerifiedFabricPackSource { ..source },
+                selected: objects,
+                staging,
+                maximum_blob_bytes: object_limits.max_reused_blob_bytes,
+            };
+            let source = source.with_staging(staging);
             let mut live = || match checkpoint_pack_context(cx) {
                 PackContextCheckpoint::Live => true,
                 PackContextCheckpoint::Stopped { budget_exhaustion } => {
@@ -647,27 +827,26 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             };
             // Validate only what the candidate adds above the authority-selected
             // closure; the record then names those objects (frankengit-lh8z).
-            let objects = selected.selected_closure().closure().objects();
             let result = match intent.method() {
                 NativeMergeMethod::MergeCommit => validate_merge_objects_above(
                     &source,
                     merge,
-                    objects,
-                    self.object_limits,
+                    ObjectFrontier::with_headers(objects, &headers),
+                    object_limits,
                     &mut live,
                 ),
                 NativeMergeMethod::FastForwardOnly => validate_fast_forward_objects_above(
                     &source,
                     merge,
-                    objects,
-                    self.object_limits,
+                    ObjectFrontier::with_headers(objects, &headers),
+                    object_limits,
                     &mut live,
                 ),
                 NativeMergeMethod::Squash => validate_squash_objects_above(
                     &source,
                     merge,
-                    objects,
-                    self.object_limits,
+                    ObjectFrontier::with_headers(objects, &headers),
+                    object_limits,
                     &mut live,
                 ),
             };
@@ -730,16 +909,33 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             }
             closure
         };
-        fgit_admission::merge::native::protection::enforce_merge_at(
-            authority,
-            cx,
-            basis,
-            &selected.snapshot().refs,
-            intent,
-            self.inner.context.principal_id,
-            &|| self.merge_checkpoint(cx).is_err(),
-        )
-        .await?;
+        match self.inner.authentication {
+            Some(authentication) => {
+                fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
+                    authority,
+                    cx,
+                    basis,
+                    &selected.snapshot().refs,
+                    intent,
+                    self.inner.context.principal_id,
+                    authentication,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+            }
+            None => {
+                fgit_admission::merge::native::protection::enforce_merge_at(
+                    authority,
+                    cx,
+                    basis,
+                    &selected.snapshot().refs,
+                    intent,
+                    self.inner.context.principal_id,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+            }
+        }?;
         self.merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)

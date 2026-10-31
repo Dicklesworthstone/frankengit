@@ -23,6 +23,7 @@ use fgit_wire::smart_http::Service;
 
 use crate::ref_write_scope::RefWriteScope;
 use crate::{AuthenticatedReceiveSession, LoopbackReceiveSession};
+use fgit_admission::evidence::AdmissionAuthentication;
 
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_GRANTS: usize = 256;
@@ -136,6 +137,7 @@ impl Grant {
     pub(super) fn session(&self, key: IdempotencyKey) -> LoopbackReceiveSession {
         LoopbackReceiveSession::Authenticated(
             AuthenticatedReceiveSession::new(self.principal, key)
+                .with_authentication(AdmissionAuthentication::HttpToken)
                 .with_ref_write_scope(self.ref_write_scope.clone()),
         )
     }
@@ -817,6 +819,10 @@ mod tests {
             let authorization = basic(format!("{username}:{token}").as_bytes());
             let selected = source.authenticate(Some(&authorization)).unwrap();
             assert_eq!(selected.principal, principal);
+            assert_eq!(
+                selected_session(&selected).authentication(),
+                AdmissionAuthentication::HttpToken,
+            );
             assert!(
                 selected.permits(Service::UploadPack) && selected.permits(Service::ReceivePack)
             );

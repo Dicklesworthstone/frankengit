@@ -8,6 +8,7 @@ use std::io::{self, Cursor, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::{AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive};
 use fgit_authority::IdempotencyKey;
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
@@ -272,6 +273,7 @@ impl OneNode {
             &mut reader,
             &mut writer,
             self.git_daemon_receive_principal,
+            AdmissionAuthentication::OperatorAssertion,
             None,
             &ingress,
             shared_quota,
@@ -314,14 +316,17 @@ impl OneNode {
     /// UNKNOWN response that never invents per-ref rejections. `route`
     /// supplies the repository route bound into the retry key: the raw TCP
     /// binding reads it from the git-daemon greeting, SSH takes it from the
-    /// authorized exec request. `principal` is the authenticated writer;
+    /// authorized exec request. `principal` is the authorized writer;
     /// `None` is refused before any byte of the request is read. The optional
     /// immutable ref ceiling comes from that same command authorization.
+    /// `authentication` retains that boundary's proof: a raw Git operator
+    /// assertion cannot acquire the SSH binding's credential provenance.
     pub(crate) fn serve_guarded_receive_session<R, W, G, F>(
         &self,
         reader: &mut R,
         writer: &mut W,
         principal: Option<fgit_types::PrincipalId>,
+        authentication: AdmissionAuthentication,
         ref_write_scope: Option<std::sync::Arc<fgit_types::ref_write_scope::RefWriteScope>>,
         ingress: &GitDaemonSessionDeadline,
         shared_quota: Option<&crate::PushQuota>,
@@ -415,6 +420,7 @@ impl OneNode {
             };
             let authenticated =
                 crate::AuthenticatedReceiveSession::new(principal, retry_key(&route, &prefix)?)
+                    .with_authentication(authentication)
                     .with_ref_write_scope(ref_write_scope);
             // Check every original command before reading PACK bytes, acquiring
             // a writer slot, binding retry keys or publishing any microbatch.

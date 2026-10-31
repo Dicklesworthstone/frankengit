@@ -527,6 +527,10 @@ pub enum PolicyInputRefusal {
         /// Whether a next value was supplied.
         next_present: bool,
     },
+    /// A restricted reference input must describe only structural update shape.
+    /// Supplying an ancestry classification would change the meaning of its
+    /// `update_unclassified` predicates.
+    ReferenceUpdateKindUnsupported { name: Vec<u8>, kind: RefUpdateKind },
     /// Two ref commands target the same ref.
     DuplicateSubject {
         /// The ref, as bytes.
@@ -597,6 +601,12 @@ impl fmt::Display for PolicyInputRefusal {
                 kind.token(),
                 previous_present,
                 next_present
+            ),
+            Self::ReferenceUpdateKindUnsupported { name, kind } => write!(
+                formatter,
+                "restricted reference input for `{}` cannot carry `{}` ancestry classification",
+                lossy(name),
+                kind.token(),
             ),
             Self::DuplicateSubject { name } => {
                 write!(formatter, "two ref commands target `{}`", lossy(name))

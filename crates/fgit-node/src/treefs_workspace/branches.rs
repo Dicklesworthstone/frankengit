@@ -445,9 +445,16 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_basis_bound_validated_receive_durable_in(request, &context, &validated, limits)
-            .await
-            .map_err(admission_error)
+        self.admit_basis_bound_validated_receive_with_authentication_in(
+            request,
+            &context,
+            &validated,
+            limits,
+            None,
+            authenticated.authentication(),
+        )
+        .await
+        .map_err(admission_error)
     }
 
     /// Bounded, byte-ordered branch listing at one authenticated current head.

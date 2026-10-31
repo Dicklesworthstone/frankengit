@@ -80,8 +80,10 @@ filtered/partial bundles, unknown or duplicate capabilities, detached HEAD,
 empty direct-ref sets and implicit hash-domain conversions. Limits include
 4096 header records, a 1 MiB header, a 128 MiB whole-file bound and the node's
 stricter pack, expansion, object-size, graph-work and cancellation budgets.
-This is a bounded complete-transfer profile, not streaming large-repository
-support or a universal Git interoperability claim.
+These are the buffered profile's bounds. For larger independently bounded
+inputs or blobs, select the [file-backed full import](NATIVE_GIT_BUNDLE_FILE_IMPORT.md)
+and [streaming export](NATIVE_GIT_BUNDLE_STREAMING_EXPORT.md) profiles explicitly.
+Their byte allowances remain separate from metadata, graph and work limits.
 
 ## Implementation and verification
 

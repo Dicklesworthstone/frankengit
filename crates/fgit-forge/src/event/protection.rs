@@ -217,7 +217,7 @@ impl NativeProtectionEvent {
     }
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
-        // Kinds 16 and 17 wrap an explicitly named historical protection encoding.
+        // Kinds 16 through 18 wrap an explicitly named historical protection encoding.
         // This preserves every old byte when no custom policy is selected.
         if self.protection.ref_policy.is_some() {
             out.write_scalar(if self.protection.has_review_quorum() {
@@ -273,6 +273,14 @@ impl NativeProtectionEvent {
         Self::read_with_profile(
             input,
             fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1,
+        )
+    }
+    pub(super) fn read_with_authentication_policy(
+        input: &mut Decoder<'_>,
+    ) -> Result<Self, CodecRefusal> {
+        Self::read_with_profile(
+            input,
+            fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1,
         )
     }
     fn read_with_profile(
@@ -482,3 +490,6 @@ mod quorum_tests;
 
 #[cfg(test)]
 mod ref_policy_tests;
+
+#[cfg(test)]
+mod authentication_policy_tests;

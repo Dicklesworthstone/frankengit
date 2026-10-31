@@ -86,6 +86,50 @@ pub(super) struct Inventory {
     pending: Option<Pending>,
 }
 impl Inventory {
+    /// A resolved identity and its original authenticated scratch span.
+    pub(super) fn object(&self, id: GitOid) -> Result<Resolved, BundleVerifyError> {
+        self.by_id
+            .get(&id)
+            .and_then(|at| self.entries.get(*at))
+            .and_then(|entry| entry.resolved)
+            .ok_or(BundleVerifyError::ResolutionIncomplete)
+    }
+
+    /// Retain the transport dependency of a selected delta result as well as
+    /// its native graph dependencies. Only completed in-pack resolution is
+    /// consulted; no destination object source exists here.
+    pub(super) fn delta_base(&self, id: GitOid) -> Result<Option<GitOid>, BundleVerifyError> {
+        let entry = self
+            .by_id
+            .get(&id)
+            .and_then(|at| self.entries.get(*at))
+            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+        let Some(base) = entry.base else {
+            return Ok(None);
+        };
+        let at = match base {
+            Base::Offset(offset) => self.by_offset.get(&offset),
+            Base::Identity(identity) => self.by_id.get(&identity),
+        }
+        .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+        let resolved = self
+            .entries
+            .get(*at)
+            .and_then(|entry| entry.resolved)
+            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+        Ok(Some(resolved.id))
+    }
+
+    pub(super) fn charge_selection_work(
+        &mut self,
+        amount: usize,
+        limits: &BundleVerifyLimits,
+    ) -> Result<(), BundleVerifyError> {
+        self.budget
+            .charge_work(amount, &limits.pack)
+            .map_err(BundleVerifyError::Pack)
+    }
+
     pub(super) fn new(_limits: &BundleVerifyLimits) -> Self {
         Self {
             entries: Vec::new(),

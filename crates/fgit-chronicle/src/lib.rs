@@ -110,9 +110,9 @@ pub use outcome_checkpoint::{
     collect_cumulative_outcomes_from_capsule_checkpoint_async, load_outcome_index_checkpoint,
     load_outcome_index_checkpoint_async, load_outcome_index_checkpoint_leaves,
     load_verified_outcome_index_checkpoint, load_verified_outcome_index_checkpoint_async,
-    outcome_index_checkpoint_root, stage_outcome_index_checkpoint,
-    stage_outcome_index_checkpoint_async, verify_outcome_index_checkpoint_chain,
-    verify_outcome_index_checkpoint_chain_async,
+    outcome_index_checkpoint_root, outcome_index_leaf_archive_namespace,
+    stage_outcome_index_checkpoint, stage_outcome_index_checkpoint_async,
+    verify_outcome_index_checkpoint_chain, verify_outcome_index_checkpoint_chain_async,
 };
 pub use publish::{
     CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,

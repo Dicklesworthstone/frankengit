@@ -1,7 +1,7 @@
 //! Exact schema 1.2: the authority-selected repository DSL and its decision.
 use super::{
-    EvaluatedPolicyDecisionEvidence, MAX_FRAME_BYTES, MAX_SNAPSHOT_BYTES, MAX_TRACE_BYTES,
-    PolicyDecisionEvidence, Profile, RefPolicyEvaluation, bound, invalid,
+    AdmissionAuthentication, EvaluatedPolicyDecisionEvidence, MAX_FRAME_BYTES, MAX_SNAPSHOT_BYTES,
+    MAX_TRACE_BYTES, PolicyDecisionEvidence, Profile, RefPolicyEvaluation, bound, invalid,
 };
 use crate::{AdmissionContext, CanonicalRefState};
 use fgit_chronicle::PublicationBasis;
@@ -25,6 +25,7 @@ pub struct ActivatedPolicyDecisionEvidence {
     pub(super) references: EvaluatedPolicyDecisionEvidence,
     publication: RefPolicyPublication,
     evaluation: RefPolicyEvaluation,
+    pub(super) authentication: Option<AdmissionAuthentication>,
 }
 impl ActivatedPolicyDecisionEvidence {
     #[must_use]
@@ -62,6 +63,7 @@ impl ActivatedPolicyDecisionEvidence {
             review_branches,
             snapshot,
             publication,
+            None,
         )?;
         let bytes = encode_body(&value).map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
         if bytes.len() > MAX_FRAME_BYTES {
@@ -81,6 +83,7 @@ impl ActivatedPolicyDecisionEvidence {
         review_branches: Vec<RefName>,
         snapshot: PolicySnapshot,
         publication: RefPolicyPublication,
+        authentication: Option<AdmissionAuthentication>,
     ) -> Result<Self, RefusalCode> {
         let references = EvaluatedPolicyDecisionEvidence::evaluate(
             base,
@@ -94,17 +97,19 @@ impl ActivatedPolicyDecisionEvidence {
                 RefPolicyPublication::NativeMerge => Vec::new(),
             },
         )?;
-        let evaluation = RefPolicyEvaluation::evaluate(
+        let evaluation = RefPolicyEvaluation::evaluate_with_authentication(
             profile,
             snapshot,
             references.principal,
             references.base.principal_snapshot_id,
             references.subjects(profile)?,
+            authentication,
         )?;
         let value = Self {
             references,
             publication,
             evaluation,
+            authentication,
         };
         value.verify_decision(context, basis, fold)?;
         Ok(value)
@@ -113,19 +118,23 @@ impl ActivatedPolicyDecisionEvidence {
     pub fn replay(&self) -> Result<(), RefusalCode> {
         self.references.replay()?;
         if !matches!(
-            self.evaluation.profile,
-            Profile::RepositoryRefV1 | Profile::RepositoryActorIdV1
+            (self.evaluation.profile, self.authentication),
+            (
+                Profile::RepositoryRefV1 | Profile::RepositoryActorIdV1,
+                None
+            ) | (Profile::RepositoryAuthenticationV1, Some(_))
         ) || (self.publication == RefPolicyPublication::NativeMerge
             && !self.references.review_branches.is_empty())
         {
             return Err(RefusalCode::EvidenceInvalid);
         }
-        let actual = RefPolicyEvaluation::evaluate(
+        let actual = RefPolicyEvaluation::evaluate_with_authentication(
             self.evaluation.profile,
             self.evaluation.snapshot.clone(),
             self.references.principal,
             self.references.base.principal_snapshot_id,
             self.references.subjects(self.evaluation.profile)?,
+            self.authentication,
         )?;
         if actual != self.evaluation {
             return Err(RefusalCode::EvidenceInvalid);
@@ -191,7 +200,10 @@ impl ActivatedPolicyDecisionEvidence {
         out: &mut Encoder,
         profile: Profile,
     ) -> Result<(), CodecRefusal> {
-        if self.evaluation.profile != profile || !profile.accepts(&self.evaluation.snapshot) {
+        if self.evaluation.profile != profile
+            || !profile.accepts(&self.evaluation.snapshot)
+            || (profile == Profile::RepositoryAuthenticationV1) != self.authentication.is_some()
+        {
             return Err(invalid("policy_decision.activated_profile"));
         }
         let references = encode_body(&self.references)?;
@@ -219,6 +231,22 @@ impl ActivatedPolicyDecisionEvidence {
     }
 
     pub(super) fn read_fields(
+        input: &mut Decoder<'_>,
+        profile: Profile,
+        authentication: Option<AdmissionAuthentication>,
+    ) -> Result<Self, CodecRefusal> {
+        let mut value = Self::read_fields_unverified(input, profile)?;
+        value.authentication = authentication;
+        value
+            .replay()
+            .map_err(|_| invalid("policy_decision.activated_replay"))?;
+        Ok(value)
+    }
+
+    // Schema 1.4 appends authentication to these historical fields. Its reader
+    // must consume that suffix before replay; no unchecked value escapes the
+    // exact-version CanonicalBody decoder.
+    pub(super) fn read_fields_unverified(
         input: &mut Decoder<'_>,
         profile: Profile,
     ) -> Result<Self, CodecRefusal> {
@@ -256,7 +284,7 @@ impl ActivatedPolicyDecisionEvidence {
             .ok_or_else(|| invalid("policy_decision.verdict"))?;
         let trace = input.read_text("policy_decision.trace")?;
         bound("policy_decision.trace", trace.len(), MAX_TRACE_BYTES)?;
-        let value = Self {
+        Ok(Self {
             references,
             publication,
             evaluation: RefPolicyEvaluation {
@@ -265,11 +293,8 @@ impl ActivatedPolicyDecisionEvidence {
                 decision,
                 trace: trace.to_owned(),
             },
-        };
-        value
-            .replay()
-            .map_err(|_| invalid("policy_decision.activated_replay"))?;
-        Ok(value)
+            authentication: None,
+        })
     }
 }
 
@@ -283,6 +308,6 @@ impl CanonicalBody for ActivatedPolicyDecisionEvidence {
         self.write_fields(out, Profile::RepositoryRefV1)
     }
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        Self::read_fields(input, Profile::RepositoryRefV1)
+        Self::read_fields(input, Profile::RepositoryRefV1, None)
     }
 }

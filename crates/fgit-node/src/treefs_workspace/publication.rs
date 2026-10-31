@@ -17,6 +17,7 @@ use crate::VerifiedFabricPackSource;
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
 use crate::receive_staging::ReceiveStaging;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::{
     AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
 };
@@ -228,6 +229,32 @@ impl OneNode {
         expected_candidate: GitOid,
         input: &[u8],
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.apply_workspace_bundle_with_authentication_in(
+            request,
+            principal_id,
+            idempotency_key,
+            reference,
+            expected_base,
+            expected_candidate,
+            input,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    /// Carry verified transport facts through the same bounded candidate and
+    /// immutable retry checks as the public operator entry point.
+    pub(crate) async fn apply_workspace_bundle_with_authentication_in(
+        &self,
+        request: &NodeRequestContext,
+        principal_id: PrincipalId,
+        idempotency_key: &[u8],
+        reference: &RefName,
+        expected_base: GitOid,
+        expected_candidate: GitOid,
+        input: &[u8],
+        authentication: AdmissionAuthentication,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         if idempotency_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
             return Err(invalid("invalid bounded idempotency key"));
         }
@@ -303,7 +330,10 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        let session = LoopbackReceiveSession::authenticated(principal_id, key);
+        let session = LoopbackReceiveSession::Authenticated(
+            crate::AuthenticatedReceiveSession::new(principal_id, key)
+                .with_authentication(authentication),
+        );
         self.admit_basis_bound_loopback_receive_publishing_in(
             request,
             &session,

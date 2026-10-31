@@ -17,6 +17,7 @@ mod rebase;
 #[path = "bundle_review/tests.rs"]
 mod tests;
 
+use crate::treefs_workspace::native_merge::read_frontier_header;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -251,6 +252,7 @@ impl OneNode {
             .min(32 * 1024 * 1024);
         let limits = MergeObjectLimits {
             max_object_bytes: maximum_object_bytes,
+            max_reused_blob_bytes: self.reused_merge_blob_limit(),
             ..MergeObjectLimits::default()
         };
         let mut parents = vec![expected_base];
@@ -413,6 +415,7 @@ struct OriginalSource<'a> {
     allowed: &'a BTreeSet<GitOid>,
     budget: &'a ReadBudget,
     frontier: Option<RefCell<reachability::ParentReachability>>,
+    maximum_reused_blob_bytes: usize,
 }
 impl<'a> OriginalSource<'a> {
     fn with_parents(
@@ -431,6 +434,7 @@ impl<'a> OriginalSource<'a> {
             allowed,
             budget,
             frontier: Some(RefCell::new(frontier)),
+            maximum_reused_blob_bytes: limits.max_reused_blob_bytes,
         })
     }
 
@@ -483,18 +487,24 @@ impl<'a> OriginalSource<'a> {
             return Err(MergeSourceError::OutsideSelection);
         }
         self.live()?;
-        let result = self.inner.read_object_header(&id);
+        let result = read_frontier_header(&self.inner, &id, self.maximum_reused_blob_bytes);
         self.live()?;
-        let (kind, body_bytes) = result.map_err(|_| MergeSourceError::Unavailable(id))?;
+        let header = result.map_err(|error| {
+            if matches!(
+                &error,
+                PackWriteError::Pack(PackError::ObjectSizeLimit { .. })
+            ) {
+                self.budget.exhausted.set(true);
+                MergeSourceError::BudgetExceeded
+            } else {
+                MergeSourceError::Unavailable(id)
+            }
+        })?;
         if let Some(frontier) = &self.frontier {
-            frontier.borrow().require_kind(id, kind)?;
+            frontier.borrow().require_kind(id, header.object_type)?;
         }
         self.live()?;
-        Ok(CanonicalObjectHeader {
-            id,
-            object_type: kind,
-            body_bytes,
-        })
+        Ok(header)
     }
 
     fn read(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {

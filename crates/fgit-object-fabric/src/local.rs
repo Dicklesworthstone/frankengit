@@ -12,12 +12,19 @@ pub use batch::{StagedBatch, SyncedBatch};
 #[path = "local_bounded_read.rs"]
 mod bounded_read;
 
+#[path = "local_bounded_compare.rs"]
+mod bounded_compare;
+
 #[path = "local_blob_stream.rs"]
 mod blob_stream;
 pub use blob_stream::{LocalBlobStream, VerifiedObjectIntegrity};
 
 #[path = "local_blob_write.rs"]
 mod blob_write;
+
+#[path = "local_synced_blob.rs"]
+mod synced_blob;
+pub use synced_blob::SyncedBlob;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -656,13 +663,8 @@ impl LocalFilesystemFabric {
                 Ok(ImmutableWrite::Created)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let staged = fs::read(stage.path()).map_err(|error| {
-                    storage_error(StorageOperation::PublishImmutableBody, error)
-                })?;
-                let stored = fs::read(&final_path).map_err(|error| {
-                    storage_error(StorageOperation::PublishImmutableBody, error)
-                })?;
-                if staged != stored {
+                if !bounded_compare::equal(stage.path(), &final_path, self.max_stored_object_bytes)?
+                {
                     return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
                 Ok(ImmutableWrite::AlreadyPresent)
@@ -700,23 +702,27 @@ impl LocalFilesystemFabric {
         self.crash_if(LocalCrashPoint::AfterStageSync)?;
         self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
         stage.close();
-        match fs::hard_link(stage.path(), final_path) {
+        let result = match fs::hard_link(stage.path(), final_path) {
             Ok(()) => {
                 self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
-                sync_directory(parent)?;
-                self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
-                self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
-                Ok(ImmutableWrite::Created)
+                ImmutableWrite::Created
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let existing = self.read_bounded(final_path)?;
                 if existing != body {
                     return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
-                Ok(ImmutableWrite::AlreadyPresent)
+                ImmutableWrite::AlreadyPresent
             }
-            Err(error) => Err(storage_error(operation, error)),
-        }
+            Err(error) => return Err(storage_error(operation, error)),
+        };
+        // A competing writer can link after create_directory's initial sync
+        // and fail before its own fence. Exact bytes alone do not establish
+        // durability: manifest and retention retries must sync that name too.
+        sync_directory(parent)?;
+        self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
+        self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
+        Ok(result)
     }
 
     fn crash_if(&self, point: LocalCrashPoint) -> Result<(), StoreRefusal> {

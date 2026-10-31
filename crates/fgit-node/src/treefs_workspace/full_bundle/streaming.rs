@@ -10,14 +10,15 @@ use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use fgit_git_object::ObjectType;
 use fgit_pack::full_bundle::stream::{
     StreamFullBundleError, StreamFullBundleLimits, StreamFullBundleReceipt,
-    write_full_bundle_stream,
+    write_full_bundle_stream, write_incremental_bundle_stream,
 };
 use fgit_pack::{BundleReference, PackError, PackWriteError};
 use fgit_runtime::Exhaustion;
 use fgit_types::cell::{ReadMode, admits_read};
-use fgit_types::{GitHashAlgorithm, GitOid, HeadGeneration, RepositoryAuthorityHeadId};
+use fgit_types::{GitHashAlgorithm, GitOid, HeadGeneration, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use super::NodeWorkspaceRefusal;
@@ -179,14 +180,15 @@ pub(super) async fn drain_materialization<F: Future>(
     .await
 }
 
-/// Applies the selected-payload ceiling during graph discovery. The existing
-/// traversal requests references once per unique object. A refused read can
-/// allocate one body up to the source's per-object ceiling, but its bytes are
-/// checked before parsing or allocating that object's reference metadata.
+/// Applies the selected-payload ceiling during graph discovery. Blob kind and
+/// length come from a checked envelope, with no body allocation or read. Native
+/// metadata keeps its independent buffered ceiling. The codec later verifies
+/// every selected payload, including the exact EOF of each streamed blob.
 struct BoundedStreamSelectionSource<'source, 'fabric> {
     source: &'source VerifiedFabricPackSource<'fabric>,
     selected_bytes: Cell<usize>,
     maximum_bytes: usize,
+    maximum_blob_bytes: usize,
 }
 
 impl PermittedClosureTraversalSource for BoundedStreamSelectionSource<'_, '_> {
@@ -199,12 +201,26 @@ impl PermittedClosureTraversalSource for BoundedStreamSelectionSource<'_, '_> {
     }
 
     fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
-        let (kind, body) = self.source.read_object(id)?;
-        let selected_bytes = self.selected_bytes.get().checked_add(body.len()).ok_or(
-            PackError::IntegerOverflow {
-                context: "streamed bundle selection source bytes",
-            },
-        )?;
+        let (kind, length) = self.source.read_object_header_within(id, usize::MAX)?;
+        let maximum = if kind == ObjectType::Blob {
+            self.maximum_blob_bytes
+        } else {
+            self.source.buffered_object_limit()
+        };
+        if length > maximum {
+            return Err(PackError::ObjectSizeLimit {
+                actual: length,
+                limit: maximum,
+            }
+            .into());
+        }
+        let selected_bytes =
+            self.selected_bytes
+                .get()
+                .checked_add(length)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "streamed bundle selection source bytes",
+                })?;
         if selected_bytes > self.maximum_bytes {
             return Err(PackError::TotalExpandedLimit {
                 actual: selected_bytes,
@@ -213,8 +229,26 @@ impl PermittedClosureTraversalSource for BoundedStreamSelectionSource<'_, '_> {
             .into());
         }
         self.selected_bytes.set(selected_bytes);
+        if kind == ObjectType::Blob {
+            return Ok(Vec::new());
+        }
+        let (observed_kind, body) = self.source.read_object(id)?;
+        if observed_kind != kind || body.len() != length {
+            return Err(PackWriteError::MissingCanonicalObject(*id));
+        }
         self.source.references_from_body(kind, &body)
     }
+}
+
+mod incremental;
+
+#[derive(Clone, Copy)]
+enum StreamProfile<'a> {
+    Full,
+    Incremental {
+        references: &'a [RefName],
+        prerequisites: &'a [GitOid],
+    },
 }
 
 impl OneNode {
@@ -224,12 +258,13 @@ impl OneNode {
     /// an export root, and the stream codec independently checks native typed
     /// edges, completeness and absence of unrelated objects before success.
     ///
-    /// Selection keeps bounded identity/frontier metadata; output retains one
-    /// bounded object and compressor state rather than a full `PackPlan` or
-    /// bundle. The node's configured fabric read ceiling remains in force.
-    /// Selection reads objects to discover edges, and streaming rereads them by
-    /// immutable identity. Each phase independently enforces the same aggregate
-    /// selected-payload ceiling; that limit does not count physical reads.
+    /// Selection keeps bounded identity/frontier metadata and reads blob
+    /// envelopes without their payloads. Output streams blobs through bounded
+    /// chunks and retains at most one bounded metadata body and compressor
+    /// state. Metadata and streamed blobs have separate query and node limits.
+    /// Discovery counts each selected object's exact declared payload length;
+    /// the codec independently verifies the same aggregate ceiling against the
+    /// bytes it consumes. This limit does not count repeated physical reads.
     ///
     /// `output` must be a private tentative sink. Errors may leave partial bytes
     /// in it. No file publication, flush, durability, cleanup or node shutdown
@@ -261,6 +296,87 @@ impl OneNode {
         request: &NodeRequestContext,
         visibility: &RefVisibility,
         query: StreamBundleExportQuery,
+        output: &mut (impl Write + ?Sized),
+        allow_work: &mut impl FnMut() -> bool,
+    ) -> Result<SelectedStreamBundleExport, StreamBundleExportRefusal> {
+        self.export_git_bundle_stream_profile_controlled_in(
+            request,
+            visibility,
+            query,
+            StreamProfile::Full,
+            output,
+            allow_work,
+        )
+        .await
+    }
+
+    /// Stream exactly the named visible references, omitting the complete typed
+    /// closure of explicit currently visible commit prerequisites. The receiver
+    /// must already possess that history. Omitted blob payloads are not read or
+    /// certified healthy; emitted bytes still pass native and strong verification.
+    ///
+    /// The whole visible native-metadata proof and both reachability walks obey
+    /// finite query object/index/edge bounds. Visible reference roots obey the
+    /// reference ceiling too. Metadata discovery and emitted payloads each have
+    /// their own application of the expanded-byte ceiling, not one physical-read
+    /// counter. The same inherited request and deadline cover every phase.
+    ///
+    /// Like full streaming export, the result names the authenticated starting
+    /// snapshot, not necessarily the current head at completion. Output remains
+    /// tentative; its owner must close the node and settle file publication.
+    pub async fn export_incremental_git_bundle_stream_in(
+        &self,
+        request: &NodeRequestContext,
+        references: &[RefName],
+        prerequisites: &[GitOid],
+        visibility: &RefVisibility,
+        query: StreamBundleExportQuery,
+        output: &mut (impl Write + ?Sized),
+    ) -> Result<SelectedStreamBundleExport, StreamBundleExportRefusal> {
+        self.export_incremental_git_bundle_stream_controlled_in(
+            request,
+            references,
+            prerequisites,
+            visibility,
+            query,
+            output,
+            &mut || true,
+        )
+        .await
+    }
+
+    /// Incremental streaming with the same sticky caller-stop probe and
+    /// request-cancel/drain lifecycle as the controlled full export.
+    pub async fn export_incremental_git_bundle_stream_controlled_in(
+        &self,
+        request: &NodeRequestContext,
+        references: &[RefName],
+        prerequisites: &[GitOid],
+        visibility: &RefVisibility,
+        query: StreamBundleExportQuery,
+        output: &mut (impl Write + ?Sized),
+        allow_work: &mut impl FnMut() -> bool,
+    ) -> Result<SelectedStreamBundleExport, StreamBundleExportRefusal> {
+        self.export_git_bundle_stream_profile_controlled_in(
+            request,
+            visibility,
+            query,
+            StreamProfile::Incremental {
+                references,
+                prerequisites,
+            },
+            output,
+            allow_work,
+        )
+        .await
+    }
+
+    async fn export_git_bundle_stream_profile_controlled_in(
+        &self,
+        request: &NodeRequestContext,
+        visibility: &RefVisibility,
+        query: StreamBundleExportQuery,
+        profile: StreamProfile<'_>,
         output: &mut (impl Write + ?Sized),
         allow_work: &mut impl FnMut() -> bool,
     ) -> Result<SelectedStreamBundleExport, StreamBundleExportRefusal> {
@@ -301,6 +417,23 @@ impl OneNode {
             }
         };
         checkpoint()?;
+        let requested_names = match profile {
+            StreamProfile::Full => None,
+            StreamProfile::Incremental {
+                references,
+                prerequisites,
+            } => {
+                let names = incremental::validate_frontier(
+                    references,
+                    prerequisites,
+                    self.object_format,
+                    &query.limits,
+                    &mut || live(),
+                );
+                checkpoint()?;
+                Some(names?)
+            }
+        };
         // The Sync predicate fences materializer work/cache installation at
         // the same deadline. The outer poll adds the caller's mutable probe;
         // stopping cancels only the inherited child and drains that operation.
@@ -328,12 +461,30 @@ impl OneNode {
         }
         let mut references = Vec::new();
         let mut selected_name_bytes = 0usize;
+        let mut visible_roots = Vec::new();
         for (name, tip) in &selected.snapshot().refs {
             checkpoint()?;
             if visibility.hides(name.as_bytes())
                 || selected.snapshot().hidden_refs.hides(name.as_bytes())
             {
                 continue;
+            }
+            if let Some(names) = &requested_names {
+                if visible_roots.len() == query.limits.envelope.max_references {
+                    return Err(super::bundle_error(
+                        fgit_pack::full_bundle::FullBundleError::Limit("visible references"),
+                    )
+                    .into());
+                }
+                visible_roots.try_reserve(1).map_err(|_| {
+                    super::bundle_error(PackError::AllocationFailed {
+                        requested: visible_roots.len().saturating_add(1),
+                    })
+                })?;
+                visible_roots.push(*tip);
+                if !names.contains(&name) {
+                    continue;
+                }
             }
             if references.len() == query.limits.envelope.max_references {
                 return Err(
@@ -368,17 +519,25 @@ impl OneNode {
             })?;
             references.push(BundleReference::new(*tip, name.clone()));
         }
-        if references.is_empty() {
+        if references.is_empty()
+            || requested_names
+                .as_ref()
+                .is_some_and(|names| names.len() != references.len())
+        {
             return Err(NodeWorkspaceRefusal::RefUnavailable.into());
         }
-        let head = selected.snapshot().head_target.as_ref().and_then(|name| {
-            references
-                .iter()
-                .find(|reference| {
-                    reference.name() == name && name.as_bytes().starts_with(b"refs/heads/")
-                })
-                .map(|reference| *reference.target())
-        });
+        let head = if matches!(profile, StreamProfile::Full) {
+            selected.snapshot().head_target.as_ref().and_then(|name| {
+                references
+                    .iter()
+                    .find(|reference| {
+                        reference.name() == name && name.as_bytes().starts_with(b"refs/heads/")
+                    })
+                    .map(|reference| *reference.target())
+            })
+        } else {
+            None
+        };
         let reference_records = references
             .len()
             .checked_add(usize::from(head.is_some()))
@@ -397,7 +556,18 @@ impl OneNode {
         limits.pack.max_object_bytes = limits
             .pack
             .max_object_bytes
-            .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
+            .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX))
+            .min(crate::DEFAULT_MAX_OBJECT_BYTES as usize);
+        limits.max_streamed_blob_bytes = limits
+            .max_streamed_blob_bytes
+            .min(self.selected_pack_limits.max_object_bytes)
+            .min(
+                self.service_config
+                    .selected_pack_blob_limit
+                    .unwrap_or_else(|| {
+                        usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)
+                    }),
+            );
         let exhaustion = Cell::new(None);
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
@@ -407,52 +577,81 @@ impl OneNode {
             database_exhaustion: &exhaustion,
             session_is_live: Some(&live),
         };
-        let selection_source = BoundedStreamSelectionSource {
-            source: &source,
-            selected_bytes: Cell::new(0),
-            maximum_bytes: limits.pack.max_total_expanded_bytes,
+        let receipt = match profile {
+            StreamProfile::Full => {
+                let selection_source = BoundedStreamSelectionSource {
+                    source: &source,
+                    selected_bytes: Cell::new(0),
+                    maximum_bytes: limits.pack.max_total_expanded_bytes,
+                    maximum_blob_bytes: limits.max_streamed_blob_bytes,
+                };
+                let mut roots = Vec::new();
+                roots.try_reserve_exact(references.len()).map_err(|_| {
+                    super::bundle_error(PackError::AllocationFailed {
+                        requested: references.len(),
+                    })
+                })?;
+                roots.extend(references.iter().map(|reference| *reference.target()));
+                let maximum_objects = usize::try_from(limits.pack.max_entries)
+                    .unwrap_or(usize::MAX)
+                    .min(limits.pack.max_index_entries);
+                let ids = reachable_within_permitted_closure_bounded(
+                    &selection_source,
+                    selected.selected_closure().closure(),
+                    &roots,
+                    UnpermittedRootPolicy::RejectWant,
+                    &limits.pack,
+                    ClosureTraversalLimits {
+                        unique_nodes: maximum_objects,
+                        inspected_edges: limits.max_graph_edges,
+                        frontier: maximum_objects,
+                    },
+                );
+                checkpoint()?;
+                let ids =
+                    ids.map_err(|error| NodeWorkspaceRefusal::BundleGraph(Box::new(error)))?;
+                let mut selected_ids = Vec::new();
+                selected_ids.try_reserve_exact(ids.len()).map_err(|_| {
+                    super::bundle_error(PackError::AllocationFailed {
+                        requested: ids.len(),
+                    })
+                })?;
+                selected_ids.extend(ids);
+                write_full_bundle_stream(
+                    self.object_format,
+                    &references,
+                    head,
+                    &selected_ids,
+                    &source,
+                    &limits,
+                    &mut || live(),
+                    output,
+                )
+            }
+            StreamProfile::Incremental { prerequisites, .. } => {
+                let prepared = incremental::prepare(
+                    &source,
+                    selected.selected_closure().closure(),
+                    &visible_roots,
+                    &references,
+                    prerequisites,
+                    &limits,
+                );
+                checkpoint()?;
+                let prepared = prepared?;
+                write_incremental_bundle_stream(
+                    self.object_format,
+                    &references,
+                    prerequisites,
+                    &prepared.objects,
+                    &prepared.external,
+                    &source,
+                    &limits,
+                    &mut || live(),
+                    output,
+                )
+            }
         };
-        let mut roots = Vec::new();
-        roots.try_reserve_exact(references.len()).map_err(|_| {
-            super::bundle_error(PackError::AllocationFailed {
-                requested: references.len(),
-            })
-        })?;
-        roots.extend(references.iter().map(|reference| *reference.target()));
-        let maximum_objects = usize::try_from(limits.pack.max_entries)
-            .unwrap_or(usize::MAX)
-            .min(limits.pack.max_index_entries);
-        let ids = reachable_within_permitted_closure_bounded(
-            &selection_source,
-            selected.selected_closure().closure(),
-            &roots,
-            UnpermittedRootPolicy::RejectWant,
-            &limits.pack,
-            ClosureTraversalLimits {
-                unique_nodes: maximum_objects,
-                inspected_edges: limits.max_graph_edges,
-                frontier: maximum_objects,
-            },
-        );
-        checkpoint()?;
-        let ids = ids.map_err(|error| NodeWorkspaceRefusal::BundleGraph(Box::new(error)))?;
-        let mut selected_ids = Vec::new();
-        selected_ids.try_reserve_exact(ids.len()).map_err(|_| {
-            super::bundle_error(PackError::AllocationFailed {
-                requested: ids.len(),
-            })
-        })?;
-        selected_ids.extend(ids);
-        let receipt = write_full_bundle_stream(
-            self.object_format,
-            &references,
-            head,
-            &selected_ids,
-            &source,
-            &limits,
-            &mut || live(),
-            output,
-        );
         checkpoint()?;
         let receipt = receipt.map_err(StreamBundleExportRefusal::Stream)?;
         Ok(SelectedStreamBundleExport {

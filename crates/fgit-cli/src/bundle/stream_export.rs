@@ -1,4 +1,5 @@
 //! Explicit streaming Git-only export with caller-owned local publication.
+mod incremental;
 mod local_file;
 
 use std::collections::BTreeSet;
@@ -18,16 +19,19 @@ pub(super) const USAGE: &str =
     "usage: fg bundle export <storage-root> <tenant-id> <repository-id> <new-bundle-file>
   --streaming --trusted-local [--object-format sha1|sha256]
   [--max-output-mib N] [--max-expanded-mib N] [--max-object-mib N]
+  [--max-blob-mib N]
   [--max-objects N] [--max-refs N] [--max-edges N]
   [--max-compression-work N] [--timeout-secs N]
 
-The streaming profile retains one bounded native object and compressor plus
-bounded object/edge metadata. It writes V2/SHA-1 or V3/SHA-256 full bundles in
+The streaming profile retains bounded native metadata, a blob input chunk and
+compressor state plus bounded object/edge metadata. It writes V2/SHA-1 or V3/SHA-256 full bundles in
 deterministic native object-ID order with whole objects and no delta window.
 Only current visible refs and their complete verified graph are exported.
 
 Output and expanded-byte defaults are 128 MiB; each can be set to 1..16384 MiB.
-The object-byte default and ceiling are 32 MiB. Object count defaults to 100000,
+The buffered object-byte default and ceiling are 32 MiB. The independent blob
+allowance defaults to 32 MiB and accepts 1..16384 MiB. A larger blob allowance
+does not widen metadata allocation or aggregate expanded bytes. Object count defaults to 100000,
 and ref-header count to 4096 (including HEAD); both have a ceiling of 1000000.
 Graph edges default to 1000000 (ceiling 8000000); compression work defaults to
 1000000000 (ceiling 1000000000000). Limits are independent; raising a byte limit
@@ -52,6 +56,7 @@ struct Options {
     path: PathBuf,
     format: GitHashAlgorithm,
     query: StreamBundleExportQuery,
+    incremental: Option<incremental::Selection>,
 }
 
 fn number(flag: &str, value: &str, maximum: u64) -> Result<u64, String> {
@@ -78,6 +83,16 @@ fn mib(flag: &str, value: &str, maximum: u64) -> Result<usize, String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
+    if args
+        .first()
+        .is_some_and(|operation| operation == "sync-export")
+    {
+        return incremental::parse(args);
+    }
+    parse_full(args)
+}
+
+fn parse_full(args: &[String]) -> Result<Options, String> {
     if args.len() < 7
         || args.len() > 40
         || args.first().map(String::as_str) != Some("export")
@@ -133,6 +148,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--max-object-mib" => {
                 query.limits.pack.max_object_bytes = mib(flag, value, 32)?;
             }
+            "--max-blob-mib" => {
+                query.limits.max_streamed_blob_bytes = mib(flag, value, 16_384)?;
+            }
             "--max-objects" => {
                 let count = number(flag, value, 1_000_000)? as u32;
                 query.limits.pack.max_entries = count;
@@ -167,6 +185,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         path,
         format,
         query,
+        incremental: None,
     })
 }
 
@@ -188,8 +207,17 @@ fn abort(stage: &mut OwnedExport, cause: impl std::fmt::Display) -> String {
 }
 
 fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, String> {
-    if args == ["export", "--streaming", "--help"] || args == ["export", "--help", "--streaming"] {
-        writeln!(output, "{USAGE}").map_err(|error| error.to_string())?;
+    if args.len() == 3
+        && matches!(args[0].as_str(), "export" | "sync-export")
+        && ((args[1] == "--streaming" && args[2] == "--help")
+            || (args[1] == "--help" && args[2] == "--streaming"))
+    {
+        let usage = if args[0] == "sync-export" {
+            incremental::USAGE
+        } else {
+            USAGE
+        };
+        writeln!(output, "{usage}").map_err(|error| error.to_string())?;
         return Ok(0);
     }
     let mut options = parse(args)?;
@@ -223,6 +251,7 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
     let config = NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
         .with_object_format(options.format)
         .with_max_object_bytes(options.query.limits.pack.max_object_bytes as u64)
+        .with_selected_pack_blob_limit(options.query.limits.max_streamed_blob_bytes)
         .with_git_daemon_session_timeout(session_timeout);
     let mut node = OneNode::open_existing(config).map_err(|error| abort(&mut stage, error))?;
     let operation = (|| {
@@ -247,15 +276,28 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
         };
         // Keep the native future through completion after requesting stop.
         // Dropping it would not finish the node's cleanup obligations.
-        node.runtime()
-            .block_on(node.export_full_git_bundle_stream_controlled_in(
-                &request,
-                &Default::default(),
-                options.query.clone(),
-                &mut stage,
-                &mut allow_work,
-            ))
-            .map_err(|error| error.to_string())
+        let exported = if let Some(selection) = &options.incremental {
+            node.runtime()
+                .block_on(node.export_incremental_git_bundle_stream_controlled_in(
+                    &request,
+                    &selection.references,
+                    &selection.prerequisites,
+                    &Default::default(),
+                    options.query.clone(),
+                    &mut stage,
+                    &mut allow_work,
+                ))
+        } else {
+            node.runtime()
+                .block_on(node.export_full_git_bundle_stream_controlled_in(
+                    &request,
+                    &Default::default(),
+                    options.query.clone(),
+                    &mut stage,
+                    &mut allow_work,
+                ))
+        };
+        exported.map_err(|error| error.to_string())
     })();
     // Every successfully opened node closes, including after failed reads.
     let shutdown = node.shutdown().map_err(|error| error.to_string());
@@ -285,8 +327,22 @@ fn write_receipt(
     report: &SelectedStreamBundleExport,
 ) -> Result<(), String> {
     let receipt = report.receipt();
+    let (kind, incremental_fields) = if let Some(selection) = &options.incremental {
+        (
+            "git_bundle_incremental_export",
+            format!(
+                ",\"reference_count\":{},\"prerequisite_count\":{},\"external_object_count\":{}",
+                selection.references.len(),
+                receipt.prerequisite_count(),
+                receipt.external_object_count(),
+            ),
+        )
+    } else {
+        ("git_bundle_export", String::new())
+    };
     let line = format!(
-        "{{\"type\":\"git_bundle_export\",\"schema_version\":1,\"streaming\":true,\"profile\":{},\"source_head\":{},\"source_generation\":{},\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"object_count\":{},\"total_object_bytes\":{},\"pack_checksum\":{},\"pack_bytes\":{},\"header_bytes\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"compression_work\":{},\"publication_state\":\"durable\",\"bundle_created\":true,\"node_closed\":true,\"repository_changed\":false,\"includes_forge_metadata\":false}}",
+        "{{\"type\":{},\"schema_version\":1,\"streaming\":true,\"profile\":{},\"source_head\":{},\"source_generation\":{},\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"object_count\":{},\"total_object_bytes\":{},\"pack_checksum\":{},\"pack_bytes\":{},\"header_bytes\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"compression_work\":{},\"publication_state\":\"durable\",\"bundle_created\":true,\"node_closed\":true,\"repository_changed\":false,\"includes_forge_metadata\":false{incremental_fields}}}",
+        quote(kind),
         quote(receipt.profile_id()),
         quote(&report.head().to_string()),
         report.generation().get(),

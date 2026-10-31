@@ -26,7 +26,7 @@ use fgit_types::{
     RootLayoutVersion, SchemaFamily,
 };
 
-use super::{PolicyDecisionEvidence, evidence_root};
+use super::{AdmissionAuthentication, PolicyDecisionEvidence, evidence_root};
 use crate::{AdmissionContext, CanonicalRefState};
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -40,6 +40,9 @@ pub use activated::{ActivatedPolicyDecisionEvidence, RefPolicyPublication};
 #[path = "policy_evidence/actor.rs"]
 mod actor;
 pub use actor::ActorPolicyDecisionEvidence;
+#[path = "policy_evidence/authentication.rs"]
+mod authentication;
+pub use authentication::AuthenticationPolicyDecisionEvidence;
 
 /// Exact supported policy-evidence minor. The legacy variant is not a claim
 /// that the historical record retained an evaluated compiled snapshot.
@@ -49,6 +52,7 @@ pub enum PolicyDecisionRecord {
     Evaluated(Box<EvaluatedPolicyDecisionEvidence>),
     Activated(Box<ActivatedPolicyDecisionEvidence>),
     ActorActivated(Box<ActorPolicyDecisionEvidence>),
+    AuthenticationActivated(Box<AuthenticationPolicyDecisionEvidence>),
 }
 
 impl PolicyDecisionRecord {
@@ -59,6 +63,7 @@ impl PolicyDecisionRecord {
             Self::Evaluated(body) => &body.base,
             Self::Activated(body) => &body.references.base,
             Self::ActorActivated(body) => &body.0.references.base,
+            Self::AuthenticationActivated(body) => &body.0.references.base,
         }
     }
 
@@ -68,6 +73,7 @@ impl PolicyDecisionRecord {
             Self::Evaluated(body) => evidence_root(body.as_ref()),
             Self::Activated(body) => evidence_root(body.as_ref()),
             Self::ActorActivated(body) => evidence_root(body.as_ref()),
+            Self::AuthenticationActivated(body) => evidence_root(body.as_ref()),
         }
     }
 
@@ -85,6 +91,11 @@ impl PolicyDecisionRecord {
                 Ok(bytes)
             }
             Self::ActorActivated(body) => {
+                let bytes = encode_body(body.as_ref())?;
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Ok(bytes)
+            }
+            Self::AuthenticationActivated(body) => {
                 let bytes = encode_body(body.as_ref())?;
                 bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
                 Ok(bytes)
@@ -123,11 +134,17 @@ impl PolicyDecisionRecord {
                     bytes, limits,
                 )?))
             }
+            4 => {
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Self::AuthenticationActivated(Box::new(decode_body::<
+                    AuthenticationPolicyDecisionEvidence,
+                >(bytes, limits)?))
+            }
             minor => {
                 return Err(CodecRefusal::schema_minor_unsupported(
                     PolicyDecisionEvidence::DOMAIN,
                     minor,
-                    3,
+                    4,
                 ));
             }
         };
@@ -145,6 +162,17 @@ impl PolicyDecisionRecord {
             Self::Evaluated(body) => Some(body),
             Self::Activated(body) => Some(&body.references),
             Self::ActorActivated(body) => Some(&body.0.references),
+            Self::AuthenticationActivated(body) => Some(&body.0.references),
+        }
+    }
+
+    /// Authentication recorded by the exact evidence schema. Old records do
+    /// not acquire facts from the current request or a later credential.
+    #[must_use]
+    pub fn authentication(&self) -> Option<AdmissionAuthentication> {
+        match self {
+            Self::AuthenticationActivated(body) => Some(body.authentication()),
+            _ => None,
         }
     }
 
@@ -159,6 +187,7 @@ impl PolicyDecisionRecord {
             Self::Evaluated(body) => body.verify_decision(context, basis, fold),
             Self::Activated(body) => body.verify_decision(context, basis, fold),
             Self::ActorActivated(body) => body.verify_decision(context, basis, fold),
+            Self::AuthenticationActivated(body) => body.verify_decision(context, basis, fold),
         }
     }
 }
@@ -233,6 +262,24 @@ impl RefPolicyEvaluation {
         principal_snapshot: fgit_types::PrincipalSnapshotId,
         inputs: Vec<RefUpdateFact>,
     ) -> Result<Self, RefusalCode> {
+        Self::evaluate_with_authentication(
+            profile,
+            snapshot,
+            principal,
+            principal_snapshot,
+            inputs,
+            None,
+        )
+    }
+
+    fn evaluate_with_authentication(
+        profile: Profile,
+        snapshot: PolicySnapshot,
+        principal: PrincipalId,
+        principal_snapshot: fgit_types::PrincipalSnapshotId,
+        inputs: Vec<RefUpdateFact>,
+        authentication: Option<AdmissionAuthentication>,
+    ) -> Result<Self, RefusalCode> {
         // Bound work and possible trace growth BEFORE allocating the evaluator's
         // subject/visit graph. Frozen profiles have one rule; installed policies
         // also reserve their bounded rule/predicate multiplicity.
@@ -262,18 +309,35 @@ impl RefPolicyEvaluation {
         if !profile.accepts(&snapshot) {
             return Err(RefusalCode::EvidenceInvalid);
         }
-        // Ref-only profiles cannot observe any actor attributes. The explicit
-        // actor-ID profile observes only this exact sealed principal; kind,
-        // strength, memberships, snapshot selectors, force and time stay absent.
-        let input = crate::policy_bridge::build_input_root(
-            principal,
-            principal_snapshot,
-            inputs,
-            PolicyInstant::from_seconds(0),
-        )
-        .map_err(|_| RefusalCode::EvidenceInvalid)?;
-        let evaluation = fgit_policy::evaluate(&snapshot, &input)
-            .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
+        let evaluation = match (profile, authentication) {
+            (Profile::RepositoryAuthenticationV1, Some(authentication)) => {
+                let input = fgit_policy::reference_profile::AuthenticatedReferenceInput::try_new(
+                    principal,
+                    authentication.authentication_strength(),
+                    inputs,
+                )
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                fgit_policy::reference_profile::evaluate_authenticated(&snapshot, &input)
+                    .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?
+            }
+            (Profile::RepositoryAuthenticationV1, None) | (_, Some(_)) => {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            (_, None) => {
+                // Frozen historical profiles retain their exact evaluation.
+                // Their complete program validation excludes every unavailable
+                // compatibility field, including authentication.
+                let input = crate::policy_bridge::build_input_root(
+                    principal,
+                    principal_snapshot,
+                    inputs,
+                    PolicyInstant::from_seconds(0),
+                )
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                fgit_policy::evaluate(&snapshot, &input)
+                    .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?
+            }
+        };
         if evaluation.decision() != Decision::Allow {
             return Err(RefusalCode::ProtectedRefTransitionDenied);
         }
@@ -477,7 +541,9 @@ impl EvaluatedPolicyDecisionEvidence {
             .filter(|fact| match profile {
                 Profile::HeadDeletionV1 => self.head_target.as_ref() == Some(fact.name()),
                 Profile::DirectReviewV1 => self.review_branches.binary_search(fact.name()).is_ok(),
-                Profile::RepositoryRefV1 | Profile::RepositoryActorIdV1 => true,
+                Profile::RepositoryRefV1
+                | Profile::RepositoryActorIdV1
+                | Profile::RepositoryAuthenticationV1 => true,
             })
             .map(RefPolicyInput::evaluator_fact)
             .collect()
@@ -528,6 +594,7 @@ enum Profile {
     DirectReviewV1,
     RepositoryRefV1,
     RepositoryActorIdV1,
+    RepositoryAuthenticationV1,
 }
 
 impl Profile {
@@ -538,6 +605,9 @@ impl Profile {
         match self {
             Self::RepositoryRefV1 => Some(ReferencePolicyProfile::ReferenceFactsV1),
             Self::RepositoryActorIdV1 => Some(ReferencePolicyProfile::ReferenceActorIdV1),
+            Self::RepositoryAuthenticationV1 => {
+                Some(ReferencePolicyProfile::ReferenceAuthenticationV1)
+            }
             Self::HeadDeletionV1 | Self::DirectReviewV1 => None,
         }
     }
@@ -547,6 +617,7 @@ impl Profile {
             Self::DirectReviewV1 => 2,
             Self::RepositoryRefV1 => 3,
             Self::RepositoryActorIdV1 => 4,
+            Self::RepositoryAuthenticationV1 => 5,
         }
     }
     const fn name(self) -> &'static str {
@@ -555,20 +626,25 @@ impl Profile {
             Self::DirectReviewV1 => "admission_direct_review_v1",
             Self::RepositoryRefV1 => "repository_ref_v1",
             Self::RepositoryActorIdV1 => "repository_ref_actor_id_v1",
+            Self::RepositoryAuthenticationV1 => "repository_ref_authentication_v1",
         }
     }
     const fn reason(self) -> &'static str {
         match self {
             Self::HeadDeletionV1 => "default branch deletion is prohibited",
             Self::DirectReviewV1 => "direct update requires canonical review",
-            Self::RepositoryRefV1 | Self::RepositoryActorIdV1 => "repository policy",
+            Self::RepositoryRefV1
+            | Self::RepositoryActorIdV1
+            | Self::RepositoryAuthenticationV1 => "repository policy",
         }
     }
     const fn predicate(self) -> Predicate {
         match self {
             Self::HeadDeletionV1 => Predicate::UpdateKindEquals(RefUpdateKind::Delete),
             Self::DirectReviewV1 => Predicate::Always,
-            Self::RepositoryRefV1 | Self::RepositoryActorIdV1 => Predicate::Never,
+            Self::RepositoryRefV1
+            | Self::RepositoryActorIdV1
+            | Self::RepositoryAuthenticationV1 => Predicate::Never,
         }
     }
 
@@ -801,3 +877,7 @@ const fn invalid(field: &'static str) -> CodecRefusal {
 #[cfg(test)]
 #[path = "policy_evidence/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "policy_evidence/authentication_tests.rs"]
+mod authentication_tests;

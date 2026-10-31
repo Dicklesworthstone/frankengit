@@ -5,6 +5,7 @@
 use super::{CandidateEnvelope, MAX_BUNDLE_BYTES, MAX_CANDIDATE_BYTES, invalid, receive_error};
 use crate::receive_staging::ReceiveStaging;
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode, VerifiedFabricPackSource};
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionResult, CommandOutcome, SessionMapping,
 };
@@ -54,6 +55,34 @@ impl OneNode {
         onto: GitOid,
         expected_candidate: GitOid,
         input: &[u8],
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.apply_rebase_bundle_with_authentication_in(
+            request,
+            principal_id,
+            idempotency_key,
+            reference,
+            expected_source,
+            onto,
+            expected_candidate,
+            input,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    /// Preserve node-verified credential facts without changing the original
+    /// ref transaction, terminal recovery, or public operator entry point.
+    pub(crate) async fn apply_rebase_bundle_with_authentication_in(
+        &self,
+        request: &NodeRequestContext,
+        principal_id: PrincipalId,
+        idempotency_key: &[u8],
+        reference: &RefName,
+        expected_source: GitOid,
+        onto: GitOid,
+        expected_candidate: GitOid,
+        input: &[u8],
+        authentication: AdmissionAuthentication,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         let envelope = CandidateEnvelope::parse_profile(input, 1, true)?;
         envelope.bind(self.object_format, reference, onto, expected_candidate)?;
@@ -210,12 +239,13 @@ impl OneNode {
             idempotency_key: key,
             object_format: self.object_format,
         };
-        self.admit_basis_bound_validated_receive_publishing_in(
+        self.admit_basis_bound_validated_receive_with_authentication_in(
             request,
             &context,
             &validated,
             AdmissionLimits::default(),
             Some(&staging),
+            authentication,
         )
         .await
         .map_err(admission_error)

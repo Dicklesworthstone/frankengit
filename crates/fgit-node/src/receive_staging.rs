@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use fgit_object_fabric::fabric::{PlacementAdmission, StoreRefusal, VerifiedObject};
-use fgit_object_fabric::local::{LocalFilesystemFabric, SyncedBatch};
+use fgit_object_fabric::local::{LocalFilesystemFabric, SyncedBatch, SyncedBlob};
 use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
 use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
 use fgit_types::{GitOid, RefusalCode};
@@ -51,8 +51,9 @@ pub struct ReceiveStaging {
 #[derive(Default)]
 struct State {
     batches: Vec<(ObligationLedger, SyncedBatch)>,
+    blobs: Vec<(ObligationLedger, SyncedBlob)>,
     // Exact owned identity -> batch index: private graph reads never scan all batches.
-    staged: BTreeMap<GitOid, usize>,
+    staged: BTreeMap<GitOid, Custody>,
     /// Prepared representation custody is ineligible for serving until every
     /// staged object passes publication's final identity-collision recheck.
     received_pack: Option<PendingReceivedPack>,
@@ -60,6 +61,12 @@ struct State {
     /// A failed publication may have linked some batches and abandoned the
     /// rest, so no later caller may treat this receive's objects as placed.
     failed: Option<Failure>,
+}
+
+#[derive(Clone, Copy)]
+enum Custody {
+    Batch(usize),
+    Blob(usize),
 }
 
 #[derive(Clone)]
@@ -82,6 +89,7 @@ impl std::fmt::Debug for ReceiveStaging {
         let state = self.lock();
         f.debug_struct("ReceiveStaging")
             .field("batches", &state.batches.len())
+            .field("streamed_blobs", &state.blobs.len())
             .field("staged", &state.staged.len())
             .field("received_pack_pending", &state.received_pack.is_some())
             .field("published", &state.published)
@@ -122,7 +130,7 @@ impl ReceiveStaging {
         if let Some(failure) = &state.failed {
             return Err(failure.refusal());
         }
-        let Some(index) = state.staged.get(&identity) else {
+        let Some(custody) = state.staged.get(&identity) else {
             return Ok(None);
         };
         if state.published {
@@ -134,12 +142,21 @@ impl ReceiveStaging {
                 .map(|read| Some(read.object))
                 .map_err(NodeRefusal::from);
         }
-        let (_, batch) = state
-            .batches
-            .get(*index)
-            .ok_or(NodeRefusal::ResourceContainment)?;
-        batch
-            .read_object_bounded(fabric, identity, maximum_payload_bytes)
+        let object = match *custody {
+            Custody::Batch(index) => state
+                .batches
+                .get(index)
+                .ok_or(NodeRefusal::ResourceContainment)?
+                .1
+                .read_object_bounded(fabric, identity, maximum_payload_bytes),
+            Custody::Blob(index) => state
+                .blobs
+                .get(index)
+                .ok_or(NodeRefusal::ResourceContainment)?
+                .1
+                .read_object_bounded(fabric, identity, maximum_payload_bytes),
+        };
+        object
             .map_err(NodeRefusal::from)?
             .map(Some)
             .ok_or(NodeRefusal::ResourceContainment)
@@ -194,9 +211,33 @@ impl ReceiveStaging {
         }
         let index = state.batches.len();
         for identity in staged.1.identities() {
-            state.staged.entry(*identity).or_insert(index);
+            state
+                .staged
+                .entry(*identity)
+                .or_insert(Custody::Batch(index));
         }
         state.batches.push(staged);
+        Ok(())
+    }
+
+    /// Retain a fully authenticated, synced streamed blob without linking its
+    /// permanent name. The owner keeps the original commitments for publication.
+    pub(crate) fn retain_synced_blob(
+        &self,
+        staged: (ObligationLedger, SyncedBlob),
+    ) -> Result<(), NodeRefusal> {
+        let mut state = self.lock();
+        if state.published || state.failed.is_some() {
+            drop(state);
+            settle_abandoned_blob(staged);
+            return Err(NodeRefusal::ResourceContainment);
+        }
+        let index = state.blobs.len();
+        state
+            .staged
+            .entry(staged.1.identity())
+            .or_insert(Custody::Blob(index));
+        state.blobs.push(staged);
         Ok(())
     }
 
@@ -227,6 +268,27 @@ impl ReceiveStaging {
                 for remaining in batches {
                     settle_abandoned(remaining);
                 }
+                for remaining in state.blobs.drain(..) {
+                    settle_abandoned_blob(remaining);
+                }
+                let refusal = failure.refusal();
+                state.failed = Some(failure);
+                state.received_pack.take();
+                return Err(refusal);
+            }
+        }
+        let mut blobs = std::mem::take(&mut state.blobs).into_iter();
+        while let Some((ledger, blob)) = blobs.next() {
+            let outcome = fabric.publish_synced_blob(blob, live);
+            let failure = if ledger.close().is_quiescent() {
+                outcome.err().map(Failure::Store)
+            } else {
+                Some(Failure::Containment)
+            };
+            if let Some(failure) = failure {
+                for remaining in blobs {
+                    settle_abandoned_blob(remaining);
+                }
                 let refusal = failure.refusal();
                 state.failed = Some(failure);
                 state.received_pack.take();
@@ -247,6 +309,9 @@ impl Drop for ReceiveStaging {
         for staged in state.batches.drain(..) {
             settle_abandoned(staged);
         }
+        for staged in state.blobs.drain(..) {
+            settle_abandoned_blob(staged);
+        }
     }
 }
 
@@ -256,7 +321,75 @@ fn settle_abandoned((ledger, batch): (ObligationLedger, SyncedBatch)) {
     let _closed = ledger.close();
 }
 
+fn settle_abandoned_blob((ledger, blob): (ObligationLedger, SyncedBlob)) {
+    let _abandoned = blob.abandon();
+    let _closed = ledger.close();
+}
+
 impl OneNode {
+    /// Retain a streamed blob and its reservation in synced private custody.
+    /// The ordinary admission projection owns the later publication decision.
+    pub(crate) fn stage_synced_git_blob(
+        &self,
+        identity: GitOid,
+        length: u64,
+        commitment: [u8; 32],
+        maximum_payload_bytes: u64,
+        reader: &mut dyn std::io::Read,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(ObligationLedger, SyncedBlob), NodeRefusal> {
+        if identity.algorithm() != self.object_format {
+            return Err(NodeRefusal::ObjectFormatMismatch {
+                stored: self.object_format,
+                supplied: identity.algorithm(),
+            });
+        }
+        let envelope = fgit_object_fabric::ObjectEnvelope::new(
+            self.namespace.clone(),
+            identity,
+            fgit_object_fabric::ObjectKind::Blob,
+            length,
+            commitment,
+            crate::OBJECT_CODEC_NAMESPACE.to_vec(),
+            commitment,
+            None,
+            &self.segment_limits,
+        )
+        .map_err(|error| NodeRefusal::from(StoreRefusal::Fabric(error)))?;
+        let resources = crate::placement_resources(length);
+        let ledger = ObligationLedger::root(
+            RegionId::new(1),
+            LeakDisposition::RecordAndContinue,
+            resources,
+        );
+        let grant = match ledger.grant(resources) {
+            Ok(grant) => grant,
+            Err(error) => {
+                return if ledger.close().is_quiescent() {
+                    Err(NodeRefusal::from(error))
+                } else {
+                    Err(NodeRefusal::ResourceContainment)
+                };
+            }
+        };
+        match self.fabric.stage_synced_blob_stream_if_absent(
+            envelope,
+            reader,
+            maximum_payload_bytes,
+            PlacementAdmission::new(&ledger, grant),
+            live,
+        ) {
+            Ok(blob) => Ok((ledger, blob)),
+            Err(error) => {
+                if ledger.close().is_quiescent() {
+                    Err(NodeRefusal::from(error))
+                } else {
+                    Err(NodeRefusal::ResourceContainment)
+                }
+            }
+        }
+    }
+
     /// [`Self::put_verified_git_objects`] without linking: the identity-sorted
     /// objects are written and synced into `staging/` as one synced batch,
     /// returned with the ledger holding its reservations (frankengit-tz5z).

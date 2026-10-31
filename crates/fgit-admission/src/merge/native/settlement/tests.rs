@@ -250,6 +250,22 @@ async fn stage<B: CanonicalBody + Sync>(
         .map_err(unavailable_projection)
 }
 
+async fn stage_principal_snapshot(
+    store: &Store,
+    repo: RepositoryId,
+    snapshot: &crate::evidence::PrincipalSnapshotRecord,
+) -> Result<Digest, ProjectionFailure> {
+    let namespace = b"frankengit/admission/principal-snapshot/v1/";
+    match snapshot {
+        crate::evidence::PrincipalSnapshotRecord::Legacy(body) => {
+            stage(store, repo, namespace, body).await
+        }
+        crate::evidence::PrincipalSnapshotRecord::Authenticated(body) => {
+            stage(store, repo, namespace, body).await
+        }
+    }
+}
+
 impl AsyncAdmissionProjection<Store> for Projection {
     async fn snapshot_async<'a>(
         &'a self,
@@ -292,13 +308,7 @@ impl AsyncAdmissionProjection<Store> for Projection {
         let bodies = DecisionEvidenceBodies::derive(&self.context, basis, request, fold)
             .map_err(ProjectionFailure::Unavailable)?;
         let repo = self.context.repository_id;
-        stage(
-            store,
-            repo,
-            b"frankengit/admission/principal-snapshot/v1/",
-            bodies.principal_snapshot(),
-        )
-        .await?;
+        stage_principal_snapshot(store, repo, bodies.principal_snapshot()).await?;
         let evidence = CommitEvidence {
             principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot())
                 .map_err(ProjectionFailure::Unavailable)?,
@@ -374,10 +384,9 @@ impl AsyncAdmissionProjection<Store> for Projection {
     ) -> Result<RefusalMaterialization, ProjectionFailure> {
         let bodies = RefusalEvidenceBodies::derive(&self.context, basis, tx_id, code)
             .map_err(ProjectionFailure::Unavailable)?;
-        stage(
+        stage_principal_snapshot(
             store,
             self.context.repository_id,
-            b"frankengit/admission/principal-snapshot/v1/",
             bodies.principal_snapshot(),
         )
         .await?;

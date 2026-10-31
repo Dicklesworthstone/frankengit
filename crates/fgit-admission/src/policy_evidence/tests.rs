@@ -18,7 +18,7 @@ fn oid(algorithm: GitHashAlgorithm, byte: u8) -> GitOid {
     }
 }
 
-fn folded(
+pub(super) fn folded(
     algorithm: GitHashAlgorithm,
     target: RefName,
     head: RefName,
@@ -767,10 +767,10 @@ fn exact_minor_dispatch_refuses_future_schema_truncation_suffix_and_tight_bounds
     let mut future = frame.clone();
     let (_, header) = read_frame_header(&future, DecodeLimits::DEFAULT).unwrap();
     let minor = header.offset() as usize - 2;
-    future[minor..minor + 2].copy_from_slice(&4_u16.to_be_bytes());
+    future[minor..minor + 2].copy_from_slice(&5_u16.to_be_bytes());
     assert!(matches!(
         PolicyDecisionRecord::decode(&future, DecodeLimits::DEFAULT),
-        Err(CodecRefusal::SchemaMinorUnsupported { observed: 4, .. })
+        Err(CodecRefusal::SchemaMinorUnsupported { observed: 5, .. })
     ));
     PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
 }

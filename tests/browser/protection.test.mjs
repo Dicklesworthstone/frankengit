@@ -4,7 +4,7 @@ import { ProtectionClient, protectionPolicy, protectionBranch, protectionChanges
   PROTECTION_RECEIPT_LIMIT, requestBody, fastForwardCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-actions.mjs';
 import { TOKEN, ROTATED, ADMIN, REVIEWER, OTHER, HREF, hex, policy, refPolicy, snapshot, terminal, recovered, response, harness, deferred, webcrypto } from './protection-fixtures.mjs';
 
-for (const profile of ['reference_facts_v1', 'reference_actor_id_v1']) {
+for (const profile of ['reference_facts_v1', 'reference_actor_id_v1', 'reference_authentication_v1']) {
 test(`${profile}: requests bind exact frame bytes and profile through export, restore and explicit clearing`, async () => {
   const compiled = refPolicy(profile);
   const selected = { administrators: [ADMIN], branches: [], ref_policy: compiled };

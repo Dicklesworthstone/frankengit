@@ -16,6 +16,7 @@
 
 extern crate self as fgit_node;
 
+mod admission_authentication;
 pub mod agent_journal;
 
 /// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
@@ -35,10 +36,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use admission_authentication::{read_principal_snapshot_in, stage_principal_snapshot_in};
 use fgit_admission::evidence::{
-    DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies,
+    AdmissionAuthentication, DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies,
     ForgeEventBatch as AdmissionForgeEventEvidence, InvariantEvidence, OutboxEffectBatch,
-    PolicyDecisionRecord, PrincipalSnapshot, RefusalEvidenceBodies, RetentionDelta, evidence_root,
+    PolicyDecisionRecord, RefusalEvidenceBodies, RetentionDelta, evidence_root,
     principal_snapshot_id,
 };
 pub use fgit_admission::merge::native::NativeMergeMethod;
@@ -58,6 +60,8 @@ pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod bounded_receive_intake;
 mod capsule_history;
 mod closure_selection;
+pub mod outcome_checkpoint;
+mod outcome_collection;
 pub mod source_retrieval;
 mod treefs_workspace;
 #[cfg(target_os = "linux")]
@@ -92,6 +96,7 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+    StreamBundleImportQuery, StreamBundleImportRefusal,
 };
 
 use fgit_authority::{
@@ -1589,25 +1594,23 @@ impl DurableAdmissionMaterializer {
             ));
         }
         ensure_materializer_catch_up_live(is_cancelled)?;
-        let principal_snapshot =
-            read_evidence_body_in::<Authority, PrincipalSnapshot, IsCancelled>(
-                authority,
-                cx,
-                context.repository_id,
-                ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-                Digest::new(
-                    evidence
-                        .principal_snapshot_id
-                        .as_internal_object_id()
-                        .algorithm(),
-                    *evidence
-                        .principal_snapshot_id
-                        .as_internal_object_id()
-                        .digest(),
-                ),
-                is_cancelled,
-            )
-            .await?;
+        let principal_snapshot = read_principal_snapshot_in(
+            authority,
+            cx,
+            context.repository_id,
+            Digest::new(
+                evidence
+                    .principal_snapshot_id
+                    .as_internal_object_id()
+                    .algorithm(),
+                *evidence
+                    .principal_snapshot_id
+                    .as_internal_object_id()
+                    .digest(),
+            ),
+            is_cancelled,
+        )
+        .await?;
         let policy_decision = read_policy_decision_in(
             authority,
             cx,
@@ -1759,11 +1762,10 @@ impl DurableAdmissionMaterializer {
         IsCancelled: Fn() -> bool + Sync,
     {
         let repository_id = bodies.principal_snapshot().repository_id();
-        stage_evidence_body_in(
+        stage_principal_snapshot_in(
             authority,
             cx,
             repository_id,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
             bodies.principal_snapshot(),
             is_cancelled,
         )
@@ -1826,11 +1828,10 @@ impl DurableAdmissionMaterializer {
         IsCancelled: Fn() -> bool + Sync,
     {
         let repository_id = bodies.principal_snapshot().repository_id();
-        stage_evidence_body_in(
+        stage_principal_snapshot_in(
             authority,
             cx,
             repository_id,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
             bodies.principal_snapshot(),
             is_cancelled,
         )
@@ -2537,7 +2538,9 @@ struct AsyncMaterializedBasis {
 #[derive(Debug)]
 pub struct DurableAsyncAdmissionProjection<'materializer> {
     materializer: &'materializer DurableAdmissionMaterializer,
+    outcome_checkpoint_fabric: Option<&'materializer LocalFilesystemFabric>,
     context: AdmissionContext,
+    authentication: Option<AdmissionAuthentication>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
     /// A receive's staged objects, published before its first commit's
     /// frames (frankengit-tz5z).
@@ -2560,10 +2563,34 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
     ) -> Self {
         Self {
             materializer,
+            outcome_checkpoint_fabric: None,
             context,
+            authentication: None,
             prepared: Mutex::new(None),
             publication: None,
         }
+    }
+
+    /// Record only provenance selected by a node authentication boundary.
+    #[must_use]
+    pub(crate) const fn with_authentication(
+        mut self,
+        authentication: AdmissionAuthentication,
+    ) -> Self {
+        self.authentication = Some(authentication);
+        self
+    }
+
+    /// Enables retained-leaf checkpoint reads in their dedicated fabric
+    /// namespace. The authority-selected capsule and exact position/root
+    /// verifier remain the only source of cumulative outcome evidence.
+    #[must_use]
+    pub const fn with_outcome_checkpoint_fabric(
+        mut self,
+        fabric: &'materializer LocalFilesystemFabric,
+    ) -> Self {
+        self.outcome_checkpoint_fabric = Some(fabric);
+        self
     }
 
     /// Publishes `staging`'s objects when a commit is staged, before its
@@ -2590,7 +2617,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
     ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
-        let bodies = fgit_admission::merge::native::protection::direct_decision_evidence_at(
+        let bodies = admission_authentication::direct_decision_evidence_in(
             authority,
             cx,
             &self.context,
@@ -2599,6 +2626,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             root_layout,
             request,
             fold,
+            self.authentication,
             &|| cx.checkpoint().is_err(),
         )
         .await?;
@@ -2673,6 +2701,23 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {
+    async fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a FsqliteCx,
+        head_key: &'a fgit_authority::HeadKey,
+        authenticated: &'a AuthenticatedHead,
+    ) -> Result<fgit_authority::CumulativeOutcomes, fgit_authority::OutcomeFailure> {
+        outcome_collection::collect(
+            authority,
+            cx,
+            head_key,
+            authenticated,
+            self.outcome_checkpoint_fabric,
+        )
+        .await
+    }
+
     fn validation_authority(
         &self,
         basis: &PublicationBasis,
@@ -2816,13 +2861,14 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
         let stage_context = cx.create_child();
         let is_cancelled = || stage_context.checkpoint().is_err();
         self.materializer
-            .stage_refusal_evidence_in(
+            .stage_refusal_evidence_with_authentication_in(
                 authority,
                 &stage_context,
                 &self.context,
                 basis,
                 tx_id,
                 code,
+                self.authentication,
                 &is_cancelled,
             )
             .await
@@ -2972,7 +3018,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
         }
         // Legacy digest packages carry no authenticated exact-candidate votes.
         // They cannot bypass a protected target through a different materializer.
-        fgit_admission::merge::native::protection::attach_prepared_policy_at(
+        admission_authentication::attach_prepared_policy_in(
             authority,
             cx,
             context,
@@ -2980,6 +3026,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             &resolved,
             &mut prepared,
             fgit_admission::evidence::RefPolicyPublication::Direct,
+            self.authentication,
             &is_cancelled,
         )
         .await?;
@@ -4872,18 +4919,37 @@ mod ref_write_scope;
 pub struct AuthenticatedReceiveSession {
     principal_id: PrincipalId,
     client_idempotency_key: IdempotencyKey,
+    authentication: AdmissionAuthentication,
     ref_write_scope: Option<Arc<ref_write_scope::RefWriteScope>>,
 }
 
 impl AuthenticatedReceiveSession {
-    /// Forms an authenticated receive session from authority-bound identity.
+    /// Forms an operator-asserted session. Supplying a principal alone does not
+    /// establish that the node verified a remote credential.
     #[must_use]
     pub const fn new(principal_id: PrincipalId, client_idempotency_key: IdempotencyKey) -> Self {
         Self {
             principal_id,
             client_idempotency_key,
+            authentication: AdmissionAuthentication::OperatorAssertion,
             ref_write_scope: None,
         }
+    }
+
+    /// Attach a verifier's result at the node-owned transport boundary.
+    #[must_use]
+    pub(crate) const fn with_authentication(
+        mut self,
+        authentication: AdmissionAuthentication,
+    ) -> Self {
+        self.authentication = authentication;
+        self
+    }
+
+    /// The recorded method establishes no principal kind or membership facts.
+    #[must_use]
+    pub const fn authentication(&self) -> AdmissionAuthentication {
+        self.authentication
     }
 
     /// Narrow the existing authentication boundary's code-write grant. This is
@@ -7457,8 +7523,10 @@ pub struct NodeConfig {
     /// explicitly.
     selected_pack_limits: PackLimits,
     /// An explicit selected-blob ceiling, separate from the eager import and
-    /// metadata ceiling. Only this opt-in widens the fabric's stored-file cap.
+    /// metadata ceiling. Explicit blob allowances widen the fabric's stored-file cap.
     selected_pack_blob_limit: Option<usize>,
+    /// Explicit blob allowance for the private file-backed full-bundle importer.
+    bundle_import_blob_limit: Option<usize>,
     /// Disposable deterministic pack computations, shared by this service's
     /// independently reopened children. This cache never selects objects or
     /// grants disclosure; each request authenticates its own selected closure.
@@ -7561,6 +7629,7 @@ impl NodeConfig {
             segment_limits: SegmentLimits::default(),
             selected_pack_limits: default_selected_pack_limits(),
             selected_pack_blob_limit: None,
+            bundle_import_blob_limit: None,
             pack_computation_cache: Arc::new(PackComputationCache::new(DEFAULT_PACK_CACHE_BYTES)),
             received_pack_cache: Arc::new(received_pack::ReceivedPackCache::new(
                 DEFAULT_RECEIVED_PACK_CACHE_BYTES,
@@ -7910,9 +7979,11 @@ impl NodeConfig {
     }
 
     /// Selects an explicit per-blob serving/export ceiling. Above 32 MiB the
-    /// node selects the V6 streaming profiles; commit/tree/tag parsing and
-    /// untyped ref-root reads retain their 32 MiB buffered ceiling. The local
-    /// stored-file bound includes independently bounded envelope/framing bytes.
+    /// node selects the V6 streaming serving profiles; commit/tree/tag parsing
+    /// and ordinary untyped ref-root reads retain their 32 MiB buffered ceiling.
+    /// Streaming bundle export identifies blob roots from checked envelopes and
+    /// retains its own deterministic bundle profile. The local stored-file bound
+    /// includes independently bounded envelope/framing bytes.
     /// Existing configurations keep their original profiles and 32 MiB limit.
     /// Receive/import object limits and the total pack envelope are separate.
     #[must_use]
@@ -7929,8 +8000,28 @@ impl NodeConfig {
         self.selected_pack_blob_limit
     }
 
+    /// Selects the independent blob allowance for file-backed full-bundle
+    /// import. Buffered metadata, ordinary receive/directory imports, serving
+    /// limits and aggregate import budgets retain their own bounds.
+    #[must_use]
+    pub const fn with_bundle_import_blob_limit(mut self, maximum_blob_bytes: usize) -> Self {
+        self.bundle_import_blob_limit = Some(maximum_blob_bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn bundle_import_blob_limit(&self) -> Option<usize> {
+        self.bundle_import_blob_limit
+    }
+
     fn fabric_stored_object_limit(&self) -> u64 {
-        let Some(maximum_blob_bytes) = self.selected_pack_blob_limit else {
+        let maximum_blob_bytes =
+            match (self.selected_pack_blob_limit, self.bundle_import_blob_limit) {
+                (Some(selected), Some(import)) => Some(selected.max(import)),
+                (Some(limit), None) | (None, Some(limit)) => Some(limit),
+                (None, None) => None,
+            };
+        let Some(maximum_blob_bytes) = maximum_blob_bytes else {
             return self.max_object_bytes;
         };
         let stored = u64::try_from(maximum_blob_bytes)
@@ -8164,6 +8255,9 @@ pub struct OneNode {
     admission_materializer: DurableAdmissionMaterializer,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
+    /// Retained outcome leaves use their own repository-scoped fabric
+    /// namespace. They are checkpoint evidence, never native source objects.
+    outcome_checkpoint_fabric: LocalFilesystemFabric,
     git_daemon_repository_path: GitDaemonRepositoryPath,
     tenant_id: TenantId,
     repository_id: RepositoryId,
@@ -8523,6 +8617,12 @@ impl OneNode {
             config.fabric_stored_object_limit(),
             config.segment_limits.clone(),
         )?;
+        let outcome_checkpoint_fabric = open_local_fabric(
+            config.storage_root.clone(),
+            fgit_chronicle::outcome_index_leaf_archive_namespace(config.repository_id),
+            config.fabric_stored_object_limit(),
+            config.segment_limits.clone(),
+        )?;
 
         let head_key = head_key(config.repository_id)?;
         let admission_cache_scope = admission_cache_scope().map_err(NodeRefusal::from)?;
@@ -8547,6 +8647,7 @@ impl OneNode {
             ),
             head_key,
             fabric,
+            outcome_checkpoint_fabric,
             git_daemon_repository_path: config.git_daemon_repository_path,
             tenant_id: config.tenant_id,
             repository_id: config.repository_id,
@@ -9297,10 +9398,11 @@ impl OneNode {
                 RefusalCode::EvidenceInvalid,
             ));
         }
-        Ok(DurableAsyncAdmissionProjection::new(
-            &self.admission_materializer,
-            context.clone(),
-        ))
+        Ok(
+            DurableAsyncAdmissionProjection::new(&self.admission_materializer, context.clone())
+                .with_authentication(AdmissionAuthentication::OperatorAssertion)
+                .with_outcome_checkpoint_fabric(&self.outcome_checkpoint_fabric),
+        )
     }
 
     /// Admits one verified receive-pack session through the node-owned durable
@@ -9460,9 +9562,20 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        self.admit_validated_receive_durable_in(request, &context, validated, limits)
-            .await
-            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
+        let projection = self
+            .durable_admission_projection(&context)
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
+            .with_authentication(authenticated.authentication());
+        admit_validated_receive_async(
+            &self.authority,
+            request.authority(),
+            &context,
+            validated,
+            limits,
+            &projection,
+        )
+        .await
+        .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
 
     /// Admits a basis-bound receive through the authenticated loopback
@@ -9511,9 +9624,16 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
-        Box::pin(self.admit_basis_bound_validated_receive_publishing_in(
-            request, &context, validated, limits, staging,
-        ))
+        Box::pin(
+            self.admit_basis_bound_validated_receive_with_authentication_in(
+                request,
+                &context,
+                validated,
+                limits,
+                staging,
+                authenticated.authentication(),
+            ),
+        )
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
@@ -9671,7 +9791,29 @@ impl OneNode {
         limits: AdmissionLimits,
         staging: Option<&receive_staging::ReceiveStaging>,
     ) -> Result<AdmissionResult, AdmissionError> {
-        let projection = self.durable_admission_projection_publishing(context, staging)?;
+        self.admit_validated_source_import_with_authentication_publishing_in(
+            request,
+            context,
+            validated,
+            limits,
+            staging,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    async fn admit_validated_source_import_with_authentication_publishing_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        validated: &ValidatedSourceImport,
+        limits: AdmissionLimits,
+        staging: Option<&receive_staging::ReceiveStaging>,
+        authentication: AdmissionAuthentication,
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self
+            .durable_admission_projection_publishing(context, staging)?
+            .with_authentication(authentication);
         Box::pin(admit_validated_source_import_async(
             &self.authority,
             request.authority(),
@@ -11663,6 +11805,8 @@ mod tests {
     mod capsule_history;
     mod closure_selection;
     mod fabric_read_budget;
+    mod outcome_checkpoint;
+    mod outcome_collection;
     mod policy_evidence;
     mod upload_work_budget;
 
@@ -11696,8 +11840,8 @@ mod tests {
 
     use fgit_admission::evidence::{
         DURABLE_REFUSAL_EVIDENCE_DETAIL, EvaluatedPolicyDecisionEvidence, ForgeEventBatch,
-        InvariantEvidence, OutboxEffectBatch, PrincipalSnapshot, RefusalEvidence,
-        RefusalEvidenceBodies, RetentionDelta, evidence_root,
+        InvariantEvidence, OutboxEffectBatch, RefusalEvidence, RefusalEvidenceBodies,
+        RetentionDelta, evidence_root,
     };
     use fgit_admission::{
         AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionSnapshot,
@@ -14370,11 +14514,19 @@ mod tests {
         let principal_identity = record.principal_snapshot_id.as_internal_object_id();
         let principal_snapshot_root =
             Digest::new(principal_identity.algorithm(), *principal_identity.digest());
-        assert_published_evidence_body::<PrincipalSnapshot>(
-            &node,
-            &authority_request,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-            principal_snapshot_root,
+        let principal_snapshot = node
+            .runtime()
+            .block_on(read_principal_snapshot_in(
+                &node.authority,
+                authority_request.authority(),
+                node.repository_id,
+                principal_snapshot_root,
+                &|| false,
+            ))
+            .expect("the published principal snapshot is canonical and matches its root");
+        assert_eq!(
+            principal_snapshot.authentication(),
+            Some(AdmissionAuthentication::OperatorAssertion),
         );
         assert_published_evidence_body::<EvaluatedPolicyDecisionEvidence>(
             &node,
@@ -15964,6 +16116,36 @@ mod selected_pack_envelope_tests {
         let restricted = selected.with_max_object_bytes(4096);
         assert_eq!(restricted.max_object_bytes, 4096);
         assert!(restricted.fabric_stored_object_limit() > 96 * mib as u64);
+    }
+
+    #[test]
+    fn a_bundle_import_blob_allowance_preserves_serving_and_buffered_limits() {
+        let mib = 1024 * 1024;
+        let base = NodeConfig::new(
+            PathBuf::from("/nonexistent"),
+            TenantId::from_bytes([0x41; 16]),
+            RepositoryId::from_bytes([0x42; 16]),
+        );
+        let imported = base.clone().with_bundle_import_blob_limit(96 * mib);
+        assert_eq!(imported.bundle_import_blob_limit(), Some(96 * mib));
+        assert_eq!(imported.max_object_bytes, base.max_object_bytes);
+        assert_eq!(imported.selected_pack_limits, base.selected_pack_limits);
+        assert_eq!(imported.selected_pack_blob_limit(), None);
+        assert_eq!(
+            imported.git_daemon_receive_limits,
+            base.git_daemon_receive_limits
+        );
+        assert_eq!(
+            imported.fabric_stored_object_limit(),
+            (96 * mib + imported.segment_limits.max_envelope_bytes + 8) as u64
+        );
+        let both = imported.with_selected_pack_blob_limit(128 * mib);
+        assert_eq!(both.bundle_import_blob_limit(), Some(96 * mib));
+        assert_eq!(both.selected_pack_blob_limit(), Some(128 * mib));
+        assert_eq!(
+            both.fabric_stored_object_limit(),
+            (128 * mib + both.segment_limits.max_envelope_bytes + 8) as u64
+        );
     }
 
     fn pack_request(sideband: bool) -> PackRequest {

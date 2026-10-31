@@ -1,0 +1,52 @@
+name: Authenticated publication and immutable replay
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/fgit-admission/**
+      - crates/fgit-policy/**
+      - crates/fgit-forge/**
+      - crates/fgit-node/**
+      - crates/fgit-object-fabric/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - scripts/verify-authenticated-publication.sh
+      - .github/workflows/authenticated-publication.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: authenticated-publication-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_HTTP_USER_AGENT: 'frankengit-ci (+https://github.com/Dicklesworthstone/frankengit)'
+      CARGO_TARGET_DIR: /tmp/fg-authenticated-publication
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            /tmp/fg-authenticated-publication
+          key: fg-auth-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: fg-auth-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Verify the exact committed implementation
+        run: bash scripts/verify-authenticated-publication.sh
+      - uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            /tmp/fg-authenticated-publication
+          key: fg-auth-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}

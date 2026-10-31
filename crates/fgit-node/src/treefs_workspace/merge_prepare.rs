@@ -23,8 +23,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use fgit_admission::merge::native::objects::{
-    CanonicalObjectHeader, FrontierObjectHeaders, MergeObjectLimits, validate_merge_objects_above,
-    validate_squash_objects_above,
+    CanonicalObjectHeader, FrontierObjectHeaders, MergeObjectLimits, ObjectFrontier,
+    validate_merge_objects_above, validate_squash_objects_above,
 };
 use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
@@ -45,6 +45,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use super::NodeWorkspaceRefusal;
+use super::native_merge::read_frontier_header;
 use crate::ancestry_metadata::{AncestryMetadataAccess, VerifiedCommitMetadata};
 use crate::{
     AuthoritySelectedClosure, NodeRequestContext, OneNode, PackContextCheckpoint,
@@ -216,7 +217,14 @@ impl OneNode {
         )
         .map_err(NodeWorkspaceRefusal::MergePreparation)?;
         let bundle = if let MergePreparation::Clean(plan) = &outcome {
-            Some(bundle_for_plan(&source, target, incoming, plan, limits)?)
+            Some(bundle_for_plan(
+                &source,
+                target,
+                incoming,
+                plan,
+                limits,
+                self.reused_merge_blob_limit(),
+            )?)
         } else {
             None
         };
@@ -237,6 +245,7 @@ fn bundle_for_plan(
     incoming: &RefName,
     plan: &PreparedMerge,
     limits: PreparationLimits,
+    maximum_reused_blob_bytes: usize,
 ) -> Result<Vec<u8>, NodeWorkspaceRefusal> {
     let candidate = CandidateSource {
         original,
@@ -245,6 +254,15 @@ fn bundle_for_plan(
             .iter()
             .map(|object| (object.id, object))
             .collect(),
+    };
+    let headers = CandidateFrontierHeaders {
+        source: &candidate,
+        maximum_blob_bytes: maximum_reused_blob_bytes,
+    };
+    let object_limits = MergeObjectLimits {
+        max_object_bytes: original.inner.buffered_object_limit(),
+        max_reused_blob_bytes: maximum_reused_blob_bytes,
+        ..MergeObjectLimits::default()
     };
     for object in &plan.objects {
         original.checkpoint().map_err(source_error)?;
@@ -277,15 +295,15 @@ fn bundle_for_plan(
         MergeCommitStyle::TwoParent => validate_merge_objects_above(
             &candidate,
             &coordinates,
-            original.selected.closure().objects(),
-            MergeObjectLimits::default(),
+            ObjectFrontier::with_headers(original.selected.closure().objects(), &headers),
+            object_limits,
             &mut live,
         ),
         MergeCommitStyle::Squash => validate_squash_objects_above(
             &candidate,
             &coordinates,
-            original.selected.closure().objects(),
-            MergeObjectLimits::default(),
+            ObjectFrontier::with_headers(original.selected.closure().objects(), &headers),
+            object_limits,
             &mut live,
         ),
     };
@@ -517,6 +535,25 @@ struct CandidateSource<'a, 'b> {
 }
 impl FrontierObjectHeaders for CandidateSource<'_, '_> {
     fn load_header(&self, id: &GitOid) -> Result<Option<CanonicalObjectHeader>, PackWriteError> {
+        self.header_with_blob_limit(id, self.original.inner.buffered_object_limit())
+    }
+}
+struct CandidateFrontierHeaders<'a, 'b, 'c> {
+    source: &'a CandidateSource<'b, 'c>,
+    maximum_blob_bytes: usize,
+}
+impl FrontierObjectHeaders for CandidateFrontierHeaders<'_, '_, '_> {
+    fn load_header(&self, id: &GitOid) -> Result<Option<CanonicalObjectHeader>, PackWriteError> {
+        self.source
+            .header_with_blob_limit(id, self.maximum_blob_bytes)
+    }
+}
+impl CandidateSource<'_, '_> {
+    fn header_with_blob_limit(
+        &self,
+        id: &GitOid,
+        maximum_blob_bytes: usize,
+    ) -> Result<Option<CanonicalObjectHeader>, PackWriteError> {
         self.original
             .checkpoint()
             .map_err(|_| PackError::DeadlineExceeded)?;
@@ -528,11 +565,11 @@ impl FrontierObjectHeaders for CandidateSource<'_, '_> {
         if !self.original.selected.closure().objects().contains(id) {
             return Err(PackWriteError::MissingCanonicalObject(*id));
         }
-        let result = self.original.inner.read_object_header(id);
+        let result = read_frontier_header(&self.original.inner, id, maximum_blob_bytes);
         self.original
             .checkpoint()
             .map_err(|_| PackError::DeadlineExceeded)?;
-        let (object_type, body_bytes) = result.map_err(|error| {
+        let header = result.map_err(|error| {
             if matches!(
                 &error,
                 PackWriteError::Pack(
@@ -546,11 +583,7 @@ impl FrontierObjectHeaders for CandidateSource<'_, '_> {
             }
             error
         })?;
-        Ok(Some(CanonicalObjectHeader {
-            id: *id,
-            object_type,
-            body_bytes,
-        }))
+        Ok(Some(header))
     }
 }
 impl CanonicalObjectSource for CandidateSource<'_, '_> {
@@ -642,6 +675,21 @@ mod tests {
         conflict: bool,
         rename: bool,
     ) -> (Scratch, OneNode, GitOid, GitOid) {
+        fixture_with_preserved(
+            format,
+            conflict,
+            rename,
+            b"unchanged sibling\n".to_vec(),
+            32 * 1024 * 1024,
+        )
+    }
+    pub(super) fn fixture_with_preserved(
+        format: GitHashAlgorithm,
+        conflict: bool,
+        rename: bool,
+        preserved_body: Vec<u8>,
+        maximum_object_bytes: u64,
+    ) -> (Scratch, OneNode, GitOid, GitOid) {
         let root = std::env::temp_dir().join(format!(
             "fg-merge-prepare-{}-{}",
             std::process::id(),
@@ -653,7 +701,8 @@ mod tests {
                 TenantId::from_bytes([0x71; 16]),
                 RepositoryId::from_bytes([0x72; 16]),
             )
-            .with_object_format(format),
+            .with_object_format(format)
+            .with_max_object_bytes(maximum_object_bytes),
         )
         .unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -680,12 +729,7 @@ mod tests {
             },
             &mut ids,
         );
-        let preserved = object(
-            &node,
-            ObjectType::Blob,
-            b"unchanged sibling\n".to_vec(),
-            &mut ids,
-        );
+        let preserved = object(&node, ObjectType::Blob, preserved_body, &mut ids);
         let bt = tree(&node, &[("keep", preserved), ("text", original)], &mut ids);
         let base = commit(&node, bt, &[], "base", &mut ids);
         let ot = tree(&node, &[("keep", preserved), ("text", ours)], &mut ids);
@@ -991,3 +1035,7 @@ mod rename_tests;
 #[cfg(test)]
 #[path = "merge_prepare/ancestry_tests.rs"]
 mod ancestry_tests;
+
+#[cfg(test)]
+#[path = "merge_prepare/frontier_reuse_tests.rs"]
+mod frontier_reuse_tests;

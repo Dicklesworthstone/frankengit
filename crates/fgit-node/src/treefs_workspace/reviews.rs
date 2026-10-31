@@ -9,6 +9,7 @@ use crate::{
     LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode,
     VerifiedFabricPackSource, async_projection_unavailable,
 };
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::merge::NativeMergeBasis;
 use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_admission::merge::native::pull_request::reviews::gate::{self, ReviewRequirements};
@@ -94,7 +95,8 @@ impl OneNode {
                 node: self,
                 inner: self
                     .durable_admission_projection(&context)
-                    .map_err(map_error)?,
+                    .map_err(map_error)?
+                    .with_authentication(authenticated.authentication()),
                 object_limits: MergeObjectLimits::default(),
                 workspace: None,
                 workspace_capability: None,
@@ -239,6 +241,38 @@ impl OneNode {
         required_reviewers: &[PrincipalId],
         method: NativeMergeMethod,
     ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
+        self.apply_reviewed_merge_bundle_with_authentication_in(
+            request,
+            principal,
+            key_bytes,
+            number,
+            version,
+            merge,
+            input,
+            policy_epoch,
+            required_reviewers,
+            method,
+            AdmissionAuthentication::OperatorAssertion,
+        )
+        .await
+    }
+
+    /// Preserve verified transport provenance without changing the public
+    /// operator-asserted API or the reviewed request's semantic identity.
+    pub(crate) async fn apply_reviewed_merge_bundle_with_authentication_in(
+        &self,
+        request: &NodeRequestContext,
+        principal: PrincipalId,
+        key_bytes: &[u8],
+        number: PullRequestNumber,
+        version: ExpectedVersion,
+        merge: &NativeMerge,
+        input: &[u8],
+        policy_epoch: PolicyEpoch,
+        required_reviewers: &[PrincipalId],
+        method: NativeMergeMethod,
+        authentication: AdmissionAuthentication,
+    ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
         let map_error =
             |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
         if required_reviewers.len() > gate::MAX_REQUIRED_REVIEWERS {
@@ -314,7 +348,8 @@ impl OneNode {
             node: self,
             inner: self
                 .durable_admission_projection(&context)
-                .map_err(map_error)?,
+                .map_err(map_error)?
+                .with_authentication(authentication),
             object_limits: MergeObjectLimits::default(),
             workspace: None,
             workspace_capability: None,
@@ -357,6 +392,20 @@ struct ReviewOwner<'a> {
     bundle: Option<&'a [u8]>,
 }
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
+    fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        store: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        head_key: &'a fgit_authority::HeadKey,
+        head: &'a AuthenticatedHead,
+    ) -> impl Future<
+        Output = Result<fgit_authority::CumulativeOutcomes, fgit_authority::OutcomeFailure>,
+    > + Send
+    + 'a {
+        self.inner
+            .collect_cumulative_outcomes_async(store, cx, head_key, head)
+    }
+
     fn snapshot_async<'a>(
         &'a self,
         store: &'a FsqliteAuthorityStore,
@@ -391,6 +440,12 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
     }
 }
 impl NativeMergeProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
+    fn admission_authentication(
+        &self,
+    ) -> Option<fgit_admission::evidence::AdmissionAuthentication> {
+        self.inner.admission_authentication()
+    }
+
     fn validate_squash_async<'a>(
         &'a self,
         store: &'a FsqliteAuthorityStore,

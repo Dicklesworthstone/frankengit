@@ -249,6 +249,7 @@ fn exact_object_edge_and_byte_budgets_have_retryable_refused_twins() {
             max_objects: 2,
             max_edges: 3,
             max_object_bytes: largest,
+            max_reused_blob_bytes: largest,
             max_total_bytes: total,
         };
         let run = |limits| {

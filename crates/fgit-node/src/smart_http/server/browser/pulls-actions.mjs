@@ -240,7 +240,7 @@ function protectionChecks(values) {
 function protectionRefPolicy(value) {
   protectionFields(value, ['snapshot_id', 'profile', 'mode', 'frame_hex']);
   const id = opaque(value.snapshot_id);
-  if (!id.startsWith('frankengit/policy-snapshot/v1/') || !['reference_facts_v1', 'reference_actor_id_v1'].includes(value.profile) || value.mode !== 'enforce') {
+  if (!id.startsWith('frankengit/policy-snapshot/v1/') || !['reference_facts_v1', 'reference_actor_id_v1', 'reference_authentication_v1'].includes(value.profile) || value.mode !== 'enforce') {
     fail('Unsupported repository ref policy descriptor.');
   }
   // The native decoder authenticates this frame's identity and factual profile.

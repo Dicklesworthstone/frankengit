@@ -120,7 +120,7 @@ fn workspace_package(
         &mut || true,
     )
     .expect("the source fixture passes the production native object validator");
-    package_with_workspace(
+    let mut package = package_with_workspace(
         node,
         fixture,
         context,
@@ -129,7 +129,9 @@ fn workspace_package(
             receipt.snapshot_digest(),
             WorkspaceEpoch::from_u64(receipt.epochs().staged().get()),
         )),
-    )
+    );
+    prepare_current_package(node, context, &mut package, Some(receipt.snapshot_digest()));
+    package
 }
 
 fn candidate_for_tree(node: &OneNode, original: &Fixture, tree: GitOid) -> Fixture {
@@ -249,7 +251,14 @@ fn rederive_workspace_evidence(
         fold.outcome,
         fgit_reference::effect::FoldOutcome::Folded(_)
     ));
-    let bodies = DecisionEvidenceBodies::derive(context, before.basis(), &request, &fold).unwrap();
+    let bodies = DecisionEvidenceBodies::derive_with_authentication(
+        context,
+        before.basis(),
+        &request,
+        &fold,
+        AdmissionAuthentication::OperatorAssertion,
+    )
+    .unwrap();
     package.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
         forge_event_batch_root: event_root,
@@ -258,6 +267,7 @@ fn rederive_workspace_evidence(
         outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
         retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),
     };
+    prepare_current_package(node, context, package, Some(receipt.snapshot_digest()));
 }
 
 fn admit(

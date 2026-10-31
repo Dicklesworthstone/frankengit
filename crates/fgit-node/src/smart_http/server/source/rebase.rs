@@ -154,7 +154,7 @@ pub(super) fn execute(
         let result = drive_request_while(
             node,
             &context,
-            node.apply_rebase_bundle_durable_in(
+            node.apply_rebase_bundle_with_authentication_in(
                 &context,
                 authenticated.principal_id(),
                 authenticated.client_idempotency_key().as_bytes(),
@@ -163,6 +163,7 @@ pub(super) fn execute(
                 command.onto,
                 command.candidate,
                 bundle,
+                authenticated.authentication(),
             ),
             &mut live,
         )

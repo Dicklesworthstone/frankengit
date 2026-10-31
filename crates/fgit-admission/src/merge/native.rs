@@ -249,6 +249,12 @@ pub trait NativeMergeProjection<S>: AsyncAdmissionProjection<S>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
+    /// Authentication established by this request's host. Missing historical
+    /// evidence stays missing; terminal retries retain their recorded receipt.
+    fn admission_authentication(&self) -> Option<crate::evidence::AdmissionAuthentication> {
+        None
+    }
+
     /// Checks the caller's cancellation and work budget between storage steps.
     fn merge_checkpoint(&self, _cx: &S::Context) -> Result<(), RefusalCode> {
         Ok(())
@@ -552,8 +558,9 @@ where
         }
         let (basis, receipt, authenticated) =
             crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative =
-            fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        let cumulative = projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await?;
         if cumulative.observed() != receipt.token() {
             continue;
         }
@@ -644,7 +651,7 @@ where
                 &resolved,
             )
             .map_err(ProjectionFailure::Refuse)?;
-            protection::attach_prepared_policy_at(
+            protection::attach_prepared_policy_selected_at(
                 store,
                 cx,
                 context,
@@ -652,6 +659,7 @@ where
                 &resolved,
                 &mut prepared,
                 crate::evidence::RefPolicyPublication::NativeMerge,
+                projection.admission_authentication(),
                 &|| projection.merge_checkpoint(cx).is_err(),
             )
             .await?;

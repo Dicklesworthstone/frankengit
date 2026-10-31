@@ -6,6 +6,8 @@
 
 #[path = "native_merge_delivery_faults/issue_append.rs"]
 mod issue_append;
+#[path = "native_merge_delivery_faults/metadata_authentication.rs"]
+mod metadata_authentication;
 #[path = "native_merge_delivery_faults/object_publication.rs"]
 mod object_publication;
 #[path = "native_merge_delivery_faults/pull_request.rs"]
@@ -199,6 +201,22 @@ impl Model {
         {
             PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(root),
             PutOutcome::Conflict => Err(RefusalCode::EvidenceInvalid),
+        }
+    }
+
+    fn stage_principal_snapshot(
+        &self,
+        repo: RepositoryId,
+        snapshot: &fgit_admission::evidence::PrincipalSnapshotRecord,
+    ) -> Result<Digest, RefusalCode> {
+        let namespace = b"frankengit/admission/principal-snapshot/v1/";
+        match snapshot {
+            fgit_admission::evidence::PrincipalSnapshotRecord::Legacy(body) => {
+                self.stage(repo, namespace, body)
+            }
+            fgit_admission::evidence::PrincipalSnapshotRecord::Authenticated(body) => {
+                self.stage(repo, namespace, body)
+            }
         }
     }
 
@@ -438,11 +456,8 @@ impl AdmissionEvidence for DerivedEvidence {
     ) -> Result<CommitEvidence, RefusalCode> {
         let bodies = DecisionEvidenceBodies::derive(&self.context, basis, request, fold)?;
         let repo = self.context.repository_id;
-        self.store.stage(
-            repo,
-            b"frankengit/admission/principal-snapshot/v1/",
-            bodies.principal_snapshot(),
-        )?;
+        self.store
+            .stage_principal_snapshot(repo, bodies.principal_snapshot())?;
         Ok(CommitEvidence {
             principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot())?,
             forge_event_batch_root: self.store.stage(
@@ -479,11 +494,8 @@ impl AdmissionEvidence for DerivedEvidence {
         code: RefusalCode,
     ) -> Result<RefusalMaterialization, RefusalCode> {
         let bodies = RefusalEvidenceBodies::derive(&self.context, basis, tx_id, code)?;
-        self.store.stage(
-            self.context.repository_id,
-            b"frankengit/admission/principal-snapshot/v1/",
-            bodies.principal_snapshot(),
-        )?;
+        self.store
+            .stage_principal_snapshot(self.context.repository_id, bodies.principal_snapshot())?;
         Ok(RefusalMaterialization {
             policy_epoch: basis.body().policy_epoch,
             detail: format!("native merge model lane: {code:?}"),

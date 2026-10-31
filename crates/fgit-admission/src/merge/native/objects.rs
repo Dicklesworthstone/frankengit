@@ -65,6 +65,9 @@ impl<'a> From<&'a BTreeSet<GitOid>> for ObjectFrontier<'a> {
     }
 }
 
+/// Largest independently bounded admitted-blob metadata profile (16 GiB).
+pub const MAX_REUSED_BLOB_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
 /// Independent object/work ceilings. A caller also supplies its live deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MergeObjectLimits {
@@ -75,6 +78,11 @@ pub struct MergeObjectLimits {
     pub max_objects: usize,
     pub max_edges: usize,
     pub max_object_bytes: usize,
+    /// Payload length of an admitted blob checked through frontier metadata.
+    /// Defaults to 32 MiB and may be raised through [`MAX_REUSED_BLOB_BYTES`].
+    /// This never widens a body allocation or a commit/tree/tag parsing bound.
+    /// A declined header retains `max_object_bytes`, including for blobs.
+    pub max_reused_blob_bytes: usize,
     pub max_total_bytes: usize,
 }
 impl Default for MergeObjectLimits {
@@ -83,6 +91,7 @@ impl Default for MergeObjectLimits {
             max_objects: 100_000,
             max_edges: 400_000,
             max_object_bytes: 32 * 1024 * 1024,
+            max_reused_blob_bytes: 32 * 1024 * 1024,
             max_total_bytes: 128 * 1024 * 1024,
         }
     }
@@ -296,8 +305,10 @@ pub fn validate_commit_closure_above<'a>(
 
 /// Verify an explicit two-parent merge ABOVE the authority-selected closure
 /// (frankengit-lh8z). Objects the candidate reaches that are already selected
-/// were verified when admitted: their kind is checked here, but their bytes are
-/// not hashed again and their edges are not walked. Base ancestry is proved by
+/// were verified when admitted: checked headers retain kind and size checks
+/// without rereading their payloads. If a source declines metadata, its loaded
+/// bytes are independently verified under the body budgets. Reused outgoing
+/// edges are not walked. Base ancestry is proved by
 /// an exact frontier traversal over selected commits instead of a full parent
 /// map. The result names the objects this merge adds plus the four commits
 /// admission requires; the serving closure, a union over every decision, is
@@ -435,6 +446,8 @@ fn validate_candidate_objects(
         || limits.max_edges > maximum.max_edges
         || limits.max_object_bytes == 0
         || limits.max_object_bytes > maximum.max_object_bytes
+        || limits.max_reused_blob_bytes == 0
+        || u64::try_from(limits.max_reused_blob_bytes).unwrap_or(u64::MAX) > MAX_REUSED_BLOB_BYTES
         || limits.max_total_bytes == 0
         || limits.max_total_bytes > maximum.max_total_bytes
     {
@@ -497,7 +510,12 @@ fn validate_candidate_objects(
                 if header.id != id || required.get(&id) != Some(&header.object_type) {
                     return Err(invalid());
                 }
-                if header.body_bytes > limits.max_object_bytes {
+                let maximum_bytes = if header.object_type == ObjectType::Blob {
+                    limits.max_reused_blob_bytes
+                } else {
+                    limits.max_object_bytes
+                };
+                if header.body_bytes > maximum_bytes {
                     return Err(budget());
                 }
                 continue;
@@ -521,11 +539,6 @@ fn validate_candidate_objects(
             .checked_add(object.body().len())
             .filter(|bytes| *bytes <= limits.max_total_bytes)
             .ok_or_else(budget)?;
-        // An already-selected object other than the candidate was verified when
-        // it was admitted. Its kind is checked above; it adds nothing here.
-        if reused {
-            continue;
-        }
         let profile = if id == candidate && expected_parents.is_some() {
             AcceptanceProfile::StrictCreate
         } else {
@@ -541,6 +554,12 @@ fn validate_candidate_objects(
         )
         .map_err(native_parse_failure)?;
         checkpoint(deadline)?;
+        // A declined header can denote newly supplied bytes whose identity was
+        // already admitted. Verify those actual bytes before retaining the
+        // original frontier; they add no new decision-closure objects here.
+        if reused {
+            continue;
+        }
         visited.insert(id);
         let mut outgoing = Vec::new();
         match parsed {
@@ -1085,6 +1104,7 @@ const fn source_failure(error: PackWriteError) -> ProjectionFailure {
         PackWriteError::Pack(PackError::DeadlineExceeded) => {
             ProjectionFailure::Unavailable(RefusalCode::CancellationInProgress)
         }
+        PackWriteError::Pack(PackError::ObjectSizeLimit { .. }) => budget(),
         _ => ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing),
     }
 }

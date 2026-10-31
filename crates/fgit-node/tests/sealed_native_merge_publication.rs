@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
-use fgit_admission::evidence::{DecisionEvidenceBodies, evidence_root, principal_snapshot_id};
+use fgit_admission::evidence::{
+    AdmissionAuthentication, DecisionEvidenceBodies, evidence_root, principal_snapshot_id,
+};
 use fgit_admission::merge::native::{
     NativeMergeIntent,
     objects::{MergeObjectLimits, validate_merge_objects, validate_merge_objects_above},
@@ -488,7 +490,14 @@ fn package_with_workspace(
         },
         &request,
     );
-    let bodies = DecisionEvidenceBodies::derive(context, before.basis(), &request, &fold).unwrap();
+    let bodies = DecisionEvidenceBodies::derive_with_authentication(
+        context,
+        before.basis(),
+        &request,
+        &fold,
+        AdmissionAuthentication::OperatorAssertion,
+    )
+    .unwrap();
     package.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
         forge_event_batch_root: event_root,
@@ -522,7 +531,32 @@ fn exact_package(node: &OneNode, f: &Fixture, context: &AdmissionContext) -> Pac
         exact.objects,
         BTreeSet::from([f.merged_tree, f.candidate, f.base, f.target, f.source])
     );
-    package(node, f, context, exact)
+    let mut package = package(node, f, context, exact);
+    prepare_current_package(node, context, &mut package, None);
+    package
+}
+
+fn prepare_current_package(
+    node: &OneNode,
+    context: &AdmissionContext,
+    package: &mut Package,
+    workspace_snapshot: Option<[u8; 32]>,
+) {
+    let request = node.request_context();
+    let prepared = node
+        .runtime()
+        .block_on(node.prepare_sealed_merge_evidence_in(
+            &request,
+            context,
+            &package.sealed(),
+            workspace_snapshot,
+        ))
+        .unwrap();
+    assert_eq!(
+        prepared.evidence, package.evidence,
+        "current host preparation preserves the independently evaluated complete fold",
+    );
+    package.evidence = prepared.evidence;
 }
 
 fn apply(

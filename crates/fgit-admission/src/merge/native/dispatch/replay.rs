@@ -361,8 +361,9 @@ where
         }
         let events = storage::read_events(store, cx, context.repository_id, intent.payload).await?;
         delivery::validate_payload_positions(&state.forge, &events)?;
-        let cumulative =
-            fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        let cumulative = projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await?;
         if cumulative.observed() != receipt.token() {
             continue;
         }

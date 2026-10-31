@@ -3,6 +3,7 @@ mod fetch;
 mod incremental;
 mod recover;
 mod stream_export;
+mod stream_import;
 mod verify;
 use super::merge_apply::preparation::{publish_new_bundle, require_absent};
 use super::publication_support::{describe, quote, read_bundle, set_once, write_terminal_receipt};
@@ -150,10 +151,21 @@ fn key_bytes(key: &Key, input: &mut impl Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub fn run(args: &[String]) -> Result<u8, String> {
-    if args.first().is_some_and(|arg| arg == "export")
+    if args.first().is_some_and(|arg| arg == "import")
+        && (stream_import::requested(args)
+            || (args.len() == 3
+                && ((args[1] == "--file-backed" && args[2] == "--help")
+                    || (args[1] == "--help" && args[2] == "--file-backed"))))
+    {
+        return stream_import::run(args);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "export" | "sync-export"))
         && (args.iter().skip(5).any(|arg| arg == "--streaming")
-            || args == ["export", "--streaming", "--help"]
-            || args == ["export", "--help", "--streaming"])
+            || (args.len() == 3
+                && ((args[1] == "--streaming" && args[2] == "--help")
+                    || (args[1] == "--help" && args[2] == "--streaming"))))
     {
         return stream_export::run(args);
     }
@@ -179,12 +191,13 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     {
         writeln!(
             std::io::stdout().lock(),
-            "{USAGE}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+            "{USAGE}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
             fetch::USAGE,
             incremental::USAGE,
             verify::USAGE,
             recover::USAGE,
-            stream_export::USAGE
+            stream_export::USAGE,
+            stream_import::USAGE
         )
         .map_err(|e| e.to_string())?;
         return Ok(0);

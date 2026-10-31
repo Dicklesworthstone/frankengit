@@ -44,6 +44,13 @@ impl<'a> CanonicalBlobStream<'a> {
         self.length
     }
 
+    /// Share the exact length/EOF/native-identity guard with other streaming
+    /// codecs without exposing the source reader or changing its public API.
+    pub(crate) fn verified_reader(&mut self) -> Result<VerifiedBlobReader<'_>, PackWriteError> {
+        self.validate_key(self.key)?;
+        VerifiedBlobReader::new(self.key.id, self.length, &mut *self.reader)
+    }
+
     /// Change only derived ordering hints after the adapter checks identity
     /// and native type. The original length and owned reader stay untouched.
     pub(super) const fn set_ordering_metadata(&mut self, recency: u64, path_hash: u64) {
@@ -172,7 +179,7 @@ impl NativeBlobHash {
 
 /// Protects even custom encoders from accepting a short, growing, or forged
 /// source. The final one-byte probe is never included in the native hash.
-struct VerifiedBlobReader<'a> {
+pub(crate) struct VerifiedBlobReader<'a> {
     reader: &'a mut dyn CanonicalBlobReader,
     id: ObjectId,
     declared: usize,
@@ -205,7 +212,7 @@ impl<'a> VerifiedBlobReader<'a> {
         }
     }
 
-    fn finish(self) -> Result<(), PackWriteError> {
+    pub(crate) fn finish(self) -> Result<(), PackWriteError> {
         if !self.eof || self.consumed != self.declared {
             return Err(self.length_error(self.consumed));
         }

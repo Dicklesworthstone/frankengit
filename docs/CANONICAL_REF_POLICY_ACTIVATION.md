@@ -1,6 +1,7 @@
 # Canonically activated repository ref policy
 
-The `reference_facts_v1` and `reference_actor_id_v1` profiles make a stored,
+The `reference_facts_v1`, `reference_actor_id_v1`, and
+`reference_authentication_v1` profiles make a stored,
 administrator-selected DSL snapshot effective on ordinary ref publication and native merges. It is part
 of the existing complete review/check protection policy. It is not selected
 by a local file, an immutable object's existence, or the hidden-ref
@@ -70,8 +71,15 @@ a principal refuses an actor policy instead of substituting a zero identifier.
 Inspection reports the smallest supported profile: a policy without actor-ID
 predicates remains `reference_facts_v1` with its historical encoding.
 
+The `reference_authentication_v1` profile additionally accepts authentication
+comparisons against the method established by the admission boundary. HTTP
+tokens and authorized SSH keys establish single-factor strength; explicit
+operator assertions establish none. Legacy missing provenance refuses even a
+negated authentication condition. [Admission authentication](ADMISSION_AUTHENTICATION.md)
+lists supported routes and an installable policy example.
+
 An existing-to-existing ref update is `update_unclassified` because this gate
-does not authenticate ancestry. Actor kind/snapshot/authentication/membership predicates,
+does not authenticate ancestry. Actor kind/snapshot/membership predicates,
 force intent, fast-forward/non-fast-forward, aggregate reads and accepted
 evidence predicates are rejected at installation, including negation and
 unreachable branches. Empty or invented facts never make those conditions
@@ -101,6 +109,8 @@ kinds 9, 13 and 14 retain their original bytes when no DSL policy is selected.
 Actor-ID policies require kind 17 with the same bounded protection/frame shape.
 Kind 16 refuses actor predicates, and kind 17 refuses a ref-only snapshot, so
 upgrading a reader cannot reinterpret old bytes or create a second encoding.
+Authentication policies require kind 18 and cannot be relabelled as kinds 16 or
+17. Kind 18 likewise refuses a snapshot that belongs to either older profile.
 Older readers refuse unknown required kinds rather than treating the policy as absent.
 Embedding the frame retains it with the existing forge event; there is no new
 mutable authority, policy database or dangling snapshot retention root.
@@ -129,6 +139,12 @@ sealed request and staged principal snapshot. Replay alone is not principal
 authentication: even a substituted principal that also satisfies the policy
 must fail the enclosing decision's identity check. Schema 1.2 remains ref-only
 and rejects an actor policy, including a relabelled 1.3 payload.
+
+Schema 1.4 records the authentication profile and appends the exact method to
+the activated evidence fields. The enclosing decision checks it against
+principal snapshot 1.1 before replay can be accepted. Recovery uses that
+original receipt, without changing the transaction seal or consulting a retry's
+current credential. Historical snapshots never acquire an authentication fact.
 
 The durable reader authenticates the original authority/forge selection and
 requires the recorded snapshot to equal the selected snapshot. It rejects a
@@ -165,6 +181,6 @@ restart and historical terminal recovery. HTTP/MCP tests exercise their actual
 administration adapters. Execution results are recorded separately; the test
 inventory is not a claim of a passed full release, crash or power-loss campaign.
 
-This implements enforce mode for the bounded ref-fact and actor-ID profiles. Canary/shadow
+This implements enforce mode for the bounded ref-fact, actor-ID and authentication profiles. Canary/shadow
 rollout, break-glass, time windows, authenticated actor attributes/ancestry/evidence facts,
 and the complete policy-integrity bead remain separate unfinished work.

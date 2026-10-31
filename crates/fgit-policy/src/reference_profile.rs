@@ -1,12 +1,18 @@
 //! The closed factual profile for canonically activated repository ref policy.
 //!
 //! Admission knows native ref names, scopes and create/delete/update shape. It
-//! does not thereby know authentication strength, ancestry, accepted evidence,
+//! additionally binds explicit authentication provenance when supplied by the
+//! admission owner. It does not thereby know ancestry, accepted evidence,
 //! aggregates or force intent. Inspect every predicate before activation, even
 //! an unreachable arm: absence is not a false fact an author may negate.
 
 use crate::program::{MAX_SET_ELEMENTS, MAX_TEXT_LITERAL_LEN, Predicate, Selector};
-use crate::{PolicySnapshot, RefUpdateKind};
+use crate::{
+    AuthenticationStrength, PolicyEvaluation, PolicyInputRefusal, PolicySnapshot, RefUpdateFact,
+    RefUpdateKind,
+};
+use fgit_types::PrincipalId;
+use std::collections::BTreeSet;
 
 pub const MAX_REFERENCE_POLICY_BYTES: usize = 64 * 1024;
 pub const MAX_REFERENCE_POLICY_RULES: usize = 64;
@@ -18,11 +24,13 @@ pub const MAX_REFERENCE_POLICY_TRACE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Closed factual profiles. Historical ref-only decisions never learn new
 /// facts; the actor profile additionally observes only the principal identifier
-/// bound to the sealed transaction, not authentication or membership claims.
+/// bound to the sealed transaction. Authentication has a separately activated
+/// profile; none of these profiles observes principal kind or membership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePolicyProfile {
     ReferenceFactsV1,
     ReferenceActorIdV1,
+    ReferenceAuthenticationV1,
 }
 impl ReferencePolicyProfile {
     #[must_use]
@@ -30,6 +38,7 @@ impl ReferencePolicyProfile {
         match self {
             Self::ReferenceFactsV1 => "reference_facts_v1",
             Self::ReferenceActorIdV1 => "reference_actor_id_v1",
+            Self::ReferenceAuthenticationV1 => "reference_authentication_v1",
         }
     }
 }
@@ -40,14 +49,97 @@ impl ReferencePolicyProfile {
 pub fn classify(
     snapshot: &PolicySnapshot,
 ) -> Result<ReferencePolicyProfile, ReferencePolicyRefusal> {
-    match validate(snapshot) {
-        Ok(_) => Ok(ReferencePolicyProfile::ReferenceFactsV1),
-        Err(ReferencePolicyRefusal::UnsupportedFacts) => {
-            validate_for(ReferencePolicyProfile::ReferenceActorIdV1, snapshot)?;
-            Ok(ReferencePolicyProfile::ReferenceActorIdV1)
+    for profile in [
+        ReferencePolicyProfile::ReferenceFactsV1,
+        ReferencePolicyProfile::ReferenceActorIdV1,
+        ReferencePolicyProfile::ReferenceAuthenticationV1,
+    ] {
+        match validate_for(profile, snapshot) {
+            Ok(_) => return Ok(profile),
+            Err(ReferencePolicyRefusal::UnsupportedFacts) => {}
+            Err(error) => return Err(error),
         }
-        Err(error) => Err(error),
     }
+    Err(ReferencePolicyRefusal::UnsupportedFacts)
+}
+
+/// The complete available facts for the authentication profile. There is no
+/// principal kind, membership, snapshot selector, clock, evidence or aggregate
+/// to fill with compatibility defaults. The caller authenticates these facts;
+/// policy evaluation itself performs no authentication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedReferenceInput {
+    principal: PrincipalId,
+    authentication: AuthenticationStrength,
+    updates: Vec<RefUpdateFact>,
+}
+
+impl AuthenticatedReferenceInput {
+    pub fn try_new(
+        principal: PrincipalId,
+        authentication: AuthenticationStrength,
+        updates: Vec<RefUpdateFact>,
+    ) -> Result<Self, PolicyInputRefusal> {
+        if updates.len() > crate::basis::MAX_SUBJECTS {
+            return Err(PolicyInputRefusal::CountExceeded {
+                field: "updates",
+                observed: updates.len(),
+                limit: crate::basis::MAX_SUBJECTS,
+            });
+        }
+        let mut names = BTreeSet::new();
+        for update in &updates {
+            if !structural(update.kind()) {
+                return Err(PolicyInputRefusal::ReferenceUpdateKindUnsupported {
+                    name: update.name().as_bytes().to_vec(),
+                    kind: update.kind(),
+                });
+            }
+            if !names.insert(update.name()) {
+                return Err(PolicyInputRefusal::DuplicateSubject {
+                    name: update.name().as_bytes().to_vec(),
+                });
+            }
+        }
+        drop(names);
+        Ok(Self {
+            principal,
+            authentication,
+            updates,
+        })
+    }
+
+    #[must_use]
+    pub const fn principal(&self) -> PrincipalId {
+        self.principal
+    }
+
+    #[must_use]
+    pub const fn authentication(&self) -> AuthenticationStrength {
+        self.authentication
+    }
+
+    #[must_use]
+    pub fn updates(&self) -> &[RefUpdateFact] {
+        &self.updates
+    }
+}
+
+/// Validate the whole program, even with no subjects, before the ordinary
+/// policy engine can inspect any restricted fact. Missing facts cannot become
+/// successful predicates through negation or a short-circuited branch.
+pub fn evaluate_authenticated(
+    snapshot: &PolicySnapshot,
+    input: &AuthenticatedReferenceInput,
+) -> Result<PolicyEvaluation, ReferencePolicyRefusal> {
+    validate_evaluation_for(
+        ReferencePolicyProfile::ReferenceAuthenticationV1,
+        snapshot,
+        input.updates().iter().map(RefUpdateFact::name),
+    )?;
+    Ok(crate::eval::evaluate_authenticated_reference(
+        snapshot, input,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -198,14 +290,22 @@ fn inspect(
         }
         Predicate::UpdateKindEquals(kind) if structural(*kind) => Ok(()),
         Predicate::UpdateKindIn(kinds) if kinds.iter().all(|kind| structural(*kind)) => Ok(()),
+        Predicate::AuthenticationCompare { .. }
+            if profile == ReferencePolicyProfile::ReferenceAuthenticationV1 =>
+        {
+            Ok(())
+        }
         _ => Err(ReferencePolicyRefusal::UnsupportedFacts),
     }
 }
 
 const fn text_selector(profile: ReferencePolicyProfile, selector: Selector) -> bool {
     matches!(selector, Selector::RefName | Selector::RefScope)
-        || (matches!(profile, ReferencePolicyProfile::ReferenceActorIdV1)
-            && matches!(selector, Selector::ActorId))
+        || (matches!(
+            profile,
+            ReferencePolicyProfile::ReferenceActorIdV1
+                | ReferencePolicyProfile::ReferenceAuthenticationV1
+        ) && matches!(selector, Selector::ActorId))
 }
 
 const fn reserve_bytes(used: &mut usize, extra: usize) -> Result<(), ReferencePolicyRefusal> {

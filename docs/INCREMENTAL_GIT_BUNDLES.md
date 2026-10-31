@@ -29,12 +29,91 @@ recovery identities do not change. A full bundle may also be supplied to
 `sync-import`, but cannot borrow omitted dependencies without prerequisites.
 
 Export verifies current visible history with the native upload-pack graph
-reader and excludes the complete prerequisite closure. The native pack planner
-and writer produce the actual bytes. Export does not mutate canonical state,
-and never replaces an existing output file. The current implementation still
+reader and excludes the complete prerequisite closure. The original buffered
+profile uses the native pack planner and writer; the explicit streaming profile
+below emits each selected body through the existing bounded encoder. Export
+does not mutate canonical state, and never replaces an existing output file.
+The current implementation still
 verifies the complete visible graph, so reduced transfer size is not a claim
 of reduced server-side read cost or larger repository capacity.
 
+## Streaming incremental export
+
+Add `--streaming` to select the incremental writer without a payload-bearing
+pack plan or whole-bundle output buffer:
+
+```sh
+fg bundle sync-export "$SOURCE" "$TENANT" "$REPOSITORY" change.bundle \
+  --streaming --trusted-local --object-format sha256 \
+  --ref refs/heads/main --prerequisite "$BASE_COMMIT" \
+  --max-output-mib 256 --max-expanded-mib 256 \
+  --max-compression-work 4000000000 --timeout-secs 600
+```
+
+The streaming path keeps bounded native metadata, a blob input chunk and
+compressor state plus bounded object, edge and header metadata. Output and
+expanded-body allowances each default to 128 MiB and can be raised independently
+through 16384 MiB. The
+buffered object default and ceiling remain 32 MiB. The independent
+`--max-blob-mib` allowance defaults to 32 MiB and accepts 1 through 16384 MiB;
+large selected blobs use the checked native streaming reader. This does not
+widen metadata, aggregate expanded-byte, output or work limits. It accepts the
+same byte, object, reference, graph, compression-work and timeout options as
+[full streaming export](NATIVE_GIT_BUNDLE_STREAMING_EXPORT.md). The independent
+64-reference and 64-prerequisite frontier bounds still apply. The reference
+ceiling also bounds all visible roots needed to prove the prerequisite history,
+even when fewer refs are selected for export. Raising an output limit does not
+widen another limit.
+
+The node selects one authenticated starting snapshot and combines caller
+visibility with its canonical hidden-ref policy. It checks all prerequisites
+against that visible graph and requires commit targets. The existing native
+graph reader supplies the verified metadata and typed closure facts for the
+omitted history. The prerequisite and wanted walks reuse those facts rather
+than rereading omitted bodies; all graph discovery remains independently
+bounded and retains the native reader's 4,000,000-edge ceiling. Selected payload
+sizes are bounded before emission, and the codec
+checks each emitted object's native identity and actual typed edges.
+
+An emitted blob must finish at its declared length and pass the original stored
+commitments and native hash before the bundle completes. Premature EOF, extra
+bytes, corruption and cancellation cannot produce a successful receipt. Short
+source reads are combined into the same fixed input chunks; small-object
+ordering, compression bytes and both existing streaming profile identifiers
+are preserved.
+
+An external closure is a transfer assumption: the receiver must possess the
+declared history. This export does not certify the physical health of omitted
+blob payloads. Typed-edge blobs need only their bounded stored headers during
+discovery; emitted bodies receive full storage and native verification.
+An advertised tip entirely within the prerequisite closure produces a valid
+zero-object pack. Hidden-only or unrelated retained objects do not enlarge
+the permitted frontier, and unrelated selected objects are rejected.
+
+Objects are emitted in deterministic native-ID order with whole-object
+compression and no delta window. Repeating the streaming profile at the same
+snapshot and limits produces the same bytes; its bytes need not equal the
+buffered profile's ordering. The receipt retains
+`type=git_bundle_incremental_export`, adds `streaming=true` and the explicit
+profile, and includes `reference_count`, `prerequisite_count`,
+`external_object_count`, native pack checksum, whole-bundle SHA-256, byte counts
+and compression work. `source_head` names the starting snapshot; it does not
+claim that concurrent publication could not subsequently advance the source.
+
+The command uses the full export's private-file owner: native completion and
+successful node shutdown precede file synchronization, create-only publication
+and parent synchronization. A prepublication refusal cleans only this attempt's
+owned stage. An existing destination is never replaced. Errors after a file
+becomes visible report that publication state and preserve the file. The same
+Unix parent-directory ownership rules and cooperative cancellation limits apply.
+
+An incremental bundle remains dependent on its declared originals.
+`bundle verify` and `bundle recover` retain their self-contained full-bundle
+contracts. Use a prerequisite-aware receiver for this transfer.
+**The existing `sync-import` input limit remains 128 MiB**: raising the export
+ceiling does not make this node's buffered import accept a larger artifact.
+
+## Atomic incremental import
 Import validates prerequisite reachability against the exact current visible
 ref snapshot, including complete native dependency bytes and required kinds.
 Only that declared history can supply omitted graph edges or external REF_DELTA
@@ -73,6 +152,9 @@ empty packs, thin REF_DELTA input, missing/wrong/undeclared/disconnected origina
 atomic stale-lease refusal, restart recovery, quota-independent replay, mandatory
 protection, and the original full/mapped bundle regressions. The fresh-process
 campaign independently decodes the exact emitted native objects for both hash
-domains. Test presence is not execution evidence; results must name a tested
+domains and both buffered and streaming export profiles. Its native commands run
+with an empty executable search path. Streaming cases add source-limit refusals,
+invalid outbound prerequisites, private-stage cleanup, deterministic repeats and
+zero-object transfer checks. Test presence is not execution evidence; results must name a tested
 revision. Full workspace, lint, release, external-Git conformance, and remote
 transport authentication are not implied by this document.

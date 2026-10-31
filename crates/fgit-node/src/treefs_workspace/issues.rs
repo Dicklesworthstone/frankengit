@@ -113,7 +113,10 @@ impl OneNode {
         self.push_quota.evaluate(&authenticated.principal_id())?;
         let projection = NodeNativeMergeProjection {
             node: self,
-            inner: self.durable_admission_projection(&context).map_err(error)?,
+            inner: self
+                .durable_admission_projection(&context)
+                .map_err(error)?
+                .with_authentication(authenticated.authentication()),
             object_limits: MergeObjectLimits::default(),
             staging: None,
             workspace: None,
@@ -268,5 +271,8 @@ impl std::fmt::Display for IssueReadRefusal {
     }
 }
 impl std::error::Error for IssueReadRefusal {}
+#[cfg(test)]
+#[path = "issues/authentication_tests.rs"]
+mod authentication_tests;
 #[cfg(test)]
 mod tests;

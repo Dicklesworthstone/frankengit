@@ -73,10 +73,17 @@ The ref-only activation profile refuses principal facts. A separate
 bound by admission to the sealed request, using required event kind 17 and
 policy-decision schema 1.3. HTTP retains its credential-established principal;
 trusted local CLI and MCP retain their operator-assertion boundary. Actor
-attributes, authentication strength, memberships, review receipts, graph facts
+attributes, memberships, review receipts, graph facts
 and evaluation time still require independent provenance and remain refused.
 The pure policy evaluator does not authenticate identities. Old ref-only event
 kind 16 and evidence schema 1.2 remain closed to actor predicates.
+
+The separate `reference_authentication_v1` profile now accepts the method and
+strength established by the node's HTTP/SSH verifier or explicit operator
+boundary. It uses required event kind 18, principal snapshot 1.1, and
+policy-decision schema 1.4. It does not widen the historical profiles or infer
+facts from legacy snapshots. See [admission authentication](ADMISSION_AUTHENTICATION.md)
+for the supported routes, exact evidence checks, and remaining identity work.
 
 ## Verification status
 

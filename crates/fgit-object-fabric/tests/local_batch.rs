@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 //! Actual filesystem batch publication and typed obligation settlement.
+
+#[path = "local_batch/bounded_compare.rs"]
+mod bounded_compare;
+
 use fgit_crypto::{GitObjectKind, git_object_id, git_payload_commitment};
 use fgit_object_fabric::fabric::{
     ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,

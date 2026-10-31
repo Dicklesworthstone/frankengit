@@ -13,10 +13,13 @@ advertisements, optional HEAD, an exact selected object inventory, a
 caller-owned `Write` sink. The caller authenticates the repository snapshot and
 authorizes disclosure before selecting those inputs.
 
-The exporter sorts objects by their exact native identity and loads one body at
-a time. It verifies the requested identity against the object's native type and
-bytes, parses the actual bytes to discover typed edges, and compresses the body
-with the existing deterministic no-delta compression policy. Source-provided
+The exporter sorts objects by their exact native identity. Native metadata is
+loaded one bounded body at a time. Sources that expose `open_blob` supply blobs
+through the existing checked reader, in bounded chunks, without allocating the
+complete payload. The exporter verifies the requested identity, native kind,
+declared length and exact EOF, and computes the native identity over the bytes
+actually emitted. Metadata parsing discovers typed edges. Compression retains
+the existing deterministic no-delta policy. Source-provided
 edge metadata is not accepted as a substitute for parsing. The profile identifier
 is `git-pack-compressed-oid-no-delta-v1`; its OID ordering is intentionally distinct
 from the materializing planner's ordering. Repeated exports with the same inputs
@@ -30,17 +33,23 @@ unreachable extras, duplicate identities or refs, mixed hash domains and invalid
 native bytes refuse. Gitlinks are foreign references and are never loaded, but
 they still consume the graph-edge allowance.
 
-Memory holds one source body and its bounded parsed view, one compressor's
-buffers, bounded header bytes, and O(objects + edges) metadata. This is a payload
-streaming contract, not a constant-memory or one-physical-storage-read guarantee.
+Memory holds one bounded metadata body and its parsed view, a 16 KiB blob input
+chunk, one compressor's buffers, bounded header bytes, and O(objects + edges)
+metadata. Short source reads are filled into the same fixed-size encoder inputs
+as the buffered path, preserving the existing byte profiles. Sources without
+`open_blob` retain the buffered object limit; a raised blob allowance does not
+authorize an oversized fallback allocation. This is a payload streaming
+contract, not a constant-memory or one-physical-storage-read guarantee.
 Sources and writers remain responsible for bounding their own blocking I/O.
 
 ## Independent resource limits
 
 `StreamFullBundleLimits` combines the existing `PackLimits` and
-`FullBundleLimits` with an explicit graph-edge ceiling and a shared compression
-work allowance. Pack output bytes, whole-bundle bytes, total expanded source
-bytes, per-object bytes, object/index counts, ref counts and header bytes retain
+`FullBundleLimits` with an explicit graph-edge ceiling, a shared compression
+work allowance and `max_streamed_blob_bytes`. The blob allowance defaults to
+32 MiB independently of the buffered metadata/object limit. Pack output bytes,
+whole-bundle bytes, total expanded source bytes, metadata and blob bytes,
+object/index counts, ref counts and header bytes retain
 independent checks. Increasing an output-byte limit does not increase another
 allowance.
 
@@ -70,6 +79,30 @@ restore forge events, authority decisions, access policy, credentials or signed
 capsule state. This implements the streaming Git portion of
 `frankengit-root-doctrine-x2mv.4.21`; that broader bead remains open.
 
+## Prerequisite-scoped streaming
+
+`fg bundle sync-export --streaming` reuses this encoder and private-file
+publication owner for incremental Git transfer. It takes explicit named refs
+and commit prerequisites and omits their complete declared closure.
+See [incremental synchronization](INCREMENTAL_GIT_BUNDLES.md) for its command,
+receipt and receiver limits.
+
+The library entry point is
+`fgit_pack::full_bundle::stream::write_incremental_bundle_stream`. It accepts
+the selected inventory and an independently caller-validated typed external
+closure. The node derives that closure from its authenticated visible graph;
+caller-supplied have sets are not disclosure authority. The codec checks
+prerequisite kinds, selected/external disjointness, exact native edges and
+target kinds, and reachability of every emitted object. All omitted object
+identities are bounded and validated, but the export receipt does not certify
+omitted payload bytes. Its `prerequisite_count` and `external_object_count`
+are zero for a full stream.
+
+The full writer's byte profile and public signature are unchanged. Incremental
+streams use a distinct profile and retain the same independent resource bounds.
+They are not self-contained inputs for the existing full-bundle verify/recover
+commands, and exporting a larger artifact does not widen sync-import's
+128 MiB input limit.
 ## Focused validation
 
 ```sh
@@ -131,6 +164,7 @@ an idempotency key. Canonical hidden-ref policy still applies.
 | `--max-output-mib` | 128 | 1 through 16384 MiB |
 | `--max-expanded-mib` | 128 | 1 through 16384 MiB |
 | `--max-object-mib` | 32 | 1 through 32 MiB |
+| `--max-blob-mib` | 32 | 1 through 16384 MiB |
 | `--max-objects` | 100000 | 1 through 1000000 |
 | `--max-refs` | 4096 | 1 through 1000000, including advertised HEAD |
 | `--max-edges` | 1000000 | 1 through 8000000 |
@@ -141,9 +175,18 @@ Numeric leaf options require positive canonical decimal integers; duplicate and
 unknown options refuse. The independent header-byte limit remains 1 MiB and is
 not widened by `--max-refs`. The expanded-byte allowance counts the selected
 native object bodies. It does not measure physical rereads during selection
-and emission. The per-object allowance also configures the node's object-read
-bound before allocation. The streaming memory contract remains one bounded
-object and compressor plus bounded object, edge and header metadata.
+and emission. `--max-object-mib` also configures the node's buffered object-read
+bound before allocation. `--max-blob-mib` configures the separate selected-blob
+storage policy, including bounded storage framing, while leaving metadata and
+import allocation limits unchanged. Blob lengths count against the selected
+expanded-byte limit before payload reads. Full export discovers blob leaves
+from checked headers; emission verifies their complete original commitments.
+
+For example, add `--max-blob-mib 256` to export a 100 MiB blob without widening
+the 32 MiB metadata allowance. Set `--max-expanded-mib`, `--max-output-mib` and
+`--max-compression-work` separately when the whole selected repository needs
+more than their defaults. When verifying or recovering that full bundle, pass
+an adequate independent `--max-blob-mib` to the file-backed receiver as well.
 
 ### Deadline and cancellation
 
@@ -226,7 +269,11 @@ The source snapshot may cease to be the current head while the export runs.
 The receipt identifies what was selected; it does not promise completion-time
 freshness. Its whole-file SHA-256 is an artifact fingerprint and does not itself
 authenticate an issuer. The resulting file is consumable by the native
-file-backed `fg bundle verify` and `fg bundle recover` commands. This transfers
+file-backed `fg bundle verify`, `fg bundle recover`, and
+[`fg bundle import --file-backed`](NATIVE_GIT_BUNDLE_FILE_IMPORT.md) commands.
+The import profile publishes the complete native source into an initialized
+node through ordinary atomic admission, with independent input, expanded-byte,
+metadata and blob allowances. This transfers
 Git objects, direct refs and HEAD; it does not restore forge metadata, authority
 policy, credentials, or a complete signed repository capsule.
 
@@ -241,6 +288,7 @@ export CARGO_TARGET_DIR=/data/frankengit-targets/streaming-cli
 cargo test -p fgit-cli --bin fg bundle::stream_export --locked
 cargo test -p fgit-cli --test bundle_stream_export_filesystem --locked
 cargo test -p fgit-cli --test bundle_stream_export --locked -- --test-threads=1
+cargo test -p fgit-cli --test bundle_stream_export_large_blobs --locked -- --test-threads=1
 ```
 
 The unit and real-filesystem targets cover argument boundaries, create-only
@@ -250,5 +298,15 @@ process target exercises both hash domains through source import, streaming
 export, file-backed verification and native bare-repository recovery, with no
 foreign executable available on PATH. It also checks deterministic receipts
 and bytes, narrowed resource refusals, destination collisions and a shorter
-global deadline. Its ordinary fixtures are small; the separate native codec
-large-file target above does not substitute for a large real-CLI recovery drill.
+global deadline. The separate `bundle_stream_export_large_blobs` process target
+uses a real 33 MiB blob in each hash domain. It checks default refusal, full and
+incremental export with a 1 MiB metadata limit and a 40 MiB blob allowance,
+independent aggregate and blob refusals, unchanged source refs, deterministic
+bytes, exact native inventories and trailers, and file-backed full-bundle
+verification and recovery. It also imports the full bundle into an initialized
+node with a 1 MiB metadata cap, checks the exact selected closure and streamed
+33 MiB body, and compares exact terminal receipts across file-backed and
+buffered retries. Its source objects enter through the public durable
+loose-object importer. The codec's `bundle_stream_blobs` target also checks short
+reads, exact EOF, source identity, cancellation, and buffered/streamed byte
+compatibility in both bundle profiles.

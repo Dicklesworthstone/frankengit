@@ -13,7 +13,7 @@ const plan = extra => prepareIntent({ endpoint: 'https://forge.example/team/repo
 const refPolicy = (profile = 'reference_facts_v1') => ({ snapshot_id: `frankengit/policy-snapshot/v1/v1.0/alg:2/${'d'.repeat(64)}`,
   profile, mode: 'enforce', frame_hex: '000102ff' });
 
-for (const profile of ['reference_facts_v1', 'reference_actor_id_v1']) {
+for (const profile of ['reference_facts_v1', 'reference_actor_id_v1', 'reference_authentication_v1']) {
 test(`${profile}: snapshots retain exact frames and profile in intents, forms and change summaries`, () => {
   const compiled = refPolicy(profile);
   const replacement = { administrators: [ACTOR], branches: [], ref_policy: compiled };

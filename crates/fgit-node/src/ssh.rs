@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_identity::deploy_key::DeployKeyBinding;
 use fgit_ssh::command::SshGitService;
 use fgit_ssh::session::{SessionPhase, SshServerSession, SshSessionError};
@@ -975,6 +976,7 @@ impl OneNode {
             reader,
             writer,
             grant.as_ref().map(SshCommandGrant::principal),
+            AdmissionAuthentication::SshDeployKey,
             grant
                 .as_ref()
                 .and_then(SshCommandGrant::ref_write_scope)

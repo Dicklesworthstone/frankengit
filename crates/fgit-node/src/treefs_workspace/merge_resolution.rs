@@ -267,7 +267,14 @@ impl OneNode {
             limits,
             style,
         )?;
-        let bundle = bundle_for_plan(&source, target, incoming, &resolved.plan, limits)?;
+        let bundle = bundle_for_plan(
+            &source,
+            target,
+            incoming,
+            &resolved.plan,
+            limits,
+            self.reused_merge_blob_limit(),
+        )?;
         source.checkpoint().map_err(ResolutionError::from)?;
         let bundle_sha256 = fgit_crypto::sha256_digest(&bundle);
         source.checkpoint().map_err(ResolutionError::from)?;

@@ -89,8 +89,9 @@ where
         }
         let (basis, receipt, authenticated) =
             crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative =
-            fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        let cumulative = projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await?;
         if cumulative.observed() != receipt.token() {
             continue;
         }
@@ -131,7 +132,7 @@ where
                     projection,
                 )
                 .await?;
-            let prepared = prepare_event(
+            let mut prepared = prepare_event(
                 context, &event, &closure, tx_id, &attempt, &basis, &resolved,
             )
             .map_err(ProjectionFailure::Refuse)?;
@@ -145,6 +146,30 @@ where
                 return Err(
                     ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach).into(),
                 );
+            }
+            if let Some(authentication) = projection.admission_authentication() {
+                // Metadata uses the same principal receipt as ref publication,
+                // while retaining its own validation and policy semantics. The
+                // exact request and full fold already bind the original seal.
+                prepared.evidence =
+                    crate::evidence::DecisionEvidenceBodies::derive_with_authentication(
+                        context,
+                        &basis,
+                        &prepared.request,
+                        &prepared.fold,
+                        authentication,
+                    )
+                    .map_err(ProjectionFailure::Unavailable)?;
+                prepared.materialization.record.principal_snapshot_id = prepared
+                    .evidence
+                    .principal_snapshot()
+                    .id()
+                    .map_err(ProjectionFailure::Unavailable)?;
+                prepared.materialization.record.policy_decision_root = prepared
+                    .evidence
+                    .policy_decision()
+                    .root()
+                    .map_err(ProjectionFailure::Unavailable)?;
             }
             Ok(prepared)
         }
